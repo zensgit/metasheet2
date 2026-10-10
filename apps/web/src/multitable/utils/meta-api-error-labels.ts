@@ -3,6 +3,13 @@
 // Scope: frontend-generated fallback strings only. Backend payload messages,
 // field error values, legacy string errors, codes, and HTTP status metadata
 // stay raw in the API client.
+//
+// P5: the outage sentence is NOT authored here any more. `utils/networkErrors.ts`
+// owns both outage copies and the response/no-response decision between them; this
+// module only ever sees a real `Response` (parseJson read its status), so it always
+// resolves to the "server answered" side.
+
+import { SERVICE_UNAVAILABLE_COPY, unavailableMessageFor } from '../../utils/networkErrors'
 
 type LocaleText = { en: string; zh: string }
 
@@ -34,7 +41,14 @@ export type MetaApiErrorLabelKey =
   | 'error.aiBulkJobCommitInProgress'
   // Gateway-side outage copy (F4-B): 502/503/504 arrive while the backend is down or
   // restarting. Neutral wording by owner ruling — it must NOT say "upgrading".
+  // A RESPONSE EXISTS on this path, so it must NOT claim the network is unreachable.
   | 'error.serverRestarting'
+  // 客户反馈 2026-09-24 #4b (裁定 PR #6074): the automation save gate refuses a condition VALUE that does
+  // not fit its field's type (AUTOMATION_CONDITION_VALUE_INVALID — a date field given "yesterday",
+  // a number field given "abc"). Label only; the rule editor (A9-fe) owns the inline presentation.
+  | 'error.automationConditionValueInvalid'
+  // 字段类型转换（第 3 刀）：写入在等锁期间，它要改的那一列被转换了类型。服务端答 409 FIELD_SCHEMA_CHANGED。
+  | 'error.fieldSchemaChanged'
 
 const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
   'error.forbidden': { en: 'Insufficient permissions', zh: '权限不足' },
@@ -93,12 +107,23 @@ const META_API_ERROR_LABELS: Record<MetaApiErrorLabelKey, LocaleText> = {
     en: 'Another write for this bulk-fill job is already in progress.',
     zh: '该批量填充任务已有另一次写入正在进行中。',
   },
-  // Deliberately identical in spirit to utils/networkErrors.ts: the user cannot tell
-  // (and should not have to) whether the gateway answered 502 or the connection was
-  // reset outright — both mean "the backend is not there right now".
-  'error.serverRestarting': {
-    en: 'The service is temporarily unavailable. Please try again in a moment.',
-    zh: '服务暂时不可用，请稍后重试',
+  // P5 — REVERSAL of the old "one wording, two layers" ruling. A 502/503/504 proves the
+  // request REACHED something that answered; a rejected fetch proves it did not. On
+  // 2026-09-14 the customer link dropped and this sentence was shown for the
+  // no-response case too, so the customer read it as "delete is broken". Sourced from
+  // the shared table so the two sentences can never drift or re-merge by accident.
+  'error.serverRestarting': { ...SERVICE_UNAVAILABLE_COPY },
+  // #4b: values-free — names the expected FORMAT, never the offending value or a field id.
+  'error.automationConditionValueInvalid': {
+    en: 'A condition value does not match its field type (dates use YYYY-MM-DD, date-times YYYY-MM-DD HH:mm, numbers digits only).',
+    zh: '条件值与字段类型不匹配（日期请填 YYYY-MM-DD，日期时间请填 YYYY-MM-DD HH:mm，数字只填数字）。',
+  },
+  // Field retype slice 3b. The write was refused because a column it touches changed type or options while the
+  // write was waiting (core-backend field-schema-fence-recheck.ts, 409 FIELD_SCHEMA_CHANGED). Nothing was saved.
+  // Values-free: names no field, no type, no option. Says what happened and what to do, nothing about locks.
+  'error.fieldSchemaChanged': {
+    en: 'This column was just changed to another type, so your edit was not saved. Refresh the page and edit again.',
+    zh: '这一列刚刚被改成了别的类型，你这次的修改没有保存。请刷新页面后重新修改。',
   },
 }
 
@@ -114,6 +139,24 @@ export function apiFieldValidationFallback(isZh = false): string {
   return metaApiErrorLabel('error.fieldValidation', isZh)
 }
 
+/** core-backend/src/multitable/field-schema-fence-recheck.ts `FIELD_SCHEMA_CHANGED_CODE`. */
+export const FIELD_SCHEMA_CHANGED_CODE = 'FIELD_SCHEMA_CHANGED'
+
+// Codes whose copy the CLIENT owns even when the server sent a message. Everywhere else the server's sentence
+// wins (see the file header). This one is different on purpose: the server's message is an English literal written
+// for API callers, and the refusal is the outcome of a race the user could not see — a column converted under an
+// edit that was already on its way. The user has to read, in their own language, that the edit was not saved.
+// Keep this table short: one entry per code that has been argued for.
+const CODE_OWNED_ERROR_KEY_BY_CODE: Record<string, MetaApiErrorLabelKey> = {
+  [FIELD_SCHEMA_CHANGED_CODE]: 'error.fieldSchemaChanged',
+}
+
+/** The client's own sentence for `code`, or null when the server's message is to be shown as it is. */
+export function apiCodeOwnedErrorMessage(code: string | undefined, isZh = false): string | null {
+  const key = code ? CODE_OWNED_ERROR_KEY_BY_CODE[code] : undefined
+  return key ? metaApiErrorLabel(key, isZh) : null
+}
+
 export function apiDefaultErrorMessage(code: string | undefined, status: number, isZh = false): string {
   switch (code) {
     case 'FORBIDDEN':
@@ -127,12 +170,28 @@ export function apiDefaultErrorMessage(code: string | undefined, status: number,
     // Chinese sentence still wins in parseJson, exactly like VALIDATION_ERROR.
     case 'FIELD_RETYPE_NOT_LOSSLESS':
       return metaApiErrorLabel('error.fieldRetypeNotLossless', isZh)
+    // #4b: the automation condition-value refusal (automation-conditions.ts
+    // AUTOMATION_CONDITION_VALUE_INVALID_CODE) — same rule as above: real copy when the payload
+    // arrives without a message; the server's own sentence still wins in parseJson.
+    case 'AUTOMATION_CONDITION_VALUE_INVALID':
+      return metaApiErrorLabel('error.automationConditionValueInvalid', isZh)
+    // Field retype slice 3b: see apiCodeOwnedErrorMessage below — for this code the client copy is used whether
+    // or not the payload carries a message.
+    case FIELD_SCHEMA_CHANGED_CODE:
+      return metaApiErrorLabel('error.fieldSchemaChanged', isZh)
     default:
       // Gateway-side outage statuses only (F4-B). 500 stays `API 500` on purpose: a
       // 500 is an application bug with a real stack behind it, and telling the user
       // to "try again in a moment" would hide it. Pinned by a spec assertion.
       if (status === 502 || status === 503 || status === 504) {
-        return metaApiErrorLabel('error.serverRestarting', isZh)
+        // A RESPONSE EXISTS here -- we are reading `status` off it -- so the copy is resolved by
+        // the shared discriminator rather than read straight out of the label table. That is not
+        // decoration: it makes the `hasHttpResponse === true` arm a PRODUCTION path, so a mutation
+        // that makes the discriminator answer "no response received" for a real 503 turns the
+        // already-CI-wired F4-B assertions in tests/meta-api-error-labels.spec.ts red. Reading the
+        // static entry instead left that arm test-only, and the only spec covering it ran nowhere.
+        // `{ status, ok: false }` is the minimal response-shaped witness `hasHttpResponse` accepts.
+        return unavailableMessageFor({ status, ok: false }, isZh)
       }
       return `API ${status}`
   }
@@ -147,6 +206,9 @@ const AI_SHORTCUT_ERROR_KEY_BY_CODE: Record<string, MetaApiErrorLabelKey> = {
   AI_UNSAFE_INPUT: 'error.aiUnsafeInput',
   AI_PROVIDER_ERROR: 'error.aiProviderError',
   VERSION_CONFLICT: 'error.aiVersionConflict',
+  // Field retype slice 3b: the AI run's write is one of the fenced writers (POST …/ai/shortcut/run answers 409
+  // with this code). Provider usage is already spent; the output was not written.
+  [FIELD_SCHEMA_CHANGED_CODE]: 'error.fieldSchemaChanged',
 }
 
 /**

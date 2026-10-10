@@ -912,7 +912,10 @@ describe('Attendance punch outcome clarity (mount)', () => {
     await flushUi(6)
 
     const pageText = container!.textContent ?? ''
-    expect(pageText).toContain('服务暂时不可用，请稍后重试')
+    // P5: apiFetch rejected without any response, so the panel must render the
+    // no-response sentence, NOT the gateway one (that swap is the 2026-09-14 incident).
+    expect(pageText).toContain('无法连接服务器（未收到任何响应），请检查网络或稍后重试')
+    expect(pageText).not.toContain('服务暂时不可用，请稍后重试')
     // The browser literal must not reach the panel, and the copy must not collapse
     // into the bare generic fallback (what a Latin-only message would have produced).
     expect(pageText).not.toContain('Failed to fetch')

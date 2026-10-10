@@ -127,10 +127,10 @@ const flows: StockPrepHelpFlow[] = [
     enTitle: 'Setting it up the first time',
     zhWho: '给管理员:第一次把这套部署接起来的人。',
     enWho: 'For the administrator setting a deployment up for the first time.',
-    zhBody: '「开始使用」里是一张六步地图:接一条只读连接、证明它只能读、告诉备料用这条源、建表装列、'
+    zhBody: '「开始使用」里是一张七步地图:登记外接数据源、在数据工厂新增 SQL 绑定、证明它只能读、告诉备料用这条源、建表装列、'
       + '给角色授权、拿一个项目跑一遍。任何一步都能点开看 —— 它是地图,不是闸机,前一步没做完也不挡着您看后一步。'
       + '装完之后再回来复查,去「数据来源与体检」。',
-    enBody: 'Getting Started lays out six steps: wire a read-only connection, prove it can only read, point stock preparation'
+    enBody: 'Getting Started lays out seven steps: register the external data source, add the SQL binding in Data Factory, prove it can only read, point stock preparation'
       + ' at it, create the tables and columns, grant the roles, then take one project through end to end. Every step'
       + ' opens — it is a map, not a turnstile, and an unfinished step never blocks the next one. Come back to'
       + ' Sources & Health Check afterwards to re-check.',

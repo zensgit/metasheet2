@@ -12,53 +12,142 @@ import {
 } from './field-config'
 import { isSystemFieldType } from './system-fields'
 import { isEmptyValue } from './conditional-formatting'
+import {
+  businessTodayKey,
+  formatDateOnlyValue,
+  formatDateTimeInZone,
+  getBusinessTimezone,
+  parseDateTimeInput,
+  resolveDateTimeTimezone,
+} from './business-timezone'
+import { getLookupTargetField } from './lookup-target-fields'
+
+// #6204: the date-only day key lives in ./business-timezone.ts (beside the parsers it is built on) so the
+// conditional-formatting rules — which this module imports — can use the SAME function as the grid without an
+// import cycle. Re-exported here: every existing `field-display` import keeps working.
+export { formatDateOnlyValue }
 
 function formatDate(value: unknown): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  return formatDateOnlyValue(value) ?? String(value)
 }
 
-export function resolveDateTimeTimezone(property?: Record<string, unknown> | null): string {
-  const timezone = typeof property?.timezone === 'string' && property.timezone.trim().length > 0
-    ? property.timezone.trim()
-    : 'UTC'
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0))
-    return timezone
-  } catch {
-    return 'UTC'
-  }
+// 客户反馈 2026-09-24 #4c: date-times are shown AND parsed in ONE business timezone, fixed
+// `YYYY-MM-DD HH:mm` 24-hour — never in the browser's zone or locale. See ./business-timezone.ts.
+export { resolveDateTimeTimezone }
+
+/**
+ * Editor text for a stored date-time: its `YYYY-MM-DD HH:mm` wall clock in `timezone` (the business
+ * timezone by default), or '' when empty / not a date-time.
+ */
+export function dateTimeInputValue(value: unknown, timezone: string = getBusinessTimezone()): string {
+  return formatDateTimeInZone(value, timezone) ?? ''
 }
 
-export function dateTimeInputValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return ''
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+/**
+ * Stored value for editor text read as a wall clock in `timezone` (the business timezone by default):
+ * the UTC ISO instant, or `null` for empty AND for unparseable text. Callers that must tell "cleared"
+ * from "still typing" use `parseDateTimeInput` instead.
+ */
+export function dateTimeValueFromInput(value: string, timezone: string = getBusinessTimezone()): string | null {
+  const parsed = parseDateTimeInput(value, timezone)
+  return parsed.ok ? parsed.value : null
 }
 
-export function dateTimeValueFromLocalInput(value: string): string | null {
-  const trimmed = value.trim()
-  if (!trimmed) return null
-  const date = new Date(trimmed)
-  return Number.isNaN(date.getTime()) ? null : date.toISOString()
-}
-
-function formatDateTime(value: unknown, timezone?: string): string {
+function formatDateTime(value: unknown, timezone: string): string {
   if (value === null || value === undefined || value === '') return '—'
-  const date = new Date(String(value))
-  if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: timezone,
-  })
+  return formatDateTimeInZone(value, timezone) ?? String(value)
+}
+
+/** True for the field types whose values are UTC instants shown as business wall clocks. */
+export function isDateTimeLikeFieldType(type: string): boolean {
+  return type === 'dateTime' || type === 'createdTime' || type === 'modifiedTime'
+}
+
+/** The zone a field's date-time values are shown in: a dateTime field's zone rule, else the business zone. */
+export function dateTimeFieldTimezone(field: Pick<MetaField, 'type' | 'property'>): string {
+  return field.type === 'dateTime' ? resolveDateTimeTimezone(field.property) : getBusinessTimezone()
+}
+
+/**
+ * The zone the calendar / timeline / Gantt views put a field's values onto days in (客户反馈 2026-09-24 #4c
+ * follow-up): a date-time-like field's zone (so a record lands on the day its cell shows), else `null`. A `date`
+ * field is put on its day by {@link viewDateOnlyDayKey} (#6181); text / number fields keep their existing day logic.
+ */
+export function viewDayZone(field: Pick<MetaField, 'type' | 'property'> | null | undefined): string | null {
+  return field && isDateTimeLikeFieldType(field.type) ? dateTimeFieldTimezone(field) : null
+}
+
+/**
+ * "Today" for a calendar / timeline / Gantt keyed on `field`: today's day in that field's day zone (a date-time
+ * field's zone rule), else in the business timezone — for `date` fields too, so the day a view opens on,
+ * highlights and quick-creates on is the SAME business day in every browser (a floating `date` names a day,
+ * and the organisation's "today" is the business day). Never the browser's day or the UTC day.
+ */
+export function viewTodayKey(field: Pick<MetaField, 'type' | 'property'> | null | undefined, nowMs: number = Date.now()): string {
+  return businessTodayKey(viewDayZone(field) ?? getBusinessTimezone(), nowMs)
+}
+
+/**
+ * #6181: the calendar day (`YYYY-MM-DD`) the calendar / timeline / Gantt views put a `date` (date-only) field's
+ * value on — the day its cell shows ({@link formatDateOnlyValue}): a day as written keeps that day; a stored
+ * instant (`2026-09-17T16:00:00.000Z`) is the day it falls on in the business timezone (`2026-09-18`). Never the
+ * UTC day of the instant, never the browser's day. `null` when the field is not a `date` field or the value
+ * names no day — the caller keeps its own fallback. (Date-time-like fields go through {@link viewDayZone}.)
+ */
+export function viewDateOnlyDayKey(field: Pick<MetaField, 'type'> | null | undefined, value: unknown): string | null {
+  return field?.type === 'date' ? formatDateOnlyValue(value) : null
+}
+
+/**
+ * #6181: where the timeline / Gantt views place a `date` value on their time axis — UTC midnight of
+ * {@link viewDateOnlyDayKey}. A zone-free day frame: those views read a `date` position back as its UTC day
+ * (`toISOString().slice(0, 10)`), which in this frame IS the day the cell shows, whatever the browser's zone —
+ * a day as written sits exactly where it always did (`2026-09-18` → `2026-09-18T00:00:00.000Z`). `null` when
+ * `viewDateOnlyDayKey` is.
+ */
+export function viewDateOnlyDayUtcMs(field: Pick<MetaField, 'type'> | null | undefined, value: unknown): number | null {
+  const day = viewDateOnlyDayKey(field, value)
+  if (!day) return null
+  const ms = Date.parse(`${day}T00:00:00.000Z`)
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * Display texts of a LOOKUP cell whose target field is date-time-like (客户反馈 2026-09-24 #4c follow-up): each
+ * looked-up instant as the SAME `YYYY-MM-DD HH:mm` wall clock the target column shows (the target's zone rule).
+ * `null` when the field is not a lookup or its target is unknown / not date-time-like — the caller keeps its
+ * raw projection. A looked-up value that is not a date-time keeps its raw text (never dropped).
+ */
+export function lookupDateTimeTexts(field: Pick<MetaField, 'type'> & { id?: string }, value: unknown): string[] | null {
+  if (field.type !== 'lookup') return null
+  const target = getLookupTargetField(field.id)
+  if (!target) return null
+  const items = Array.isArray(value) ? value : [value]
+  const present = items.filter((item) => item !== null && item !== undefined && String(item).trim().length > 0)
+  // A looked-up `date` column shows the same `YYYY-MM-DD` its own cells show (formatDateOnlyValue).
+  if (target.type === 'date') return present.map((item) => formatDateOnlyValue(item) ?? String(item))
+  if (!isDateTimeLikeFieldType(target.type)) return null
+  const zone = dateTimeFieldTimezone(target)
+  return present.map((item) => formatDateTimeInZone(item, zone) ?? String(item))
+}
+
+/**
+ * Export / group-header / filter text of a date-time cell: the SAME `YYYY-MM-DD HH:mm` business wall clock
+ * the grid shows (客户反馈 2026-09-24 #4c, B1/N5). `null` when the field is not date-time-like or the value is
+ * not a date-time — the caller keeps its raw projection (never drops the cell). A lookup of a date-time field
+ * exports its wall clocks joined the way the export joins any array (`; `).
+ */
+export function dateTimeExportText(field: Pick<MetaField, 'type' | 'property'> & { id?: string }, value: unknown): string | null {
+  if (field.type === 'lookup') {
+    const texts = lookupDateTimeTexts(field, value)
+    return texts && texts.length > 0 ? texts.join('; ') : null
+  }
+  // A `date` cell exports / groups as the `YYYY-MM-DD` it shows — not the raw stored instant.
+  if (field.type === 'date') return formatDateOnlyValue(value)
+  if (!isDateTimeLikeFieldType(field.type)) return null
+  if (value === null || value === undefined || value === '') return null
+  return formatDateTimeInZone(value, dateTimeFieldTimezone(field))
 }
 
 function formatAutoNumber(value: unknown, property: Record<string, unknown> | undefined): string {
@@ -140,7 +229,8 @@ export function formatFieldDisplay(params: {
 
   if (field.type === 'date') return formatDate(value)
   if (field.type === 'dateTime') return formatDateTime(value, resolveDateTimeTimezone(field.property))
-  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value)
+  // System timestamps carry no field zone: the business timezone, same format as a dateTime cell.
+  if (field.type === 'createdTime' || field.type === 'modifiedTime') return formatDateTime(value, getBusinessTimezone())
   if (field.type === 'autoNumber') return formatAutoNumber(value, field.property)
   if (isSystemFieldType(field.type)) return String(value)
   if (field.type === 'boolean') return isZh ? (value ? '是' : '否') : (value ? 'Yes' : 'No')
@@ -214,6 +304,10 @@ export function formatFieldDisplay(params: {
     const count = Array.isArray(value) ? value.length : value ? 1 : 0
     return summarizeAttachmentCount(count, isZh)
   }
+
+  // Lookup of a date-time field: the target column's wall clock, never the raw stored ISO.
+  const lookupDateTimes = lookupDateTimeTexts(field, value)
+  if (lookupDateTimes) return lookupDateTimes.length > 0 ? lookupDateTimes.join(', ') : '—'
 
   if (Array.isArray(value)) {
     const displayValues = value

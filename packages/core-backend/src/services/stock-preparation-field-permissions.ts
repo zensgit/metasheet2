@@ -188,6 +188,7 @@
  */
 
 import { poolManager } from '../integration/db/connection-pool'
+import { SheetNotLiveError, assertSheetLiveForUpdate } from '../multitable/sheet-liveness'
 
 /**
  * BASE provenance marker — the plugin-family prefix, and the exact value written by a caller that
@@ -284,7 +285,9 @@ export const STOCK_PREPARATION_FIELD_PERMISSION_MAX_ENTRIES = 500
  * member, so a caller can exhaustively switch on it.
  * - `ENTRIES_INVALID`      — input SHAPE is wrong (bad sheetId, non-string/empty id, over the cap,
  *                            or a `reconcile` region with no `packId` to attribute it to).
- * - `SHEET_NOT_FOUND`      — `sheetId` is not a row in `meta_sheets`.
+ * - `SHEET_NOT_FOUND`      — `sheetId` is not a LIVE row in `meta_sheets`: absent, or soft-deleted as
+ *                            read UNDER the write transaction's own row lock (#5938). Both answer the
+ *                            same code and the same message, so the distinction is not an oracle.
  * - `FIELD_NOT_ON_SHEET`   — a `fieldId` is not a `meta_fields` row FOR THAT sheet.
  * - `ROLE_NOT_FOUND`       — a `roleId` is not a row in `roles`.
  * - `PACK_CONFLICT`        — another pack's marker holds a (column, role) pair this call declares.
@@ -1000,16 +1003,29 @@ export class StockPreparationFieldPermissionsService {
 
     // ONE transaction for validation + every write.
     return pool.transaction(async ({ query }) => {
-      // Existence check AND the never-escalate-under-concurrency row lock in one statement — the
-      // SAME `meta_sheets` lock the operator authoring route and the permission-revert path take, so
-      // this write serializes against a concurrent revert instead of racing it.
-      const sheetRes = await query('SELECT id FROM meta_sheets WHERE id = $1 FOR UPDATE', [sheetId])
-      if (sheetRes.rows.length === 0) {
-        throw new StockPreparationFieldPermissionsError(
-          'SHEET_NOT_FOUND',
-          `Sheet not found: ${sheetId}`,
-          [sheetId],
-        )
+      // LIVENESS check AND the never-escalate-under-concurrency row lock in one statement — the SAME
+      // `meta_sheets` lock (and now the same helper) the operator authoring route and the
+      // permission-revert path take, so this write serializes against a concurrent revert instead of
+      // racing it.
+      //
+      // #5938: this used to ask only whether the row EXISTS. A soft delete leaves the row present, so
+      // a sheet deleted before — or, worse, DURING — this call still passed: the caller's pre-flight
+      // saw a live sheet, the delete committed, this transaction took the now-FREE lock, saw a row,
+      // and wrote `field_permissions` onto a dead sheet (rows that outlive it and come back with a
+      // restore). Reading `deleted_at` UNDER the lock is what closes it. The refusal is mapped onto
+      // this port's existing `SHEET_NOT_FOUND` — same code, same message for `deleted` and `absent`,
+      // so tightening it does not hand a caller a new existence oracle.
+      try {
+        await assertSheetLiveForUpdate(query, sheetId)
+      } catch (error) {
+        if (error instanceof SheetNotLiveError) {
+          throw new StockPreparationFieldPermissionsError(
+            'SHEET_NOT_FOUND',
+            `Sheet not found: ${sheetId}`,
+            [sheetId],
+          )
+        }
+        throw error
       }
 
       const fieldIds = [...new Set(entries.map((entry) => entry.fieldId))]

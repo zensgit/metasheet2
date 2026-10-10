@@ -1216,22 +1216,29 @@ function testW3aMissingComponentDetailNeverReachesTheHoldOrTheLedger() {
 }
 
 // -----------------------------------------------------------------------------
-// F1c-b -- 客户包的 父组件图号 / 父组件名称 (ext_parentDrawingNo / ext_parentName)
+// 规格 P(owner 2026-09-15)-- 客户包那一对 父组件图号 / 父组件名称 副本(ext_parentDrawingNo /
+// ext_parentName)已撤:「留模板对做正本,改中文名,备料包去掉那一对,导出改读模板对」。
 //
-// 现场(222,演示项目 581 行):模板列 parentComponentCode / parentComponentName 在 F1c 之后
-// 579/581 行有值(规格记录的缺值原因:根行无父),而**同名同义**的客户包列 ext_parentDrawingNo /
-// ext_parentName 是 0 行有值 —— 人看的是中文包列,填上的是英文模板列。包列填不上不是"没配":
-// 这条拉取链上能往 ext_ 列写值的只有部署自己的 ext 映射(applyExtFieldMapping,读 PART 行)
-// 和 F1c 起规划器派生的那三列,而父件这一侧展开层只发出一个 OBJ_ID,part 列映射够不着它。
+// 来历(F1c-b,现已撤):222 上模板列 parentComponentCode / parentComponentName 在 F1c 之后 579/581
+// 行有值,而同名同义的包列 0 行有值;F1c-b 让规划器从刚写进 out 的模板对抄值派生那两列,于是客户看到
+// 两对内容相同的列、把英文那对删了(已恢复)。裁决之后规划器对这两个 id **既不派生也不读**;既有安装
+// 上的两列与其值原样保留(受管字段守卫也不允许删),只是不再有写手。
 //
-// 这几条用例钉住:①**派生出来的**两列与模板列逐行相等(同源 —— 值就是模板列那一个值本身,不是
-// 复制一份规则),包括父件自己那个字段为空时两边一起缺席、不发明空串;②根行/父件不在批内 ⇒ 一个
-// 键都不写;③动作没声明 ⇒ 不派生;④**本次拉取带上来的**映射值 ⇒ 不覆盖(表上手填的值不在这道闸
-// 的作用域内,见该用例的作用域说明);⑤存量空列在下一次 dry-run 以 update 补上且不触发
-// manual_confirm。
+// 这几条用例钉住:①模板对照旧从批内父行解析,退回路径与缺席规则一字未动(正本;硬约束 (a));
+// ②动作声明了那两个 ext_ id、包也装着(222 今晚就是这个形状)⇒ 记录上仍然一个键都不出现 ——
+// 声明两列 / 一列 / 不声明 / 没装包四种形状同判,而可写 band 里它们还在(撤的是写手,不是列);
+// ③来料自带的映射值原样透传(测得的,不是派生的),空白不再被派生填上;④登记表与源码一致:
+// DENORMALIZED_PLM_FIELD_IDS 的 ext_ 半边只剩三列;⑤存量行:模板对已填的行不再因这两列产生 update,
+// 模板对空着的行以 update 补**模板对**且 patch 里没有那两个键(#5625 那条 installed-fields 用例的
+// 相应调整,不是删掉)。
+//
+// 变异(内存级):M1「把那两列留在 DENORMALIZED_PLM_FIELD_IDS 里 / 恢复派生」⇒ ① ② ③ ④ 全红。
 // -----------------------------------------------------------------------------
 
-const PARENT_PACK_COLUMN_IDS = ['ext_parentDrawingNo', 'ext_parentName']
+// 已撤的那一对。既有部署的动作 extensionFieldIds(durable JSON)与包安装账本里今天仍然有它们,所以
+// 用例照旧把它们声明进动作、装进表 —— 证的正是「声明了、装了,也不再写」。
+const RETIRED_PARENT_PACK_COLUMN_IDS = Object.freeze(['ext_parentDrawingNo', 'ext_parentName'])
+const PARENT_PACK_COLUMN_IDS = RETIRED_PARENT_PACK_COLUMN_IDS
 
 // 包安装到表上之后的字段属性,与安装器盖的那一份同形(ownership=plm_system ⇒ 进 pickFields 的
 // 可写 band)。只列扩展列:模板列由冻结模板自己管,写进 installed 也会被 template_governed 挡掉。
@@ -1330,223 +1337,98 @@ function twoFamilyBatch() {
   }
 }
 
-// 同源 = 包列的值就是模板列那一个值本身。
-// M1(派生源换成子行自己的 componentCode / componentName)⇒ 本用例红。
-function testParentPackColumnsAreTheTemplateColumnsOwnValue() {
+// ① + ②:模板对照旧解析;已撤的那一对在任何声明形状下都不出现。
+// M1(恢复 out.ext_parentDrawingNo / out.ext_parentName 的派生)⇒ 本用例红。
+function testRetiredParentPackColumnsAreNeverDerivedWhileTheTemplatePairStillIs() {
   const batch = twoFamilyBatch()
-  const plan = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-same-source' })
+  const plan = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-retired' })
   const adds = byDecision(plan, DECISIONS.ADD)
   assert.equal(adds.length, 9, 'nine rows are added')
+  const recordOf = (sourceId) => adds.find((decision) => decision.record.componentSourceId === sourceId).record
 
-  const childA = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD').record
-  assert.equal(childA.ext_parentDrawingNo, 'TZ-0001', '父组件图号 落进客户包列')
-  assert.equal(childA.ext_parentName, '主体组件 DN1200', '父组件名称 落进客户包列,并且是父件**未切分**的全串')
-  const childB = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-2').record
-  assert.equal(childB.ext_parentDrawingNo, 'TZ-0002')
-  assert.equal(childB.ext_parentName, '副体组件', '父件没有全串时包列跟着模板列一起退回 componentName —— 同一条路径,不是第二套规则')
+  // 正本:模板对从批内父行解析,退回路径与缺席规则一字未动(硬约束 (a))。
+  const childA = recordOf('PART-CHILD')
+  assert.equal(childA.parentComponentCode, 'TZ-0001', '父组件图号 落进模板列')
+  assert.equal(childA.parentComponentName, '主体组件 DN1200', '父组件名称 是父件**未切分**的全串')
+  const childB = recordOf('PART-CHILD-2')
+  assert.equal(childB.parentComponentCode, 'TZ-0002')
+  assert.equal(childB.parentComponentName, '副体组件', '父件没有全串时退回 componentName —— 同一条路径')
+  const childC = recordOf('PART-CHILD-3')
+  assert.equal(Object.prototype.hasOwnProperty.call(childC, 'parentComponentCode'), false, '父件图号为空 ⇒ 模板列缺席,不写空串')
+  assert.equal(childC.parentComponentName, '无图号组件 DN800', '名字那一列不受图号缺值牵连')
+  const childD = recordOf('PART-CHILD-4')
+  assert.equal(childD.parentComponentCode, 'TZ-0004', '图号那一列不受名字缺值牵连')
+  assert.equal(Object.prototype.hasOwnProperty.call(childD, 'parentComponentName'), false, '父件两个名字键都空 ⇒ 模板列缺席,不写空串')
+  for (const sourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ROOT-3', 'PART-ROOT-4', 'PART-ORPHAN']) {
+    for (const fieldId of ['parentComponentCode', 'parentComponentName']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(recordOf(sourceId), fieldId), false, sourceId + ' 不写 ' + fieldId + ' —— 无父就是无键,不是空串')
+    }
+  }
 
-  // 父件在批内、但父件自己那个字段为空:模板列缺席 ⇒ 包列**缺席**,不是空串。
-  // 这两条各自单独钉住 `out.parentComponentCode !== undefined` / `out.parentComponentName !== undefined`
-  // 那两道守卫 —— 去掉任意一道改写空串,这里必红(反驳 B blocker 1)。
-  const childC = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-3').record
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(childC, 'ext_parentDrawingNo'),
-    false,
-    '父件图号为空 ⇒ 客户包列缺席,不写空串',
-  )
-  assert.equal(childC.ext_parentName, '无图号组件 DN800', '名字那一列不受图号缺值牵连,照派生')
-  const childD = adds.find((decision) => decision.record.componentSourceId === 'PART-CHILD-4').record
-  assert.equal(childD.ext_parentDrawingNo, 'TZ-0004', '图号那一列不受名字缺值牵连,照派生')
-  assert.equal(
-    Object.prototype.hasOwnProperty.call(childD, 'ext_parentName'),
-    false,
-    '父件两个名字键都空 ⇒ 客户包列缺席,不写空串',
-  )
-
-  // 逐行相等,而且**键在不在**也相等:把两列与模板列拆成两份取值逻辑,这一圈必红。
+  // 已撤的那一对:声明了、包也装了,九行记录上一个键都没有 —— 不是空串,是没有。
   for (const decision of adds) {
-    const record = decision.record
-    for (const [packId, templateId] of [
-      ['ext_parentDrawingNo', 'parentComponentCode'],
-      ['ext_parentName', 'parentComponentName'],
-    ]) {
+    for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
       assert.equal(
-        Object.prototype.hasOwnProperty.call(record, packId),
-        Object.prototype.hasOwnProperty.call(record, templateId),
-        record.componentSourceId + ': ' + packId + ' 与 ' + templateId + ' 要么都写要么都不写',
-      )
-      assert.equal(record[packId], record[templateId], record.componentSourceId + ': ' + packId + ' 与模板列逐行相等')
-    }
-    assertNoHumanFields(record, 'F1c-b add record')
-  }
-
-  // 根行无父、孤儿的父件不在这批里:都是**缺席**,不是空串。
-  for (const componentSourceId of ['PART-ROOT', 'PART-ROOT-2', 'PART-ROOT-3', 'PART-ROOT-4', 'PART-ORPHAN']) {
-    const record = adds.find((decision) => decision.record.componentSourceId === componentSourceId).record
-    for (const fieldId of ['ext_parentDrawingNo', 'ext_parentName', 'parentComponentCode', 'parentComponentName']) {
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(record, fieldId),
+        Object.prototype.hasOwnProperty.call(decision.record, fieldId),
         false,
-        componentSourceId + ' 不写 ' + fieldId + ' —— 无父就是无键,不是空串',
+        decision.record.componentSourceId + ': 已撤的 ' + fieldId + ' 不再派生(声明了、装了也不派生)',
       )
     }
-  }
-}
-
-// 两道闸,各一条否定控制。
-// M2(去掉 canDeriveExtensionField 闸)⇒ 第一段红。
-function testParentPackColumnsNeedBothTheDeclarationAndThePack() {
-  const batch = twoFamilyBatch()
-
-  // ① 包装了(pickFields 认这两列),但动作没声明 ⇒ 不派生。声明才是"目标表已绑定"的凭据,
-  //    派进一个 target 没绑的 ext_ 列会让整行写入被 apply-writer 拒("这列空着"升级成"这个项目
-  //    根本 apply 不了")。
-  const undeclared = planWithParentPackColumns({ expandedRows: batch.rows, extensionFieldIds: null, runId: 'run-parent-pack-undeclared' })
-  for (const decision of byDecision(undeclared, DECISIONS.ADD)) {
     assert.deepEqual(
       Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
       [],
-      '动作没声明扩展列 ⇒ 一个 ext_ 键都不派生',
+      decision.record.componentSourceId + ': 只声明那两列 ⇒ 记录上没有任何 ext_ 键',
     )
+    assertNoHumanFields(decision.record, 'retired parent pack add record')
   }
-  const undeclaredChild = byDecision(undeclared, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
-  assert.equal(undeclaredChild.parentComponentCode, 'TZ-0001', '模板列照旧 —— 这次改动纯加法')
-  assert.equal(undeclaredChild.parentComponentName, '主体组件 DN1200')
+  // 可写 band 一字未动:装了包、声明了,它们仍在 plm_system band 里 —— 既有安装零删除,撤的是写手不是列。
+  for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+    assert.equal(plan.summary.plmSystemFields.includes(fieldId), true, fieldId + ' 仍在包感知可写 band 里')
+  }
 
-  // ② 声明了,但表上没装这个包 ⇒ pickFields 的可写 band 里没有这两列,记录上同样没有。
-  //    派生只能给内存行加一个键,加不了任何人表上的一列。
-  const noPack = planWithParentPackColumns({ expandedRows: batch.rows, installPack: false, runId: 'run-parent-pack-no-pack' })
-  for (const decision of byDecision(noPack, DECISIONS.ADD)) {
-    assert.deepEqual(
-      Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
-      [],
-      '没装包的部署一个 ext_ 列都写不出去',
-    )
-  }
-  assert.equal(noPack.summary.plmSystemFields.includes('ext_parentDrawingNo'), false, '没装包 ⇒ 可写 band 里没有这两列')
-
-  // ③ 声明是**逐列**的:只声明两列中的一列 ⇒ 只派生那一列,另一列一个键都不写。
-  //    ①② 两段是 all / none 两个**对称**形状,「只要传了非空数组就把登记表里的列全派生」这种
-  //    整批放行的接线在它们身上判据恒等 ⇒ 变异存活(终审 J11_PARTIAL)。现网真正可达的正是不
-  //    对称形状:222 上的 action.extensionFieldIds 是一份 durable JSON,旧配置只含 F1c 那三列时
-  //    这两列一个也不该冒出来 —— 冒出来就是往 target 的 fieldIdMap 没绑的 ext_ id 上写,
-  //    explicit 绑定模式下(222 由 derive-target-binding.mjs 生成 fieldIdMap,即 explicit)apply-writer
-  //    硬拒整行("这列空着"升级成"这个项目根本 apply 不了");implicit 模式靠 pickFields 的包感知 band 兜底。两个方向各跑一次,
-  //    照 testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull 那条不对称用例的形状。
-  const DERIVED_FOR_CHILD_A = {
-    ext_parentDrawingNo: 'TZ-0001',
-    ext_parentName: '主体组件 DN1200',
-  }
-  const TEMPLATE_COLUMN_OF = {
-    ext_parentDrawingNo: 'parentComponentCode',
-    ext_parentName: 'parentComponentName',
-  }
-  for (const [declaredId, undeclaredId] of [
-    ['ext_parentDrawingNo', 'ext_parentName'],
-    ['ext_parentName', 'ext_parentDrawingNo'],
+  // 四种声明形状同判:只声明一列 / 只声明另一列 / 不声明 / 没装包。
+  for (const [label, input] of [
+    ['only-drawingNo', { extensionFieldIds: ['ext_parentDrawingNo'] }],
+    ['only-name', { extensionFieldIds: ['ext_parentName'] }],
+    ['undeclared', { extensionFieldIds: null }],
+    ['no-pack', { installPack: false }],
   ]) {
-    const partial = planWithParentPackColumns({
-      expandedRows: batch.rows,
-      extensionFieldIds: [declaredId],
-      runId: 'run-parent-pack-partial',
-    })
-    const partialAdds = byDecision(partial, DECISIONS.ADD)
-    assert.equal(partialAdds.length, 9, '只声明一列不改变 add 的条数')
-    const partialChild = partialAdds.find((d) => d.record.componentSourceId === 'PART-CHILD').record
-    assert.equal(
-      partialChild[declaredId],
-      DERIVED_FOR_CHILD_A[declaredId],
-      '只声明了 ' + declaredId + ' ⇒ 这一列照派生',
-    )
-    for (const decision of partialAdds) {
-      const record = decision.record
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(record, undeclaredId),
-        false,
-        record.componentSourceId + ': 没声明 ' + undeclaredId + ' ⇒ 无键 —— 不是空串,也不能被另一列的声明捎带出来',
-      )
-      // 被声明的那一列仍然只跟着它自己的模板列走:模板列在它就在,模板列缺席它也缺席。
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(record, declaredId),
-        Object.prototype.hasOwnProperty.call(record, TEMPLATE_COLUMN_OF[declaredId]),
-        record.componentSourceId + ': ' + declaredId + ' 与 ' + TEMPLATE_COLUMN_OF[declaredId] + ' 要么都写要么都不写',
-      )
+    const shaped = planWithParentPackColumns({ expandedRows: batch.rows, runId: 'run-parent-pack-' + label, ...input })
+    const shapedAdds = byDecision(shaped, DECISIONS.ADD)
+    assert.equal(shapedAdds.length, 9, label + ': 声明形状不改变 add 的条数')
+    for (const decision of shapedAdds) {
       assert.deepEqual(
-        Object.keys(record).filter((key) => key.startsWith('ext_') && key !== declaredId),
+        Object.keys(decision.record).filter((key) => key.startsWith('ext_')),
         [],
-        record.componentSourceId + ': 只声明 ' + declaredId + ' ⇒ 记录上不会冒出第二个 ext_ 键',
+        label + ': ' + decision.record.componentSourceId + ' 上没有任何 ext_ 键',
       )
     }
+    const shapedChild = shapedAdds.find((d) => d.record.componentSourceId === 'PART-CHILD').record
+    assert.equal(shapedChild.parentComponentCode, 'TZ-0001', label + ': 模板列照旧')
+    assert.equal(shapedChild.parentComponentName, '主体组件 DN1200', label + ': 模板列照旧')
   }
 }
 
-// **本次拉取带上来的**值(部署自己的 ext 映射测到的)永远优先;派生的从不覆盖这一次测得的值。
-// M3(去掉 isBlank 判断)⇒ 本用例红。
-//
-// 作用域:isBlank 读的是**展开行**,不是表上的存量行 —— 人在表里手填进这两个包列的值不受这道
-// 闸保护,下一次拉取会被派生值以 update 覆盖(见 testExistingRowsGetThePackColumnsAsAPlainUpdate
-// 的 'empty-string' 分支同理)。手填值的保护在另一道闸上:包把这两列声明成 human_preserved 或钉
-// preserveOnRefresh,它们就根本不进 pickFields 的可写 band。这是包声明的事,不是这段代码的事。
-function testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull() {
+// ③ 来料自带的值原样透传 —— 那是部署自己 ext 映射测得的,pickFields 照抄;派生不再补空白。
+// M1 的另一面:恢复派生 ⇒ 空白形状被填上模板值 ⇒ 红。
+function testMappedRetiredPackValuesPassThroughAndBlanksStayBlank() {
   const batch = twoFamilyBatch()
-  const mapped = {
-    ...batch.childA,
-    ext_parentDrawingNo: 'MAPPED-DWG-9',
-    ext_parentName: '映射来的父件名',
-  }
-  const plan = planWithParentPackColumns({
-    expandedRows: [batch.parentA, mapped],
-    runId: 'run-parent-pack-measured',
-  })
+  const mapped = { ...batch.childA, ext_parentDrawingNo: 'MAPPED-DWG-9', ext_parentName: '映射来的父件名' }
+  const plan = planWithParentPackColumns({ expandedRows: [batch.parentA, mapped], runId: 'run-parent-pack-mapped' })
   const record = byDecision(plan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
-  assert.equal(record.ext_parentDrawingNo, 'MAPPED-DWG-9', '部署自己映射到的值胜出 —— 测得的压过派生的')
+  assert.equal(record.ext_parentDrawingNo, 'MAPPED-DWG-9', '映射值原样透传 —— 测得的,不是派生的')
   assert.equal(record.ext_parentName, '映射来的父件名')
-  // 模板列不受影响:它本来就不归这条规则管。
-  assert.equal(record.parentComponentCode, 'TZ-0001')
+  assert.equal(record.parentComponentCode, 'TZ-0001', '模板列不受映射值影响')
   assert.equal(record.parentComponentName, '主体组件 DN1200')
 
-  // 空白的几种写法都算"没有值",照派生(空串/空格不是人写下的值)。
   for (const blank of ['', '   ', null, undefined]) {
     const blanked = { ...batch.childA, ext_parentDrawingNo: blank, ext_parentName: blank }
-    const blankedPlan = planWithParentPackColumns({
-      expandedRows: [batch.parentA, blanked],
-      runId: 'run-parent-pack-blank',
-    })
+    const blankedPlan = planWithParentPackColumns({ expandedRows: [batch.parentA, blanked], runId: 'run-parent-pack-blank' })
     const blankedRecord = byDecision(blankedPlan, DECISIONS.ADD).find((d) => d.record.componentSourceId === 'PART-CHILD').record
-    assert.equal(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白值 ' + JSON.stringify(blank) + ' 照派生')
-    assert.equal(blankedRecord.ext_parentName, '主体组件 DN1200')
-  }
-
-  // 逐列接线的负控。上面两种形状都是**对称**的(两列同时带映射值 / 两列同时空白),把两个
-  // `isBlank` 读交叉接线(图号闸去读名称列、名称闸去读图号列)在对称形状下判据恒等 ⇒ 变异存活。
-  // 现网真正可达的是不对称形状:部署只映射了两列中的**一列**。两个方向各跑一次 —— 被映射的那列
-  // 必须保住映射值(交叉接线会拿派生值把它盖掉),另一列必须照常派生(交叉接线会因为「另一列有
-  // 值」把它的派生关掉)。这两条断言把每一道闸钉到它自己那一列上。
-  const DERIVED_PARENT_VALUE = {
-    ext_parentDrawingNo: 'TZ-0001',
-    ext_parentName: '主体组件 DN1200',
-  }
-  for (const [mappedId, derivedId] of [
-    ['ext_parentDrawingNo', 'ext_parentName'],
-    ['ext_parentName', 'ext_parentDrawingNo'],
-  ]) {
-    const asymmetric = { ...batch.childA, [mappedId]: 'ONLY-MAPPED-' + mappedId }
-    const asymmetricPlan = planWithParentPackColumns({
-      expandedRows: [batch.parentA, asymmetric],
-      runId: 'run-parent-pack-asymmetric',
-    })
-    const asymmetricRecord = byDecision(asymmetricPlan, DECISIONS.ADD)
-      .find((decision) => decision.record.componentSourceId === 'PART-CHILD').record
-    assert.equal(
-      asymmetricRecord[mappedId],
-      'ONLY-MAPPED-' + mappedId,
-      '只映射了 ' + mappedId + ' 一列 ⇒ 这一列的映射值保住(这道闸读的必须是它自己那一列)',
-    )
-    assert.equal(
-      asymmetricRecord[derivedId],
-      DERIVED_PARENT_VALUE[derivedId],
-      '只映射了 ' + mappedId + ' 一列 ⇒ ' + derivedId + ' 照常派生(另一列有值不该关掉这一列的派生)',
-    )
+    assert.notEqual(blankedRecord.ext_parentDrawingNo, 'TZ-0001', '空白 ' + JSON.stringify(blank) + ' 不再被派生填上')
+    assert.notEqual(blankedRecord.ext_parentName, '主体组件 DN1200', '空白 ' + JSON.stringify(blank) + ' 不再被派生填上')
+    assert.equal(blankedRecord.parentComponentCode, 'TZ-0001', '模板列照旧')
+    assert.equal(blankedRecord.parentComponentName, '主体组件 DN1200')
   }
 }
 
@@ -1563,7 +1445,8 @@ function testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull() {
 //    denormalizedPlmFields 里加第六列而**不**登记 ⇒ 这里红。两种抽法都留着:只有闸没有落值
 //    (或反过来)的新列同样是漏登记,也同样是一条自相矛盾的派生。
 function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
-  const ALL_DERIVED_EXT_IDS = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec', 'ext_parentDrawingNo', 'ext_parentName']
+  // 规格 P(2026-09-15):五列回到三列 —— ext_parentDrawingNo / ext_parentName 已撤。
+  const ALL_DERIVED_EXT_IDS = ['ext_componentSortNo', 'ext_parentSortNo', 'ext_nameAndSpec']
   const parent = row({
     componentSourceId: 'PART-ROOT',
     componentCode: 'TZ-0001',
@@ -1627,117 +1510,392 @@ function testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived() {
     registeredExtIds,
     '源码里真的落值(out.ext_… =)的 ext_ 列必须与 DENORMALIZED_PLM_FIELD_IDS 逐项相同(漏登记 ⇒ 红)',
   )
+
+  // 规格 P 的 M1 tripwire,按名点出来:已撤的那一对既不在登记表里,也不在源码的闸 / 落值两种字面量里。
+  for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+    assert.equal(DENORMALIZED_PLM_FIELD_IDS.includes(fieldId), false, 'M1: 已撤的 ' + fieldId + ' 不得留在 DENORMALIZED_PLM_FIELD_IDS 里')
+    assert.equal(gatedExtIds.includes(fieldId), false, 'M1: 源码里不得再有 canDeriveExtensionField(' + fieldId + ')')
+    assert.equal(assignedExtIds.includes(fieldId), false, 'M1: 源码里不得再有 out.' + fieldId + ' =')
+  }
+  assert.equal(registeredExtIds.length, 3, '派生的 ext_ 列回到 F1c 的三列')
 }
 
-// 222 上那 581 行的迁移答案:没有迁移。下一次 dry-run 把两列以 **update** 补上,不触发
-// manual_confirm(这两列既不在 IDENTITY_FIELD_IDS 也不在 LINEAGE_FIELD_IDS,是普通的
-// plm_system 刷新),人工列一字不动,补完之后再拉一次是 SKIP。
-//
-// 第三种形状('hand-authored')钉的是**行为变化**,不是补值:这两列从本次改动起第一次有了刷新
-// 写手,于是人**在表里手填**进这两个包列的值会被下一次刷新以 update 覆盖(manual_confirm 仍然
-// 是 0 —— 这不是冲突,是刷新)。`isBlank` 那道闸读的是展开行,管不到表上的存量值;包列要挡住
-// 刷新只有一条路:包把该列声明成 `ownership: 'human_preserved'` —— 它随即离开 plm_system 可写
-// band(派生照样在内存里跑,只是 pickFields 一个字也不往表上写)。规格「已有值(人工/映射)⇒
-// 不覆盖」的**人工**那一半今天不成立,这里把现状钉死,免得合进去的是一条自己说不覆盖、实际
-// 覆盖的硬规则(见 PR 正文 owner 待办)。
-function testExistingRowsGetThePackColumnsAsAPlainUpdate() {
+// ⑤ 存量行(222 上 581 行的答案:没有迁移,也没有删除)。#5625 那条「存量行以普通 update 补包列」
+// 用例的相应调整 —— 补的对象从包列换成正本:
+//   形状 A:模板对已填、已撤的那一对 不存在 / 空串 / 人手填 —— 来料上没有那两个键(X6:缺键 ≠
+//         变更),模板对与来料相等 ⇒ 整行 SKIP,零 update;手填值原样留在表上(没人读、没人写、
+//         没人删 —— 这是「既有安装零数据删除」在规划器层的形状)。
+//   形状 B:模板对空着(#5446 之前写入、从未重拉的行)⇒ 一条 update 补**模板对**;patch 与
+//         changedFields 里只有模板对,没有那两个 ext_ 键;不挂 manual_confirm;补完再拉是 SKIP。
+// M1(恢复派生)⇒ 形状 A 的 empty-string / hand-authored 变成 update、形状 B 的 patch 多出两个键 ⇒ 红。
+function testExistingRowsAreHealedOnTheTemplatePairAndNeverOnTheRetiredPair() {
   const batch = twoFamilyBatch()
   const HAND_AUTHORED = { ext_parentDrawingNo: '人手填的图号', ext_parentName: '人手填的父件名' }
-  // 存量行的三种真实形状:列不存在(从没写过)、列存在但为空串、列里是人手填的值。
+  const TEMPLATE_PAIR_FILLED = { parentComponentCode: 'TZ-0001', parentComponentName: '主体组件 DN1200' }
   for (const existingShape of ['absent', 'empty-string', 'hand-authored']) {
-    const emptyShape = existingShape
-    const existingChild = {
-      ...batch.childA,
-      parentComponentCode: 'TZ-0001',
-      parentComponentName: '主体组件 DN1200',
-      notes: '人工备注必须活下来',
-      ...(existingShape === 'empty-string' ? { ext_parentDrawingNo: '', ext_parentName: '' } : {}),
-      ...(existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}),
-    }
-    const plan = planWithParentPackColumns({
+    const retiredCells = existingShape === 'empty-string'
+      ? { ext_parentDrawingNo: '', ext_parentName: '' }
+      : existingShape === 'hand-authored' ? { ...HAND_AUTHORED } : {}
+    const existingRoot = { ...batch.parentA, ...retiredCells }
+
+    // 形状 A —— 模板对已填。
+    const settledChild = { ...batch.childA, ...TEMPLATE_PAIR_FILLED, notes: '人工备注必须活下来', ...retiredCells }
+    const settled = planWithParentPackColumns({
       expandedRows: [batch.parentA, batch.childA],
-      existingRows: [{ ...batch.parentA }, existingChild],
-      runId: 'run-parent-pack-backfill',
+      existingRows: [existingRoot, settledChild],
+      runId: 'run-parent-pack-settled',
     })
-    assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0, emptyShape + ': 补两列不挂起任何一行')
-    assert.equal(plan.valid, true, emptyShape + ': 计划仍然是可执行的')
-    const updates = byDecision(plan, DECISIONS.UPDATE)
-    assert.equal(updates.length, 1, emptyShape + ': 只有那条子行需要刷新')
+    assert.equal(settled.valid, true, existingShape + ': 计划仍然是可执行的')
+    assert.equal(settled.counts[DECISIONS.MANUAL_CONFIRM], 0, existingShape + ': 不挂起任何一行')
+    assert.equal(byDecision(settled, DECISIONS.UPDATE).length, 0, existingShape + ': 模板对已填 ⇒ 已撤的那一对不再制造 update(手填值原样留在表上)')
+    assert.equal(byDecision(settled, DECISIONS.SKIP).length, 2, existingShape + ': 两行都是 SKIP')
+    for (const decision of settled.decisions) {
+      assert.equal(decision.conflictSummary.type, 'unchanged', existingShape + ': 理由是 unchanged,不点名任何一列')
+    }
+
+    // 形状 B —— 模板对空着(batch.childA 本身不带模板对;#5446 之前写入的行就是这个样子)。
+    const unfilledChild = { ...batch.childA, notes: '人工备注必须活下来', ...retiredCells }
+    const healing = planWithParentPackColumns({
+      expandedRows: [batch.parentA, batch.childA],
+      existingRows: [existingRoot, unfilledChild],
+      runId: 'run-parent-pack-heal',
+    })
+    assert.equal(healing.valid, true)
+    assert.equal(healing.counts[DECISIONS.MANUAL_CONFIRM], 0, existingShape + ': 补模板对不挂起任何一行')
+    const updates = byDecision(healing, DECISIONS.UPDATE)
+    assert.equal(updates.length, 1, existingShape + ': 只有模板对空着的子行需要刷新')
+    assert.equal(updates[0].idempotencyKey, batch.childA.idempotencyKey, existingShape + ': 刷新的是有父的子行')
     assert.deepEqual(
       updates[0].changedFields.slice().sort(),
-      ['ext_parentDrawingNo', 'ext_parentName'],
-      emptyShape + ': 变的就是这两列,别的一列没动',
+      ['parentComponentCode', 'parentComponentName'],
+      existingShape + ': 变的只有模板对,别的一列没动',
     )
-    assert.equal(updates[0].patch.ext_parentDrawingNo, 'TZ-0001', emptyShape + ': update 把 父组件图号 填进包列')
-    assert.equal(updates[0].patch.ext_parentName, '主体组件 DN1200', emptyShape + ': update 把 父组件名称 填进包列')
-    // update 计划里同样逐行相等(硬规则 1 覆盖 add 与 update 两条路径)。
-    assert.equal(updates[0].patch.ext_parentDrawingNo, updates[0].patch.parentComponentCode)
-    assert.equal(updates[0].patch.ext_parentName, updates[0].patch.parentComponentName)
-    assertNoHumanFields(updates[0].patch, 'F1c-b backfill patch')
-
-    if (existingShape === 'hand-authored') {
-      // 现状,不是理想:手填值被派生值取代,而且这一行照样是普通 update(不挂起、不提示)。
-      assert.notEqual(
-        updates[0].patch.ext_parentDrawingNo,
-        HAND_AUTHORED.ext_parentDrawingNo,
-        'hand-authored: 手填进包列的图号被派生值覆盖 —— 规格「人工值不覆盖」那一半今天不成立',
-      )
-      assert.notEqual(
-        updates[0].patch.ext_parentName,
-        HAND_AUTHORED.ext_parentName,
-        'hand-authored: 手填进包列的父件名被派生值覆盖',
-      )
-      assert.equal(plan.counts[DECISIONS.MANUAL_CONFIRM], 0, 'hand-authored: 覆盖手填值不会挂起这一行')
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(updates[0].patch, 'notes'),
-        false,
-        'hand-authored: 真正的人工列(notes)不进 patch,一字不动',
-      )
-
-      // **经包安装器安装的列**只有这一条路挡得住:包把这一列声明成 human_preserved ⇒ 它离开
-      // plm_system 可写 band,手填值活下来(派生照样在内存里跑,只是 pickFields 一个字也不往表上
-      // 写 —— 这是包声明的取舍,不是这段代码的开关)。
-      //
-      // band 本身认两条路(derivePackAwarePlmWritableFields:(1) `preserveOnRefresh === true` 显式
-      // 钉、(2) `ownership === human_preserved` 兜底,见 lib 里 'preserve_on_refresh_pinned' /
-      // 'human_preserved_ownership' 两个 reason),这里一次改了两个键,所以钉住的是 (1) 先命中。
-      // 走包这条路两者必须一致(preserveOnRefresh 由 ownership 推导,安装器拒掉不一致的 stanza),
-      // 但绕过安装器直接把字段属性 patch 成 preserveOnRefresh:true 同样离开可写 band —— "唯一"
-      // 说的是包声明这一层,不是 band 那一层。
-      const preservedPlan = planStockPreparationConflicts({
-        expandedRows: [batch.parentA, batch.childA],
-        existingRows: [{ ...batch.parentA }, existingChild],
-        runId: 'run-parent-pack-human-preserved',
-        plannedAt: '2026-09-12T00:00:00.000Z',
-        extensionFieldIds: PARENT_PACK_COLUMN_IDS,
-        installedFieldProperties: PARENT_PACK_COLUMN_IDS.map((id) => ({
-          ...installedPackColumn(id),
-          property: {
-            stockPreparation: {
-              ...installedPackColumn(id).property.stockPreparation,
-              ownership: 'human_preserved',
-              preserveOnRefresh: true,
-            },
-          },
-        })),
-      })
-      assert.equal(
-        byDecision(preservedPlan, DECISIONS.UPDATE).length,
-        0,
-        'hand-authored: 包把这两列声明成 human_preserved ⇒ 刷新一个字也不写',
-      )
+    assert.equal(updates[0].patch.parentComponentCode, 'TZ-0001', existingShape + ': update 把 父组件图号 填进模板列')
+    assert.equal(updates[0].patch.parentComponentName, '主体组件 DN1200', existingShape + ': update 把 父组件名称 填进模板列')
+    for (const fieldId of RETIRED_PARENT_PACK_COLUMN_IDS) {
+      assert.equal(Object.prototype.hasOwnProperty.call(updates[0].patch, fieldId), false, existingShape + ': patch 里没有已撤的 ' + fieldId)
+      assert.equal(updates[0].changedFields.includes(fieldId), false, existingShape + ': changedFields 不点名已撤的 ' + fieldId)
     }
+    assert.equal(Object.prototype.hasOwnProperty.call(updates[0].patch, 'notes'), false, existingShape + ': 真正的人工列(notes)不进 patch')
+    assertNoHumanFields(updates[0].patch, 'template pair heal patch')
+    const rootDecision = healing.decisions.find((decision) => decision.idempotencyKey === batch.parentA.idempotencyKey)
+    assert.equal(rootDecision.decision, DECISIONS.SKIP, existingShape + ': 根行来料没有这些键 ⇒ SKIP')
 
-    // 幂等:填好之后再拉一次是 SKIP,不会每次 dry-run 都报一条 update。
-    const filled = { ...existingChild, ext_parentDrawingNo: 'TZ-0001', ext_parentName: '主体组件 DN1200' }
+    // 幂等:补好模板对之后再拉一次是 SKIP —— 已撤的那一对不论表上是什么都不再制造 update。
     const second = planWithParentPackColumns({
       expandedRows: [batch.parentA, batch.childA],
-      existingRows: [{ ...batch.parentA }, filled],
-      runId: 'run-parent-pack-backfill-2',
+      existingRows: [existingRoot, { ...unfilledChild, ...TEMPLATE_PAIR_FILLED }],
+      runId: 'run-parent-pack-heal-2',
     })
-    assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, emptyShape + ': 填好之后重拉不再写')
-    assert.equal(byDecision(second, DECISIONS.SKIP).length, 2, emptyShape + ': 两行都是 SKIP')
+    assert.equal(byDecision(second, DECISIONS.UPDATE).length, 0, existingShape + ': 补好之后重拉不再写')
+    assert.equal(byDecision(second, DECISIONS.SKIP).length, 2, existingShape + ': 两行都是 SKIP')
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// X6 — 来料没这个键 ≠ 变更(#5625 三选一里的 ②,替 owner 定的口径,可撤回)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `changedFields` 只把**来料真正给了值**的格算作变更。判据与下游 `pickFields` 的投影判据是同一个量
+// (`row[field] !== undefined`):来料上键缺席 / 键在但值为 `undefined` 的格根本写不进 patch,所以也
+// 不能算变更 —— 否则就是「说变了、什么也没写」的空 update(#5625 代价 (a)(b);F1c-b 终审 r2)。
+// `null` 与空串是值,不是缺席:键在 ⇒ 照 `valuesEqualForTemplateField` 比较。存量那一侧不看键的
+// 在与不在:来料给了值、存量没这一列 ⇒ 仍是变更(回填方向,testExistingRowsAreBackfilledByAReRun)。
+//
+// 变异(内存级):M1「把收窄去掉」⇒ 本组缺键用例红 + table-actions 的端到端计数用例红;
+// M2「把 null 也当缺席」⇒ null 用例红;M3「只在 refresh 调用点收窄、lineage/identity 不收」⇒
+// testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide 红。
+function testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide() {
+  const { changedFields } = __internals
+  const existing = { f: 'x' }
+  assert.deepEqual(changedFields({}, existing, ['f']), [], '键缺席 ⇒ 不算变更')
+  assert.deepEqual(changedFields({ f: undefined }, existing, ['f']), [], '键在但值为 undefined ⇒ 与 pickFields 同判据,不算变更')
+  assert.deepEqual(changedFields({}, { f: '' }, ['f']), [], '存量空串、来料无键 ⇒ 不算变更(F1c-b 终审 r2 那条永不收敛的空 update)')
+  assert.deepEqual(changedFields({}, { f: null }, ['f']), [], '存量 null、来料无键 ⇒ 不算变更(改前就相等,保持)')
+  assert.deepEqual(changedFields({ f: null }, existing, ['f']), ['f'], 'null 是值,不是缺席:键在且为 null ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: '' }, existing, ['f']), ['f'], '空串是值 ⇒ 仍照比较 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'y' }, existing, ['f']), ['f'], '来料给了不同的值 ⇒ 变更')
+  assert.deepEqual(changedFields({ f: 'x' }, existing, ['f']), [], '来料给了相同的值 ⇒ 相等')
+  assert.deepEqual(changedFields({ f: 'x' }, {}, ['f']), ['f'], '来料给了值、存量没这一列 ⇒ 仍是变更(回填方向不受影响)')
+  assert.deepEqual(changedFields({ f: 'x' }, { f: undefined }, ['f']), ['f'], '存量 undefined、来料有值 ⇒ 变更')
+  // 模板归一化照旧 —— 只要来料给了键,比较的那一半一个字没改。
+  const numberField = new Map([['f', { id: 'f', type: 'number' }]])
+  assert.deepEqual(changedFields({ f: '5' }, { f: 5 }, ['f'], numberField), [], '来料 "5" 与存量 5 按 number 模板相等')
+  assert.deepEqual(changedFields({ f: '6' }, { f: 5 }, ['f'], numberField), ['f'], '来料 "6" 与存量 5 按 number 模板不等')
+  // 混合列表:保持 fields 的顺序,只留下「来料给了、且不等」的那些。
+  assert.deepEqual(
+    changedFields({ b: null, c: 'same', d: 'new' }, { a: 'x', b: 'y', c: 'same', d: 'old' }, ['a', 'b', 'c', 'd']),
+    ['b', 'd'],
+    'a 缺席不算;b 给了 null 算;c 相同不算;d 不同算',
+  )
+}
+
+// refresh 调用点(:1629 那一带)——#5625 的两处代价与 F1c-b 的空 update,正向钉住。
+function testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn() {
+  const EXT = 'ext_designer'
+  const installed = [installedPackColumn(EXT)]
+  const refreshReason = (decision) => JSON.parse(decision.patch.lastPlmConflictSummary)
+
+  // (a) #5625 代价 (a):存量有值、来料上没这个键。
+  const absentIntake = row({ componentSourceId: 'PART-ABSENT', pathTokens: ['PART-ABSENT'] })
+  assert.equal(Object.prototype.hasOwnProperty.call(absentIntake, EXT), false, '前提:来料上没有这个键')
+  // (b) F1c-b 终审 r2:存量空串、来料上没这个键。
+  const absentIntakeEmpty = row({ componentSourceId: 'PART-ABSENT-EMPTY', pathTokens: ['PART-ABSENT-EMPTY'] })
+  // (c) null 是值。
+  const nullIntake = row({ componentSourceId: 'PART-NULL', pathTokens: ['PART-NULL'], [EXT]: null })
+  // (d) 值不同 / (e) 值相同。
+  const changedIntake = row({ componentSourceId: 'PART-CHANGED', pathTokens: ['PART-CHANGED'], [EXT]: '设计员乙' })
+  const sameIntake = row({ componentSourceId: 'PART-SAME', pathTokens: ['PART-SAME'], [EXT]: '设计员甲' })
+  // (f) #5625 代价 (b):别的列真变了、来料仍没这个键 ⇒ 理由只能列 patch 里真有的列。
+  const quantityIntake = row({ componentSourceId: 'PART-QTY', pathTokens: ['PART-QTY'], rawQuantity: 9, totalQuantity: 9 })
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [absentIntake, absentIntakeEmpty, nullIntake, changedIntake, sameIntake, quantityIntake],
+    existingRows: [
+      { ...absentIntake, [EXT]: '设计员甲' },
+      { ...absentIntakeEmpty, [EXT]: '' },
+      { ...nullIntake, [EXT]: '设计员甲' },
+      { ...changedIntake, [EXT]: '设计员甲' },
+      { ...sameIntake },
+      { ...quantityIntake, rawQuantity: 2, totalQuantity: 2, [EXT]: '设计员甲' },
+    ],
+    runId: 'run-x6-refresh',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+    installedFieldProperties: installed,
+  })
+  // 这一列**确实在**比较 band 里 —— 不然下面每一条 SKIP 都是空话(守卫没接线那类漏法)。
+  assert.ok(plan.summary.plmSystemFields.includes(EXT), '包列在 plm_system 可写/比较 band 里')
+  assert.equal(plan.valid, true)
+  assert.deepEqual(plan.counts, { add: 0, update: 3, skip: 3, inactive: 0, manual_confirm: 0 })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  for (const [intake, label] of [[absentIntake, '存量有值'], [absentIntakeEmpty, '存量空串']]) {
+    const decision = byKey.get(intake.idempotencyKey)
+    assert.equal(decision.decision, DECISIONS.SKIP, label + '、来料无键 ⇒ SKIP(X6 之前是 update:1 的空 update)')
+    assert.equal(decision.conflictSummary.type, 'unchanged', label + ': 理由是 unchanged')
+    assert.equal(Object.prototype.hasOwnProperty.call(decision, 'patch'), false, label + ': 没有 patch,一个字不写')
+    assert.equal(JSON.stringify(decision).includes(EXT), false, label + ': 决策里不点名这一列')
+  }
+
+  const nullDecision = byKey.get(nullIntake.idempotencyKey)
+  assert.equal(nullDecision.decision, DECISIONS.UPDATE, 'null 是值,不是缺席 ⇒ 仍是变更')
+  assert.deepEqual(nullDecision.changedFields, [EXT])
+  assert.equal(Object.prototype.hasOwnProperty.call(nullDecision.patch, EXT), true, 'null 进 patch(pickFields 同样投影 null)')
+  assert.equal(nullDecision.patch[EXT], null)
+  assert.deepEqual(refreshReason(nullDecision).changedFields, [EXT], '理由点名的列就是 patch 里的列')
+
+  const changedDecision = byKey.get(changedIntake.idempotencyKey)
+  assert.equal(changedDecision.decision, DECISIONS.UPDATE, '来料给了不同的值 ⇒ 仍是变更')
+  assert.deepEqual(changedDecision.changedFields, [EXT])
+  assert.equal(changedDecision.patch[EXT], '设计员乙')
+
+  const sameDecision = byKey.get(sameIntake.idempotencyKey)
+  assert.equal(sameDecision.decision, DECISIONS.SKIP, '来料给了相同的值 ⇒ 相等')
+
+  const quantityDecision = byKey.get(quantityIntake.idempotencyKey)
+  assert.equal(quantityDecision.decision, DECISIONS.UPDATE, '别的列真变了 ⇒ 照常 update')
+  assert.deepEqual(quantityDecision.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'], '理由只列真正变了的列')
+  assert.equal(Object.prototype.hasOwnProperty.call(quantityDecision.patch, EXT), false, 'patch 里没有来料没给的列')
+  assert.equal(
+    refreshReason(quantityDecision).changedFields.includes(EXT),
+    false,
+    'lastPlmConflictSummary 不点名 patch 里没有的列(#5625 代价 (b):理由与写入一致)',
+  )
+}
+
+// lineage(:1605)/ identity(:1617)两处调用点:此前来料缺键同样从不写入(pickFields 一样跳过),
+// 判成变更只会把行推进 manual_confirm;收窄后归 SKIP。键在值变 ⇒ 仍挂起。M3 ⇒ 本用例红。
+function testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide() {
+  // lineage:来料没有 `path` 键,存量的 path 是另一串 ⇒ 不算 lineage 变更。
+  const lineageAbsent = row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] })
+  delete lineageAbsent.path
+  const lineageAbsentExisting = {
+    ...row({ componentSourceId: 'PART-LN-ABSENT', pathTokens: ['PART-LN-ABSENT'] }),
+    path: JSON.stringify(['ELSEWHERE', 'PART-LN-ABSENT']),
+  }
+  // lineage 对照:来料给了不同的 path ⇒ 仍是 lineage_mismatch。
+  const lineageChanged = row({ componentSourceId: 'PART-LN-CHANGED', pathTokens: ['PART-LN-CHANGED'] })
+  const lineageChangedExisting = { ...lineageChanged, path: JSON.stringify(['ELSEWHERE', 'PART-LN-CHANGED']) }
+  // identity:来料没有 `material` 键,存量有 ⇒ 不算 identity 变更。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  delete identityAbsent.material
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // identity 对照:来料给了不同的 material ⇒ 仍是 component_identity_conflict。
+  const identityChanged = row({ componentSourceId: 'PART-ID-CHANGED', pathTokens: ['PART-ID-CHANGED'], material: 'Iron' })
+  const identityChangedExisting = { ...identityChanged, material: 'Steel' }
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [lineageAbsent, lineageChanged, identityAbsent, identityChanged],
+    existingRows: [lineageAbsentExisting, lineageChangedExisting, identityAbsentExisting, identityChangedExisting],
+    runId: 'run-x6-lineage-identity',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+
+  const lineageAbsentDecision = byKey.get(lineageAbsent.idempotencyKey)
+  assert.equal(lineageAbsentDecision.decision, DECISIONS.SKIP, 'lineage:来料无 path 键 ⇒ 不算变更(X6 之前是 lineage_mismatch 挂起)')
+  assert.equal(lineageAbsentDecision.conflictSummary.type, 'unchanged')
+  const lineageChangedDecision = byKey.get(lineageChanged.idempotencyKey)
+  assert.equal(lineageChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'lineage:来料给了不同的 path ⇒ 仍挂起')
+  assert.equal(lineageChangedDecision.conflictSummary.type, 'lineage_mismatch')
+  assert.deepEqual(lineageChangedDecision.changedFields, ['path'])
+
+  const identityAbsentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(identityAbsentDecision.decision, DECISIONS.SKIP, 'identity:来料无 material 键 ⇒ 不算变更(X6 之前是 component_identity_conflict 挂起)')
+  assert.equal(identityAbsentDecision.conflictSummary.type, 'unchanged')
+  const identityChangedDecision = byKey.get(identityChanged.idempotencyKey)
+  assert.equal(identityChangedDecision.decision, DECISIONS.MANUAL_CONFIRM, 'identity:来料给了不同的 material ⇒ 仍挂起')
+  assert.equal(identityChangedDecision.conflictSummary.type, 'component_identity_conflict')
+  assert.deepEqual(identityChangedDecision.changedFields, ['material'])
+
+  assert.deepEqual(plan.counts, { add: 0, update: 0, skip: 2, inactive: 0, manual_confirm: 2 })
+}
+
+// 反驳 r1 blocker A1 —— **批级**后果,不只是行级。lineage / identity 调用点收窄后,那一行从
+// manual_confirm 变 SKIP 的同时,整批的「挂起必须被显式承认」闸门也跟着松开:
+//   `valid: counts[MANUAL_CONFIRM] === 0`(lib 的 return 处)由 false 翻成 true
+//   ⇒ dry-run 状态 manual_confirm_required → ready(table-actions `dryRunStatus`)
+//   ⇒ apply 不再 409 TABLE_ACTION_MANUAL_CONFIRM_REQUIRED(table-actions apply 的 MANUAL_CONFIRM 闸)
+//   ⇒ 大 BOM 检查点 apply 的同一闸(large-bom-jobs LARGE_BOM_APPLY_MANUAL_CONFIRM_ACK_REQUIRED)
+//   ⇒ MVP 快照路径的 `!plan.valid` 拒绝(STOCK_PREPARATION_MVP_SOURCE_EXPANSION_NOT_READY)
+// 都不再触发 —— 同一批里那条 add 由「整批 409 拒绝」变成「直接写」。
+// 可达性是**真实配置**,不是构造:readPlan.part.materialField 是可选项(bom-expansion normalizeReadPlan
+// 的 part 可选列表);不配时 rowFromPart 照样把 `material` 键放到展开行上、值 undefined。
+// 这里把「缺身份键的行 + 同批一条 add」的 valid 与 counts 前后钉死;对照组(键在值变)证明闸门本身
+// 没丢。M1(去掉收窄)⇒ 本用例红:counts 回到 {add:1, manual_confirm:1}、valid=false。
+function testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch() {
+  const addRow = row({ componentSourceId: 'PART-NEW', pathTokens: ['PART-NEW'] })
+  // 展开行的真实形状:键在、值 undefined(readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [addRow, identityAbsent],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  // X6 之前:counts = {add:1, manual_confirm:1}、valid=false ⇒ 同批那条 add 被整批 409 拦住,要
+  // acceptManualConfirmHold=true 才能过。X6 之后:整批可执行,add 直接写。
+  assert.deepEqual(
+    plan.counts,
+    { add: 1, update: 0, skip: 1, inactive: 0, manual_confirm: 0 },
+    'X6:来料缺身份键的行是 SKIP、不是 manual_confirm(X6 之前 {add:1, manual_confirm:1})',
+  )
+  assert.equal(plan.valid, true, 'X6:整批不再挂起(X6 之前 valid=false ⇒ dry-run manual_confirm_required、apply 409)')
+  const byKey = new Map(plan.decisions.map((decision) => [decision.idempotencyKey, decision]))
+  const absentDecision = byKey.get(identityAbsent.idempotencyKey)
+  assert.equal(absentDecision.decision, DECISIONS.SKIP)
+  assert.equal(absentDecision.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(absentDecision, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+  const addDecision = byKey.get(addRow.idempotencyKey)
+  assert.equal(addDecision.decision, DECISIONS.ADD, '同批那条 add 在闸门松开后直接写')
+  assert.equal(addDecision.record.lastPlmRefreshRunId, 'run-x6-batch-gate')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样:整批 valid=false,同批的 add 仍被拦在闸后。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [addRow, identityChanged],
+    existingRows: [identityAbsentExisting],
+    runId: 'run-x6-batch-gate-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起(闸门本身没丢,只是缺键的行不再触发它)')
+  const heldAdd = held.decisions.find((decision) => decision.idempotencyKey === addRow.idempotencyKey)
+  assert.equal(heldAdd.decision, DECISIONS.ADD, '对照组里那条 add 的行级决策不变,变的是整批能否执行')
+}
+
+// 终审 blocker 1 —— 批级边界的**完整清单**。上一条用例只钉住了三类里的 add;`plan.valid`
+// (lib 的 `valid: counts[MANUAL_CONFIRM] === 0`)由 false 翻 true,放开的是三类写:
+//   (1) **add**:新建行(testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch 已钉);
+//   (2) **mark_inactive**:既有行的 `active` 由 true 翻成 false —— 存量里不在本批的 active 行走
+//       planner 的 existing-only 循环,补丁 = { active:false } + 四列刷新戳(makeInactiveDecision);
+//   (3) **同批其余 update**:既有行的完整 `pickFields` 补丁(全部已给值 plm 列,不只 changed 列)。
+// 生产闸 `cleanRowCount = add + update`(stock-preparation-table-actions.cjs:2191)**不数 inactive**:
+// 「X6 让闸触发量变小」这句只约束 (1)(3),**不约束 (2)** —— mark_inactive 的写本来就在 maxCleanRows
+// 覆盖面之外,X6 之前唯一拦住它的就是整批 409。
+// 形状:一条来料缺身份键的既有行(readPlan 未配 materialField ⇒ 键在、值 undefined)+ 一条**不在批内**
+// 的 active 既有行(⇒ mark_inactive)+ 一条数量真变的既有行(⇒ update)。
+// X6 之前:counts.manual_confirm=1 ⇒ valid=false ⇒ dry-run manual_confirm_required、apply 409
+// (不带 acceptManualConfirmHold)⇒ inactive 补丁与 update 补丁一起**永不落表**;X6 之后:valid=true,
+// 三类都落。对照组(键在值变)证明闸门本身没丢。M1(去掉收窄)⇒ 本用例红在 `plan.valid` 那条断言。
+function testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates() {
+  // (a) 来料缺身份键的既有行:键在、值 undefined(真实形状,readPlan 未配 materialField)。
+  const identityAbsent = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: undefined })
+  assert.equal(Object.prototype.hasOwnProperty.call(identityAbsent, 'material'), true, '前提:来料上键在')
+  assert.equal(identityAbsent.material, undefined, '前提:来料上值为 undefined')
+  const identityAbsentExisting = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'] })
+  assert.equal(typeof identityAbsentExisting.material, 'string', '前提:存量这一列有值')
+  // (b) 同批另一条既有行,数量真变 ⇒ 一次带值 update。
+  const quantityChanged = row({ componentSourceId: 'PART-UPD', pathTokens: ['PART-UPD'], rawQuantity: 5, totalQuantity: 5 })
+  const quantityChangedExisting = { ...quantityChanged, rawQuantity: 4, totalQuantity: 4 }
+  // (c) 存量里一条**不在本批**的 active 行 ⇒ mark_inactive。
+  const goneExisting = row({ componentSourceId: 'PART-GONE', pathTokens: ['PART-GONE'] })
+  assert.equal(goneExisting.active, true, '前提:这条既有行当前是 active')
+
+  const plan = planStockPreparationConflicts({
+    expandedRows: [identityAbsent, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+
+  assert.equal(
+    plan.valid,
+    true,
+    'X6:整批可执行 —— mark_inactive 与同批 update 的补丁这才会落表(X6 之前 valid=false ⇒ 整批 409,两者一起永不落)',
+  )
+  assert.deepEqual(
+    plan.counts,
+    { add: 0, update: 1, skip: 1, inactive: 1, manual_confirm: 0 },
+    'X6:缺身份键的行是 SKIP(X6 之前 {update:1, skip:0, inactive:1, manual_confirm:1})',
+  )
+
+  // (2) mark_inactive:这是一次**真写**,且不在生产闸的覆盖面里。
+  const inactive = byDecision(plan, DECISIONS.INACTIVE)[0]
+  assert.equal(inactive.idempotencyKey, goneExisting.idempotencyKey)
+  assert.equal(inactive.patch.active, false, 'mark_inactive:既有行的 active 由 true 翻成 false')
+  assert.equal(typeof inactive.patch.active, 'boolean', 'active 是布尔 false,不是空串/字符串')
+  assert.deepEqual(
+    Object.keys(inactive.patch).sort(),
+    ['active', 'lastPlmConflictSummary', 'lastPlmRefreshAt', 'lastPlmRefreshDecision', 'lastPlmRefreshRunId'],
+    'inactive 补丁 = active + 四列刷新戳',
+  )
+  assert.equal(inactive.conflictSummary.type, 'missing_from_plm')
+
+  // (3) 同批其余 update:补丁是 pickFields 的全部已给值 plm 列,不只 changed 列。
+  const update = byDecision(plan, DECISIONS.UPDATE)[0]
+  assert.equal(update.idempotencyKey, quantityChanged.idempotencyKey)
+  assert.deepEqual(update.changedFields.slice().sort(), ['rawQuantity', 'totalQuantity'])
+  assert.equal(update.patch.rawQuantity, 5)
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(update.patch, 'componentName'),
+    true,
+    '同批 update 落的是全部已给值 plm 列(componentName 没变也在补丁里),不只 changed 列',
+  )
+
+  const skip = byDecision(plan, DECISIONS.SKIP)[0]
+  assert.equal(skip.idempotencyKey, identityAbsent.idempotencyKey)
+  assert.equal(skip.conflictSummary.type, 'unchanged')
+  assert.equal(Object.prototype.hasOwnProperty.call(skip, 'patch'), false, 'SKIP 行没有 patch:存量 material 一个字不动')
+
+  // 对照:来料给了**不同**的 material ⇒ 闸门原样,inactive / update 的行级决策不变,变的是整批能否执行。
+  const identityChanged = row({ componentSourceId: 'PART-ID-ABSENT', pathTokens: ['PART-ID-ABSENT'], material: 'Iron' })
+  const held = planStockPreparationConflicts({
+    expandedRows: [identityChanged, quantityChanged],
+    existingRows: [identityAbsentExisting, quantityChangedExisting, goneExisting],
+    runId: 'run-x6-batch-inactive-control',
+    plannedAt: '2026-09-12T00:00:00.000Z',
+  })
+  assert.deepEqual(held.counts, { add: 0, update: 1, skip: 0, inactive: 1, manual_confirm: 1 }, '键在值变 ⇒ 仍是 manual_confirm')
+  assert.equal(held.valid, false, '键在值变 ⇒ 整批仍挂起:inactive 与 update 的补丁仍被整批 409 拦在闸后')
+  assert.equal(byDecision(held, DECISIONS.INACTIVE)[0].patch.active, false, '对照组里 inactive 的行级决策不变')
+  assert.equal(byDecision(held, DECISIONS.UPDATE)[0].idempotencyKey, quantityChanged.idempotencyKey, '对照组里 update 的行级决策不变')
 }
 
 function main() {
@@ -1763,11 +1921,15 @@ function main() {
   testO1bKeyedHoldsAndTheReservedNamespaceAreUntouched()
   testDenormalizedParentAndSpecReachTheMainRow()
   testParentComponentNameIsTheUnsplitLegacyString()
-  testParentPackColumnsAreTheTemplateColumnsOwnValue()
-  testParentPackColumnsNeedBothTheDeclarationAndThePack()
-  testParentPackColumnsNeverOverwriteAValueMeasuredByThisPull()
+  testRetiredParentPackColumnsAreNeverDerivedWhileTheTemplatePairStillIs()
+  testMappedRetiredPackValuesPassThroughAndBlanksStayBlank()
   testDenormalizedFieldRegistryMatchesWhatIsActuallyDerived()
-  testExistingRowsGetThePackColumnsAsAPlainUpdate()
+  testExistingRowsAreHealedOnTheTemplatePairAndNeverOnTheRetiredPair()
+  testX6ChangedFieldsIgnoresKeysTheIntakeDidNotProvide()
+  testX6RefreshSkipsRowsWhoseIntakeLacksTheColumn()
+  testX6LineageAndIdentityIgnoreKeysTheIntakeDidNotProvide()
+  testX6AbsentIdentityKeyNoLongerHoldsTheWholeBatch()
+  testX6AbsentIdentityKeyAlsoReleasesInactiveAndSameBatchUpdates()
   testUndeclaredSpecSlotYieldsAnEmptyColumnAndNoError()
   testUnresolvableParentIsAbsenceNotAGuess()
   testExistingRowsAreBackfilledByAReRun()

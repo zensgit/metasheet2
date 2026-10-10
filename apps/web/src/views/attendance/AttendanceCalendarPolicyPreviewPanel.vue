@@ -269,9 +269,7 @@ async function runPreview() {
 .attendance__calendar-preview {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid #e5e7eb;
+  gap: 16px;
 }
 
 .attendance__calendar-preview-header {
@@ -287,8 +285,8 @@ async function runPreview() {
 
 .attendance__calendar-preview-controls {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
 }
 
 .attendance__calendar-preview-result {
@@ -326,30 +324,59 @@ async function runPreview() {
 .attendance__field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
+  min-width: 0;
   font-size: 12px;
-  color: #555;
+  color: var(--ms-text-2);
+}
+
+.attendance__field--checkbox {
+  grid-column: 1 / -1;
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
 }
 
 .attendance__field input,
 .attendance__field select {
+  width: 100%;
   min-width: 0;
-  padding: 6px 10px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 14px;
+}
+
+.attendance__field--checkbox input {
+  width: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  height: 16px;
+  accent-color: var(--ms-color-primary);
 }
 
 .attendance__field-hint {
   margin: 0;
-  color: #777;
-  font-size: 11px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid #d0d0d0;
-  background: #fff;
+  border-radius: var(--ms-radius-md);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
 }
 

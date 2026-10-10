@@ -18,23 +18,27 @@
   after this component so the reports-only sections between them (zero DOM
   nodes in overview mode) do not break that adjacency.
 
-  `afterCommon` is a layout-only slot immediately below the frozen 常用
-  band. The parent owns any dedicated request card; this component still
-  fetches nothing and does not restyle the first viewport.
+  `afterCommon` is a layout-only slot immediately below the 常用 band.
+  The parent owns any dedicated request card; this component still
+  fetches nothing and does not own those write paths.
 
-  Visual follow-up (owner, 2026-08-24): employee-workspace chrome only —
-  DingTalk/Feishu employee-page tone. No punch, policy, approval, or API change.
+  Visual follow-up (owner, 2026-08-24): employee-workspace chrome only.
+  Calm refresh (owner, 2026-10-09): surfaces, type, and actions consume
+  `--ms-*` tokens. No punch, policy, approval, or API change.
 
-  Owner lock (2026-08-24): first-viewport IA is frozen.
+  Owner lock (2026-08-24, IA only): first-viewport *layout* stays
   Desktop: punch|待办 + compact 申请 footer; 常用 full-width below.
   Mobile: punch → 待办+申请 footer → 常用.
-  缺卡 row uses the makeup 面性 icon; never the character 缺.
-  No employee 自定义. Admin-only icon settings. Do not restyle further.
+  缺卡 / anomaly rows use the makeup 面性 icon; never the character 缺.
+  No employee 自定义. Admin-only icon settings.
+
+  Visual unfreeze (2026-09-16): polish hierarchy / spacing / empty
+  states / punch CTA emphasis / 常用 tiles only. Do not change IA,
+  afterCommon wiring, or dedicated-card behavior.
 
   Below-the-fold follow-up (owner, 2026-08-25): history filters stay a
   collapsed-by-default disclosure (OD-O2) but show the active range while
-  closed; expanded fields use a wrap-safe toolbar. Do not restyle the
-  locked first viewport.
+  closed; expanded fields use a wrap-safe toolbar.
 -->
 <template>
   <div class="attendance-ew">
@@ -56,11 +60,21 @@
         <div class="attendance-ew__hero-top">
           <div class="attendance__hero-clock">
             <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
-            <p class="attendance-ew__clock-status">{{ clockStatusLine }}</p>
+            <p class="attendance-ew__clock-status" :data-attendance-clock-state="punchEmphasis">
+              <span
+                class="attendance-ew__clock-dot"
+                :class="`attendance-ew__clock-dot--${punchEmphasis}`"
+                aria-hidden="true"
+              />
+              {{ clockStatusLine }}
+            </p>
           </div>
           <div class="attendance__actions attendance__hero-actions">
             <button
               class="attendance__btn attendance__btn--primary attendance__btn--hero"
+              :class="punchButtonClass('check_in')"
+              data-attendance-hero-cta="check_in"
+              :data-attendance-hero-next="punchEmphasis === 'check_in' ? 'true' : undefined"
               :disabled="punching"
               @click="$emit('punch', 'check_in')"
             >
@@ -68,6 +82,9 @@
             </button>
             <button
               class="attendance__btn attendance__btn--hero-secondary"
+              :class="punchButtonClass('check_out')"
+              data-attendance-hero-cta="check_out"
+              :data-attendance-hero-next="punchEmphasis === 'check_out' ? 'true' : undefined"
               :disabled="punching"
               @click="$emit('punch', 'check_out')"
             >
@@ -199,16 +216,31 @@
       <div
         v-if="attentionItem.key === 'all_clear'"
         class="attendance-ew__todo-empty"
+        data-attendance-todo-empty
       >
-        <strong>{{ attentionItem.title }}</strong>
-        <p>{{ attentionItem.detail }}</p>
+        <span
+          class="attendance-ew__todo-mark"
+          :class="`attendance-ew__todo-mark--${todoMark.tone}`"
+          data-attendance-todo-mark
+          :data-attendance-todo-tone="todoMark.tone"
+          aria-hidden="true"
+        >
+          <AttendanceEmployeeCommonIcon :name="todoMark.icon" />
+        </span>
+        <div class="attendance-ew__todo-copy">
+          <strong>{{ attentionItem.title }}</strong>
+          <p>{{ attentionItem.detail }}</p>
+        </div>
       </div>
       <div v-else class="attendance-ew__todo-row">
         <span
-          class="attendance-ew__todo-mark attendance-ew__todo-mark--makeup"
+          class="attendance-ew__todo-mark"
+          :class="`attendance-ew__todo-mark--${todoMark.tone}`"
+          data-attendance-todo-mark
+          :data-attendance-todo-tone="todoMark.tone"
           aria-hidden="true"
         >
-          <AttendanceEmployeeCommonIcon name="clock-plus" />
+          <AttendanceEmployeeCommonIcon :name="todoMark.icon" />
         </span>
         <div class="attendance-ew__todo-copy">
           <strong>{{ attentionItem.title }}</strong>
@@ -227,14 +259,17 @@
 
       <div class="attendance-ew__request-footer" data-selfservice-card="requests">
         <div class="attendance-ew__request-footer-row">
-          <div>
-            <h3>{{ tr('My applications', '我的申请') }}</h3>
-            <small v-if="hasRequestBody" class="attendance__field-hint">
-              {{ tr('Summarizes the current request backlog from the visible date range.', '汇总当前可见日期区间内的申请处理状态。') }}
-            </small>
-          </div>
-          <strong v-if="hasRequestBody">{{ requestsTotal }}</strong>
-          <span v-else class="attendance-ew__request-empty">{{ tr('No pending approvals', '暂无待审批') }}</span>
+          <h3>{{ tr('My applications', '我的申请') }}</h3>
+          <strong
+            v-if="hasRequestBody"
+            class="attendance-ew__request-count"
+            data-attendance-request-count
+          >{{ requestsTotal }}</strong>
+          <span
+            v-else
+            class="attendance-ew__request-empty"
+            data-attendance-request-empty
+          >{{ tr('No pending approvals', '暂无待审批') }}</span>
         </div>
         <template v-if="hasRequestBody">
           <div class="attendance__chip-list">
@@ -319,7 +354,7 @@
             <span class="attendance-ew__tile-icon" :class="`attendance-ew__tile-icon--${tile.tone}`" aria-hidden="true">
               <AttendanceEmployeeCommonIcon :name="tile.icon" />
             </span>
-            <span>{{ tile.label }}</span>
+            <span class="attendance-ew__tile-label">{{ tile.label }}</span>
           </button>
         </div>
         <p class="attendance-ew__common-hint">{{ selfServiceQuickActionHint }}</p>
@@ -476,6 +511,8 @@ import {
   formatWorkDurationMinutes,
   greetingHeadline,
   isClockedIn,
+  resolveHeroPunchEmphasis,
+  resolveTodoMark,
   suggestOffDutyTime,
   workWindowShortLabel,
 } from './attendanceEmployeeWorkspacePresentation'
@@ -678,6 +715,17 @@ const clockedIn = computed(() => isClockedIn(props.heroTimeline))
 
 const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
+const punchEmphasis = computed(() => resolveHeroPunchEmphasis(props.heroTimeline))
+
+const todoMark = computed(() => resolveTodoMark(props.attentionItem.key))
+
+function punchButtonClass(which: 'check_in' | 'check_out'): string {
+  if (punchEmphasis.value === 'complete') return 'attendance-ew__punch-btn--complete'
+  return punchEmphasis.value === which
+    ? 'attendance-ew__punch-btn--next'
+    : 'attendance-ew__punch-btn--rest'
+}
+
 const offDutySuggest = computed(() => suggestOffDutyTime(props.selfRulesWorkWindowSummary))
 const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
   ? `${props.tr('Hours', '工时')} · ${props.workbenchFocusDateLabel}`
@@ -723,19 +771,23 @@ const hasRequestBody = computed(() =>
 </script>
 
 <style scoped>
-/* Employee-workspace chrome only. First viewport: desktop punch|待办+申请 footer,
-   常用 full-width below; mobile punch → 待办+申请 footer → 常用. */
+/* Employee-workspace chrome only. First-viewport IA: desktop punch|待办+申请
+   footer, 常用 full-width below; mobile punch → 待办+申请 footer → 常用.
+   Visual system (2026-10-09): one card elevation (--ms-shadow-card),
+   --ms-radius-lg, --ms-border-light, type via --ms-text-1/2/3.
+   Primary blue is reserved for the next punch action. */
 .attendance-ew {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-4, 16px);
+  gap: var(--ms-space-5);
   min-width: 0;
+  color: var(--ms-text-1);
 }
 
 .attendance-ew__greeting {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
@@ -747,22 +799,22 @@ const hasRequestBody = computed(() =>
   margin: 0;
   font-size: 28px;
   line-height: 1.2;
-  font-weight: 700;
-  color: #1f2329;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
   letter-spacing: -0.02em;
 }
 
 .attendance-ew__hello-sub {
-  margin: 4px 0 0;
-  font-size: 13px;
-  line-height: 1.4;
-  color: #8f959e;
+  margin: var(--ms-space-1) 0 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--ms-text-2);
 }
 
 .attendance-ew__primary {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
-  gap: var(--ms-space-4, 16px);
+  gap: var(--ms-space-4);
   align-items: stretch;
   min-width: 0;
 }
@@ -770,7 +822,7 @@ const hasRequestBody = computed(() =>
 .attendance-ew__today {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-3, 12px);
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
@@ -778,25 +830,48 @@ const hasRequestBody = computed(() =>
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
+  gap: var(--ms-space-5);
   min-width: 0;
 }
 
 .attendance-ew__clock-status {
-  margin: 6px 0 0;
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+  margin: var(--ms-space-2) 0 0;
+  font-size: 14px;
   line-height: 1.4;
-  color: #646a73;
+  color: var(--ms-text-2);
+}
+
+.attendance-ew__clock-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ms-text-3);
+}
+
+.attendance-ew__clock-dot--check_in {
+  background: var(--ms-color-warning);
+}
+
+.attendance-ew__clock-dot--check_out {
+  background: var(--ms-color-primary);
+}
+
+.attendance-ew__clock-dot--complete {
+  background: var(--ms-color-success);
 }
 
 .attendance-ew__metrics {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--ms-space-2);
   min-width: 0;
-  padding-top: 14px;
-  margin-top: 4px;
-  border-top: 1px solid rgba(31, 35, 41, 0.06);
+  padding-top: var(--ms-space-3);
+  margin-top: var(--ms-space-2);
+  border-top: 1px solid var(--ms-border-light);
 }
 
 .attendance-ew__metrics .attendance__selfservice-lead {
@@ -816,61 +891,84 @@ const hasRequestBody = computed(() =>
 .attendance-ew__attention {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--ms-space-3);
   min-width: 0;
   min-height: 100%;
-  border: none;
-  border-radius: 18px;
-  background: #fff;
-  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
-  padding: 16px 18px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+  padding: var(--ms-space-5);
 }
 
 .attendance-ew__todo-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance-ew__todo-head h3 {
   margin: 0;
-  font-size: 15px;
-  font-weight: 650;
-  color: #1f2329;
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
 }
 
 .attendance-ew__todo-badge {
-  min-width: 16px;
-  height: 16px;
-  padding: 0 5px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 6px;
   border-radius: 999px;
-  background: #f54a45;
-  color: #fff;
-  font-size: 11px;
-  line-height: 16px;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 18px;
   text-align: center;
 }
 
 .attendance-ew__todo-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
 .attendance-ew__todo-mark {
   flex: 0 0 auto;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--ms-radius-lg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .attendance-ew__todo-mark--makeup {
-  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+}
+
+.attendance-ew__todo-mark--leave {
+  background: var(--el-color-success-light-9);
+  color: var(--ms-color-success);
+}
+
+.attendance-ew__todo-mark--review {
+  background: var(--el-color-warning-light-9);
+  color: var(--ms-color-warning);
+}
+
+.attendance-ew__todo-mark--setup {
+  background: var(--el-color-info-light-9);
+  color: var(--ms-color-info);
+}
+
+.attendance-ew__todo-mark--clear {
+  background: var(--el-color-success-light-9);
+  color: var(--ms-color-success);
 }
 
 .attendance-ew__todo-mark :deep(svg) {
@@ -886,42 +984,56 @@ const hasRequestBody = computed(() =>
 .attendance-ew__todo-copy strong,
 .attendance-ew__todo-empty strong {
   display: block;
-  font-size: 14px;
-  color: #1f2329;
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
 }
 
 .attendance-ew__todo-copy p,
 .attendance-ew__todo-empty p,
 .attendance-ew__attention p {
-  margin: 2px 0 0;
-  color: #8f959e;
-  font-size: 12px;
+  margin: var(--ms-space-1) 0 0;
+  color: var(--ms-text-3);
+  font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
 }
 
 .attendance-ew__todo-link {
   flex: 0 0 auto;
-  border: none;
-  background: none;
-  padding: 0;
-  color: #3370ff;
+  border: 1px solid var(--el-color-primary-light-7);
+  background: var(--el-color-primary-light-9);
+  padding: 6px var(--ms-space-3);
+  border-radius: var(--ms-radius-md);
+  color: var(--ms-color-primary);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--ms-font-weight-title);
   cursor: pointer;
 }
 
+.attendance-ew__todo-link:hover {
+  background: var(--el-color-primary-light-8);
+}
+
+.attendance-ew__todo-link:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 2px;
+}
+
 .attendance-ew__todo-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
 .attendance-ew__request-footer {
   margin-top: auto;
-  padding-top: 12px;
-  border-top: 1px solid rgba(31, 35, 41, 0.06);
+  padding-top: var(--ms-space-3);
+  border-top: 1px solid var(--ms-border-light);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--ms-space-2);
   min-width: 0;
 }
 
@@ -929,111 +1041,157 @@ const hasRequestBody = computed(() =>
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
 .attendance-ew__request-footer-row h3 {
   margin: 0;
-  font-size: 14px;
-  font-weight: 650;
-  color: #1f2329;
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+}
+
+.attendance-ew__request-count {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 20px;
+  text-align: center;
 }
 
 .attendance-ew__request-empty {
-  color: #8f959e;
+  color: var(--ms-text-3);
   font-size: 13px;
+  line-height: 1.4;
 }
 
 .attendance-ew__common {
   min-width: 0;
 }
 
-.attendance-ew__common-hint {
+.attendance-ew__common .attendance__requests-header {
   margin: 0;
-  color: #8f959e;
-  font-size: 12px;
-  line-height: 1.4;
+}
+
+.attendance-ew__common h3 {
+  margin: 0;
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+}
+
+.attendance-ew__common-hint {
+  margin: var(--ms-space-1) 0 0;
+  color: var(--ms-text-3);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .attendance-ew__tools {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: var(--ms-space-4, 16px);
+  gap: var(--ms-space-4);
   min-width: 0;
 }
 
 .attendance-ew__tools-deemphasized {
-  opacity: 0.92;
+  opacity: 1;
 }
 
 .attendance-ew__tiles {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance-ew__tile {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: var(--ms-space-2);
   width: 100%;
   min-width: 0;
-  padding: 4px 0;
+  min-height: 88px;
+  padding: var(--ms-space-2) var(--ms-space-1) var(--ms-space-2);
   border: none;
+  border-radius: var(--ms-radius-lg);
   background: transparent;
-  color: #1f2329;
-  font-size: 12px;
+  color: var(--ms-text-1);
+  font-size: 13px;
   line-height: 1.3;
   cursor: pointer;
 }
 
+.attendance-ew__tile:hover {
+  background: var(--ms-bg-page);
+}
+
+.attendance-ew__tile:focus-visible {
+  outline: 2px solid var(--ms-color-primary);
+  outline-offset: 2px;
+}
+
+.attendance-ew__tile-label {
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
+}
+
 .attendance-ew__tile-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 16px;
+  width: 48px;
+  height: 48px;
+  border-radius: var(--ms-radius-lg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
-  box-shadow: 0 6px 14px rgba(31, 45, 82, 0.14);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  box-shadow: none;
 }
 
 .attendance-ew__tile-icon :deep(svg) {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
 }
 
 .attendance-ew__tile-icon--makeup {
-  background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .attendance-ew__tile-icon--leave {
-  background: linear-gradient(180deg, #34c759 0%, #00b42a 100%);
+  background: var(--el-color-success-light-9);
+  color: var(--ms-color-success);
 }
 
 .attendance-ew__tile-icon--overtime {
-  background: linear-gradient(180deg, #ff9a2e 0%, #ff7d00 100%);
+  background: var(--el-color-warning-light-9);
+  color: var(--ms-color-warning);
 }
 
 .attendance-ew__tile-icon--swap {
-  background: linear-gradient(180deg, #9b8af0 0%, #7b67ee 100%);
+  background: var(--el-color-info-light-9);
+  color: var(--ms-color-info);
 }
 
 .attendance-ew__history-filters {
   grid-column: 1 / -1;
-  border: 1px solid rgba(31, 45, 82, 0.06);
-  border-radius: 16px;
-  padding: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
-  background: #fff;
-  box-shadow: 0 4px 16px rgba(31, 45, 82, 0.04);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: var(--ms-space-3) var(--ms-space-4);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
   min-width: 0;
   max-width: 100%;
 }
 
 .attendance-ew__history-filters[open] {
-  background: #fff;
+  background: var(--ms-bg-card);
 }
 
 .attendance-ew__history-filters-summary {
@@ -1041,17 +1199,18 @@ const hasRequestBody = computed(() =>
   flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--ms-space-2, 8px) var(--ms-space-4, 16px);
+  gap: var(--ms-space-2) var(--ms-space-4);
   min-width: 0;
 }
 
 .attendance-ew__history-filters-title {
   min-width: 0;
+  color: var(--ms-text-1);
 }
 
 .attendance-ew__history-filters-range {
   font-weight: 500;
-  color: var(--ms-text-2, #646a73);
+  color: var(--ms-text-2);
   font-variant-numeric: tabular-nums;
   min-width: 0;
 }
@@ -1059,7 +1218,7 @@ const hasRequestBody = computed(() =>
 .attendance__filters {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--ms-space-4);
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -1068,8 +1227,8 @@ const hasRequestBody = computed(() =>
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   align-items: end;
-  gap: var(--ms-space-3, 12px) var(--ms-space-4, 16px);
-  padding-top: var(--ms-space-3, 12px);
+  gap: var(--ms-space-3) var(--ms-space-4);
+  padding-top: var(--ms-space-3);
   min-width: 0;
   max-width: 100%;
 }
@@ -1083,54 +1242,58 @@ const hasRequestBody = computed(() =>
 .attendance__punch-note {
   display: flex;
   align-items: flex-end;
-  gap: 12px;
-  margin-top: 12px;
+  gap: var(--ms-space-3);
+  margin-top: var(--ms-space-3);
   flex-wrap: wrap;
 }
 
 .attendance__field {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ms-space-1);
   font-size: 12px;
-  color: #555;
+  color: var(--ms-text-2);
 }
 
 .attendance__field input {
   padding: 6px 10px;
-  border: 1px solid #e5e6eb;
-  border-radius: 8px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
   min-width: 0;
   width: 100%;
   max-width: 100%;
+  color: var(--ms-text-1);
+  background: var(--ms-bg-card);
 }
 
 .attendance__field-hint {
-  color: #8f959e;
-  font-size: 11px;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .attendance__field-hint--error {
-  color: #c0392b;
+  color: var(--ms-color-danger);
 }
 
 .attendance__field-hint--strong {
   display: inline-flex;
-  margin-top: 8px;
-  font-weight: 600;
+  margin-top: var(--ms-space-2);
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-2);
 }
 
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 999px;
-  border: 1px solid #e5e6eb;
-  background: #fff;
+  border-radius: var(--ms-radius-md);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
 }
 
 .attendance-ew__balance-toggle {
   display: inline-flex;
-  gap: 4px;
+  gap: var(--ms-space-1);
 }
 
 .attendance-ew__balance-toggle .attendance__btn {
@@ -1139,8 +1302,8 @@ const hasRequestBody = computed(() =>
 }
 
 .attendance__btn--primary {
-  background: linear-gradient(180deg, #4c83ff 0%, #3370ff 100%);
-  border-color: transparent;
+  background: var(--ms-color-primary);
+  border-color: var(--ms-color-primary);
   color: #fff;
 }
 
@@ -1158,30 +1321,30 @@ const hasRequestBody = computed(() =>
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__status {
-  font-size: 12px;
-  color: #2e7d32;
+  font-size: 13px;
+  color: var(--ms-color-success);
 }
 
 .attendance__status--error {
-  color: #c62828;
+  color: var(--ms-color-danger);
 }
 
 .attendance__card {
-  background: #fff;
-  border: none;
-  border-radius: 18px;
-  padding: 16px 18px;
-  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: var(--ms-space-5);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__card--selfservice {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--ms-space-3);
   min-width: 0;
 }
 
@@ -1191,151 +1354,165 @@ const hasRequestBody = computed(() =>
 
 .attendance__selfservice-lead {
   margin: 0;
-  color: #646a73;
+  color: var(--ms-text-2);
   line-height: 1.5;
-  font-size: 12px;
+  font-size: 13px;
 }
 
 .attendance__selfservice-callout {
-  border: none;
-  border-radius: 12px;
-  background: #f7f9fc;
-  padding: 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-page);
+  padding: var(--ms-space-3);
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ms-space-3);
   align-items: center;
 }
 
 .attendance__selfservice-callout-copy {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__selfservice-callout-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--ms-space-2);
   flex-wrap: wrap;
 }
 
 .attendance__selfservice-callout-copy p {
   margin: 0;
-  color: #646a73;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
 .attendance__request-list--compact {
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__request-item {
-  border: none;
-  border-radius: 10px;
-  padding: 10px;
-  background: #f7f9fc;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-3);
+  background: var(--ms-bg-page);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__request-meta {
   display: flex;
-  gap: 12px;
+  gap: var(--ms-space-3);
   font-size: 12px;
-  color: #666;
+  color: var(--ms-text-3);
 }
 
 .attendance__request-note {
   margin: 0;
-  color: #475569;
+  color: var(--ms-text-2);
   line-height: 1.5;
 }
 
 .attendance__chip-list {
-  margin-top: 10px;
+  margin-top: 0;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: var(--ms-space-2);
 }
 
 .attendance__status-chip {
   margin-left: 0;
   font-size: 12px;
+  font-weight: 500;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #f0f0f0;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  border: 1px solid var(--ms-border-light);
   align-self: flex-start;
 }
 
-.attendance__status-chip--pending { background: #fff3e0; color: #ef6c00; }
-.attendance__status-chip--approved { background: #e8f5e9; color: #2e7d32; }
-.attendance__status-chip--normal { background: #e8f5e9; color: #2e7d32; }
-.attendance__status-chip--late { background: #fff3e0; color: #ef6c00; }
-.attendance__status-chip--early_leave { background: #ede7f6; color: #6a1b9a; }
-.attendance__status-chip--late_early { background: #ffebee; color: #c62828; }
-.attendance__status-chip--partial { background: #e3f2fd; color: #1565c0; }
-.attendance__status-chip--adjusted { background: #e0f7fa; color: #006064; }
-.attendance__status-chip--off { background: #eceff1; color: #546e7a; }
-.attendance__status-chip--absent { background: #f5f5f5; color: #616161; }
-.attendance__status-chip--rejected { background: #ffebee; color: #c62828; }
-.attendance__status-chip--cancelled { background: #eceff1; color: #546e7a; }
+.attendance__status-chip--pending { background: var(--el-color-warning-light-9); color: var(--el-color-warning-dark-2); border-color: transparent; }
+.attendance__status-chip--approved { background: var(--el-color-success-light-9); color: var(--el-color-success-dark-2); border-color: transparent; }
+.attendance__status-chip--normal { background: var(--el-color-success-light-9); color: var(--el-color-success-dark-2); border-color: transparent; }
+.attendance__status-chip--late { background: var(--el-color-warning-light-9); color: var(--el-color-warning-dark-2); border-color: transparent; }
+.attendance__status-chip--early_leave { background: var(--el-color-info-light-9); color: var(--el-color-info-dark-2); border-color: transparent; }
+.attendance__status-chip--late_early { background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); border-color: transparent; }
+.attendance__status-chip--partial { background: var(--el-color-primary-light-9); color: var(--el-color-primary-dark-2); border-color: transparent; }
+.attendance__status-chip--adjusted { background: var(--el-color-primary-light-9); color: var(--el-color-primary-dark-2); border-color: transparent; }
+.attendance__status-chip--off { background: var(--ms-bg-page); color: var(--ms-text-2); border-color: var(--ms-border-light); }
+.attendance__status-chip--absent { background: var(--ms-bg-page); color: var(--ms-text-2); border-color: var(--ms-border-light); }
+.attendance__status-chip--rejected { background: var(--el-color-danger-light-9); color: var(--el-color-danger-dark-2); border-color: transparent; }
+.attendance__status-chip--cancelled { background: var(--ms-bg-page); color: var(--ms-text-2); border-color: var(--ms-border-light); }
 
 .attendance__summary {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  gap: var(--ms-space-2);
+  margin-top: var(--ms-space-2);
   min-width: 0;
 }
 
 .attendance__summary-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ms-space-1);
   background: transparent;
   border-radius: 0;
-  padding: 4px 0;
+  padding: var(--ms-space-1) 0;
 }
 
 .attendance__summary-item span {
   font-size: 12px;
-  color: #8f959e;
+  color: var(--ms-text-3);
+}
+
+.attendance__summary-item strong {
+  color: var(--ms-text-1);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__details-summary {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: var(--ms-font-weight-title);
   color: var(--ms-text-1);
 }
 
 .attendance__error {
-  color: #c0392b;
+  color: var(--ms-color-danger);
   font-size: 12px;
 }
 
 .attendance__empty {
-  color: #8f959e;
+  color: var(--ms-text-3);
   font-size: 13px;
 }
 
 .attendance__selfbalance-remaining {
-  font-size: 20px;
-  font-weight: 600;
+  font-size: 28px;
+  font-weight: var(--ms-font-weight-title);
   color: var(--ms-text-1);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.attendance__selfbalance-remaining strong {
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__hero-punch {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ms-space-1);
   min-width: 0;
-  padding: 20px 22px 16px;
-  border: none;
-  border-radius: 18px;
-  background: #fff;
-  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
+  padding: var(--ms-space-5) var(--ms-space-5) var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__hero-clock {
@@ -1347,9 +1524,9 @@ const hasRequestBody = computed(() =>
 
 .attendance__hero-time {
   font-size: clamp(48px, 5vw, 64px);
-  font-weight: 650;
+  font-weight: var(--ms-font-weight-title);
   line-height: 1;
-  color: #1f2329;
+  color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
 }
@@ -1358,7 +1535,7 @@ const hasRequestBody = computed(() =>
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
+  gap: var(--ms-space-2);
   flex: 0 0 auto;
 }
 
@@ -1366,19 +1543,49 @@ const hasRequestBody = computed(() =>
   min-height: 44px;
   min-width: 132px;
   font-size: 15px;
-  font-weight: 650;
-  border-radius: 999px;
-  box-shadow: 0 8px 18px rgba(51, 112, 255, 0.28);
+  font-weight: var(--ms-font-weight-title);
+  border-radius: var(--ms-radius-lg);
+  box-shadow: none;
 }
 
 .attendance__btn--hero-secondary {
   min-height: 40px;
   min-width: 132px;
   font-size: 14px;
-  border-radius: 999px;
-  border-color: transparent;
-  background: #e8f3ff;
-  color: #3370ff;
+  font-weight: var(--ms-font-weight-title);
+  border-radius: var(--ms-radius-lg);
+  border-color: var(--el-color-primary-light-7);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  box-shadow: none;
+}
+
+.attendance-ew__punch-btn--next {
+  background: var(--ms-color-primary);
+  border-color: var(--ms-color-primary);
+  color: #fff;
+  box-shadow: none;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance-ew__punch-btn--rest {
+  background: var(--ms-bg-page);
+  border-color: var(--ms-border-light);
+  color: var(--ms-text-2);
+  box-shadow: none;
+}
+
+.attendance-ew__punch-btn--rest.attendance__btn--primary {
+  background: var(--ms-bg-page);
+  border-color: var(--ms-border-light);
+  color: var(--ms-text-2);
+}
+
+.attendance-ew__punch-btn--complete,
+.attendance-ew__punch-btn--complete.attendance__btn--primary {
+  background: var(--el-color-primary-light-9);
+  border-color: var(--el-color-primary-light-7);
+  color: var(--ms-color-primary);
   box-shadow: none;
 }
 
@@ -1389,20 +1596,20 @@ const hasRequestBody = computed(() =>
 }
 
 .attendance__hero-timeline-node--pending {
-  color: var(--ms-text-3, #8f959e);
+  color: var(--ms-text-3);
 }
 
 .attendance__summary--stat {
-  gap: 12px;
+  gap: var(--ms-space-3);
 }
 
 .attendance__summary-item--stat {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ms-space-1);
   min-width: 0;
-  padding: 4px 0;
+  padding: var(--ms-space-1) 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -1410,19 +1617,19 @@ const hasRequestBody = computed(() =>
 }
 
 .attendance__summary-value {
-  font-size: 16px;
+  font-size: 18px;
   line-height: 1.2;
-  font-weight: 650;
-  color: #1f2329;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
 }
 
 .attendance__summary-value--ok {
-  color: #00b42a;
+  color: var(--ms-color-success);
 }
 
 .attendance__summary-value--warning {
-  color: #ff7d00;
+  color: var(--ms-color-warning);
 }
 
 @media (max-width: 1099px) {
@@ -1441,12 +1648,16 @@ const hasRequestBody = computed(() =>
 }
 
 @media (max-width: 768px) {
+  .attendance-ew {
+    gap: var(--ms-space-4);
+  }
+
   .attendance-ew__hello {
     font-size: 26px;
   }
 
   .attendance__hero-time {
-    font-size: 54px;
+    font-size: 52px;
   }
 
   .attendance-ew__hero-top {
@@ -1481,7 +1692,7 @@ const hasRequestBody = computed(() =>
 
   .attendance__request-meta {
     flex-direction: column;
-    gap: 4px;
+    gap: var(--ms-space-1);
   }
 
   .attendance__filters .attendance__field {
@@ -1495,13 +1706,18 @@ const hasRequestBody = computed(() =>
   .attendance-ew__balance-toggle .attendance__btn {
     width: auto;
   }
+
+  .attendance-ew__attention,
+  .attendance__hero-punch,
+  .attendance__card {
+    padding: var(--ms-space-4);
+  }
 }
 </style>
 
 <style>
 /* Overview page wash only — scoped by the employee overview class, not the app shell. */
 .attendance--overview {
-  background-color: #f4f6fa;
-  background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
+  background: var(--ms-bg-page, #f5f6f8);
 }
 </style>

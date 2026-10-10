@@ -342,6 +342,7 @@ on:
       - 'scripts/ops/integration-guard-run-web-specs.sh'
       - 'scripts/ops/integration-guard-required-wiring-contract.test.mjs'
       - '.github/workflows/plugin-tests.yml'
+      - '.github/workflows/stock-prep-powershell51.yml'
 
 jobs:
   integration-guard:
@@ -413,6 +414,55 @@ jobs:
             exit 1
           fi
           echo "chain-completeness: $chained suites, all executed by the package test chain (floor $MIN_CHAINED_SUITES)."
+
+      # Bridge Agent contract tests — THE ONLY WORKFLOW CALLER OF THE THREE FILES BELOW.
+      # scripts/ops/bridge-agent-readonly-contract.test.mjs pins the Bridge Agent scripts by
+      # whole-file digest (#6148); the task and driver-smoke contracts check the scheduled-task
+      # helper and the driver smoke script. Before this step no workflow ran any of them, and the
+      # readonly contract sat red on main from 2026-06-05 until #6148 with nothing noticing.
+      #
+      # UNGATED on the scope verdict (no `if` at all), deliberately, rather than adding the Bridge
+      # scripts and tests to the guarded-path roster: the roster matches exact paths only, so a NEW
+      # scripts/ops/bridge-agent-*.ps1 would never be in it — yet the family test in the readonly
+      # contract exists precisely to red such a file until it is pinned. Ungated, the three files
+      # run on every event this workflow triggers on, including the out-of-scope no-op path, and a
+      # Bridge-only PR does not pay for the pnpm install and the plugin/web suites. The files use
+      # only node builtins, so the step needs nothing beyond setup-node. Placed ABOVE `resolve-diff`
+      # for the same reason as `chain-completeness`: every un-`if`'d step keeps GitHub's implicit
+      # `if: success()`, and nothing upstream of here can fail.
+      #
+      # `node --test` reports a file that exits 0 before declaring its tests as ONE passing test, so
+      # a bare exit code would green an emptied or early-exiting test file. The floor below is the
+      # test count after #6148 plus the scheduled-task pin; lowering it is a visible edit here and
+      # in the contract pin. What the tests prove: a pinned script cannot change without a visible
+      # re-pin. They do not prove a script cannot write; the provable guarantee is the read-only
+      # database account the agent connects with.
+      #
+      # This step's `id`, `shell`, the absence of `if`/`continue-on-error`, its position above
+      # `resolve-diff`, and its `run:` text byte-for-byte are pinned by
+      # scripts/ops/integration-guard-required-wiring-contract.test.mjs (Pins 19/20).
+      - name: Bridge Agent contract tests (ungated on the scope verdict)
+        id: bridge-agent-contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN_BRIDGE_CONTRACT_TESTS=26
+          if ! bridge_out="$(node --test scripts/ops/bridge-agent-readonly-contract.test.mjs scripts/ops/bridge-agent-readonly-task-contract.test.mjs scripts/ops/bridge-agent-driver-smoke-contract.test.mjs 2>&1)"; then
+            printf '%s\n' "$bridge_out"
+            echo "bridge-agent contracts: node --test exited non-zero (output above)" >&2
+            exit 1
+          fi
+          printf '%s\n' "$bridge_out"
+          bridge_tests="$(printf '%s\n' "$bridge_out" | sed -nE 's/^.*tests ([0-9]+)$/\1/p' | tail -n 1)"
+          if [ -z "$bridge_tests" ]; then
+            echo "bridge-agent contracts: no 'tests <N>' summary line found — refusing to report green" >&2
+            exit 1
+          fi
+          if [ "$bridge_tests" -lt "$MIN_BRIDGE_CONTRACT_TESTS" ]; then
+            echo "bridge-agent contracts: only $bridge_tests tests ran, expected at least $MIN_BRIDGE_CONTRACT_TESTS — an emptied or early-exiting test file reads as one passing test" >&2
+            exit 1
+          fi
+          echo "bridge-agent contracts: $bridge_tests tests ran (floor $MIN_BRIDGE_CONTRACT_TESTS)."
 
       # #4614 P2 fix: this used to be piped straight into the classifier step
       # (`resolve-diff | classify`), where a shell `pipefail` mechanism claim was made about how a

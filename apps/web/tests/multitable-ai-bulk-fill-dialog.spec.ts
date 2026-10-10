@@ -160,6 +160,33 @@ describe('MetaAiBulkFillDialog — truthful-status rendering', () => {
     const partial = q('[data-test="ai-bulk-partial"]')
     expect(partial?.textContent).toContain('stopped early')
     expect(partial?.textContent).not.toMatch(/\d+ of \d+/) // no row count leak
+    // A quota/provider stop keeps the generic advice: write these, then re-run.
+    expect(partial?.textContent).toContain('run AI fill again to continue')
+    expect(partial?.textContent).not.toContain('restore')
+    app.unmount()
+  })
+
+  it('#5838 capped:true because the TABLE stopped being confirmable: the notice does NOT give the two instructions that both refuse', async () => {
+    const { app } = mountDialog(async () => jsonResponse({
+      ok: true,
+      data: {
+        ...PREVIEW_WIRE,
+        skipped: [...PREVIEW_WIRE.skipped, { recordId: 'rec_stop', reason: 'sheet_not_live' }],
+        capped: true,
+      },
+    }))
+    ;(q('[data-test="ai-bulk-generate"]') as HTMLButtonElement).click()
+    await flush()
+    const partial = q('[data-test="ai-bulk-partial"]')
+    // The generic copy tells the user to write the results and re-run. On a table that is gone the
+    // commit answers 404 SHEET_DELETED and the re-run is refused at the entry gate, so this stop must
+    // name the condition and the only action that can work (restore), and still leak no count.
+    expect(partial?.textContent).toContain('could not be confirmed available')
+    expect(partial?.textContent).toContain('restore it first')
+    expect(partial?.textContent).not.toContain('Write these results, then run AI fill again')
+    expect(partial?.textContent).not.toMatch(/\d+ of \d+/)
+    // …and the per-row reason stays in the skipped bucket, uncollapsed.
+    expect(q('[data-test="ai-bulk-skipped"]')?.textContent).toContain('could not be confirmed available')
     app.unmount()
   })
 

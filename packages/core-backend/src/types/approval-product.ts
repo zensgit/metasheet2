@@ -105,6 +105,31 @@ export const APPROVAL_ACTION_TYPES = [
   'handle',
 ] as const
 export type ApprovalActionType = typeof APPROVAL_ACTION_TYPES[number]
+/**
+ * Lock-5 L5-B (gate B-1) — the three EXPLICIT add-sign modes. `parallel` (并加签, the default when
+ * the key is absent) and `before` seat co-signers into the current node's CURRENT round (outside a
+ * parallel region the two are byte-identical — gate B-2's pin; `before` is refused inside one).
+ * `after` (后加签) is OD-L5-4(b)'s deferred same-node round: the actor's seat is consumed as an
+ * approval and, when that approval completes the node's current round, the addees activate as a
+ * FRESH `nodeEntryEpoch` round at the SAME node. No node is inserted and the current node is not
+ * skipped. Any other value is a values-free 400 `APPROVAL_ADD_SIGN_MODE_INVALID` at BOTH doors
+ * (route and service) — never silently flattened to the default.
+ */
+export const APPROVAL_ADD_SIGN_MODES = ['before', 'parallel', 'after'] as const
+export type ApprovalAddSignMode = typeof APPROVAL_ADD_SIGN_MODES[number]
+export function isApprovalAddSignMode(value: unknown): value is ApprovalAddSignMode {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_MODES as readonly string[]).includes(value)
+}
+/**
+ * Lock-5 OD-L5-5(a) — the appended round's aggregation for `after` with two or more addees:
+ * `all` (会签) needs every addee, `any` (或签) the first. Supplied at action time, REQUIRED there,
+ * and ignored for `before`/`parallel` (which inherit the node's own mode — today's behaviour).
+ */
+export const APPROVAL_ADD_SIGN_AGGREGATIONS = ['all', 'any'] as const
+export type ApprovalAddSignAggregation = typeof APPROVAL_ADD_SIGN_AGGREGATIONS[number]
+export function isApprovalAddSignAggregation(value: unknown): value is ApprovalAddSignAggregation {
+  return typeof value === 'string' && (APPROVAL_ADD_SIGN_AGGREGATIONS as readonly string[]).includes(value)
+}
 export type ApprovalStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'revoked' | 'cancelled'
 export const APPROVAL_TERMINAL_STATUSES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
 export type ApprovalTerminalStatus = typeof APPROVAL_TERMINAL_STATUSES[number]
@@ -937,6 +962,21 @@ export interface UnifiedApprovalDTO {
    * parallelism can keep using `currentNodeKey` unchanged.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
+   * (start → cursor) — `computeReturnableNodeKeys` (services/approval-return-targets.ts): the
+   * FROZEN runtime graph walked exactly as `dispatchAction`'s `return` arm walks it, after every
+   * VIEWER-INDEPENDENT refusal that arm applies (cancel-round instance kind, handler cursor, the
+   * cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region); the per-actor seat
+   * checks are NOT folded in (`nodeOperations` / `canDecideCurrentNode` answer those for THIS
+   * viewer). `[]` = nothing is legal (a client hides 退回).
+   * ABSENT = not computed: an older server, a non-pending instance, a bridged / legacy instance
+   * with no frozen graph, or a graph the walker could not evaluate — a client keeps its own
+   * fallback. Carried by the detail read and by every action response; never by list rows.
+   * Presentation only: the gate's own 409s remain the authority. Mirrors
+   * `services/approval-bridge-types.ts`, the detail read's declaration of the same DTO.
+   */
+  returnableNodeKeys?: string[]
   assignments: ApprovalAssignmentDTO[]
   createdAt: string
   updatedAt: string
@@ -988,8 +1028,21 @@ export interface ApprovalActionRequest {
    * P1-B add_sign — `parallel` (并加签, default) adds co-signers at the current
    * node; `before` (前加签) is rejected inside a parallel region in v1
    * (no node-internal ordered queue yet — see design §7).
+   *
+   * Lock-5 L5-B (gates B-1/B-3/B-4): `after` (后加签) consumes the actor's seat as an approval
+   * and opens a fresh same-node round for the addees once that approval completes the current
+   * round; it is refused inside a parallel region (same 409 as `before`) and refused when the
+   * approval cannot complete the current round (409 `APPROVAL_ADD_SIGN_AFTER_ROUND_INCOMPLETE`,
+   * nothing persisted). An unknown value is a 400 `APPROVAL_ADD_SIGN_MODE_INVALID` (see
+   * `APPROVAL_ADD_SIGN_MODES`).
    */
-  addSignMode?: 'before' | 'parallel'
+  addSignMode?: ApprovalAddSignMode
+  /**
+   * Lock-5 OD-L5-5(a) / gate B-5 — REQUIRED with `addSignMode: 'after'` and two or more
+   * `targetUserIds`; governs the appended round (`all` = every addee, `any` = the first). Optional
+   * with one addee (a single seat completes either way). Ignored for `before`/`parallel`.
+   */
+  addSignAggregation?: ApprovalAddSignAggregation
   /**
    * P1-B reduce_sign — assignee_id of the previously add-signed row to remove.
    * Only rows stamped `metadata.addSign === true` are removable.
@@ -1016,6 +1069,38 @@ export interface ApprovalActionRequest {
    * `undefined`) stays a 200 no-op.
    */
   attachmentIds?: string[]
+  /**
+   * H-5 (settlement parity) — the legacy `POST /api/approvals/:id/reject` door's OWN column.
+   *
+   * `approval_records.reason` is a persisted audit column that ONLY that door has ever written
+   * (`/actions` has no `reason` field and never has), and that door enforces its presence with a
+   * 400 `APPROVAL_REJECTION_REASON_REQUIRED`. Routing that door through `dispatchAction` without
+   * this rider would collect the text and then drop it on the floor — "mandatory then discarded".
+   *
+   * INTERNAL-ONLY, exactly like `channelOrigin`: the `/actions` route builds its request from an
+   * explicit field whitelist that does not include this key, so an HTTP body can never reach it
+   * through that door. Absent ⇒ the column is written NULL, which is what every caller other than
+   * the legacy reject door produces today — a pure widening, byte-identical for them.
+   *
+   * Read by the `reject` arm only. Present on any other action it is simply not read (the other
+   * arms build their own `insertApprovalRecord` payloads and none of them names `reason`).
+   */
+  reason?: string | null
+  /**
+   * H-5 (settlement parity) — an OPTIONAL optimistic-lock PRECONDITION, checked under the
+   * settlement transaction's OWN `FOR UPDATE` lock on the instance row.
+   *
+   * The legacy decision doors publish a `version` precondition (409 `APPROVAL_VERSION_CONFLICT`).
+   * They must release their row lock before calling this method — `dispatchAction` re-locks the
+   * same row on a SECOND pool connection, so holding it across the call is a deterministic
+   * self-deadlock — which means the version they validated under their own lock is no longer the
+   * version the write lands on. Passing it here makes it a real precondition again: the check and
+   * the write happen in ONE transaction under ONE lock, the way the doors' inline DML used to.
+   *
+   * Absent ⇒ no version check at all (`/actions`, the DingTalk card wrapper and the after-sales
+   * bridge have no version concept and never set it) — byte-identical to today for them.
+   */
+  expectedVersion?: number
 }
 
 export interface ApprovalTemplateListItemDTO {

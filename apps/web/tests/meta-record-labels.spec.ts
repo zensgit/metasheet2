@@ -7,6 +7,7 @@ import {
   restoredFromVersionBadge,
   recordPosition,
   recordHiddenFieldsHeading,
+  recordApprovalErrorLabel,
 } from '../src/multitable/utils/meta-record-labels'
 
 describe('meta-record-labels static keys', () => {
@@ -175,5 +176,51 @@ describe('meta-record-labels helpers', () => {
     expect(recordPosition(1, 12345, true)).toBe('1/1.2万')
     // both the current index AND the total compact independently, past the SAME 1000 threshold
     expect(recordPosition(12345, 20000, false)).toBe('12.3K / 20K')
+  })
+
+  // 记录级送审拒绝文案 — three real-world misleads this pins against regressing:
+  //  B1) APPROVAL_ORG_UNRESOLVED had NO copy entry at all (the dialog fell back to the route's fixed
+  //      English sentence). The fix must be actionable ("an administrator must fix it") and values-free
+  //      (no membership count, no org id/name, no user id — those never reach the client at all, but the
+  //      copy itself must not invent any either).
+  //  B2) RECORD_APPROVAL_PERMISSION_DENIED is shared by THREE gates (record read / multitable
+  //      submit-approval / approval approvals:write) — naming only two, as the old copy did, misdirects a
+  //      caller refused at the read gate. The copy must name all three causes and imply none.
+  it('APPROVAL_ORG_UNRESOLVED gets its own actionable, values-free copy (B1)', () => {
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', true))
+      .toBe('你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。')
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', false))
+      .toBe("Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.")
+    // values-free: no digits (a membership count) anywhere in either locale's copy
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', true)).not.toMatch(/[0-9]/)
+    expect(recordApprovalErrorLabel('APPROVAL_ORG_UNRESOLVED', false)).not.toMatch(/[0-9]/)
+  })
+
+  it('RECORD_APPROVAL_PERMISSION_DENIED names all three refusal gates without implying which fired (B2)', () => {
+    const zh = recordApprovalErrorLabel('RECORD_APPROVAL_PERMISSION_DENIED', true)!
+    const en = recordApprovalErrorLabel('RECORD_APPROVAL_PERMISSION_DENIED', false)!
+    expect(zh).toBe('没有送审权限（可能是记录读取权限、多维表送审权限或审批发起权限之一缺失），请联系管理员核实相关权限。')
+    expect(en).toBe('You do not have permission to submit this record for approval — this can be missing record read access, missing multitable submit-approval permission, or missing approval-write permission. Ask an administrator to check your access.')
+    // all THREE causes named — a reader told this refusal came from the read gate must not be sent to
+    // ask for only the other two permissions (the pre-fix bug)
+    expect(zh).toContain('记录读取权限')
+    expect(zh).toContain('多维表送审权限')
+    expect(zh).toContain('审批发起权限')
+    expect(en).toContain('record read access')
+    expect(en).toContain('multitable submit-approval permission')
+    expect(en).toContain('approval-write permission')
+  })
+
+  // B3) An empty published-template roster and a 403 on the roster read are the SAME dialog state BY
+  // DESIGN (MetaRecordApprovalSubmitDialog.vue loadTemplates has no free-text template-id fallback for
+  // either), and multitable-record-approval-submit.spec.ts pins that collapse directly ("shows the same
+  // notice when the roster read is refused (403)") — so this only pins that the ONE sentence stays
+  // actionable (tells the operator to ask an administrator to check both possible causes) rather than
+  // asserting which one applies.
+  it('the no-template/no-permission notice stays one sentence but names an actionable next step (B3)', () => {
+    expect(recordLabel('approval.templatesUnavailable', true))
+      .toBe('无可用模板或无审批读取权限，请联系管理员确认已发布审批模板，并核实你是否有审批读取权限。')
+    expect(recordLabel('approval.templatesUnavailable', false))
+      .toBe('No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.')
   })
 })

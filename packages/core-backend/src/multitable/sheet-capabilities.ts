@@ -5,7 +5,11 @@
  */
 
 import { listUserPermissions, isAdmin } from '../rbac/service'
-import { APPROVAL_PROJECTION_BASE_ID, restrictApprovalProjectionCapabilitiesPerRow } from './approval-projection-constants'
+import {
+  APPROVAL_PROJECTION_BASE_ID,
+  restrictApprovalProjectionCapabilitiesPerRow,
+  approvalProjectionParticipantPredicateSql,
+} from './approval-projection-constants'
 import { loadElearningProjectionSheetOrgMap } from './elearning-projection-access'
 import {
   deriveElearningProjectionSheetId,
@@ -13,6 +17,7 @@ import {
   restrictElearningProjectionCapabilities,
 } from './elearning-projection-constants'
 import { deriveCanManageFields } from './manage-schema-permission'
+import { deriveCanSubmitApproval } from './submit-approval-permission'
 
 // ── Permission code sets ────────────────────────────────────────────
 
@@ -52,6 +57,11 @@ export type MultitableCapabilities = {
   // Sheet-level "send notification" capability (B1-S1 button send_notification gate).
   // Full sheet write/admin only — NOT write-own (notify is member fan-out, not record-scoped).
   canSendNotification: boolean
+  // Record-level "submit for approval" capability (multitable x approval phase 2). Its OWN permission
+  // code (`multitable:submit-approval`) — NOT implied by `multitable:write`: starting an approval is a
+  // cross-product action, and the approval product independently re-checks `approvals:write` on its own
+  // side (ApprovalProductService.createApproval), so this is the MULTITABLE-side door only.
+  canSubmitApproval: boolean
 }
 
 export type SheetPermissionScope = {
@@ -94,6 +104,9 @@ export function deriveCapabilities(permissions: string[], isAdminRole: boolean):
     hasPermission(permissions, 'workflow:write') ||
     hasPermission(permissions, 'workflow:create') ||
     hasPermission(permissions, 'workflow:execute')
+  // Record-level submit-for-approval: its OWN code, never implied by write/automation. Shared helper so
+  // this file and its access.ts clone cannot drift apart.
+  const canSubmitApproval = deriveCanSubmitApproval(permissions, isAdminRole, hasPermission)
 
   return {
     canRead,
@@ -107,6 +120,7 @@ export function deriveCapabilities(permissions: string[], isAdminRole: boolean):
     canManageAutomation,
     canExport: canRead,
     canSendNotification: canWrite,
+    canSubmitApproval,
   }
 }
 
@@ -269,12 +283,23 @@ export async function resolveSheetCapabilitiesForUser(
       // T36-1 (Plan A): participants keep the read plane here too (this choke serves the Yjs
       // bridge + OAPI tokens — read parity with the REST choke, W1-2 G-4). Fail-closed: any
       // participant-lookup error → full fence.
+      // Project-key fix: `sheetId` is already a bound single-sheet parameter here ($1); the SAME
+      // shared predicate `permission-service.ts` uses for the carve-out + deny arms derives the
+      // writer's namespaced key from it — this was previously a SECOND hand-rolled copy that
+      // compared against the bare (never-written) column name.
       let isParticipant = false
+      // Gate condition P3-1: guard an empty/blank actor id BEFORE the predicate, matching the three
+      // sibling consumers (`permission-service.ts` carve-out and both deny arms). The shared
+      // predicate COALESCEs a missing key to '', and the writer stores `approverId: ''` on a pending
+      // row, so without this guard an empty actor id would MATCH such a row. Inert today (base
+      // capabilities for '' are all-false and the per-row restriction only downgrades), added so all
+      // four consumers agree rather than relying on a downstream all-false to absorb it.
       try {
+        if (!userId || userId.trim() === '') throw new Error('blank actor id')
         const participant = await query(
           `SELECT 1 FROM meta_records
             WHERE sheet_id = $1
-              AND (data->>'requesterId' = $2 OR data->>'approverId' = $2)
+              AND ${approvalProjectionParticipantPredicateSql('data', '$1', '$2')}
             LIMIT 1`,
           [sheetId, userId],
         )

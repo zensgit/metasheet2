@@ -60,13 +60,20 @@ import { extractSelectOptions, isPlainObject, normalizeJson } from './field-code
 import { recordRecordRevision } from './record-history-service'
 import { fenceWriterEntry } from './canonical-sheet-fence'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  fieldSchemaSnapshotFromRows,
+  type FieldSchemaSnapshot,
+  type FieldSchemaSnapshotEntry,
+} from './field-schema-fence-recheck'
+import {
+  AUTOMATION_CONDITION_VALUE_INVALID_CODE,
   ConditionGroupValidationError,
   normalizeConditionGroupInput,
   validateConditionGroupAgainstFields,
   type AutomationConditionField,
   type ConditionGroup,
 } from './automation-conditions'
-import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode } from './automation-executor'
+import { AutomationExecutor, AUTOMATION_NO_RECIPIENTS_ERROR, normalizeNotificationRecipients, TARGET_RECORD_MISSING_SKIP_REASON, type AutomationRule as ExecutorRule, type AutomationExecution, type AutomationDeps, type ExecutionContext, type ActionJobLifecycle, type AutomationStepResult, type AutomationDispatchMode, type CrossBaseWriteTarget } from './automation-executor'
 // F9c: the save-time recipient gate resolves the SAME roster as the execution path and the button
 // route (one resolver, zero drift) — see assertNotificationRecipientsAtSave.
 import { loadSheetMemberUserIdSet } from './permission-service'
@@ -94,6 +101,7 @@ import {
   automationRetryLedgerRetentionCutoffIso,
   claimFirstAutomationRetryAttempt,
   hasAutomationRetryLedgerEvidence,
+  isTargetRecordMissingSkippedExecution,
   isWithinAutomationRetryWindow,
   realFireTestRunEligibility,
   retryLedgerFamiliesForActions,
@@ -115,7 +123,7 @@ import {
   automationUserHasApprovalRead,
 } from './automation-approval-template-access'
 import { metrics } from '../metrics/metrics'
-import { loadSheetLiveness } from './sheet-liveness'
+import { loadSheetLiveness, loadSheetLivenessBatch, SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE, type SheetLiveness } from './sheet-liveness'
 import {
   normalizeDingTalkAutomationActionInputs,
   validateDingTalkAutomationActionConfigs,
@@ -140,6 +148,19 @@ export type AutomationRuleValidationCode =
   | 'RECIPIENT_NOT_AUTHORIZED'
   | 'NO_RECIPIENTS'
   | 'ROSTER_UNAVAILABLE'
+  | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
+  // 客户反馈 2026-09-24 #4b: a condition VALUE that does not fit its field's type (automation-conditions.ts).
+  | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
+ * update/delete/lock of the trigger record". Under a `record.deleted` trigger the trigger record no longer
+ * exists, so such an action can only ever be a 0-row no-op (and, before the executor fix, a self-chaining
+ * ghost event: one user delete ⇒ three execution logs). Stable code for clients; ONE fixed, values-free
+ * Chinese message (the editor shows the same sentence as its inline hint).
+ */
+export const DELETED_TRIGGER_SELF_MUTATION_CODE = 'DELETED_TRIGGER_SELF_MUTATION'
+export const DELETED_TRIGGER_SELF_MUTATION_MESSAGE = '记录删除时触发记录已不存在，不能再修改/删除/锁定它'
 
 export class AutomationRuleValidationError extends Error {
   readonly code: AutomationRuleValidationCode
@@ -190,6 +211,15 @@ export class AutomationTestRunRejectedError extends Error {
     this.name = 'AutomationTestRunRejectedError'
   }
 }
+
+/**
+ * testRun's rule gate (#5812 follow-up). ONE code and ONE fixed, values-free message for a missing rule,
+ * a rule bound to another sheet and a disabled rule, so the refusal is not an oracle for rule ids or for
+ * which sheet owns a rule. Thrown as a typed rejection so the route passes it through by CODE — the route
+ * no longer recognises this refusal by matching message text.
+ */
+export const TEST_RUN_RULE_NOT_FOUND_CODE = 'TEST_RUN_RULE_NOT_FOUND'
+export const TEST_RUN_RULE_NOT_FOUND_MESSAGE = 'Automation rule not found or not enabled'
 
 function valuesFreeSimulationStep(step: AutomationStepResult): AutomationStepResult {
   return {
@@ -254,6 +284,85 @@ const APPROVAL_COMPLETION_TRIGGER_EVENT_TYPES: readonly string[] = [
   'approval.revoked',
   'approval.cancelled',
 ]
+
+/**
+ * Capped id sample for AGGREGATED log lines (sheet liveness). Identifiers only — never values — and
+ * capped so one template's 50 rules cannot turn one incident into 50 lines' worth of payload; the exact
+ * count always rides alongside as `ruleCount`, and the full per-rule list is available at DEBUG.
+ */
+const LOG_ID_SAMPLE_LIMIT = 5
+function sampleIds(ids: readonly string[]): string[] {
+  const unique = Array.from(new Set(ids))
+  return unique.length <= LOG_ID_SAMPLE_LIMIT
+    ? unique
+    : [...unique.slice(0, LOG_ID_SAMPLE_LIMIT), `+${unique.length - LOG_ID_SAMPLE_LIMIT} more`]
+}
+
+/**
+ * Values-free description of a THROWN lookup error, for a WARN: the constructor name (a code identifier)
+ * and, when present and identifier-shaped, the driver's `code` (a PostgreSQL SQLSTATE such as `57014`, or
+ * a Node errno such as `ECONNREFUSED`). Never `message` / `detail` / `hint` — those can carry connection
+ * details or row values. `err.name` alone is not enough: node-postgres's `DatabaseError` sets `name` to the
+ * protocol message type `'error'`, so every server-side failure (timeout, permission, too many
+ * connections) would log the same class.
+ */
+const LOOKUP_ERROR_CLASS_SHAPE = /^[A-Za-z_$][\w$]{0,63}$/
+const LOOKUP_ERROR_CODE_SHAPE = /^[0-9A-Z_]{2,32}$/
+export function describeLookupError(err: unknown): { errorClass: string; errorCode?: string } {
+  let errorClass: string = typeof err
+  if (err instanceof Error) {
+    const ctorName = (err as { constructor?: { name?: unknown } }).constructor?.name
+    errorClass = typeof ctorName === 'string' && LOOKUP_ERROR_CLASS_SHAPE.test(ctorName)
+      ? ctorName
+      : LOOKUP_ERROR_CLASS_SHAPE.test(err.name) ? err.name : 'Error'
+  }
+  const code = err !== null && typeof err === 'object' ? (err as { code?: unknown }).code : undefined
+  return typeof code === 'string' && LOOKUP_ERROR_CODE_SHAPE.test(code) ? { errorClass, errorCode: code } : { errorClass }
+}
+
+/**
+ * Prefix of the reason persisted on the failed execution (and its start_approval step) when an approval
+ * bridge is not resumed because its sheet is soft-deleted. The full reason is built by
+ * {@link bridgeSheetDeletedMessage}. Values-free: no ids — the execution row already names the rule and
+ * sheet.
+ */
+export const BRIDGE_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; approval bridge not resumed`
+
+/**
+ * The admin-facing refusals for a whole-execution RETRY and a suspended-execution RESUME whose rule's sheet
+ * is soft-deleted (#5803). They start with the same `SHEET_DELETED:` prefix as the bridge refusal and are
+ * returned as `{ status: 409, code: SHEET_DELETED_CODE, message }`. Values-free: no ids (the admin already
+ * holds the execution id / resume token they sent). Each says what did NOT happen, so a restore-then-redo is
+ * the obvious next step: neither refusal writes anything, consumes the first-retry marker, or claims the
+ * resume token (see `retryExecution` / `resumeExecution`).
+ */
+export const RETRY_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; execution not retried. Nothing was run or recorded and the original execution is unchanged; restore the sheet, then retry it.`
+export const RESUME_SHEET_DELETED_MESSAGE =
+  `${SHEET_DELETED_CODE}: the rule's sheet has been deleted; suspended execution not resumed. Nothing was run and the resume token was not consumed; restore the sheet, then resume it.`
+
+const APPROVAL_OUTCOME_LABELS: ReadonlySet<string> = new Set(['approved', 'rejected', 'revoked', 'cancelled'])
+/** The approval outcome as a closed enum label (values-free even if an event carried something else). */
+export function approvalOutcomeLabel(outcome: unknown): string {
+  return typeof outcome === 'string' && APPROVAL_OUTCOME_LABELS.has(outcome) ? outcome : 'unknown'
+}
+
+/**
+ * The full refusal reason. It keeps the approval OUTCOME (the old "Approval completed with <outcome>"
+ * text is replaced by this one, and a later restore does not replay the run, so the run history is where
+ * an operator decides whether anything must be applied by hand) and says exactly what was WITHHELD — which
+ * depends on the outcome: the tail only ever runs on `approved`, and a non-approved outcome only writes
+ * back with the `onNonApproved` opt-in. A rejected run with no opt-in withheld nothing, and says so, so it
+ * is not mistaken for a lost write.
+ */
+export function bridgeSheetDeletedMessage(outcome: unknown, withheld: { writeback: boolean; tail: boolean }): string {
+  const parts: string[] = []
+  if (withheld.writeback) parts.push('declared result writeback not applied')
+  if (withheld.tail) parts.push('remaining actions not run')
+  const what = parts.length > 0 ? parts.join(', ') : 'nothing was pending to write back or run'
+  return `${BRIDGE_SHEET_DELETED_MESSAGE} (approval outcome: ${approvalOutcomeLabel(outcome)}; ${what})`
+}
 
 function hasRetryableFwbFailure(execution: AutomationExecution): boolean {
   return execution.steps.some((step) => {
@@ -377,6 +486,11 @@ type ResultWritebackField = typeof RESULT_WRITEBACK_FIELDS[number]
 // T3-5: optional cross-base target on a resultWriteback — a LITERAL triple (no expression templating).
 // When any is set the save gate requires all three; runtime routes the backwrite to the target record.
 const RESULT_WRITEBACK_TARGET_KEYS = ['targetBaseId', 'targetSheetId', 'targetRecordId'] as const
+// #5742: the four terminal approval outcomes a backwrite can carry. They are the ONLY legal keys of the
+// optional `resultWriteback.outcomeValues` declared mapping (outcome → the literal value written into the
+// status field), so a Chinese single-select does not have to grow an option literally named 'approved'.
+const RESULT_WRITEBACK_OUTCOMES = ['approved', 'rejected', 'revoked', 'cancelled'] as const
+export type ResultWritebackOutcome = typeof RESULT_WRITEBACK_OUTCOMES[number]
 const TEXT_RESULT_WRITEBACK_TYPES = new Set(['string', 'longText'])
 const STATUS_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'select'])
 const COMPLETED_AT_RESULT_WRITEBACK_TYPES = new Set([...TEXT_RESULT_WRITEBACK_TYPES, 'dateTime'])
@@ -434,7 +548,7 @@ function validateSendEmailActionConfigs(
   return null
 }
 
-function validateStartApprovalConfig(config: Record<string, unknown>, path: string): string | null {
+export function validateStartApprovalConfig(config: Record<string, unknown>, path: string): string | null {
   const templateId = typeof config.templateId === 'string' ? config.templateId.trim() : ''
   if (!templateId) return `${path}.templateId is required`
   const mapping = isRecord(config.formDataMapping) ? config.formDataMapping : null
@@ -453,7 +567,10 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
   }
   // W7-1 approval-result backwrite: a DECLARED, FIXED outcome→field mapping. The admin picks WHICH
   // source field receives `outcome` / `approver` / `completedAt` — NOT a free template expression — so
-  // the write path stays values-constrained (values come from the completion event, never user strings).
+  // the write path stays values-constrained: the approver/completedAt values come from the completion
+  // EVENT only, and the status value comes from the event OR (since #5742) from the declared
+  // `outcomeValues` LITERAL — which for a select must be one of that field's own options (save + fire-time
+  // check), and for string/longText may be any declared literal. Never a template evaluated on record data.
   // Optional; ≥1 field if present. The mapping is part of the action config, so it is covered by the
   // resume-time action-fingerprint drift guard (cannot be swapped after the approval suspends).
   if (config.resultWriteback !== undefined) {
@@ -461,6 +578,23 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
     const onNonApproved = config.resultWriteback.onNonApproved
     if (onNonApproved !== undefined && typeof onNonApproved !== 'boolean') {
       return `${path}.resultWriteback.onNonApproved must be a boolean`
+    }
+    // #5742 outcomeValues: an OPTIONAL declared outcome→written-value mapping. Keys are restricted to the
+    // four terminal outcomes (an unknown key is a typo that would silently never apply — reject it loudly);
+    // each present value must be a non-empty string. An EMPTY object is allowed and means "absent" (the raw
+    // outcome is written), which is exactly the pre-#5742 behaviour every saved rule already has.
+    const outcomeValues = config.resultWriteback.outcomeValues
+    if (outcomeValues !== undefined) {
+      if (!isRecord(outcomeValues)) return `${path}.resultWriteback.outcomeValues must be an object`
+      for (const key of Object.keys(outcomeValues)) {
+        if (!(RESULT_WRITEBACK_OUTCOMES as readonly string[]).includes(key)) {
+          return `${path}.resultWriteback.outcomeValues key ${key} is not one of ${RESULT_WRITEBACK_OUTCOMES.join('/')}`
+        }
+        const value = outcomeValues[key]
+        if (typeof value !== 'string' || value.trim().length === 0) {
+          return `${path}.resultWriteback.outcomeValues.${key} must be a non-empty string`
+        }
+      }
     }
     let mapped = 0
     for (const field of RESULT_WRITEBACK_FIELDS) {
@@ -470,6 +604,17 @@ function validateStartApprovalConfig(config: Record<string, unknown>, path: stri
       mapped += 1
     }
     if (mapped === 0) return `${path}.resultWriteback must map at least one of statusField/approverField/completedAtField`
+    // #5742: the mapping ONLY applies to the status field (buildResultWritebackPatch reads it under
+    // `if (statusField)`), so `outcomeValues` without a `statusField` is dead config that silently never
+    // fires — reject it loudly. Checked AFTER the field loop so the more specific "must map at least one
+    // of …" error still wins for a writeback that maps no field at all. `{}` stays legal (= absent).
+    if (
+      isRecord(outcomeValues)
+      && Object.keys(outcomeValues).length > 0
+      && resultWritebackFieldId(config.resultWriteback, 'statusField') === null
+    ) {
+      return `${path}.resultWriteback.outcomeValues requires ${path}.resultWriteback.statusField (the mapping only applies to the status field)`
+    }
     // T3-5 cross-base target: an OPTIONAL literal triple. If ANY of the three target ids is present, require
     // the FULL triple as non-empty strings (Q4). No expression templating — literal ids only. Target
     // field-type/read validation AND the author's target-base write authority are DEFERRED to runtime (the
@@ -527,6 +672,25 @@ function resultWritebackFieldId(writeback: Record<string, unknown>, field: Resul
   return trimmed.length > 0 ? trimmed : null
 }
 
+/**
+ * #5742 — the VALUE a backwrite writes into `statusField` for one terminal outcome.
+ *
+ * Pure. `resultWriteback.outcomeValues[outcome]` wins when it is a non-empty (trimmed) string; otherwise
+ * the RAW outcome string is returned, which is byte-identical to the pre-#5742 behaviour — so every saved
+ * rule without the mapping keeps writing 'approved'/'rejected'/'revoked'/'cancelled' exactly as before.
+ *
+ * The TRIMMED value is what gets written AND what the save/fire-time select-option check validates, so the
+ * two can never disagree (a mapping of ' 已通过 ' is validated and written as '已通过').
+ */
+export function resolveWritebackStatusValue(writeback: Record<string, unknown>, outcome: string): string {
+  const outcomeValues = writeback.outcomeValues
+  if (!isRecord(outcomeValues)) return outcome
+  const mapped = outcomeValues[outcome]
+  if (typeof mapped !== 'string') return outcome
+  const trimmed = mapped.trim()
+  return trimmed.length > 0 ? trimmed : outcome
+}
+
 // T3-5: read one cross-base target id (trimmed non-empty string, else null).
 function resultWritebackTargetId(
   writeback: Record<string, unknown>,
@@ -544,15 +708,36 @@ function isCrossBaseWriteback(writeback: Record<string, unknown>): boolean {
   return RESULT_WRITEBACK_TARGET_KEYS.some((key) => resultWritebackTargetId(writeback, key) !== null)
 }
 
+// W7-1 gate, shared by the writeback itself and by the deleted-sheet refusal reason (so the reason's
+// "writeback not applied" can never disagree with whether a writeback would have been attempted): the
+// declared `resultWriteback`, or null when this bridge + outcome would not write back at all. The approved
+// branch writes whenever configured; a non-approved outcome needs the explicit `onNonApproved` opt-in.
+function declaredApprovalResultWriteback(
+  bridge: Pick<AutomationApprovalBridgeRow, 'recordId' | 'sheetId'>,
+  startApprovalConfig: Record<string, unknown>,
+  outcome: string,
+): Record<string, unknown> | null {
+  const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
+  if (!writeback || !bridge.recordId || !bridge.sheetId) return null
+  if (outcome !== 'approved' && writeback.onNonApproved !== true) return null
+  return writeback
+}
+
 // Discriminated result of a backwrite: same-base returns the `patch` (merged into the resume tail context);
-// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3).
+// cross-base returns only the target triple (its patch is NOT merged into the tail — §3.3); same-base-missing
+// (客户反馈 2026-09-24 #3 final review F3) = a CONFIGURED same-base writeback found its record gone (lock-check
+// SELECT saw no row, or the UPDATE affected 0 rows) and wrote nothing — surfaced as a values-free marker.
 type ApprovalBackwriteOutcome =
   | { kind: 'same-base'; patch: Record<string, unknown> }
+  | { kind: 'same-base-missing' }
   | { kind: 'cross-base'; target: { targetBaseId: string; targetSheetId: string; targetRecordId: string } }
 
-// The backwrite patch: DECLARED fixed field→value mapping, VALUES sourced from the completion EVENT only
-// (status = outcome, approver = the approval actor, completedAt = the event time). Never the trigger actor.
-function buildResultWritebackPatch(
+// The backwrite patch: DECLARED fixed field→value mapping. approver = the approval actor and completedAt =
+// the event time come from the completion EVENT only (never the trigger actor); status = the RESOLVED
+// outcome value (#5742: the declared `outcomeValues` literal when present, else the raw outcome).
+// Exported for unit coverage: this is the single line where the mapping becomes user-visible, so it needs
+// its own test rather than leaning on the shared resolver's cases.
+export function buildResultWritebackPatch(
   writeback: Record<string, unknown>,
   event: ApprovalCompletionEventV1,
 ): Record<string, unknown> {
@@ -560,7 +745,7 @@ function buildResultWritebackPatch(
   const statusField = resultWritebackFieldId(writeback, 'statusField')
   const approverField = resultWritebackFieldId(writeback, 'approverField')
   const completedAtField = resultWritebackFieldId(writeback, 'completedAtField')
-  if (statusField) patch[statusField] = event.transition.toStatus
+  if (statusField) patch[statusField] = resolveWritebackStatusValue(writeback, event.transition.toStatus)
   if (approverField) patch[approverField] = event.actor?.id ?? null
   if (completedAtField) patch[completedAtField] = event.occurredAt
   return patch
@@ -593,19 +778,23 @@ function normalizeFieldProperty(value: unknown): Record<string, unknown> | undef
   return undefined
 }
 
-function resultWritebackFieldTypeError(
+export function resultWritebackFieldTypeError(
   field: ResultWritebackField,
   target: ResultWritebackTargetField,
   outcome: string,
+  // #5742: the whole writeback, so the select-option check validates the RESOLVED value (outcomeValues
+  // mapping applied) instead of the raw outcome literal. Defaults to an empty mapping = raw outcome.
+  writeback: Record<string, unknown> = {},
 ): string | null {
   if (field === 'statusField') {
     if (!STATUS_RESULT_WRITEBACK_TYPES.has(target.type)) {
       return `resultWriteback.statusField target ${target.id} must be string/longText/select, got ${target.type}`
     }
     if (target.type === 'select') {
+      const resolved = resolveWritebackStatusValue(writeback, outcome)
       const options = new Set((extractSelectOptions(target.property) ?? []).map((option) => option.value))
-      if (!options.has(outcome)) {
-        return `resultWriteback.statusField select ${target.id} does not include option ${outcome}`
+      if (!options.has(resolved)) {
+        return `resultWriteback.statusField select ${target.id} does not include option '${resolved}' (for outcome ${outcome})`
       }
     }
     return null
@@ -657,6 +846,99 @@ function validateCrossBaseWriteActionConfigs(
   for (const [index, action] of (actions ?? []).entries()) {
     const error = validateCrossBaseWriteConfig(action.config, action.type, `actions[${index}].config`)
     if (error) return error
+  }
+  return null
+}
+
+const RECORD_DELETED_TRIGGER = 'record.deleted'
+
+/**
+ * The record-mutating actions whose SAME-BASE form addresses the TRIGGER record (automation-executor.ts:
+ * `effectiveRecordId = context.recordId` unless the cross-base gate fires). `update_field` is the v0 alias
+ * of `update_record` (normalizeLegacyActionPair) and is listed so a raw legacy payload cannot slip past.
+ */
+const TRIGGER_RECORD_MUTATING_ACTION_TYPES = new Set<string>(['update_record', 'delete_record', 'lock_record', 'update_field'])
+
+/**
+ * Does this action STRUCTURALLY resolve to the TRIGGER record at run time? Mirrors the executor's
+ * addressing: without a COMPLETE explicit triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) the
+ * write falls back to `context.recordId`. (An INCOMPLETE triple is refused earlier by
+ * validateCrossBaseWriteConfig with its own, more specific message.) A complete triple is only NECESSARY for
+ * retargeting, not sufficient: if the gate resolves it as same-base the executor still writes the trigger
+ * record — that half needs the database and lives in validateDeletedTriggerSelfMutationTargets.
+ */
+function actionTargetsTriggerRecord(actionType: string, config: Record<string, unknown> | null | undefined): boolean {
+  if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(actionType)) return false
+  const text = (key: string): string => (typeof config?.[key] === 'string' ? (config[key] as string).trim() : '')
+  return !(text('targetBaseId') && text('targetSheetId') && text('targetRecordId'))
+}
+
+/**
+ * 客户反馈 2026-09-24 #3 — refuse "record.deleted + same-base update_record / delete_record / lock_record of
+ * the trigger record" at SAVE, top level and nested (condition_branch / parallel_branch sub-actions —
+ * `nestedActions` is the collectNestedAutomationActions flattening). Returns the fixed message or null.
+ * Deliberately NOT applied to an on/off switch (disable-only, and enable-only since #6155), a name-only or
+ * conditions-only edit, or to deleteRule: an operator must always be able to turn such a rule off and back
+ * on (setRuleEnabled routes through updateRule) — see the updateRule gate for the exact input shapes that
+ * run this check.
+ */
+export function validateDeletedTriggerSelfMutation(
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+): string | null {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  if (actionTargetsTriggerRecord(actionType, actionConfig)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  for (const action of nestedActions ?? []) {
+    if (actionTargetsTriggerRecord(action.type, action.config)) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
+  }
+  return null
+}
+
+/**
+ * The addressing verdict of the executor's cross-base write gate, injected so this module never re-derives
+ * it: `AutomationExecutor.resolveCrossBaseWriteTarget` bound to the service's `queryFn`.
+ */
+export type CrossBaseWriteTargetResolver = (
+  triggerSheetId: string,
+  targetSheetId: string,
+  declaredTargetBaseId: string | undefined,
+) => Promise<CrossBaseWriteTarget>
+
+/**
+ * 客户反馈 2026-09-24 #3, final review F4 — the half of the save gate that needs the database. A COMPLETE
+ * triple (`targetBaseId` + `targetSheetId` + `targetRecordId`) passes the structural check in
+ * {@link validateDeletedTriggerSelfMutation}, but at run time the executor only retargets when its
+ * cross-base gate says `crossBase`. When the target sheet resolves to the rule's OWN base (for example
+ * `targetBaseId` equal to the rule sheet's base), the gate answers same-base and update / delete / lock
+ * address `context.recordId`: the deleted trigger record again. So each complete triple on a
+ * trigger-record-mutating action is resolved with the gate's own addressing verdict (`resolveTarget`,
+ * never a local copy) against the rule's sheet, with the SAME raw inputs the executor passes
+ * (`config.targetSheetId`, `config.targetBaseId` if a string). A same-base verdict is refused with the same
+ * message. A cross-base or unresolvable verdict is left alone: at run time it either retargets or fails
+ * closed, and neither touches the trigger record. Top level and nested, like the structural check.
+ */
+export async function validateDeletedTriggerSelfMutationTargets(
+  ruleSheetId: string,
+  triggerType: string,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  nestedActions: AutomationAction[] | null | undefined,
+  resolveTarget: CrossBaseWriteTargetResolver,
+): Promise<string | null> {
+  if (triggerType !== RECORD_DELETED_TRIGGER) return null
+  const candidates: Array<{ type: string; config: Record<string, unknown> | null | undefined }> = [
+    { type: actionType, config: actionConfig },
+    ...(nestedActions ?? []).map((action) => ({ type: action.type, config: action.config })),
+  ]
+  for (const { type, config } of candidates) {
+    // Only the shape the structural check lets through: a mutating action WITH a complete triple.
+    if (!TRIGGER_RECORD_MUTATING_ACTION_TYPES.has(type) || actionTargetsTriggerRecord(type, config)) continue
+    const targetSheetId = config?.targetSheetId as string
+    const declaredTargetBaseId = typeof config?.targetBaseId === 'string' ? config.targetBaseId : undefined
+    const target = await resolveTarget(ruleSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return DELETED_TRIGGER_SELF_MUTATION_MESSAGE
   }
   return null
 }
@@ -1088,7 +1370,12 @@ export async function resolveAutomationSchedulerLeaderOptions(): Promise<Automat
 export class AutomationService {
   private eventBus: EventBus
   private db: Kysely<Database>
-  private subscriptionIds: string[] = []
+  private producerSubscriptionIds: string[] = []
+  private completionSubscriptionIds: string[] = []
+  private readonly producerInFlight = new Set<Promise<void>>()
+  private readonly transitiveCompletionInFlight = new Set<Promise<void>>()
+  private readonly completionConsumerInFlight = new Set<Promise<void>>()
+  private producerStopPromise: Promise<void> | null = null
   private executor: AutomationExecutor
   private scheduler: AutomationScheduler
   private logService: AutomationLogService
@@ -1117,6 +1404,16 @@ export class AutomationService {
     const deps: AutomationDeps = {
       eventBus,
       queryFn,
+      // 客户反馈 2026-09-24 #4b — the sheet's field types for TYPED condition evaluation (same read as the
+      // save-time preflight). The executor caches one read per execution and degrades to the untyped
+      // legacy evaluation (with a values-free warning) if this read fails — it never fails a run.
+      loadConditionFields: async (sheetId) => {
+        const fieldRes = await queryFn(
+          'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
+          [sheetId],
+        )
+        return serializeAutomationConditionFieldRows(fieldRes.rows)
+      },
       transaction: async (handler) => poolManager.get().transaction(async ({ query }) => {
         const txQuery: AutomationQueryFn = async (sqlText, params) => {
           const result = await query(sqlText, params)
@@ -1228,29 +1525,29 @@ export class AutomationService {
       const id = this.eventBus.subscribe<AutomationEventPayload>(
         eventType,
         (payload) => {
-          this.handleEvent(eventType, payload).catch((err) => {
+          this.trackLifecycleTask(this.producerInFlight, this.handleEvent(eventType, payload), (err) => {
             logger.error(`Automation handler error for ${eventType}`, err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.producerSubscriptionIds.push(id)
     }
 
     for (const eventType of ['approval.approved', 'approval.rejected', 'approval.revoked', 'approval.cancelled']) {
       const id = this.eventBus.subscribe<ApprovalCompletionEventV1>(
         eventType,
         (payload) => {
-          this.handleApprovalCompletionEvent(payload).catch((err) => {
+          this.trackLifecycleTask(this.transitiveCompletionInFlight, this.handleApprovalCompletionEvent(payload), (err) => {
             logger.error(`Automation approval bridge handler error for ${eventType}`, err instanceof Error ? err : undefined)
           })
           // T1-3 (Q7): fresh approval.completed rules fire for EVERY completion, independently of the
           // bridge resume above — the two consumers share no state (a bridged approval also fires rules).
-          this.handleApprovalCompletionTrigger(payload).catch((err) => {
+          this.trackLifecycleTask(this.completionConsumerInFlight, this.handleApprovalCompletionTrigger(payload), (err) => {
             logger.error(`Automation approval.completed trigger error for ${eventType}`, err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.completionSubscriptionIds.push(id)
     }
 
     // A-2a: pending-task events ride their own subscription — one event per new actionable
@@ -1259,12 +1556,12 @@ export class AutomationService {
       const id = this.eventBus.subscribe<ApprovalTaskCreatedEventV1>(
         'approval.task_created',
         (payload) => {
-          this.handleApprovalTaskCreatedTrigger(payload).catch((err) => {
+          this.trackLifecycleTask(this.completionConsumerInFlight, this.handleApprovalTaskCreatedTrigger(payload), (err) => {
             logger.error('Automation approval.task_created trigger error', err instanceof Error ? err : undefined)
           })
         },
       )
-      this.subscriptionIds.push(id)
+      this.completionSubscriptionIds.push(id)
     }
 
     logger.info('AutomationService initialized (V1)')
@@ -1313,6 +1610,28 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // 客户反馈 2026-09-24 #3: a record.deleted rule cannot update/delete/lock its own (already gone) trigger record.
+    const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+    )
+    if (deletedTriggerSelfMutationError) {
+      throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
+    // Final review F4: a complete triple the executor's gate resolves as SAME-base still writes the trigger record.
+    const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+      sheetId,
+      input.triggerType,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+      this.crossBaseWriteTargetResolver(),
+    )
+    if (deletedTriggerSameBaseTargetError) {
+      throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+    }
     const linkValidationError = await validateDingTalkAutomationLinks(
       this.queryFn,
       sheetId,
@@ -1757,6 +2076,68 @@ export class AutomationService {
       )
     }
 
+    // 客户反馈 2026-09-24 #3 (裁定 PR #6074): refuse the RESULTING shape "record.deleted + same-base
+    // update/delete/lock of the trigger record" whenever the edit touches the shape — trigger type, action
+    // type/config/list, execution mode. Deliberately NOT gated like the T1-2/T1-3 blocks above (every write
+    // shape): a rename, a conditions-only or a triggerConfig-only edit, and a pure on/off switch of an EXISTING
+    // such rule must still succeed — `setRuleEnabled` routes through this method.
+    // #6155 (Ratified-by-default-2026-09-29, reverses one sentence of #6078): an enable-only PATCH
+    // (`{ enabled: true }` with none of the five shape fields) is NOT checked either. Switching a rule off and
+    // on again must bring back the state it had; the shape does not change; a rule of this shape that is on
+    // already runs and the self-targeting action changes no table record (#6078: a delete_record step ends as
+    // skipped, an update_record / lock_record step as success). `enabled: true` sent TOGETHER with a
+    // shape field is still checked — the shape field alone opens this gate. Existing rules stay loadable and
+    // switchable; they cannot be saved forward with this shape.
+    if (
+      input.triggerType !== undefined
+      || input.actionType !== undefined
+      || input.actionConfig !== undefined
+      || input.actions !== undefined
+      || input.executionMode !== undefined
+    ) {
+      // Every shape above is also a T1-2 shape, so `existingRuleSnapshot` was already fetched there — no
+      // extra getRule (unit tests mock getRule as a strict response queue; see the T1-3 note).
+      const existingForDeletedTrigger = existingRuleSnapshot !== undefined ? existingRuleSnapshot : await this.getRule(ruleId)
+      existingRuleSnapshot = existingForDeletedTrigger
+      if (!existingForDeletedTrigger || existingForDeletedTrigger.sheet_id !== sheetId) return null
+      const nextTriggerType = input.triggerType ?? existingForDeletedTrigger.trigger_type
+      const nextPair = normalizeLegacyActionPair(
+        input.actionType ?? existingForDeletedTrigger.action_type,
+        (input.actionConfig ?? existingForDeletedTrigger.action_config ?? null) as Record<string, unknown> | null,
+      )
+      const nextActions = input.actions !== undefined ? input.actions : existingForDeletedTrigger.actions ?? null
+      const nextExecutionMode = input.executionMode !== undefined
+        ? normalizeExecutionMode(input.executionMode)
+        : existingForDeletedTrigger.execution_mode ?? null
+      const nestedForDeletedTrigger = collectNestedAutomationActions(
+        nextPair.actionType,
+        (nextPair.actionConfig ?? {}) as Record<string, unknown>,
+        nextActions,
+        nextExecutionMode,
+      )
+      const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+      )
+      if (deletedTriggerSelfMutationError) {
+        throw new AutomationRuleValidationError(deletedTriggerSelfMutationError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+      // Final review F4 (same gate condition as above, so on/off switches / rename / conditions-only edits still skip it).
+      const deletedTriggerSameBaseTargetError = await validateDeletedTriggerSelfMutationTargets(
+        sheetId,
+        nextTriggerType,
+        nextPair.actionType,
+        nextPair.actionConfig,
+        nestedForDeletedTrigger,
+        this.crossBaseWriteTargetResolver(),
+      )
+      if (deletedTriggerSameBaseTargetError) {
+        throw new AutomationRuleValidationError(deletedTriggerSameBaseTargetError, DELETED_TRIGGER_SELF_MUTATION_CODE)
+      }
+    }
+
     if (Object.keys(updates).length === 0) return this.getRule(ruleId)
 
     updates.updated_at = new Date().toISOString()
@@ -1799,7 +2180,8 @@ export class AutomationService {
   }
 
   /**
-   * Enable or disable a rule through the same resulting-shape validation as every other edit.
+   * Enable or disable a rule through the same resulting-shape validation as every other edit — except the
+   * record-deleted self-mutation shape check, which a pure on/off switch does not run (#6155).
    */
   async setRuleEnabled(
     ruleId: string,
@@ -2363,12 +2745,53 @@ export class AutomationService {
     this.scheduler.unregister(ruleId)
   }
 
-  shutdown(): void {
-    for (const id of this.subscriptionIds) {
-      this.eventBus.unsubscribe(id)
+  private trackLifecycleTask(
+    owner: Set<Promise<void>>,
+    task: Promise<void>,
+    onError: (error: unknown) => void,
+  ): void {
+    const settled = task.catch(onError)
+    owner.add(settled)
+    void settled.then(
+      () => owner.delete(settled),
+      () => owner.delete(settled),
+    )
+  }
+
+  private async drainLifecycleTasks(owner: Set<Promise<void>>): Promise<void> {
+    while (owner.size > 0) {
+      await Promise.allSettled([...owner])
     }
-    this.subscriptionIds = []
-    this.scheduler.destroy()
+  }
+
+  stopProducerAdmissions(): Promise<void> {
+    this.producerStopPromise ??= (async () => {
+      for (const id of this.producerSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+      const schedulerStop = this.scheduler.destroy()
+      await this.drainLifecycleTasks(this.producerInFlight)
+      await schedulerStop
+    })()
+    return this.producerStopPromise
+  }
+
+  async drainTransitiveCompletionProducers(): Promise<void> {
+    await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
+  }
+
+  detachCompletionConsumers(): void {
+    for (const id of this.completionSubscriptionIds.splice(0)) this.eventBus.unsubscribe(id)
+  }
+
+  async drainCompletionConsumers(): Promise<void> {
+    await this.drainLifecycleTasks(this.transitiveCompletionInFlight)
+    await this.drainLifecycleTasks(this.completionConsumerInFlight)
+  }
+
+  async shutdown(): Promise<void> {
+    await this.stopProducerAdmissions()
+    await this.drainTransitiveCompletionProducers()
+    this.detachCompletionConsumers()
+    await this.drainCompletionConsumers()
     logger.info('AutomationService shut down')
   }
 
@@ -2777,10 +3200,27 @@ export class AutomationService {
   /**
    * T1-2 inbound webhook dispatch.
    *
-   * The caller is anonymous; only possession of the per-rule secret authorizes delivery. The request body is
-   * exposed as `recordData`, but record context is intentionally synthetic (`recordId=''`, `actorId=null`):
+   * The caller is NOT anonymous as mounted: `POST /api/multitable/automation/webhooks/:ruleId` is neither a
+   * declared exception to the global session gate (auth/api-path-policy.ts `GLOBAL_GATE_EXCEPTIONS`; the
+   * gate is in index.ts) nor matched by its two request-shaped exceptions (public-form token, OAPI `mst_`
+   * allowlist), so the request must carry a valid session JWT before it reaches this method. That
+   * session is then IGNORED: there is no table-permission check here, and possession of the per-rule secret
+   * (a verified signature) is the only thing that authorizes delivery. The request body is exposed as
+   * `recordData`, but record context is intentionally synthetic (`recordId=''`, `actorId=null`):
    * caller-supplied `recordId` / `sheetId` / actor-shaped fields are data only and cannot retarget actions
    * or impersonate a user. Side effects run under the stored rule author, matching scheduled triggers.
+   *
+   * Every refusal is the same uniform `401 { ok:false }` at the route (design-lock decision 3: no
+   * existence/state oracle); only the metric label and the log line carry the reason.
+   *
+   * SHEET LIVENESS (soft delete, #5803). This lane hands the rule straight to `executeRule`, so neither
+   * `loadEnabledRules` nor the rule loaders ever see it — and the executor's same-sheet fast path does not
+   * look at `meta_sheets`, so a `create_record` on the rule's own sheet INSERTed into a soft-deleted sheet
+   * and `send_webhook` kept pushing data out. The check runs AFTER the signature verified, never before:
+   * ahead of it, a caller without the secret would drive a `meta_sheets` read per request and take a
+   * different code path depending on the sheet's state (a deleted sheet's rule would skip the HMAC check
+   * altogether), leaving only timing noise between that state and the caller. After it, the only caller who
+   * can reach the lookup already holds the rule's secret, and still gets the same uniform 401.
    */
   async handleInboundWebhook(
     ruleId: string,
@@ -2809,6 +3249,11 @@ export class AutomationService {
       nowMs,
     })
     if (verified.ok === false) return this.rejectInboundWebhook(ruleId, verified.reason)
+
+    // #5803: AFTER the signature check (see the doc above). Fail-OPEN on a failed lookup, like the siblings.
+    if (!(await this.ruleSheetLive(rule, WEBHOOK_RECEIVED_TRIGGER))) {
+      return this.rejectInboundWebhook(ruleId, 'sheet_deleted')
+    }
 
     const triggerEvent: AutomationEventPayload & Record<string, unknown> = {
       sheetId: rule.sheet_id,
@@ -3030,6 +3475,17 @@ export class AutomationService {
       // Fail closed (A4-D7): null/undefined, array, or empty `{}` cannot rebuild context.
       return { status: 409, code: 'MISSING_TRIGGER_EVENT', message: 'Original execution has no usable stored trigger event to retry' }
     }
+    // 客户反馈 2026-09-24 #3 final review F2: every step skipped because the trigger record is gone — a retry
+    // replays the same trigger against the same record id and can only skip again. Decided from the stored row
+    // alone, like the three refusals above: before the sweep kick, the rule read and the one-shot first-retry
+    // marker, and nothing is recorded.
+    if (isTargetRecordMissingSkippedExecution(original)) {
+      return {
+        status: 409,
+        code: 'TARGET_RECORD_MISSING_NOT_RETRYABLE',
+        message: 'Every step of this execution was skipped because its trigger record no longer exists; a retry cannot change that',
+      }
+    }
     this.kickAutomationRetryLedgerSweepIfDue(Date.now())
     const lineage = await this.collectExecutionLineage(original)
     const lineageIds = lineage.map((execution) => execution.id)
@@ -3069,6 +3525,21 @@ export class AutomationService {
         code: 'RULE_CHANGED',
         message: 'Rule actions changed since the original execution; cannot retry safely',
       }
+    }
+    // SHEET LIVENESS (soft delete, #5803). A retry hands the CURRENT rule straight to `executeRule`, so no
+    // rule loader ever filtered it, and the executor's same-sheet fast path never reads `meta_sheets`.
+    // Checked after the rule/fingerprint gates (they write nothing) and BEFORE the first-retry marker below:
+    // that claim is a one-shot CAS on the lineage root, and spending it on a refused attempt would make the
+    // post-restore retry a "not the first retry" — which, with the Class-A/B ledger families on, must show
+    // ledger evidence the original may never have written.
+    // Answered like every other refusal on this lane — a coded 409, nothing persisted. It is NOT recorded as
+    // a new execution row (the #5800 bridge refusal is recorded because no caller is there to answer; here
+    // the admin is): the original run is immutable (A5), and a refusal row would join the lineage — a later
+    // retry of THAT row is never "first", so with the ledger families on and no evidence it would be refused
+    // AND spend the marker — and it would count as a failed run in the rule's stats. The WARN carries the
+    // execution id. Fail-OPEN on a failed lookup, like every other lane in this file.
+    if (!(await this.ruleSheetLive(rule, 'automation.retry', { executionId: original.id }))) {
+      return { status: 409, code: SHEET_DELETED_CODE, message: RETRY_SHEET_DELETED_MESSAGE }
     }
     const firstRetryAttempt = await claimFirstAutomationRetryAttempt(this.queryFn, rootExecutionId)
     const isGenuinelyFirstRetry = firstRetryAttempt && original.rerunOfExecutionId == null
@@ -3197,6 +3668,23 @@ export class AutomationService {
         return { status: 409, code: 'SUSPENSION_CURSOR_INVALID', message: 'Resume cursor ids are inconsistent with the branch position; cannot resume safely' }
       }
     }
+    // SHEET LIVENESS (soft delete, #5803). Resume continues the tail through the executor directly, past every
+    // rule loader. Checked after the rule/cursor/fingerprint gates (they write nothing) and BEFORE the record
+    // re-fetch below: that read keys `meta_records` on `sheet_id` without joining `meta_sheets`, and a soft
+    // delete leaves the records in place, so it would find the row and go on. The sheet checked is the
+    // rule's, which is the one the tail's context addresses; `suspension.sheetId` is written from the same
+    // rule at suspend time and a rule never changes sheet (`updateRule` is sheet-scoped and never sets it).
+    // Like every other validation failure here it precedes the single-use claim, so the refusal writes
+    // nothing and the token stays `pending`: after a restore the same resume works. It is NOT recorded on the
+    // execution the way the #5800 bridge refusal is: that lane has no caller to answer and nothing re-drives
+    // it, so it goes terminal; here the admin gets the reason synchronously and IS the re-driver. Recording
+    // would need the claim first (an unclaimed write can clobber a concurrent resume's steps), and the claim
+    // is terminal — it would mark the suspension `resumed` although nothing resumed, and forfeit the
+    // post-restore resume. The WARN carries the execution id (never the token). Fail-OPEN on a failed
+    // lookup, like every other lane in this file.
+    if (!(await this.ruleSheetLive(rule, 'automation.resume', { executionId: suspension.executionId }))) {
+      return { status: 409, code: SHEET_DELETED_CODE, message: RESUME_SHEET_DELETED_MESSAGE }
+    }
     // Re-fetch the live record (D4); fail closed if it was deleted during the wait (T9).
     let recordData: Record<string, unknown> = {}
     if (suspension.recordId) {
@@ -3308,9 +3796,36 @@ export class AutomationService {
   /**
    * The bridge resume continuation — extracted VERBATIM so the legacy (terminal-early) path and the P1#1 lease
    * path share ONE body. Its early `return`s are the DETERMINISTIC failures (missing execution, missing/disabled
-   * rule, changed fingerprint, non-approved outcome, record gone); each settles the execution and returns
-   * normally (no throw), so the caller then writes the terminal bridge state (legacy: already done by
-   * claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the caller's reclaim path.
+   * rule, changed fingerprint, soft-deleted sheet, non-approved outcome, record gone); each settles the
+   * execution and returns normally (no throw), so the caller then writes the terminal bridge state (legacy:
+   * already done by claimCompletion; lease: markBridgeResumed). Only an UNEXPECTED throw escapes to the
+   * caller's reclaim path.
+   *
+   * SHEET LIVENESS (soft delete, #5800). This lane is reached from `multitable_automation_approval_bridges`,
+   * not from the template-keyed rule loaders, so `dropRulesOnDeletedSheets` never saw it — and its record
+   * read keys `meta_records` on `sheet_id` without joining `meta_sheets`, which a soft delete does not
+   * cascade into. Unchecked, an approval completing after its sheet was soft-deleted wrote the result back
+   * onto that sheet and ran the rest of the rule. The check (`approvalBridgeSheetLive`) sits after the
+   * rule/fingerprint gates (they write nothing to the sheet, and the rule supplies the sheet-id fallback)
+   * and BEFORE the outcome branch, because the non-approved branch can write too. A deleted sheet is one
+   * more deterministic failure: execution `failed` with a coded reason, tail steps `skipped`, bridge
+   * terminal `resumed` ("completion consumed") through the caller's normal path. Terminal rather than
+   * parked: nothing re-drives a parked bridge (the completion event is one-shot, no sweeper reads this
+   * table, and on the legacy path the row is already `resumed` before this body runs), so "leave it for a
+   * restore" would in practice be "neither run nor recorded". A later restore therefore does NOT replay it.
+   *
+   * RESTORE GAP (known, disclosed — #5800 accepts "terminal in place"; a replay is an owner decision).
+   * Delete → approval completes → restore: before #5800 the writeback landed on the hidden records and
+   * reappeared with the restore; now the result and the tail are withheld for good. Nothing re-drives it:
+   * a redelivery reads the terminal bridge as consumed ('none'), a whole-execution retry is refused
+   * (START_APPROVAL_ALREADY_CREATED), and the restore route only clears `deleted_at`. What survives, so it
+   * can be found and applied by hand: the execution is `failed` with a reason starting `SHEET_DELETED:`
+   * that names the approval outcome and what was withheld (`bridgeSheetDeletedMessage`); the
+   * start_approval step output keeps the approval ids and outcome; the bridge row keeps `outcome`; the
+   * WARN (`reason: 'sheet_deleted'`) carries the outcome. To list them for a sheet: the admin runs API
+   * `GET /api/multitable/automation-executions?sheetId=<id>&status=failed`, keeping entries whose
+   * `error` starts with `SHEET_DELETED:`. A restore-time re-drive would key on bridges with `outcome` set,
+   * status `resumed`, and such an execution.
    */
   private async resumeApprovalBridgeContinuation(bridge: AutomationApprovalBridgeRow, event: ApprovalCompletionEventV1): Promise<void> {
     const execution = await this.logService.getById(bridge.executionId)
@@ -3332,8 +3847,26 @@ export class AutomationService {
     }
 
     const result = this.approvalCompletionStepResult(event)
+    // The ONE sheet this continuation addresses: the record read below keys on it, the same-base
+    // writeback targets it, and the tail's ExecutionContext.sheetId is set to it. Checked BEFORE the
+    // outcome branch because the non-approved branch writes too (`resultWriteback.onNonApproved`).
+    const bridgeSheetId = bridge.sheetId ?? execRule.sheetId
+    const startApprovalConfig = execRule.actions[bridge.stepIndex]?.config ?? {}
+    if (!(await this.approvalBridgeSheetLive(bridge, bridgeSheetId, event.transition.toStatus))) {
+      // The reason keeps the outcome and names exactly what was withheld (see bridgeSheetDeletedMessage).
+      const reason = bridgeSheetDeletedMessage(event.transition.toStatus, {
+        writeback: declaredApprovalResultWriteback(bridge, startApprovalConfig, event.transition.toStatus) !== null,
+        tail: event.transition.toStatus === 'approved' && execRule.actions.length > bridge.stepIndex + 1,
+      })
+      await this.failApprovalBridgeExecution(execution, bridge, reason, {
+        ...result,
+        status: 'failed',
+        error: reason,
+      })
+      return
+    }
     if (event.transition.toStatus !== 'approved') {
-      await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
+      await this.tryWriteApprovalResultBack(bridge, startApprovalConfig, event, result)
       await this.failApprovalBridgeExecution(execution, bridge, result.error ?? `Approval completed with ${event.transition.toStatus}`, result)
       return
     }
@@ -3342,7 +3875,7 @@ export class AutomationService {
     if (bridge.recordId) {
       const rec = await this.queryFn(
         `SELECT data FROM meta_records WHERE id = $1 AND sheet_id = $2`,
-        [bridge.recordId, bridge.sheetId ?? execRule.sheetId],
+        [bridge.recordId, bridgeSheetId],
       )
       const row = (rec.rows[0] ?? null) as { data?: Record<string, unknown> } | null
       if (!row) {
@@ -3355,7 +3888,7 @@ export class AutomationService {
     // W7-1: declared approval-result backwrite to the SOURCE record (fixed mapping, values from the
     // event, through the lock guard). Best-effort — a locked/missing record logs + skips rather than
     // crashing the resume, so the automation's remaining actions still run.
-    const backwritten = await this.tryWriteApprovalResultBack(bridge, execRule.actions[bridge.stepIndex]?.config ?? {}, event, result)
+    const backwritten = await this.tryWriteApprovalResultBack(bridge, startApprovalConfig, event, result)
     // W7-1a: merge the backwrite into the resume snapshot so the TAIL actions (send_webhook /
     // update_record / ...) see the just-written result, not the pre-approval record.
     if (backwritten) recordData = { ...recordData, ...backwritten }
@@ -3364,7 +3897,7 @@ export class AutomationService {
     const context: ExecutionContext = {
       executionId: execution.id,
       ruleId: execRule.id,
-      sheetId: execRule.sheetId,
+      sheetId: bridgeSheetId,
       recordId: bridge.recordId ?? '',
       recordData,
       ruleCreatedBy: execRule.createdBy,
@@ -3420,6 +3953,18 @@ export class AutomationService {
     try {
       const outcome = await this.writeApprovalResultBack(bridge, startApprovalConfig, event)
       if (!outcome) return null
+      if (outcome.kind === 'same-base-missing') {
+        // 客户反馈 2026-09-24 #3 final review F3: the same-base twin of the cross-base `backwriteSkipped` below.
+        // A configured writeback whose record vanished used to return null with NO trace on the step, so the run
+        // history could not tell "not configured" from "configured, record gone, nothing written". VALUES-FREE:
+        // the marker is the fixed reason code (never an id, a field value or an error string). The step status is
+        // unchanged (same-base leniency) and nothing is merged into the tail's recordData.
+        result.output = {
+          ...(isRecord(result.output) ? result.output : {}),
+          backwriteSkipped: TARGET_RECORD_MISSING_SKIP_REASON,
+        }
+        return null
+      }
       if (outcome.kind === 'cross-base') {
         // Q3 audit: extend the start_approval step output with the target triple. §3.3: the cross-base
         // patch is NOT merged into the resume `recordData` the tail actions see (unlike the same-base
@@ -3460,6 +4005,11 @@ export class AutomationService {
       return
     }
     const rules = await this.loadEnabledApprovalCompletedRules(templateId)
+    // Housekeeping BEFORE the empty-list return: the dedup-ledger retention sweep is due-throttled and
+    // fire-and-forget, and it must not become conditional on this channel happening to contribute rules
+    // — the sheet-liveness filter inside the loader can now empty the list, which would otherwise have
+    // silently stopped the sweep on a deployment whose approval rules all sit on soft-deleted sheets.
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
     if (rules.length === 0) return
 
     // Q4(b): thread the automation chain depth — a bridge-originated approval (started by start_approval)
@@ -3473,7 +4023,6 @@ export class AutomationService {
       return
     }
 
-    this.kickEventDedupLedgerSweepIfDue(Date.now())
     const outcome = event.transition.toStatus
     let retryableFailure = false
     for (const rule of rules) {
@@ -3539,6 +4088,8 @@ export class AutomationService {
       return
     }
     const rules = await this.loadEnabledApprovalTaskCreatedRules(templateId)
+    // Housekeeping before the empty-list return, for the same reason as the completion twin.
+    this.kickEventDedupLedgerSweepIfDue(Date.now())
     if (rules.length === 0) return
 
     const parentDepth = await this.approvalBridgeAutomationDepth(event.approval.instanceId)
@@ -3548,7 +4099,6 @@ export class AutomationService {
       return
     }
 
-    this.kickEventDedupLedgerSweepIfDue(Date.now())
     for (const rule of rules) {
       if (!(await this.approvalCompletedCreatorAuthorized(rule.created_by))) {
         logger.warn(`approval.task_created rule ${rule.id} skipped: creator lacks approvals:read at fire time`)
@@ -3607,8 +4157,10 @@ export class AutomationService {
   /**
    * W7-1 approval-result backwrite: write the DECLARED fixed outcome→field mapping (from the
    * start_approval action's `resultWriteback`) onto the SOURCE record, using values from the completion
-   * event ONLY (never user-templated strings — that keeps the write path values-constrained, the whole
-   * reason this was gated). Goes through the record lock guard (B1: an automation does not implicitly own
+   * event — plus, since #5742, the DECLARED `outcomeValues` literal for the status field (a select literal
+   * is constrained to that field's own options by the save/fire-time check; a string/longText one is any
+   * declared literal). Never a user-templated string evaluated against record data — that is what keeps the
+   * write path values-constrained, the whole reason this was gated. Goes through the record lock guard (B1: an automation does not implicitly own
    * a lock). Null-safe: `approver` is null on auto/system approval (the field is written null, not
    * crashed). Same-base only (the source record that started the approval). The approved branch always
    * writes when configured; non-approved terminal outcomes require the explicit `onNonApproved` opt-in so
@@ -3619,9 +4171,8 @@ export class AutomationService {
     startApprovalConfig: Record<string, unknown>,
     event: ApprovalCompletionEventV1,
   ): Promise<ApprovalBackwriteOutcome | null> {
-    const writeback = isRecord(startApprovalConfig.resultWriteback) ? startApprovalConfig.resultWriteback : null
+    const writeback = declaredApprovalResultWriteback(bridge, startApprovalConfig, event.transition.toStatus)
     if (!writeback || !bridge.recordId || !bridge.sheetId) return null
-    if (event.transition.toStatus !== 'approved' && writeback.onNonApproved !== true) return null
 
     // T3-5: a configured cross-base target routes the backwrite to the TARGET record in another base
     // (gated by the shared executor cross-base write gate). The SOURCE record is NOT mutated.
@@ -3630,14 +4181,16 @@ export class AutomationService {
     }
 
     // ── same-base (W7-1): write onto the SOURCE record that started the approval ──
-    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(bridge.sheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
     // W7-1a parity: the shared tail lock-checks the SOURCE record (actor = the approval actor), writes the
     // patch, and emits the chaining event + realtime fan-out (actor passed through) so UI / subscribers /
     // downstream record.updated automations see the backwrite live. onMissing: 'skip' — a gone record
-    // returns null (the resume's own missing-record path already handled it), NOT an error.
+    // is NOT an error (the resume's own missing-record path already handled it); it comes back as
+    // `same-base-missing` so the step output carries a values-free marker (final review F3).
     const actorId = event.actor?.id ?? null
     const wrote = await this.applyResultWritebackPatch(bridge.sheetId, bridge.recordId, patch, {
       lockActorId: actorId,
@@ -3646,8 +4199,11 @@ export class AutomationService {
       automationDepth: this.backwriteAutomationDepth(bridge),
       lockedMessage: 'source record is locked',
       onMissing: 'skip',
+      schemaSnapshot,
     })
-    if (!wrote) return null
+    // Final review F3: `false` here only ever means "the record is gone" (SELECT saw no row, or the UPDATE
+    // affected 0 rows) — say so instead of the silent null that "no writeback configured" also returns.
+    if (!wrote) return { kind: 'same-base-missing' }
     return { kind: 'same-base', patch }
   }
 
@@ -3697,7 +4253,8 @@ export class AutomationService {
     if (gate.ok === false) throw new Error(gate.error)
 
     // Target field-type/read validation runs against the TARGET sheet (deferred from save per Q4).
-    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus)
+    const schemaSnapshot = new Map<string, FieldSchemaSnapshotEntry>()
+    await this.assertResultWritebackFields(targetSheetId, writeback, event.transition.toStatus, schemaSnapshot)
     const patch = buildResultWritebackPatch(writeback, event)
     if (Object.keys(patch).length === 0) return null
 
@@ -3713,6 +4270,7 @@ export class AutomationService {
       lockedMessage: 'target record is locked',
       onMissing: 'throw',
       missingMessage: `cross-base resultWriteback target record not found: ${targetRecordId} ∉ ${targetSheetId}`,
+      schemaSnapshot,
     })
     if (!wrote) return null // unreachable with onMissing:'throw'; keeps the boolean contract total
     return { kind: 'cross-base', target: { targetBaseId, targetSheetId, targetRecordId } }
@@ -3722,6 +4280,13 @@ export class AutomationService {
   // backwrite-driven cascade can't run away.
   private backwriteAutomationDepth(bridge: AutomationApprovalBridgeRow): number {
     return (((bridge.triggerEvent as Record<string, unknown> | null)?._automationDepth as number) ?? 0) + 1
+  }
+
+  // Rule-save F4: the executor's OWN cross-base addressing verdict, on the same `queryFn` the executor's gate
+  // uses at run time (the constructor wires `deps.queryFn = queryFn`). Read-only; takes no quota slot.
+  private crossBaseWriteTargetResolver(): CrossBaseWriteTargetResolver {
+    return (triggerSheetId, targetSheetId, declaredTargetBaseId) =>
+      this.executor.resolveCrossBaseWriteTarget(this.queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
   }
 
   /**
@@ -3779,13 +4344,22 @@ export class AutomationService {
    * longer exists" guard on the SOURCE record proves the authors already expect mid-flight deletes here).
    * The PRE-EXISTING contract for a 0-row UPDATE (proven by the fact that no RETURNING/rowCount check
    * existed at all before this slice) was SILENT SUCCESS for both same-base and cross-base callers — the
-   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Regressing that
-   * into a thrown error would be an unrelated behavior change outside this slice's mandate. So the guard
-   * fails closed on the REVISION ONLY (`if (updatedRow) { ...write revision... }`): a 0-row UPDATE still
-   * reports success and still emits the chaining/realtime events (unchanged), but writes NO spurious
-   * revision for a record this UPDATE never touched — a fabricated one would persist forever
-   * (`meta_record_revisions.record_id` carries no FK) and could resurrect the deleted record via
-   * `reconstructRecordsAtT`.
+   * automation-lane contract (slice ③), not the plugin-lane throw contract (slice ②). Slice ④ therefore
+   * failed closed on the REVISION ONLY: a 0-row UPDATE writes NO spurious revision for a record this
+   * UPDATE never touched — a fabricated one would persist forever (`meta_record_revisions.record_id`
+   * carries no FK) and could resurrect the deleted record via `reconstructRecordsAtT`.
+   *
+   * 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3, 裁定 PR #6074 A1): a 0-row UPDATE now ALSO publishes nothing —
+   * no same-txn outbox enqueue, no legacy `multitable.record.updated` emit, no realtime invalidation. The
+   * old "still emits" leg was the same shape as the executor's ghost `record.deleted` self-chain: a fresh
+   * event (new `_eventId`, depth+1) for a record nobody wrote, re-firing downstream rules on a row that
+   * no longer exists. The gone-record POLICY is unchanged and stays the caller's `opts.onMissing` — the
+   * UPDATE seeing 0 rows is the identical fact the lock-check SELECT decides on, observed one statement
+   * later: same-base 'skip' returns false (the resume's own missing-record path already handled it, the
+   * step stays success — leniency preserved — and, since final review F3, `writeApprovalResultBack` turns
+   * that `false` into `same-base-missing` so the step output carries the values-free
+   * `backwriteSkipped: 'target_record_missing'`), cross-base 'throw' fails closed exactly as a not-found
+   * target does (`tryWriteApprovalResultBack` surfaces it as `backwriteSkipped`; never a crash).
    */
   private async applyResultWritebackPatch(
     sheetId: string,
@@ -3799,6 +4373,11 @@ export class AutomationService {
       lockedMessage: string
       onMissing: 'skip' | 'throw'
       missingMessage?: string
+      /**
+       * Field retype slice 3a (ADR §3.11 row 7): the field rows `assertResultWritebackFields` validated the
+       * patch against — read through `this.queryFn` OUTSIDE the transaction below, i.e. before the fence.
+       */
+      schemaSnapshot?: FieldSchemaSnapshot | null
     },
   ): Promise<boolean> {
     // P1#2 REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable enqueue
@@ -3811,6 +4390,10 @@ export class AutomationService {
       _automationDepth: opts.automationDepth,
     })
     const wrote = await this.withTransaction(sheetId, async (query) => {
+      // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
+      // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
+      // unless the conversion flag AND the writer fence are both on.
+      await assertFieldSchemaUnchangedAfterFence(query, sheetId, opts.schemaSnapshot ?? null, Object.keys(patch))
       const lockRes = await query(
         'SELECT locked, locked_by, created_by FROM meta_records WHERE id = $1 AND sheet_id = $2',
         [recordId, sheetId],
@@ -3831,23 +4414,30 @@ export class AutomationService {
         [JSON.stringify(patch), recordId, sheetId],
       )
       const updatedRow = updateRes.rows[0] as { version?: unknown; data?: unknown } | undefined
-      if (updatedRow) {
-        const nextVersion = Number(updatedRow.version)
-        await recordRecordRevision(query, {
-          sheetId,
-          recordId,
-          version: Number.isFinite(nextVersion) ? nextVersion : 0,
-          action: 'update',
-          source: 'approval',
-          actorId: opts.chainActorId ?? null,
-          changedFieldIds: Object.keys(patch),
-          patch,
-          snapshot: normalizeJson(updatedRow.data),
-        })
+      if (!updatedRow) {
+        // 0-ROW EMIT GUARD (客户反馈 2026-09-24 #3): the record vanished between the non-locking SELECT above
+        // and this UPDATE. Nothing was written ⇒ nothing is announced: no revision, no enqueue (below is
+        // skipped), no legacy emit / realtime publish (the caller skips both on `false`). Same gone-record
+        // policy as the SELECT branch — the caller's `onMissing`.
+        if (opts.onMissing === 'throw') throw new Error(opts.missingMessage ?? `resultWriteback target record not found: ${recordId} ∉ ${sheetId}`)
+        return false
       }
+      const nextVersion = Number(updatedRow.version)
+      await recordRecordRevision(query, {
+        sheetId,
+        recordId,
+        version: Number.isFinite(nextVersion) ? nextVersion : 0,
+        action: 'update',
+        source: 'approval',
+        actorId: opts.chainActorId ?? null,
+        changedFieldIds: Object.keys(patch),
+        patch,
+        snapshot: normalizeJson(updatedRow.data),
+      })
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
       // writeback UPDATE + revision. A rollback (locked / gone target throws or returns false above) enqueues
-      // nothing by construction. Flag OFF ⇒ no-op (the legacy emit below fires instead).
+      // nothing by construction — and so does the 0-row guard above. Flag OFF ⇒ no-op (the legacy emit
+      // below fires instead).
       await enqueueRecordEventIfDurable(
         {
           isTransaction: true,
@@ -3884,6 +4474,8 @@ export class AutomationService {
     sheetId: string,
     writeback: Record<string, unknown>,
     outcome: string,
+    /** Field retype slice 3a: filled with what this check validated against, for the post-fence re-check. */
+    schemaSnapshotOut?: Map<string, FieldSchemaSnapshotEntry>,
   ): Promise<void> {
     const mapped = RESULT_WRITEBACK_FIELDS
       .map((field) => ({ field, id: resultWritebackFieldId(writeback, field) }))
@@ -3908,14 +4500,28 @@ export class AutomationService {
       if (!target) {
         throw new Error(`resultWriteback.${entry.field} target field not found: ${entry.id}`)
       }
-      const typeError = resultWritebackFieldTypeError(entry.field, target, outcome)
+      const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
       if (typeError) throw new Error(typeError)
     }
+    // Field retype slice 3a: what the check above validated against — re-compared after the fence.
+    if (schemaSnapshotOut) for (const [id, entry] of fieldSchemaSnapshotFromRows(res.rows)) schemaSnapshotOut.set(id, entry)
   }
 
   // W7-obs rule-save fail-fast: reuse the runtime resultWriteback field check at SAVE-time, against the
-  // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null. 'approved'
-  // is the only outcome the backwrite writes (approval-only path), so it matches the runtime check.
+  // rule's source sheet. Returns an error message (→ AutomationRuleValidationError) or null.
+  //
+  // WIRING, stated exactly (it is narrower than "save"): the ONLY caller is createRule (:1397). updateRule
+  // does NOT run this gate — it never has — so editing an existing rule is NOT hard-failed here; the editor's
+  // client blocker is the hint on that path and the FIRE-TIME check (assertResultWritebackFields) is the
+  // fail-closed authority for every path. Widening it to updateRule is an owner call (it would make an
+  // already-saved rule whose select lost an option unsaveable until the mapping is fixed), not this issue's.
+  //
+  // #5742 outcome coverage: 'approved' is always checked (the path every backwrite rule has). When the rule
+  // opts into `onNonApproved`, 'rejected' is checked TOO, so a mapped-but-missing option fails where the
+  // author can still fix it. 'revoked' / 'cancelled' stay on the FIRE-TIME check only: save-time strictness
+  // is deliberately scoped to the outcomes the editor gates, so an existing rule whose select lacks a
+  // 撤销/取消 option is not retroactively unsaveable (it still fails closed at fire time, which is where
+  // those rare terminal states actually occur).
   private async assertResultWritebackFieldsAtSave(
     sheetId: string,
     actions: AutomationAction[] | null,
@@ -3949,8 +4555,13 @@ export class AutomationService {
         // skip-missing posture). We only fail-fast on a TYPE mismatch for a field that ALREADY exists,
         // which is an unambiguous misconfiguration the admin should fix now.
         if (!target) continue
-        const typeError = resultWritebackFieldTypeError(entry.field, target, 'approved')
-        if (typeError) return typeError
+        const outcomes: ResultWritebackOutcome[] = writeback.onNonApproved === true
+          ? ['approved', 'rejected']
+          : ['approved']
+        for (const outcome of outcomes) {
+          const typeError = resultWritebackFieldTypeError(entry.field, target, outcome, writeback)
+          if (typeError) return typeError
+        }
       }
     }
     return null
@@ -4010,7 +4621,20 @@ export class AutomationService {
     // rule owned by sheet B. Bind the rule to the gated sheet, mirroring updateRule/deleteRule
     // (`existing.sheet_id !== sheetId → not found`).
     if (!rule || rule.sheet_id !== sheetId || !rule.enabled) {
-      throw new Error(`Rule ${ruleId} not found or not enabled`)
+      throw new AutomationTestRunRejectedError(404, TEST_RUN_RULE_NOT_FOUND_CODE, TEST_RUN_RULE_NOT_FOUND_MESSAGE)
+    }
+    // SHEET LIVENESS (#5812 follow-up), defence in depth: the route refuses a non-live sheet first (after its
+    // capability 403, so an unauthorized caller learns nothing) and stays authoritative; this NARROWS (does not
+    // close) the check-then-run window and covers any direct caller. A soft-delete landing after this check but
+    // before/while executeRule runs still proceeds (real_fire included — the executor's same-sheet fast path never
+    // reads meta_sheets). Accepted residual, no lock: identical check-then-run shape to the webhook/retry/resume
+    // lanes, and a soft-deleted sheet is restorable. Both modes, before input validation, any
+    // execution and any persistence — nothing is run or recorded. Same helper and semantics as the other
+    // direct-execute lanes (#5803/#5810): refuse on EXACTLY 'deleted'; 'absent' passes; a THROWN lookup fails
+    // OPEN with the values-free WARN. `rule.sheet_id === sheetId` here, so this is the gated sheet. The body is
+    // the route's own SHEET_DELETED refusal, so the client cannot tell which layer answered.
+    if (!(await this.ruleSheetLive(rule, 'automation.test_run'))) {
+      throw new AutomationTestRunRejectedError(404, SHEET_DELETED_CODE, SHEET_DELETED_MESSAGE)
     }
     const execRule = toExecutorRule(rule)
     let testRunRoot: string | undefined
@@ -4115,6 +4739,32 @@ export class AutomationService {
   /**
    * T1-3 Q1: cross-sheet routing for approval.completed rules by REQUIRED trigger_config.templateId.
    * JSONB expression filter with no index in v1 by design (small table); revisit only on a perf signal.
+   *
+   * SHEET LIVENESS (soft delete). This SELECT keys on trigger_type + enabled + templateId ONLY, so the
+   * rows it returns can name sheets that are no longer live — the gap `loadEnabledRules` closes on the
+   * record lane and the scheduler dispatch closes on the scheduled lane was simply absent here, leaving
+   * a soft-deleted sheet's rules armed on the approval channels. `dropRulesOnDeletedSheets` applies the
+   * SAME comparison from the same module (batched, since one call spans many sheets) — and deliberately
+   * differs from the siblings on ONE axis, error behaviour: see its own doc for why it catches where
+   * they propagate. It sits in the LOADER rather than in the dispatch loops so that both channels and
+   * every future caller of these loaders inherit it (the task_created lane has no outcome filter to
+   * hide behind, and a caller that forgets is how this gap opened in the first place). The price, named:
+   * a completion whose outcome the caller would have discarded for free at
+   * `approvalCompletedConfiguredOutcomes` now costs ONE extra query — one, not one per sheet, which is
+   * why the lookup is batched.
+   *
+   * NOT scoped by base / workspace / tenant — that is #5780, and it is deliberately NOT fixed here: an
+   * enabled rule bound to this template fires wherever in the deployment it lives. What is missing is a
+   * RULING, not a column: ownership is already reachable on both sides in one join —
+   * `approval_instances.org_id` (written on every instance, and its resolution fail-closes with
+   * APPROVAL_ORG_UNRESOLVED) on the completion side, and `automation_rules.sheet_id` → `meta_sheets.
+   * base_id` → `meta_bases.workspace_id` / `owner_id` on the rule side. What nobody has decided is
+   * whether the org axis and the workspace/base axis are the SAME ownership, which pair is
+   * authoritative, and what a rule whose base has no workspace should do. That decision is the owner's
+   * (#5780); picking one inside a liveness fix would be inventing a tenancy model. The current
+   * (wrong-looking, deliberately unchanged) behaviour is pinned by the cross-base characterization case
+   * in tests/integration/automation-approval-completed-trigger.test.ts; when #5780 lands that assertion
+   * is expected to INVERT, and the inversion is the signal, not a regression.
    */
   async loadEnabledApprovalCompletedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
@@ -4125,10 +4775,14 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_COMPLETED_TRIGGER)
   }
 
-  /** A-2a: same template-keyed routing for approval.task_created rules (see loadEnabledApprovalCompletedRules). */
+  /**
+   * A-2a: same template-keyed routing for approval.task_created rules (see
+   * loadEnabledApprovalCompletedRules) — including the same sheet-liveness filter, and the same
+   * deliberate absence of a base/tenant predicate (#5780).
+   */
   async loadEnabledApprovalTaskCreatedRules(templateId: string): Promise<AutomationRule[]> {
     const rows = await this.db
       .selectFrom('automation_rules')
@@ -4138,10 +4792,252 @@ export class AutomationService {
       .where(sql<string>`trigger_config->>'templateId'`, '=', templateId)
       .orderBy('created_at', 'asc')
       .execute()
-    return rows.map((r) => this.mapRow(r))
+    return this.dropRulesOnDeletedSheets(rows.map((r) => this.mapRow(r)), APPROVAL_TASK_CREATED_TRIGGER)
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * SHEET LIVENESS (soft delete) for the TEMPLATE-keyed approval channels — and, one rule at a time through
+   * `ruleSheetLive`, for the direct-execute lanes (inbound webhook, admin retry, admin resume; #5803).
+   *
+   * ── Same definition of "live" — and TWO deliberate divergences, named ─────────────────────────
+   * The record lane refuses inside `loadEnabledRules` and the scheduled lane refuses in the scheduler
+   * dispatch callback. All three read the same column through the same module
+   * (src/multitable/sheet-liveness.ts) and suppress on EXACTLY `'deleted'`, so the VERDICT is one
+   * definition. Two things here are NOT the same as the siblings, and both are choices, not spellings:
+   *
+   *   (a) ARITY. These loaders select by trigger_type + templateId, so ONE call spans MANY sheets. The
+   *       DECISION is therefore per rule, while the LOOKUP is one batched round trip for the whole call
+   *       (`loadSheetLivenessBatch`, same module, same comparison). The siblings ask about one sheet.
+   *   (b) ERROR BEHAVIOUR. The siblings do NOT catch: a throw out of `loadSheetLiveness` propagates —
+   *       on the record lane it leaves `loadEnabledRules` and `handleEvent` rejects, so NO rule of that
+   *       sheet runs and (under durable delivery) the consumer adapter maps the handler throw to a
+   *       retryable `adapter_error` and the dispatch loop redelivers. THIS lane catches instead and
+   *       keeps the rule armed. That is a behavioural divergence from the siblings, with reasons below.
+   *
+   * `=== 'deleted'` and not `!== 'live'`: that closes the soft-delete gap exactly and leaves `absent`
+   * (no `meta_sheets` row at all) behaving as it does on the sibling lane, rather than quietly widening
+   * this into a stricter rule than the one the record lane chose. Note `absent` is a SUCCESSFUL lookup
+   * that found no row — not the same thing as the failed lookup below.
+   *
+   * ── FAIL-OPEN when the lookup THROWS: the rule stays armed, and the keep is LOGGED ────────────
+   *   1. Only POSITIVE proof of a soft delete suppresses a rule anywhere in this file. A failed lookup
+   *      is not proof; it is the absence of an answer.
+   *   2. This guard is hygiene, not authorization. The authorization gates on these channels — the
+   *      creator `approvals:read` re-check, the template-visibility re-check, the record-less action
+   *      allowlist and the cross-base write gate in the executor — sit DOWNSTREAM of this filter, are
+   *      unchanged, and fail CLOSED. Nothing here is a last line of defence, so nothing here should buy
+   *      safety with availability.
+   *   3. The two alternatives were both considered and rejected:
+   *      · SWALLOW AND DROP (catch, return fewer rules) turns a transient DB error into a
+   *        deployment-wide SILENT outage: no error reaches any caller, no execution row is written, and
+   *        because a dropped rule never reaches its per-rule `runWithEventDedup` claim, nothing marks
+   *        the work as owed — the runs simply never happened, with nothing anywhere saying so.
+   *      · PROPAGATE (the siblings' behaviour: no catch, let `handleApprovalCompletionTrigger` reject)
+   *        IS repairable under durable delivery — the adapter's retryable `adapter_error` redelivers.
+   *        It was not taken because the durable path is default OFF
+   *        (`AUTOMATION_DURABLE_DELIVERY_ENABLED`), so on the legacy bus the same throw is an ERROR log
+   *        and a permanently lost event; and because a `meta_sheets` read failing mid-incident would
+   *        then take out every approval automation deployment-wide, to protect against a rule whose
+   *        worst case on these two channels is an outbound message (see the action allowlists above:
+   *        record-writing actions are save-rejected here, and the one exception,
+   *        `write_approval_form_values`, needs a default-OFF flag AND durable delivery).
+   *        Whoever turns durable delivery on deployment-wide should revisit this trade, not inherit it.
+   * The cost of the choice is paid in the log: every fail-open keep is reported with the affected rule
+   * ids and a coded reason, so a persistently failing lookup is read off the log rather than inferred
+   * from absent runs. VALUES-FREE: rule/sheet ids, the error CLASS and, when identifier-shaped, the
+   * driver code (SQLSTATE / errno) via `describeLookupError` — never the error text, which can carry
+   * connection details.
+   *
+   * ── Log VOLUME is bounded by the call, not by the rule count ──────────────────────────────────
+   * A template can route 50 rules; a failing `meta_sheets` read is exactly the moment the log pipeline
+   * is already under stress. So the WARN is aggregated — one per distinct dead sheet, one per failed
+   * call — carrying `ruleCount` plus a capped `ruleIds` sample, and the per-rule line is DEBUG. An
+   * operator still sees "these rules stopped / stayed armed, for this reason" without O(rules × events).
+   */
+  private async dropRulesOnDeletedSheets(
+    rules: AutomationRule[],
+    channel: string,
+    // Extra VALUES-FREE identifiers for the log lines (the single-rule lanes pass the execution id). Spread
+    // FIRST so it can never overwrite a field below. The loaders pass nothing: their log lines are unchanged.
+    logContext: Readonly<Record<string, string>> = {},
+  ): Promise<AutomationRule[]> {
+    if (rules.length === 0) return rules
+    // ONE round trip for the whole call, whatever the number of distinct sheets: this runs while the
+    // durable consumer's lease is ticking, and a serial per-sheet loop made an approval event's wall
+    // time scale with the sheet count under exactly the pool pressure that makes each checkout slow.
+    let livenessBySheet: Map<string, SheetLiveness> | null = null
+    let lookupError: ReturnType<typeof describeLookupError> | null = null
+    try {
+      livenessBySheet = await loadSheetLivenessBatch(this.queryFn, rules.map((rule) => rule.sheet_id))
+    } catch (err) {
+      lookupError = describeLookupError(err)
+    }
+
+    if (livenessBySheet === null) {
+      // FAIL-OPEN, reported ONCE for the call (the failure was one query, not one per rule).
+      logger.warn(`${channel}: sheet liveness lookup failed, failing OPEN and keeping ${rules.length} rule(s)`, {
+        ...logContext,
+        channel,
+        reason: 'liveness_lookup_failed',
+        ruleCount: rules.length,
+        ruleIds: sampleIds(rules.map((rule) => rule.id)),
+        sheetIds: sampleIds(rules.map((rule) => rule.sheet_id)),
+        ...(lookupError ?? {}),
+      })
+      for (const rule of rules) {
+        logger.debug(`${channel} rule ${rule.id} kept: sheet ${rule.sheet_id} liveness unknown (lookup failed)`, {
+          ...logContext,
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'liveness_lookup_failed',
+        })
+      }
+      return rules
+    }
+
+    const kept: AutomationRule[] = []
+    const droppedBySheet = new Map<string, string[]>()
+    for (const rule of rules) {
+      if (livenessBySheet.get(rule.sheet_id) === 'deleted') {
+        const seen = droppedBySheet.get(rule.sheet_id)
+        if (seen) seen.push(rule.id)
+        else droppedBySheet.set(rule.sheet_id, [rule.id])
+        logger.debug(`${channel} rule ${rule.id} skipped: sheet ${rule.sheet_id} is not live (soft-deleted)`, {
+          ...logContext,
+          channel,
+          ruleId: rule.id,
+          sheetId: rule.sheet_id,
+          reason: 'sheet_deleted',
+        })
+        continue
+      }
+      kept.push(rule)
+    }
+    // One WARN per distinct dead sheet — that is the actionable unit ("this sheet is deleted but still
+    // has armed rules"), and it is bounded by sheets, not by rules × events.
+    for (const [sheetId, ruleIds] of droppedBySheet) {
+      logger.warn(`${channel}: ${ruleIds.length} rule(s) skipped — sheet ${sheetId} is not live (soft-deleted)`, {
+        ...logContext,
+        channel,
+        sheetId,
+        reason: 'sheet_deleted',
+        ruleCount: ruleIds.length,
+        ruleIds: sampleIds(ruleIds),
+      })
+    }
+    return kept
+  }
+
+  /**
+   * SHEET LIVENESS for the three DIRECT-EXECUTE lanes (#5803): the inbound webhook, the admin whole-execution
+   * retry and the admin resume. Each holds ONE already-loaded rule and hands it to the executor itself, so
+   * none of them passes through `loadEnabledRules`, the scheduler callback or the template-keyed loaders —
+   * and the executor's same-sheet fast path never reads `meta_sheets`.
+   *
+   * Deliberately a one-rule call of `dropRulesOnDeletedSheets`, not a new check: the same lookup (one
+   * batched round trip, here of one id), the same verdict (refuse on EXACTLY `'deleted'`; `absent` passes),
+   * the same FAIL-OPEN on a thrown lookup with the same values-free WARN (`describeLookupError`: class +
+   * driver code, never the text), and the same `sheet_deleted` WARN. `channel` names the lane in every log
+   * line. `false` means positive proof of a soft delete and nothing else; each caller turns it into its own
+   * refusal (webhook: the uniform 401; retry / resume: a coded 409 with nothing written).
+   *
+   * Why fail-open holds on these lanes too, re-derived rather than copied:
+   *   · What a wrongly-kept run can touch is a soft-deleted sheet's records (hidden and restorable, not
+   *     destroyed; the cross-base write gate downstream is unchanged and still refuses a deleted TARGET) or
+   *     an outbound message — on retry / resume, one the admin explicitly confirmed (`confirmSideEffects`).
+   *   · A real outage rarely stops at this read. Resume issues the execution read and the token claim before
+   *     any action; retry issues the first-retry CAS; record-writing actions and a `workflow_job_v1` rule's
+   *     execution row hit the same database. NOT covered: a legacy rule whose actions are outbound-only can
+   *     act without touching the database, so for it the keep is paid for in the WARN — the same trade the
+   *     approval loader lanes made.
+   *   · Failing CLOSED on the webhook would answer a LIVE sheet's sender with the uniform 401 ("not
+   *     ingestable": a sender has no reason to retry it) and lose the delivery with no execution row
+   *     anywhere. On retry / resume a fail-closed refusal would only cost a re-click; it was not taken there
+   *     so that every lane keeps ONE failure rule behind ONE helper, and the admin confirmed the side effects
+   *     either way.
+   */
+  private async ruleSheetLive(
+    rule: AutomationRule,
+    channel: string,
+    logContext: Readonly<Record<string, string>> = {},
+  ): Promise<boolean> {
+    return (await this.dropRulesOnDeletedSheets([rule], channel, logContext)).length > 0
+  }
+
+  /**
+   * SHEET LIVENESS for the approval-bridge continuation (#5800) — the third `approval.*` lane, which is
+   * driven by the bridge table and so never passes through `dropRulesOnDeletedSheets`.
+   *
+   * Same definition as every other lane: `loadSheetLiveness` from sheet-liveness.ts, refuse on EXACTLY
+   * `'deleted'`. `absent` (a successful lookup that found no row) proceeds as it does on the siblings.
+   * `absent` is reachable: neither `automation_rules.sheet_id` nor the bridge table's `sheet_id` has a
+   * foreign key to `meta_sheets`, so a hard-deleted (or never-existing) sheet id survives on both rows.
+   * Whether the continuation itself then stops an `absent` run depends on its shape — its record read
+   * stops only ONE of them:
+   *   · approved WITH a recordId — stopped: `meta_records.sheet_id` cascades on a hard delete, so the
+   *     record read that follows finds no row and fails the run as "Record no longer exists" before any
+   *     writeback or remaining action.
+   *   · non-approved outcome — NOT stopped: it skips the record read. With the `onNonApproved` opt-in the
+   *     writeback is still attempted; a same-base one has no row to land on (the patch is keyed on
+   *     `id` + `sheet_id`), but a CROSS-BASE one reaches the cross-base write gate and, if the gate
+   *     authorizes it, writes the other base's record.
+   *   · record-less bridge (`recordId` null, e.g. a scheduled workflow_job_v1 rule) — NOT stopped: it
+   *     skips the record read too, and on `approved` the remaining actions run.
+   *
+   * Returns false ONLY on positive proof of a soft delete; the caller then fails the execution with
+   * `BRIDGE_SHEET_DELETED_MESSAGE` and the bridge goes terminal through its normal path.
+   *
+   * FAIL-OPEN when the lookup THROWS — the same choice as `dropRulesOnDeletedSheets`, re-derived for
+   * THIS lane rather than copied, because this lane writes records:
+   *   · PROPAGATE is a stranded run on the default path. With durable delivery OFF (the default),
+   *     `claimCompletion` has already flipped the bridge to terminal `resumed` before this body runs, so a
+   *     throw leaves the execution suspended forever under a consumed bridge — exactly "neither run nor
+   *     recorded". (With delivery ON a throw would be reclaimed and retried; the one-path choice is named
+   *     here so whoever turns durable delivery on deployment-wide can revisit it.)
+   *   · FAIL-CLOSED-TERMINAL turns a transient `meta_sheets` read error into the permanent loss of a
+   *     LIVE sheet's approval writeback: the completion event is one-shot, and a whole-execution retry is
+   *     refused once an approval exists (START_APPROVAL_ALREADY_CREATED).
+   *   · The residual window is narrow: the record read and the writeback transaction right after this use
+   *     the same database, so a real outage surfaces there as a throw (legacy: logged; lease: reclaimed).
+   *     Only a failure confined to this one read lets a run through, and the data it could then touch is a
+   *     soft-deleted sheet's records — hidden and restorable, not destroyed; the lock guard and the
+   *     cross-base write gate downstream are unchanged and still fail closed.
+   * The keep is logged at WARN with the bridge id, the error CLASS and the driver code
+   * (`describeLookupError`, shared with `dropRulesOnDeletedSheets`) — never the text, which can carry
+   * connection details. One bridge per call, so there is nothing to aggregate.
+   */
+  private async approvalBridgeSheetLive(bridge: AutomationApprovalBridgeRow, sheetId: string, outcome: unknown): Promise<boolean> {
+    let liveness: SheetLiveness
+    try {
+      liveness = await loadSheetLiveness(this.queryFn, sheetId)
+    } catch (err) {
+      logger.warn(`approval bridge ${bridge.id}: sheet liveness lookup failed, failing OPEN and resuming`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        sheetId,
+        reason: 'liveness_lookup_failed',
+        ...describeLookupError(err),
+      })
+      return true
+    }
+    if (liveness === 'deleted') {
+      // `outcome` rides on the WARN so a refusal that withheld an APPROVED result is told apart from one
+      // that withheld nothing, straight from the log (a restore does not replay it).
+      logger.warn(`approval bridge ${bridge.id} not resumed: sheet ${sheetId} is not live (soft-deleted); marking the run failed`, {
+        bridgeId: bridge.id,
+        ruleId: bridge.ruleId,
+        executionId: bridge.executionId,
+        sheetId,
+        outcome: approvalOutcomeLabel(outcome),
+        reason: 'sheet_deleted',
+      })
+      return false
+    }
+    return true
+  }
 
   private mapRow(row: Record<string, unknown>): AutomationRule {
     return {
@@ -4384,34 +5280,119 @@ export async function preflightDingTalkAutomationCreate(
   return { ...input, actionConfig, actions }
 }
 
+/** The action side of a create/update input, as far as the condition preflight reads it (#4b). */
+export interface AutomationConditionPreflightActions {
+  actionType?: string | null
+  actionConfig?: Record<string, unknown> | null
+  actions?: AutomationAction[] | null
+}
+
+/** A condition_branch condition group found in a rule's action tree, with the request path it came from. */
+interface ConditionBranchGroupRef {
+  path: string
+  group: ConditionGroup
+}
+
+/**
+ * 客户反馈 2026-09-24 #4b — every `condition_branch` condition group in a rule input, at every nesting the
+ * save path accepts: the top-level `actionConfig` when the rule's action IS a condition_branch, and each
+ * `actions[i]` of that type (the A6-3-1 shape forbids a condition_branch nested inside a branch, so those two
+ * levels are exhaustive). A branch whose `conditions` is not even a valid group is SKIPPED here — the
+ * service's own shape validation (`validateConditionBranchConfig`) reports it with its established message and
+ * path, so the refusal a client sees for a malformed branch is unchanged.
+ *
+ * `input.actionType` and `input.actionConfig` must be the EFFECTIVE pair. `updateRule` merges BOTH
+ * (`input.actionType ?? existing.action_type`, `input.actionConfig ?? existing.action_config`), so the PATCH
+ * route resolves them through `preflightAutomationRuleUpdate` before calling the preflight — otherwise
+ *   - a rule stored as `condition_branch` with `actions: null` could take an unvalidated branch value through a
+ *     PATCH that carries only `actionConfig`, and
+ *   - an `update_record` rule whose `actionConfig` carries `branches` (never checked: it is not a branch rule)
+ *     could be re-typed to `condition_branch` by a PATCH that carries only `actionType` (+ `executionMode`),
+ *     turning those stored, never-checked branches live.
+ */
+function collectConditionBranchGroups(input: AutomationConditionPreflightActions): ConditionBranchGroupRef[] {
+  const refs: ConditionBranchGroupRef[] = []
+  const visitConfig = (config: unknown, path: string): void => {
+    if (!isRecord(config) || !Array.isArray(config.branches)) return
+    config.branches.forEach((branch, index) => {
+      if (!isRecord(branch) || branch.conditions === undefined) return
+      const groupPath = `${path}.branches[${index}].conditions`
+      try {
+        refs.push({ path: groupPath, group: normalizeConditionGroupInput(branch.conditions, groupPath) })
+      } catch (error) {
+        if (!(error instanceof ConditionGroupValidationError)) throw error
+      }
+    })
+  }
+  // `actions[i]` first: when a V1 request carries `actions`, the legacy `actionConfig` column is a mirror of
+  // `actions[0].config` (parseCreateRuleInput copies it) and the executor runs `actions`, so the first refusal
+  // a client sees names the path it actually edits. A condition_branch stored in the legacy columns alone
+  // (actions null / []) is still reached through `actionConfig`.
+  for (const [index, action] of (input.actions ?? []).entries()) {
+    if (isRecord(action) && action.type === 'condition_branch') visitConfig(action.config, `actions[${index}].config`)
+  }
+  if (input.actionType === 'condition_branch') visitConfig(input.actionConfig, 'actionConfig')
+  return refs
+}
+
 /**
  * Validate automation conditions against the sheet's current fields. The
  * route parser only validates JSON shape; this preflight closes the API gap
  * where direct clients could persist unknown fields, unsupported operators, or
  * frontend-incompatible scalar value types.
+ *
+ * 客户反馈 2026-09-24 #4b (裁定 PR #6074): `condition_branch` conditions (`actionsInput`) are validated against
+ * the SAME fields, from ONE `meta_fields` read, with their request path (`actions[0].config.branches[1].
+ * conditions…`); before, a branch condition was only shape-checked and a number field could be saved with
+ * `'abc'`. A value that does not fit its field's type is refused with the stable code
+ * `AUTOMATION_CONDITION_VALUE_INVALID` (date `YYYY-MM-DD`, dateTime wall clock / ISO, number, boolean).
+ * Nothing to validate ⇒ no DB read.
  */
 export async function preflightAutomationConditionFields(
   queryFn: AutomationQueryFn,
   sheetId: string,
   conditions: ConditionGroup | null | undefined,
+  actionsInput?: AutomationConditionPreflightActions | null,
 ): Promise<void> {
-  if (!conditions) return
+  const branchGroups = actionsInput ? collectConditionBranchGroups(actionsInput) : []
+  if (!conditions && branchGroups.length === 0) return
 
   const fieldRes = await queryFn(
     'SELECT id, type, property FROM meta_fields WHERE sheet_id = $1',
     [sheetId],
   )
+  const fields = serializeAutomationConditionFieldRows(fieldRes.rows)
   try {
-    validateConditionGroupAgainstFields(
-      conditions,
-      serializeAutomationConditionFieldRows(fieldRes.rows),
-    )
+    validateConditionGroupAgainstFields(conditions, fields)
+    for (const ref of branchGroups) {
+      validateConditionGroupAgainstFields(ref.group, fields, ref.path)
+    }
   } catch (error) {
     if (error instanceof ConditionGroupValidationError) {
-      throw new AutomationRuleValidationError(error.message)
+      throw new AutomationRuleValidationError(error.message, error.code)
     }
     throw error
   }
+}
+
+/** What the PATCH route learns from the update preflight, beyond the normalized input (#4b). */
+export interface AutomationRuleUpdatePreflight {
+  /** `input` with DingTalk action values normalized where the request provided them. */
+  input: UpdateRuleInput
+  /**
+   * The rule's action type AFTER the update — `input.actionType ?? existing.action_type` — when the request
+   * touches the action tree (`actionType` / `actionConfig` / `actions`); `undefined` when it does not (no rule
+   * row was read). The condition preflight needs this to find the branches of a `condition_branch` rule
+   * whose PATCH carries only `actionConfig`.
+   */
+  effectiveActionType?: string
+  /**
+   * The rule's legacy `actionConfig` AFTER the update — the request's (normalized) when it sent one, else the
+   * STORED one — under the same condition as `effectiveActionType`. The condition preflight needs this for a
+   * PATCH that re-types a rule to `condition_branch` WITHOUT resending `actionConfig`: `updateRule` keeps the
+   * stored config, whose `branches` were never field-checked while the rule was not a branch rule.
+   */
+  effectiveActionConfig?: Record<string, unknown> | null
 }
 
 /**
@@ -4429,11 +5410,27 @@ export async function preflightDingTalkAutomationUpdate(
   input: UpdateRuleInput,
   service: Pick<AutomationService, 'getRule'>,
 ): Promise<UpdateRuleInput | null> {
+  const preflight = await preflightAutomationRuleUpdate(queryFn, sheetId, ruleId, input, service)
+  return preflight ? preflight.input : null
+}
+
+/**
+ * The full PATCH-time preflight: `preflightDingTalkAutomationUpdate` plus the EFFECTIVE action type the
+ * same rule read resolved (one `getRule` call either way — no extra fetch). `null` when the existing rule is
+ * missing or belongs to a different sheet.
+ */
+export async function preflightAutomationRuleUpdate(
+  queryFn: AutomationQueryFn,
+  sheetId: string,
+  ruleId: string,
+  input: UpdateRuleInput,
+  service: Pick<AutomationService, 'getRule'>,
+): Promise<AutomationRuleUpdatePreflight | null> {
   const touchesAction =
     input.actionType !== undefined ||
     input.actionConfig !== undefined ||
     input.actions !== undefined
-  if (!touchesAction) return input
+  if (!touchesAction) return { input }
 
   const existing = await service.getRule(ruleId)
   if (!existing || existing.sheet_id !== sheetId) return null
@@ -4469,5 +5466,5 @@ export async function preflightDingTalkAutomationUpdate(
   const out: UpdateRuleInput = { ...input }
   if (input.actionConfig !== undefined) out.actionConfig = normalizedActionConfig
   if (input.actions !== undefined) out.actions = Array.isArray(input.actions) ? normalizedActions : null
-  return out
+  return { input: out, effectiveActionType: nextActionType, effectiveActionConfig: normalizedActionConfig }
 }

@@ -38,7 +38,7 @@
  * stopped together in afterAll — see the HARNESS CONSTRAINT note below for why (one shared pool per
  * process). DATABASE_URL-gated; two-point wired (vitest.config exclude + plugin-tests.yml run-list).
  */
-import { afterAll, afterEach, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest'
 
 // Injected fault switches — hoisted so the module-mock factory (which vitest hoists above imports) can see
 // them. ctor / init / load cover the three rungs of the REAL init chain: the round-2 P1 was precisely that
@@ -103,6 +103,7 @@ vi.mock('../../src/multitable/automation-durable-dispatcher', async (importOrigi
 })
 
 import { MetaSheetServer } from '../../src/index'
+import { pool as pgPool } from '../../src/db/pg'
 import { getAutomationServiceInstance } from '../../src/multitable/automation-service'
 import { getSharedWebhookRetryScheduler } from '../../src/services/WebhookRetryScheduler'
 
@@ -138,16 +139,11 @@ async function startServer(): Promise<{ server: MetaSheetServer; error: unknown 
 }
 
 /**
- * HARNESS CONSTRAINT — one shared global pool per process: `server.stop()` is a FULL graceful shutdown that
- * ENDS the shared poolManager pool, so any lifecycle started after a stop() sees "Cannot use a pool after
- * calling end on the pool" everywhere. Therefore:
- *   - FAILURE lifecycles (start() rejects) are NEVER stopped: the fail-closed throw fires in the boot blocks,
- *     which all run BEFORE `httpServer.listen`, so no socket exists. The activation rollback is what
- *     guarantees no durable loop/scheduler timer survives the rejection — and the failure tests ASSERT that
- *     (handle null + zero dispatcher DB calls past an interval), instead of relying on fork-exit reaping.
- *   - SUCCESS lifecycles are collected and stopped ONLY in afterAll, in reverse order, catch-wrapped: the
- *     first stop() ends the pool; later stops' pool-dependent cleanup errors are swallowed (their listeners
- *     still close; the fork exits right after).
+ * HARNESS CONSTRAINT — one shared global pool per process: production `server.stop()` ends it, but this
+ * matrix starts several real server lifecycles in one worker. Startup failures now intentionally invoke the
+ * same idempotent stop path as a normal shutdown. The suite therefore spies only `pool.end()` to a no-op;
+ * every producer/listener/worker rollback still executes, while later matrix rows retain a usable shared DB.
+ * Successful lifecycles are collected and stopped in afterAll before the pool spy is restored.
  */
 const startedServers: MetaSheetServer[] = []
 
@@ -160,6 +156,13 @@ async function stopQuietly(server: MetaSheetServer): Promise<void> {
 }
 
 describeIfDatabase('durable-delivery startup fail-closed (REAL MetaSheetServer.start lifecycle)', () => {
+  let restorePoolEnd: (() => void) | undefined
+
+  beforeAll(() => {
+    const poolEnd = vi.spyOn(pgPool, 'end').mockResolvedValue(undefined)
+    restorePoolEnd = () => poolEnd.mockRestore()
+  })
+
   afterEach(() => {
     delete process.env[DURABLE_FLAG]
     delete process.env[SCHED_DISABLE]
@@ -172,13 +175,13 @@ describeIfDatabase('durable-delivery startup fail-closed (REAL MetaSheetServer.s
     for (const server of startedServers.reverse()) {
       await stopQuietly(server)
     }
+    restorePoolEnd?.()
   })
 
   test('S1 flag ON + retry scheduler disabled → REJECTS naming the scheduler; loop handle null; zero DB ticks past one interval', async () => {
     process.env[DURABLE_FLAG] = 'true'
     process.env[SCHED_DISABLE] = '1'
     const { server, error } = await startServer()
-    // start() rejected in the pre-listen boot blocks — nothing to stop (see harness constraint above).
     expect(error).toBeTruthy()
     expect(String(error)).toMatch(/fail-closed.*webhook retry scheduler/)
     // Round-2 P2: the rejection must leave NO live durable machinery — a null handle AND behavioral silence.

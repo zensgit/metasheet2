@@ -17,6 +17,8 @@
       :directory="directory"
       :directory-loaded="directoryLoaded"
       :memory="recentProjects"
+      :can-pull="canRunPull"
+      :project-targets="projectTargetList"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
@@ -98,7 +100,7 @@
     <!-- ── 1. 搜项目 ────────────────────────────────────────────────────────────────────────────
          The SAME native datalist #5445 built for the confirmation queue: option VALUE is the number
          and option LABEL is the name, so the browser's own type-ahead filters on either. An operator
-         who only remembers 「注射水缓冲罐」 finds 230920006 without being told it, and the trained
+         who only remembers 「示例乙型」 finds 200000006 without being told it, and the trained
          operator who types the number keeps the path they already use. -->
     <div class="sp-board__search" :class="{ 'sp-board__search--home': showHome }">
       <label class="sp-board__field">
@@ -112,8 +114,11 @@
           :placeholder="bi('项目号或名称', 'Project number or name')"
           @keyup.enter="openProject"
         >
-        <!-- D1=A: the union, not the directory alone. The home page's own caption says the list
-             holds "这台电脑最近开过的、和管理员归档过的项目" — so it has to. -->
+        <!-- D1=A: the union, not the directory alone. The home page's quick-open hint (#6088) says the
+             list holds 「这台电脑最近开过的项目、平台登记的项目,以及备料表里已经有数据的项目」 — so it
+             has to. A directory row is labelled by its own name; a row only this computer's memory
+             knows is labelled with the home page's words for that half of the list, verbatim. The
+             memory is written only when this page opens a project, so "opened" is literally true. -->
         <datalist id="stock-prep-board-directory-options" data-testid="stock-prep-project-board-datalist">
           <option
             v-for="project in directoryProjects"
@@ -124,7 +129,7 @@
             v-for="entry in memoryOnlyProjectNos"
             :key="`memory:${entry}`"
             :value="entry"
-          >{{ bi('这台电脑最近开过的', 'Recently opened on this computer') }}</option>
+          >{{ bi('这台电脑最近开过的项目', 'A project this computer recently opened') }}</option>
         </datalist>
       </label>
       <button
@@ -149,6 +154,118 @@
          the board still answers a foreign tenant's project number with a 404 byte-identical to the
          one an unknown number gets (the server decides that, and its suite asserts it) — what
          changed is only what this tab renders around that refusal. -->
+    <!-- 一个项目一张备料表 (S2, R-36) — THIS PROJECT'S SHEET, said in one line. The projectTarget.read
+         control of the workbench manifest (OPERATE, the board's own tier): rendered only once GET
+         …/projects/:projectNo/target answered, i.e. the server's switch is on. 「直接打开」 deep-links
+         the fill view of the project's OWN sheet; archived reads 「打开(已归档)」 and says who restores
+         it. A caller without the pull right is told to contact a pull operator — never pointed at a
+         button they do not have. -->
+    <section
+      v-if="openedProjectNo && projectTarget"
+      class="sp-board__target"
+      data-testid="stock-prep-project-target-status"
+      :data-target-status="projectTarget.status"
+    >
+      <p class="sp-board__target-line">
+        {{ bi(targetStatusText.zh, targetStatusText.en) }}
+        <span v-if="targetRowsText" class="sp-board__target-rows" data-testid="stock-prep-project-target-rows">{{ targetRowsText }}</span>
+      </p>
+      <p v-if="targetNextText" class="sp-board__hint" data-testid="stock-prep-project-target-next">
+        {{ bi(targetNextText.zh, targetNextText.en) }}
+      </p>
+      <button
+        v-if="projectTargetFillTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-open"
+        @click="openProjectTargetSheet"
+      >
+        {{ projectTarget.status === 'archived'
+          ? bi(targetPlain('open_archived_action').zh, targetPlain('open_archived_action').en)
+          : bi(targetPlain('open_action').zh, targetPlain('open_action').en) }}
+      </button>
+      <!-- S4 (ADR §6, register R-38) — 归档代替删除 (Q2). The projectTarget.archive / .restore controls
+           of the workbench manifest (PULL tier): rendered only when the caller holds that capability
+           AND the server says the action fits this sheet's state (`may.archive` / `may.restore`). A
+           caller without the pull right gets no button — the line above already says to contact a
+           pull operator. Pressing asks for the project number to be TYPED before anything is sent. -->
+      <button
+        v-if="canArchiveTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-archive"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('archive')"
+      >{{ bi(targetPlain('archive_action').zh, targetPlain('archive_action').en) }}</button>
+      <button
+        v-if="canRestoreTarget"
+        type="button"
+        class="sp-board__link"
+        data-testid="stock-prep-project-target-restore"
+        :disabled="lifecycleBusy"
+        @click="openLifecyclePrompt('restore')"
+      >{{ bi(targetPlain('restore_action').zh, targetPlain('restore_action').en) }}</button>
+      <div
+        v-if="lifecyclePrompt"
+        class="sp-board__lifecycle"
+        role="group"
+        data-testid="stock-prep-project-target-lifecycle-prompt"
+        :data-action="lifecyclePrompt"
+      >
+        <p class="sp-board__hint">
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive').zh, targetPlain('confirm_archive').en)
+            : bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}
+        </p>
+        <p v-if="lifecyclePrompt === 'archive'" class="sp-board__hint" data-testid="stock-prep-project-target-lifecycle-remove-vs-archive">
+          {{ bi(targetPlain('remove_vs_archive').zh, targetPlain('remove_vs_archive').en) }}
+        </p>
+        <label class="sp-board__lifecycle-field">
+          <span>
+            {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+            <strong data-testid="stock-prep-project-target-lifecycle-project-no">{{ openedProjectNo }}</strong>
+          </span>
+          <input
+            v-model="lifecycleTyped"
+            type="text"
+            class="sp-board__lifecycle-input"
+            data-testid="stock-prep-project-target-lifecycle-input"
+            :disabled="lifecycleBusy"
+            :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+          />
+        </label>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-confirm"
+          :disabled="lifecycleBusy || !lifecycleTypedMatches"
+          @click="confirmLifecycle"
+        >
+          {{ lifecyclePrompt === 'archive'
+            ? bi(targetPlain('confirm_archive_action').zh, targetPlain('confirm_archive_action').en)
+            : bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}
+        </button>
+        <button
+          type="button"
+          class="sp-board__link"
+          data-testid="stock-prep-project-target-lifecycle-cancel"
+          :disabled="lifecycleBusy"
+          @click="closeLifecyclePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+      <p
+        v-if="lifecycleNotice"
+        class="sp-board__hint"
+        role="status"
+        data-testid="stock-prep-project-target-lifecycle-result"
+        :data-result="lifecycleNotice.kind"
+      >
+        {{ bi(lifecycleNoticeText.zh, lifecycleNoticeText.en) }}
+        <span v-if="lifecycleNoticeText.zhNext">{{ bi(lifecycleNoticeText.zhNext, lifecycleNoticeText.enNext ?? '') }}</span>
+        <code v-if="lifecycleNotice.kind === 'refused' && lifecycleNotice.code" class="sp-board__token">{{ lifecycleNotice.code }}</code>
+      </p>
+    </section>
+
     <section v-if="openedProjectNo" class="sp-board__pull" data-testid="stock-prep-project-board-pull">
       <!-- H14: this page's step 1 is 从PLM拉取数据, and its empty state already sends people to a
            button by that name. `run-variant` makes the button actually carry it. See the panel. -->
@@ -162,10 +279,12 @@
         :large-bom-api="largeBomApi"
         :large-bom-poll-wait="largeBomPollWait"
         :fill-target="composedFillTarget"
+        :target-api="projectTargetApi"
         @navigate-stage="(key: string) => emit('navigate-stage', key)"
         @open-multitable="openFillTarget"
         @synced="onSyncReportChanged"
         @busy-changed="onSyncBusyChanged"
+        @project-target-changed="onProjectTargetChanged"
       />
     </section>
 
@@ -345,11 +464,11 @@
             type="button"
             class="sp-board__button"
             data-testid="stock-prep-project-board-notify-next"
-            :disabled="busy || !handoff.isCurrentHandler || handoff.terminal"
+            :disabled="busy || !notifyPressable"
             :title="notifyTitle"
             @click="notifyNext"
           >
-            {{ bi('通知下一步', 'Tell the next person') }}
+            {{ notifyLabel }}
           </button>
 
           <!-- 导出Excel — the #5437 client, reused. Same route, same gate, same download trigger. -->
@@ -404,8 +523,8 @@
           </button>
           <p class="sp-board__fill-hint">
             {{ bi(
-              '打开的是备料主表。表里是这台系统上所有项目的行,请按项目号找您这一个 —— 目前还不能只显示一个项目。',
-              'This opens the stock-preparation table. It holds the rows for every project on this system, so find yours by project number — filtering it down to a single project is not available yet.',
+              '这是这套部署的备料表,请按项目号确认是您要处理的项目。',
+              'This is this deployment’s stock-preparation table — confirm the project number before you work on it.',
             ) }}
           </p>
         </template>
@@ -465,35 +584,60 @@ import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import {
+  advanceStockPreparationHandoff,
   exportStockPreparationPrepLines,
   readStockPreparationOperatorDirectory,
+  stockPreparationHandoffAdvanceWasReplay,
+  stockPreparationHandoffFromStepKey,
+  stockPreparationHandoffMayPress,
+  stockPreparationHandoffResendableStepKey,
   type StockPreparationDecisionQueue,
+  type StockPreparationHandoffAdvanceResult,
   type StockPreparationOperatorDirectory,
   type StockPreparationOperatorProject,
 } from '../../../services/integration/stockPreparation/confirmationQueue'
 import { readStockPreparationOperatorHomeDirectory } from '../../../services/integration/stockPreparation/operatorHomeDirectory'
 import {
-  advanceStockPreparationHandoff,
   readStockPreparationHandoff,
   readStockPreparationProjectBoard,
   type StockPreparationHandoffCursor,
   type StockPreparationProjectBoard,
 } from '../../../services/integration/stockPreparation/projectBoard'
 import type { StockPreparationProjectSyncApi, StockPreparationProjectSyncReport } from '../../../services/integration/stockPreparation/projectSync'
+import {
+  changeStockPreparationProjectTargetLifecycle,
+  createStockPreparationProjectTargetApi,
+  stockPrepProjectNumbersMatch,
+  stockPrepProjectTargetFillTarget,
+  type StockPrepProjectLifecycleAction,
+  type StockPrepProjectLifecycleOutcome,
+  type StockPrepProjectTargetList,
+  type StockPrepProjectTargetState,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 import type { StockPreparationLargeBomJobApi } from '../../../services/integration/stockPreparation/largeBomPull'
 import {
   STOCK_PREP_CONFIRM_PANEL_NOTE,
   STOCK_PREP_TOOLTIP_ROWS_IN_TABLE,
+  STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS,
   stockPrepBoardErrorPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
   stockPrepErrorCopyText,
   stockPrepErrorPlain,
+  stockPrepHandoffOutcomePlain,
+  stockPrepHandoffStepPlain,
   type StockPrepPlainEntry,
   type StockPrepPlainText,
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import { copyTextToClipboard } from '../../../views/plm/plmClipboard'
-import { canRunStockPrepProjectSync } from '../../../services/integration/stockPreparation/workbenchAccess'
+import { canRunStockPrepProjectSync, grantedStockPrepCapabilities } from '../../../services/integration/stockPreparation/workbenchAccess'
 import { useAuth } from '../../../composables/useAuth'
-import { operatorNextStep, type OperatorNextStepResult } from '../../../services/integration/stockPreparation/operatorNextStep'
+import {
+  operatorNextStep,
+  STOCK_PREP_NOTIFY_LAST_STEP_LABEL,
+  type OperatorNextStepResult,
+} from '../../../services/integration/stockPreparation/operatorNextStep'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import {
   readStockPrepRecentProjects,
@@ -513,8 +657,13 @@ const props = withDefaults(
     largeBomApi?: StockPreparationLargeBomJobApi | null
     /** Test seam ONLY — forwarded so specs never wait on a real timer. */
     largeBomPollWait?: ((ms: number) => Promise<void>) | null
+    /**
+     * Test seam ONLY (S2) — the project-target client, shared with the composed pull panel. Null in
+     * production: built from `scope`.
+     */
+    projectTargetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null },
+  { scope: () => ({}), projectNo: '', syncApi: null, largeBomApi: null, largeBomPollWait: null, projectTargetApi: null },
 )
 
 const emit = defineEmits<{
@@ -719,9 +868,11 @@ async function scrollToConfirmPanel(): Promise<void> {
  * on the panel that reports it.
  *
  * NEVER AN UNEXERCISABLE PRESS. The composed queue renders this button only for a caller who passes
- * `canOpenStockPrepProjectBoard` (operate ∧ read), and `canRunStockPrepProjectSync` is that same tier
- * plus platform admin — so every caller who can see it can run it. The panel's own `run` re-checks
- * permission and busy state anyway; this adds no second implementation of what 同步 means.
+ * `canOpenStockPrepProjectBoard` (operate ∧ read); `canRunStockPrepProjectSync` is one rung ABOVE
+ * that since R-33 (pull ∧ operate ∧ read, or platform admin), and `nextStep` below strips the
+ * pull/resync action for a caller who fails it — so every caller who can see this button can run
+ * it. The panel's own `run` re-checks permission and busy state anyway; this adds no second
+ * implementation of what 同步 means.
  */
 async function onEmbeddedResync(): Promise<void> {
   await nextTick()
@@ -794,8 +945,11 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   // same class of wrong answer as 「都清了」 for a project nobody has ever heard of.
   //
   // So the board says the honest thing FIRST — this number has no data here yet — and names the
-  // control. The administrator sentence is kept for the one case where it is true: the pull panel is
-  // absent because this caller may not press it.
+  // control. The 「请联系拉取人员」 sentence is kept for the one case where it is true: the pull panel
+  // is absent because this caller may not press it. Since R-33 (2026-10-08) that is every floor
+  // operator — pulling belongs to a holder of `stock-prep:pull` (the 拉取人员), a `stock-prep:admin`
+  // or a platform administrator — so the sentence names the 拉取人员 first, never 「备料操作权限」,
+  // which the reader already holds.
   if (canRunPull.value) {
     return {
       zh: `这个项目号在您这里还没有数据。`,
@@ -807,8 +961,8 @@ const emptyPlain = computed<StockPrepPlainEntry | null>(() => {
   return {
     zh: '这个项目号在您这里还没有数据,而拉取数据不是您能做的一步。',
     en: 'There is no data for this project number here yet, and pulling it in is not a step you can run.',
-    zhNext: '请找有备料操作权限的同事或平台管理员把它拉进来;也请顺便核对一下号码有没有打错。',
-    enNext: 'Ask a colleague with the stock-preparation operator permission, or a platform administrator, to pull it in — and check the number for a typo while you are at it.',
+    zhNext: '请联系拉取人员(或平台管理员)把它拉进来;也请顺便核对一下号码有没有打错。',
+    enNext: 'Please contact a pull operator (拉取人员) — or a platform administrator — to pull it in, and check the number for a typo while you are at it.',
   }
 })
 
@@ -930,18 +1084,26 @@ const archiveText = computed<StockPrepPlainEntry>(() => {
 /**
  * 轮到谁. Three honest answers, and the first one is the important one: a deployment with no handoff
  * chain must not be told a turn it does not have.
+ *
+ * ONLY `completed` MEANS DONE. `terminal` is the LAST step being the CURRENT one, not yet handed on —
+ * reading it as "finished" told the last handler 「已经走完最后一步」 about the step still in front of them.
  */
 const turnText = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return bi('这台系统没有设置流转顺序', 'No handoff order is set up on this system')
-  if (cursor.completed || cursor.terminal) return bi('已经走完最后一步', 'The last step is done')
+  if (cursor.completed) return bi('已经走完最后一步', 'The last step is done')
   const step = cursor.currentStepKey ?? ''
   const position = cursor.stepIndex !== null && cursor.stepCount > 0
     ? bi(`(第 ${cursor.stepIndex + 1}/${cursor.stepCount} 步)`, ` (step ${cursor.stepIndex + 1} of ${cursor.stepCount})`)
     : ''
   if (!step) return bi('还没开始', 'Not started yet')
-  return cursor.isCurrentHandler
-    ? bi(`轮到您了${position}`, `It is your turn${position}`)
+  if (cursor.isCurrentHandler) return bi(`轮到您了${position}`, `It is your turn${position}`)
+  // SOMEBODY ELSE'S STEP, by the desk's name — a bare key like `final_review` tells the floor nothing.
+  // The closed step vocabulary (plainLanguage.ts, the same one the queue labels its status line with);
+  // a key it does not know keeps today's raw text rather than a guess.
+  const plain = stockPrepHandoffStepPlain(step)
+  return plain
+    ? bi(`${plain.zh}${position}`, `${plain.en}${position}`)
     : bi(`${step}${position}`, `${step}${position}`)
 })
 
@@ -992,14 +1154,59 @@ const lastChangedFromPlmText = computed<string>(() => {
 })
 
 /** I-20: 表里有多少行's tooltip, the design's own worked example. */
-const rowsTooltip = STOCK_PREP_TOOLTIP_ROWS_IN_TABLE
+const rowsTooltip: StockPrepPlainText = {
+  zh: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.zh}${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.zh}`,
+  en: `${STOCK_PREP_TOOLTIP_ROWS_IN_TABLE.en} ${STOCK_PREP_TOOLTIP_TOOLBAR_ROWS_ARE_VIEW_ROWS.en}`,
+}
 
 const notifyTitle = computed<string>(() => {
   const cursor = handoff.value
   if (!cursor) return ''
-  if (cursor.terminal) return bi('已经是最后一步了', 'This is already the last step')
+  // An owed notice is this caller's to send even when the turn is somebody else's — the queue's own
+  // invitation sentence, so the two surfaces say the same thing about the same state.
+  if (stockPreparationHandoffResendableStepKey(cursor)) {
+    return bi(
+      '上一跳的群通知还没发出去,再点一次「通知下一步」就会补发。',
+      'The group notice for the previous step has not gone out yet — press 通知下一步 again and it will be sent.',
+    )
+  }
   if (!cursor.isCurrentHandler) return bi('现在不是轮到您,所以不用您来通知', 'It is not your turn, so this is not yours to send')
   return ''
+})
+
+/**
+ * MAY THIS CALLER PRESS 通知下一步 — the confirmation queue's own rule (confirmationQueue.ts
+ * `stockPreparationHandoffMayPress`), so the two buttons cannot disagree about who may press.
+ *
+ * `terminal` is NOT "the chain is done": the server sets it when the LAST step is the current one and
+ * has not been handed on (http-routes.cjs, the GET /handoff answer: `terminal: !completed && stepIndex
+ * === steps.length - 1`), and pressing it there is what tells 仓库/采购. Only `completed` means nothing
+ * is left — except an OWED notice (`resendableStepKey`), which the server offers only to a handler of
+ * that hop and which stays theirs to send after the turn, or the whole chain, has moved on.
+ * The server re-checks the handler on the POST whatever this says; the page only stops hiding it.
+ */
+const notifyPressable = computed<boolean>(() => stockPreparationHandoffMayPress(handoff.value))
+
+/**
+ * WHAT A PRESS WOULD SEND, once, for everything that names it: an owed resend (the press sends THAT
+ * hop's notice, not the current step's), the LAST step (the press tells 仓库/采购, the queue's H-09),
+ * or an ordinary hand-over. The button label and the 「下一步」 bar both read this, so the two
+ * controls for one press cannot describe it in two ways.
+ */
+const notifyTarget = computed<'resend' | 'last-step' | 'next'>(() => {
+  const cursor = handoff.value
+  if (stockPreparationHandoffResendableStepKey(cursor)) return 'resend'
+  if (cursor && cursor.terminal) return 'last-step'
+  return 'next'
+})
+
+/** The button's words, the queue's own labels. */
+const notifyLabel = computed<string>(() => {
+  if (notifyTarget.value === 'resend') {
+    return bi('通知下一步(补发上一步的群消息)', 'Tell the next person (resend the previous step’s message)')
+  }
+  if (notifyTarget.value === 'last-step') return bi(STOCK_PREP_NOTIFY_LAST_STEP_LABEL.zh, STOCK_PREP_NOTIFY_LAST_STEP_LABEL.en)
+  return bi('通知下一步', 'Tell the next person')
 })
 
 /**
@@ -1023,7 +1230,6 @@ const posture = computed<StockPrepPosture>(() => stockPrepPosture({
  */
 const nextStep = computed<OperatorNextStepResult | null>(() => {
   if (!openedProjectNo.value || visibleErrorCode.value) return null
-  const cursor = handoff.value
   const step = operatorNextStep({
     boardFound: board.value !== null,
     pulledRowCount: board.value?.pulledRowCount ?? 0,
@@ -1031,7 +1237,14 @@ const nextStep = computed<OperatorNextStepResult | null>(() => {
     pendingDecisionCount: board.value?.pendingDecisionCount ?? 0,
     justConfirmed: justConfirmed.value,
     hasExported: Boolean(board.value?.lastExportAt),
-    isCurrentHandler: Boolean(cursor?.isCurrentHandler && !cursor.terminal),
+    // The SAME rule as the button, so the bar never offers a press the button refuses — or says
+    // 「没有等您的事」 above a last step that is still waiting on this operator.
+    isCurrentHandler: notifyPressable.value,
+    // …and the SAME words as the button: on the last step both say 「通知仓库和采购」.
+    handoffLastStep: notifyTarget.value === 'last-step',
+    // R-33: the SAME predicate as the pull button, so the two pull-driving sentences name the
+    // 拉取人员 for a floor operator instead of telling them to press a button they do not have.
+    canPull: canRunPull.value,
   })
   // R-11 again: a control the caller cannot exercise is ABSENT, not disabled and not silently inert.
   // Both sync-driving actions are gated by the same predicate the composed panel gates its own run
@@ -1151,6 +1364,7 @@ async function loadDirectory(): Promise<void> {
   try {
     // See operatorHomeDirectory.ts for why the home call (and only it) opts in and throttles: the
     // confirmation queue's own directory read stays the plain, un-opted-in, un-throttled call too.
+    if (home) void loadProjectTargetList()
     directory.value = home
       ? await readStockPreparationOperatorHomeDirectory(props.scope)
       : await readStockPreparationOperatorDirectory(props.scope)
@@ -1216,8 +1430,15 @@ async function loadBoard(projectNo: string, mode: 'open' | 'refresh' = 'open'): 
     handoff.value = null
     handoffNotice.value = ''
     exportEmptyNotice.value = false
+    projectTarget.value = null
+    // S4: a question about one project's lifecycle never survives a switch to another project.
+    closeLifecyclePrompt()
+    lifecycleNotice.value = null
   }
   if (!target) return
+  // S2: this project's sheet state — independent of the board read, silent on failure (switch off is
+  // a 404 DISABLED and means "no line", not an error the operator should see).
+  void loadProjectTarget(target)
   if (refresh) {
     refreshing.value = true
     errorCode.value = null
@@ -1352,27 +1573,67 @@ function onNextStepAction(): void {
   }
 }
 
+/** Somebody else moved this step first; the server's compare-and-set refused the press (409). */
+const HANDOFF_STEP_MISMATCH_CODE = 'STOCK_PREPARATION_HANDOFF_STEP_MISMATCH'
+
 async function notifyNext(): Promise<void> {
   const current = board.value
   const cursor = handoff.value
-  if (!current || !current.projectNo || !cursor || !cursor.isCurrentHandler || cursor.terminal) return
+  if (!current || !current.projectNo || !cursor || !notifyPressable.value) return
+  // THE STEP THIS PRESS COMPLETES, derived exactly as the confirmation queue derives it: the owed
+  // resend first, then the current step. The route refuses a press without it (400
+  // STOCK_PREPARATION_HANDOFF_REQUEST_INVALID) — which is what every press on this page got while it
+  // posted through a client that never sent one. No step to name means there is nothing to press for.
+  const fromStepKey = stockPreparationHandoffFromStepKey(cursor)
+  if (!fromStepKey) return
+  const projectNo = current.projectNo
   handoffNotice.value = ''
   // A WRITE: 「这一步没有保存成功」 is the right sentence when this one fails.
   await run(async () => {
-    const result = await advanceStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo: current.projectNo as string })
-    // The three outcomes are said as three different sentences because they are three different
-    // facts. "已经通知" on a deployment whose notifier is not configured would be a claim we cannot
-    // back — the turn moved, and nobody was told.
-    if (result.notifyOutcome === 'sent') {
+    let result: StockPreparationHandoffAdvanceResult
+    try {
+      result = await advanceStockPreparationHandoff({ ...props.scope, projectNo, fromStepKey })
+    } catch (error) {
+      // 409 STEP_MISMATCH: the cursor on screen is stale — somebody else already handed this step on.
+      // Re-read it so 轮到谁 and the button show where the chain really is, then let the refusal reach
+      // the error line with its own sentence (the same entry the queue shows), never the generic
+      // 「过一会儿再点一次」: pressing again against a stale step can only be refused again.
+      if ((error as { code?: unknown })?.code === HANDOFF_STEP_MISMATCH_CODE) {
+        try {
+          handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+        } catch {
+          // The refusal is what the operator needs to read; a failed re-read must not replace it.
+        }
+      }
+      throw error
+    }
+    handoff.value = await readStockPreparationHandoff({ ...props.scope, projectNo })
+    // WHAT HAPPENED TO THE MESSAGE decides the sentence — not whether the turn moved. This used to key
+    // off `changed`, which told an operator whose message had just FAILED either 「这台系统没有配通知
+    // 渠道」 (a fresh advance) or 「没有重复交」 (an owed resend). The at-most-once claim is spent by
+    // then, so no later click can resend: the only fix is a word in person, and they were not told so.
+    // "Was it a plain replay" is the confirmation queue's own predicate (confirmationQueue.ts), and a
+    // message that went out wrong or not at all is said in the queue's own words (plainLanguage.ts).
+    // The three sentences that were already right — sent, no destination, replay — are unchanged.
+    const outcomePlain = result.notifyOutcome === 'sent' || result.notifyOutcome === 'no_destination'
+      ? null
+      : stockPrepHandoffOutcomePlain(result.notifyOutcome)
+    if (stockPreparationHandoffAdvanceWasReplay(result)) {
+      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
+    } else if (result.notifyOutcome === 'sent') {
       handoffNotice.value = bi('已经交给下一步,并且通知到了。', 'Handed to the next step, and they were notified.')
-    } else if (result.changed) {
+    } else if (outcomePlain) {
+      // failed / partial / skipped: the turn moved and the message did not reach everyone it should.
+      const lead = bi(outcomePlain.zh, outcomePlain.en)
+      const next = bi(outcomePlain.zhNext ?? '', outcomePlain.enNext ?? '')
+      handoffNotice.value = next ? `${lead} ${next}` : lead
+    } else {
+      // no_destination (or an older backend's not_configured): the turn moved, and there was nowhere
+      // to send. "已经通知" here would be a claim we cannot back.
       handoffNotice.value = bi(
         '已经交给下一步。这台系统没有配通知渠道,所以没有发出提醒 —— 记得口头知会一声。',
         'Handed to the next step. This system has no notification channel configured, so no alert was sent — tell them yourself.',
       )
-    } else {
-      handoffNotice.value = bi('这一步已经交出去了,没有重复交。', 'This step had already been handed on; it was not handed on twice.')
     }
   }, 'write')
 }
@@ -1416,6 +1677,9 @@ function triggerExportDownload(blob: Blob, filename: string): void {
  * so that read never happens) and a project the board 404s on — where nothing has claimed anything.
  */
 const composedFillTarget = computed(() => {
+  // S2: once the project has its OWN sheet (switch on, registry row), that sheet's fill view is the
+  // destination — the registry is the one authority for "which sheet is this project's" (ADR §3).
+  if (projectTargetFillTarget.value) return projectTargetFillTarget.value
   if (board.value) return board.value.fillTarget ?? null
   return directory.value?.fillTarget ?? null
 })
@@ -1450,6 +1714,150 @@ watch(() => props.projectNo, (next) => {
   if (target === openedProjectNo.value) return
   projectNoInput.value = target
   void loadBoard(target)
+})
+
+// ── 一个项目一张备料表 (S2, R-36) — the project's own sheet, as the server's registry states it ──────
+
+/** This project's sheet; null = no line (switch off, unreadable, or not loaded yet). */
+const projectTarget = ref<StockPrepProjectTargetState | null>(null)
+/** The tenant's registry rows, for 今天要处理; null = the switch is off or the list was unreadable. */
+const projectTargetList = ref<StockPrepProjectTargetList | null>(null)
+let projectTargetGeneration = 0
+
+function projectTargetClient(): StockPreparationProjectTargetApi {
+  return props.projectTargetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+async function loadProjectTarget(projectNo: string): Promise<void> {
+  const mine = ++projectTargetGeneration
+  try {
+    const state = await projectTargetClient().get(projectNo)
+    if (mine === projectTargetGeneration && openedProjectNo.value === projectNo) projectTarget.value = state
+  } catch {
+    if (mine === projectTargetGeneration) projectTarget.value = null
+  }
+}
+
+async function loadProjectTargetList(): Promise<void> {
+  try {
+    projectTargetList.value = await projectTargetClient().list()
+  } catch {
+    projectTargetList.value = null
+  }
+}
+
+/** The pull panel re-read the sheet after a create or a re-pull — no second request needed. */
+function onProjectTargetChanged(state: StockPrepProjectTargetState | null): void {
+  if (state) {
+    projectTargetGeneration += 1
+    projectTarget.value = state
+  } else if (openedProjectNo.value) {
+    void loadProjectTarget(openedProjectNo.value)
+  }
+}
+
+const projectTargetFillTarget = computed(() => stockPrepProjectTargetFillTarget(projectTarget.value))
+
+function targetPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectTargetPlain(id) ?? { zh: id, en: id }
+}
+
+const targetStatusText = computed<StockPrepPlainText>(() => {
+  const status = projectTarget.value?.status ?? 'absent'
+  return targetPlain(`status_${status}`)
+})
+
+/** Who acts next — never a button this caller does not have. */
+const targetNextText = computed<StockPrepPlainText | null>(() => {
+  const state = projectTarget.value
+  if (!state) return null
+  if (state.status === 'absent') return targetPlain(canRunPull.value && state.may.create ? 'absent_can_create' : 'contact_puller_create')
+  if (state.status === 'archived') return targetPlain(canRunPull.value && state.may.restore ? 'restore_pending' : 'contact_puller_restore')
+  return null
+})
+
+const targetRowsText = computed<string>(() => {
+  const state = projectTarget.value
+  if (!state || state.status === 'absent') return ''
+  const text = stockPrepProjectTargetRowCountText(state)
+  return text ? bi(text.zh, text.en) : ''
+})
+
+function openProjectTargetSheet(): void {
+  emit('open-multitable', projectTargetFillTarget.value)
+}
+
+// ── S4 (ADR §6, register R-38) — archive / restore this project's sheet ─────────────────────────────
+//
+// The two controls render iff the caller holds the manifest capability (the PULL tier — the same
+// mirror the server's gate is checked against in StockPreparationProjectArchive.spec.ts) AND the
+// server's `may.*` says the action fits the sheet's current state. The project number must be typed
+// before anything is sent; `changeStockPreparationProjectTargetLifecycle` stops a mismatch locally and
+// the server compares it again.
+
+function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'projectTarget.restore'): boolean {
+  return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
+}
+
+const canArchiveTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'active' && state.may.archive && holdsLifecycleCapability('projectTarget.archive'))
+})
+
+const canRestoreTarget = computed<boolean>(() => {
+  const state = projectTarget.value
+  return Boolean(state && state.status === 'archived' && state.may.restore && holdsLifecycleCapability('projectTarget.restore'))
+})
+
+const lifecyclePrompt = ref<StockPrepProjectLifecycleAction | null>(null)
+const lifecycleTyped = ref('')
+const lifecycleBusy = ref(false)
+const lifecycleNotice = ref<StockPrepProjectLifecycleOutcome | null>(null)
+const lifecycleTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(openedProjectNo.value, lifecycleTyped.value))
+
+function openLifecyclePrompt(action: StockPrepProjectLifecycleAction): void {
+  lifecyclePrompt.value = action
+  lifecycleTyped.value = ''
+  lifecycleNotice.value = null
+}
+
+function closeLifecyclePrompt(): void {
+  lifecyclePrompt.value = null
+  lifecycleTyped.value = ''
+}
+
+async function confirmLifecycle(): Promise<void> {
+  const action = lifecyclePrompt.value
+  const projectNo = openedProjectNo.value
+  if (!action || !projectNo || lifecycleBusy.value) return
+  lifecycleBusy.value = true
+  try {
+    const outcome = await changeStockPreparationProjectTargetLifecycle({
+      targetApi: projectTargetClient(),
+      canPull: holdsLifecycleCapability(action === 'archive' ? 'projectTarget.archive' : 'projectTarget.restore'),
+    }, action, projectNo, lifecycleTyped.value)
+    lifecycleNotice.value = outcome
+    if (outcome.kind === 'done') {
+      closeLifecyclePrompt()
+      if (outcome.state && openedProjectNo.value === projectNo) {
+        projectTargetGeneration += 1
+        projectTarget.value = outcome.state
+      } else if (openedProjectNo.value === projectNo) {
+        void loadProjectTarget(projectNo)
+      }
+    }
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
+
+const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = lifecycleNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') return targetPlain(notice.action === 'archive' ? 'archived_done' : 'restored_done')
+  if (notice.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (notice.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(notice.code ?? '')
 })
 
 onMounted(async () => {
@@ -1668,6 +2076,25 @@ onMounted(async () => {
   text-decoration: underline;
 }
 
+/* S4: the typed confirmation for archive / restore, inside the sheet-state line. */
+.sp-board__lifecycle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  flex-basis: 100%;
+}
+
+.sp-board__lifecycle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ms-space-2);
+}
+
+.sp-board__lifecycle-input {
+  min-width: 10em;
+}
+
 /* P1-2: Panel 2 — 就地展开 embedded 队列 + 进度条. */
 .sp-board__confirm-panel {
   display: flex;
@@ -1776,5 +2203,29 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: var(--ms-space-3);
+}
+
+/* S2: this project's own sheet, one line. Outlined, never a filled primary (G1). */
+.sp-board__target {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ms-space-2) var(--ms-space-3);
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sp-board__target-line {
+  margin: 0;
+  color: var(--ms-text-1);
+}
+
+.sp-board__target-rows {
+  margin-left: var(--ms-space-2);
+  color: var(--ms-text-2);
 }
 </style>

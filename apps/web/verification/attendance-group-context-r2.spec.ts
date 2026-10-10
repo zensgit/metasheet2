@@ -205,11 +205,26 @@ test('desktop drawer navigation survives Back, Forward, and refresh', async ({ b
   await page.reload()
   await assertReadyAssignments(page)
 
+  // WRITES, not "non-GET verbs". Two endpoints in this app are verb-shaped like a write and are not
+  // one, so the claim this test makes — navigating, going Back/Forward and refreshing never mutates
+  // anything — is about effects, not about methods:
+  //   * POST /api/attendance-admin/users/batch/resolve — a batch READ whose input is too long for a
+  //     query string.
+  //   * DELETE /api/method-probe — the DELETE transport probe (src/utils/delete-fallback.ts, fired
+  //     once per page session from main.ts after bootstrapSession). The route reads no request input
+  //     and touches no data; it exists only so the client can learn whether HTTP DELETE survives the
+  //     customer's egress at all (packages/core-backend/src/routes/method-probe.ts). One entry per
+  //     page load is expected here: the reload gives the probe a fresh JS context.
+  // Anything else non-GET is a real mutation and still fails this test.
   const writes = requests.filter(({ method, pathname }) => !(
     method === 'GET'
     || (method === 'POST' && pathname === '/api/attendance-admin/users/batch/resolve')
+    || (method === 'DELETE' && pathname === '/api/method-probe')
   ))
   expect(writes).toEqual([])
+  // Positive control: the probe really did fire, so the exemption above is carrying weight rather
+  // than quietly covering for a probe that stopped running.
+  expect(requests).toContainEqual({ method: 'DELETE', pathname: '/api/method-probe' })
   await context.close()
 })
 

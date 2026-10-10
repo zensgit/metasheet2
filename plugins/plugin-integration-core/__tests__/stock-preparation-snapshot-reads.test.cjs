@@ -285,6 +285,8 @@ async function main() {
       pathChanged: 0,
       missingChildBom: 0,
       fingerprintChanged: 0,
+      componentCodeChanged: 0,
+      materialChanged: 0,
     })
     assert.equal(result.blockingExceptionCount, 2, 'two blocking-severity exceptions (open + resolved)')
     assert.deepEqual(Object.keys(result).sort(), ['baseSnapshotBatchId', 'blockingExceptionCount', 'changeCounts', 'snapshotBatchId'])
@@ -695,6 +697,8 @@ async function main() {
       pathChanged: 0,
       missingChildBom: 0,
       fingerprintChanged: 0,
+      componentCodeChanged: 0,
+      materialChanged: 0,
     })
     assert.equal(diffResult.blockingExceptionCount, 2)
     const rowsResult = await listSnapshotDiffRows({

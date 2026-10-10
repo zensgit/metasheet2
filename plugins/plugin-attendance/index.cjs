@@ -159,6 +159,16 @@ const RESERVED_EVENT_SOURCES = new Set([OUTDOOR_APPROVAL_EVENT_SOURCE])
 const ATTENDANCE_APPROVAL_WORKFLOW_KEY = 'attendance.request'
 const ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS = ['attendance:approve', 'attendance:admin']
 
+// Approval change-request design lock v5.9 §14.1/§14.3 #10-#11 (lane decision 2, 2026-09-17):
+// mirrors the core-side `APPROVAL_CANCEL_ROUND_WORKFLOW_KEY`
+// (packages/core-backend/src/attendance/w4c3b-central-approval-hooks.ts) — SAME identifier, same
+// value, by the same convention `ATTENDANCE_APPROVAL_WORKFLOW_KEY` above already follows for that
+// core file (CJS boundary: this module has zero import of the TS side, so the value is duplicated
+// rather than imported). A pinning test asserts both the name and the value are byte-identical to
+// the core constant on every CI run
+// (packages/core-backend/tests/unit/approval-cancel-round-plugin-mirror-constant.test.ts).
+const APPROVAL_CANCEL_ROUND_WORKFLOW_KEY = 'approval.cancel-round'
+
 // ── S7-1 dynamic approval-assignee sources (RATIFIED attendance-approval-s7 resolver design-lock) ──
 // The whole capability is a default-OFF, flag-gated opt-in (§5). Read the flag at REQUEST time (not at
 // activate) so a test / operator flip takes effect without a restart.
@@ -6091,9 +6101,36 @@ function isEncryptedSecretValue(value) {
   return typeof value === 'string' && value.startsWith(SECRET_PREFIX)
 }
 
+// Same sentinels / same posture as packages/core-backend/src/security/encrypted-secrets.ts
+// (resolveEncryptionMaterial). This file is CJS and cannot import the TS helper, so the production
+// check is re-stated minimally here; keep the two in sync. Precedent for an in-plugin production
+// gate: plugins/plugin-integration-core/lib/credential-store.cjs:63-71.
+const DEFAULT_INTEGRATION_SECRET_KEY = 'default-key-change-in-production'
+const DEFAULT_INTEGRATION_SECRET_SALT = 'default-salt-change-in-production'
+
 function getIntegrationSecretKey() {
-  const masterKey = process.env.ENCRYPTION_KEY || 'default-key-change-in-production'
-  const salt = Buffer.from(process.env.ENCRYPTION_SALT || 'default-salt-change-in-production')
+  const rawKey = process.env.ENCRYPTION_KEY
+  const rawSalt = process.env.ENCRYPTION_SALT
+  // Trim before comparing, matching auth-runtime-config.ts `isProductionRuntime` (which
+  // encrypted-secrets.ts reuses). A strict === here made NODE_ENV=" production " fail-close in
+  // core-backend while this plugin quietly wrote appSecrets under the built-in default key.
+  if (normalizeTextValue(process.env.NODE_ENV) === 'production') {
+    // values-free: variable names + reason only, never the value.
+    const issues = []
+    const key = normalizeTextValue(rawKey)
+    const salt = normalizeTextValue(rawSalt)
+    if (!key) issues.push('ENCRYPTION_KEY not configured / not set')
+    else if (key === DEFAULT_INTEGRATION_SECRET_KEY) issues.push('ENCRYPTION_KEY uses the built-in default placeholder value')
+    if (!salt) issues.push('ENCRYPTION_SALT not configured / not set')
+    else if (salt === DEFAULT_INTEGRATION_SECRET_SALT) issues.push('ENCRYPTION_SALT uses the built-in default placeholder value')
+    if (issues.length > 0) {
+      throw new Error(`[plugin-attendance] Invalid encryption material for production: ${issues.join('; ')}`)
+    }
+  }
+  // Derivation keeps using the RAW value (not the trimmed one): trimming would change pbkdf2's
+  // output for any deployment whose key has stray whitespace and orphan every stored secret.
+  const masterKey = rawKey || DEFAULT_INTEGRATION_SECRET_KEY
+  const salt = Buffer.from(rawSalt || DEFAULT_INTEGRATION_SECRET_SALT)
   return crypto.pbkdf2Sync(masterKey, salt, SECRET_KEY_ITERATIONS, SECRET_KEY_LENGTH, 'sha256')
 }
 
@@ -6513,6 +6550,37 @@ function getUserLabel(req, fallback) {
   if (typeof user?.name === 'string' && user.name.trim().length > 0) return user.name
   if (typeof user?.email === 'string' && user.email.trim().length > 0) return user.email
   return fallback
+}
+
+// The authenticated caller's role claims, read exactly as core's `resolveApprovalActorRoles` reads
+// them (the `req.user.role` singular claim, trimmed, unioned with the string entries of the
+// `req.user.roles` array claim, deduplicated). Used ONLY for the cancel-round entry's post-action
+// count push, so the caller's pushed todo / approval count is computed on the same viewer the
+// caller's own count read resolves; it is not an authorization input.
+function getActorRoleClaims(req) {
+  const user = req.user
+  const role = typeof user?.role === 'string' && user.role.trim().length > 0 ? [user.role.trim()] : []
+  const roles = Array.isArray(user?.roles)
+    ? user.roles.filter((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+  return Array.from(new Set([...role, ...roles]))
+}
+
+// The authenticated caller's permission claims, read exactly as core's
+// `resolveApprovalActorPermissions` reads them (the string entries of `req.user.permissions` unioned
+// with those of `req.user.perms`, trimmed, blanks dropped, deduplicated). Used ONLY for the
+// cancel-round entry's post-action count push, so a caller whose pending items include a
+// permission-queue seat is pushed the same count their own count read resolves; it is not an
+// authorization input.
+function getActorPermissionClaims(req) {
+  const user = req.user
+  const permissions = Array.isArray(user?.permissions)
+    ? user.permissions.filter((entry) => typeof entry === 'string')
+    : []
+  const perms = Array.isArray(user?.perms)
+    ? user.perms.filter((entry) => typeof entry === 'string')
+    : []
+  return Array.from(new Set([...permissions, ...perms].map((entry) => entry.trim()).filter(Boolean)))
 }
 
 function getClientIp(req) {
@@ -16489,6 +16557,25 @@ function isAttendanceReportSyncScheduledTriggerRuntimeEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_SYNC_SCHEDULED_TRIGGER_ENABLED, false)
 }
 
+// B3 item 2 (spec-B3-stock-prep-own-base): opt-out gate for the activate()-time PRELOAD of the
+// attendance report field catalog. Default ON - unset keeps today's behaviour (the catalog object is
+// provisioned and seeded at plugin boot). Setting ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false (trimmed,
+// case-insensitive) skips ONLY that boot preload and logs one values-free info line; the on-demand
+// callers (saveAttendanceReportFormulaField / buildAttendanceReportFieldCatalogResponse) are untouched,
+// so opening a report still provisions the catalog. Read at call time, never at module load, so both
+// branches are exercisable in a single process.
+function isAttendanceReportFieldCatalogSeedEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
+}
+
+// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the
+// launch endpoint `POST /api/attendance/requests/:id/cancel-round` stays OFF until phase D acceptance
+// passes. Default OFF; gates ONLY the launch — every other cancel-round route is unaffected. Read at
+// call time, never at module load, so both branches are exercisable in a single process.
+function isAttendanceCancelRoundEntryEnabled() {
+  return parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)
+}
+
 function confidenceRank(value) {
   if (value === 'high') return 3
   if (value === 'medium') return 2
@@ -24270,7 +24357,30 @@ function buildAttendanceApprovalInstancePayload({
   }
 }
 
+// Approval change-request design lock v5.9 §14.3 #10/#11 defensive check (lane decision 2,
+// 2026-09-17): `upsertAttendanceApprovalInstance` below is the SAME chokepoint that feeds both
+// #10's attendance_requests FK-pairing column write and #11's `approval_instances.workflow_key`
+// write (both derive from this one `payload.workflowKey`). The
+// lock's own account of #11 calls its protection "structural" — every caller reaches this function
+// through `buildAttendanceApprovalInstancePayload`, the SOLE site in this file that sets the
+// payload's workflow-key property, always with the literal `ATTENDANCE_APPROVAL_WORKFLOW_KEY`
+// (mechanically pinned by the "assigned exactly once" unit test alongside this constant's mirror
+// test), so this assertion is PROVABLY unreachable for every current caller — it changes no
+// behavior today. It exists as a fail-closed trip-wire alongside #10's DB-level
+// `atr_not_cancel_round` CHECK, in case a future change ever threads a caller-supplied workflow
+// key through this path.
+function assertAttendanceApprovalPayloadNotCancelRound(payload) {
+  if (payload && payload.workflowKey === APPROVAL_CANCEL_ROUND_WORKFLOW_KEY) {
+    throw new HttpError(
+      500,
+      'ATTENDANCE_APPROVAL_INSTANCE_CANCEL_ROUND_FORBIDDEN',
+      'Attendance approval instance write must never target the cancel-round workflow key',
+    )
+  }
+}
+
 async function upsertAttendanceApprovalInstance(client, payload) {
+  assertAttendanceApprovalPayloadNotCancelRound(payload)
   // Lock-11 §10 W-4: derive the org to stamp BEFORE the INSERT, same transaction (TOCTOU
   // discipline matching W-1/W-2). A refusal here throws (values-free HttpError) and the whole
   // boundary transaction rolls back — no approval_instances row, no attendance_requests row,
@@ -24541,6 +24651,10 @@ module.exports = {
   // node 18/20 matrix is the old-ICU oracle that makes the leg discriminating.
   __buildZonedDateForTests: buildZonedDate,
   __getZonedMinutesForTests: getZonedMinutes,
+  // The REAL symbols the DingTalk appSecret write (normalizeIntegrationConfigForStorage) and read
+  // (normalizeIntegrationConfig) go through, so the production encryption-material gate is proven
+  // on the production code path rather than on a copy.
+  __attendanceIntegrationSecretForTests: { getIntegrationSecretKey, encryptIntegrationSecretValue, decryptIntegrationSecretValue },
   __attendanceWorkDateResolverForTests: {
     createPluginAttendanceWorkDateResolver,
     createAttendanceWorkDateResolver: getSharedWorkDateResolverForTests,
@@ -24689,6 +24803,7 @@ module.exports = {
     cloneAttendanceReportFieldCategories,
     cloneAttendanceReportFieldDefinitions,
     ensureAttendanceReportFieldCatalog,
+    isAttendanceReportFieldCatalogSeedEnabled,
     getAttendanceRecordReportFieldValue,
     getAttendanceReportFieldCatalogDescriptor,
     getAttendanceReportFieldProjectId,
@@ -24893,6 +25008,8 @@ module.exports = {
   __attendanceApprovalCenterForTests: {
     ATTENDANCE_APPROVAL_WORKFLOW_KEY,
     ATTENDANCE_APPROVAL_QUEUE_PERMISSIONS,
+    APPROVAL_CANCEL_ROUND_WORKFLOW_KEY,
+    assertAttendanceApprovalPayloadNotCancelRound,
     attendanceRequestTypeLabel,
     buildAttendanceApprovalNodeKey,
     buildAttendanceApprovalAssignments,
@@ -24952,6 +25069,41 @@ module.exports = {
       if (context.api?.events?.emit) {
         context.api.events.emit(type, data)
       }
+    }
+
+    /**
+     * Codex 审阅第 3 条修复 (2026-09-19) — THE single `attendance.request.cancelled` send site.
+     *
+     * Both the HTTP cancel route and the approval side's cancel-round redemption reach the event
+     * through THIS function and nothing else, so the gate and the payload exist once. Previously
+     * the gate and payload were inline in `cancelRequest`, and the redemption path (which never
+     * calls `cancelRequest` — its only two callers are the two HTTP routes) therefore emitted the
+     * event ZERO times under the `legacy` / `legacy_compat` postures, which are the only postures
+     * any org runs today. Measured: `{sendsAfterA: 0, sendsAfterB: 1}` over the twin fixture.
+     *
+     * ⚠️ THE GATE IS DERIVED, NOT COPIED FORWARD. Only `legacy` and `legacy_compat` emit here:
+     *   - `executed`  ⇒ the boundary enqueued `attendance_result_event_outbox` and the W4C-2
+     *                   dispatcher (`w4c2-outbox-dispatcher.ts:85-168`) emits it on drain. Emitting
+     *                   here as well would DOUBLE-send.
+     *   - `replay`    ⇒ the boundary returned at its replay preflight, BEFORE the enqueue
+     *                   (`w4c3b-request-operation-boundary.ts:870-874`); the original run already
+     *                   delivered. Emitting here would make a replay a duplicate delivery. This is
+     *                   the idempotency, reusing the W4 replay preflight — no new table, no new key.
+     *   - business_refused / anything else ⇒ nothing was cancelled; there is nothing to announce.
+     *
+     * Returns whether it sent, so callers can be asserted against rather than trusted.
+     */
+    const emitRequestCancelledEventForOutcomeV1 = (outcome, fallbackRequestId) => {
+      const kind = outcome?.kind
+      if (kind !== 'legacy' && kind !== 'legacy_compat') return false
+      const result = outcome.response?.data
+      emitEvent('attendance.request.cancelled', {
+        requestId: result?.requestId ?? fallbackRequestId,
+        status: result?.status ?? 'cancelled',
+        orgId: result?.orgId,
+        userId: result?.userId,
+      })
+      return true
     }
 
     // W4C-2 (#4556 lock §12.2 last sentence; #4607 gate handover P3-4): default-rule and
@@ -25565,6 +25717,54 @@ module.exports = {
         [orgId, groupId, userId]
       )
       return rows.length > 0
+    }
+
+    // ACL slice A reads + O3 in-group writes (2026-09-20). Unknown action → false.
+    // Still admin-only (must NOT be added here): add/remove managers, group CRUD,
+    // rule/holiday/payroll edits, fixed-schedule apply/rebuild/clear/config.
+    const ATTENDANCE_GROUP_MANAGER_ACTIONS = new Set([
+      'view_group',
+      'list_members',
+      'list_managers',
+      'add_members',
+      'remove_members',
+      'view_team_availability',
+      'fixed_schedule_preview',
+    ])
+
+    async function canManageAttendanceGroup(orgId, userId, groupId, action) {
+      if (!ATTENDANCE_GROUP_MANAGER_ACTIONS.has(action)) return false
+      if (!orgId || !userId || !groupId) return false
+      return userManagesAttendanceGroup(orgId, groupId, userId)
+    }
+
+    async function listManagedAttendanceGroupIds(orgId, userId) {
+      const rows = await db.query(
+        `SELECT group_id
+         FROM attendance_group_managers
+         WHERE org_id = $1
+           AND user_id = $2
+           AND role IN ('owner', 'sub_owner')`,
+        [orgId, userId]
+      )
+      return rows.map((row) => row.group_id).filter(Boolean)
+    }
+
+    async function resolveAttendanceGroupCatalogAccess(orgId, userId) {
+      if (process.env.RBAC_BYPASS === 'true' || await hasAttendanceAdminAccess(userId)) {
+        return { kind: 'org' }
+      }
+      const groupIds = await listManagedAttendanceGroupIds(orgId, userId)
+      if (groupIds.length === 0) return { kind: 'denied' }
+      return { kind: 'managed', groupIds }
+    }
+
+    function respondAttendanceGroupCatalogForbidden(res) {
+      res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+    }
+
+    function respondAttendanceGroupManagerTableMissing(res) {
+      res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
     }
 
     function respondAttendanceSchedulerScopeForbidden(res) {
@@ -26264,7 +26464,39 @@ module.exports = {
       return false
     }
 
-    function withAttendanceGroupMemberAccess(handler) {
+    async function authorizeAttendanceGroupScopedAction(req, res, { groupId, action }) {
+      const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+      if (!actorAccess) return null
+
+      if (process.env.RBAC_BYPASS === 'true') {
+        return { ...actorAccess, scope: 'org' }
+      }
+
+      try {
+        if (await hasAttendanceAdminAccess(actorAccess.userId)) {
+          return { ...actorAccess, scope: 'org' }
+        }
+        const allowed = await canManageAttendanceGroup(actorAccess.orgId, actorAccess.userId, groupId, action)
+        if (!allowed) {
+          res.status(403).json({
+            ok: false,
+            error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
+          })
+          return null
+        }
+        return { ...actorAccess, scope: 'managed' }
+      } catch (error) {
+        if (isDatabaseSchemaError(error)) {
+          respondAttendanceGroupManagerTableMissing(res)
+          return null
+        }
+        logger.error('Attendance group scoped authorization failed', error)
+        res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+        return null
+      }
+    }
+
+    function withAttendanceGroupMemberAccess(action, handler) {
       return async (req, res, next) => {
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -26272,51 +26504,29 @@ module.exports = {
           return
         }
 
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        const actorAccess = await authorizeAttendanceGroupScopedAction(req, res, { groupId, action })
         if (!actorAccess) return
 
-        const invokeHandler = async () => {
-          try {
-            const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
-              groupId,
-              orgId: actorAccess.orgId,
-            })
-            if (!groupExists) return
-            await handler(req, res, next, actorAccess)
-          } catch (error) {
-            if (error instanceof HttpError && !res.headersSent) {
-              res.status(error.status).json({
-                ok: false,
-                error: {
-                  code: error.code,
-                  message: error.message,
-                  ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
-                },
-              })
-              return
-            }
-            throw error
-          }
-        }
-
-        if (process.env.RBAC_BYPASS === 'true') {
-          await invokeHandler()
-          return
-        }
-
         try {
-          if (await hasAttendanceAdminAccess(actorAccess.userId)) {
-            await invokeHandler()
-            return
-          }
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
+          const groupExists = await assertAttendanceGroupInActorOrg(db, res, {
+            groupId,
+            orgId: actorAccess.orgId,
+          })
+          if (!groupExists) return
+          await handler(req, res, next, actorAccess)
         } catch (error) {
-          if (isDatabaseSchemaError(error)) {
-            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance group manager tables missing' } })
+          if (error instanceof HttpError && !res.headersSent) {
+            res.status(error.status).json({
+              ok: false,
+              error: {
+                code: error.code,
+                message: error.message,
+                ...(Array.isArray(error.details) && error.details.length > 0 ? { details: error.details } : {}),
+              },
+            })
             return
           }
-          logger.error('Attendance group scoped manager guard failed', error)
-          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+          throw error
         }
       }
     }
@@ -33621,8 +33831,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33635,6 +33845,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -33863,8 +34074,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         (id, user_id, org_id, work_date, request_type, requested_in_at, requested_out_at, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -33877,6 +34088,7 @@ module.exports = {
           draft.reason,
           'pending',
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(draft.metadata),
         ],
       )
@@ -34138,8 +34350,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'schedule_dispatch', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34148,6 +34360,7 @@ module.exports = {
           input.startDate,
           input.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34423,8 +34636,8 @@ module.exports = {
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const requestRows = await trx.query(
         `INSERT INTO attendance_requests
-         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, metadata)
-         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7::jsonb)
+         (id, user_id, org_id, work_date, request_type, reason, status, approval_instance_id, approval_workflow_key, metadata)
+         VALUES ($1, $2, $3, $4, 'shift_swap', $5, 'pending', $6, $7, $8::jsonb)
          RETURNING *`,
         [
           requestId,
@@ -34433,6 +34646,7 @@ module.exports = {
           requesterSource.workDate,
           route.reason,
           approvalId,
+          approvalPayload.workflowKey,
           JSON.stringify(metadata),
         ],
       )
@@ -34764,7 +34978,8 @@ module.exports = {
         const rows = await trx.query(
           `UPDATE attendance_requests
            SET work_date = $2, request_type = $3, requested_in_at = $4, requested_out_at = $5,
-               reason = $6, metadata = $7::jsonb, approval_instance_id = $8, updated_at = now()
+               reason = $6, metadata = $7::jsonb, approval_instance_id = $8,
+               approval_workflow_key = $9, updated_at = now()
            WHERE id = $1
            RETURNING *`,
           [
@@ -34776,6 +34991,7 @@ module.exports = {
             draft.reason,
             JSON.stringify(draft.metadata),
             approvalId,
+            approvalPayload.workflowKey,
           ],
         )
         const snapshotToken = buildRequestSnapshotToken(snapshotAppend)
@@ -35053,6 +35269,33 @@ module.exports = {
       },
       execute: async function executeRequestCancel(trx, prepared, operation) {
         const { route, requestRow, approvalId, approval, approvedLeave, actorPosture } = prepared.state
+        // ── Lock §3 C-2 全局锁序 — the ORIGINAL approval instance is locked BEFORE the request row.
+        // lock:110 「建议全局顺序 rollout/advisory 锁 → 轮次引擎实例 → 原单据实例 → attendance_requests
+        // → 余额批次，现有适配器改为同序」; lock:227 repeats it as the row-lock class order.
+        // Until this commit this adapter took `attendance_requests FOR UPDATE` first and the
+        // original `approval_instances` row second, while the core approval side takes them the
+        // other way round (`classifyAndLockAttendanceRequestForInstance`, always reached with the
+        // instance row already `FOR UPDATE`-held by `dispatchAction` / `bulkReassignApprovals`).
+        // That is a cycle on the SAME (request, instance) pair, and it is not theoretical: it is
+        // CONSTRUCTED and deadlocks deterministically (40P01) in census Q-G,
+        // `packages/core-backend/tests/integration/approval-cancel-round-lock-order-census.db.test.ts`.
+        // Behaviour note (disclosed, not buried): when BOTH rows are mutated concurrently between
+        // prepare and execute, the 409 that surfaces is now 'Approval changed during cancellation
+        // preparation' where it used to be 'Request changed during cancellation preparation' —
+        // same status and same code (`REQUEST_STATE_CONFLICT`), and no test asserts the
+        // precedence. The one row lock this now takes before the authorization calls below has the
+        // same blast radius as the request-row lock that was already taken before them.
+        let lockedApproval = null
+        if (approvalId) {
+          const approvalRows = await trx.query(
+            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
+            [approvalId],
+          )
+          lockedApproval = approvalRows[0] ?? null
+          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
+            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
+          }
+        }
         const lockedRequestRows = await trx.query(
           'SELECT * FROM attendance_requests WHERE id = $1::uuid FOR UPDATE',
           [route.requestId],
@@ -35082,17 +35325,6 @@ module.exports = {
           },
         )
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
-        let lockedApproval = null
-        if (approvalId) {
-          const approvalRows = await trx.query(
-            'SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE',
-            [approvalId],
-          )
-          lockedApproval = approvalRows[0] ?? null
-          if (JSON.stringify(lockedApproval) !== JSON.stringify(approval)) {
-            throw new HttpError(409, 'REQUEST_STATE_CONFLICT', 'Approval changed during cancellation preparation')
-          }
-        }
         if (requestRow.status !== 'pending' && !approvedLeave) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
@@ -35118,12 +35350,31 @@ module.exports = {
             mode: operation.acceptedWritePosture === 'authoritative' ? 'authoritative' : 'shadow',
           })
           if (cancellationCalculation.kind === 'review_required') {
-            throw new HttpError(
-              409,
-              'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
-              'Approved leave cancellation requires attendance review',
-              singleValidationDetail('calculation', cancellationCalculation.reason),
-            )
+            // Lock §3 C-3 / §11-④ (approval-change-request lock:126-130). This used to `throw` the
+            // 409 straight from here. A throw is the WRONG shape for a business outcome that the
+            // approval side has to be able to decide on: an approved document's cancel round must
+            // be able to PERSIST a `blocked` closure in the same transaction, and a throw unwinds
+            // the transaction it would have to be written in. So the business outcome is RETURNED,
+            // and the boundary — which is the only thing that knows which entry it is serving —
+            // decides what to do with it.
+            //
+            // The HTTP entry is unchanged in observable behaviour: the boundary throws THIS error
+            // object, constructed here with the same four arguments as before (status 409, code,
+            // message, `singleValidationDetail('calculation', reason)`), so the response body is
+            // byte-for-byte what it was. Oracle:
+            // `attendance-w4c3b-request-operation-routes.db.test.ts`, "rolls back approved-leave
+            // cancellation when P14 has no frozen parent calculation".
+            return {
+              kind: 'business_refused',
+              code: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+              detail: cancellationCalculation.reason,
+              httpError: new HttpError(
+                409,
+                'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED',
+                'Approved leave cancellation requires attendance review',
+                singleValidationDetail('calculation', cancellationCalculation.reason),
+              ),
+            }
           }
         }
 
@@ -35688,6 +35939,29 @@ module.exports = {
             },
           })
         : null
+
+    // Approval-change-request lock §3 C-1 — hand the SAME boundary to the approval side's
+    // cancel-round redemption. Not a second boundary and not a cancel-only shim: the object bound
+    // here is the one the HTTP routes above already call, so 判据 II's 完整业务取消 and an ordinary
+    // `POST /requests/:id/cancel` run the identical W4 protocol (prepare/prepareIdentity → identity
+    // congruence → rollout-locked posture → authorization → replay preflight → adapter.execute →
+    // seal/outbox), differing only in who owns the connection and the transaction.
+    if (
+      w4RequestOperationBoundary
+      && attendanceW4SegmentCalculationPort
+      && typeof attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary === 'function'
+    ) {
+      attendanceW4SegmentCalculationPort.registerCancelRoundExecutionBoundary(w4RequestOperationBoundary)
+      // Codex 审阅第 3 条修复 (2026-09-19) — bind the POST-COMMIT `attendance.request.cancelled`
+      // delivery to the SAME function the HTTP route calls. The approval side owns the transaction
+      // and calls this only after its COMMIT; the gate and the payload live here, once, so the two
+      // paths cannot drift into two event constructions.
+      if (typeof attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery === 'function') {
+        attendanceW4SegmentCalculationPort.registerCancelRoundCancelledEventDelivery(
+          (result, fallbackRequestId) => emitRequestCancelledEventForOutcomeV1(result, fallbackRequestId),
+        )
+      }
+    }
 
     // W4C-3c: manual_edit / recompute / ops_retirement adapters — only entrypoints for these writes.
 	    async function loadW4c3cRecordSubjectForOperation(trx, orgId, recordId) {
@@ -36764,6 +37038,523 @@ module.exports = {
         }
       })
     )
+
+    // ── Approval change-request lock v5.9, product entry v2 (lock header 「RATIFY 追记」 2026-09-28),
+    //    phase A: the attendance-side cancel-round entry (P-1 Q1′ = (i): launch behind
+    //    `attendance:write`, read progress behind `attendance:read`); A2 (owner 2026-09-29,
+    //    「Attendance-side + OFF flag (Recommended)」): approver approve / reject behind
+    //    `attendance:approve`, the requester's withdraw behind `attendance:write`, and a default-OFF
+    //    flag (`ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED`) on the launch only.
+    //
+    // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」): the approver's 「cancellations
+    // waiting for me」 list, `GET /api/attendance/cancel-rounds/pending`, behind `attendance:approve`,
+    // listing only the viewer's own live seats — the seat verdict is the port's, i.e. the decision
+    // door's own predicate on the role claims the actions route dispatches with, and the document gate
+    // is the actions route's own (`toCancelRoundRequest` below).
+    //
+    // The routes reach core ONLY through `context.services.approvalCancelRoundEntry`, which core
+    // injects into this plugin alone. No port (or a port missing any of its six methods) ⇒ none of
+    // the routes is registered (fail-closed: no entry rather than a half-wired one).
+    //
+    // VISIBILITY is lock I7 — `canReadApprovalInstance` on the request's ORIGINAL approval instance
+    // (P-4: the predicate sits on the original document, never a second one). A viewer who fails it,
+    // an unknown id, a request with no approval instance, and a request that is not a LEAVE all get
+    // the SAME 404 body.
+    //
+    // LEAVE ONLY: the entry is the leave-cancellation entry (§15.1 「原请假单」; phase 1 ships only the
+    // leave suite). It scopes to `request_type === 'leave'` — together with P-1 (a) below this is the
+    // same `approvedLeave` predicate the W4 cancel adapter applies (`status === 'approved' &&
+    // request_type === 'leave'`), so a round is never opened on a document the W4 redemption would
+    // refuse AT LAUNCH TIME. It cannot cover a change to the request after launch (for example the
+    // existing direct-cancel route cancelling the leave while the round is pending); that case is
+    // recorded as owner merge/deploy input in the phase A design MD. The refusal SHAPE (the
+    // not-found body, no new code) is a provisional implementation choice pending an owner/gate
+    // pick — see the same MD.
+    //
+    // LAUNCH preconditions are P-1 (a)/(b)/(c) on the attendance request row, answered with the P-8
+    // registered codes, and then the dedicated creation path re-checks them on the approval instance
+    // under its own row lock (the authoritative half). Refusals from that path are passed through as
+    // (status, code, message) only.
+    const cancelRoundEntryPort = context?.services?.approvalCancelRoundEntry ?? null
+    if (
+      cancelRoundEntryPort
+      && typeof cancelRoundEntryPort.canReadDocument === 'function'
+      && typeof cancelRoundEntryPort.readRoundSummary === 'function'
+      && typeof cancelRoundEntryPort.launch === 'function'
+      && typeof cancelRoundEntryPort.decide === 'function'
+      && typeof cancelRoundEntryPort.withdraw === 'function'
+      && typeof cancelRoundEntryPort.listSeatedPendingRounds === 'function'
+    ) {
+      const respondCancelRoundRequestNotFound = (res) => {
+        res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+      }
+
+      // LEAVE ONLY + an approval instance to key on, over a request row already read org-scoped. The
+      // ONE document gate: the single-row loader below (every per-request cancel-round route) and the
+      // C2 list's batch read both pass their rows through it.
+      const toCancelRoundRequest = (row) => {
+        if (!row || !row.approval_instance_id) return null
+        if (row.request_type !== 'leave') return null
+        return {
+          requestId: String(row.id),
+          userId: row.user_id,
+          status: row.status,
+          documentInstanceId: String(row.approval_instance_id),
+        }
+      }
+
+      // Org scope + the document gate above. Shared by every per-request cancel-round route.
+      const loadCancelRoundRequestRow = async (requestId, orgId) => {
+        const rows = await db.query(
+          'SELECT id, user_id, status, request_type, approval_instance_id FROM attendance_requests WHERE id = $1 AND org_id = $2',
+          [requestId, orgId]
+        )
+        return toCancelRoundRequest(rows[0])
+      }
+
+      // The row above, visible to the viewer by lock I7 on the ORIGINAL document (summary, launch,
+      // withdraw). The approver route does not add this: see its own comment.
+      const loadCancelRoundRequestForViewer = async (requestId, orgId, viewerId) => {
+        const request = await loadCancelRoundRequestRow(requestId, orgId)
+        if (!request) return null
+        const readable = await cancelRoundEntryPort.canReadDocument(viewerId, request.documentInstanceId)
+        if (!readable) return null
+        return request
+      }
+
+      // A refusal from the port carries (status, code, message) only; anything malformed is a 500.
+      const respondCancelRoundPortRefusal = (res, result, fallbackMessage) => {
+        const status = Number.isInteger(result?.status) && result.status >= 400 && result.status <= 599
+          ? result.status
+          : 500
+        res.status(status).json({
+          ok: false,
+          error: {
+            code: typeof result?.code === 'string' ? result.code : 'INTERNAL_ERROR',
+            message: typeof result?.message === 'string' ? result.message : fallbackMessage,
+          },
+        })
+      }
+
+      // Owner 2026-09-29 14:3x 「Minimal action response (Recommended)」: an approve / reject / withdraw
+      // success names the round acted on and where it now stands — `{ requestId, roundId, outcome,
+      // status }` and nothing else. The round summary is served ONLY by the summary route, behind lock
+      // I7; the approver route has no I7 in front of its seat check, so it must not hand the summary
+      // back. Fields are copied one by one so nothing else the port returns can ride along.
+      const respondCancelRoundActionOutcome = (res, requestId, round) => {
+        if (!round || typeof round.roundId !== 'string' || typeof round.outcome !== 'string' || typeof round.status !== 'string') {
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to act on cancellation' } })
+          return
+        }
+        res.json({
+          ok: true,
+          data: { requestId, roundId: round.roundId, outcome: round.outcome, status: round.status },
+        })
+      }
+
+      const cancelRoundLaunchBodySchema = z.object({
+        reason: z.string().max(2000).optional().nullable(),
+      })
+
+      // The summary also carries `entryEnabled` (owner 2026-09-29 14:3x, 「Summary exposes entryEnabled
+      // (Recommended)」): the GLOBAL state of the launch flag and nothing per user, so the client can
+      // tell 「entry switched off」 apart from 「this document cannot be cancelled」 — the OFF launch itself
+      // answers the not-found body and cannot say which. The launch's 201 carries the same field so the
+      // two bodies keep one shape.
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:read', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            const summary = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            res.json({
+              ok: true,
+              data: { requestId: request.requestId, ...summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round summary failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load cancellation' } })
+          }
+        })
+      )
+
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round',
+        withPermission('attendance:write', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          // A2 default-OFF launch flag, checked before any read or write. OFF answers with the entry's
+          // own not-found body — the same bytes as a never-existing id — rather than a new
+          // feature-disabled code (P-8: no code before it is registered; see the design MD §A2).
+          if (!isAttendanceCancelRoundEntryEnabled()) {
+            respondCancelRoundRequestNotFound(res)
+            return
+          }
+          const parsed = cancelRoundLaunchBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          const reason = typeof parsed.data.reason === 'string' && parsed.data.reason.trim().length > 0
+            ? parsed.data.reason.trim()
+            : null
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            // P-1 (a) — only an approved leave can be cancelled.
+            if (request.status !== 'approved') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
+                  message: 'A cancel round can only be started for an approved document',
+                },
+              })
+              return
+            }
+            // P-1 (b) / lock:157 — only the original requester; a participant who may READ the
+            // document (approver, admin, delegate, proxy submitter) may not launch.
+            if (request.userId !== viewerId) {
+              res.status(403).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_REQUESTER_ONLY',
+                  message: 'Only the original requester may start a cancel round for this document',
+                },
+              })
+              return
+            }
+            // P-1 (c) / I3 — at most one in-flight round; the creation path's partial unique index
+            // remains the authoritative backstop for the concurrent case.
+            const current = await cancelRoundEntryPort.readRoundSummary(request.documentInstanceId, viewerId)
+            if (current && current.round && current.round.outcome === 'pending') {
+              res.status(409).json({
+                ok: false,
+                error: {
+                  code: 'CANCEL_ROUND_ALREADY_PENDING',
+                  message: 'This document already has a cancel round in progress',
+                },
+              })
+              return
+            }
+            const result = await cancelRoundEntryPort.launch(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+              },
+              { reason }
+            )
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to start cancellation')
+              return
+            }
+            res.status(201).json({
+              ok: true,
+              data: { requestId: request.requestId, ...result.summary, entryEnabled: isAttendanceCancelRoundEntryEnabled() },
+            })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round launch failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to start cancellation' } })
+          }
+        })
+      )
+
+      // `expectedRoundId` (optional; phase D D2): the round the caller has on screen. When present and
+      // it is not the document's latest round, the port refuses before dispatching anything (409, the
+      // engine's existing INVALID_STATUS_TRANSITION) — so a caller acting from a list never acts on a
+      // round other than the one listed, and needs no read of the document to know that.
+      const cancelRoundDecisionBodySchema = z.object({
+        action: z.enum(['approve', 'reject']),
+        comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
+      })
+      const cancelRoundWithdrawBodySchema = z.object({
+        comment: z.string().max(2000).optional().nullable(),
+        expectedRoundId: z.string().max(200).optional().nullable(),
+      })
+      const normalizeCancelRoundComment = (value) =>
+        typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+      const normalizeCancelRoundExpectedRoundId = (value) =>
+        typeof value === 'string' && value.trim().length > 0 ? value.trim() : null
+
+      // A2 — an approver's approve / reject on the document's latest cancel round. The seat is the
+      // authority: the port hands the action, AS the caller, to the same service entry
+      // `POST /api/approvals/:id/actions` uses, where the seat check, the §2-G3 seat rules and the §9-9
+      // action set run unchanged. Like that route, this one adds no document-visibility predicate in
+      // front of the seat check, so a holder of `attendance:approve` without a seat receives the
+      // service's existing refusal. Only the two verbs the owner named are accepted here; every other
+      // verb is a 400 before any lookup (the service's own §9-9 gate still stands behind it).
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round/actions',
+        withPermission('attendance:approve', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          const parsed = cancelRoundDecisionBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round action payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestRow(requestId, getOrgId(req))
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            const result = await cancelRoundEntryPort.decide(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+                ip: req.ip ?? null,
+                userAgent: req.get('user-agent') ?? null,
+              },
+              {
+                action: parsed.data.action,
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
+            )
+            if (result && result.ok === false && result.noRound === true) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to act on cancellation')
+              return
+            }
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round action failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to act on cancellation' } })
+          }
+        })
+      )
+
+      // A2 — the requester withdraws the pending cancellation: the engine's `revoke` on the round's own
+      // instance, through the same service entry, whose revoke gate (allowRevoke → requester → status →
+      // window) decides. Visibility is lock I7 on the ORIGINAL document, as for the summary and the
+      // launch; then only the leave's own user may withdraw (lock:157 仅原 requester — the same rule the
+      // launch applies), answered with the engine's own revoke-refusal code and message.
+      context.api.http.addRoute(
+        'POST',
+        '/api/attendance/requests/:id/cancel-round/withdraw',
+        withPermission('attendance:write', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const requestId = normalizeUuidString(req.params.id)
+          if (!requestId) {
+            respondInvalidUuid(res)
+            return
+          }
+          const parsed = cancelRoundWithdrawBodySchema.safeParse(req.body ?? {})
+          if (!parsed.success) {
+            res.status(400).json(validationErrorBody('Invalid cancel-round withdraw payload', formatZodValidationDetails(parsed.error)))
+            return
+          }
+          try {
+            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            if (!request) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (request.userId !== viewerId) {
+              res.status(403).json({
+                ok: false,
+                error: {
+                  code: 'APPROVAL_REVOKE_FORBIDDEN',
+                  message: 'Only the requester can revoke this approval',
+                },
+              })
+              return
+            }
+            const result = await cancelRoundEntryPort.withdraw(
+              request.documentInstanceId,
+              {
+                userId: viewerId,
+                userName: getUserLabel(req, viewerId),
+                roles: getActorRoleClaims(req),
+                permissions: getActorPermissionClaims(req),
+                ip: req.ip ?? null,
+                userAgent: req.get('user-agent') ?? null,
+              },
+              {
+                comment: normalizeCancelRoundComment(parsed.data.comment),
+                expectedRoundId: normalizeCancelRoundExpectedRoundId(parsed.data.expectedRoundId),
+              }
+            )
+            if (result && result.ok === false && result.noRound === true) {
+              respondCancelRoundRequestNotFound(res)
+              return
+            }
+            if (!result || result.ok !== true) {
+              respondCancelRoundPortRefusal(res, result, 'Failed to withdraw cancellation')
+              return
+            }
+            respondCancelRoundActionOutcome(res, request.requestId, result.round)
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round withdraw failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to withdraw cancellation' } })
+          }
+        })
+      )
+
+      const toCancelRoundIsoOrNull = (value) => {
+        if (value === null || value === undefined) return null
+        const parsed = value instanceof Date ? value : new Date(value)
+        return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString()
+      }
+
+      // C2 (owner 2026-09-29 16:5x, 「Attendance-side list (Recommended)」) — the approver's 「cancellations
+      // waiting for me」: every pending cancel round the caller could approve / reject RIGHT NOW on
+      // `POST …/cancel-round/actions`, and nothing else.
+      //   - Guard: `attendance:approve`, the actions route's own guard (no grant-policy change).
+      //   - Seat: the port's `listSeatedPendingRounds` — the decision door's own predicate over the
+      //     round's active assignments, with the role claims the actions route dispatches with. A holder
+      //     of `attendance:approve` without a seat gets an EMPTY list (200), not a refusal.
+      //   - Document: org scope + `toCancelRoundRequest`, the actions route's own gate (no I7, like the
+      //     actions route: the seat is the authority). A round whose request row is in another org, is
+      //     not a leave, or has no approval instance is not listed — the actions route answers it 404.
+      //   - Fields: the round, the leave it cancels (type, start, end) and the leave owner's directory
+      //     name — the same directory `name` this plugin's other `attendance:approve`-reachable reads
+      //     join from `users`, never the original document's requester snapshot (`null` when absent).
+      //     No delivery data, no other seat holder, no status field (every item is pending by
+      //     construction).
+      //   - Paging: the plugin's `parsePagination` (default 50, max 200), newest launch first;
+      //     `total` counts every listed round.
+      context.api.http.addRoute(
+        'GET',
+        '/api/attendance/cancel-rounds/pending',
+        withPermission('attendance:approve', async (req, res) => {
+          const viewerId = getUserId(req)
+          if (!viewerId) {
+            res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+            return
+          }
+          const { pageSize, offset } = parsePagination(req.query)
+          try {
+            const seated = await cancelRoundEntryPort.listSeatedPendingRounds(viewerId)
+            if (!Array.isArray(seated)) {
+              throw new Error('cancel-round pending list: the port answered a non-array')
+            }
+            const documentIds = Array.from(new Set(
+              seated
+                .map((round) => round?.documentInstanceId)
+                .filter((id) => typeof id === 'string' && id.length > 0)
+            ))
+            const requestByDocument = new Map()
+            if (documentIds.length > 0) {
+              const rows = await db.query(
+                `SELECT ar.id, ar.user_id, ar.status, ar.request_type, ar.approval_instance_id,
+                        ar.requested_in_at, ar.requested_out_at, u.name AS requester_name
+                   FROM attendance_requests ar
+                   LEFT JOIN users u ON u.id = ar.user_id
+                  WHERE ar.org_id = $1
+                    AND ar.approval_instance_id = ANY($2::text[])
+                  ORDER BY ar.id`,
+                [getOrgId(req), documentIds]
+              )
+              for (const row of rows) {
+                const request = toCancelRoundRequest(row)
+                // One request per document: the lowest id, the same pick the todo center's cancel-round
+                // deep link makes when two request rows share one approval instance.
+                if (!request || requestByDocument.has(request.documentInstanceId)) continue
+                requestByDocument.set(request.documentInstanceId, { request, row })
+              }
+            }
+            const listed = []
+            const seenRounds = new Set()
+            for (const round of seated) {
+              if (!round || typeof round.roundId !== 'string' || seenRounds.has(round.roundId)) continue
+              const match = requestByDocument.get(round.documentInstanceId)
+              if (!match) continue
+              seenRounds.add(round.roundId)
+              const requesterName = typeof match.row.requester_name === 'string' && match.row.requester_name.trim().length > 0
+                ? match.row.requester_name
+                : null
+              listed.push({
+                requestId: match.request.requestId,
+                roundId: round.roundId,
+                engineInstanceId: String(round.engineInstanceId),
+                requesterUserId: match.request.userId,
+                requesterName,
+                requestType: match.row.request_type,
+                startAt: toCancelRoundIsoOrNull(match.row.requested_in_at),
+                endAt: toCancelRoundIsoOrNull(match.row.requested_out_at),
+                launchedAt: typeof round.launchedAt === 'string' ? round.launchedAt : null,
+              })
+            }
+            res.json({ ok: true, data: { items: listed.slice(offset, offset + pageSize), total: listed.length } })
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+              return
+            }
+            logger.error('Attendance cancel-round pending list failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to list cancellations' } })
+          }
+        })
+      )
+    }
 
     context.api.http.addRoute(
       'POST',
@@ -38483,15 +39274,7 @@ module.exports = {
           },
         })
 
-        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
-          const result = outcome.response?.data
-          emitEvent('attendance.request.cancelled', {
-            requestId: result?.requestId ?? requestId,
-            status: result?.status ?? 'cancelled',
-            orgId: result?.orgId,
-            userId: result?.userId,
-          })
-        }
+        emitRequestCancelledEventForOutcomeV1(outcome, requestId)
         res.json(outcome.response)
       } catch (error) {
         if (error instanceof HttpError) {
@@ -44817,7 +45600,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const schema = z.object({
           orgId: z.string().optional(),
         })
@@ -44834,29 +45617,85 @@ module.exports = {
         const routeActorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!routeActorAccess) return
         const orgId = routeActorAccess.orgId
+        const actorId = routeActorAccess.userId
         const { page, pageSize, offset } = parsePagination(req.query)
 
+        let catalogAccess
         try {
-          const countRows = await db.query(
-            'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
-            [orgId]
-          )
+          catalogAccess = await resolveAttendanceGroupCatalogAccess(orgId, actorId)
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group catalog access failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
+          return
+        }
+        if (catalogAccess.kind === 'denied') {
+          respondAttendanceGroupCatalogForbidden(res)
+          return
+        }
+
+        const managedScope = catalogAccess.kind === 'managed'
+
+        try {
+          const countRows = managedScope
+            ? await db.query(
+              `SELECT COUNT(*)::int AS total
+               FROM attendance_groups g
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )`,
+              [orgId, actorId]
+            )
+            : await db.query(
+              'SELECT COUNT(*)::int AS total FROM attendance_groups WHERE org_id = $1',
+              [orgId]
+            )
           const total = Number(countRows[0]?.total ?? 0)
 
-          const rows = await db.query(
-            `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
-             FROM attendance_groups g
-             LEFT JOIN (
-               SELECT group_id, COUNT(*)::int AS member_count
-               FROM attendance_group_members
-               WHERE org_id = $1
-               GROUP BY group_id
-             ) member_counts ON member_counts.group_id = g.id
-             WHERE g.org_id = $1
-             ORDER BY g.created_at DESC
-             LIMIT $2 OFFSET $3`,
-            [orgId, pageSize, offset]
-          )
+          const rows = managedScope
+            ? await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+                 AND g.id IN (
+                   SELECT m.group_id
+                   FROM attendance_group_managers m
+                   WHERE m.org_id = $1
+                     AND m.user_id = $2
+                     AND m.role IN ('owner', 'sub_owner')
+                 )
+               ORDER BY g.created_at DESC
+               LIMIT $3 OFFSET $4`,
+              [orgId, actorId, pageSize, offset]
+            )
+            : await db.query(
+              `SELECT g.*, COALESCE(member_counts.member_count, 0)::int AS member_count
+               FROM attendance_groups g
+               LEFT JOIN (
+                 SELECT group_id, COUNT(*)::int AS member_count
+                 FROM attendance_group_members
+                 WHERE org_id = $1
+                 GROUP BY group_id
+               ) member_counts ON member_counts.group_id = g.id
+               WHERE g.org_id = $1
+               ORDER BY g.created_at DESC
+               LIMIT $2 OFFSET $3`,
+              [orgId, pageSize, offset]
+            )
 
           res.json({
             ok: true,
@@ -44865,6 +45704,7 @@ module.exports = {
               total,
               page,
               pageSize,
+              scope: managedScope ? 'managed' : 'org',
             },
           })
         } catch (error) {
@@ -44875,19 +45715,38 @@ module.exports = {
           logger.error('Attendance groups fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load groups' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id',
-      withPermission('attendance:admin', async (req, res) => {
+      async (req, res) => {
         const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
         if (!actorAccess) return
         const orgId = actorAccess.orgId
+        const actorId = actorAccess.userId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
+          return
+        }
+
+        try {
+          if (process.env.RBAC_BYPASS !== 'true' && !(await hasAttendanceAdminAccess(actorId))) {
+            const allowed = await canManageAttendanceGroup(orgId, actorId, groupId, 'view_group')
+            if (!allowed) {
+              res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' } })
+              return
+            }
+          }
+        } catch (error) {
+          if (isDatabaseSchemaError(error)) {
+            respondAttendanceGroupManagerTableMissing(res)
+            return
+          }
+          logger.error('Attendance group lookup authorization failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
           return
         }
 
@@ -44923,7 +45782,7 @@ module.exports = {
           logger.error('Attendance group lookup failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -45137,7 +45996,7 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('list_members', async (req, res, _next, actorAccess) => {
         const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -45182,7 +46041,7 @@ module.exports = {
     context.api.http.addRoute(
       'POST',
       '/api/attendance/groups/:id/members',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('add_members', async (req, res, _next, actorAccess) => {
         const schema = z.object({
           userId: z.string().optional(),
           userIds: z.array(z.string()).optional(),
@@ -45225,6 +46084,14 @@ module.exports = {
               if (rows.length) created.push(mapAttendanceGroupMemberRow(rows[0]))
             }
           })
+          emitEvent('attendance.group.members.changed', {
+            orgId,
+            groupId,
+            actorId: actorAccess.userId,
+            action: 'add',
+            scope: actorAccess.scope === 'managed' ? 'managed' : 'org',
+            count: created.length,
+          })
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -45240,7 +46107,7 @@ module.exports = {
     context.api.http.addRoute(
       'DELETE',
       '/api/attendance/groups/:id/members/:userId',
-      withAttendanceGroupMemberAccess(async (req, res, _next, actorAccess) => {
+      withAttendanceGroupMemberAccess('remove_members', async (req, res, _next, actorAccess) => {
         const orgId = actorAccess.orgId
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
@@ -45257,6 +46124,14 @@ module.exports = {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Member not found' } })
             return
           }
+          emitEvent('attendance.group.members.changed', {
+            orgId,
+            groupId,
+            actorId: actorAccess.userId,
+            action: 'remove',
+            scope: actorAccess.scope === 'managed' ? 'managed' : 'org',
+            count: 1,
+          })
           res.json({ ok: true, data: { id: rows[0].id } })
         } catch (error) {
           if (isDatabaseSchemaError(error)) {
@@ -45272,15 +46147,18 @@ module.exports = {
     context.api.http.addRoute(
       'GET',
       '/api/attendance/groups/:id/managers',
-      withPermission('attendance:admin', async (req, res) => {
-        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
-        if (!actorAccess) return
-        const orgId = actorAccess.orgId
+      async (req, res) => {
         const groupId = normalizeUuidString(req.params.id)
         if (!groupId) {
           respondInvalidUuid(res)
           return
         }
+        const actorAccess = await authorizeAttendanceGroupScopedAction(req, res, {
+          groupId,
+          action: 'list_managers',
+        })
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const { page, pageSize, offset } = parsePagination(req.query)
 
         try {
@@ -45316,7 +46194,7 @@ module.exports = {
           logger.error('Attendance group managers fetch failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load group managers' } })
         }
-      })
+      }
     )
 
     context.api.http.addRoute(
@@ -45587,10 +46465,6 @@ module.exports = {
       async (req, res) => {
         const actorAccess = await resolveAttendanceFixedScheduleRouteActorContext(req, res)
         if (!actorAccess) return
-        if (!actorAccess.fullAdmin) {
-          res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Insufficient permissions' } })
-          return
-        }
         const schema = z.object({
           shiftId: z.string().min(1),
           startDate: z.string().min(1),
@@ -45609,6 +46483,26 @@ module.exports = {
         if (!groupId) {
           respondInvalidUuid(res)
           return
+        }
+        if (process.env.RBAC_BYPASS !== 'true' && !actorAccess.fullAdmin) {
+          try {
+            const allowed = await canManageAttendanceGroup(orgId, actorAccess.userId, groupId, 'fixed_schedule_preview')
+            if (!allowed) {
+              res.status(403).json({
+                ok: false,
+                error: { code: 'FORBIDDEN', message: 'Insufficient permissions for this group' },
+              })
+              return
+            }
+          } catch (error) {
+            if (isDatabaseSchemaError(error)) {
+              respondAttendanceGroupManagerTableMissing(res)
+              return
+            }
+            logger.error('Attendance group fixed schedule preview authorization failed', error)
+            res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Permission check failed' } })
+            return
+          }
         }
         const shiftId = normalizeUuidString(parsed.data.shiftId)
         if (!shiftId) {
@@ -50756,10 +51650,14 @@ module.exports = {
 	      logger.warn('Attendance settings preload failed', error)
 	    }
 
-	    try {
-	      await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
-	    } catch (error) {
-	      logger.warn('Attendance report field catalog preload failed', error)
+	    if (isAttendanceReportFieldCatalogSeedEnabled()) {
+	      try {
+	        await ensureAttendanceReportFieldCatalog(context, DEFAULT_ORG_ID, logger)
+	      } catch (error) {
+	        logger.warn('Attendance report field catalog preload failed', error)
+	      }
+	    } else {
+	      logger.info('Attendance report field catalog preload skipped (ATTENDANCE_REPORT_FIELD_CATALOG_SEED=false)')
 	    }
 
     logger.info('Attendance plugin activated')

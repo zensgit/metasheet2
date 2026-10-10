@@ -25,6 +25,7 @@ import { RecordWriteService, RecordValidationError, type RecordPatchInput } from
 import { createRecordWriteHelpers } from '../../src/routes/univer-meta'
 import { deriveCapabilities } from '../../src/multitable/sheet-capabilities'
 import { resolvePersonAssignableDirectory } from '../../src/multitable/person-field-restriction'
+import { CommentService } from '../../src/services/CommentService'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => poolManager.get().query(sql, params)
@@ -40,6 +41,16 @@ const G_OTHER = '22222222-2222-4222-8222-222222222222'
 const U_IN = `u_pmg_in_${TS}`
 const U_OUT = `u_pmg_out_${TS}`
 const U_INACTIVE = `u_pmg_inactive_${TS}` // 2c-S2: in G_ALLOW but is_active=FALSE → excluded from the assignable directory
+// #5809: a sheet member whose name and email both differ from its id, so the exact lookup's id / name /
+// email arms can each be proven on their own (the other fixture users have name == id).
+const U_EXACT = `u_pmg_exact_${TS}`
+const U_EXACT_NAME = `Fake Exact ${TS}`
+const U_EXACT_EMAIL = `fake.exact.${TS}@t.local`
+// #5809 refuter round: a member whose STORED name / email carry whitespace JS trim() strips but PG's
+// one-argument btrim() does not (U+3000 ideographic space, NBSP, tab).
+const U_PADDED = `u_pmg_padded_${TS}`
+const U_PADDED_NAME = `Fake Padded ${TS}`
+const U_PADDED_EMAIL = `fake.padded.${TS}@t.local`
 
 const F_PERSON = 'fld_person_restricted'
 const F_PERSON_FREE = 'fld_person_free'
@@ -111,6 +122,11 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,FALSE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_INACTIVE, `${U_INACTIVE}@t.local`, U_INACTIVE])
     await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_INACTIVE])
     await q('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING', [G_ALLOW, U_INACTIVE])
+    // #5809 fixture: an eligible, active sheet member in NO group (unrestricted fields only).
+    await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_EXACT, U_EXACT_EMAIL, U_EXACT_NAME])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_EXACT])
+    await q(`INSERT INTO users (id, email, name, password_hash, role, permissions, is_active, is_admin) VALUES ($1,$2,$3,'x','user','[]'::jsonb,TRUE,FALSE) ON CONFLICT (id) DO NOTHING`, [U_PADDED, `\u00A0${U_PADDED_EMAIL}\t`, `${U_PADDED_NAME}\u3000`])
+    await q(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1,'multitable:read') ON CONFLICT DO NOTHING`, [U_PADDED])
   })
   beforeEach(async () => {
     await q('INSERT INTO meta_records (id, sheet_id, data, version) VALUES ($1,$2,$3::jsonb,1) ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, version = 1', [REC_ID, SHEET_ID, JSON.stringify({})])
@@ -124,8 +140,8 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE_ID]).catch(() => {})
     await q('DELETE FROM platform_member_group_members WHERE group_id = ANY($1)', [[G_ALLOW, G_OTHER]]).catch(() => {})
     await q('DELETE FROM platform_member_groups WHERE id = ANY($1)', [[G_ALLOW, G_OTHER]]).catch(() => {})
-    await q('DELETE FROM user_permissions WHERE user_id = ANY($1)', [[ACTOR, U_IN, U_OUT]]).catch(() => {})
-    await q('DELETE FROM users WHERE id = ANY($1)', [[ACTOR, U_IN, U_OUT]]).catch(() => {})
+    await q('DELETE FROM user_permissions WHERE user_id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT, U_PADDED]]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1)', [[ACTOR, U_IN, U_OUT, U_EXACT, U_PADDED]]).catch(() => {})
   })
 
   test('sentinel: DATABASE_URL set', () => {
@@ -190,5 +206,120 @@ describeIfDatabase('#16 person restrictToMemberGroupIds enforcement (real DB)', 
     const ids = dir.map((e) => e.userId)
     expect(ids).toEqual(expect.arrayContaining([ACTOR, U_IN, U_OUT])) // all active sheet members
     expect(ids).not.toContain(U_INACTIVE) // inactive → not a sheet member, not in the directory
+  })
+
+  // -- #5781: the HYDRATION BOUNDS, executed against real Postgres ------------------------------
+  //
+  // Why here and not in a unit test: tests/unit/multitable-person-directory-resolver.test.ts proves
+  // the bounds by asserting on the SQL STRING produced for a fake query fn, and
+  // tests/unit/multitable-person-directory-bounded.test.ts mocks resolvePersonAssignableDirectory
+  // wholesale. Neither ever executes the ILIKE predicate, the LIKE-escape convention or the
+  // `LIMIT $n` against a real engine, so a shape PG rejects or case-folds differently (the 222 box
+  // runs a Chinese locale) would leave every suite green and fail first on the deployment. These are
+  // the only assertions that run the #5781 SQL for real.
+  test('#5781 bound (real DB): the LIMIT is executed by PG, not applied in memory', async () => {
+    const all = await resolvePersonAssignableDirectory(q, SHEET_ID, [])
+    expect(all.length).toBeGreaterThanOrEqual(3) // ACTOR + U_IN + U_OUT are all active sheet members
+    const bounded = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { limit: 2 })
+    expect(bounded).toHaveLength(2)
+  })
+
+  test('#5781 bound (real DB): the search term is a case-insensitive SUBSTRING match on name/email', async () => {
+    // U_IN's fixture name/email both contain this fragment; upper-cased to prove ILIKE case folding
+    // actually happens in the engine (the route lower-cases nothing).
+    const term = `_IN_${TS}`
+    const hit = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: term, limit: 50 })
+    expect(hit.map((e) => e.userId)).toEqual([U_IN])
+    expect(hit[0]?.email).toBe(`${U_IN}@t.local`) // still hydrated, just bounded
+
+    const miss = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `no_such_person_${TS}`, limit: 50 })
+    expect(miss).toEqual([])
+  })
+
+  test('#5781 bound (real DB): LIKE metacharacters in the term stay LITERAL (a bare % is not "everything")', async () => {
+    // The term is deliberately FIXTURE-SCOPED rather than a bare '%': this suite shares a database
+    // with the rest of the real-DB lane, so `search: '%'` + `toEqual([])` would be an assertion
+    // about every row in that database (and, with a 50-row ceiling, would not even be a reliable
+    // probe — the fixtures sort late). `<U_IN's id>%` decides it both ways with no ambiguity:
+    //   escaped   → a literal trailing percent sign, which no row has          ⇒ []
+    //   unescaped → a prefix wildcard, which matches U_IN's name AND email      ⇒ [U_IN]
+    // so this is the assertion that catches escapeLikeTerm being dropped.
+    const literalPct = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `${U_IN}%`, limit: 50 })
+    expect(literalPct).toEqual([])
+    // `_` is the OTHER LIKE metacharacter: as a wildcard `u_pmg` would match any 5-char prefix, but as
+    // a literal it must still match the fixture ids (which genuinely contain underscores).
+    const underscore = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: `u_pmg_in_${TS}`, limit: 50 })
+    expect(underscore.map((e) => e.userId)).toEqual([U_IN])
+  })
+
+  test('#5781 bound (real DB): the bounds NEVER widen the allowed set (a term cannot reach outside it)', async () => {
+    // The whole safety property of #5781's hydration bounds: $1 stays the write-validator's allowed
+    // set. Searching a RESTRICTED field for a user who is a sheet member but NOT in the group must
+    // still return nothing - the term filters within the allowed set, it does not select from users.
+    const outside = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_OUT, limit: 50 })
+    expect(outside).toEqual([])
+    const inside = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_IN, limit: 50 })
+    expect(inside.map((e) => e.userId)).toEqual([U_IN])
+    // ... and an INACTIVE member of the allowed group stays excluded even when searched for by name.
+    const inactive = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { search: U_INACTIVE, limit: 50 })
+    expect(inactive).toEqual([])
+  })
+
+  // -- #5809: the EXACT lookup mode (import resolver), executed against real Postgres -------------
+  // tests/unit/multitable-person-directory-resolver.test.ts only inspects the SQL string; this runs the
+  // lower()/btrim()/::text equality for real (the 222 box runs a Chinese locale).
+  test('#5809 exact (real DB): id, name and email each match by case-insensitive EQUALITY', async () => {
+    const opts = (exact: string) => ({ exact, limit: 51 })
+    const byId = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, opts(U_EXACT.toUpperCase()))
+    expect(byId.map((e) => e.userId)).toEqual([U_EXACT])
+    const byName = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, opts(` ${U_EXACT_NAME.toLowerCase()} `))
+    expect(byName.map((e) => e.userId)).toEqual([U_EXACT])
+    const byEmail = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, opts(U_EXACT_EMAIL.toUpperCase()))
+    expect(byEmail.map((e) => e.userId)).toEqual([U_EXACT])
+    expect(byEmail[0]?.name).toBe(U_EXACT_NAME)
+  })
+
+  test('#5809 exact (real DB): a fragment the substring search matches returns nothing', async () => {
+    const fragment = `exact.${TS}`
+    const substring = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { search: fragment, limit: 50 })
+    expect(substring.map((e) => e.userId)).toEqual([U_EXACT])
+    const exact = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { exact: fragment, limit: 51 })
+    expect(exact).toEqual([])
+  })
+
+  test('#5809 exact (real DB): never reaches outside the allowed set, nor an inactive member', async () => {
+    // U_EXACT is a sheet member but in no group: a restricted field cannot resolve it by id.
+    const outsideGroup = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { exact: U_EXACT, limit: 51 })
+    expect(outsideGroup).toEqual([])
+    const out = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { exact: U_OUT, limit: 51 })
+    expect(out).toEqual([])
+    const inside = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { exact: U_IN, limit: 51 })
+    expect(inside.map((e) => e.userId)).toEqual([U_IN])
+    const inactive = await resolvePersonAssignableDirectory(q, SHEET_ID, [G_ALLOW], undefined, { exact: U_INACTIVE, limit: 51 })
+    expect(inactive).toEqual([])
+  })
+
+  test('#5809 exact (real DB): a stored name/email padded with U+3000 / NBSP / tab still equals the trimmed term', async () => {
+    const byName = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { exact: U_PADDED_NAME.toLowerCase(), limit: 51 })
+    expect(byName.map((e) => e.userId)).toEqual([U_PADDED])
+    const byEmail = await resolvePersonAssignableDirectory(q, SHEET_ID, [], undefined, { exact: U_PADDED_EMAIL, limit: 51 })
+    expect(byEmail.map((e) => e.userId)).toEqual([U_PADDED])
+  })
+
+  // The mention SQL has no other wired real-Postgres lane; this runs the #5809 exact-email arm for real.
+  test('#5809 mention candidates exact-email (real DB): email EQUALITY only, trimmed like JS trim()', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const service = new CommentService({} as any, { info() {}, warn() {}, error() {}, debug() {} } as any)
+    const exactEmail = (term: string) => service.listMentionCandidates(SHEET_ID, { q: term, limit: 51, match: 'exact-email' })
+    expect((await exactEmail(U_EXACT_EMAIL.toUpperCase())).items.map((item) => item.id)).toEqual([U_EXACT])
+    expect((await exactEmail(U_PADDED_EMAIL)).items.map((item) => item.id)).toEqual([U_PADDED])
+    // A fragment the substring search matches is not an email owner.
+    const fragment = `exact.${TS}@t.local`
+    const substring = await service.listMentionCandidates(SHEET_ID, { q: fragment, limit: 51 })
+    expect(substring.items.map((item) => item.id)).toContain(U_EXACT)
+    expect((await exactEmail(fragment)).items).toEqual([])
+    // Names and ids are not matched in this mode.
+    expect((await exactEmail(U_EXACT_NAME)).items).toEqual([])
+    expect((await exactEmail(U_EXACT)).items).toEqual([])
   })
 })

@@ -58,6 +58,7 @@ const ALL_KEYS: WorkbenchLabelKey[] = [
   'toast.excelExportFailed', 'toast.bulkDeleteFailed',
   'toast.workbenchInitFailed',
   'confirm.discardContextChanges', 'confirm.discardRecordChanges',
+  'confirm.discardCommentEdit',
   'confirm.pageLeaveBusy', 'confirm.pageLeaveDirty',
   'card.install', 'card.installing',
   'error.loadSheets', 'error.loadSheetMetadata', 'error.loadBaseMetadata',
@@ -93,6 +94,9 @@ describe('workbench-labels static table', () => {
     // F5: the toast shown when the page-leave guard blocks "More templates ->" (zh text is the
     // user-facing wording agreed in the feedback triage; it must not drift into the .vue file).
     expect(workbenchLabel('toast.templateCenterBlocked', true)).toBe('有未保存的更改，请先处理')
+    // #5813: asked before the header Comments button drops an in-progress comment edit.
+    expect(workbenchLabel('confirm.discardCommentEdit', true)).toBe('放弃对这条评论未保存的修改吗？')
+    expect(workbenchLabel('confirm.discardCommentEdit', false)).toBe('Discard your unsaved edit to this comment?')
   })
 
   // W1 G-10 (2026-07-13, display layer only): Sheet = 数据表, Base = 工作区 in zh — locks the

@@ -155,27 +155,44 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  // 一线自己拉数据: the owner ruled a floor operator may self-serve the pull, and the server split the
-  // two routes that DO it (dry-run, apply) onto the operator tier while reconcile and mvp-persist
-  // stayed platform-admin. The control follows the server, not the other way round — the plugin
-  // suite stock-preparation-operator-pull-gate.test.cjs is what proves the server actually admits it.
-  it('P-01: the stock-prep OPERATOR tier gets the sync control', () => {
-    h.permissions = ['stock-prep:read', 'stock-prep:operate']
+  // 拉取人员拉数据 (R-33, 2026-10-08; was 一线自己拉数据): the owner first ruled a floor operator may
+  // self-serve the pull, then reversed it — pulling belongs to the 拉取人员, a holder of
+  // `stock-prep:pull` on top of operate and read. The control follows the server, not the other way
+  // round — the plugin suite stock-preparation-operator-pull-gate.test.cjs (P-14) is what proves the
+  // server admits the puller and refuses the floor operator.
+  it('P-01: the stock-prep PULL tier (read+operate+pull) gets the sync control', () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate', 'stock-prep:pull']
     const root = mountPanel({ api: api() })
     expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).toBeNull()
   })
 
-  it('P-01: the operate tier is a CONJUNCTION — operate WITHOUT read still gets nothing', () => {
-    h.permissions = ['stock-prep:operate']
+  it('P-01: the floor operator (read+operate, no pull) no longer gets it, and is sent to the 拉取人员', () => {
+    h.permissions = ['stock-prep:read', 'stock-prep:operate']
     const root = mountPanel({ api: api() })
     expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
-    expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]')).not.toBeNull()
+    const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
+    expect(denied).not.toBeNull()
+    expect(denied.textContent).toContain('请联系拉取人员')
+    // …and is NOT told to obtain a permission they already hold.
+    expect(denied.textContent).not.toContain('备料操作权限')
+  })
+
+  it('P-01: the pull tier is a CONJUNCTION — pull WITHOUT operate, pull WITHOUT read, and operate WITHOUT read all get nothing', () => {
+    for (const permissions of [['stock-prep:read', 'stock-prep:pull'], ['stock-prep:operate', 'stock-prep:pull'], ['stock-prep:pull'], ['stock-prep:operate']]) {
+      h.permissions = permissions
+      const root = mountPanel({ api: api() })
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]'), permissions.join('+')).toBeNull()
+      expect(root.querySelector('[data-testid="stock-prep-project-sync-denied"]'), permissions.join('+')).not.toBeNull()
+      app?.unmount()
+      app = null
+      container!.innerHTML = ''
+    }
   })
 
   it('P-01: neither the integration:write nor the read-only tier gets it, and both are told who does', () => {
     // NOTE the probe this suite injects is an EXACT-match one, so `stock-prep:admin` does not satisfy
-    // `stock-prep:operate` here the way the real `useAuth` ladder would. That is deliberate: this
+    // `stock-prep:pull` here the way the real `useAuth` ladder would. That is deliberate: this
     // assertion is about the codes the panel asks for, and the ladder itself is pinned by
     // stockPrepPermissionMatrix.spec.ts against the live plugin module.
     for (const permissions of [['integration:write'], ['integration:read'], ['stock-prep:read'], []]) {
@@ -184,10 +201,10 @@ describe('StockPreparationProjectSyncPanel', () => {
       expect(root.querySelector('[data-testid="stock-prep-project-sync-run"]')).toBeNull()
       const denied = root.querySelector('[data-testid="stock-prep-project-sync-denied"]') as HTMLElement
       expect(denied).not.toBeNull()
-      // The reason names BOTH tiers that can run it — sending someone to the wrong person is its own
-      // kind of dead end.
+      // The reason names BOTH tiers that can run it — the 拉取人员 first, the platform administrator
+      // second — because sending someone to the wrong person is its own kind of dead end.
+      expect(denied.textContent).toContain('拉取人员')
       expect(denied.textContent).toContain('平台管理员')
-      expect(denied.textContent).toContain('备料操作权限')
       app?.unmount()
       app = null
       container!.innerHTML = ''
@@ -320,6 +337,93 @@ describe('StockPreparationProjectSyncPanel', () => {
     expect(archive.getAttribute('data-status')).toBe('skip')
     expect(archive.textContent).toContain('这是设置,不是故障')
     expect((root.textContent || '')).not.toContain('失败')
+  })
+
+  // ---- P-07: 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) —————————————————————————
+  // a dry-run failure names its ACTUAL cause instead of always printing the same "try again" line.
+  // The OLD, always-the-same sentence — asserted absent for the two classes it used to wrongly cover.
+  const OLD_GENERIC_PLAN_READ_FAILED_ZH = '没能连上取数,试算没有跑起来'
+
+  it('P-07: a CONNECTION_* dry-run refusal names the broken connection, not the generic retry line', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(500, '/dry-run', { code: 'CONNECTION_CANONICAL_UNAVAILABLE' }),
+      ),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('连接配置失效')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    // The code stays visible in 技术详情 for whoever quotes it to an administrator.
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_FAILED_CONNECTION')
+    expect(tech.textContent).toContain('CONNECTION_CANONICAL_UNAVAILABLE')
+  })
+
+  it('P-07: a TARGET_SHEET_FOREIGN_PROJECT refusal names the other project, not the generic retry line', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(
+        new StockPreparationProjectSyncCallError(409, '/dry-run', { code: 'TARGET_SHEET_FOREIGN_PROJECT' }),
+      ),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('其他项目的有效数据')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_FAILED_FOREIGN_PROJECT')
+    expect(tech.textContent).toContain('TARGET_SHEET_FOREIGN_PROJECT')
+  })
+
+  it('P-07: a bare 403 on the plan is named as a permission refusal', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(403, '/dry-run', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('没有从 PLM 拉取')
+  })
+
+  it('P-07: a bare 401 on the plan is named as an expired session, not a permission refusal', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(401, '/dry-run', {})),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.getAttribute('data-status')).toBe('fail')
+    expect(plan.textContent).toContain('登录已过期')
+    expect(plan.textContent).not.toContain('没有从 PLM 拉取')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+    const tech = root.querySelector('[data-testid="stock-prep-project-sync-tech"]') as HTMLElement
+    expect(tech.textContent).toContain('PLAN_READ_UNAUTHENTICATED')
+  })
+
+  it('P-07: SOURCE_UNAVAILABLE keeps the original "try again shortly" sentence — this IS the transient case', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(503, '/dry-run', { code: 'SOURCE_UNAVAILABLE' })),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
+  })
+
+  it('P-07: an unrecognized dry-run failure asks the operator to screenshot the technical details', async () => {
+    const double = api({
+      dryRun: vi.fn().mockRejectedValue(new StockPreparationProjectSyncCallError(400, '/dry-run', { code: 'SOME_OTHER_CODE' })),
+    })
+    const root = mountPanel({ api: double })
+    await runSync(root)
+    const plan = root.querySelector('[data-step="dry-run"]') as HTMLElement
+    expect(plan.textContent).toContain('截图')
+    expect(plan.textContent).not.toContain(OLD_GENERIC_PLAN_READ_FAILED_ZH)
   })
 
   // ---- P-06: the partial-write headline tells the truth ------------------------------------

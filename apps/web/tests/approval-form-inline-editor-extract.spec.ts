@@ -383,7 +383,6 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
     listSheetsSpy.mockRejectedValue(new Error('network down'))
 
     await mountView()
-    setInput('approval-template-key', 'rl_demo')
     setInput('approval-template-name', '关联记录演示')
 
     // Add a record-link field through the CHILD's palette click (exercises the real
@@ -704,7 +703,6 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
   // -------------------------------------------------------------------------
   it('(k) L8-C: the number-props config block is type-selected, its three controls are typed (not inert), and their values reach the create payload', async () => {
     await mountView()
-    setInput('approval-template-key', 'num_l8c')
     setInput('approval-template-name', 'L8C数字')
 
     // The default create-mode field starts as `text` — the block is absent until retyped.
@@ -750,7 +748,6 @@ describe('ApprovalFormInlineEditor extraction (F0, Gate F0)', () => {
 
   it('(l) L8-C: unchecking the toggles / clearing the currency select removes the keys (editor-authoritative, not resurrected)', async () => {
     await mountView()
-    setInput('approval-template-key', 'num_l8c_clear')
     setInput('approval-template-name', 'L8C清空')
 
     const typeSelect = container!.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement

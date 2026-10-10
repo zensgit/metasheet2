@@ -54,7 +54,7 @@ describe('buildBatchExpectedVersions — BS-4 wire-drift guard', () => {
 })
 
 type Props = {
-  visible: boolean; phase: 'preview' | 'result'; loading: boolean; targetVersion: number
+  visible: boolean; phase: 'preview' | 'result'; loading: boolean; executing?: boolean; targetVersion: number
   previewRecords: RestoreBatchPreviewRecord[]; restorableCount: number; skippedCount: number; executable: boolean
   resultRecords: RestoreBatchExecuteRecord[]; restoredCount: number
   recordLabelOf: (id: string) => string; isZh: boolean
@@ -80,6 +80,19 @@ const q = (sel: string) => document.body.querySelector(sel) as HTMLElement | nul
 afterEach(() => { while (mounted.length) mounted.pop()!.unmount(); document.body.innerHTML = '' })
 
 describe('RestoreBatchDialog — BS-4 panel', () => {
+  it('blocks close, backdrop cancellation and advanced changes while execution is pending', async () => {
+    const props = mountDialog({ loading: true, executing: true, executable: true, restorableCount: 1 })
+    await nextTick()
+    for (const selector of ['.restore-batch__close', '[data-test="batch-restore-cancel"]', '[data-test="batch-restore-advanced"]']) {
+      const button = q(selector) as HTMLButtonElement
+      expect(button.disabled).toBe(true)
+      button.click()
+    }
+    q('[data-test="restore-batch"]')!.click()
+    expect(props.onCancel).not.toHaveBeenCalled()
+    expect(props.onPreviewVersion).not.toHaveBeenCalled()
+  })
+
   it('preview: renders per-record restorable/skipped(reason) + ENABLES confirm when executable & restorable>0', async () => {
     const props = mountDialog({
       executable: true, restorableCount: 1, skippedCount: 1,

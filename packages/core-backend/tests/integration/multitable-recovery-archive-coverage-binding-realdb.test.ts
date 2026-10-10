@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import { Kysely, PostgresDialect, sql } from 'kysely'
 import { Pool } from 'pg'
+import { suspendPreparedMigrationLayer, restorePreparedMigrationLayer } from '../utils/recovery-prepared-migration-layer'
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest'
 
 import * as archiveCatalogMigration from '../../src/db/migrations/zzzz20260826120000_create_meta_recovery_archive_catalog'
@@ -256,11 +257,17 @@ async function truncateCoverage(): Promise<void> {
   const legalHoldTarget = legalHoldTable.rows[0]?.present
     ? 'meta_recovery_archive_legal_holds,'
     : ''
+  const derivedEffectsTable = await q(
+    `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_derived_effects') IS NOT NULL AS present`,
+  )
+  const derivedEffectTarget = derivedEffectsTable.rows[0]?.present
+    ? 'meta_recovery_archive_derived_effects,'
+    : ''
   const restoreJobsTable = await q(
     `SELECT pg_catalog.to_regclass('public.meta_recovery_archive_jobs') IS NOT NULL AS present`,
   )
   const restoreJobTargets = restoreJobsTable.rows[0]?.present
-    ? `meta_recovery_archive_restore_plans,
+    ? `${derivedEffectTarget}meta_recovery_archive_restore_plans,
          meta_recovery_archive_job_chunks,
          meta_recovery_archive_sync_receipts,
          meta_recovery_token_burns,
@@ -356,6 +363,7 @@ describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)'
   beforeAll(async () => {
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 4 })
     db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
+    await suspendPreparedMigrationLayer(db)
     await installIfAbsent()
     await provisionFixtureKey()
     initialFingerprint = await bindingFingerprint()
@@ -393,7 +401,7 @@ describeIfRealDbStep('Phase D2d2-PREP-A coverage section/root binding (real DB)'
       await cleanupSourceFixtures()
       await removeFixtureKey()
     } finally {
-      await db.destroy()
+      try { await restorePreparedMigrationLayer(db) } finally { await db.destroy() }
     }
   })
 

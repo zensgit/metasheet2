@@ -101,6 +101,9 @@ function addressesASheet(h: Handler): boolean {
     || /\bresolveSheetCapabilities\b|\bresolveSheetReadableCapabilities\b/.test(h.body)
     || /\brequireRecordReadable\b/.test(h.body)
     || /\bresolveMetaSheetId\b/.test(h.body)
+    // The three field-retype-convert endpoints take a FIELD id and reach the sheet through their shared gate. Without
+    // this line they resolve no capabilities in their own body and would silently leave the closed world.
+    || /\bgateFieldRetypeConvert\b/.test(h.body)
   )
 }
 
@@ -113,6 +116,10 @@ function addressesASheet(h: Handler): boolean {
  *   - `requireRecordReadable` — refuses a non-live sheet itself (univer-meta.ts), so its callers inherit
  *   - `handleExactAnchorPreview` / `handleExactAnchorExecute` — the four revert/reset one-liners
  *     delegate wholesale to these, which check liveness after their existence-hiding authority gate
+ *   - `gateFieldRetypeConvert` — the ONE gate the field-retype-convert preview / execute / undo share. It
+ *     resolves the sheet, refuses a non-live one itself (404, after the 403) and answers null, which each
+ *     caller acts on with its very next statement. What it does is PROVEN below ('the shared field-retype gate'),
+ *     not assumed from its name.
  */
 const GUARD_PATTERNS: Array<[RegExp, string]> = [
   [/sheetLiveness !== 'live'/, "explicit sheetLiveness refusal"],
@@ -127,6 +134,7 @@ const GUARD_PATTERNS: Array<[RegExp, string]> = [
   [/deleted_at IS NULL/, 'inline deleted_at IS NULL'],
   [/\brequireRecordReadable\b/, 'requireRecordReadable (refuses a non-live sheet)'],
   [/\bhandleExactAnchor(Preview|Execute)\b/, 'delegates to the exact-anchor handler'],
+  [/\bawait gateFieldRetypeConvert\(/, 'gateFieldRetypeConvert (the shared field-retype gate refuses a non-live sheet)'],
 ]
 
 function guardOf(h: Handler): string | null {
@@ -157,10 +165,80 @@ const EXEMPT: Record<string, string> = {
     'creates a BASE. It never resolves a sheet — the only `sheetId` token in its body belongs to the '
     + 'template-install helper text further down the file, not to this handler.',
   'POST /templates/:templateId/install':
-    'CREATES sheets. There is no pre-existing sheet whose liveness could be asserted; the sheets it '
-    + 'makes are live by construction.',
+    'CREATES sheets — and, since the #5861 install dedupe, MAY REPLAY a create it recorded up to the '
+    + 'dedupe window ago. On the fresh path the sheets it returns are live by construction. On the '
+    + 'replay path the liveness of exactly what it hands back IS asserted, just not in this handler '
+    + 'body: `multitable/template-install-dedupe.ts` re-reads the recorded base (`meta_bases ... AND '
+    + 'deleted_at IS NULL`) AND every recorded sheet id (`meta_sheets WHERE id = ANY(...) AND '
+    + 'deleted_at IS NULL`, all of them or no replay) before returning the recorded response; any miss '
+    + 'drops the ledger row and installs afresh. That is why the classifier still sees no guard token '
+    + 'here. If that module ever stops re-asserting liveness, this exemption is false again.',
   'GET /record-subscription-notifications':
     'reads the CALLER’S OWN notification rows, keyed by user, not by sheet. It takes no sheet id.',
+}
+
+/**
+ * ORDER, for the sheet-row EXISTENCE PROBE. The classifier above counts `loadSheetRow` (and an inline
+ * `deleted_at IS NULL` sheet read) as a liveness guard, and it has no order rule. A probe that answers
+ * 404 for a soft-deleted or absent sheet BEFORE the handler's first authority refusal tells a caller
+ * who may not use that sheet whether it is still there — the oracle #5830 removed from
+ * `requireRecordReadable`, still present in the route handlers named below. The list is exact and can
+ * only shrink: a new handler of this shape reds, and a fixed one must leave.
+ *
+ * ── The third alternative, and why it exists (#5936) ──────────────────────────
+ * The first two alternatives recognise the probe only in its `loadSheetRow(…)` and its EXACT
+ * single-line `FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL` forms. `GET /context` writes
+ * the same question with a TABLE ALIAS, across four lines and behind a LEFT JOIN
+ * (`FROM meta_sheets s … WHERE s.id = $1 AND s.deleted_at IS NULL`), so it matched neither — and a
+ * ledger that cannot see a handler cannot hold it to account. It was found by hand, not by this
+ * guard, which is the failure this alternative removes.
+ *
+ * It reads the QUESTION — "is the row for the id THIS REQUEST NAMES still there?" — not the table
+ * name, and it is deliberately the same test the all-routes guard already applies to AST-extracted
+ * SQL (`sheetTableLivenessFilter`, tests/utils/sheet-liveness-route-scan.ts:930), rewritten for RAW
+ * SOURCE text. BOTH halves must be present, and each may be spelled bare OR alias-qualified:
+ *   - the ADDRESSED-ID binding `id = $n`, behind a `(?<![.\w])` lookbehind so that `base_id = $1`
+ *     and (under an alias `s`) `r.id = $1` are not read as one. Without it a base-scoped LIST
+ *     (`FROM meta_sheets s WHERE s.base_id = $1 AND s.deleted_at IS NULL`) — which proves nothing
+ *     about the ONE sheet a request addresses — would be reported here as an existence oracle;
+ *   - the soft-delete filter `deleted_at IS NULL`, on the SHEET. When the FROM carries an alias the
+ *     filter may be BACK-REFERENCED to it, so `FROM meta_sheets s … b.deleted_at IS NULL`
+ *     (univer-meta.ts's base-liveness filter) and `FROM other_table x … x.deleted_at IS NULL` do
+ *     NOT match. The BARE spelling is accepted too: `FROM meta_sheets s … WHERE s.id = $1 AND
+ *     deleted_at IS NULL` is valid SQL and this file's own idiom.
+ * Case-insensitive and `\s+`-tolerant (the SQL here is multi-line, and its keyword casing is a style
+ * choice, not a contract), and `FROM`-only — never `JOIN`: a joined `meta_sheets` is a row FILTER on
+ * another table's rows (`FROM meta_records r JOIN meta_sheets s …`), not this ledger's question.
+ *
+ * KNOWN LIMIT, stated instead of claimed away. The span between the halves is bounded (400 chars
+ * each) and may not cross a backtick, a `;`, or a second `FROM`/`JOIN … meta_sheets`. That keeps a
+ * match inside ONE template-literal SQL fragment, so two adjacent statements cannot be spliced into
+ * a GAP that names a handler whose SQL holds no probe at all — at the price of missing a probe
+ * ASSEMBLED from two concatenated template literals. No such shape exists in this file today: the
+ * widening leaves this ledger's found-set unchanged, and adds `GET /context` to it on the UNFIXED
+ * source, which is the only reason to widen it.
+ */
+const EXISTENCE_PROBE = /\bawait\s+loadSheet(?:Row|RowShared|Summary)\s*\(|\bFROM meta_sheets WHERE id = \$1 AND deleted_at IS NULL\b|\bFROM\s+(?:\w+\.)?meta_sheets\b(?:\s+(?:AS\s+)?(?!WHERE\b|JOIN\b|LEFT\b|INNER\b|RIGHT\b|FULL\b|CROSS\b|ON\b|ORDER\b|GROUP\b|LIMIT\b|OFFSET\b|UNION\b)(\w+))?(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?id\s*=\s*\$\d+(?:(?!(?:FROM|JOIN)\s+(?:\w+\.)?meta_sheets\b)[^`;]){0,400}?(?<![.\w])(?:\1\.)?deleted_at\s+IS\s+NULL\b/i
+/** Where a handler first refuses a caller for lack of authority (the shared record gate refuses inside). */
+const AUTHORITY_REFUSAL = /\.status\(\s*403\s*\)|\bstatus:\s*403\b|\bsend\w*Forbidden\w*\(|\bForbiddenError\b|\brequireRecordReadable\(/
+/** The probe's miss is answered with a 404 by the very next `if`. */
+const PROBE_MISS_IS_404 = /^(?:(?!\bif\b)[\s\S]){0,160}\bif\s*\(\s*(?:!\s*\w+|\w+\.rows\.length\s*===\s*0)\s*\)\s*(?:\{\s*)?(?:return\s+res\.status\(\s*404\s*\)|throw\s+new\s+NotFoundError\b|return\s*\{\s*kind:\s*'error',\s*status:\s*404\b)/
+
+function probesExistenceBeforeAuthority(body: string): boolean {
+  const probe = body.search(EXISTENCE_PROBE)
+  if (probe === -1) return false
+  const authority = body.search(AUTHORITY_REFUSAL)
+  return authority === -1 || probe < authority
+}
+
+const EXISTENCE_BEFORE_AUTHORITY_GAP = {
+  reason: 'GAP — tracked in #5839 — each handler below reads the sheet row (deleted_at IS NULL) and answers 404 '
+    + '(mostly echoing the id) before its first 403, so a signed-in caller the handler then refuses can tell a live '
+    + 'sheet from a soft-deleted or absent one. Fix per handler: drop the probe (sheetLiveness already refuses a '
+    + 'non-live sheet after the 403) or move it after the 403, with the values-free SHEET_NOT_FOUND_MESSAGE.',
+  handlers: [
+    'GET /sheets/:sheetId/config-history',
+  ],
 }
 
 describe('sheet-liveness closure over univer-meta routes', () => {
@@ -228,6 +306,181 @@ describe('sheet-liveness closure over univer-meta routes', () => {
       + `write must not proceed because the OTHER end happened to be live:\n`
       + offenders.map((r) => `  - ${r}`).join('\n'),
     ).toEqual([])
+  })
+
+  it('GAP ledger: the handlers that probe sheet existence before their first authority refusal are exactly the named ones', () => {
+    expect(EXISTENCE_BEFORE_AUTHORITY_GAP.reason).toMatch(/^GAP — tracked in #[1-9]\d* — \S/)
+    const found = inScope.filter((h) => probesExistenceBeforeAuthority(h.body)).map((h) => h.key).sort()
+    const named = [...EXISTENCE_BEFORE_AUTHORITY_GAP.handlers].sort()
+    expect(
+      found,
+      'A sheet-row existence probe answers 404 before the first 403: move it after the authority check '
+      + '(or drop it — sheetLiveness refuses after the 403). A fixed handler must leave the ledger.',
+    ).toEqual(named)
+    // What the reason rests on, per handler: the probe's miss is a 404.
+    const notA404 = inScope
+      .filter((h) => named.includes(h.key))
+      .filter((h) => !PROBE_MISS_IS_404.test(h.body.slice(h.body.search(EXISTENCE_PROBE))))
+      .map((h) => h.key)
+    expect(notA404).toEqual([])
+  })
+
+  it('the existence-before-authority check reads order, not presence', () => {
+    const probe = "const sheet = await loadSheetRow(pool.query.bind(pool), sheetId)\n  if (!sheet) {\n    return res.status(404).json({})\n  }"
+    const inline = "const r = await pool.query(\n  'SELECT id FROM meta_sheets WHERE id = $1 AND deleted_at IS NULL',\n  [sheetId],\n)\nif (r.rows.length === 0) throw new NotFoundError('x')"
+    const cap = "const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)"
+    const refuse = 'if (!capabilities.canRead) return sendForbidden(res)'
+    const liveness = "if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
+    expect(probesExistenceBeforeAuthority([probe, cap, refuse, liveness].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([inline, cap, refuse].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([probe, cap].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([probe, 'return res.status(403).json({})'].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness, probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority(['if (!ok) return { kind: \'error\', status: 403 }', probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority(['const r = await requireRecordReadable(req, q, sheetId, recordId)', probe].join('\n'))).toBe(false)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness].join('\n'))).toBe(false)
+    expect(PROBE_MISS_IS_404.test(probe.slice(probe.search(EXISTENCE_PROBE)))).toBe(true)
+    expect(PROBE_MISS_IS_404.test(inline.slice(inline.search(EXISTENCE_PROBE)))).toBe(true)
+    const soft = "const sheet = await loadSheetRow(q, sheetId)\nif (flag) log()\nif (!sheet) return res.status(404).json({})"
+    expect(PROBE_MISS_IS_404.test(soft.slice(soft.search(EXISTENCE_PROBE)))).toBe(false)
+  })
+
+  /**
+   * #5936 — SELF-TEST for the third alternative. `GET /context` asked the existence question with a
+   * table ALIAS across four lines and this regex could not see it, so the ledger under-counted and the
+   * handler was found by hand instead. These cells are what "the widened probe reads the QUESTION, not
+   * the table name" rests on, in both directions: drop the addressed-id binding and the two LIST
+   * negatives go green; drop the back-reference and the three alias negatives go green; let the span
+   * cross a backtick (or a `;`, or a second meta_sheets) and one SPLICE negative goes green per barrier
+   * removed; drop the `i` flag and the lowercase positive goes red; drop `\s+` tolerance and the bare
+   * multi-line positive goes red.
+   */
+  it('the probe reads the QUESTION — bare or aliased, one line or four, any case — and only for an ADDRESSED id', () => {
+    const cap = "const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, q, sheetId)"
+    const refuse = 'if (!capabilities.canRead) return sendForbidden(res)'
+    const liveness = "if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)"
+    // GET /context's own shape, verbatim in structure: alias + LEFT JOIN + newlines.
+    const aliased = 'const sheetRowResult = await pool.query(\n'
+      + '  `SELECT s.id, s.base_id, s.name, s.description,\n'
+      + '          b.id AS base_ref_id, b.name AS base_name\n'
+      + '     FROM meta_sheets s\n'
+      + '     LEFT JOIN meta_bases b ON b.id = s.base_id\n'
+      + '    WHERE s.id = $1 AND s.deleted_at IS NULL`,\n'
+      + '  [resolvedSheetId],\n'
+      + ')\n'
+      + 'const sheetRow = sheetRowResult.rows[0]\n'
+      + 'if (!sheetRow) return res.status(404).json({})'
+    expect(EXISTENCE_PROBE.test(aliased)).toBe(true)
+    // Schema-qualified and `AS`-spelled variants of the same question (both occur in this repo).
+    expect(EXISTENCE_PROBE.test('FROM public.meta_sheets sheet_row\n WHERE sheet_row.id = $1 AND sheet_row.deleted_at IS NULL')).toBe(true)
+    expect(EXISTENCE_PROBE.test('FROM meta_sheets AS s\n WHERE s.id = $1 AND s.deleted_at IS NULL')).toBe(true)
+    // BARE and MULTI-LINE — univer-meta.ts's other idiom (univer-meta.ts:8180 and :8726 are written
+    // this way). The single-line alternative demands literal single spaces, so it cannot see this.
+    expect(EXISTENCE_PROBE.test('FROM meta_sheets\n WHERE id = $1 AND deleted_at IS NULL')).toBe(true)
+    // ALIASED table, UNQUALIFIED filter — also valid SQL, also this file's idiom (univer-meta.ts:5733).
+    expect(EXISTENCE_PROBE.test('SELECT s.id FROM meta_sheets s WHERE s.id = $1 AND deleted_at IS NULL')).toBe(true)
+    // Lowercase: the same question. Which keyword casing a handler happens to use is not a contract,
+    // and the shared fixture's BEYOND_CAPABILITY has always been case-insensitive — so is this.
+    expect(EXISTENCE_PROBE.test('select s.id from meta_sheets s where s.id = $1 and s.deleted_at is null')).toBe(true)
+    // ORDER still decides, exactly as for the two older forms.
+    expect(probesExistenceBeforeAuthority([aliased, cap, refuse, liveness].join('\n'))).toBe(true)
+    expect(probesExistenceBeforeAuthority([cap, refuse, liveness, aliased].join('\n'))).toBe(false)
+
+    // NEGATIVES, (i) the filter must be on the SHEET — the alias is captured and back-referenced.
+    const otherTable = 'FROM other_table x\n  LEFT JOIN meta_bases b ON b.id = x.base_id\n WHERE x.id = $1 AND x.deleted_at IS NULL'
+    // univer-meta.ts's real base-liveness filter: meta_sheets is aliased `s`, the filter is on `b`.
+    const otherAlias = 'FROM meta_sheets s\n  JOIN meta_bases b ON b.id = s.base_id AND b.deleted_at IS NULL'
+    // …including when the SHEET id IS bound: the id half alone is not the question.
+    const otherAliasBound = 'FROM meta_sheets s JOIN meta_bases b ON b.id = s.base_id WHERE s.id = $1 AND b.deleted_at IS NULL'
+    const otherEntity = 'FROM meta_bases b WHERE b.id = $1 AND b.deleted_at IS NULL'
+    // A JOINed meta_sheets is a row filter on ANOTHER table's rows, not this ledger's question.
+    const joined = 'FROM meta_records r\n  JOIN meta_sheets s ON s.id = r.sheet_id\n WHERE r.id = $1 AND s.deleted_at IS NULL'
+    // (ii) the query must be bound to the ADDRESSED id. A base-scoped LIST, or an `ANY($1)` batch,
+    // answers "which sheets are live" — nothing about the one sheet a request names — so reporting it
+    // would be a GAP entry no handler could ever clear.
+    const baseList = 'SELECT s.id, s.name FROM meta_sheets s\n WHERE s.base_id = $1 AND s.deleted_at IS NULL\n ORDER BY s.created_at ASC'
+    const anyList = 'SELECT s.id FROM meta_sheets s WHERE s.id = ANY($1::text[]) AND s.deleted_at IS NULL'
+    // (iii) the two halves must belong to ONE SQL fragment. Here they are two separate queries: the
+    // first names a sheet id, the second filters a JOINed sheet's soft delete. Spliced, they would
+    // name a handler whose SQL contains no existence probe at all.
+    const splice = 'const a = await q(`SELECT s.id FROM meta_sheets s WHERE s.id = $1`)\n'
+      + 'const b = await q(`SELECT r.id FROM meta_records r JOIN meta_sheets s ON s.id = r.sheet_id WHERE s.deleted_at IS NULL`)'
+    // The span has TWO independent barriers, so `splice` above (which trips both) cannot tell which
+    // one is load-bearing. One cell per barrier: this splice holds no SECOND meta_sheets, so only the
+    // template-literal boundary stops it…
+    const spliceAdjacent = 'const a = await q(`SELECT s.id FROM meta_sheets s WHERE s.id = $1`)\n'
+      + 'const b = await q(`SELECT c.id FROM meta_comments c WHERE c.sheet_id = $1 AND deleted_at IS NULL`)'
+    // …this one is a single template literal holding two statements, stopped only by the `;`…
+    const spliceStatement = 'FROM meta_sheets s WHERE s.id = $1; SELECT 1 FROM audit_logs WHERE deleted_at IS NULL'
+    // …and this one is ONE statement whose `deleted_at IS NULL` belongs to a SUBSELECT over the base's
+    // other sheets, not to the addressed row (which is read WITHOUT a soft-delete filter, so it is not
+    // an is-it-still-live probe at all). Only the second-meta_sheets bound stops it.
+    const subselect = 'FROM meta_sheets s\n WHERE s.id = $1\n   AND s.base_id IN (SELECT base_id FROM meta_sheets WHERE deleted_at IS NULL)'
+    for (const notAProbe of [otherTable, otherAlias, otherAliasBound, otherEntity, joined, baseList, anyList, splice, spliceAdjacent, spliceStatement, subselect]) {
+      expect(EXISTENCE_PROBE.test(notAProbe), notAProbe).toBe(false)
+    }
+  })
+
+  /**
+   * The shared field-retype gate, PROVEN. `gateFieldRetypeConvert` counts as a liveness mechanism above only because
+   * of what these assertions read out of the source — the order ③ canManageFields → ④ liveness → ⑤ canRead AND
+   * full-table read lives in ONE function (multitable/field-retype-convert-gates.ts), the route gate feeds it the
+   * liveness the resolver returned and answers the refusal, and every caller stops on its null.
+   */
+  it('the shared field-retype gate: one judgment (③ → ④ → ⑤ with canRead), fed the resolved liveness, acted on by all three endpoints', () => {
+    const gates = stripComments(readFileSync(join(__dirname, '../../src/multitable/field-retype-convert-gates.ts'), 'utf8').replace(/\r\n/g, '\n'))
+    const judge = gates.slice(gates.indexOf('export async function judgeFieldRetypeConvertGates('))
+    const order = [
+      judge.indexOf('input.capabilities.canManageFields !== true'),
+      judge.indexOf("input.sheetLiveness !== 'live'"),
+      judge.indexOf('input.capabilities.canRead !== true'),
+      judge.indexOf('await input.hasFullTableReadAccess()'),
+      judge.indexOf('return null'),
+    ]
+    expect(order.every((i) => i >= 0), `a gate is missing from judgeFieldRetypeConvertGates: ${order.join(',')}`).toBe(true)
+    expect(order).toEqual([...order].sort((a, b) => a - b))
+    // every branch before the last LEAVES with a refusal
+    expect((judge.match(/return \{ gate: [345], kind: '/g) ?? []).length).toBe(4)
+
+    const code = stripComments(SRC)
+    const fn = (name: string): string => {
+      const start = code.indexOf(`async function ${name}(`)
+      expect(start, `${name} is not a module-level function of univer-meta.ts`).toBeGreaterThanOrEqual(0)
+      return code.slice(start, code.indexOf('\n}\n', start))
+    }
+    const gate = fn('gateFieldRetypeConvert')
+    expect(gate).toMatch(/const \{ access, capabilities, sheetLiveness \} = await resolveSheetCapabilities\(req, query, sheetId\)/)
+    expect(gate).toMatch(/await judgeFieldRetypeConvertGates\(\{\s*capabilities,\s*sheetLiveness,/)
+    expect(gate).toMatch(/if \(refusal\) \{\s*sendFieldRetypeConvertGateRefusal\(res, refusal\)\s*return null\s*\}/)
+    // it judges nothing itself: no capability or liveness comparison of its own that could drift from the judgment
+    expect(gate).not.toMatch(/canManageFields|canRead\b|!== 'live'/)
+
+    const send = code.slice(code.indexOf('function sendFieldRetypeConvertGateRefusal('))
+    expect(send.slice(0, send.indexOf('\n}\n'))).toMatch(/refusal\.kind === 'not_live'\) return sendSheetNotLive\(res, refusal\.sheetLiveness\)/)
+
+    // the in-transaction re-check reads liveness AGAIN, from the transaction, and uses the same judgment
+    const fresh = fn('authorizeFieldRetypeConvertInTransaction')
+    expect(fresh).toMatch(/await resolveRecoverySheetAuthority\(req, query, sheetId\)/)
+    expect(fresh).toMatch(/const sheetLiveness = await loadSheetLiveness\(query, sheetId\)/)
+    expect(fresh).toMatch(/return judgeFieldRetypeConvertGates\(\{\s*capabilities: authority\.capabilities,\s*sheetLiveness,/)
+
+    // all three endpoints, and nobody else, go through the gate — and stop on its null with the next statement
+    const callers = HANDLERS.filter((h) => /\bgateFieldRetypeConvert\b/.test(h.body))
+    expect(callers.map((h) => h.key).sort()).toEqual([
+      'POST /fields/:fieldId/retype-execute',
+      'POST /fields/:fieldId/retype-preview',
+      'POST /fields/:fieldId/retype-undo',
+    ])
+    for (const h of callers) {
+      expect(h.body, h.key).toMatch(/const gate = await gateFieldRetypeConvert\(req, res, query, sheetId\)\n\s*if \(!gate\) return\n/)
+      // no second, hand-written copy of a gate in the handler
+      expect(h.body, h.key).not.toMatch(/capabilities\.canManageFields|capabilities\.canRead|hasFullTableReadAccess\(/)
+    }
+    // the two WRITE endpoints hand the in-transaction re-check to their transaction
+    for (const h of callers.filter((c) => !c.key.endsWith('retype-preview'))) {
+      expect(h.body, h.key).toMatch(/authorize: \(fresh\) => authorizeFieldRetypeConvertInTransaction\(req, fresh as unknown as QueryFn, sheetId\)/)
+      expect(h.body, h.key).toMatch(/outcome\.gate \? sendFieldRetypeConvertGateRefusal\(res, outcome\.gate\)/)
+    }
   })
 
   // THE TRIPWIRE. A refactor that changes the registration STYLE (or a CRLF regression like the one

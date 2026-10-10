@@ -124,60 +124,23 @@ jobs:
             scripts/ops/github-dingtalk-oauth-stability-summary.test.mjs \
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
-  stock-prep-powershell51:
-    name: stock-prep PowerShell 5.1 acceptance
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js 20.x
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20.x
-
-      # The release package runs this acceptance boundary under Windows PowerShell 5.1. pwsh 7 has
-      # different native-stderr semantics and cannot stand in for the target shell contract.
-      - name: Run target-shell smoke capture regression
-        shell: powershell
-        run: |
-          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/stock-preparation-onprem-acceptance.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/stock-preparation-s6a-onprem-acceptance.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.ps51.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-      # S6-A win32 artifact-root ACL + attestation (follow-up 1 of
-      # docs/development/stock-preparation-s6a-windows-runtime-parity-20260818.md). This is the
-      # only job with a real NTFS volume and a real icacls.exe, so the layer-3 checks (apply, verify,
-      # idempotent re-run, tampered-ACL retraction against a throwaway TEMP directory) can only run
-      # here. Both shells are exercised: the deploy path runs under whichever PowerShell the operator
-      # host provides, and 5.1's native-stderr semantics differ from pwsh 7's.
-      - name: Run S6-A artifact-root ACL attestation tests (Windows PowerShell 5.1 + pwsh 7)
-        shell: powershell
-        run: |
-          $powershell51 = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-          & $powershell51 -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & pwsh -NoProfile -ExecutionPolicy Bypass -File `
-            scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
   test:
+    # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
     runs-on: ubuntu-latest
+    # Leave headroom for the full integration suite without using the six-hour default timeout.
+    timeout-minutes: 150
 
     strategy:
       fail-fast: false
       matrix:
-        node-version: [18.x, 20.x]
+        # Node 18 reached end-of-life on 2025-04-30 and everything this repo ships runs on Node 20
+        # (Dockerfile.backend / Dockerfile.frontend are node:20-slim; the on-prem runbooks require
+        # Node 20). The 18.x leg cost ~27 runner-minutes per run and was never a required check;
+        # `test (20.x)` is. It stays a one-entry matrix on purpose: the produced check name must
+        # remain exactly `test (20.x)` (branch protection names it), and a plain job would be
+        # reported as `test`. Dropped 2026-10-07 when the repository went private and Actions
+        # minutes started to bill.
+        node-version: [20.x]
 
     steps:
       - name: Checkout repository
@@ -188,12 +151,15 @@ jobs:
         with:
           node-version: ${{ matrix.node-version }}
 
+      - name: GitHub-hosted runner routing contract
+        run: node --test scripts/ops/github-hosted-runner-routing.test.mjs
+
       # R12-C: the Global History flag manifest is an operator contract — the status helper reads it to
       # decide safe flag combinations. This node:test (no deps, no DB) is source-derived: it fails if a
       # MULTITABLE_ flag read in packages/core-backend/src is missing from the manifest. Runs early so a
       # manifest/source drift fails the required `test` check fast, before the pnpm install/build.
       - name: Global History flag manifest contract (R12-C)
-        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs scripts/ops/multitable-global-history-flag-status.test.mjs scripts/ops/multitable-recovery-schema-containment.test.mjs scripts/ops/multitable-onprem-package-upgrade-inplace.test.mjs scripts/ops/multitable-onprem-preflight.test.mjs
 
       # W0 L6/L7 CI two-point wiring contract (no DB): both exact-anchor real-DB suites must stay
       # excluded from the no-DB Vitest lane and named in the multitable real-DB whole-file step.
@@ -387,6 +353,51 @@ jobs:
       - name: B4 department-bindings CI wiring contract
         run: node --test scripts/ops/b4-department-bindings-ci-wiring.test.mjs
 
+      # Approval form grouping design lock v2.13 phase 2 slice A-3 — CI two-point wiring contract
+      # (no DB): the backfill-batch DDL schema suite (design-gate changesRequired #4 FK proof)
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the atgbbl_link_fk CASCADE proof.
+      - name: A3 backfill-schema CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-schema-ci-wiring.test.mjs
+
+      # Same slice, W7 preview unit — the read-only `previewApprovalTemplateGroupBackfill` suite
+      # must stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory
+      # real-DB step). Dropping either point silently disables the "preview never writes" proof.
+      - name: A3 backfill-preview CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-preview-ci-wiring.test.mjs
+
+      # Same slice, W8 execute unit — the write `executeApprovalTemplateGroupBackfill` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the changesRequired #2/#3 idempotency and
+      # cross-verification proofs.
+      - name: A3 backfill-execute CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-execute-ci-wiring.test.mjs
+
+      # Same slice, W9 rollback unit — the `rollbackApprovalTemplateGroupBackfillBatch` suite must
+      # stay wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB
+      # step). Dropping either point silently disables the §4.2 token-match / §4.3
+      # created_new+remaining=0 archive-precision proofs.
+      - name: A3 backfill-rollback CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-rollback-ci-wiring.test.mjs
+
+      # Same slice, batch LIST unit (design-gate P1-5 / changesRequired #5) — the read-only
+      # `listApprovalTemplateGroupBackfillBatches` suite must stay wired into BOTH
+      # vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step). Dropping either
+      # point silently disables the ordering/pagination/org-scoping/rolledBackAt-round-trip proofs
+      # — the only reachability path to a rollback-able batchId once execute's own response is gone.
+      - name: A3 backfill-batches-list CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-batches-list-ci-wiring.test.mjs
+
+      # Same slice, batch DDL `down()` data-retention guard (candidate, not yet ratified) — round-2
+      # implementation-gate fix (`impl-gate-A3-guarded-down-round2-20260921.md` P2-B): this suite
+      # existed since round 1 but was deliberately deferred out of both vitest.config.ts (exclude)
+      # and this real-DB step while round 1's own hard constraint required plugin-tests.yml/s6a to
+      # stay byte-identical that round. Wired here (with the allowlist exemption's removal and the
+      # s6a re-pin, same commit). Dropping either point silently disables the fail-closed/strictness/
+      # 42P01-regression proofs.
+      - name: A3 backfill-down-guard CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-backfill-down-guard-ci-wiring.test.mjs
+
       # B5-a CI two-point wiring contract (no DB): the routing-policy schema suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-a routing-policy CI wiring contract
@@ -457,6 +468,12 @@ jobs:
       - name: E-learning V0.1 auth/tenant/RBAC CI wiring contract
         run: node --test scripts/ops/elearning-v01-auth-ci-wiring.test.mjs
 
+      # Tasks auth gate wiring (no DB): dedicated config + setup + whole-file
+      # gate must stay pinned on the 20.x post-migrate step. Runs before
+      # install so dropping the step fails the required check without a build.
+      - name: Tasks auth CI wiring contract
+        run: node --test scripts/ops/tasks-auth-ci-wiring.test.mjs
+
       # B5-b CI two-point wiring contract (no DB): the routing-policy RESOLVER suite must stay wired
       # into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       - name: B5-b routing-resolver CI wiring contract
@@ -514,6 +531,14 @@ jobs:
       - name: Approval data-closure CI wiring contract
         run: node --test scripts/ops/approval-data-closure-ci-wiring.test.mjs
 
+      # Approval form grouping (design lock v2.13) CI two-point wiring contract: all four
+      # approval-template-groups real-DB suites (phase-1 lifecycle/serialization, phase-3
+      # sections/reorder) must stay wired into BOTH vitest.config.ts (exclude) AND the approval
+      # real-DB step here (whole-file, on the required 20.x leg). Step-id-anchored (never by
+      # title), so a name-prefix decoy cannot stand in for the real step.
+      - name: Approval template-groups CI wiring contract
+        run: node --test scripts/ops/approval-template-groups-ci-wiring.test.mjs
+
       # #4604 owner HOLD: multitable-onprem-package-build.yml is workflow_dispatch only and
       # only ever exercises the verify script against a NORMAL package — it never proves the
       # loopback-config negative case. Without an automated caller, deleting the loopback
@@ -530,7 +555,7 @@ jobs:
       # Corp-scope Phase B cannot migrate until staging proves its only managed
       # backend and the only container publishing 18900 are the exact Phase A
       # image. Both matrix legs execute the behavior suite; branch protection
-      # currently requires test (20.x), while test (18.x) is additional coverage.
+      # currently requires test (20.x); the matrix has no other leg since 2026-10-07.
       # Run the wiring guard in this same job. The wiring and behavior suites
       # assert each other's invocation, so removing either step turns the
       # required Node 20 context red.
@@ -584,7 +609,7 @@ jobs:
             scripts/ops/attendance-w4c3c-execute-ops-retirement-cleanup.test.mjs
 
       # The production monitor invokes the same state helper covered here.
-      # Keep this in the required 18/20 matrix so HTTP classification, silence
+      # Keep this in the required `test` matrix so HTTP classification, silence
       # barriers, and alert/recovery streak semantics cannot drift silently.
       - name: Prod health probe monitor contract
         run: node --test scripts/ops/prod-health-probe-state.test.mjs
@@ -618,7 +643,8 @@ jobs:
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
-          # ACL layers self-report SKIP. The real-icacls coverage lives in stock-prep-powershell51.
+          # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
+          # job, now in .github/workflows/stock-prep-powershell51.yml.
           ./scripts/ops/__tests__/multitable-onprem-s6a-artifact-root-acl.tests.ps1
 
       - name: Setup pnpm
@@ -836,6 +862,13 @@ jobs:
 
       - name: Run type checking
         if: matrix.node-version == '20.x'
+        env:
+          # GitHub-hosted runners for a PRIVATE repository are 2 vCPU / 8 GB (public ones were
+          # 4 / 16), so Node's default heap dropped to ~2 GB and `vue-tsc -b` on apps/web began to
+          # OOM here on 2026-10-07, the day the repository went private. 4 GB covers the three
+          # vue-tsc runs of `pnpm type-check`; apps/web's `build` script sets its own heap, which
+          # also fixes the seven other workflows that build the web app.
+          NODE_OPTIONS: --max-old-space-size=4096
         run: |
           pnpm type-check
 
@@ -863,15 +896,15 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (31) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) = 48. Get each file's own count locally with
+      # (6) = 51. Get each file's own count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=48
+          EXPECTED_OPS_TESTS_COUNT=51
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1052,7 +1085,22 @@ jobs:
           user: postgres
       - name: Create test database
         run: |
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
           createdb -U postgres metasheet_test || true
+
+      - name: Run private-db backend drain proof
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/timemachine-private-db-backend-drain.db.test.ts \
+            --reporter=verbose
+
+      - name: Run isolated manual checkpoint acceptance
+        run: |
+          TM_TEST_PG_BIN="$(pg_config --bindir)" node scripts/ops/run-recovery-manual-checkpoint.mjs
 
       - name: Run DB migrations
         env:
@@ -1188,6 +1236,24 @@ jobs:
             tests/elearning-pilot-auth/elearning-pilot-auth-gate.ts \
             --reporter=verbose
 
+      # Tasks auth gate: trust-off harness, whole file, after migrate.
+      # Do not fold this into vitest.integration.config.ts (that setup caches trust).
+      - name: Run tasks auth gate
+        id: tasks-auth-gate
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          RBAC_BYPASS: 'false'
+          RBAC_TOKEN_TRUST: 'false'
+          PRODUCT_MODE: plm-workbench
+          RBAC_OPTIONAL: ''
+          TASKS_ENABLED: 'true'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for tasks auth gate}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.tasks-auth.config.ts run \
+            tests/tasks-auth/tasks-auth-gate.ts \
+            --reporter=verbose
+
       - name: Run sealed-export S3 private-ingestion real-DB proof
         id: sealed-export-s3-real-db
         if: matrix.node-version == '20.x'
@@ -1208,6 +1274,23 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for sealed-export S4 real-DB proof}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
+            --reporter=verbose
+
+      # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
+      # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
+      # participating transaction. Two-session races against a real PostgreSQL; the suite's own
+      # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
+      # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      - name: Run external-system delete x pointer-write lock protocol real-DB proof
+        id: external-system-delete-bind-lock-protocol-real-db
+        if: matrix.node-version == '20.x'
+        env:
+          DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          EXPECT_DB: '1'
+        run: |
+          : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
+          pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
+            tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
             --reporter=verbose
 
       - name: Run required after-sales install integration
@@ -1292,7 +1375,7 @@ jobs:
             tests/integration/snapshot-protection.test.ts \
             --reporter=verbose
 
-      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
+      - name: Run multitable real-DB integration (permission golden + view-aggregate + formula dry-run + read-path field mask + foreign-field taint mask + dashboard authz + realtime invalidation + automation retry provenance + cross-base governed automation writes + webhook outbound chain + AI shortcut run + AI ledger retention sweep + record-level version restore + rollup countall non-gating characterization + rollup filter condition fail-closed + rollup string/boolean reducers + dashboard non-numeric rollup rejection + dashboard-level filtering (narrow/AND/row-deny/no-side-channel) + record recycle-bin delete/restore + field type-retype revert schema-only scalar-gated + cross-base relation-agg authorized-reader read gate + dangling-link repair-on-read + sheet-delete cascade + oapi-4a per-base/sheet scope guard + oapi-4a REST token-create scope + mirror-read-only enumeration hardening + cross-base editable-mirror write-through op + cross-base mirror write-through Decision-F concurrency + personal-views slice-1 actor-scoped isolation + W1-2 permission-matrix B1 side-door goldens (Yjs bridge flush actor-tier/lock/row-deny/rule-deny, OAPI token write re-gate parity, base-write/sheet-write non-intersection) + W1-2 permission-matrix B2 oracle/no-leak goldens (G-5 row-level-read-deny zero-presence on export + history, G-4 OAPI token-vs-interactive read-mask parity across the 5 records:read routes) + W1-2 permission-matrix B3 management-surface 403 matrix (field/view CRUD, sheet-permission grant, sheet_config flag + conditional-rules, across A3/A4/A5/A6 actor tiers) + W1-2 permission-matrix B4 G-7 export⊆read differential (field-mask/row-deny/taint modifier combinations, same actor) + W1-1 formula freshness goldens (Yjs-bridge formula recompute GF1-GF4/GF9 + expression-change bulk recompute GF5-GF8/GF12) + W1-3 per-subject field-write gate goldens (Yjs bridge flush GW1-GW3 headline/positive-control/atomic-mixed, single-record PATCH GW4-GW6 mst_-token/session-JWT dual-caller + regression spot-check) + W3-5 batchId===null default (record-service.ts single-record self-referential batch_id vs record-write-service.ts bulk fresh-id control) + W1-2 permission-matrix B4 G-8 comments sheet-visibility gate (comments:read/write actor 403'd on a no-read sheet across list/summary/presence read + create write + no identifier/content leak) + LOCK-12 partial-success bulk PATCH shared-batch grouping + 4c-2 forward tombstone-capture flag-off/on/cap goldens (field-delete value+link+auto-number capture, record-delete inbound-only capture, R1 undelete rehydration + masking parity, retention keep-days sweep) + notification-center retention sweep (env-gated, batched, sheet-scoped survivors) + D-6 config-restore-execute metaFieldCache invalidation golden + F2 attachment-download read-gate row-deny/field-mask security regression guard + AI-fields S1 write-provenance/batch-grouping goldens + A6-3-3a automation branch-local-wait suspend/resume goldens + Phase C2 cross-base automation governed DELETE/LOCK goldens + C1 automation real-time fan-out goldens + duplicate/clone record route security goldens + T3-6 approval-record multitable projection goldens — six previously skip-green DB-gated specs now actually executing + D-1c §0.6 HISTORY_INCOMPLETE fail-closed precheck goldens G-HI-1..4 + D-1c W0 slice ① form-submit CREATE/EDIT public-form revision goldens, incl. zero-row concurrent-delete fail-closed + D-1c W0 slice ② plugin-SDK createRecord/patchRecord revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ③ automation create_record/update_record revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ④ approval resultWriteback revision goldens, incl. genuine-lock-race concurrent-delete fail-closed + D-1c W0 slice ⑤ (FINAL) attachment-delete cell-strip revision goldens, incl. zero-row concurrent-delete fail-closed + W0 tail field-undelete rehydration revision goldens (version-bump + emit-at-new-version, W0-1 contiguity/content-projection positive control, zero-row concurrent-delete fail-closed — un-pends the last OD-6 KNOWN_REVISION_GAPS entry) + W0-1 L4 all-writer canonical fence goldens (module fence-before-check/durable-block claim-reclaim-refuse/CHECK closed-set, per-fenced-family production-wiring refusal for REST create/patch/delete + bulk + plugin patch + plugin recoverable delete, partial-fence gap exposure for plugin create + auto-number backfill, flag-off parity, constructed TOCTOU race via pg_blocking_pids, exact-bigint synthetic-seq ordering) + W0-1 v3.7 L5 trust-checkpoint schema goldens (building→active state machine, partial-unique one-active guard + concurrent double-activation race, seq-based + display-T totally-ordered selection across the 2^53 boundary, floor-clamped retention prune, non-forgeable server-owned system_kind, P3-2 fail-closed strict-enablement precondition) + W0-1 L6-a sealed operation-endpoint ledger goldens (endpoint-last exact count/max validation, DEFERRABLE-FK write-events-but-never-seal fails at COMMIT, append-after-seal refusal, endpoint-before-events refusal, legacy-NULL exemption, exact-bigint 2^53 neighbours, G-BATCH-ENDPOINT bulk multi-row anchor + REST create/patch mint-under-fence wiring, G-MULTIOP one-commit-N-transactions batch↔operation decouple, §F2 UPDATE-immutability, §H1 DELETE-immutability + retention-only deletion, §H2 whole-operation atomic retention prune, §H3 fail-closed schema probe, flag-off parity))
         id: multitable-real-db-integration
         if: matrix.node-version == '20.x'
         env:
@@ -1338,6 +1421,7 @@ jobs:
             tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
             tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
             tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts \
+            tests/integration/stock-preparation-prep-line-export-tenant-wall-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \
@@ -1523,6 +1607,7 @@ jobs:
             tests/integration/multitable-ai-suggest-formula.test.ts \
             tests/integration/data-source-c3-keyset-realdb.test.ts \
             tests/integration/data-source-test-ephemeral-realdb.test.ts \
+            tests/integration/data-source-reseal-load-failed-realdb.test.ts \
             tests/integration/multitable-personal-views-slice1-realdb.test.ts \
             tests/integration/multitable-personal-views-slice2-fieldorder-realdb.test.ts \
             tests/integration/multitable-personal-views-slice3-context-overlay-realdb.test.ts \
@@ -1532,6 +1617,7 @@ jobs:
             tests/integration/multitable-tombstone-field-rehydrate-revision-realdb.test.ts \
             tests/integration/multitable-tombstone-record-capture-realdb.test.ts \
             tests/integration/multitable-tombstone-retention-realdb.test.ts \
+            tests/integration/multitable-notification-retention-realdb.test.ts \
             tests/integration/multitable-automation-outbox-schema-realdb.test.ts \
             tests/integration/multitable-action-applied-ledger-realdb.test.ts \
             tests/integration/multitable-automation-execution-ledger-realdb.test.ts \
@@ -1564,15 +1650,36 @@ jobs:
             tests/integration/b2a-operation-claim-078-realdb.test.ts \
             --reporter=dot
 
-      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens)
+      - name: Run approval real-DB integration (directory endpoints + P1-C field redaction + P1-B add_sign/reduce_sign + direct_manager create/start + A/E/B/D/G cross-lane acceptance + dept_head sync-plumbing carry-forward + continuous_managers chain walk + common template presets + DT-OPS-01 deprovision selection goldens + cancel-round Q-A census/creation/redemption/seat-guards/FK-migration/outlet-guards/node-timeout/seed-template-visibility/attendance-entry)
         id: approval-real-db-integration
         # Lane A (directory endpoints) + Lane B (P1-C hidden field redaction) + Lane D (add_sign/reduce_sign). Wired as WHOLE FILE runs so the
         # gate is robust (a name filter that matches zero tests would exit green and hide
         # regressions). The file is describeIfDatabase-guarded + excluded from the no-DB
         # default test job, so this is its real CI lane.
+        #
+        # The seven `approval-cancel-round-*.db.test.ts` files at the tail of this run-list were
+        # promoted here from a standalone (non-required) `approval-realdb-cancel-round.yml` lane,
+        # which is DELETED in the same commit — per the #5095 precedent
+        # (`docs/development/approval-lock11-writer-org-derivation-20260822.md` §4.1). At the time
+        # this file was the s6a `pluginTestsWorkflow` provenance pin, so that commit recomputed it
+        # via `computePackageProvenancePinSet(repoRoot)`. Since
+        # docs/development/s6a-pins-scope-narrowing-design-20260930.md this file is no longer a
+        # provenance input (the pinned executor is .github/workflows/stock-prep-powershell51.yml),
+        # so run-list edits here need no pin recompute. Keeping both lanes would have run the same
+        # seven files twice per PR for no additional coverage.
         if: matrix.node-version == '20.x'
         env:
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
+          # Arms this step's embedded anti-skip-green sentinels (module-top-level
+          # `itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip`, e.g.
+          # approval-comments.db.test.ts:56, approval-instance-readability-s1.db.test.ts:50,
+          # approval-lock9-process-attachments-realdb.db.test.ts:35): second in-worker door —
+          # a DATABASE_URL that is set in this step's shell but falsy by the time it reaches
+          # the vitest worker goes RED instead of a silent skipped-green. A truthy-but-wrong
+          # DATABASE_URL reds either way, armed or not, from the suites' own connection
+          # failures — this arming does not specifically catch that case. The other files
+          # this step runs do not reference EXPECT_DB, so this is a no-op for them.
+          EXPECT_DB: '1'
         run: |
           : "${DATABASE_URL:?DATABASE_URL is required for approval real-DB integration}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
@@ -1653,6 +1760,25 @@ jobs:
             tests/integration/approval-instance-readability-s1.db.test.ts \
             tests/integration/approval-comments.db.test.ts \
             tests/integration/approval-lock9-process-attachments-realdb.db.test.ts \
+            tests/integration/approval-cancel-round-lock-order-census.db.test.ts \
+            tests/integration/approval-cancel-round-creation.db.test.ts \
+            tests/integration/approval-cancel-round-redemption.db.test.ts \
+            tests/integration/approval-cancel-round-seat-guards.db.test.ts \
+            tests/integration/approval-cancel-round-attendance-fk-migration.db.test.ts \
+            tests/integration/approval-cancel-round-outlet-guards.db.test.ts \
+            tests/integration/approval-cancel-round-node-timeout-effect.db.test.ts \
+            tests/integration/approval-cancel-round-seed-template-visibility.db.test.ts \
+            tests/integration/approval-cancel-round-attendance-entry.db.test.ts \
+            tests/integration/approval-template-groups-lifecycle.db.test.ts \
+            tests/integration/approval-template-groups-serialization.db.test.ts \
+            tests/integration/approval-template-groups-sections.db.test.ts \
+            tests/integration/approval-template-groups-reorder.db.test.ts \
+            tests/integration/approval-template-groups-backfill-schema.db.test.ts \
+            tests/integration/approval-template-groups-backfill-preview.db.test.ts \
+            tests/integration/approval-template-groups-backfill-execute.db.test.ts \
+            tests/integration/approval-template-groups-backfill-rollback.db.test.ts \
+            tests/integration/approval-template-groups-backfill-batches-list.db.test.ts \
+            tests/integration/approval-template-groups-backfill-down-guard.db.test.ts \
             --reporter=dot
 
       - name: Run comment-reaction keystone (real wire, real PG)
@@ -1732,8 +1858,6 @@ jobs:
           kill $(cat server.pid) || true
 
       - name: Build web app
-        # Skip on Node 18 - @vitejs/plugin-vue@6.x requires Node 20+ (crypto.hash API)
-        if: matrix.node-version != '18.x'
         run: |
           pnpm --filter @metasheet/web build
 
@@ -1741,7 +1865,7 @@ jobs:
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
         # title-prefix anchoring. Deliberately NO `if:` pin added here — this
-        # step already runs UNCONDITIONALLY on both matrix legs (18.x/20.x);
+        # step already runs UNCONDITIONALLY on every matrix leg (only 20.x since 2026-10-07);
         # copying the `if: matrix.node-version == '20.x'` pin from the
         # approval/multitable siblings would NARROW coverage to one leg, a
         # real behaviour change this round does not make. The wiring guard's

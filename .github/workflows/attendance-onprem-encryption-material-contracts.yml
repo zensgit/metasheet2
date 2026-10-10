@@ -1,0 +1,62 @@
+name: Attendance On-Prem Encryption Material Contracts
+
+# Hermetic PR-time guard for the encryption-material preflight contracts that
+# scripts/ops/attendance-onprem-{env-check,preflight,bootstrap-admin,package-verify}.sh enforce,
+# and for the ONE caller that actually executes bootstrap-admin.sh in CI
+# (.github/workflows/stock-prep-staging-window-rehearsal.yml, recipe step 5).
+#
+# Why a PR lane exists at all: bootstrap-admin.sh only ever runs inside a dispatch-only workflow
+# (the staging rehearsal) or on the customer host. A PR that adds a new REQUIRED gate to it can
+# therefore be fully green while it breaks the rehearsal on main -- which is exactly what the
+# owner review of #5718 found (F4: the rehearsal composes its env file without
+# ENCRYPTION_KEY/ENCRYPTION_SALT, so the new gate exited 1 before any DB work). Same shape and
+# same rationale as multitable-onprem-package-verify-static-contracts.yml.
+#
+# The test is values-free: every env fixture is synthetic and built by the test, `node` and `psql`
+# are replaced by PATH stubs so a missed guard still cannot reach a database, and no assertion
+# prints a material value. No network, no Docker, no npm dependency (bare `node --test`).
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/attendance-onprem-encryption-material-contracts.yml'
+      - '.github/workflows/stock-prep-staging-window-rehearsal.yml'
+      - 'scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs'
+      - 'scripts/ops/attendance-onprem-env-check.sh'
+      - 'scripts/ops/attendance-preflight.sh'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
+      - 'scripts/ops/attendance-onprem-package-verify.sh'
+      - 'docker/app.env.example'
+      - 'docker/app.env.attendance-onprem.template'
+      - 'docker/app.env.attendance-onprem.ready.env'
+      - 'docker/app.env.multitable-onprem.template'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/attendance-onprem-encryption-material-contracts.yml'
+      - '.github/workflows/stock-prep-staging-window-rehearsal.yml'
+      - 'scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs'
+      - 'scripts/ops/attendance-onprem-env-check.sh'
+      - 'scripts/ops/attendance-preflight.sh'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
+      - 'scripts/ops/attendance-onprem-package-verify.sh'
+      - 'docker/app.env.example'
+      - 'docker/app.env.attendance-onprem.template'
+      - 'docker/app.env.attendance-onprem.ready.env'
+      - 'docker/app.env.multitable-onprem.template'
+
+permissions:
+  contents: read
+
+jobs:
+  encryption-material-contracts:
+    name: Encryption material preflight + rehearsal caller contracts (values-free, no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run hermetic encryption-material contract tests
+        run: node --test scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs

@@ -1,0 +1,823 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, h, nextTick, provide, ref, type App as VueApp } from 'vue'
+import { useAuth } from '../src/composables/useAuth'
+import ApprovalTemplateGroupsPanel from '../src/views/approval/ApprovalTemplateGroupsPanel.vue'
+import { SessionOrgHostKey } from '../src/components/SessionOrgSwitcher.vue'
+import { useSessionOrg } from '../src/composables/useSessionOrg'
+
+/**
+ * A-2 scope item 4 (approval form grouping design lock v2.13 §4 acceptance J, 2026-09-18):
+ * exercises the panel's own SESSION_ORG_REQUIRED → SessionOrgSwitcher → retry loop end to end,
+ * through the real `useSessionOrg`/`useAuth` composables (only the shared `apiFetch` module is
+ * mocked — same seam `useSessionOrg.spec.ts` establishes) rather than mocking the composable
+ * itself, so the mutation below actually exercises the panel's own branch.
+ */
+const mocks = vi.hoisted(() => ({ apiFetch: vi.fn() }))
+vi.mock('../src/utils/api', () => ({ apiFetch: mocks.apiFetch, getApiBase: () => '' }))
+
+const tr = (en: string, _zh: string) => en
+
+const jwt = (org: string) =>
+  `header.${btoa(JSON.stringify({ userId: 'actor', tenantId: org, exp: Math.floor(Date.now() / 1000) + 60 }))}.signature`
+
+function jsonResponse(status: number, body: unknown) {
+  return { ok: status >= 200 && status < 300, status, json: async () => body }
+}
+
+const EMPTY_LIST = { groups: [] }
+function group(id: string, orgId: string, name: string, archivedAt: string | null = null) {
+  return { id, orgId, name, sortOrder: archivedAt ? null : 1, createdBy: 'u', createdAt: 'x', updatedAt: 'x', archivedAt }
+}
+
+describe('ApprovalTemplateGroupsPanel — acceptance J (design lock v2.13 §4)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+  })
+
+  function mount() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr })
+      },
+    })
+    app.mount(container)
+    return container
+  }
+
+  // Drains both the microtask queue (the api.ts await chain: apiFetch -> response.json() ->
+  // caller unwrap) and Vue's render scheduler, across several macrotask turns — a fixed count of
+  // `nextTick()` alone was empirically one or two turns short of the full chain settling.
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  it('single-org member: list loads clean on mount, the selector is never shown, and no session-org call is ever made', async () => {
+    useAuth().setToken(jwt('org-a'))
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/approval-template-groups') {
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Finance')] })
+      }
+      throw new Error(`unexpected call: ${path}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(el.textContent).toContain('Finance')
+    expect(mocks.apiFetch.mock.calls.some(([path]) => String(path).startsWith('/api/auth/session-org'))).toBe(false)
+  })
+
+  it('a 403 SESSION_ORG_REQUIRED on create shows the switcher; selecting an org retries the SAME create and gets 201', async () => {
+    useAuth().setToken(jwt('org-a'))
+    let createAttempts = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        return jsonResponse(200, EMPTY_LIST)
+      }
+      if (path === '/api/approval-template-groups' && init?.method === 'POST') {
+        createAttempts += 1
+        if (createAttempts === 1) {
+          return jsonResponse(403, { error: { code: 'SESSION_ORG_REQUIRED', message: 'An authenticated session organization is required' } })
+        }
+        return jsonResponse(201, { group: group('atg_2', 'org-b', 'Ops') })
+      }
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      if (path === '/api/auth/session-org' && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const input = el.querySelector('[data-testid="approval-template-groups-create-input"]') as HTMLInputElement
+    input.value = 'Ops'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    const form = el.querySelector('form') as HTMLFormElement
+    form.dispatchEvent(new Event('submit', { cancelable: true }))
+    await settle()
+
+    // 403 blocked the create — the switcher is now up, and the group never rendered.
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).not.toBeNull()
+    expect(el.textContent).not.toContain('Ops')
+
+    const select = el.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle(6)
+
+    expect(createAttempts).toBe(2)
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(el.textContent).toContain('Ops')
+  })
+
+  it('a 403 SESSION_ORG_REQUIRED on the initial mount-time list load shows the switcher; selecting an org retries the SAME list load', async () => {
+    // Distinct from the create-flow case above: this drives the `loadGroups()` catch branch
+    // specifically (mount-time GET), which that test's mock never 403s on (its GET always
+    // resolves 200 with an empty list) — so a mutation only on `loadGroups`'s branch would pass
+    // every other case in this file untouched. This case is what gives that branch discriminating
+    // power.
+    useAuth().setToken(jwt('org-a'))
+    let listAttempts = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listAttempts += 1
+        if (listAttempts === 1) {
+          return jsonResponse(403, { error: { code: 'SESSION_ORG_REQUIRED', message: 'An authenticated session organization is required' } })
+        }
+        return jsonResponse(200, { groups: [group('atg_3', 'org-b', 'Legal')] })
+      }
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      if (path === '/api/auth/session-org' && init?.method === 'POST') {
+        return jsonResponse(200, { success: true, data: { currentOrgId: 'org-b', token: jwt('org-b') } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    expect(listAttempts).toBe(1)
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).not.toBeNull()
+    expect(el.textContent).not.toContain('Legal')
+
+    const select = el.querySelector('select[name="sessionOrgId"]') as HTMLSelectElement
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await settle(6)
+
+    expect(listAttempts).toBe(2)
+    expect(el.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(el.textContent).toContain('Legal')
+  })
+})
+
+/**
+ * Daily-ops fix round (groups-daily-ops-real-browser-acceptance-20260920.md):
+ *   P2-1 — archived groups get a visual distinction (badge + `data-group-id`, so a same-name
+ *          archived/active pair is no longer byte-identical DOM, per the finding's exact repro).
+ *   P2-2 — the panel renders `describeApprovalTemplateGroupError`'s product copy, not the raw
+ *          "锁文...owner...勘误" server string, for the create-name-rejected case.
+ *   P2-4 — rename / archive / unarchive controls, consuming the ALREADY-EXISTING client functions
+ *          (`renameApprovalTemplateGroup` / `archiveApprovalTemplateGroup` /
+ *          `unarchiveApprovalTemplateGroup`) and the lock's already-ratified endpoints — no new
+ *          backend capability, purely wiring a UI onto what §6 phase 1 already shipped.
+ */
+describe('ApprovalTemplateGroupsPanel — daily-ops fixes (P2-1 / P2-2 / P2-4)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+    useAuth().setToken(jwt('org-a'))
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.restoreAllMocks()
+  })
+
+  function mount() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr })
+      },
+    })
+    app.mount(container)
+    return container
+  }
+
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  it('P2-1: an archived group is visually distinct from an active one and carries its own id in the DOM', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/approval-template-groups') {
+        return jsonResponse(200, {
+          groups: [
+            group('atg_active', 'org-a', 'Purchase'),
+            group('atg_archived', 'org-a', 'Purchase', '2026-09-20T00:00:00.000Z'),
+          ],
+        })
+      }
+      throw new Error(`unexpected call: ${path}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const activeLi = el.querySelector('[data-group-id="atg_active"]') as HTMLElement
+    const archivedLi = el.querySelector('[data-group-id="atg_archived"]') as HTMLElement
+    expect(activeLi).not.toBeNull()
+    expect(archivedLi).not.toBeNull()
+    // Same name, but no longer byte-identical DOM (the finding's exact repro).
+    expect(activeLi.outerHTML).not.toBe(archivedLi.outerHTML)
+    expect(archivedLi.textContent).toMatch(/Archived/i)
+    expect(activeLi.textContent).not.toMatch(/Archived/i)
+    expect(archivedLi.className).toContain('archived')
+  })
+
+  it('P2-2: a GROUP_NAME_UNSUPPORTED create failure renders product copy, never the internal-jargon server string', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) return jsonResponse(200, EMPTY_LIST)
+      if (path === '/api/approval-template-groups' && init?.method === 'POST') {
+        return jsonResponse(400, {
+          error: {
+            code: 'GROUP_NAME_UNSUPPORTED',
+            message: 'This value must include at least one ASCII letter, digit, or symbol character.',
+          },
+        })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const input = el.querySelector('[data-testid="approval-template-groups-create-input"]') as HTMLInputElement
+    input.value = '请假'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    const form = el.querySelector('form') as HTMLFormElement
+    form.dispatchEvent(new Event('submit', { cancelable: true }))
+    await settle()
+
+    const error = el.querySelector('[data-testid="approval-template-groups-load-error"]')
+    expect(error).not.toBeNull()
+    expect(error!.textContent).not.toContain('锁文')
+    expect(error!.textContent).not.toContain('owner')
+    expect(error!.textContent).not.toContain('勘误')
+    expect(error!.textContent).not.toContain('This value must include at least one ASCII')
+    // P3-2 (impl-gate-A5-daily-ops-round1-20260920.md): removing the jargon is only half of the
+    // finding. Round 1's copy ("This group name is not supported. Try a different name.") read
+    // identically for a zero-width-junk name and for a normal Chinese one, so an admin could not
+    // tell that 请假Leave WOULD be accepted. The copy must state the rule the server enforces and
+    // show a name that satisfies it.
+    expect(error!.textContent).toMatch(/at least one/i)
+    expect(error!.textContent).toContain('请假Leave')
+  })
+
+  it('P2-4 rename: submitting a new name PATCHes the group and updates it in place', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string; body?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Finance')] })
+      }
+      if (path === '/api/approval-template-groups/atg_1' && init?.method === 'PATCH') {
+        expect(JSON.parse(init.body as string)).toEqual({ name: 'Finance & Ops' })
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance & Ops') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const li = el.querySelector('[data-group-id="atg_1"]') as HTMLElement
+    ;(li.querySelector('[data-testid="approval-template-groups-rename-button"]') as HTMLButtonElement).click()
+    await nextTick()
+
+    const renameInput = li.querySelector('[data-testid="approval-template-groups-rename-input"]') as HTMLInputElement
+    expect(renameInput).not.toBeNull()
+    renameInput.value = 'Finance & Ops'
+    renameInput.dispatchEvent(new Event('input'))
+    await nextTick()
+    ;(li.querySelector('[data-testid="approval-template-groups-rename-save"]') as HTMLButtonElement).click()
+    await settle()
+
+    expect(el.textContent).toContain('Finance & Ops')
+    expect(el.querySelector('[data-testid="approval-template-groups-rename-input"]')).toBeNull()
+  })
+
+  it('P2-4 archive: asks for confirmation, and a cancelled confirm makes zero API calls', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/approval-template-groups') return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Finance')] })
+      throw new Error(`unexpected call: ${path}`)
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+
+    const el = mount()
+    await settle()
+    const archiveCallsBefore = mocks.apiFetch.mock.calls.length
+    ;(el.querySelector('[data-testid="approval-template-groups-archive-button"]') as HTMLButtonElement).click()
+    await settle()
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(mocks.apiFetch.mock.calls.length).toBe(archiveCallsBefore)
+    expect(el.textContent).not.toMatch(/Archived/i)
+  })
+
+  it('P2-4 archive/unarchive: a confirmed archive POSTs /archive and flips the group to archived; unarchive POSTs /unarchive and flips it back', async () => {
+    let archived = false
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Finance', archived ? '2026-09-20T00:00:00.000Z' : null)] })
+      }
+      if (path === '/api/approval-template-groups/atg_1/archive' && init?.method === 'POST') {
+        archived = true
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z') })
+      }
+      if (path === '/api/approval-template-groups/atg_1/unarchive' && init?.method === 'POST') {
+        archived = false
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const el = mount()
+    await settle()
+
+    ;(el.querySelector('[data-testid="approval-template-groups-archive-button"]') as HTMLButtonElement).click()
+    await settle()
+    expect(el.querySelector('[data-testid="approval-template-groups-archive-button"]')).toBeNull()
+    expect(el.querySelector('[data-testid="approval-template-groups-unarchive-button"]')).not.toBeNull()
+    expect(el.textContent).toMatch(/Archived/i)
+
+    ;(el.querySelector('[data-testid="approval-template-groups-unarchive-button"]') as HTMLButtonElement).click()
+    await settle()
+    expect(el.querySelector('[data-testid="approval-template-groups-unarchive-button"]')).toBeNull()
+    expect(el.querySelector('[data-testid="approval-template-groups-archive-button"]')).not.toBeNull()
+    expect(el.textContent).not.toMatch(/Archived/i)
+  })
+
+  it('P2-4: archive/rename/unarchive each emit "changed" so the sections view re-reads', async () => {
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Finance')] })
+      }
+      if (path === '/api/approval-template-groups/atg_1/archive' && init?.method === 'POST') {
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const onChanged = vi.fn()
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, onChanged })
+      },
+    })
+    app.mount(container)
+    await settle()
+
+    ;(container.querySelector('[data-testid="approval-template-groups-archive-button"]') as HTMLButtonElement).click()
+    await settle()
+
+    expect(onChanged).toHaveBeenCalledTimes(1)
+  })
+
+  // P3-3 (impl-gate-A5-daily-ops-round1-20260920.md): archive/unarchive MOVE the row in the
+  // server's order (`ORDER BY (archived_at IS NOT NULL), sort_order NULLS LAST, archived_at DESC
+  // NULLS LAST, name`; archiving nulls `sort_order`, unarchiving takes MAX+1), but round 1 only
+  // swapped the row in place, so a just-archived group stayed sitting among the active ones until
+  // the admin collapsed and reopened the panel. The fix re-reads the list from the server rather
+  // than reimplementing that four-key comparator on the client.
+  it('P3-3: archiving re-reads the list so the rendered order is the server\'s, not the pre-archive one', async () => {
+    let archived = false
+    let listCalls = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listCalls += 1
+        // The server's own ordering: active rows first, archived rows last.
+        return jsonResponse(200, {
+          groups: archived
+            ? [group('atg_2', 'org-a', 'Ops'), group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z')]
+            : [group('atg_1', 'org-a', 'Finance'), group('atg_2', 'org-a', 'Ops')],
+        })
+      }
+      if (path === '/api/approval-template-groups/atg_1/archive' && init?.method === 'POST') {
+        archived = true
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance', '2026-09-20T00:00:00.000Z') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    const el = mount()
+    await settle()
+
+    const renderedOrder = () =>
+      Array.from(el.querySelectorAll('[data-group-id]')).map((node) => node.getAttribute('data-group-id'))
+    expect(renderedOrder()).toEqual(['atg_1', 'atg_2'])
+    const listCallsBeforeArchive = listCalls
+
+    ;(el.querySelector(
+      '[data-group-id="atg_1"] [data-testid="approval-template-groups-archive-button"]',
+    ) as HTMLButtonElement).click()
+    await settle()
+
+    // The archived row moved to the tail, exactly where the server puts it.
+    expect(renderedOrder()).toEqual(['atg_2', 'atg_1'])
+    // NIT-B (round 3): the row id is stable for every row and the STATE is its own attribute, so
+    // this asserts the archived state without the row leaving the `…-item` population.
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
+      .toBe('approval-template-groups-item')
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-archived')).toBe('true')
+    expect(el.querySelectorAll('[data-testid="approval-template-groups-item"]').length).toBe(2)
+    // One re-read, not a re-read per render.
+    expect(listCalls).toBe(listCallsBeforeArchive + 1)
+  })
+
+  // P3-D (impl-gate-A5-daily-ops-round2-20260920.md): P3-3 above covers only the ARCHIVE side of
+  // `replaceGroup`'s in-place-swap gap. Unarchiving moves the row too — the server takes
+  // `sort_order = MAX+1`, landing it at the END of the now-active rows, which is not necessarily
+  // where an in-place splice would leave it. The round-2 gate's M-h mutation (delete `onUnarchive`'s
+  // `await loadGroups()`) survived every one of the five specs' 76 tests green; this is the mirror
+  // of P3-3's archive case that gives that branch discriminating power.
+  //
+  // Fixture: TWO already-archived groups, `atg_3` archived MORE RECENTLY than `atg_1` — the
+  // server's own order (`archived_at DESC NULLS LAST`) therefore renders `atg_3` BEFORE `atg_1`.
+  // Unarchiving `atg_1` (the one that renders LAST) makes an in-place swap and a real re-read
+  // observably different: a swap-in-place leaves `atg_1` sitting exactly where it was — AFTER the
+  // still-archived `atg_3` — while the server re-reads `atg_1` as the only active row, first.
+  it('P3-D: unarchiving re-reads the list so the rendered order is the server\'s, not the pre-unarchive one', async () => {
+    let unarchived = false
+    let listCalls = 0
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        listCalls += 1
+        return jsonResponse(200, {
+          groups: unarchived
+            // Server order after unarchiving: the now-active atg_1 sorts first (active rows
+            // before archived ones), atg_3 stays archived and last.
+            ? [group('atg_1', 'org-a', 'Finance', null), group('atg_3', 'org-a', 'Sales', '2026-09-19T00:00:00.000Z')]
+            // Before: both archived, atg_3 archived MORE RECENTLY so it renders first.
+            : [group('atg_3', 'org-a', 'Sales', '2026-09-19T00:00:00.000Z'), group('atg_1', 'org-a', 'Finance', '2026-09-18T00:00:00.000Z')],
+        })
+      }
+      if (path === '/api/approval-template-groups/atg_1/unarchive' && init?.method === 'POST') {
+        unarchived = true
+        return jsonResponse(200, { group: group('atg_1', 'org-a', 'Finance') })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+
+    const el = mount()
+    await settle()
+
+    const renderedOrder = () =>
+      Array.from(el.querySelectorAll('[data-group-id]')).map((node) => node.getAttribute('data-group-id'))
+    expect(renderedOrder()).toEqual(['atg_3', 'atg_1'])
+    const listCallsBeforeUnarchive = listCalls
+
+    ;(el.querySelector(
+      '[data-group-id="atg_1"] [data-testid="approval-template-groups-unarchive-button"]',
+    ) as HTMLButtonElement).click()
+    await settle()
+
+    // The newly-active row moved to the FRONT, exactly where the server puts it — an in-place
+    // swap would have left it stuck after the still-archived atg_3.
+    expect(renderedOrder()).toEqual(['atg_1', 'atg_3'])
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-testid'))
+      .toBe('approval-template-groups-item')
+    expect(el.querySelector('[data-group-id="atg_1"]')!.getAttribute('data-archived')).toBe('false')
+    expect(el.querySelector('[data-group-id="atg_3"]')!.getAttribute('data-archived')).toBe('true')
+    // One re-read, not a re-read per render.
+    expect(listCalls).toBe(listCallsBeforeUnarchive + 1)
+  })
+})
+
+/**
+ * P1-A (impl-gate-A5-daily-ops-round1-20260920.md) — HOSTED mode.
+ *
+ * Standalone (every case above) this panel keeps its own `useSessionOrg()` instance and its own
+ * switcher; that is what acceptance J's mutation is red against. Inside TemplateCenterView the
+ * page provides the ONE instance for the whole page, and this panel must then render no control of
+ * its own — two live instances destroy each other's `orgs` through the composable's
+ * `onAuthPrincipalChange` handler (see `SessionOrgSwitcher.vue`'s `SessionOrgHost` doc comment).
+ */
+describe('ApprovalTemplateGroupsPanel — hosted session-org entry (P1-A)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+    useAuth().setToken(jwt('org-a'))
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.restoreAllMocks()
+  })
+
+  it('reports the 403 to the host, draws no switcher, adds no second session-org lookup — and its list returns when the host replays loadGroups()', async () => {
+    let bound = false
+    mocks.apiFetch.mockImplementation(async (path: string, init?: { method?: string }) => {
+      if (path === '/api/approval-template-groups' && !init) {
+        if (!bound) {
+          return jsonResponse(403, {
+            error: { code: 'SESSION_ORG_REQUIRED', message: 'An authenticated session organization is required' },
+          })
+        }
+        return jsonResponse(200, { groups: [group('atg_1', 'org-a', 'Legal')] })
+      }
+      if (path === '/api/auth/session-orgs') {
+        return jsonResponse(200, { success: true, data: { orgs: ['org-a', 'org-b'], currentOrgId: null } })
+      }
+      throw new Error(`unexpected call: ${path} ${init?.method}`)
+    })
+    const notifySessionOrgRequired = vi.fn()
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        // The real composable — the host's single instance, as TemplateCenterView builds it, and
+        // the host's own one fetch of the org list. Populating `orgs` here is what makes the
+        // assertions below discriminating: `SessionOrgSwitcher`'s own `v-if` hides it while `orgs`
+        // is empty, so a panel that FAILED to defer would still render nothing and the case would
+        // pass vacuously. With two orgs known, a non-deferring panel renders a second control.
+        const sessionOrg = useSessionOrg()
+        void sessionOrg.loadSessionOrgs()
+        provide(SessionOrgHostKey, { sessionOrg, notifySessionOrgRequired })
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+
+    const sessionOrgLookups = () =>
+      mocks.apiFetch.mock.calls.filter(([path]) => String(path).startsWith('/api/auth/session-org')).length
+    // Sanity: the host's instance really does hold two orgs now, i.e. anything that rendered a
+    // switcher here WOULD be visible.
+    expect(sessionOrgLookups()).toBe(1)
+
+    expect(container.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+    expect(notifySessionOrgRequired).toHaveBeenCalledTimes(1)
+    // No SECOND lookup: the host owns that one call, the panel adds none of its own.
+    expect(sessionOrgLookups()).toBe(1)
+    // The list is suppressed while blocked — it is empty, so "No groups yet." would be a lie.
+    expect(container.querySelector('[data-testid="approval-template-groups-list"]')).toBeNull()
+
+    // Exactly what TemplateCenterView.onPageSessionOrgChange calls after a successful switch.
+    bound = true
+    await panelRef.value!.loadGroups()
+    await settle()
+
+    expect(container.querySelector('[data-testid="approval-template-groups-list"]')).not.toBeNull()
+    expect(container.textContent).toContain('Legal')
+    expect(container.querySelectorAll('[data-testid="session-org-switcher"]').length).toBe(0)
+  })
+})
+
+/**
+ * (ii) Request-algebra guard (impl-gate-A5-daily-ops-round2-20260920.md, additional load-bearing
+ * scenario) — sibling of `TemplateGroupSections.vue`'s identical case: the host replays THIS
+ * panel's `loadGroups()` too, on the same successful-switch event
+ * (`TemplateCenterView.onPageSessionOrgChange` calls `groupsPanelRef.value?.loadGroups()`
+ * alongside the sections view's `loadAll()`), so the same overlapping-calls race applies here.
+ */
+describe('ApprovalTemplateGroupsPanel — request algebra guard (rapid org switch)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  beforeEach(() => {
+    localStorage.clear()
+    mocks.apiFetch.mockReset()
+    useAuth().setToken(jwt('org-a'))
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.restoreAllMocks()
+  })
+
+  async function settle(rounds = 4) {
+    for (let i = 0; i < rounds; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await nextTick()
+    }
+  }
+
+  it('(ii) a stale loadGroups() answer that arrives AFTER a newer one must not overwrite the newer org\'s rendered list', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    // onMounted's own loadGroups() is the first call — let it settle cleanly before the race.
+    expect(resolvers.length).toBe(1)
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+
+    // Two rapid successive org switches: TemplateCenterView.onPageSessionOrgChange calls
+    // `loadGroups()` again on EACH switch, before either has necessarily returned.
+    const stale = panelRef.value!.loadGroups() // fired for the org being switched AWAY from
+    const fresh = panelRef.value!.loadGroups() // fired for the org just switched TO
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // Resolve OUT OF ORDER: the request fired SECOND (the org now current) answers first.
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await settle()
+    resolvers[1](jsonResponse(200, { groups: [group('atg_stale', 'org-a', 'Stale Org Group')] }))
+    await Promise.all([stale, fresh])
+    await settle()
+
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('Stale Org Group')
+  })
+
+  // ── Boundary ③ of the round-3 acceptance: the guard has THREE exits, one per way a superseded
+  // call can still act, and round 2b measured that only the first of them was driven by any case
+  // (M-p / M-q / M-r / M-s all survived). The case above drives the post-await SUCCESS exit; the
+  // two below drive the CATCH exit and the FINALLY exit. Each one delays the stale request and
+  // lets it take a different way out, and each asserts the specific damage that exit can do.
+
+  it('(③ catch exit) a stale loadGroups() FAILURE landing after a newer one must not post the previous org\'s error over the new org\'s list', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    const rejecters: Array<(err: Error) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve, reject) => { resolvers.push(resolve); rejecters.push(reject) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    expect(resolvers.length).toBe(1)
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+
+    const stale = panelRef.value!.loadGroups() // the org being switched AWAY from
+    const fresh = panelRef.value!.loadGroups() // the org just switched TO
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // The new org answers first and renders. THEN the abandoned org's request fails.
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await settle()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    rejecters[1](new Error('boom'))
+    await Promise.all([stale, fresh])
+    await settle()
+
+    // The panel's success path writes `groups`/`sessionOrgBlocked` and never clears `loadError`,
+    // so a stale error banner would sit on top of the new org's data until the next successful
+    // load — indefinitely, since nothing re-reads on its own.
+    expect(container!.querySelector('[data-testid="approval-template-groups-load-error"]')).toBeNull()
+    expect(container!.textContent).toContain('Fresh Org Group')
+    expect(container!.textContent).not.toContain('boom')
+  })
+
+  it('(③ finally exit) a stale loadGroups() settling while the newer one is STILL in flight must not clear the newer request\'s loading state', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({
+      setup() {
+        return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef })
+      },
+    })
+    app.mount(container)
+    await settle()
+    resolvers[0](jsonResponse(200, EMPTY_LIST))
+    await settle()
+    // Positive control for the selector this case asserts the ABSENCE of: with nothing loading
+    // and no groups, the "no groups yet" row IS rendered here.
+    expect(container!.querySelector('.approval-template-groups-panel__empty')).not.toBeNull()
+
+    const stale = panelRef.value!.loadGroups()
+    const fresh = panelRef.value!.loadGroups()
+    await settle(1)
+    expect(resolvers.length).toBe(3)
+
+    // Only the ABANDONED org's request answers. The current org's is still on the wire.
+    resolvers[1](jsonResponse(200, { groups: [group('atg_stale', 'org-a', 'Stale Org Group')] }))
+    await stale
+    await settle()
+
+    // Still loading — so the empty row must NOT be back. Without the guard on the `finally`, the
+    // stale call lowers `loading` and the panel renders "no groups yet" as a settled answer for
+    // an organization it has not heard from yet.
+    expect(container!.querySelector('.approval-template-groups-panel__empty')).toBeNull()
+    expect(container!.textContent).not.toContain('Stale Org Group')
+
+    resolvers[2](jsonResponse(200, { groups: [group('atg_fresh', 'org-b', 'Fresh Org Group')] }))
+    await fresh
+    await settle()
+    expect(container!.textContent).toContain('Fresh Org Group')
+  })
+
+  // ── Boundary ① at the component that OWNS the state ────────────────────────────────────────
+  // The page clears what the page owns; this panel's groups, error banner and in-flight load are
+  // the panel's own and are cleared here, by the same funnel. Without this, an admin who signs in
+  // as somebody else keeps looking at the previous account's group list until something re-reads.
+  it('(①) an external principal change drops this panel\'s rendered groups, and the load it had in flight cannot commit afterwards', async () => {
+    const resolvers: Array<(res: { ok: boolean; status: number; json: () => Promise<unknown> }) => void> = []
+    mocks.apiFetch.mockImplementation(
+      (path: string) =>
+        path === '/api/approval-template-groups'
+          ? new Promise((resolve) => { resolvers.push(resolve) })
+          : Promise.reject(new Error(`unexpected call: ${path}`)),
+    )
+    const panelRef = ref<{ loadGroups: () => Promise<void> } | null>(null)
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp({ setup() { return () => h(ApprovalTemplateGroupsPanel, { tr, ref: panelRef }) } })
+    app.mount(container)
+    await settle()
+    resolvers[0](jsonResponse(200, { groups: [group('atg_a', 'org-a', 'Previous Account Group')] }))
+    await settle()
+    expect(container!.textContent).toContain('Previous Account Group')
+
+    // A second read for the SAME (previous) account is on the wire when the account changes.
+    const inFlight = panelRef.value!.loadGroups()
+    await settle(1)
+    expect(resolvers.length).toBe(2)
+
+    useAuth().setToken(jwt('org-z'))
+    await settle()
+
+    // Cleared, not merely marked dirty: nothing from the previous account is still rendered.
+    expect(container!.textContent).not.toContain('Previous Account Group')
+
+    // The read issued under the previous account now answers. It must not repaint that account's
+    // groups into the new account's panel — the same request algebra the rapid-switch cases use,
+    // driven here by an identity change instead of an organization change.
+    resolvers[1](jsonResponse(200, { groups: [group('atg_a', 'org-a', 'Previous Account Group')] }))
+    await inFlight
+    await settle()
+    expect(container!.textContent).not.toContain('Previous Account Group')
+    expect(container!.querySelector('[data-testid="approval-template-groups-load-error"]')).toBeNull()
+  })
+})

@@ -4,13 +4,13 @@
       <div class="restore-batch-modal" role="dialog" :aria-label="l('record.batchRestoreTitle')">
         <div class="restore-batch__header">
           <strong>{{ l('record.batchRestoreTitle') }}</strong>
-          <MtIconButton class="restore-batch__close" :aria-label="l('record.batchRestoreCancel')" @click="onCancel">&times;</MtIconButton>
+          <MtIconButton class="restore-batch__close" :disabled="executing" :aria-label="l('record.batchRestoreCancel')" @click="onCancel">&times;</MtIconButton>
         </div>
 
         <!-- Target control: default = revert to original (v1); Advanced reveals a version-N picker (the MIX entry). -->
         <div v-if="phase === 'preview'" class="restore-batch__target">
           <p class="restore-batch__revert">{{ l('record.batchRestoreRevertOriginal') }}</p>
-          <button type="button" class="restore-batch__advanced-toggle" data-test="batch-restore-advanced" @click="advancedOpen = !advancedOpen">
+          <button type="button" class="restore-batch__advanced-toggle" :disabled="executing" data-test="batch-restore-advanced" @click="advancedOpen = !advancedOpen">
             {{ l('record.batchRestoreAdvanced') }}
           </button>
           <label v-if="advancedOpen" class="restore-batch__version">
@@ -21,6 +21,7 @@
               class="restore-batch__version-input"
               data-test="batch-restore-version"
               :value="versionInput"
+              :disabled="executing"
               @change="onVersionChange"
               @keyup.enter="onVersionChange"
             />
@@ -74,7 +75,7 @@
 
         <div class="restore-batch__footer">
           <template v-if="phase === 'preview'">
-            <MtButton class="restore-batch__btn" @click="onCancel">{{ l('record.batchRestoreCancel') }}</MtButton>
+            <MtButton class="restore-batch__btn" :disabled="executing" data-test="batch-restore-cancel" @click="onCancel">{{ l('record.batchRestoreCancel') }}</MtButton>
             <MtButton
               variant="primary"
               class="restore-batch__btn restore-batch__btn--primary"
@@ -105,6 +106,7 @@ const props = defineProps<{
   visible: boolean
   phase: 'preview' | 'result'
   loading: boolean
+  executing?: boolean
   targetVersion: number
   previewRecords: RestoreBatchPreviewRecord[]
   restorableCount: number
@@ -129,6 +131,7 @@ const versionInput = computed(() => props.targetVersion)
 const canConfirm = computed(() => !props.loading && props.executable && props.restorableCount > 0)
 
 function onVersionChange(ev: Event): void {
+  if (props.executing) return
   const raw = Number((ev.target as HTMLInputElement).value)
   if (Number.isFinite(raw) && raw >= 1) emit('preview-version', Math.floor(raw))
 }
@@ -136,6 +139,7 @@ function onConfirm(): void {
   if (canConfirm.value) emit('confirm')
 }
 function onCancel(): void {
+  if (props.executing) return
   emit('cancel')
 }
 function onDone(): void {

@@ -1959,6 +1959,140 @@ describe('DirectoryManagementView', () => {
     expect(container?.textContent).toContain('目录成员 王武 已创建本地用户并完成绑定')
   })
 
+  // #6259: the admit-user route answers a login-name rule failure with 400 INVALID_USERNAME +
+  // details.rule (it used to be a 500 with the English sentence). Both create-and-bind forms label
+  // the field 登录名 like the create-user form, state the rule up front, and show Chinese copy for
+  // that code; anything without the rule code keeps the server message.
+  const LOGIN_NAME_RULE_ZH = '登录名只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏'
+  const LOGIN_NAME_HINT_ZH = '登录名：只能用小写字母、数字和 . _ -，3–64 位且至少一个字母；中文姓名请填「姓名」栏。'
+  const LOGIN_NAME_RULE_EN = 'Username must be 3-64 characters and include at least one letter. Only lowercase letters, numbers, dot, underscore, and dash are allowed'
+
+  function mockDirectoryLoadWithPendingAccount(accountId: string, withReviewItem: boolean) {
+    const account = createAccount({ id: accountId, name: '测试员', email: null, mobile: '13900000000' })
+    apiFetchMock
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [createIntegration()] } }))
+      .mockResolvedValueOnce(createJsonResponse({ ok: true, data: { items: [] } }))
+      .mockResolvedValueOnce(createJsonResponse(createScheduleSnapshotPayload()))
+      .mockResolvedValueOnce(createJsonResponse(createAlertListPayload([])))
+      .mockResolvedValueOnce(createJsonResponse(createReviewItemsPayload(withReviewItem
+        ? [{
+          kind: 'pending_binding',
+          reason: '目录成员尚未绑定本地用户。',
+          account,
+          flags: { missingUnionId: false, missingOpenId: false },
+          actionable: { canBatchUnbind: false, canConfirmRecommendation: false },
+          recommendations: [],
+          recommendationStatus: { code: 'no_exact_match', message: '未匹配到本地用户' },
+        }]
+        : [])))
+      .mockResolvedValueOnce(createJsonResponse(createAccountListPayload([account], { total: 1 })))
+  }
+
+  it('labels both create-and-bind forms 登录名 with the rule hint and shows Chinese copy for INVALID_USERNAME (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-zh-login', true)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+        details: { rule: 'login_name_ascii' },
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const toggleButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('手动创建用户'))
+    expect(toggleButton).toBeTruthy()
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    // Same account expanded => the review-queue form AND the account-list form are both rendered.
+    const forms = Array.from(container!.querySelectorAll('.directory-admin__review-admission'))
+      .filter((form) => form.textContent?.includes('创建本地用户') || form.querySelector('input[placeholder="例如 liqing"]'))
+    expect(forms).toHaveLength(2)
+    for (const form of forms) {
+      const labels = Array.from(form.querySelectorAll('.directory-admin__field > span')).map((span) => span.textContent?.trim())
+      expect(labels).toContain('登录名（可选）')
+      expect(labels).not.toContain('用户名（可选）')
+      const hint = form.querySelector('[data-directory-admission-rule="login-name"]')
+      expect(hint?.textContent?.trim()).toBe(LOGIN_NAME_HINT_ZH)
+      expect(form.textContent).toContain('邮箱、登录名、手机号至少填写一项')
+      expect(form.textContent).not.toContain('用户名')
+    }
+
+    const usernameInput = forms[0].querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = '测试员'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(container!.querySelectorAll('.directory-admin__review-item button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    expect(createAndBindButton).toBeTruthy()
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-zh-login/admit-user',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          name: '测试员',
+          username: '测试员',
+          mobile: '13900000000',
+          enableDingTalkGrant: true,
+        }),
+      }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_ZH)
+    expect(container?.textContent).not.toContain('Username must be')
+    expect(container?.textContent).not.toContain('最近创建并绑定结果')
+  })
+
+  it('keeps the server message for an admission error without the login-name rule code (#6259)', async () => {
+    mockDirectoryLoadWithPendingAccount('account-en-fallback', false)
+    apiFetchMock.mockResolvedValueOnce(createJsonResponse({
+      ok: false,
+      error: {
+        // Same code but no details.rule: localisation is keyed by the rule code, never by prose.
+        code: 'INVALID_USERNAME',
+        message: LOGIN_NAME_RULE_EN,
+      },
+    }, 400))
+
+    app = createApp(DirectoryManagementView)
+    registerRouterLink(app)
+    app.mount(container!)
+    await flushUi()
+
+    const accountCard = findAccountsSection(container!).querySelector('.directory-admin__account') as HTMLElement
+    expect(accountCard).toBeTruthy()
+    const toggleButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('手动创建用户'))
+    toggleButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(2)
+
+    const usernameInput = accountCard.querySelector('input[placeholder="例如 liqing"]') as HTMLInputElement | null
+    expect(usernameInput).toBeTruthy()
+    usernameInput!.value = 'li qing'
+    usernameInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi(2)
+
+    const createAndBindButton = Array.from(accountCard.querySelectorAll('button')).find((button) => button.textContent?.includes('创建用户并绑定'))
+    createAndBindButton?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await flushUi(12)
+
+    expect(apiFetchMock).toHaveBeenCalledWith(
+      '/api/admin/directory/accounts/account-en-fallback/admit-user',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    const status = container!.querySelector('.directory-admin__status.directory-admin__status--error')
+    expect(status?.textContent?.trim()).toBe(LOGIN_NAME_RULE_EN)
+    expect(container?.textContent).not.toContain(LOGIN_NAME_RULE_ZH)
+  })
+
   it('focuses a reviewed account and quick-binds it from the accounts banner', async () => {
     apiFetchMock
       .mockResolvedValueOnce(createJsonResponse({

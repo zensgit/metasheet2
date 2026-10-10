@@ -69,8 +69,27 @@ export type StockPreparationProjectSyncReason =
   | 'PLAN_PROJECT_NOT_FOUND'
   | 'PLAN_LARGE_BOM_BOUNDED'
   | 'PLAN_NOT_APPLYABLE'
+  // 客户反馈 2026-09-24 #2 — a dry-run failure used to collapse into ONE reason regardless of what the
+  // server actually said, so 「数据来源的连接坏了」、「这张表被别的项目占了」 and 「服务暂时连不上」 all
+  // rendered the SAME sentence, 「没能连上取数,稍后再试一次」 — which is actionable for exactly the last
+  // of those three and a dead end (or a lie) for the other two. `classifyPlanReadFailureReason` below
+  // sorts a failed dry run into the outcome a person can actually act on differently; `PLAN_READ_FAILED`
+  // itself is KEPT, unchanged, as the transient bucket (`SOURCE_UNAVAILABLE`, a network failure, any
+  // 5xx) the original sentence was written for.
+  | 'PLAN_READ_FAILED_CONNECTION'
+  | 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  | 'PLAN_READ_UNAUTHENTICATED'
+  | 'PLAN_READ_NOT_PERMITTED'
   | 'PLAN_READ_FAILED'
+  | 'PLAN_READ_FAILED_UNKNOWN'
   | 'PLAN_MALFORMED_RESPONSE'
+  // 一个项目一张备料表 (S2, R-36) — the project-sheet refusals a dry run can meet once the server's
+  // MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED switch is on. Each has a different next step, so
+  // none of them may fall through to 「稍后再试」: retrying fixes none of them.
+  | 'PLAN_PROJECT_SHEET_ABSENT'
+  | 'PLAN_PROJECT_SHEET_ARCHIVED'
+  | 'PLAN_TARGET_NOT_OURS'
+  | 'PLAN_TARGET_SCHEMA_INCOMPLETE'
   // 2. 确认
   | 'NOTHING_TO_CONFIRM'
   | 'CONFIRMATIONS_QUEUED'
@@ -91,6 +110,9 @@ export type StockPreparationProjectSyncReason =
   | 'WRITE_NO_PLAN'
   | 'WRITE_PARTIAL'
   | 'WRITE_FAILED'
+  // S2 (R-36, Q4): the puller looked at the preview of a freshly created sheet and chose not to write.
+  // Nothing was written; the new sheet stays (empty, 「还没拉过」) — there is no 「撤销新建」.
+  | 'WRITE_NOT_CONFIRMED'
   // 4. 批次存档
   | 'BATCH_ARCHIVED'
   | 'BATCH_ALREADY_ARCHIVED'
@@ -371,6 +393,8 @@ export type StockPreparationProjectSyncVerdict =
   | 'already_up_to_date'
   | 'partial'
   | 'held'
+  // S2: the operator declined the write after the preview. Not `blocked` — nothing refused anything.
+  | 'not_written'
   | 'blocked'
   | 'not_run'
 
@@ -466,6 +490,85 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
 }
 
 /**
+ * 客户反馈 2026-09-24 #2 (裁定见 PR #6074;后端诊断见 #6067) — WHICH SENTENCE A FAILED DRY RUN GETS.
+ *
+ * Before this function existed, `classifyPlanStep`'s `!plan` branch always answered
+ * `PLAN_READ_FAILED`, so the panel printed the SAME 「没能连上取数,稍后再试一次」 whether the real cause
+ * was a dead connection, another project already sitting in the target sheet, a permission refusal,
+ * or the source genuinely being down — the last of those is the ONLY one retrying can fix, and it is
+ * what that sentence promises. This function reads nothing new: `classifyPlanStep`'s caller already
+ * carries a clamped, identifier-shaped error CODE (`clampErrorCode`) and an HTTP STATUS in `options`,
+ * and never a server message. Sorted by CODE first, because a `CONNECTION_*` or
+ * `TARGET_SHEET_FOREIGN_PROJECT` refusal is meaningful regardless of which HTTP status the load path
+ * happens to answer with today (`inferHttpStatus` in http-routes.cjs falls back to 500 for the
+ * connection-resolver's own error, which — read by status alone — would otherwise be
+ * indistinguishable from a genuine server fault).
+ *
+ *   `TARGET_SHEET_FOREIGN_PROJECT` (409, stock-preparation-table-actions.cjs) — the target sheet
+ *     already holds another project's active rows. Retrying never helps; an administrator has to
+ *     clear the old data or point the new project at a fresh sheet.
+ *   `CONNECTION_*` (connection-resolver.cjs) — the binding's own connection cannot be resolved
+ *     (deleted, not authorized, or no owner bound). Retrying never helps either.
+ *   `SOURCE_UNAVAILABLE`, no HTTP status at all (a raw network failure never reaches
+ *     `StockPreparationProjectSyncCallError`, so `status` is 0), or ANY 5xx — the transient case the
+ *     original sentence was written for. Kept as `PLAN_READ_FAILED`, unchanged.
+ *   401 — this caller is not signed in at all (a stale/expired session), which is a DIFFERENT fix
+ *     from a 403 (sign in again, vs. ask an administrator for a permission), so it is its own class
+ *     rather than sharing 403's sentence.
+ *   403 — this caller IS signed in and specifically refused. Both status checks run AFTER the two
+ *     code-specific cases above, since a `CONNECTION_*` refusal can itself surface at a non-401/403
+ *     status and must not be re-classified just because some OTHER caller's 401/403 looks the same on
+ *     the wire.
+ *   anything else — genuinely unclassified. Says so plainly instead of guessing a cause that is not
+ *     there.
+ */
+/**
+ * 一个项目一张备料表 (S2, R-36) — the project-sheet codes `classifyPlanReadFailureReason` sorts BY CODE
+ * ahead of every status rule (all of them answer 4xx, so a status-only reading would send each to the
+ * wrong sentence: ABSENT/ARCHIVED are 409, the wall is 409, the schema refusal is 422).
+ */
+export const STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+  STOCK_PREPARATION_PROJECT_ABSENT: 'PLAN_PROJECT_SHEET_ABSENT',
+  STOCK_PREPARATION_PROJECT_ARCHIVED: 'PLAN_PROJECT_SHEET_ARCHIVED',
+  TABLE_ACTION_TARGET_TENANT_MISMATCH: 'PLAN_TARGET_NOT_OURS',
+  TABLE_ACTION_TARGET_OWNER_UNKNOWN: 'PLAN_TARGET_NOT_OURS',
+  TABLE_ACTION_TARGET_UNBOUND: 'PLAN_TARGET_NOT_OURS',
+})
+
+/**
+ * S2 fix round 1 (refuter #4): `TARGET_SCHEMA_INCOMPLETE` is NOT a project-sheet code — the env
+ * sheet answers it too (a deployment whose template columns were deleted). Its project-sheet
+ * sentence (repair the project sheet by re-installing the customer pack) is therefore chosen ONLY
+ * when the run was on a project sheet (`context.projectSheet`, set by the project-sheet flow, i.e. the
+ * server's switch is on and this project resolved to its own sheet). Everywhere else it keeps the
+ * reading it had before S2 — the status rules below (a 422 reads as PLAN_READ_FAILED_UNKNOWN) — so
+ * the switch-off text is unchanged.
+ */
+export const STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS: Readonly<Record<string, StockPreparationProjectSyncReason>> = Object.freeze({
+  TARGET_SCHEMA_INCOMPLETE: 'PLAN_TARGET_SCHEMA_INCOMPLETE',
+})
+
+export function classifyPlanReadFailureReason(
+  status: number,
+  errorCode: string | null,
+  context: { projectSheet?: boolean } = {},
+): StockPreparationProjectSyncReason {
+  if (errorCode && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS, errorCode)) {
+    return STOCK_PREP_PROJECT_SHEET_PLAN_REFUSAL_REASONS[errorCode]
+  }
+  if (context.projectSheet === true && errorCode
+    && Object.prototype.hasOwnProperty.call(STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS, errorCode)) {
+    return STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS[errorCode]
+  }
+  if (errorCode === 'TARGET_SHEET_FOREIGN_PROJECT') return 'PLAN_READ_FAILED_FOREIGN_PROJECT'
+  if (errorCode && errorCode.startsWith('CONNECTION_')) return 'PLAN_READ_FAILED_CONNECTION'
+  if (errorCode === 'SOURCE_UNAVAILABLE' || status === 0 || status >= 500) return 'PLAN_READ_FAILED'
+  if (status === 401) return 'PLAN_READ_UNAUTHENTICATED'
+  if (status === 403) return 'PLAN_READ_NOT_PERMITTED'
+  return 'PLAN_READ_FAILED_UNKNOWN'
+}
+
+/**
  * THE PLAN CLASSIFICATION — one function, so no caller can decide `held` means something else.
  *
  * The distinction that matters: `manual_confirm_required` is NOT a failure. The server issues a
@@ -476,15 +579,17 @@ export function writtenCountsOf(counts: Record<string, number> | undefined | nul
 export function classifyPlanStep(
   index: number,
   plan: { status?: string; canApply?: boolean; dryRunToken?: string | null; counts?: Record<string, number> } | null,
-  options: { status?: number; malformed?: boolean; errorCode?: string | null } = {},
+  options: { status?: number; malformed?: boolean; errorCode?: string | null; projectSheet?: boolean } = {},
 ): StockPreparationProjectSyncStepResult {
   if (options.malformed) {
     return result(index, 'dry-run', 'fail', 'PLAN_MALFORMED_RESPONSE', { status: options.status ?? 0 })
   }
   if (!plan) {
-    const detail: Record<string, string | number> = { status: options.status ?? 0 }
+    const status = options.status ?? 0
+    const detail: Record<string, string | number> = { status }
     if (options.errorCode) detail.code = options.errorCode
-    return result(index, 'dry-run', 'fail', 'PLAN_READ_FAILED', detail)
+    const reason = classifyPlanReadFailureReason(status, options.errorCode ?? null, { projectSheet: options.projectSheet === true })
+    return result(index, 'dry-run', 'fail', reason, detail)
   }
   const status = clampToken(plan.status, STOCK_PREPARATION_DRY_RUN_STATUSES)
   const planned = plannedCountsOf(plan.counts)
@@ -533,6 +638,7 @@ export function summarizeProjectSync(
   // where the panel must not say "nothing changed" — see the verdict type's note.
   else if (write?.reason === 'WRITE_PARTIAL') verdict = 'partial'
   else if (write?.reason === 'WRITE_HELD_FOR_CONFIRMATION') verdict = 'held'
+  else if (write?.reason === 'WRITE_NOT_CONFIRMED') verdict = 'not_written'
   else if (steps.length > 0) verdict = 'blocked'
 
   return {
@@ -659,6 +765,23 @@ function missingComponentsFallbackReason(error: unknown): StockPreparationMissin
 // ---------------------------------------------------------------------------
 
 /**
+ * S2 (ADR adr-stock-prep-project-sheets-20261008 §4, R-36) — the ONE optional seam the project-sheet
+ * flow needs inside the run: 「预览『将写入 N 行』→ 确认 → apply」 for a sheet that was just created.
+ * Asked once, after a plan that WOULD write (not held, token in hand) and before the write. Anything
+ * but `true` writes nothing: the write step SKIPs with `WRITE_NOT_CONFIRMED` and the archive is not
+ * attempted. Without the hook the run is exactly what it always was — every existing caller passes none.
+ */
+export interface StockPreparationProjectSyncHooks {
+  confirmWrite?: (planned: NonNullable<StockPreparationProjectSyncReport['planned']>) => Promise<boolean> | boolean
+  /**
+   * S2 fix round 1: the run is on a PROJECT SHEET (the project-sheet flow sets it). Only then does a
+   * refusal code that both sheet kinds can answer (`TARGET_SCHEMA_INCOMPLETE`) read in its
+   * project-sheet wording; see `STOCK_PREP_PROJECT_SHEET_ONLY_REFUSAL_REASONS`.
+   */
+  projectSheet?: boolean
+}
+
+/**
  * Walk the four steps for ONE project number. `onStep` fires after each so the panel can render
  * progress rather than a spinner — a run that stops at the plan must still show the plan's counts.
  *
@@ -669,6 +792,7 @@ export async function runStockPreparationProjectSync(
   api: StockPreparationProjectSyncApi,
   projectNo: string,
   onStep?: (step: StockPreparationProjectSyncStepResult) => void,
+  hooks: StockPreparationProjectSyncHooks = {},
 ): Promise<StockPreparationProjectSyncReport> {
   const steps: StockPreparationProjectSyncStepResult[] = []
   let pendingConfirmCount = 0
@@ -714,6 +838,7 @@ export async function runStockPreparationProjectSync(
       status: statusOf(error),
       malformed: isMalformed(error),
       errorCode: codeOf(error),
+      projectSheet: hooks.projectSheet === true,
     }))
   }
   if (planStep.status !== 'ok') return done()
@@ -769,6 +894,16 @@ export async function runStockPreparationProjectSync(
     record(result(3, 'apply', 'skip', 'WRITE_NO_PLAN', { planStatus: clampToken(plan?.status, STOCK_PREPARATION_DRY_RUN_STATUSES) }))
     record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
     return done()
+  }
+  // S2: the preview's yes/no, asked only now — the plan exists and would write. See the hook's type.
+  if (hooks.confirmWrite) {
+    const shown = planned ?? plannedCountsOf(undefined)
+    const go = await hooks.confirmWrite(shown)
+    if (go !== true) {
+      record(result(3, 'apply', 'skip', 'WRITE_NOT_CONFIRMED', { add: shown.add, update: shown.update, inactive: shown.inactive }))
+      record(result(4, 'archive', 'skip', 'BATCH_ARCHIVE_NOT_ATTEMPTED', {}))
+      return done()
+    }
   }
 
   let writeOk = false

@@ -66,6 +66,7 @@ import { useLocale } from '../../composables/useLocale'
 import type { DingTalkPersonDelivery } from '../types'
 import type { MultitableApiClient } from '../api/client'
 import { automationLabel, automationStatusLabel } from '../utils/meta-automation-labels'
+import { formatBusinessTimestamp } from '../utils/business-timezone'
 import { MtButton, MtIconButton } from '../ui'
 
 const props = defineProps<{
@@ -118,12 +119,9 @@ function deliveryReason(delivery: DingTalkPersonDelivery): string {
   return delivery.errorMessage || ''
 }
 
+// 客户反馈 2026-09-24 #4c follow-up: the business timezone, fixed 24-hour format — not the browser's zone / locale.
 function formatTime(ts: string): string {
-  try {
-    return new Date(ts).toLocaleString()
-  } catch {
-    return ts
-  }
+  return formatBusinessTimestamp(ts, { precision: 'second' }) ?? ts
 }
 
 function readErrorMessage(error: unknown): string {

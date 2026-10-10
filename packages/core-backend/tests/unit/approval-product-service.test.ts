@@ -250,6 +250,21 @@ function mockInsertOnlyClient() {
 // per-test mock router's "Unhandled" throw. This keeps the strict routers useful without copying
 // infrastructure-only fixtures into every behavioral test.
 function commonApprovalClientMockResult(statement: string): { rows: unknown[]; rowCount: number } | null {
+  // dispatchAction's cancel-round rollout-lock pre-read (lock §3 C-2 全局锁序). It runs BEFORE
+  // `BEGIN` on EVERY dispatch and short-circuits on the first row for anything that is not a
+  // cancel round, which is what every fixture in this file is — so the honest mock is a real row
+  // carrying a non-cancel-round `workflow_key`, and the three further reads the resolver would do
+  // for a cancel round are deliberately NOT mocked: a fixture that ever reached them would fail
+  // loudly here rather than silently taking the `none` branch.
+  //
+  // This is a MOCK, not the contract (`feedback_mock_is_not_the_contract.md`). The production
+  // behaviour of that resolver — including WHICH org it returns and when it demands no lock at
+  // all — is measured against real PostgreSQL in the Q-F census legs of
+  // `tests/integration/approval-cancel-round-lock-order-census.db.test.ts`, not here.
+  if (statement.startsWith('SELECT id, workflow_key FROM approval_instances')) {
+    return { rows: [{ id: 'approval-1', workflow_key: null }], rowCount: 1 }
+  }
+
   // nodeEntryEpoch (2026-07-03): use a stable activation sequence and keep legacy mock instances
   // on the NULL cutoff fallback so pre-existing round-scoping assertions stay unchanged.
   if (statement.startsWith('UPDATE approval_instances SET node_activation_seq = node_activation_seq + 1')) {
@@ -854,7 +869,24 @@ describe('ApprovalProductService', () => {
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
-    const service = new ApprovalProductService()
+    // H-1: the node-activation metrics hook is now AWAITED (see
+    // `ApprovalProductService.emitNodeActivationMetric`). With the real shared metrics singleton, that
+    // hook's own short transaction borrows and returns THIS SAME mocked client (both sides import
+    // `pool` from `src/db/pg`, which this file mocks with ONE client), so `pgState.client.release`
+    // would stop being a measure of dispatchAction's own connection discipline — which is exactly what
+    // the assertion at the end of this test is for. Inject a metrics stub so the two accountings stay
+    // separate. The metrics writes keep their own coverage: tests/unit/approval-metrics-service.test.ts
+    // (SQL shape) and tests/integration/approval-dedup-return-round-scoping.db.test.ts (real DB,
+    // including that the activation stamp is durable before the action response returns).
+    const metricsStub = {
+      recordInstanceStart: vi.fn(async () => {}),
+      recordNodeActivation: vi.fn(async () => {}),
+      recordNodeDecision: vi.fn(async () => {}),
+      recordTerminal: vi.fn(async () => {}),
+    }
+    const service = new ApprovalProductService(
+      metricsStub as unknown as ConstructorParameters<typeof ApprovalProductService>[0],
+    )
     vi.spyOn(service, 'getApproval').mockResolvedValue(
       buildApprovalDto({
         currentStep: 1,
@@ -900,7 +932,11 @@ describe('ApprovalProductService', () => {
       nextNodeKey: 'approval_1',
     })
     expect(completionEventState.emitApprovalCompletionEvent).not.toHaveBeenCalled()
+    // dispatchAction's OWN connection: taken once, released exactly once (no leak, no double release).
     expect(pgState.client.release).toHaveBeenCalledTimes(1)
+    // H-1: the return branch still emits the re-entered node's activation stamp, and dispatchAction
+    // does not resolve until that call has settled.
+    expect(metricsStub.recordNodeActivation).toHaveBeenCalledTimes(1)
   })
 
   it('keeps all-mode approvals pending until every assignee has acted', async () => {
@@ -3647,6 +3683,130 @@ describe('ApprovalProductService', () => {
       const result = await new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never)
       expect(result.publishedDefinitionId).toBe('pub-par')
     })
+
+    // ── T5b (test report 2026-10-08): the configure-before-publish placeholder role is not an
+    // approver. Every lane `addParallelBranch` adds carries it, so a 3rd lane shared it with the
+    // 2nd and the STATIC duplicate check 400'd the untouched draft at SAVE — contradicting the
+    // placeholder's contract (draft saves, publish is guarded). ──
+    function placeholderLanesGraph(laneSources: unknown[]) {
+      const lanes = laneSources.map((source, index) => ({ key: `lane_${index + 1}`, source }))
+      return {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: lanes.map((lane) => `e-fork-${lane.key}`), joinMode: 'all', joinNodeKey: 'join' } },
+          ...lanes.map((lane) => ({
+            key: lane.key,
+            type: 'approval',
+            config: { assigneeSources: [lane.source], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+          })),
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          ...lanes.map((lane) => ({ key: `e-fork-${lane.key}`, source: 'fork', target: lane.key })),
+          ...lanes.map((lane) => ({ key: `e-${lane.key}-join`, source: lane.key, target: 'join' })),
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+    }
+
+    it('T5b: two (or more) lanes holding the approver PLACEHOLDER pass the save-time graph gate; publish then fails with the existing placeholder-not-configured code', async () => {
+      const { APPROVAL_ROLE_CONFIGURE_SENTINEL, ApprovalProductService, assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const placeholder = { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }
+      // The exact shape insertParallelGateway + one addParallelBranch produce: requester + 2 placeholders.
+      const graph = placeholderLanesGraph([{ kind: 'requester' }, placeholder, placeholder])
+      // Save path (createTemplate/updateTemplate call assertApprovalGraph with NO options).
+      expect(() => assertApprovalGraph(graph)).not.toThrow()
+      // Publish is still guarded — by the placeholder gate, not the duplicate-approver one.
+      mockParallelPublish(graph)
+      await expect(
+        new ApprovalProductService().publishTemplate('tpl-par', { policy: { allowRevoke: true } } as never),
+      ).rejects.toMatchObject({ statusCode: 400, code: 'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED' })
+    })
+
+    it('T5b: a REAL static approver shared by two lanes is still rejected — same code and message — now with values-free branch attribution', async () => {
+      const { APPROVAL_ROLE_CONFIGURE_SENTINEL, assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const finance = { kind: 'static_role', roleIds: ['finance'] }
+      // Positive control on the exemption's narrowness: a placeholder lane between two real
+      // duplicates must not mask them. Gate r1 P3-1: a distinct lane comes FIRST, so the first
+      // conflicting lane sits at index 1, not 0 — attributing it by a constant index cannot pass.
+      const graph = placeholderLanesGraph([
+        { kind: 'requester' },
+        finance,
+        { kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] },
+        finance,
+      ])
+      let thrown: unknown
+      try {
+        assertApprovalGraph(graph)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        message: 'approvalGraph parallel branches must not contain the same approver',
+        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['lane_2', 'lane_4'] },
+      })
+      // Values-free: the attribution carries node keys only, never the shared approver id.
+      expect(JSON.stringify((thrown as { details?: unknown }).details)).not.toContain('finance')
+    })
+
+    // Gate r1 P3-1: the SECOND (all-path) duplicate check — reached only when the first-edge walk
+    // misses the overlap because it sits on a NON-first path of a condition inside a lane — carries
+    // the same values-free attribution, also with the first conflicting lane away from index 0.
+    it('T5b: a duplicate that only the ALL-PATH walk finds (non-first condition path inside a lane) carries the same values-free attribution', async () => {
+      const { assertApprovalGraph } = await import('../../src/services/ApprovalProductService')
+      const graph = {
+        nodes: [
+          { key: 'start', type: 'start', config: {} },
+          { key: 'fork', type: 'parallel', config: { branches: ['e-fork-a', 'e-fork-cond', 'e-fork-c'], joinMode: 'all', joinNodeKey: 'join' } },
+          { key: 'lane_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-a'] } },
+          {
+            key: 'cond_1',
+            type: 'condition',
+            config: {
+              branches: [{ edgeKey: 'e-cond-high', rules: [{ fieldId: 'amount', operator: 'gte', value: 1000 }], conjunction: 'and' }],
+              defaultEdgeKey: 'e-cond-low',
+            },
+          },
+          { key: 'approval_high', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-high'] } },
+          { key: 'approval_low', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'lane_c', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-shared'] } },
+          { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['final-1'] } },
+          { key: 'end', type: 'end', config: {} },
+        ],
+        edges: [
+          { key: 'e-start-fork', source: 'start', target: 'fork' },
+          { key: 'e-fork-a', source: 'fork', target: 'lane_a' },
+          { key: 'e-fork-cond', source: 'fork', target: 'cond_1' },
+          { key: 'e-fork-c', source: 'fork', target: 'lane_c' },
+          // Rules edge FIRST, default edge SECOND: the first-edge walk sees only user-high in lane 2.
+          { key: 'e-cond-high', source: 'cond_1', target: 'approval_high' },
+          { key: 'e-cond-low', source: 'cond_1', target: 'approval_low' },
+          { key: 'e-a-join', source: 'lane_a', target: 'join' },
+          { key: 'e-high-join', source: 'approval_high', target: 'join' },
+          { key: 'e-low-join', source: 'approval_low', target: 'join' },
+          { key: 'e-c-join', source: 'lane_c', target: 'join' },
+          { key: 'e-join-end', source: 'join', target: 'end' },
+        ],
+      }
+      let thrown: unknown
+      try {
+        assertApprovalGraph(graph)
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toMatchObject({
+        statusCode: 400,
+        code: 'VALIDATION_ERROR',
+        // The all-path site's pre-existing message (unchanged by this slice; the UI never echoes it).
+        message: "approvalGraph parallel node fork has duplicate approver 'user-shared' across branches",
+        details: { reason: 'parallel_duplicate_approver', nodeKey: 'fork', conflictingNodeKeys: ['cond_1', 'lane_c'] },
+      })
+      expect(JSON.stringify((thrown as { details?: unknown }).details)).not.toContain('user-shared')
+    })
   })
 
   describe('parallel branch all-path join reachability (author / publish)', () => {
@@ -4711,6 +4871,13 @@ describe('ApprovalProductService', () => {
       if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
         return { rows: [], rowCount: 0 }
       }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
 
@@ -4909,6 +5076,12 @@ describe('ApprovalProductService', () => {
   it('redacts stored record-link ids when getApproval omits a viewer', async () => {
     pgState.pool.query.mockImplementation(async (sql: string) => {
       const statement = normalize(sql)
+      // `getApproval` reads the instance's frozen runtime graph for `returnableNodeKeys` whether or
+      // not a viewer is passed (the field is viewer-independent). This fixture's published definition
+      // has no stored row, so the production answer is no graph — and no `returnableNodeKeys`.
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [], rowCount: 0 }
+      }
       if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
         return {
           rows: [buildInstanceRow({
@@ -4936,12 +5109,74 @@ describe('ApprovalProductService', () => {
           rowCount: 1,
         }
       }
+      // Owner ruling 2026-09-20 — `getApproval` now issues ONE extra durable read, the shared
+      // `readCancelRoundDurableProjectionV1`. This fixture's instance is not a cancel round, so
+      // zero rows is the production answer here; the projection's own behaviour is gated by the
+      // real-DB cases in `approval-cancel-round-redemption.db.test.ts`, not by this fake.
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
       throw new Error(`Unhandled pool query: ${statement}`)
     })
 
     const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
     const approval = await new ApprovalProductService().getApproval('apr-1')
     expect(approval?.formSnapshot).toEqual({ linked: { inaccessible: true } })
+  })
+
+  it("getApproval ships returnableNodeKeys from the instance's frozen runtime graph — the action-response carrier's call site", async () => {
+    // Gate r1 P2-1(b): every `dispatchAction` verb arm returns `(await this.getApproval(id,
+    // actor.userId, actor.roles))!`, so THIS method's one call of `toUnifiedApprovalDTO` is the
+    // action-response carrier's call-site wiring (the carriers seam test proves the builder, not
+    // the call). The dispatchAction fixtures in this suite spy `getApproval` out, so this is the one
+    // place the real wiring runs: the frozen graph is served the way production serves it and the
+    // field is asserted on the DTO — passing `null` to the builder instead of the loaded graph
+    // leaves the field absent and turns this red.
+    const frozenRuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-1'] } },
+        { key: 'approval_2', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-2'] } },
+        { key: 'approval_3', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['manager-3'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-1', source: 'start', target: 'approval_1' },
+        { key: 'edge-1-2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-2-3', source: 'approval_2', target: 'approval_3' },
+        { key: 'edge-3-end', source: 'approval_3', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    pgState.pool.query.mockImplementation(async (sql: string) => {
+      const statement = normalize(sql)
+      if (statement.startsWith('SELECT * FROM approval_instances WHERE id = $1')) {
+        return { rows: [buildInstanceRow({ current_node_key: 'approval_3' })], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT * FROM approval_assignments WHERE instance_id = $1')) {
+        return { rows: [], rowCount: 0 }
+      }
+      if (statement.startsWith('SELECT form_schema FROM approval_template_versions WHERE id = $1')) {
+        return { rows: [{ form_schema: { fields: [] } }], rowCount: 1 }
+      }
+      if (statement.startsWith('SELECT runtime_graph FROM approval_published_definitions')) {
+        return { rows: [{ runtime_graph: frozenRuntimeGraph }], rowCount: 1 }
+      }
+      if (statement.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+        return { rows: [], rowCount: 0 }
+      }
+      throw new Error(`Unhandled pool query: ${statement}`)
+    })
+
+    const { ApprovalProductService } = await import('../../src/services/ApprovalProductService')
+    // The production call shape — every HTTP caller passes the viewer; the field is viewer-independent.
+    const approval = await new ApprovalProductService().getApproval('apr-1', 'manager-3', [])
+    expect(approval?.currentNodeKey).toBe('approval_3')
+    expect(approval?.returnableNodeKeys).toEqual(['approval_1', 'approval_2'])
+    // Read ONCE: the same loaded graph feeds this field and the viewer-scoped `nodeOperations`.
+    const graphReads = pgState.pool.query.mock.calls
+      .filter(([sql]) => normalize(String(sql)).startsWith('SELECT runtime_graph FROM approval_published_definitions'))
+    expect(graphReads).toHaveLength(1)
   })
 
   // B3-08 (模板治理 — 停用/启用 + 用量): archiveTemplate/unarchiveTemplate is the only way to REACH
@@ -8533,5 +8768,135 @@ describe('ApprovalProductService', () => {
       await expect(service.createApproval({ templateId: 'tpl-1', formData: {} }, { userId: 'requester-1' }))
         .rejects.toMatchObject({ statusCode: 403, code: 'FORBIDDEN' })
     })
+  })
+
+  /**
+   * Lock §3 C-2 step ④'s replay key. These four assertions are the ones the integration
+   * double-backed cases structurally CANNOT make: a test double never normalizes its input, so the
+   * raw-`roundId` defect (`approval_rounds.id` is `text`, minted `apr_<uuid>`; the boundary's
+   * `uuidOrNull` refuses it with `W4C3B_REQUEST_BOUNDARY_INPUT_INVALID`, 500) was green in four of
+   * them until the end-to-end case ran the real boundary.
+   */
+  describe('deriveCancelRoundW4OperationIdV1 (lock §3 C-2 step ④ replay key)', () => {
+    it('derives a UUIDv5 from a round id, deterministically and distinctly, and refuses an empty one', async () => {
+      const { deriveCancelRoundW4OperationIdV1 } = await import('../../src/core/attendance-cancellation-execution-port')
+      const roundId = 'apr_2f1f2ad0-9f3d-4b3c-8e6a-1b6b6a2a7c11'
+
+      // UUID-shaped, version 5, RFC 4122 variant — what the boundary's `uuidOrNull` accepts and
+      // what `approval_rounds.id` is NOT.
+      const derived = deriveCancelRoundW4OperationIdV1(roundId)
+      expect(derived).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+      expect(derived).not.toBe(roundId)
+
+      // Deterministic: a retry of the SAME round after a rolled-back attempt replays under the
+      // same W4 operation rather than minting a second one.
+      expect(deriveCancelRoundW4OperationIdV1(roundId)).toBe(derived)
+
+      // Distinct: two rounds must never share a replay key, or the second would replay the first's
+      // response and report a cancellation it never performed.
+      expect(deriveCancelRoundW4OperationIdV1(`${roundId}x`)).not.toBe(derived)
+
+      // Fail closed rather than hand every empty identity one shared key.
+      expect(() => deriveCancelRoundW4OperationIdV1('')).toThrow()
+
+      // ── GOLDEN VALUE. The three assertions above are self-consistency: they hold for ANY
+      // derivation, including one whose namespace, name-bytes framing or hash changed. This one
+      // pins the ACTUAL key. It matters because the key is durable state: a round that already
+      // cancelled real business rows must replay under the same W4 operation, so a silent change
+      // here would make every already-redeemed round mint a second operation. The port module
+      // calls the namespace 「frozen from here on」 — this is the test that makes that sentence
+      // more than an asserted invariant.
+      expect(derived).toBe('46c05da2-ae5a-53c4-ac85-61190e0571ff')
+    })
+  })
+})
+
+// Gate round1 20260920 NIT-1: `business_refused.code` is accepted by
+// `takeBusinessRefusal` (`attendance/w4c3b-request-operation-boundary.ts`) with only a
+// `typeof string && length > 0` check — no charset constraint, because a charset regex
+// would silently drop a legitimate code and `AttendanceRequestOperationBusinessRefusalV1
+// .code` has no charset property to check against. That is safe ONLY because today's
+// codomain is a CLOSED, single-element set. This pins the census as data, not as an
+// argument: it fails on a second constructor written in the same literal-inline shape
+// (see `docs/development/approval-cancel-round-phase2-verification-20260918.md` for this
+// slice's verification record), scanned anywhere under `plugins/` or
+// `packages/core-backend/src/`. This file is collected by core-backend's default vitest
+// run — the required `test (20.x)` job's "Run core-backend tests" step
+// (`plugin-tests.yml:842-844`, `pnpm --filter @metasheet/core-backend test`); a second
+// producer written in the matched shape reds that required check.
+//
+// The pattern below deliberately requires a QUOTED code literal immediately after
+// `kind: 'business_refused'` — `takeBusinessRefusal`'s own pass-through construction
+// (`w4c3b-request-operation-boundary.ts:616`, `{ kind: 'business_refused' as const,
+// code: result.code, ... }`) also spells `kind: 'business_refused'` but forwards an
+// IDENTIFIER (`result.code`), never mints a literal, and must NOT count as a second
+// producer — it is the boundary the report names, not a duplicate mint site.
+describe('business_refused production-constructor census (gate round1 NIT-1)', () => {
+  const path = require('path') as typeof import('path')
+  const fs = require('fs') as typeof import('fs')
+
+  // Resolved off this file's own location, never `process.cwd()` — this suite's worktree
+  // symlinks `node_modules` in from elsewhere, so a naive walk must explicitly refuse to
+  // follow it rather than relying on cwd happening to be the repo root.
+  const repoRoot = path.resolve(__dirname, '../../../..')
+  const SCAN_ROOTS = [
+    path.join(repoRoot, 'plugins'),
+    path.join(repoRoot, 'packages', 'core-backend', 'src'),
+  ]
+  const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', 'coverage', 'tests', '__tests__'])
+  const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs'])
+  // Requires a QUOTED literal for `code:` right after `kind: 'business_refused'` (an
+  // optional `as const` tolerated in between) — an identifier (`code: result.code`) does
+  // NOT match, so a pass-through/validator that only forwards an already-minted code is
+  // correctly excluded. `s` (dotall) lets the two fields span a line break.
+  const CONSTRUCTOR_PATTERN = /kind:\s*['"]business_refused['"](?:\s*as\s*const)?\s*,\s*code:\s*(['"])((?:(?!\1).)*)\1/gs
+
+  function walk(dir: string, out: string[]): void {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const entry of entries) {
+      if (SKIP_DIR_NAMES.has(entry.name)) continue
+      const full = path.join(dir, entry.name)
+      if (entry.isSymbolicLink()) continue // node_modules is symlinked in this worktree
+      if (entry.isDirectory()) {
+        walk(full, out)
+      } else if (SOURCE_EXTENSIONS.has(path.extname(entry.name))) {
+        out.push(full)
+      }
+    }
+  }
+
+  it('has exactly one production constructor of `business_refused` that MINTS a literal ' +
+    'code, and that literal is the sole known value — a second constructor MUST re-open ' +
+    'the close-reason projection domain-closure review, not pass silently', () => {
+    const files: string[] = []
+    for (const root of SCAN_ROOTS) walk(root, files)
+    expect(files.length).toBeGreaterThan(0) // sanity: the walk actually found source files
+    // Per-root sanity, not just the total: if EITHER root silently resolved to nothing (the
+    // `walk` try/catch swallows a missing/unreadable directory), the sole real producer could
+    // vanish along with it and this test would go red on a bare `0`, indistinguishable from
+    // "the census broke" rather than "a root disappeared". Each root must contribute >=1 file.
+    for (const root of SCAN_ROOTS) {
+      const inRoot = files.filter((f) => f.startsWith(root + path.sep))
+      expect(inRoot.length, `scan root contributed no files (missing/unreadable?): ${root}`)
+        .toBeGreaterThan(0)
+    }
+
+    const hits: Array<{ file: string; code: string }> = []
+    for (const file of files) {
+      const content = fs.readFileSync(file, 'utf8')
+      let match: RegExpExecArray | null
+      CONSTRUCTOR_PATTERN.lastIndex = 0
+      while ((match = CONSTRUCTOR_PATTERN.exec(content))) {
+        hits.push({ file, code: match[2] })
+      }
+    }
+
+    expect(hits, JSON.stringify(hits, null, 2)).toHaveLength(1)
+    expect(hits[0].code).toBe('ATTENDANCE_CANCELLATION_REVIEW_REQUIRED')
   })
 })

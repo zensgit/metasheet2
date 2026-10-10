@@ -2,8 +2,9 @@
   Dedicated employee 加班申请 card.
 
   Display / form-UX only. Writes the same `requestForm` object AttendanceView
-  already submits through POST /api/attendance/requests. Shift-swap stays on
-  the shared collapsed form. First viewport is untouched.
+  already submits through POST /api/attendance/requests. Sister dedicated
+  cards (leave / makeup / overtime / shift-swap) are mutually exclusive.
+  First viewport is untouched.
 
   Duration follows start/end after a manual edit (0.5-hour steps). Existing
   overtime rules (min / rounding / max) stay server-side — this card does not
@@ -232,10 +233,10 @@ function toggleDurationUnit(): void {
   gap: 14px;
   min-width: 0;
   padding: 16px 18px;
-  border: none;
-  border-radius: 18px;
-  background: #fff;
-  box-shadow: 0 8px 24px rgba(31, 45, 82, 0.06);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .overtime-card__header {
@@ -248,15 +249,15 @@ function toggleDurationUnit(): void {
 .overtime-card__header h3 {
   margin: 0;
   font-size: 16px;
-  font-weight: 700;
-  color: #1f2329;
+  font-weight: var(--ms-font-weight-title);
+  color: var(--ms-text-1);
 }
 
 .overtime-card__text-btn {
   padding: 0;
   border: none;
   background: none;
-  color: #8f959e;
+  color: var(--ms-text-3);
   font-size: 13px;
   cursor: pointer;
 }
@@ -267,7 +268,7 @@ function toggleDurationUnit(): void {
   gap: 6px;
   min-width: 0;
   font-size: 12px;
-  color: #646a73;
+  color: var(--ms-text-2);
 }
 
 .overtime-card__field select,
@@ -277,10 +278,10 @@ function toggleDurationUnit(): void {
   width: 100%;
   min-width: 0;
   padding: 8px 10px;
-  border: 1px solid #e5e6eb;
-  border-radius: 10px;
-  background: #fff;
-  color: #1f2329;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   font-size: 14px;
 }
 
@@ -290,7 +291,7 @@ function toggleDurationUnit(): void {
 }
 
 .overtime-card__hint {
-  color: #8f959e;
+  color: var(--ms-text-3);
   font-size: 12px;
   line-height: 1.4;
 }
@@ -305,7 +306,7 @@ function toggleDurationUnit(): void {
 .overtime-card__duration .overtime-card__label {
   display: block;
   font-size: 12px;
-  color: #646a73;
+  color: var(--ms-text-2);
 }
 
 .overtime-card__duration-row {
@@ -318,29 +319,29 @@ function toggleDurationUnit(): void {
 
 .overtime-card__duration-value {
   margin: 4px 0 0;
-  color: #1f2329;
+  color: var(--ms-text-1);
   font-size: 28px;
-  font-weight: 700;
+  font-weight: var(--ms-font-weight-title);
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
 }
 
 .overtime-card__duration-value strong {
-  font-weight: 700;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .overtime-card__duration-unit {
   margin-left: 6px;
   font-size: 14px;
   font-weight: 400;
-  color: #1f2329;
+  color: var(--ms-text-1);
 }
 
 .overtime-card__switch {
   padding: 0;
   border: none;
   background: none;
-  color: #3370ff;
+  color: var(--ms-color-primary);
   font-size: 13px;
   cursor: pointer;
 }
@@ -354,15 +355,15 @@ function toggleDurationUnit(): void {
 .overtime-card__btn {
   padding: 8px 14px;
   border: none;
-  border-radius: 10px;
-  background: #f2f3f5;
-  color: #1f2329;
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
   font-size: 13px;
   cursor: pointer;
 }
 
 .overtime-card__btn--primary {
-  background: #3370ff;
+  background: var(--ms-color-primary);
   color: #fff;
 }
 

@@ -66,8 +66,27 @@ export function useMultitableAutomations(client?: MultitableApiClient) {
     }
   }
 
+  /**
+   * #6155: after a failed toggle, show what the SERVER stored instead of what the panel assumed — a refusal
+   * stored nothing, but a request that failed in transit may have been stored. Quiet on purpose: no `loading`
+   * (the list must not blink away) and `error` is left alone (it carries the server's sentence). If the
+   * re-read fails too, the local copy stays.
+   */
+  async function resyncRulesAfterFailedWrite(sheetId: string): Promise<void> {
+    try {
+      rules.value = await api.listAutomationRules(sheetId)
+    } catch {
+      // keep the local copy; `error` already says why the write failed
+    }
+  }
+
   async function toggleRule(sheetId: string, ruleId: string, enabled: boolean): Promise<void> {
-    await updateRule(sheetId, ruleId, { enabled })
+    try {
+      await updateRule(sheetId, ruleId, { enabled })
+    } catch (e) {
+      await resyncRulesAfterFailedWrite(sheetId)
+      throw e
+    }
   }
 
   return { rules, loading, error, loadRules, createRule, updateRule, deleteRule, toggleRule }

@@ -1126,3 +1126,180 @@ export async function sendDingTalkWorkNotification(
     raw: payload,
   }
 }
+
+/* ================================================================================================
+ * DingTalk TODO (待办) — the one-way approval-todo mirror's three calls (plan B, design §6).
+ *
+ * v1.0 api.dingtalk.com endpoints: HTTP-status based, NO oapi errcode envelope (`envelope: 'none'`,
+ * inherited from requestDingTalkJson), authenticated with the app access token in the
+ * `x-acs-dingtalk-access-token` header. All three are `kind: 'send'` — SIDE-EFFECT writes that the
+ * transport must never auto-resend: a timeout/network error/5xx/malformed-2xx comes back marked
+ * `isDingTalkOutcomeUnknown`, and the mirror ledger records `outcome_unknown` (terminal, never
+ * resent) instead of duplicating someone's todo. Definite rejections stay DingTalkBusinessError /
+ * DingTalkRequestError, which the ledger records as a DEFINITE failure (redelivery-safe).
+ *
+ * `operatorUnionId` is the DingTalk "操作者" the todo is created as (owner prerequisite §8.2, read
+ * from directory_integrations.config.todoOperatorUnionId — plaintext, not a secret). It is a PATH
+ * segment, so it is URL-encoded, never interpolated raw.
+ *
+ * VALUES-FREE CALLERS: this module builds no copy of its own; `subject` / `detailUrl` arrive fully
+ * formed from the mirror worker (which builds them from ids + the template name only) and are never
+ * logged here — the transport logs status codes and errcodes, not bodies.
+ * ============================================================================================== */
+
+export interface DingTalkTodoTaskInput {
+  /** Stable dedup id on DingTalk's side = our ledger `source_key` (the task_created eventId). */
+  sourceId: string
+  /** Values-free title built server-side (template name + request no). */
+  subject: string
+  /** unionId shown as the todo's creator (the app operator, §8.2). */
+  creatorUnionId: string
+  /** The recipient's unionId — exactly one per mirrored task. */
+  executorUnionIds: string[]
+  /** Deep link back to the platform approval detail (same URL for app and PC). */
+  detailUrl?: string
+}
+
+export interface DingTalkTodoTaskResult {
+  taskId?: string
+  raw: Record<string, unknown>
+}
+
+function todoTasksBaseUrl(config: DingTalkInteractiveCardConfig): string {
+  return `${normalizeDingTalkOpenApiBaseUrl(config.openApiBaseUrl)}/v1.0/todo/users`
+}
+
+function readTodoTaskId(payload: Record<string, unknown>): string | undefined {
+  const result = readNestedPayload(payload)
+  return readStringField(payload, 'id', 'taskId', 'task_id')
+    ?? readStringField(result, 'id', 'taskId', 'task_id')
+}
+
+/**
+ * Create ONE todo for ONE executor. `sourceId` is DingTalk's own dedup handle for the creating app —
+ * we still never rely on it for idempotency (the ledger's UNIQUE (org_id, source_key) is what makes a
+ * redelivery a no-op); it exists so an operator can reconcile a todo back to a ledger row.
+ */
+export async function createDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  input: DingTalkTodoTaskInput,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const sourceId = input.sourceId.trim()
+  const subject = input.subject.trim()
+  const creatorId = input.creatorUnionId.trim()
+  const executorIds = Array.from(new Set(
+    input.executorUnionIds.map((value) => String(value ?? '').trim()).filter(Boolean),
+  ))
+  const detailUrl = typeof input.detailUrl === 'string' ? input.detailUrl.trim() : ''
+
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!sourceId) throw new Error('DingTalk todo sourceId is required')
+  if (!subject) throw new Error('DingTalk todo subject is required')
+  if (!creatorId) throw new Error('DingTalk todo creatorId is required')
+  if (executorIds.length === 0) throw new Error('DingTalk todo executorIds is required')
+
+  const body: Record<string, unknown> = {
+    sourceId,
+    subject,
+    creatorId,
+    executorIds,
+    // The todo is an executor-only mirror: it must not show up in the operator's own list.
+    isOnlyShowExecutor: true,
+    notifyConfigs: { dingNotify: '1' },
+  }
+  if (detailUrl) {
+    body.detailUrl = { appUrl: detailUrl, pcUrl: detailUrl }
+  }
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify(body),
+    },
+    'Failed to create DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: readTodoTaskId(payload), raw: payload }
+}
+
+/**
+ * Mark a mirrored todo done (the "下一节点激活 / 实例终态" half of the mirror). Idempotent on
+ * DingTalk's side for our purposes: completing an already-done task is not an error, and a
+ * "task does not exist" business error is treated by the ledger as already-cleaned-up.
+ */
+export async function completeDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  taskId: string,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const task = taskId.trim()
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!task) throw new Error('DingTalk todo taskId is required')
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks/${encodeURIComponent(task)}`,
+    {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+      body: JSON.stringify({ done: true }),
+    },
+    'Failed to complete DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: task, raw: payload }
+}
+
+/**
+ * Delete a mirrored todo. NOT used by the mirror's state machine (a finished task is COMPLETED, never
+ * deleted — deleting would erase the recipient's own history); it exists for the operator-side
+ * reconciliation tool described in design §6.
+ */
+export async function deleteDingTalkTodoTask(
+  accessToken: string,
+  operatorUnionId: string,
+  taskId: string,
+  config: DingTalkInteractiveCardConfig = {},
+  options?: DingTalkRequestOptions,
+): Promise<DingTalkTodoTaskResult> {
+  const operator = operatorUnionId.trim()
+  const task = taskId.trim()
+  if (!accessToken.trim()) throw new Error('DingTalk access token is required')
+  if (!operator) throw new Error('DingTalk todo operator unionId is required')
+  if (!task) throw new Error('DingTalk todo taskId is required')
+
+  const payload = await requestDingTalkJson(
+    `${todoTasksBaseUrl(config)}/${encodeURIComponent(operator)}/tasks/${encodeURIComponent(task)}`,
+    {
+      method: 'DELETE',
+      headers: {
+        'x-acs-dingtalk-access-token': accessToken,
+      },
+    },
+    'Failed to delete DingTalk todo task',
+    'send',
+    options,
+  )
+
+  return { taskId: task, raw: payload }
+}

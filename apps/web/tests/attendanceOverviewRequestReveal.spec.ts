@@ -7,6 +7,7 @@ import {
   shouldRevealOverviewRequestTools,
 } from '../src/views/attendance/attendanceOverviewRequestReveal'
 import AttendanceEmployeeOvertimeRequestCard from '../src/views/attendance/AttendanceEmployeeOvertimeRequestCard.vue'
+import AttendanceEmployeeShiftSwapRequestCard from '../src/views/attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import {
   formatLeaveDurationHours,
   hoursFromLeaveMinutes,
@@ -106,6 +107,62 @@ describe('overtime-card duration follows start/end (same 0.5-hour helpers)', () 
     expect(root!.querySelector('[data-overtime-card-duration-value]')!.textContent).toContain('2.5')
     expect(formatLeaveDurationHours(138)).toBe('2.5')
     expect(formatLeaveDurationHours(138)).not.toBe('2.3')
+  })
+})
+
+describe('shift-swap card binds the existing assignment fields only', () => {
+  let app: App<Element> | undefined
+  let root: HTMLDivElement | undefined
+  afterEach(() => { app?.unmount(); root?.remove() })
+
+  function mountCard(options?: { empty?: boolean }) {
+    const form = reactive({
+      requesterAssignmentId: options?.empty ? '' : 'assignment-a',
+      counterpartyAssignmentId: options?.empty ? '' : 'assignment-b',
+      reason: 'keep',
+    })
+    root = document.createElement('div')
+    document.body.appendChild(root)
+    app = createApp(AttendanceEmployeeShiftSwapRequestCard, {
+      tr: (en: string) => en,
+      requestForm: form,
+      requesterAssignments: options?.empty ? [] : [{ id: 'assignment-a', label: 'Me · Morning · 2026-04-15 · 1' }],
+      counterpartyAssignments: options?.empty ? [] : [{ id: 'assignment-b', label: 'Coworker · Evening · 2026-04-16 · 1' }],
+      hasPublishedAssignments: !options?.empty,
+      submitting: false,
+    })
+    app.mount(root)
+    return form
+  }
+
+  it('writes requester, counterparty, and reason onto the shared requestForm', async () => {
+    const form = mountCard()
+    const requester = root!.querySelector<HTMLSelectElement>('[data-shift-swap-card-requester]')!
+    const reason = root!.querySelector<HTMLInputElement>('[data-shift-swap-card-reason]')!
+    expect(root!.querySelector('#attendance-shift-swap-card-title')!.textContent).toBe('Shift-swap request')
+    expect(requester.value).toBe('assignment-a')
+    expect(root!.querySelector<HTMLSelectElement>('[data-shift-swap-card-counterparty]')!.value).toBe('assignment-b')
+    expect(reason.value).toBe('keep')
+    expect(root!.querySelector('#attendance-request-work-date')).toBeNull()
+    expect(root!.querySelector('#attendance-request-type')).toBeNull()
+
+    reason.value = 'Need to swap with evening shift'
+    reason.dispatchEvent(new Event('input', { bubbles: true }))
+    await nextTick()
+    expect(form.reason).toBe('Need to swap with evening shift')
+    expect(form.requesterAssignmentId).toBe('assignment-a')
+    expect(form.counterpartyAssignmentId).toBe('assignment-b')
+  })
+
+  it('shows the existing empty published-assignment hint without inventing fields', async () => {
+    mountCard({ empty: true })
+    expect(root!.querySelector('[data-shift-swap-card-hint]')!.textContent).toContain(
+      'No published single-day regular assignments are available for shift swap yet.',
+    )
+    expect(root!.querySelector<HTMLSelectElement>('[data-shift-swap-card-requester]')!.disabled).toBe(true)
+    expect(root!.querySelector<HTMLSelectElement>('[data-shift-swap-card-counterparty]')!.disabled).toBe(true)
+    expect(root!.querySelector('[data-shift-swap-card-reason]')).toBeTruthy()
+    expect(root!.querySelectorAll('input, select, textarea')).toHaveLength(3)
   })
 })
 

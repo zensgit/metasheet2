@@ -1,0 +1,115 @@
+# Archive Readiness Verification
+
+## Current-Main Replay At 2b67a046
+
+- Clean tested true merge `98df048ed4bf38b1044967de46d2e16abb5e6164`, tree `d36ba30fb3ef859f174b524b6fb8fda25674e7e8`; ordered parents `94add2a91e828cdcf70ba0a0375f4d0575b37695` and then-current main `2b67a04625a0d6b089dac173e47a0de5d111e225`.
+- The main delta is exactly three notification client/test files. No conflict or manual resolution; all six readiness paths, including the screenshots, are byte-identical before this documentation-only update. Relative-main census remains the original six paths. The older frozen worktree at `978dc2e017f0db9ae878debd708cbf4560b8cec3` is untouched; a new isolated current-main worktree preserves its state.
+- Four whole-file gates PASS, **174/174**: archive modal 38, archive client 78, incoming multitable client 50 and notification bell 8. Application `vue-tsc --noEmit -p tsconfig.app.json` and diff-check PASS. Commands and logs: `pnpm --filter @metasheet/web exec vitest run --watch=false tests/multitable-recovery-archive-modal.spec.ts tests/multitable-recovery-archive-client.spec.ts tests/meta-notification-bell.spec.ts tests/multitable-client.spec.ts`; `/private/tmp/tm-readiness-replay-2b67-{focused,tsc}-20260915.log`.
+- Both complete archive suites remain in the actual domain guard invocation and `run-required-web-tests.sh` invocation, not merely path filters. No dependency installation, workflow, backend, provider, database, permission or flag change. Earlier browser/mutation evidence remains bound to its historical code; this no-conflict replay does not claim a repeated browser/DB/full-required-web run.
+- Prior published head `94add2a91...` was terminal 23 SUCCESS + 1 expected SKIP with no pending/failure. New publication needs fresh exact-head CI and stays Draft/HOLD. This is current-main readiness UI verification, not combined runtime/UX integration or a production provider/enablement claim.
+
+## Current-Main Replay At 28d11496
+
+- True merge `6983e2353d8dfb8f90a1bec776b9a86c03e51b27`, tree `3bd18da648cf7e1dd94643a55f941cfa611f27bd`, ordered parents `955ec9095b40d8ce4407ac42e21a45fc17c7e04b` and main `28d11496bb4281738c3dd13096fe317ff42e8780`.
+- Incoming attendance/client/document changes have zero overlap with the six readiness paths; all six blobs are byte-identical before this report update. No conflicts, manual resolution, backend/provider/flag/selector changes.
+- Modal/client plus incoming approval-template client: 3 files / 120 tests PASS; application vue-tsc and diff-check PASS. Logs `/private/tmp/tm-readiness-current-{focused,tsc}.log` are local only. No repeated browser/DB/mutation or full required-web claim for unchanged readiness code.
+- Connector readback of the preceding #5725 head confirmed OPEN/Draft; its returned PR workflow page contained 15 success and one expected skip, all completed. This is old-head workflow evidence, not a new-head complete checks claim. Preserve Draft/HOLD and require fresh published-head CI. Provider startup and authenticated browser-to-backend acceptance remain separate.
+
+## Current-Main Replay (2026-09-15)
+
+- Replay code head `0403667ffb0f6ab6f75792365892ebe89ca95bfd`, tree `5bbdfc62850d02922a6a060468c0457e0675cfcb`.
+- Ordered parents: existing PR #5725 head `978dc2e017f0db9ae878debd708cbf4560b8cec3` and then-current main `58f704be92fe7711332b84d87a7c545776a38b8f`.
+- True merge, no conflicts or manual resolution. All six existing candidate paths, including screenshots and design, were byte-identical before this evidence-only update. Relative-main census remains exactly those six paths.
+- Replay gates: archive modal 38/38; combined modal/client 116/116; `pnpm exec vue-tsc --noEmit -p tsconfig.app.json` exit 0; diff-check PASS. Domain guard and required-web still invoke both complete suites; no selector edits.
+- Existing browser/mutation evidence below is historical and remains bound to its original checkpoint, not a new runtime/UAT result. This replay changes no backend, provider, authority, flags or deployment state. Fresh published exact-head CI is a separate gate; PR stays Draft/HOLD.
+
+## Identity
+
+- Base main: `c6f2d437a8810a822fb4210976aaf6af9ed3af74`.
+- Code/design checkpoint: `7dd536ae4f1e76be870990ceef45ef3c940bf8c2`.
+- Code/design tree: `e6f46799f590e4ab4426ff2f8ce1587aea2eacbb`.
+- Branch: `codex/timemachine-archive-readiness-20260915`.
+- Product files: archive modal and its existing mounted spec only.
+- Runtime providers, backend, permissions, DB, flags, OpenAPI and shared CI:
+  unchanged. This report and screenshots are a documentation-only child.
+
+## Local Gates
+
+Node 20.20.2 with existing workspace dependencies; no dependency installation.
+
+| Gate | Result |
+| --- | --- |
+| Red-first readiness/recheck tests | 16 failed, 21 passed before implementation |
+| Archive modal | 38/38 PASS |
+| Archive client | 78/78 PASS |
+| Config/history/trash neighbors plus archive | 5 files, 159/159 PASS |
+| `vue-tsc --noEmit -p tsconfig.app.json` | PASS |
+| Scoped ESLint | PASS, zero errors/warnings |
+| `git diff --check` | PASS |
+| Chromium synthetic browser | 12/12 PASS at 1440, 390 and 320 px |
+
+Focused command:
+
+```sh
+pnpm --filter @metasheet/web exec vitest run \
+  multitable-recovery-archive-modal multitable-recovery-archive-client \
+  multitable-history-fe multitable-config-history-modal multitable-trash-fe
+```
+
+The complete `vue-tsc -b` is NOT recorded as passing: it reports a Vite 5/7
+plugin-type conflict in the unchanged `vite.config.ts` project. Config, node
+tsconfig and lockfile are byte-identical to base. Application-only Vue typecheck
+passes. Scoped lint initially lacked direct parser resolution through reused
+dependencies; it passed using temporary NODE_PATH entries for the already
+installed parser/plugins. No tracked dependency/config change was made.
+
+The full repository required-web script was not rerun locally for this two-file
+product change. Its existing standalone archive invocation, identical to the
+domain guard invocation, ran locally with both complete files. Remote exact-head
+CI remains a separate gate; local green does not replace it.
+
+## Discriminating Tests
+
+1. Replace disabled classification with generic unavailable: exact disabled test
+   fails (1 RED). Restore implementation and all focused/neighbor tests pass.
+2. Replace recheck job discovery with a direct catalog load: retry serialization/
+   discovery test fails (1 RED). Restore and all tests pass.
+3. Reject an in-flight catalog request after close: the late error is ignored;
+   reopening goes through job discovery again.
+4. Existing executable-token, explicit-confirmation, scope and job tests remain.
+   Async acceptance stays bound to its originating sheet; pending synchronous
+   completion survives closing/reopening that same sheet.
+
+Review exploration briefly attempted invalidating in-flight writes on close.
+Two pre-existing completion-continuity tests failed, proving that this would
+change the contract. That exploration and its contradictory tests were removed
+before the final checkpoint. No write-lifetime change was published.
+
+Independent Luna high read-only review of frozen code checkpoint `7dd536ae4`
+returned P1/P2/P3 = 0/0/0 for this bounded delta. It independently confirmed
+discovery-first retry, exact backend codes, HTTP precedence and retained
+write-lifetime semantics. No model test results are claimed; tests above were
+run by the coordinator. Review session is closed.
+
+## Browser Evidence
+
+The harness imports the real modal with synthetic service callbacks. Four
+known backend error codes across three viewports show distinct fixed copy,
+no raw provider message, no overflow, and no console/page error. Clicking the
+accessible refresh icon produces exactly three total reads (initial discovery,
+retry discovery, catalog) and zero writes, ending in the distinct empty state.
+This is presentation evidence, NOT authenticated backend/storage recovery UAT.
+
+![Desktop runtime state](assets/timemachine-archive-readiness-20260915/desktop-runtime.png)
+
+![Mobile disabled state](assets/timemachine-archive-readiness-20260915/mobile-disabled.png)
+
+## Delivery and Runtime Boundaries
+
+- Publication target: independent Draft/HOLD PR; do not update or merge #5709.
+- Remote CI at report creation: NOT YET VERIFIED.
+- Ready/merge: NOT PERFORMED.
+- Archive runtime enablement, capture/upload, KMS/object storage, isolated restore
+  or process-restart acceptance: NOT PERFORMED in this slice.
+- No flag, dispatch, deployment, staging, production or customer-data action.
+- Remaining runtime work is explicitly defined in the companion design lock.

@@ -29,6 +29,7 @@ import {
   type MultitableTemplate,
 } from '../../src/multitable/template-library'
 import type { MultitableProvisioningQueryFn } from '../../src/multitable/provisioning'
+import { handleTemplateInstallDedupeSql } from '../utils/template-install-dedupe-sql'
 import { usePinnedServer } from '../utils/pinned-server'
 
 type QueryResult = { rows: any[]; rowCount?: number }
@@ -64,6 +65,11 @@ function createStore(opts: StoreOptions = {}) {
 
   const handler = (sql: string, params: unknown[] = []): QueryResult => {
     const normalized = sql.replace(/\s+/g, ' ').trim()
+
+    // #5861:安装路由现在还会发咨询锁 + 去重账本的读/写。本 suite 不测去重,
+    // 用共享的中性实现(锁恒成功、账本恒空)让这些语句不再落到下面的「认不出就抛」。
+    const dedupeSql = handleTemplateInstallDedupeSql(normalized)
+    if (dedupeSql) return dedupeSql
 
     if (normalized.startsWith('SELECT') && normalized.includes('FROM meta_bases') && normalized.includes('WHERE id = $1')) {
       const [id] = params as [string]

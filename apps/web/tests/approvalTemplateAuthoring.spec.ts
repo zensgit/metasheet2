@@ -11,6 +11,7 @@ import {
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
+  buildUpdateTemplatePayload,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
   draftFromTemplate,
@@ -68,6 +69,15 @@ const updateTemplateSpy = vi.fn()
 const publishTemplateSpy = vi.fn()
 const getTemplateSpy = vi.fn()
 const dryRunApprovalConditionFormulaSpy = vi.fn()
+// approval-form-ux-slice1 remedy (gate condition 4 / addendum P2-3; lazy-fetch corrected round 3,
+// gate 2 P1-1): CategoryCandidateInput.vue calls this lazily, on the field's first focus/open —
+// never on mount (see the component's own doc comment for why). The mock module previously omitted
+// this export entirely, so any mounted instance that DID reach the fetch had its bare `catch {}`
+// silently swallow a vitest "no export defined on mock" error and the dropdown always rendered zero
+// candidates. Default resolves to a small non-empty list so tests that focus/open the field can
+// observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders"
+// without each test having to configure it individually.
+const listTemplateCategoriesSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
@@ -77,11 +87,14 @@ vi.mock('../src/approvals/api', () => ({
   ApprovalApiError: class ApprovalApiError extends Error {
     status: number
     code?: string
-    constructor(message: string, status = 0, code?: string) {
+    // T5b: mirrors the real class's optional values-free `details` (4th constructor argument).
+    details?: Record<string, unknown>
+    constructor(message: string, status = 0, code?: string, details?: Record<string, unknown>) {
       super(message)
       this.name = 'ApprovalApiError'
       this.status = status
       this.code = code
+      this.details = details
     }
   },
   createTemplate: (payload: unknown) => createTemplateSpy(payload),
@@ -101,6 +114,20 @@ vi.mock('../src/approvals/api', () => ({
     return template
   },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
+  listTemplateCategories: () => listTemplateCategoriesSpy(),
+}))
+
+// T2 (record-link target pickers on the default Designer 2.0 surface): the record-link catalog is
+// the ONE network dependency the authoring view owns for record-link fields (F0 gate #2). Control
+// it deterministically instead of letting the real MultitableApiClient hit the network. Only a draft
+// that contains a record-link field ever reaches it, so every other test in this file is unaffected.
+const listBasesSpy = vi.fn()
+const listSheetsSpy = vi.fn()
+vi.mock('../src/multitable/api/client', () => ({
+  multitableClient: {
+    listBases: (...args: unknown[]) => listBasesSpy(...args),
+    listSheets: (...args: unknown[]) => listSheetsSpy(...args),
+  },
 }))
 
 vi.mock('element-plus', () => ({
@@ -749,14 +776,22 @@ describe('approval template authoring helpers', () => {
 
   // P1-A0 publish-payload-shape pin — basic-info fields never travel through `publishTemplate`
   // (which sends only `{ policy }`, see `approval-template-authoring-policy-carrier.test.ts`); they
-  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (identical function,
-  // `templateAuthoring.ts`) at save time. This slice touches no basic-info persistence code — this
-  // pin exists to prove that stays true. A mutation renaming/dropping/reshaping a basic-info payload
-  // key reds either assertion below. NOTE for future authors: the `Object.keys(...).sort()`
-  // assertion is a full shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated
-  // later slice (e.g. a new top-level payload field) — that is expected; update the expected key
-  // list rather than assume this test caught a regression.
-  it('P1-A0: pins the exact basic-info shape of the create/update payload (no key renamed, dropped, or reshaped)', () => {
+  // serialize through `buildCreateTemplatePayload`/`buildUpdateTemplatePayload` (`templateAuthoring.ts`)
+  // at save time. This slice touches no basic-info persistence code — this pin exists to prove that
+  // stays true. A mutation renaming/dropping/reshaping a basic-info payload key reds either
+  // assertion below. NOTE for future authors: the `Object.keys(...).sort()` assertion is a full
+  // shape pin, so it also reds on a legitimate ADDITIVE key from an unrelated later slice (e.g. a
+  // new top-level payload field) — that is expected; update the expected key list rather than
+  // assume this test caught a regression.
+  //
+  // Correction (remedy round 3, gate 2 P3-3): the two builders are NOT "an identical function" —
+  // since approval-form-ux-slice1 §1.2, `buildUpdateTemplatePayload` is `buildCreateTemplatePayload`
+  // with `key` destructured off (`templateAuthoring.ts:2573-2574`). The two pins below are
+  // therefore separate tests: the CREATE pin (full shape, key included) and the UPDATE pin (full
+  // shape, key absent) — the update pin is a full-shape assertion, not only the key-absence check
+  // that existed before this round (a mutation that added an unrelated field to the update payload,
+  // e.g. `category` staying an extra un-omitted field, previously reds nothing here).
+  it('P1-A0: pins the exact basic-info shape of the CREATE payload (no key renamed, dropped, or reshaped)', () => {
     const draft = createEmptyTemplateDraft()
     draft.key = 'travel'
     draft.name = '出差审批'
@@ -787,6 +822,43 @@ describe('approval template authoring helpers', () => {
       visibilityScope: payload.visibilityScope,
     }).toEqual({
       key: 'travel',
+      name: '出差审批',
+      category: '差旅',
+      description: '跨部门出差需要审批',
+      slaHours: 24,
+      visibilityScope: { type: 'dept', ids: ['dept_a', 'dept_b'] },
+    })
+  })
+
+  it('P1-A0: pins the exact basic-info shape of the UPDATE payload (identical to CREATE minus key)', () => {
+    const draft = createEmptyTemplateDraft()
+    draft.key = 'travel'
+    draft.name = '出差审批'
+    draft.category = '差旅'
+    draft.description = '跨部门出差需要审批'
+    draft.slaHoursText = '24'
+    draft.visibilityType = 'dept'
+    draft.visibilityIdsText = 'dept_a, dept_b'
+
+    const payload = buildUpdateTemplatePayload(draft)
+
+    expect(Object.keys(payload).sort()).toEqual([
+      'approvalGraph',
+      'category',
+      'description',
+      'formSchema',
+      'name',
+      'slaHours',
+      'visibilityScope',
+    ])
+    expect(Object.prototype.hasOwnProperty.call(payload, 'key')).toBe(false)
+    expect({
+      name: payload.name,
+      category: payload.category,
+      description: payload.description,
+      slaHours: payload.slaHours,
+      visibilityScope: payload.visibilityScope,
+    }).toEqual({
       name: '出差审批',
       category: '差旅',
       description: '跨部门出差需要审批',
@@ -1235,6 +1307,8 @@ describe('TemplateAuthoringView', () => {
     publishTemplateSpy.mockReset()
     getTemplateSpy.mockReset()
     dryRunApprovalConditionFormulaSpy.mockReset()
+    listTemplateCategoriesSpy.mockReset()
+    listTemplateCategoriesSpy.mockResolvedValue(['差旅', '采购'])
     pushSpy.mockClear()
     replaceSpy.mockClear()
     createTemplateSpy.mockImplementation(async (payload) => ({
@@ -1301,7 +1375,6 @@ describe('TemplateAuthoringView', () => {
   it('reveals and focuses field validation errors when saving from another section', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
     setInput('approval-template-name', '出差审批')
     ;(container!.querySelector('[data-testid="approval-template-section-fields"]') as HTMLButtonElement).click()
     await flushUi()
@@ -1330,14 +1403,18 @@ describe('TemplateAuthoringView', () => {
   it('creates a draft through the existing backend endpoint wrapper path', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
+    // approval-form-ux-slice1 (20260916 design §1.2): `key` is read-only and already seeded at
+    // draft-creation time — re-pinned from a hand-typed literal to the seeded/displayed value, same
+    // discriminating power (POST still round-trips whatever key the form currently holds).
+    const seededKey = (container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value
+    expect(seededKey).toBeTruthy()
     setInput('approval-template-name', '出差审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.key).toBe('travel')
+    expect(payload.key).toBe(seededKey)
     expect(payload.name).toBe('出差审批')
     expect(payload.approvalGraph.nodes.map((node: any) => node.key)).toEqual(['start', 'approval_1', 'end'])
     expect(replaceSpy).toHaveBeenCalledWith({ path: '/approval-templates/tpl_created/edit' })
@@ -1350,7 +1427,8 @@ describe('TemplateAuthoringView', () => {
   it('P1-A0: every basic-info control commits its typed value through to the save payload (positive control)', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'travel')
+    // key is read-only/seeded at creation (approval-form-ux-slice1) — capture it instead of typing.
+    const seededKey = (container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement).value
     setInput('approval-template-name', '出差审批')
     setInput('approval-template-category', '差旅')
     setInput('approval-template-sla-hours', '24')
@@ -1366,7 +1444,7 @@ describe('TemplateAuthoringView', () => {
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.key).toBe('travel')
+    expect(payload.key).toBe(seededKey)
     expect(payload.name).toBe('出差审批')
     expect(payload.category).toBe('差旅')
     expect(payload.slaHours).toBe(24)
@@ -1374,16 +1452,56 @@ describe('TemplateAuthoringView', () => {
     expect(payload.visibilityScope).toEqual({ type: 'dept', ids: ['dept_a', 'dept_b'] })
   })
 
+  // C1 first conjunct (approval-form-ux-slice1 design §3.3, gate condition 4; lazy-fetch corrected
+  // round 3, gate 2 P1-1): the category field must actually be wired to
+  // `GET /api/approval-templates/categories`, not merely still work as a free-text input if the
+  // wiring is ripped out (a plain `<el-input>` renders identically and passes every OTHER test in
+  // this file — see the gate's G-M6 mutation, which reverted both call sites to `<el-input>` and
+  // found zero red tests before this pin existed). The fetch must NOT fire on mount (a mount-time
+  // fetch reds the required `approval-browser-verify` Playwright lane — see
+  // CategoryCandidateInput.vue's own doc comment); it fires on the field's first focus. This
+  // observes both: no call right after mount, then a call on focus, then confirms a fetched
+  // candidate actually reaches the rendered dropdown (proving the round-trip end-to-end, not just
+  // that SOME function got invoked at import time).
+  it('C1: the category field does not fetch on mount, fetches from listTemplateCategories on first focus, and renders one', async () => {
+    await mountView()
+    await flushUi()
+    expect(listTemplateCategoriesSpy).not.toHaveBeenCalled()
+
+    const categoryInput = container!.querySelector('[data-testid="approval-template-category"]') as HTMLInputElement
+    categoryInput.dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(listTemplateCategoriesSpy).toHaveBeenCalledTimes(1)
+    const list = container!.querySelector('[data-testid="category-candidate-list"]')
+    expect(list?.textContent).toContain('差旅')
+  })
+
   // P1-A0 validation-count derivation — the 基础信息 step-nav badge reads `.length` off
   // `validateTemplateBasicInfo(draft, unsupportedReason)` (`TemplateAuthoringView.vue`
   // `basicInfoIssueCount`). This exercises the LIVE component derivation (not the pure helper in
   // isolation — a helper-only test would pass even if the view's binding were broken/hardcoded), at
   // three states: 2 known issues, 0 issues, 1 different known issue. A mutation that hardcodes the
-  // badge number or drops `.length` fails at least one of these three assertions.
+  // badge number, clamps it, or drops `.length` fails at least one of these three assertions.
+  //
+  // Re-pinned (approval-form-ux-slice1, 20260916 design §1.2/A4): `key` is now seeded at
+  // draft-creation time, so a brand-new draft no longer carries the 模板 Key 必填 issue — this is
+  // the same badge this slice's A4 acceptance requires to NOT show that issue for an unsaved new
+  // draft. That alone would leave State 1 at a single typed issue (blank `name`), which is
+  // insufficient to distinguish a genuinely-derived `.length` from a hand-counted/clamped constant
+  // (e.g. `Math.min(basicInfoIssues.value.length, 1)` reads identically to a real 1-issue count).
+  // Re-pinned again (remedy round 1, gate condition 3, 20260916): State 1 additionally types an
+  // invalid SLA before the first read, so it observes TWO simultaneous issues (blank name + bad
+  // SLA text) — a count that a `Math.min(..., 1)` clamp cannot reproduce. State 2 now clears both
+  // issues (fills name AND repairs the SLA text) to reach 0, and State 3 reintroduces the SLA
+  // issue alone to prove the count still tracks the CURRENT typed array, not a first-seen value.
   it('P1-A0: the 基础信息 step-nav issue count is DERIVED from typed issues, not hand-counted', async () => {
     await mountView()
 
-    // State 1: brand-new draft — key + name both empty → exactly 2 typed issues.
+    // State 1 (A4 + discriminating power): brand-new draft — key is pre-seeded (non-blank), name
+    // is empty, and SLA is typed as invalid text → exactly 2 typed issues, neither of them the key
+    // one. A clamp/hand-count that caps at 1 cannot reproduce '2 项不完善'.
+    setInput('approval-template-sla-hours', 'abc')
+    await flushUi()
     let badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge?.textContent?.trim()).toBe('2 项不完善')
     // The count also folds into the step button's aria-label (it OVERRIDES inner text for
@@ -1391,17 +1509,19 @@ describe('TemplateAuthoringView', () => {
     const basicStepButton = container!.querySelector('[data-testid="approval-template-section-basic"]')
     expect(basicStepButton?.getAttribute('aria-label')).toContain('2 项不完善')
 
-    // State 2: fill both required fields → count derives to 0, badge disappears entirely (not "0
-    // 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for a zero state).
-    setInput('approval-template-key', 'travel')
+    // State 2: fill the name AND repair the SLA text → count derives to 0, badge disappears
+    // entirely (not "0 项不完善" theater — matches the D0/M7 "no inert/empty control" grammar for
+    // a zero state).
     setInput('approval-template-name', '出差审批')
+    setInput('approval-template-sla-hours', '24')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
     expect(badge).toBeNull()
     expect(basicStepButton?.getAttribute('aria-label')).not.toContain('项不完善')
 
-    // State 3: introduce exactly ONE different issue (bad SLA text) → count derives to 1, proving
-    // the badge tracks the CURRENT typed array rather than being stuck at its first-seen value.
+    // State 3: introduce exactly ONE different issue (bad SLA text again) → count derives to 1,
+    // proving the badge tracks the CURRENT typed array rather than being stuck at its first-seen
+    // value (and rules out a badge that merely never goes back below 2 once it has been there).
     setInput('approval-template-sla-hours', 'abc')
     await flushUi()
     badge = container!.querySelector('[data-testid="approval-template-section-basic-issue-count"]')
@@ -1476,7 +1596,7 @@ describe('TemplateAuthoringView', () => {
     expect(refusalIdx).toBeGreaterThan(-1)
     expect(validateIdx).toBeGreaterThan(-1)
     expect(refusalIdx).toBeLessThan(validateIdx)
-    expect(executable).toMatch(/模板尚未加载成功/)
+    expect(executable).toMatch(/表单尚未加载成功/)
     // …and the refusal actually RETURNS (gate NIT-8 on 696c7459a3, measured: dropping only the
     // `return null` kept this pin green at 137/137 while the defence stopped defending — the if
     // fired, set the message, and fell straight through into the create branch anyway).
@@ -1699,11 +1819,22 @@ describe('TemplateAuthoringView', () => {
     expect(createTemplateSpy).toHaveBeenCalledTimes(1) // unchanged from control 1
   })
 
-  it('B0 (gate P2-1 on 9948f3be5a): saving an EXISTING template with cleared key/name BLOCKS with 必填 — it must never be silently re-keyed', async () => {
+  it('B0 (gate P2-1 on 9948f3be5a; re-pinned onto approval-form-ux-slice1 §1.2 for A6): saving an EXISTING template never sends `key` in the PATCH body, AND cleared key/name still BLOCKS with 必填 — it must never be silently re-keyed', async () => {
     // The ungated seeder silently re-keyed an existing template to a draft_* placeholder and
     // renamed it 未命名审批 on save — and template.key is the business_key stamped on every
     // initiated instance. Proven by the gate with an old-implementation control; pinned here:
     // seeding is for NEW drafts only, existing templates block exactly as they did before B0.
+    //
+    // approval-form-ux-slice1 (20260916 design §1.2/§5-D1): the key input is now read-only, so a
+    // real user cannot reproduce "cleared key" through the UI any more — the invariant this gate
+    // protects ("an existing template's key is never silently replaced by a save") is now ALSO
+    // enforced structurally: PATCH never carries `key` at all (buildUpdateTemplatePayload), so the
+    // column cannot change regardless of what `draft.key` holds. The block below pins THAT
+    // mechanism first (mutation M1: reintroducing `key` in the update payload reds this). The
+    // original clearing scenario is kept AFTER it, unmodified — the pure-validator invariant
+    // ('模板 Key 必填'/'模板名称必填' still block an existing template's save) is untouched by this
+    // slice and remains a valid defense-in-depth regression pin even though the key half of it is
+    // no longer keyboard-reachable.
     setRouteParams({ id: 'tpl_seed_gate' })
     getTemplateSpy.mockResolvedValue(buildTemplate({}))
     await mountView()
@@ -1712,6 +1843,31 @@ describe('TemplateAuthoringView', () => {
     const keyInput = container!.querySelector('[data-testid="approval-template-key"]') as HTMLInputElement
     const nameInput = container!.querySelector('[data-testid="approval-template-name"]') as HTMLInputElement
     expect(keyInput.value).not.toBe('')
+    expect(keyInput.readOnly).toBe(true)
+
+    // C1 second conjunct (approval-form-ux-slice1 design §3.3, gate condition 4): type an
+    // off-list category — NOT one of the fetched candidates — before the ordinary save below, to
+    // pin that (a) the candidate wiring is genuinely allow-create (never degrades to a closed
+    // set), and (b) `buildUpdateTemplatePayload`'s new omit-destructure carries `category` through
+    // to the PATCH body rather than silently dropping it (see the gate's G-M5 mutation, which
+    // added `category` to that destructure's omit list and found zero red tests before this pin
+    // existed — a newly-typed category would then vanish from every save with no error).
+    setInput('approval-template-category', '临时借款')
+
+    // NEW mechanism (A6/A1): an ordinary, untouched save of an existing template — PATCH must not
+    // carry `key` at all, not merely carry the same value.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const normalSavePayload = updateTemplateSpy.mock.calls[0]?.[1] as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(normalSavePayload, 'key')).toBe(false)
+    expect(normalSavePayload.category).toBe('临时借款')
+    updateTemplateSpy.mockClear()
+
+    // ORIGINAL mechanism (pre-slice1 gate P2-1), kept verbatim: the pure validator still blocks a
+    // genuinely blank key/name on an existing template, even though a real user can no longer
+    // reach a blank key through this readonly input (this exercises the model layer directly, the
+    // same way the 445-505 unit tests exercise validateTemplateBasicInfo directly).
     for (const input of [keyInput, nameInput]) {
       input.value = ''
       input.dispatchEvent(new Event('input'))
@@ -2275,9 +2431,8 @@ describe('TemplateAuthoringView', () => {
 
   // P1-D (docs/development/approval-parity-master-design-lock-20260817.md §4 P1-D; D0 §4.1):
   // condition branch cards get a "优先级 N" priority chip (branch ARRAY ORDER — never the edge key),
-  // and the default (fall-through) branch gets an explanatory copy card. No branch delete/duplicate
-  // affordance is mounted in this slice (out of scope per master §P1-D; a future slice may add
-  // delete with its own authorization — see docs/development ledger P1-D row).
+  // and the default (fall-through) branch gets an explanatory copy card. P1-D itself mounted no
+  // branch delete; T5a (test report 2026-10-08) adds it on the Canvas only — see the T5a test below.
   function buildThreeBranchConditionGraph() {
     return {
       nodes: [
@@ -2342,13 +2497,39 @@ describe('TemplateAuthoringView', () => {
     expect(branch3Operator).toBe('lt')
   })
 
-  // P1-1 (adversarial gate, 20260817): the branch-delete affordance previously mounted here
-  // (`removeConditionBranch` / `canRemoveConditionBranch`) is OUT OF SCOPE for §P1-D — no lock
-  // row authorizes deleting a topology node from a copy-and-priority slice. It has been dropped
-  // entirely (template button, view-layer handlers, `ApprovalNodeConfigEditorApi` members); the
-  // command layer itself (`graphTopologyEdit.ts`) is untouched and stays covered by its own suite.
-  // There is therefore no delete-affordance test here anymore — asserting its absence would be a
-  // vacuous "this component doesn't render a button it never imports" check.
+  // T5a (test report 2026-10-08): 「删除分支」 returns — on the CANVAS only, where it joins the unified
+  // undo history. The flag-off structured rollback list mounts the SAME config editor but has no
+  // Canvas undo control, so it must never offer the delete (negative half); the Canvas offers it on
+  // every non-default branch card and never on the default card (positive half — not vacuous).
+  it('T5a: 「删除分支」 is Canvas-only — absent from the flag-off rollback list, present on non-default Canvas branch cards, never on the default card', async () => {
+    setRouteParams({ id: 'tpl_t5a_rollback' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildThreeBranchConditionGraph() }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-graph-readonly-list"]')).not.toBeNull()
+    expect(container!.querySelectorAll('[data-testid="approval-condition-branch"]')).toHaveLength(3)
+    expect(container!.querySelector('[data-testid="approval-condition-branch-remove"]')).toBeNull()
+    app?.unmount()
+    container?.remove()
+
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5a_canvas' })
+    await mountView()
+    await flushUi()
+    const condNode = container!.querySelector('[data-canvas-node="cond_1"] [data-testid="approval-canvas-node-select"]') as HTMLElement
+    condNode.click()
+    await flushUi()
+    const cards = Array.from(container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    ))
+    expect(cards).toHaveLength(3)
+    for (const card of cards) {
+      expect(card.querySelector('[data-testid="approval-condition-branch-remove"]')).not.toBeNull()
+    }
+    expect(container!.querySelector(
+      '[data-testid="approval-condition-default-branch"] [data-testid="approval-condition-branch-remove"]',
+    )).toBeNull()
+  })
 
   // P1-2 (adversarial gate, M8 honesty): the default-card copy must never assert a default flow
   // that doesn't exist. `conditionEdit.ts` maps an absent `config.defaultEdgeKey` to `''`, and
@@ -2467,7 +2648,6 @@ describe('TemplateAuthoringView', () => {
     ) as HTMLSelectElement
     field.value = 'field_1'
     field.dispatchEvent(new Event('change'))
-    setInput('approval-template-key', 'conditional')
     setInput('approval-template-name', '条件审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -2496,7 +2676,6 @@ describe('TemplateAuthoringView', () => {
     ) as HTMLSelectElement
     joinMode.value = 'any'
     joinMode.dispatchEvent(new Event('change'))
-    setInput('approval-template-key', 'parallel')
     setInput('approval-template-name', '并行审批')
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -2582,6 +2761,47 @@ describe('TemplateAuthoringView', () => {
     })
     expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'approval_high')).toEqual(graph.nodes[2])
     expect(payload.approvalGraph.edges).toEqual(graph.edges)
+  })
+
+  // Test report 2026-10-08, T4a (+E1): the 试运行 form's date/datetime pickers take the SAME settings
+  // as the fill form (approvals/datePickerFormat.ts), whose real-picker behaviour is proven in
+  // approval-date-picker-values.spec.ts. This spec never registers ElDatePicker, so Vue renders the
+  // unresolved `<el-date-picker>` element and every bound prop lands on it as a plain attribute —
+  // that attribute set IS the wiring under test.
+  it('T4a: the 试运行 date picker binds YYYY-MM-DD and the datetime picker binds minute format, a minute-truncated default time and a date-and-time placeholder', async () => {
+    setRouteParams({ id: 'tpl_tryrun_dates' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'trip_day', type: 'date', label: '出发日期' },
+          { id: 'meet_at', type: 'datetime', label: '会议时间' },
+          { id: 'land_at', type: 'datetime', label: '落地时间', placeholder: '请填写航班落地时间' },
+        ],
+      } as any,
+    }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const panel = container!.querySelector('[data-testid="approval-template-tryrun-panel"]')
+    expect(panel).not.toBeNull()
+    const pickers = Array.from(panel!.querySelectorAll('el-date-picker'))
+    const datePicker = pickers.find((el) => el.getAttribute('type') === 'date')
+    const datetimePickers = pickers.filter((el) => el.getAttribute('type') === 'datetime')
+    expect(datePicker).toBeTruthy()
+    expect(datetimePickers).toHaveLength(2)
+
+    expect(datePicker!.getAttribute('value-format')).toBe('YYYY-MM-DD')
+    for (const picker of datetimePickers) {
+      expect(picker.getAttribute('format')).toBe('YYYY-MM-DD HH:mm')
+      const defaultTime = new Date(picker.getAttribute('default-time') ?? '')
+      expect(Number.isNaN(defaultTime.getTime())).toBe(false)
+      expect(defaultTime.getSeconds()).toBe(0)
+    }
+    expect(datetimePickers[0].getAttribute('placeholder')).toBe('请选择日期和时间')
+    // An author-written placeholder still wins.
+    expect(datetimePickers[1].getAttribute('placeholder')).toBe('请填写航班落地时间')
   })
 
   it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
@@ -2733,6 +2953,198 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
     expect(payload.approvalGraph.nodes.find((n: any) => n.key === 'cond_1').config.branches).toHaveLength(2) // saved
+  })
+
+  // ── T5b (test report 2026-10-08): adding a 3rd+ parallel lane must be reachable and savable ──
+  function buildCcChainGraph() {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'user', targetIds: ['u_1'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-s-a', source: 'start', target: 'approval_1' },
+        { key: 'e-a-c', source: 'approval_1', target: 'cc_1' },
+        { key: 'e-c-e', source: 'cc_1', target: 'end' },
+      ],
+    }
+  }
+
+  it('T5b: inserting a parallel gateway from an edge 「+」 selects the NEW gateway (D0 §3.4); its 「+添加分支」 grows a 3rd lane and the card states the lane count', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_parallel' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-parallel"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector, 'the new gateway opens in the inspector').not.toBeNull()
+    expect(inspector.getAttribute('data-inspector-type')).toBe('parallel')
+    const gatewayKey = inspector.getAttribute('data-inspector-node')!
+    expect(gatewayKey).not.toBe('approval_1') // never the source node
+    const summary = () => container!.querySelector(
+      `[data-canvas-node="${gatewayKey}"] .template-authoring__canvas-node-summary`,
+    )?.textContent?.trim()
+    expect(summary()).toBe('2 个并行分支 · 全部完成后合并')
+
+    const addLane = inspector.querySelector(`[data-testid="approval-canvas-add-parallel-${gatewayKey}"]`) as HTMLButtonElement
+    expect(addLane.textContent?.trim()).toBe('+添加分支')
+    addLane.click()
+    await flushUi()
+    expect(summary()).toBe('3 个并行分支 · 全部完成后合并')
+    expect(container!.querySelector('[data-testid="approval-parallel-add-branch-hint"]')?.textContent).toContain('共 3 个并行分支')
+
+    // The untouched 3-lane draft (two placeholder lanes) reaches the save endpoint — the FE never
+    // blocked it; the backend half of the fix lets the server accept it too.
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+    expect(payload.approvalGraph.nodes.find((n: any) => n.key === gatewayKey).config.branches).toHaveLength(3)
+  })
+
+  // Gate r1 P2-1: the CONDITION half of 「select the NEW gateway after insert」 (D0 §3.4) — the image4
+  // path the tester actually walked. Reverting `onInsertConditionAfter`'s selectionAfter to the
+  // SOURCE node (the pre-fix behaviour) must fail here, as the parallel twin above fails for its half.
+  it('T5b: inserting a CONDITION gateway from an edge 「+」 selects the NEW gateway (D0 §3.4); its toolbar offers 「+添加分支」 and grows a 2nd rule branch', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_condition' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    const keysBefore = new Set(Array.from(container!.querySelectorAll('[data-testid="approval-canvas-node"]'))
+      .map((card) => card.getAttribute('data-canvas-node')))
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-condition"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector, 'the new gateway opens in the inspector').not.toBeNull()
+    expect(inspector.getAttribute('data-inspector-type')).toBe('condition')
+    const gatewayKey = inspector.getAttribute('data-inspector-node')!
+    expect(gatewayKey).not.toBe('approval_1') // never the source node
+    expect(keysBefore.has(gatewayKey)).toBe(false) // the node the insert just created
+    expect(container!.querySelector(`[data-canvas-node="${gatewayKey}"]`)).not.toBeNull()
+
+    // NIT-4 (gate r1): the condition gateway's add-a-branch control reads 「+添加分支」 too.
+    const addBranch = inspector.querySelector(`[data-testid="approval-canvas-add-condition-${gatewayKey}"]`) as HTMLButtonElement
+    expect(addBranch).not.toBeNull()
+    expect(addBranch.textContent?.trim()).toBe('+添加分支')
+    const ruleBranchCards = () => container!.querySelectorAll(
+      '[data-testid="approval-canvas-inspector"] [data-testid="approval-condition-branch"]',
+    )
+    expect(ruleBranchCards()).toHaveLength(1)
+    addBranch.click()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-canvas-inspector"]')?.getAttribute('data-inspector-node')).toBe(gatewayKey)
+    expect(ruleBranchCards()).toHaveLength(2)
+  })
+
+  it('T5b: a gateway fork edge carries NO insertion 「+」 (no insert command is valid there, D0 §3.4/§15); ordinary edges keep theirs', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_fork_edges' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildCcChainGraph() }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-e-a-c"]') as HTMLButtonElement).click()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-canvas-edge-insert-parallel"]') as HTMLButtonElement).click()
+    await flushUi()
+    // insertParallelGateway is deterministic: fork edges edge_1/edge_2 (gateway → lanes), join edges
+    // edge_3/edge_4 (lanes → cc_1); `e-a-c` keeps its key and now enters the gateway.
+    expect(container!.querySelectorAll('[data-testid="approval-canvas-edge"]')).toHaveLength(7)
+    const controlled = Array.from(container!.querySelectorAll('[data-testid="approval-canvas-edge-insert"]'))
+      .map((control) => control.getAttribute('data-edge-key'))
+      .sort()
+    expect(controlled).toEqual(['e-a-c', 'e-c-e', 'e-s-a', 'edge_3', 'edge_4'])
+  })
+
+  it('T5b: a save the server rejects because two parallel branches share an approver names BOTH branches — never the opaque 「保存表单失败」 or a node key', async () => {
+    approvalCanvasV2.value = true
+    setRouteParams({ id: 'tpl_t5b_dup' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'fork_1', type: 'parallel', name: '会签', config: { branches: ['e-f-a', 'e-f-b'], joinMode: 'all', joinNodeKey: 'end' } },
+          { key: 'lane_a', type: 'approval', name: '财务甲', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'lane_b', type: 'approval', name: '财务乙', config: { assigneeSources: [{ kind: 'static_role', roleIds: ['finance'] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'e-s-f', source: 'start', target: 'fork_1' },
+          { key: 'e-f-a', source: 'fork_1', target: 'lane_a' },
+          { key: 'e-f-b', source: 'fork_1', target: 'lane_b' },
+          { key: 'e-a-e', source: 'lane_a', target: 'end' },
+          { key: 'e-b-e', source: 'lane_b', target: 'end' },
+        ],
+      },
+    }))
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    updateTemplateSpy.mockRejectedValue(new ApprovalApiError(
+      'approvalGraph parallel branches must not contain the same approver',
+      400,
+      'VALIDATION_ERROR',
+      { reason: 'parallel_duplicate_approver', nodeKey: 'fork_1', conflictingNodeKeys: ['lane_a', 'lane_b'] },
+    ))
+    await mountView()
+    await flushUi()
+    scrolledElements = []
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.textContent).toContain('并行分支「会签」中「财务甲」与「财务乙」的审批人相同')
+    expect(summary.textContent).not.toContain('保存表单失败')
+    for (const key of ['fork_1', 'lane_a', 'lane_b', 'finance', 'same approver']) {
+      expect(summary.textContent).not.toContain(key)
+    }
+    expect(scrolledElements.at(-1)).toBe(summary) // brought into view, not left above the canvas
+  })
+
+  // Gate r1 P3-5: the PUBLISH half of the attribution + reveal. The server's placeholder gate names
+  // the node in its values-free details; the banner must name it by its business label, never by its
+  // key, never the opaque 「发布表单失败」, and must be brought into view like the save path's banner.
+  // (The draft itself is placeholder-free, so the client-side checklist lets confirm through — this
+  // is the server-side gate's copy, e.g. for a client whose checklist is behind the server.)
+  it('T5b: a publish the server rejects with the placeholder code names the node in the banner and brings it into view', async () => {
+    setRouteParams({ id: 'tpl_t5b_publish_placeholder' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ id: 'tpl_t5b_publish_placeholder' }))
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    publishTemplateSpy.mockRejectedValue(new ApprovalApiError(
+      'server-side placeholder message',
+      400,
+      'APPROVAL_ROLE_PLACEHOLDER_NOT_CONFIGURED',
+      { nodeKey: 'approval_1' },
+    ))
+    await mountView()
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const confirmButton = container!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
+    expect(confirmButton.disabled).toBe(false)
+    scrolledElements = []
+    confirmButton.click()
+    await flushUi()
+
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1) // the save half succeeded
+    expect(publishTemplateSpy).toHaveBeenCalledTimes(1)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]') as HTMLElement
+    expect(summary).not.toBeNull()
+    expect(summary.textContent).toContain('审批节点「审批人 1」仍为占位审批角色，请先替换为真实审批人后再发布')
+    for (const forbidden of ['approval_1', '发布表单失败', 'server-side placeholder message']) {
+      expect(summary.textContent).not.toContain(forbidden)
+    }
+    expect(scrolledElements.at(-1)).toBe(summary)
   })
 
   it('F4: no +并行 affordance INSIDE a parallel branch (backend rejects nested parallel), while +条件 stays offered', async () => {
@@ -2933,7 +3345,6 @@ describe('TemplateAuthoringView', () => {
   it('publishes with an explicit allowRevoke policy after saving', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
     // B2-03: publish now opens the pre-flight checklist FIRST; the real persist/publish sequence
     // only runs once the dialog's own confirm button is clicked (a fresh linear draft with just
@@ -2974,7 +3385,6 @@ describe('TemplateAuthoringView', () => {
   // click -> persistDraft -> publish sequence).
   it('CREATE mode: unchecking allowRevoke and publishing in the SAME sitting reaches the server (was silently discarded)', async () => {
     await mountView()
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
 
     const checkbox = container!.querySelector('[data-testid="approval-template-allow-revoke"]') as HTMLInputElement
@@ -3047,7 +3457,6 @@ describe('TemplateAuthoringView', () => {
   it('B3-09: publishes with a trimmed note when one is typed in the checklist dialog', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
     ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -3066,7 +3475,6 @@ describe('TemplateAuthoringView', () => {
   it('B3-09: reopening the publish dialog clears the previous note; whitespace-only sends no note key', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'purchase')
     setInput('approval-template-name', '采购审批')
 
     // First open: type a note, then close WITHOUT publishing.
@@ -3095,9 +3503,13 @@ describe('TemplateAuthoringView', () => {
     expect(publishTemplateSpy).toHaveBeenCalledWith('tpl_created', { policy: { allowRevoke: true } })
   })
 
-  it('B2-03: an invalid draft (blank key/name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
+  it('B2-03: an invalid draft (blank name) opens the publish checklist with a failing "表单字段" item and disables the confirm button', async () => {
     await mountView()
-    // leave key/name blank — validateTemplateFormFields fails ('模板 Key 必填' / '模板名称必填').
+    // approval-form-ux-slice1 (20260916 design §1.2): `key` is now seeded at DRAFT-CREATION time
+    // (createSeededTemplateDraft), so a fresh draft's key is never blank — only `name` is left
+    // blank, which still fails validateTemplateFormFields ('模板名称必填'). Re-pinned from the
+    // pre-slice1 blank-key/blank-name premise onto the ONE field that can still be blank on a
+    // fresh draft; the checklist-item-fails-and-blocks-confirm mechanism under test is unchanged.
 
     ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
     await flushUi()
@@ -3108,7 +3520,8 @@ describe('TemplateAuthoringView', () => {
     expect(fieldsItem).not.toBeNull()
     expect(fieldsItem!.getAttribute('data-ok')).toBe('false')
     expect(fieldsItem!.textContent).toContain('✗')
-    expect(fieldsItem!.textContent).toContain('模板 Key 必填')
+    expect(fieldsItem!.textContent).not.toContain('模板 Key 必填')
+    expect(fieldsItem!.textContent).toContain('模板名称必填')
 
     const confirmButton = dialog!.querySelector('[data-testid="approval-publish-checklist-confirm"]') as HTMLButtonElement
     expect(confirmButton.disabled).toBe(true)
@@ -3229,7 +3642,6 @@ describe('TemplateAuthoringView', () => {
 
     it('selecting a tier (immediate-apply, no separate save transaction) and publishing carries autoApproval alongside allowRevoke', async () => {
       await mountView()
-      setInput('approval-template-key', 'purchase')
       setInput('approval-template-name', '采购审批')
       ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
       await flushUi()
@@ -3381,7 +3793,6 @@ describe('TemplateAuthoringView', () => {
   it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
     await mountView()
 
-    setInput('approval-template-key', 'leave')
     setInput('approval-template-name', '请假审批')
     const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
     mergeToggle.checked = true
@@ -4141,7 +4552,6 @@ describe('TemplateAuthoringView', () => {
       const chip = container!.querySelector('[data-testid="approval-form-palette-chip-text"]') as HTMLElement
       chip.click()
       await flushUi()
-      setInput('approval-template-key', 'expense')
       setInput('approval-template-name', '费用审批')
       await flushUi()
 
@@ -4159,6 +4569,199 @@ describe('TemplateAuthoringView', () => {
       // deliberate resync, not silently reset to some OTHER count).
       const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
       expect(cards.length).toBe(beforeSave)
+    })
+
+    // ── T2 (test report 2026-10-08): on the DEFAULT surface (flag ON) a record-link field had no
+    // target picker anywhere — only the flag-OFF inline editor carried one — so 保存草稿 and 发布
+    // were both blocked by「需要选择目标空间与目标表」. Delta §3.4 + parity ledger deferral (3):
+    // the inspector carries the typed base/sheet pickers over the PARENT-OWNED catalog.
+    describe('record-link target base/sheet pickers in the Designer 2.0 inspector (delta §3.4)', () => {
+      const BASE_SELECT = 'approval-form-field-inspector-record-link-base'
+      const SHEET_SELECT = 'approval-form-field-inspector-record-link-sheet'
+
+      beforeEach(() => {
+        approvalCanvasV2.value = true
+        listBasesSpy.mockReset()
+        listSheetsSpy.mockReset()
+        listBasesSpy.mockResolvedValue({
+          bases: [
+            { id: 'base_alpha', name: '销售空间' },
+            { id: 'base_beta', name: '客服空间' },
+          ],
+        })
+        listSheetsSpy.mockResolvedValue({
+          sheets: [
+            { id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' },
+            { id: 'sheet_beta_1', name: '工单表', baseId: 'base_beta' },
+          ],
+        })
+      })
+
+      function byTestId<T extends HTMLElement = HTMLElement>(testid: string): T | null {
+        return container!.querySelector(`[data-testid="${testid}"]`) as T | null
+      }
+
+      function optionTexts(testid: string): string[] {
+        const select = byTestId<HTMLSelectElement>(testid)
+        return select ? Array.from(select.options).map((option) => option.textContent?.trim() ?? '') : []
+      }
+
+      async function changeSelect(testid: string, value: string): Promise<void> {
+        const select = byTestId<HTMLSelectElement>(testid)
+        expect(select, `${testid} must be rendered`).not.toBeNull()
+        select!.value = value
+        select!.dispatchEvent(new Event('change', { bubbles: true }))
+        await flushUi()
+      }
+
+      async function publishFieldsCheck(): Promise<{ ok: string | null; text: string }> {
+        byTestId<HTMLButtonElement>('approval-template-publish-button')!.click()
+        await flushUi()
+        const dialog = byTestId('approval-publish-checklist')
+        expect(dialog).not.toBeNull()
+        const item = dialog!.querySelector('[data-testid="approval-publish-checklist-item-fields"]')!
+        const result = { ok: item.getAttribute('data-ok'), text: item.textContent ?? '' }
+        const cancel = Array.from(dialog!.querySelectorAll('button')).find(
+          (button) => button.textContent?.trim() === '取消',
+        )
+        cancel!.click()
+        await flushUi()
+        return result
+      }
+
+      it('palette add → pick base and sheet in the inspector → the 表单字段 publish check passes and 保存草稿 pins exactly { baseId, sheetId }', async () => {
+        await mountView()
+        setInput('approval-template-name', '关联记录审批')
+        await flushUi()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+
+        const linkCard = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        )
+        expect(linkCard?.getAttribute('data-selected')).toBe('true')
+        expect(listBasesSpy).toHaveBeenCalledTimes(1)
+
+        // The tester's screenshot state: the 表单字段 item fails on the missing target.
+        const before = await publishFieldsCheck()
+        expect(before.ok).toBe('false')
+        expect(before.text).toContain('需要选择目标空间与目标表')
+
+        // The default surface now carries the typed pickers (business names only).
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间', '客服空间'])
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        expect(optionTexts(SHEET_SELECT)).toEqual(['请选择目标表', '订单表'])
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+
+        const after = await publishFieldsCheck()
+        expect(after.ok).toBe('true')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = createTemplateSpy.mock.calls[0][0] as {
+          formSchema: { fields: Array<{ type: string; props?: unknown }> }
+        }
+        const linkField = payload.formSchema.fields.find((entry) => entry.type === 'record-link')
+        expect(linkField?.props).toEqual({ baseId: 'base_alpha', sheetId: 'sheet_alpha_1' })
+      })
+
+      it('retyping an existing field INTO record-link in the inspector reaches the same pickers (no configuration dead-end)', async () => {
+        await mountView()
+        setInput('approval-template-name', '改类型为关联记录')
+        await flushUi()
+        expect(byTestId(BASE_SELECT)).toBeNull()
+
+        await changeSelect('approval-form-field-inspector-type', 'record-link')
+        const retyped = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        )
+        expect(retyped).not.toBeNull()
+        expect(listBasesSpy).toHaveBeenCalledTimes(1)
+
+        await changeSelect(BASE_SELECT, 'base_beta')
+        await changeSelect(SHEET_SELECT, 'sheet_beta_1')
+        const check = await publishFieldsCheck()
+        expect(check.ok).toBe('true')
+      })
+
+      it('an edit-mode template whose saved target is no longer in the catalog shows 目标不可用 and the publish check names it; re-picking in the inspector repairs it and the update payload carries the new pins', async () => {
+        setRouteParams({ id: 'tpl_record_link' })
+        getTemplateSpy.mockResolvedValue(buildTemplate({
+          formSchema: {
+            fields: [
+              { id: 'amount', type: 'number', label: '金额', required: true },
+              { id: 'reviewer', type: 'user', label: '审批人', required: true },
+              {
+                id: 'linked',
+                type: 'record-link',
+                label: '客户关联',
+                props: { baseId: 'base_gone', sheetId: 'sheet_gone' },
+              },
+            ],
+          },
+        }))
+        await mountView()
+        await flushUi()
+
+        const linkCard = container!.querySelector(
+          '[data-testid="approval-form-builder-card"][data-field-type="record-link"]',
+        ) as HTMLElement
+        expect(linkCard).not.toBeNull()
+        linkCard.click()
+        await flushUi()
+
+        const base = byTestId<HTMLSelectElement>(BASE_SELECT)!
+        expect(base.value).toBe('base_gone')
+        expect(base.options[base.selectedIndex]?.textContent?.trim()).toBe('目标不可用')
+        expect(container!.textContent).not.toMatch(/base_gone|sheet_gone/)
+
+        const stale = await publishFieldsCheck()
+        expect(stale.ok).toBe('false')
+        expect(stale.text).toContain('目标不可用，请重新选择目标空间与目标表')
+
+        await changeSelect(BASE_SELECT, 'base_alpha')
+        await changeSelect(SHEET_SELECT, 'sheet_alpha_1')
+        const repaired = await publishFieldsCheck()
+        expect(repaired.ok).toBe('true')
+
+        byTestId<HTMLButtonElement>('approval-template-save-button')!.click()
+        await flushUi()
+        await flushUi()
+        expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+        const payload = updateTemplateSpy.mock.calls[0][1] as {
+          formSchema: { fields: Array<{ id: string; props?: unknown }> }
+        }
+        expect(payload.formSchema.fields.find((entry) => entry.id === 'linked')?.props).toEqual({
+          baseId: 'base_alpha',
+          sheetId: 'sheet_alpha_1',
+        })
+      })
+
+      it('a catalog failure shows the parent-owned error with 重试 inside the inspector; retry refetches through the view and fills the pickers', async () => {
+        listBasesSpy.mockRejectedValue(new Error('catalog unavailable'))
+        listSheetsSpy.mockRejectedValue(new Error('catalog unavailable'))
+        await mountView()
+        byTestId('approval-form-palette-chip-record-link')!.click()
+        await flushUi()
+
+        const error = byTestId('approval-form-field-inspector-record-link-catalog-error')
+        expect(error?.textContent).toContain('关联表目录加载失败，请重试')
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间'])
+
+        listBasesSpy.mockResolvedValue({ bases: [{ id: 'base_alpha', name: '销售空间' }] })
+        listSheetsSpy.mockResolvedValue({
+          sheets: [{ id: 'sheet_alpha_1', name: '订单表', baseId: 'base_alpha' }],
+        })
+        byTestId<HTMLButtonElement>('approval-form-field-inspector-record-link-catalog-retry')!.click()
+        await flushUi()
+        await flushUi()
+
+        expect(listBasesSpy).toHaveBeenCalledTimes(2)
+        expect(byTestId('approval-form-field-inspector-record-link-catalog-error')).toBeNull()
+        expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间'])
+      })
     })
   })
   })

@@ -19,19 +19,24 @@ import {
   seatNodeKeysForViewer,
   type NodeOperationGraphView,
 } from './approval-effective-node-operations'
-import { resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { decisionDoorIsSeatGated, resolveCanDecideCurrentNode } from './approval-seat-authorization'
+import { computeReturnableNodeKeys } from './approval-return-targets'
+import { readCancelRoundDurableProjectionV1 } from '../core/attendance-cancellation-execution-port'
 import type {
   ApprovalActionRequest,
   ApprovalAssignmentRow,
   ApprovalBridgePlmAdapter,
   ApprovalInstanceRow,
   ApprovalQueryOptions,
+  ApprovalTabBadgeCountOptions,
   PlmSyncOptions,
   UnifiedApprovalDTO,
   UnifiedApprovalHistoryDTO,
 } from './approval-bridge-types'
 import { APPROVAL_ERROR_CODES } from './approval-bridge-types'
 import { isOrgPinEnabled, viewerActiveOrgIds, viewerRolesFailClosed } from './approval-instance-readability'
+import { approvalCcTabConditionSql, approvalCcUnreadConditionSql } from './approval-cc-predicate'
+import { approvalMineOutcomeUnseenConditionSql } from './approval-mine-outcome-predicate'
 import {
   collectActiveNodeKeys,
   redactHiddenFormFields,
@@ -45,6 +50,7 @@ import {
 import {
   assertAttendanceCentralMutationFailClosed,
   attendanceCentralApprovalErrorToServiceFields,
+  isCancelRoundInstance,
 } from '../attendance/w4c3b-central-approval-hooks'
 
 /**
@@ -65,6 +71,20 @@ export function __setW4c3bBridgeDispatchTestBarrierForTests(
   hook: W4c3bBridgeDispatchBarrierFn | null,
 ): void {
   bridgeDispatchTestBarrierForTests = hook
+}
+
+/**
+ * `listApprovals`'s WHERE (see `ApprovalBridgeService.buildListWhere`): the conjuncts, their bound
+ * values, the next free placeholder, and the placeholders the `tab` filter bound for the actor id
+ * and the role array (`null` when the tab never referenced them — no tab, no actor, or a tab that
+ * reads neither).
+ */
+interface ApprovalListWhere {
+  conditions: string[]
+  params: unknown[]
+  nextParamIndex: number
+  tabActorParam: number | null
+  tabRolesParam: number | null
 }
 
 const logger = new Logger('ApprovalBridgeService')
@@ -323,10 +343,20 @@ function resolveCurrentNodeType(
   return null
 }
 
-function toUnifiedDTO(
+// Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the detail
+// carrier below); the list and detail paths in this module remain its callers.
+export function toUnifiedDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentRow[] = [],
   runtimeGraph: RedactableRuntimeGraph | null = null,
+  options: {
+    /**
+     * 退回 targets — DETAIL read only. The list path shares this builder and stays byte-identical:
+     * a per-row graph walk buys the list nothing (no list surface offers 退回), so the field is
+     * computed only when the caller asks for it.
+     */
+    withReturnableNodeKeys?: boolean
+  } = {},
 ): UnifiedApprovalDTO {
   // P1-C: redact form fields the instance's currently-active node(s) mark
   // `hidden`. Keyed on the instance-active node, NOT the viewer — so observers /
@@ -341,6 +371,21 @@ function toUnifiedDTO(
   // surface can withhold approve/reject on a 办理 (handler) task. Structural read of the same JSONB
   // view already loaded for redaction; null when there is no graph (bridged/external) or no cursor.
   const currentNodeType = resolveCurrentNodeType(runtimeGraph, row.current_node_key)
+  // The server-computed 退回 target list (see `computeReturnableNodeKeys` for the contract). The same
+  // frozen graph blob loaded for redaction is the graph the return gate walks; the walk reads the
+  // RAW `row.form_snapshot` (condition branches route on the stored form, hidden fields included),
+  // never the redacted echo built above. Spread only when computed, like `currentNodeType`.
+  const returnableNodeKeys = options.withReturnableNodeKeys
+    ? computeReturnableNodeKeys({
+        runtimeGraph,
+        formSnapshot: row.form_snapshot,
+        requesterSnapshot: row.requester_snapshot,
+        workflowKey: row.workflow_key,
+        currentNodeKey: row.current_node_key,
+        status: row.status,
+        metadata: row.metadata,
+      })
+    : undefined
   return {
     id: row.id,
     sourceSystem: row.source_system,
@@ -361,6 +406,7 @@ function toUnifiedDTO(
     formSnapshot,
     currentNodeKey: row.current_node_key,
     ...(currentNodeType ? { currentNodeType } : {}),
+    ...(returnableNodeKeys ? { returnableNodeKeys } : {}),
     assignments: assignments.map((assignment) => ({
       id: assignment.id,
       type: assignment.assignment_type,
@@ -443,10 +489,14 @@ export class ApprovalBridgeService {
     return { synced, errors }
   }
 
-  async listApprovals(options?: ApprovalQueryOptions): Promise<{
-    data: UnifiedApprovalDTO[]
-    total: number
-  }> {
+  /**
+   * The list feed's WHERE, exactly as `listApprovals` has always assembled it — client filters,
+   * the `tab` filter, the server-determined scope, and the dormant org pin — extracted so a count
+   * over the same feed (the 抄送我的 / 我发起的 badges) is the SAME statement with one conjunct
+   * appended, never a second hand-built copy that can drift from the list it counts. Text and
+   * placeholder push order are unchanged by the extraction.
+   */
+  private async buildListWhere(options?: ApprovalQueryOptions): Promise<ApprovalListWhere> {
     if (!pool) throw new Error('Database not available')
 
     const conditions: string[] = []
@@ -502,6 +552,11 @@ export class ApprovalBridgeService {
     }
     const sourceSystem = options?.sourceSystem
     const includeExternalTabSources = options?.includeExternalTabSources === true
+    // Declared OUTSIDE the tab block so the placeholders the tab filter bound for the actor id and
+    // the role array are returned to the caller (`ApprovalListWhere.tabActorParam` /
+    // `tabRolesParam`): a conjunct appended later binds the SAME values the tab arm bound.
+    let tabActorIdParam: number | null = null
+    let tabActorRolesParam: number | null = null
     if (options?.tab && options.actorId) {
       const actorRoles = options.actorRoles && options.actorRoles.length > 0 ? options.actorRoles : ['__none__']
       const actorPermissions = options.actorPermissions && options.actorPermissions.length > 0 ? options.actorPermissions : ['__none__']
@@ -518,8 +573,6 @@ export class ApprovalBridgeService {
       // middle ("could not determine data type of parameter $N"). Either way 我发起的 / 抄送我的 /
       // 我已处理 answered 500 on real PostgreSQL. Allocating on first reference keeps every bound
       // value referenced and the numbering dense, for all five tabs in both source modes.
-      let tabActorIdParam: number | null = null
-      let tabActorRolesParam: number | null = null
       let tabActorPermissionsParam: number | null = null
       const actorIdParam = (): number => {
         if (tabActorIdParam === null) {
@@ -552,15 +605,8 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND metadata->>'targetType' = 'user'
-                AND metadata->>'targetId' = $${actorIdParam()}
-            )`,
-          )
+          // User arm only on the PLM source — the historical shape, kept (see approval-cc-predicate.ts).
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: null }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
         } else if (options.tab === 'processed') {
@@ -600,17 +646,7 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(
             `(
@@ -622,15 +658,7 @@ export class ApprovalBridgeService {
                   OR id IN (
                     SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
                   )
-                  OR id IN (
-                    SELECT instance_id
-                    FROM approval_records
-                    WHERE action = 'cc'
-                      AND (
-                        (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                        OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                      )
-                  )
+                  OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
                   OR id IN (
                     SELECT instance_id
                     FROM approval_assignments
@@ -689,17 +717,7 @@ export class ApprovalBridgeService {
         } else if (options.tab === 'mine') {
           conditions.push(`requester_snapshot->>'id' = $${actorIdParam()}`)
         } else if (options.tab === 'cc') {
-          conditions.push(
-            `id IN (
-              SELECT instance_id
-              FROM approval_records
-              WHERE action = 'cc'
-                AND (
-                  (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                  OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                )
-            )`,
-          )
+          conditions.push(approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() }))
         } else if (options.tab === 'completed') {
           conditions.push(`status <> 'pending'`)
           conditions.push(
@@ -708,15 +726,7 @@ export class ApprovalBridgeService {
               OR id IN (
                 SELECT instance_id FROM approval_records WHERE actor_id = $${actorIdParam()}
               )
-              OR id IN (
-                SELECT instance_id
-                FROM approval_records
-                WHERE action = 'cc'
-                  AND (
-                    (metadata->>'targetType' = 'user' AND metadata->>'targetId' = $${actorIdParam()})
-                    OR (metadata->>'targetType' = 'role' AND metadata->>'targetId' = ANY($${actorRolesParam()}))
-                  )
-              )
+              OR ${approvalCcTabConditionSql({ actorParam: actorIdParam(), rolesParam: actorRolesParam() })}
               OR id IN (
                 SELECT instance_id
                 FROM approval_assignments
@@ -819,6 +829,91 @@ export class ApprovalBridgeService {
       )
     }
 
+    return {
+      conditions,
+      params,
+      nextParamIndex: paramIndex,
+      tabActorParam: tabActorIdParam,
+      tabRolesParam: tabActorRolesParam,
+    }
+  }
+
+  /**
+   * 抄送我的 unread badge (test report 2026-10-08): the 抄送我的 feed — `buildListWhere` with
+   * `tab: 'cc'` and the caller's source scope, i.e. the very statement the tab lists — with ONE
+   * conjunct appended (`approvalCcUnreadConditionSql`, bound to the placeholders the tab filter
+   * bound). It can therefore never exceed the tab's own total for the same `sourceSystem`, and it
+   * equals the number of rows that tab marks `ccUnread` across all its pages. Client filters the
+   * tab may also carry (search, status, template, date window) are deliberately not applied: a
+   * badge counts the tab, not the current search — the same convention as the 待我处理 badge.
+   */
+  async countCcUnreadForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'cc',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalCcUnreadConditionSql({
+        instanceRef: 'approval_instances',
+        actorParam: listWhere.tabActorParam,
+        rolesParam: listWhere.tabRolesParam,
+      }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  /**
+   * 我发起的 new-outcome badge (test report 2026-10-08): the 我发起的 feed (`buildListWhere` with
+   * `tab: 'mine'` and the caller's source scope) with ONE conjunct appended —
+   * `approvalMineOutcomeUnseenConditionSql`, bound to the actor placeholder the tab filter bound.
+   * Same contract as `countCcUnreadForViewer`: never above the tab's total for the same
+   * `sourceSystem`, equal to the rows that tab marks `outcomeUnseen`, client filters not applied.
+   */
+  async countMineOutcomesUnseenForViewer(options: ApprovalTabBadgeCountOptions): Promise<number> {
+    if (!pool) throw new Error('Database not available')
+    const listWhere = await this.buildListWhere({
+      sourceSystem: options.sourceSystem,
+      includeExternalTabSources: options.includeExternalTabSources,
+      tab: 'mine',
+      tabDefaulted: false,
+      actorId: options.actorId,
+      actorRoles: options.actorRoles,
+      actorPermissions: options.actorPermissions,
+    })
+    if (listWhere.tabActorParam === null) return 0
+    const conditions = [
+      ...listWhere.conditions,
+      approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: listWhere.tabActorParam }),
+    ]
+    const result = await pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM approval_instances WHERE ${conditions.join(' AND ')}`,
+      listWhere.params,
+    )
+    return parseInt(result.rows[0]?.count || '0', 10)
+  }
+
+  async listApprovals(options?: ApprovalQueryOptions): Promise<{
+    data: UnifiedApprovalDTO[]
+    total: number
+  }> {
+    if (!pool) throw new Error('Database not available')
+
+    const listWhere = await this.buildListWhere(options)
+    const { conditions, params } = listWhere
+    let paramIndex = listWhere.nextParamIndex
+
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const limit = options?.limit ?? 50
     const offset = options?.offset ?? 0
@@ -860,6 +955,55 @@ export class ApprovalBridgeService {
       readInstanceIds = new Set(readResult.rows.map((row) => row.instance_id))
     }
 
+    // 抄送我的 unread (test report 2026-10-08): resolved ONLY when the caller asks for it (the route
+    // does while APPROVAL_CC_UNREAD_BADGE_ENABLED is on) and only on the cc tab. Same conjunct the
+    // badge count appends to this same feed (`approvalCcUnreadConditionSql`), bound to the SAME
+    // values the tab filter bound — so the rows marked here are exactly the rows the badge counts.
+    let ccUnreadInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateCcUnread === true
+      && options.tab === 'cc'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const ccParams: unknown[] = [
+        instancesResult.rows.map((row) => row.id),
+        params[listWhere.tabActorParam - 1],
+      ]
+      let ccRolesParam: number | null = null
+      if (listWhere.tabRolesParam !== null) {
+        ccParams.push(params[listWhere.tabRolesParam - 1])
+        ccRolesParam = ccParams.length
+      }
+      const ccUnreadResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalCcUnreadConditionSql({ instanceRef: 'approval_instances', actorParam: 2, rolesParam: ccRolesParam })}`,
+        ccParams,
+      )
+      ccUnreadInstanceIds = new Set(ccUnreadResult.rows.map((row) => row.id))
+    }
+
+    // 我发起的 new outcome (test report 2026-10-08): same shape as the cc annotation above — only on
+    // request, only on the mine tab, and with the SAME conjunct the badge count appends to this feed.
+    let outcomeUnseenInstanceIds: Set<string> | null = null
+    if (
+      options?.annotateMineOutcomeUnseen === true
+      && options.tab === 'mine'
+      && listWhere.tabActorParam !== null
+      && instancesResult.rows.length > 0
+    ) {
+      const outcomeResult = await pool.query<{ id: string }>(
+        `SELECT approval_instances.id
+         FROM approval_instances
+         WHERE approval_instances.id = ANY($1::text[])
+           AND ${approvalMineOutcomeUnseenConditionSql({ instanceRef: 'approval_instances', actorParam: 2 })}`,
+        [instancesResult.rows.map((row) => row.id), params[listWhere.tabActorParam - 1]],
+      )
+      outcomeUnseenInstanceIds = new Set(outcomeResult.rows.map((row) => row.id))
+    }
+
     const data = instancesResult.rows.map((row) => {
       const dto = toUnifiedDTO(
         row,
@@ -868,6 +1012,12 @@ export class ApprovalBridgeService {
       )
       if (readInstanceIds) {
         dto.isRead = readInstanceIds.has(row.id)
+      }
+      if (ccUnreadInstanceIds) {
+        dto.ccUnread = ccUnreadInstanceIds.has(row.id)
+      }
+      if (outcomeUnseenInstanceIds) {
+        dto.outcomeUnseen = outcomeUnseenInstanceIds.has(row.id)
       }
       return dto
     })
@@ -933,6 +1083,8 @@ export class ApprovalBridgeService {
       row,
       instanceAssignments,
       detailRuntimeGraph,
+      // The detail read is the one bridge carrier of `returnableNodeKeys` (the list never offers 退回).
+      { withReturnableNodeKeys: true },
     )
     // Lock-7 OD-L7-10 — DETAIL-only actor-scoped per-field access map. Computed from the viewer's
     // ACTIVE user-typed seats (the same seats the write path claims), over the SAME
@@ -987,12 +1139,20 @@ export class ApprovalBridgeService {
     // route hands the dispatch door (`resolveApprovalActorRoles`), so a ROLE-typed seat is
     // first-class here exactly as it is there.
     if (dto) {
-      dto.canDecideCurrentNode = resolveCanDecideCurrentNode({
+      const canDecideCurrentNode = resolveCanDecideCurrentNode({
         instance: row,
         assignments: instanceAssignments,
         viewerUserId: viewerUserId ?? null,
         viewerRoles: viewerRoles ?? null,
       })
+      dto.canDecideCurrentNode = canDecideCurrentNode
+      // Process-evidence (过程附件) uploader affordance: the seat answer above, restricted to the
+      // seat-gated door. `canDecideCurrentNode` alone is `true` on a pending instance with no seat
+      // gate (legacy platform row, `plm:` mirror), where nothing binds process evidence — see the
+      // field's doc in `approval-bridge-types.ts`. Two existing exports composed, no new predicate.
+      // THIS is the builder `GET /api/approvals/:id` serves; `ApprovalProductService.getApproval`
+      // builds the action / create responses and carries the identical expression.
+      dto.canAttachProcessEvidence = decisionDoorIsSeatGated(row) && canDecideCurrentNode
     }
     // Attach the FROZEN form schema (detail `columns` included) from the instance's pinned
     // template version so the read renders detail rows from the frozen schema (design-lock Fact B).
@@ -1013,6 +1173,43 @@ export class ApprovalBridgeService {
         viewerUserId,
         queryFn,
       )
+    }
+    // Owner ruling 2026-09-20 — 「呈现默认值不能替代持久读取能力;修复应白名单投影业务字段,不能直接
+    // 暴露整个 metadata。」 THIS is the `GET /api/approvals/:id` handler's `getApproval` (the route
+    // builds an `ApprovalBridgeService`, `routes/approvals.ts`'s `getBridgeService`), so this is the
+    // 刷新 path the ruling names. It shares ONE reader with `ApprovalProductService.getApproval`,
+    // the action-response builder, so the two cannot disagree about what a reload shows.
+    //
+    // Runs AFTER the per-instance admission the route applies ahead of this call
+    // (`canReadApprovalInstance`, Lock-10 S1) — a non-participant is 404'd before any of this, so
+    // the fence over these values is the existing one, unchanged and not re-implemented here.
+    //
+    // PLATFORM IDS ONLY — the SAME `isPlmId` branch this method opens with (`:915`), the route
+    // applies before its fence, and Lock-10 OD-S1-18(a) pins ("`plm:` ids are NEVER routed through
+    // the predicate — platform posture only"). A cancel round is minted by
+    // `createCancelRoundInstance` as a PLATFORM instance with a bare-UUID id (the verification
+    // measured `idHasPlmPrefix = false` on a real one), so for a `plm:` mirror this read can only
+    // ever match zero rows. Skipping it there is the architectural branch, not a new predicate.
+    // ⚠️ Deliberately NOT gated on `isCancelRoundInstance(row)` / `workflow_key`, which would be a
+    // tempting second narrowing: `workflow_key` is MUTABLE on an existing row (this corpus's own
+    // fixtures re-key instances with a bare UPDATE), and a read gated on a mutable column fails by
+    // SILENT ABSENCE — the exact defect shape this change exists to close.
+    // ⚠️ ASYMMETRY (gate round1 P3-2, OWNER-OPEN — not yet ruled on): `ApprovalProductService
+    // .getApproval`'s call to the SAME shared reader below has NO matching `isPlmId` guard; it runs
+    // unconditionally. That is not a correctness gap today — a `plm:`-mirror instance's
+    // `approval_records` rows are written by this service's own `insertApprovalRecord`, and no
+    // cancel-round writer ever attaches either whitelisted key to one, so the product-service side's
+    // extra query also matches zero rows, just without the short-circuit. Deleting THIS guard (M-F)
+    // leaves the whole redemption suite green: it is uncovered by construction, not by omission. The
+    // choice between (a) adding the same guard on the product-service side for textual symmetry with
+    // the claim two paragraphs above, or (b) dropping it here too and rewriting this branch as a bare
+    // performance short-circuit rather than an architectural one, is left to the owner — this
+    // comment documents the asymmetry that exists today; it does not resolve it.
+    if (dto && !isPlmId(id)) {
+      Object.assign(dto, await readCancelRoundDurableProjectionV1(
+        (text, values) => pool!.query(text, values),
+        id,
+      ))
     }
     return dto
   }
@@ -1069,6 +1266,11 @@ export class ApprovalBridgeService {
       if (bridgeDispatchTestBarrierForTests) {
         await bridgeDispatchTestBarrierForTests('after_instance_lock', { instanceId: id })
       }
+
+      // Lock §14.3 outlet #8 — a cancel-round instance never terminalizes through the generic
+      // bridge dispatch (it only ever moves through `ApprovalProductService.dispatchAction`'s
+      // dedicated cancel-round handling, WI-7/WI-12).
+      rejectIfCancelRound(instance, 'ApprovalBridgeService.dispatchAction')
 
       // P17/P22: attendance instances cannot terminalize through the generic bridge.
       // Classify + lock request before any instance/assignment DML (including
@@ -1566,4 +1768,44 @@ export class ServiceError extends Error {
     super(message)
     this.name = 'ServiceError'
   }
+}
+
+/**
+ * Approval change-request design lock v5.9 §14.3 — thrown by every one of the 8 chokepoints that
+ * must reject a cancel-round instance (outlets #2/#4/#6/#7/#7'/#8; #12/#13 land as a typed skip
+ * reason instead, per the lock's own distinction). `extends ServiceError` (not
+ * `AttendanceCentralApprovalError`) so `handleApprovalsError`'s `error instanceof ServiceError`
+ * branch (routes.ts) and this file's own callers funnel it through the standard envelope; extending
+ * `AttendanceCentralApprovalError` instead would get it silently absorbed into `skipped_stale` at
+ * `ApprovalProductService.ts:9637`, which is the one behavior this class must never have.
+ */
+export class CancelRoundOutletForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_OUTLET_FORBIDDEN')
+    this.name = 'CancelRoundOutletForbiddenError'
+  }
+}
+
+/** Lock §9-5 (lock:143) — creation-time suite gate: `suite='forbidden'` rejects before any write. */
+export class CancelRoundSuiteForbiddenError extends ServiceError {
+  constructor(message: string) {
+    super(message, 409, 'CANCEL_ROUND_SUITE_FORBIDDEN')
+    this.name = 'CancelRoundSuiteForbiddenError'
+  }
+}
+
+/**
+ * Shared outlet guard (lock §14.3, WI-7) — every chokepoint that must reject a cancel-round
+ * instance outright (as opposed to #12/#13's typed-skip treatment) calls this instead of
+ * hand-rolling the `isCancelRoundInstance` check, so the rejected action set stays centrally
+ * auditable. No-op for a non-cancel-round instance.
+ */
+export function rejectIfCancelRound(
+  instance: { workflow_key?: string | null },
+  outletLabel: string,
+): void {
+  if (!isCancelRoundInstance(instance)) return
+  throw new CancelRoundOutletForbiddenError(
+    `Cancel-round instances cannot be actioned through ${outletLabel}`,
+  )
 }

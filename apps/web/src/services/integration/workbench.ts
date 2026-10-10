@@ -1263,6 +1263,26 @@ export async function listIntegrationPipelineRuns(
   return Array.isArray(data) ? data : []
 }
 
+// SC-04 single-run read (GET /api/integration/runs/:runId, plugin handler `runsGet`).
+// Same client (apiFetch) and same error mapping (parseIntegrationResponse → code/status/details
+// on the thrown Error) as listIntegrationPipelineRuns, so callers branch on
+// integrationApiErrorCode(error) — RUN_NOT_FOUND / RUN_READ_NOT_IMPLEMENTED — instead of matching
+// server prose.
+//
+// Scope is passed the SAME way the list passes it: as query params, never as an `x-tenant-id`
+// header. apiFetch attaches the session JWT; the route derives the tenant from the verified claim
+// and 403s when an echoed `tenantId` disagrees, so this cannot widen scope. `workspaceId` MUST be
+// the same value the list query used — the registry's WHERE carries workspace_id, so a run listed
+// under one workspace is a 404 when read back under another.
+export async function getIntegrationRun(
+  runId: string,
+  scope: IntegrationScope = {},
+): Promise<IntegrationPipelineRun> {
+  const suffix = buildQuerySuffix({ tenantId: scope.tenantId, workspaceId: scope.workspaceId })
+  const response = await apiFetch(`/api/integration/runs/${encodeURIComponent(runId)}${suffix}`)
+  return parseIntegrationResponse<IntegrationPipelineRun>(response)
+}
+
 export async function listIntegrationDeadLetters(
   query: IntegrationPipelineObservationQuery,
 ): Promise<IntegrationDeadLetter[]> {
@@ -1316,6 +1336,63 @@ export async function listIntegrationProvenanceByRow(
   })}`)
   const data = await parseIntegrationResponse<IntegrationProvenanceTimelineEntry[]>(response)
   return Array.isArray(data) ? data : []
+}
+
+// Q4a (read-only): ONE run's provenance timeline, from the per-run sub-route
+// GET /api/integration/runs/:runId/provenance (plugin handler `runsProvenance`). Entries share
+// the IntegrationProvenanceTimelineEntry shape with the cross-run by-rowId read above — same
+// view, same projection — so a drift in one is a drift in both.
+//
+// The runId rides in the PATH (a `/runs?runId=` shaped call would hit the LIST route and return
+// runs, not events). Scope is passed as query params, never as an `x-tenant-id` header: apiFetch
+// attaches the session JWT and the route derives the tenant from the verified claim.
+//
+// The route answers `{ items, total, truncated, nextCursor }`, not a bare array — an unknown or
+// foreign run is a 404 (RUN_NOT_FOUND), never an empty list, so callers must branch on the error
+// code rather than reading "no events" as "no such run".
+//
+// f-prov200: one call returns ONE PAGE (server default 200 events). `total` / `truncated` /
+// `nextCursor` are what tell the first page from the whole timeline; pass `cursor` (the previous
+// page's nextCursor) to read the next page.
+export interface IntegrationRunProvenancePage {
+  items: IntegrationProvenanceTimelineEntry[]
+  /** Every event this run has in scope, counted server-side; null when the answer carried none. */
+  total: number | null
+  /**
+   * True when events exist beyond this page. Fail-closed: an answer that does not state
+   * `truncated: false` explicitly is treated as truncated, so a response missing the disclosure
+   * can never be rendered as a complete audit timeline.
+   */
+  truncated: boolean
+  /** Opaque cursor for the next page; null when there is no next page to ask for. */
+  nextCursor: string | null
+}
+
+export async function getIntegrationRunProvenance(
+  runId: string,
+  scope: IntegrationScope = {},
+  options: { limit?: number; cursor?: string | null } = {},
+): Promise<IntegrationRunProvenancePage> {
+  const suffix = buildQuerySuffix({
+    tenantId: scope.tenantId,
+    workspaceId: scope.workspaceId,
+    limit: options.limit,
+    cursor: options.cursor,
+  })
+  const response = await apiFetch(`/api/integration/runs/${encodeURIComponent(runId)}/provenance${suffix}`)
+  const data = await parseIntegrationResponse<{
+    items?: IntegrationProvenanceTimelineEntry[]
+    total?: unknown
+    truncated?: unknown
+    nextCursor?: unknown
+  }>(response)
+  const items = Array.isArray(data?.items) ? data.items : []
+  const total = typeof data?.total === 'number' && Number.isSafeInteger(data.total) && data.total >= 0
+    ? data.total
+    : null
+  const nextCursor = typeof data?.nextCursor === 'string' && data.nextCursor.length > 0 ? data.nextCursor : null
+  const truncated = data?.truncated !== false || nextCursor !== null
+  return { items, total, truncated, nextCursor }
 }
 
 export interface IntegrationDeadLetterReplayPayload extends IntegrationScope {

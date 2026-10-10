@@ -334,7 +334,14 @@ function assertPipelineLoaded(pipeline, input) {
 
 function createPipelineRunner(deps = {}) {
   const pipelineRegistry = requireDependency(deps, 'pipelineRegistry', ['getPipeline'])
-  const externalSystemRegistry = requireDependency(deps, 'externalSystemRegistry', ['getExternalSystem'])
+  // G4/M2 (#5553 §3): the runner has its OWN dependency check, and the route layer's hard
+  // dependency cannot reach it — index.cjs builds this runner directly, and dead-letter replay
+  // re-enters through it, so `pipelineRunner` is a second, independent adapter-load entry point.
+  // `getExternalSystemForAdapter` is REQUIRED here for the same reason it is required at route
+  // registration: without it `loadExternalSystemForAdapter` below used to fall back to the
+  // credential-stripped PUBLIC projection for the pipeline source, the pipeline target AND the
+  // replay target check — silently, with nothing failing at construction time.
+  const externalSystemRegistry = requireDependency(deps, 'externalSystemRegistry', ['getExternalSystem', 'getExternalSystemForAdapter'])
   const adapterRegistry = requireDependency(deps, 'adapterRegistry', ['createAdapter'])
   const deadLetterStore = requireDependency(deps, 'deadLetterStore', ['createDeadLetter'])
   const watermarkStore = requireDependency(deps, 'watermarkStore', ['getWatermark', 'setWatermark'])
@@ -369,11 +376,14 @@ function createPipelineRunner(deps = {}) {
   // shipped before either fence existed.
   const b2aOperationClaim = deps.b2aOperationClaim || null
 
+  // NO PUBLIC-PROJECTION FALLBACK (G4/M2). The accessor is a construction-time dependency (above),
+  // so the existence check this function used to make could only ever have had one effect: turn a
+  // misassembled runner into a silently credential-less one that read the public projection and
+  // built adapters from it. Its three call sites are the pipeline SOURCE, the pipeline TARGET and
+  // the dead-letter REPLAY target's kind check; all three now read the same decrypting accessor the
+  // route layer reads, or the runner is not constructed at all.
   async function loadExternalSystemForAdapter(input) {
-    if (typeof externalSystemRegistry.getExternalSystemForAdapter === 'function') {
-      return externalSystemRegistry.getExternalSystemForAdapter(input)
-    }
-    return externalSystemRegistry.getExternalSystem(input)
+    return externalSystemRegistry.getExternalSystemForAdapter(input)
   }
 
   /**

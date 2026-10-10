@@ -81,24 +81,24 @@ const MAX_EXPORT_ROWS = 20000
 // before — and they are ADDED IN FRONT, so every column that already existed keeps its relative
 // order.
 //
-// NATIVE FIRST, PACK COLUMN AS PER-ROW FALLBACK, for the three columns this change made native
-// (父组件图号 / 父组件名称 / 规格). Until now those three reached the working sheet ONLY through a
-// customer pack — the shipped pack owns `ext_parentDrawingNo`, `ext_parentName` and `ext_spec`
-// (lib/customer-packs/factory-a.rehearsal.cjs) — and 规格 was projected here from `ext_spec` alone.
-//   WHY A FALLBACK AND NOT A REPLACEMENT. On the day this ships, every row already in a customer's
-//   sheet has an empty native column (it did not exist) and, on a pack-carrying deployment, a
-//   POPULATED ext_ one — the same PLM datum arriving by the only route there was. Sourcing the
-//   native column alone would blank three columns that work today, for every existing row, until a
-//   re-pull. Sourcing the pack column alone would leave the export pack-dependent forever, which is
-//   the gap this change exists to close.
-//   WHY NATIVE WINS WHERE BOTH ARE PRESENT. The native column is written by the apply path itself
-//   from the read plan's declared slots; the ext_ column is the same datum reached through a
-//   per-deployment field mapping. When they disagree, the one the pull maintains is the current one.
-//   The fallback is per ROW, not per deployment, so a half-migrated sheet (old rows pack-only, new
-//   rows native) exports one complete column instead of a striped one.
-//   WHEN THE FALLBACK RETIRES. It is dead weight the moment a deployment has re-pulled every
-//   project and dropped the pack columns; it is not load-bearing for correctness, only for
-//   continuity, and it can be deleted by a later change that says so.
+// NATIVE FIRST, PACK COLUMN AS PER-ROW FALLBACK — now for 规格 ALONE. When 父组件图号 / 父组件名称 /
+// 规格 were made native (#5446) all three carried a per-row fallback to the pack column that had been
+// their only route (`ext_parentDrawingNo` / `ext_parentName` / `ext_spec`), so a sheet full of
+// pre-#5446 rows did not go blank before its first re-pull.
+//   THE PARENT PAIR'S FALLBACK RETIRED on 2026-09-15 (owner ruling: 留模板对做正本,备料包去掉那一对,
+//   导出改读模板对). `parentComponentCode` / `parentComponentName` are the ONLY source of those two
+//   cells now: the shipped pack no longer declares the pack pair, the planner no longer derives it,
+//   and a value still sitting in an installed `ext_parentDrawingNo` / `ext_parentName` column is NOT
+//   read. A row whose native cell is blank therefore prints blank — and, because the same column
+//   object feeds the hierarchy comparator (PARENT_CODE_ORDER_COLUMN below), sorts into the blank-last
+//   band. On a deployment where every project has been re-pulled since #5446 no row is affected; a
+//   project never re-pulled since then is expected to re-pull, not to lean on the retired copy.
+//   The headers are untouched by the retirement — only the SOURCE of two cells changed.
+//   WHY `ext_spec` STAYS. The owner ruled on the parent pair only. `componentSpec` / `ext_spec` are
+//   the same duplicate-name problem one column over, but nobody has ruled them synonyms (the planner
+//   deliberately does not derive `ext_spec`, see its header), so 规格 keeps the per-row fallback:
+//   native wins where both are present, the pack value fills a row with no native one, and it can
+//   be deleted by a later change that says so.
 // THE FIVE DEPARTMENTAL COMPLETION COLUMNS (#5447 / W2-3), appended AFTER the twelve above —
 // nothing above moves. #5447 added five human_preserved columns to the main template
 // (stock-preparation-templates.cjs HUMAN_PRESERVED_FIELD_IDS: makeOrBuy, procurementDone,
@@ -119,8 +119,8 @@ const MAX_EXPORT_ROWS = 20000
 // existing `demandDate` column above behaves today (its stored value passes through unchanged), so a
 // pre-existing date column and these two new ones render identically.
 const EXPORT_COLUMNS = Object.freeze([
-  Object.freeze({ id: 'parentComponentCode', label: '父组件图号', fallbackId: 'ext_parentDrawingNo' }),
-  Object.freeze({ id: 'parentComponentName', label: '父组件名称', fallbackId: 'ext_parentName' }),
+  Object.freeze({ id: 'parentComponentCode', label: '父组件图号' }),
+  Object.freeze({ id: 'parentComponentName', label: '父组件名称' }),
   Object.freeze({ id: 'componentCode', label: '图号' }),
   Object.freeze({ id: 'componentName', label: '名称' }),
   Object.freeze({ id: 'componentSpec', label: '规格', fallbackId: 'ext_spec' }),
@@ -349,12 +349,14 @@ function columnSourceValue(data, column) {
 // was not a lost sort; there was never a sort.
 //
 // THE ORDER IS IMPOSED HERE, on the read side, rather than by asking the query for it: the
-// comparator must see the same per-row pack fallback the projection uses (a pack-only row's
-// 父组件图号 lives in `ext_parentDrawingNo`, which no single ORDER BY column can express), and this
-// module keeps its single-verb contract with the records API — queryRecords and nothing else.
+// comparator must see exactly the cell the projection prints (it reads the same column object, so
+// when a column's source changes — the parent pair's pack fallback retired on 2026-09-15 — the
+// order and the printed cell move together), and this module keeps its single-verb contract with
+// the records API — queryRecords and nothing else.
 //
 // THE KEY, outermost first:
-//   1. 父组件图号 `parentComponentCode` (pack fallback applied) — every child sits under its parent,
+//   1. 父组件图号 `parentComponentCode` (the template column alone; no pack fallback since
+//      2026-09-15) — every child sits under its parent,
 //      which is what 层级 means in this workbook. BLANK LAST: a row with no parent is a top-level
 //      or orphan row and belongs after the grouped ones, never interleaved between two groups.
 //   2. 明细排序号 `componentSortNo` — numeric, and OPTIONAL by design (see SORT_FIELD_IDS: no such
@@ -385,8 +387,9 @@ function columnSourceValue(data, column) {
 //      bottom of the key list, never a substitute for one of the five above.
 //
 // PRECONDITION ON KEY 1 — say it out loud, because a deployment can silently fail it. 父组件图号 is
-// only a 层级 on a sheet whose target actually binds `parentComponentCode` (or a pack carrying
-// `ext_parentDrawingNo`). An install provisioned before that column shipped binds NEITHER until the
+// only a 层级 on a sheet whose target actually binds `parentComponentCode` (a pack's
+// `ext_parentDrawingNo` no longer counts — its fallback retired on 2026-09-15). An install
+// provisioned before that column shipped does not bind it until the
 // additive repair verb heals it and its action target is rebound (see REQUIRED_EXPORT_FIELD_IDS
 // above): every row then reads blank on key 1, the whole table lands in one blank band, and the
 // workbook degrades to a pure 图号 order. That is deterministic and repeatable — this change's

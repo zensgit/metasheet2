@@ -287,6 +287,28 @@ export function importValueResolveFailed(
     : `Unable to resolve linked value for ${fieldName}: ${rawValue}`
 }
 
+/**
+ * 客户反馈 2026-09-24 #4c — a dateTime cell the import cannot read as a wall clock. Values-free: names the
+ * field and the expected form, never the cell text (the preview table already shows the row).
+ */
+export function importDateTimeInvalid(fieldName: string, isZh: boolean): string {
+  return isZh
+    ? `${fieldName} 的时间格式不正确，请按 2026-09-24 09:00 填写`
+    : `Invalid date-time for ${fieldName} — use the form 2026-09-24 09:00`
+}
+
+/**
+ * #5809 — a person token the bounded directory could not settle: the answer was clamped (more
+ * candidates than one lookup returns) and nothing in it matched the token exactly, so the importer
+ * cannot tell "not a member" from "not in this page". Deliberately distinct from
+ * importValueResolveFailed ("unknown person") and values-free: no token, no directory data.
+ */
+export function importPersonValueTooBroad(fieldName: string, isZh: boolean): string {
+  return isZh
+    ? `${fieldName} 的人员值过于宽泛：部分匹配的人员过多且没有完全一致的，请改用完整姓名、邮箱或用户 ID`
+    : `People value for ${fieldName} is too broad: too many people partially match and none matches exactly. Use the full name, email or user ID.`
+}
+
 export function importCancelled(isZh: boolean): string {
   return isZh ? '导入已取消' : 'Import cancelled'
 }

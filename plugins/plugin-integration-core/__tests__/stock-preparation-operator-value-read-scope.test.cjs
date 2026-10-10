@@ -39,6 +39,9 @@
 //        and the tenant the read will be scoped to.
 //   V-07 THE AUDIT ROW NAMES THE VERIFIED TENANT, not the header-carried one — the concrete, durable
 //        consequence of the fix on the export, whose sheet (unlike the other two) is not tenant-derived.
+//   V-08 THE EXPORT'S TENANT WALL: a member of the OTHER tenant — scope resolved cleanly — is refused
+//        409 PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH, with zero records reads, when the deployment's
+//        bound sheet is not registered to their tenant. Both directions (V-08a, V-08b).
 //
 // ---------------------------------------------------------------------------
 // WHAT THE EXPORT LANE DOES AND DOES NOT PROVE — read this before trusting it
@@ -51,13 +54,15 @@
 // The export is different, and is deliberately modelled as such here. Since it moved onto the
 // table-action target it resolves its sheet from DEPLOY-TIME configuration — one sheet for the whole
 // deployment, with no tenant in it anywhere — and the only row-level scoping inside that sheet is
-// `projectNo`. So this suite seeds ONE shared export sheet holding both tenants' rows, because that
-// is the system that exists. What the export lane therefore proves is that the spoofed, tenantless
-// and contradicted callers are REFUSED (before any read, any action lookup, any workbook), and that
-// the tenant reaching the action lookup and the audit trail is the verified one. It does NOT prove
-// that tenant A cannot name tenant B's `projectNo` on a deployment that shares a sheet: nothing in
-// this route stops that today, before or after this change. Making the export's target tenant-scoped
-// is a separate change, and this note exists so the green here is not mistaken for it.
+// `projectNo`. What makes it per-tenant is the TENANT WALL it now shares with the 结转 write: before
+// a row is read, the bound sheet must be registered to (or, with no registry row, derived for) the
+// verified tenant's own staging project. So this suite gives each tenant ITS OWN main sheet and
+// mounts the deployment bound to ONE of them (`exportBoundTo`), which is the system that exists: the
+// scope refusals (V-01/V-03/V-04/V-05) still fire before any read, and V-08 proves the wall — a
+// member of the OTHER tenant, whose scope resolves cleanly, is refused before a single records read,
+// in both directions. Until the wall, V-08b was a 200 carrying tenant B's material names to tenant
+// A's operator; the full wall matrix (registry-proven hand-bound, derived fallback, missing port)
+// lives in stock-preparation-prep-line-export-tenant-wall.test.cjs.
 //
 // Hermetic: no DB, no network, no xlsx (the injected `stockPreparationXlsxExport` fake JSON-encodes
 // what it was asked to write).
@@ -70,6 +75,7 @@ const LIB = path.join(__dirname, '..', 'lib')
 const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
 const {
   STOCK_PREP_OPERATE,
+  STOCK_PREP_PULL,
   STOCK_PREP_READ,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const {
@@ -115,10 +121,10 @@ const ALL_B_SECRETS = [SECRET_B_VALUE, SECRET_B_MATERIAL, SECRET_B_PROJECT]
 // asserting nothing but a broken route.
 const A_VALUE = 'A-ENTERED-VALUE'
 const A_MATERIAL = 'A项目部件一'
-const A_PROJECT_NAME = 'RY2注射水缓冲罐部件'
+const A_PROJECT_NAME = '示例乙型容器'
 
-const PROJECT_NO_A = '230920006'
-const PROJECT_NO_B = '230920099'
+const PROJECT_NO_A = '200000006'
+const PROJECT_NO_B = '200000099'
 const DECISION_A = 'decision_a_1'
 const DECISION_B = 'decision_b_1'
 const FINGERPRINT = 'sha16:0123456789abcdef'
@@ -128,10 +134,11 @@ const SHEETS = Object.freeze({
   projectB: 'sheet_project_b',
   ledgerA: 'sheet_ledger_a',
   ledgerB: 'sheet_ledger_b',
-  // THE EXPORT SHEET IS SINGULAR ON PURPOSE — see the note in the header. The export route resolves
-  // its target from the DEPLOY-TIME table-action config, which is one sheet for the whole
-  // deployment, so modelling it as two would be modelling a system that does not exist.
-  mainShared: 'sheet_main_shared',
+  // ONE MAIN SHEET PER TENANT, each registered to its own tenant's staging project. The deployment
+  // binds exactly ONE of them (the table-action config is deploy-global) — see `exportBoundTo` and
+  // the note in the header.
+  mainA: 'sheet_main_tenant_a',
+  mainB: 'sheet_main_tenant_b',
 })
 
 // ---------------------------------------------------------------------------
@@ -140,6 +147,9 @@ const SHEETS = Object.freeze({
 
 const OPERATOR_A = Object.freeze({ id: 'u_op_a', tenantId: TENANT_A, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
 const OPERATOR_B = Object.freeze({ id: 'u_op_b', tenantId: TENANT_B, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+// R-33 (2026-10-08): the dry-run is PULL-tier now. The W block (the dry-run's value-bearing read)
+// runs as tenant A's 拉取人员; the V block keeps the floor operators above, whose routes did not move.
+const PULLER_A = Object.freeze({ id: 'u_pull_a', tenantId: TENANT_A, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL] })
 /**
  * THE SPOOF, in exactly the shape the middleware produces. The token carried NO tenant claim (so
  * `req.authenticatedTenantId` is absent), and `x-tenant-id: tenant-b` was copied onto `user.tenantId`.
@@ -159,6 +169,8 @@ const PLATFORM_ADMIN_TENANTLESS = Object.freeze({ id: 'u_adm_platform', roles: [
 const MEMBERSHIPS = Object.freeze({
   u_op_a: [TENANT_A],
   u_op_b: [TENANT_B],
+  // R-33: tenant A's 拉取人员, a member of tenant A and nothing else, like its floor operator.
+  u_pull_a: [TENANT_A],
   u_adm_platform: [],
 })
 
@@ -176,27 +188,30 @@ function hostDirectory() {
 
 // The pack columns a real provisioning run binds alongside the frozen template's (same list the
 // prep-line export suite uses) — the export refuses a target that does not bind the whole band.
+// `ext_parentDrawingNo` / `ext_parentName` are deliberately NOT bound here: since 2026-09-15 the
+// export reads the template pair alone, so a target without them must be exactly as good.
 const PACK_FIELD_IDS = Object.freeze([
-  'ext_parentDrawingNo', 'ext_parentName', 'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
+  'ext_spec', 'ext_pickingNode', 'ext_stockPrepDate', 'ext_blankLength',
 ])
 
 /**
  * THE DEPLOY-TIME TABLE ACTION the export resolves its target through. Note the shape of the thing:
- * ONE sheet, configured per DEPLOYMENT, with no tenant in it anywhere. That is why this suite models
- * a single shared export sheet — see the header note.
+ * ONE sheet, configured per DEPLOYMENT, with no tenant in it anywhere. `boundTo` picks WHICH tenant's
+ * sheet this deployment was bound to — see the header note.
  */
-function exportTableActionConfig() {
+function exportTableActionConfig(boundTo = 'A') {
   const fieldIds = [
     ...STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.fields.map((field) => field.id),
     ...PACK_FIELD_IDS,
   ]
+  const staging = boundTo === 'B' ? STAGING_B : STAGING_A
   return {
     actionId: PLM_STOCK_PREPARATION_ACTION_ID,
     source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
     target: {
-      sheetId: SHEETS.mainShared,
+      sheetId: boundTo === 'B' ? SHEETS.mainB : SHEETS.mainA,
       objectId: MAIN_OBJECT_ID,
-      fieldIdMap: Object.fromEntries(fieldIds.map((fieldId) => [fieldId, physicalFieldId(STAGING_A, MAIN_OBJECT_ID, fieldId)])),
+      fieldIdMap: Object.fromEntries(fieldIds.map((fieldId) => [fieldId, physicalFieldId(staging, MAIN_OBJECT_ID, fieldId)])),
     },
   }
 }
@@ -217,7 +232,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -259,7 +274,7 @@ function mainRow(stagingProjectId, sheetId, recordId, projectNo, componentName) 
  * (export). Tenant B's rows genuinely exist and are genuinely reachable BY TENANT B — without that,
  * "tenant A did not see them" would prove nothing.
  */
-function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
+function mount({ tenantPrincipalDirectory = hostDirectory(), exportBoundTo = 'A' } = {}) {
   const routes = new Map()
 
   const provisioningA = makeFakeProvisioning({
@@ -267,7 +282,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     sheetIdByObjectId: {
       [PROJECT_OBJECT_ID]: SHEETS.projectA,
       [DECISION_OBJECT_ID]: SHEETS.ledgerA,
-      [MAIN_OBJECT_ID]: SHEETS.mainShared,
+      [MAIN_OBJECT_ID]: SHEETS.mainA,
     },
   })
   const provisioningB = makeFakeProvisioning({
@@ -283,7 +298,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     objectIdBySheetId: {
       [SHEETS.projectA]: PROJECT_OBJECT_ID,
       [SHEETS.ledgerA]: DECISION_OBJECT_ID,
-      [SHEETS.mainShared]: MAIN_OBJECT_ID,
+      [SHEETS.mainA]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
       [SHEETS.projectA]: [
@@ -305,11 +320,9 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
           resolvedValue: A_VALUE,
         }),
       ],
-      // BOTH tenants' material rows live here, because on a real deployment they do: the export's
-      // sheet is deploy-time, not per-tenant, and `projectNo` is the only row-level scoping in it.
-      [SHEETS.mainShared]: [
-        mainRow(STAGING_A, SHEETS.mainShared, 'rec_ma', PROJECT_NO_A, A_MATERIAL),
-        mainRow(STAGING_A, SHEETS.mainShared, 'rec_mb', PROJECT_NO_B, SECRET_B_MATERIAL),
+      // Tenant A's OWN main sheet. Tenant B's material rows live in tenant B's (below).
+      [SHEETS.mainA]: [
+        mainRow(STAGING_A, SHEETS.mainA, 'rec_ma', PROJECT_NO_A, A_MATERIAL),
       ],
     },
   })
@@ -318,6 +331,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     objectIdBySheetId: {
       [SHEETS.projectB]: PROJECT_OBJECT_ID,
       [SHEETS.ledgerB]: DECISION_OBJECT_ID,
+      [SHEETS.mainB]: MAIN_OBJECT_ID,
     },
     rowsBySheet: {
       [SHEETS.projectB]: [
@@ -339,6 +353,9 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
           resolvedValue: SECRET_B_VALUE,
         }),
       ],
+      [SHEETS.mainB]: [
+        mainRow(STAGING_B, SHEETS.mainB, 'rec_mb', PROJECT_NO_B, SECRET_B_MATERIAL),
+      ],
     },
   })
 
@@ -357,7 +374,13 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     })
   }
 
-  const B_SHEETS = new Set([SHEETS.projectB, SHEETS.ledgerB])
+  const B_SHEETS = new Set([SHEETS.projectB, SHEETS.ledgerB, SHEETS.mainB])
+  // THE OWNERSHIP REGISTRY the export's tenant wall asks (plugin_multitable_object_registry on a real
+  // host): each tenant's main sheet is registered to that tenant's staging project, and to nobody
+  // else. Neither id is the derived one, so the registry alone decides — the hand-bound shape.
+  const REGISTRY = Object.freeze({ [SHEETS.mainA]: STAGING_A, [SHEETS.mainB]: STAGING_B })
+  // Counted separately from all host IO: "refused before a single ROW was read" is the wall's claim.
+  const recordsReads = []
   const provisioning = counted({
     async findObjectSheet(input = {}) {
       const a = await provisioningA.findObjectSheet(input)
@@ -369,9 +392,16 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     async ensureObject() {
       throw new Error('unexpected provisioning write: ensureObject')
     },
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return Object.prototype.hasOwnProperty.call(REGISTRY, sheetId) && REGISTRY[sheetId] === projectId
+    },
+    getObjectSheetId(projectId, objectId) {
+      return provisioningA.getObjectSheetId(projectId, objectId)
+    },
   })
   const records = counted({
     async queryRecords(input = {}) {
+      recordsReads.push(input && input.sheetId)
       return B_SHEETS.has(input && input.sheetId) ? recordsB.queryRecords(input) : recordsA.queryRecords(input)
     },
     async createRecord() {
@@ -394,7 +424,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
       multitable: { provisioning, records },
     },
     storage: new Map(),
-    config: { stockPreparationTableActions: [exportTableActionConfig()] },
+    config: { stockPreparationTableActions: [exportTableActionConfig(exportBoundTo)] },
   }
   const services = baseServices()
   services.stockPreparationAuditStore = {
@@ -422,6 +452,7 @@ function mount({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     xlsxCalls,
     tenantPrincipalDirectory,
     hostCallCount: () => hostCalls,
+    recordsReads,
   }
 }
 
@@ -512,6 +543,9 @@ const VALUE_READS = Object.freeze([
     bSecret: SECRET_B_MATERIAL,
     spoofRequest: () => ({ query: { projectNo: PROJECT_NO_B } }),
     bRequest: () => ({ query: { projectNo: PROJECT_NO_B } }),
+    // Tenant B's material rows are reachable only on a deployment bound to tenant B's OWN sheet —
+    // on the default (tenant-A-bound) one the tenant wall refuses tenant B outright (V-08a).
+    bMount: Object.freeze({ exportBoundTo: 'B' }),
   }),
 ])
 
@@ -617,19 +651,24 @@ function mountDryRun({ tenantPrincipalDirectory = hostDirectory() } = {}) {
     config: { stockPreparationTableActions: [pullActionConfig()] },
   }
   const services = baseServices()
+  const sourceRow = (input = {}) => ({
+    id: PULL_SOURCE_SYSTEM_ID,
+    tenantId: input && input.tenantId,
+    kind: 'data-source:sql-readonly',
+    role: 'source',
+    status: 'active',
+    config: { dataSourceId: `ds_${input && input.tenantId}`, dataSourceOwnerId: 'u_binding_owner' },
+  })
   services.externalSystemRegistry = {
-    async getExternalSystem(input = {}) {
+    // G4/M2 (#5553 §3): the PUBLIC accessor records NOTHING. `adapterTenants` counts
+    // credential-context loads only, so a call site that degraded back to this projection would
+    // leave the list empty and W-02 below would fail rather than read green off the wrong read.
+    async getExternalSystem(input = {}) { return sourceRow(input) },
+    async getExternalSystemForAdapter(input = {}) {
       // The tenant the ROUTE resolved decides which customer's PLM this is. Recorded so a guard can
       // state which tenant's source was opened, not merely which values came back.
       adapterTenants.push(input && input.tenantId)
-      return {
-        id: PULL_SOURCE_SYSTEM_ID,
-        tenantId: input && input.tenantId,
-        kind: 'data-source:sql-readonly',
-        role: 'source',
-        status: 'active',
-        config: { dataSourceId: `ds_${input && input.tenantId}`, dataSourceOwnerId: 'u_binding_owner' },
-      }
+      return sourceRow(input)
     },
     async upsertExternalSystem() { throw new Error('unexpected') },
     async deleteExternalSystem() { throw new Error('unexpected') },
@@ -674,14 +713,15 @@ const LEGACY_READER = Object.freeze({ id: 'u_int_r', tenantId: TENANT_A, permiss
 /** The middleware's shape for a platform admin: no verified claim, `x-tenant-id` copied onto the user. */
 const PLATFORM_ADMIN_HEADER_TENANT = Object.freeze({ id: 'u_adm_platform', roles: ['admin'], tenantId: TENANT_A, permissions: ['integration:admin'] })
 /**
- * THE WORST CASE: a platform admin who ALSO holds the stock-prep operator tier (so the tier check
+ * THE WORST CASE: a platform admin who ALSO holds the stock-prep pull tier (so the tier check
  * cannot be what saves us) but has no tenant of their own. Before the scope, `resolveTenantId` would
- * have let them name any tenant they liked.
+ * have let them name any tenant they liked. (Carries `stock-prep:pull` since R-33 for the same
+ * reason it carried operate before: the tier must not be what refuses them.)
  */
 const PLATFORM_ADMIN_TENANTLESS_OPERATOR = Object.freeze({
   id: 'u_adm_platform',
   roles: ['admin'],
-  permissions: ['integration:admin', STOCK_PREP_READ, STOCK_PREP_OPERATE],
+  permissions: ['integration:admin', STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_PULL],
 })
 
 let failures = 0
@@ -742,12 +782,13 @@ async function main() {
     })
 
     await run(`V-02b ${read.label}: tenant B IS reachable — by tenant B's own operator`, async () => {
-      const harness = mount()
+      const harness = mount(read.bMount || {})
       const res = await call(harness.routes, read.method, read.path, { user: OPERATOR_B, ...read.bRequest() })
       assert.equal(res.statusCode, 200, `${read.label} must serve tenant B's own operator`)
       // The canary really is in the substrate and really is reachable BY SOMEONE, so V-01's "it did
       // not appear" is a REFUSAL rather than an empty fixture. For the two tenant-derived reads that
-      // is also per-tenant sheet scoping; for the export it is not — see the header note.
+      // is also per-tenant sheet scoping; for the export it is the tenant wall on a deployment bound to
+      // tenant B's own sheet — see the header note and V-08.
       assert.equal(everythingSent(res).includes(read.bSecret), true,
         'tenant B\'s data genuinely exists and is genuinely reachable, so V-01 is not vacuous')
     })
@@ -862,12 +903,55 @@ async function main() {
   })
 
   // -------------------------------------------------------------------------
+  // V-08 THE EXPORT'S TENANT WALL — a member of the OTHER tenant, whose scope resolves cleanly,
+  //      is refused because the deployment's bound sheet is not theirs. Both directions.
+  // -------------------------------------------------------------------------
+
+  await run('V-08a export: on a tenant-A-bound deployment, tenant B\'s own operator is refused before any row is read', async () => {
+    const harness = mount({ exportBoundTo: 'A' })
+    const res = await call(harness.routes, 'GET', EXPORT_PATH, {
+      user: OPERATOR_B,
+      authenticatedTenantId: TENANT_B,
+      query: { projectNo: PROJECT_NO_A },
+    })
+    assert.equal(res.statusCode, 409, `the wall refuses (got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)})`)
+    assert.equal(errorCode(res), 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(harness.tenantPrincipalDirectory.calls, [{ userId: OPERATOR_B.id, tenantId: TENANT_B }],
+      'the scope DID resolve cleanly to tenant B — this refusal is the wall, not the scope')
+    assert.deepEqual(harness.recordsReads, [], 'refused before a single records read')
+    assert.equal(everythingSent(res).includes(A_MATERIAL), false, 'none of tenant A\'s material names')
+    assert.deepEqual(harness.auditAppends, [], 'and no audit row')
+    assert.deepEqual(harness.xlsxCalls, [], 'and no workbook')
+  })
+
+  await run('V-08b export: on a tenant-B-bound deployment, tenant A\'s operator cannot read tenant B\'s materials by naming B\'s project', async () => {
+    // THE LEAK THE HEADER NOTE USED TO SAY THIS ROUTE COULD NOT STOP. Before the wall this was a 200
+    // carrying SECRET_B_MATERIAL to tenant A's operator: the scope resolved to tenant A, and nothing
+    // between that and the records read asked whose sheet the binding named.
+    const harness = mount({ exportBoundTo: 'B' })
+    const res = await call(harness.routes, 'GET', EXPORT_PATH, {
+      user: OPERATOR_A,
+      authenticatedTenantId: TENANT_A,
+      query: { projectNo: PROJECT_NO_B },
+    })
+    assert.equal(res.statusCode, 409, `the wall refuses (got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)})`)
+    assert.equal(errorCode(res), 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH')
+    assert.deepEqual(harness.recordsReads, [], 'refused before a single records read')
+    const sent = everythingSent(res)
+    for (const secret of ALL_B_SECRETS) assert.equal(sent.includes(secret), false, `must not leak ${secret}`)
+    assert.deepEqual(harness.auditAppends, [], 'and no audit row')
+    assert.deepEqual(harness.xlsxCalls, [], 'and no workbook')
+    // Values-free refusal: the details name the public objectId and nothing else.
+    assert.deepEqual(Object.keys((res.body.error && res.body.error.details) || {}), ['objectId'])
+  })
+
+  // -------------------------------------------------------------------------
   // W-01..W-05 — the dry-run's missing-component list
   // -------------------------------------------------------------------------
 
   await run('W-01 dry-run without the flag carries no part number, and is byte-identical to the pre-W3a response', async () => {
     const harness = mountDryRun()
-    const res = await dryRun(harness, { user: OPERATOR_A })
+    const res = await dryRun(harness, { user: PULLER_A })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     // The trial DID find the missing component — otherwise this guard is vacuous.
     assert.equal(res.body.data.status, 'manual_confirm_required', 'a missing component holds the whole project')
@@ -884,7 +968,7 @@ async function main() {
     assert.equal('missingComponents' in res.body.data, false, 'W-01: and carries no key at all')
 
     // `false` and "absent" must produce the SAME response — no key, no scope check, nothing moved.
-    const explicitlyOff = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: false } })
+    const explicitlyOff = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: false } })
     const strip = (response) => {
       const data = JSON.parse(JSON.stringify(response.body.data))
       delete data.dryRunToken // freshly minted per call, and deliberately not derived from the flag
@@ -895,7 +979,7 @@ async function main() {
 
   await run('W-02 with the flag, an operator gets their OWN tenant\'s missing parts and nothing else', async () => {
     const harness = mountDryRun()
-    const res = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: true } })
+    const res = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: true } })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
 
     const list = res.body.data.missingComponents
@@ -916,13 +1000,13 @@ async function main() {
     // The host was asked to vouch for the (principal, tenant) pairing — the gate ran, it did not
     // merely happen to pass.
     assert.ok(
-      harness.tenantPrincipalDirectory.calls.some((entry) => entry.userId === OPERATOR_A.id && entry.tenantId === TENANT_A),
+      harness.tenantPrincipalDirectory.calls.some((entry) => entry.userId === PULLER_A.id && entry.tenantId === TENANT_A),
       'W-02: the opt-in went through resolveOperatorValueScope',
     )
 
     // AND THE DURABLE SURFACES DID NOT MOVE. Same revision as the values-free call, no key inside
     // evidence — the four "does not enter" claims, asserted at the route.
-    const valuesFree = await dryRun(harness, { user: OPERATOR_A })
+    const valuesFree = await dryRun(harness, { user: PULLER_A })
     assert.equal(res.body.data.revision, valuesFree.body.data.revision, 'W-02: the opt-in does not move the dry-run revision')
     assert.deepEqual(res.body.data.evidence, valuesFree.body.data.evidence, 'W-02: evidence is byte-identical either way')
     assert.equal(JSON.stringify(res.body.data.evidence).includes(A_MISSING_PART), false, 'W-02: evidence never carries the value')
@@ -978,13 +1062,27 @@ async function main() {
 
   await run('W-05 the opt-in is type-checked, and an unknown key still 400s ahead of the scope', async () => {
     const harness = mountDryRun()
-    const wrongType = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: 'true' } })
+    const wrongType = await dryRun(harness, { user: PULLER_A, body: { includeMissingComponents: 'true' } })
     assert.equal(wrongType.statusCode, 400, 'a string is not an opt-in')
     assert.equal(errorCode(wrongType), 'TABLE_ACTION_REQUEST_INVALID')
 
     const unknown = await dryRun(harness, { user: LEGACY_READER, body: { missingComponents: true } })
     assert.equal(unknown.statusCode, 400, 'the closed body allowlist is unchanged')
     assert.equal(errorCode(unknown), 'TABLE_ACTION_REQUEST_INVALID')
+  })
+
+  await run('W-06 (R-33) the floor operator is refused the dry-run outright — the opt-in cannot buy them a part number', async () => {
+    // The actor the 2026-10-08 ruling is about: read + operate, no pull. Before the ruling this was
+    // W-02's actor; now the pull gate refuses them before the body is even validated, so neither the
+    // values-free trial nor the value-bearing one is theirs — and no source binding is opened.
+    const harness = mountDryRun()
+    const refused = await dryRun(harness, { user: OPERATOR_A, body: { includeMissingComponents: true } })
+    assert.equal(refused.statusCode, 403, `W-06: the floor operator no longer pulls (got ${JSON.stringify(refused.body)})`)
+    assert.equal(errorCode(refused), 'FORBIDDEN')
+    assert.equal(everythingSent(refused).includes(A_MISSING_PART), false, 'W-06: nothing leaked with the refusal')
+    assert.deepEqual(harness.adapterTenants, [], 'W-06: refused before any source lookup')
+    const valuesFree = await dryRun(harness, { user: OPERATOR_A })
+    assert.equal(valuesFree.statusCode, 403, 'W-06: the values-free trial is refused too — the gate is the pull tier, not the opt-in')
   })
 
   if (failures > 0) {

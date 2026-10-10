@@ -31,9 +31,11 @@
  * chunking spanning multiple patchRecords calls) instead, which is where a job-commit-specific real
  * proof adds unique value over G2/G3.
  * G4 is proven via two INDEPENDENT commit actions, not two calls on ONE job: a job's commit is
- * architecturally single-shot — `setHeaderRunning`'s committable set is {suspended, errored, rejected};
- * every commit call (whether it confirms all or a subset of generated rows) unconditionally transitions
- * the job to 'resolved' via setHeaderAggregate, and 'resolved' is never committable again (confirmed by
+ * architecturally single-shot — `claimBulkJobCommit`'s committable set is {suspended, errored, rejected}
+ * (#5842; the claim flips the job to `committing`, which is NOT in that set, so a second claim is
+ * refused while the first is live); every commit call (whether it confirms all or a subset of generated
+ * rows) transitions the job to 'resolved' via finishBulkJobCommit, and 'resolved' is never committable
+ * again (confirmed by
  * reading ai-bulk-job-service.ts / routes/multitable-ai.ts and the existing "committable-set MATRIX"
  * test in multitable-ai-bulk-job.test.ts). So "two commit requests on the same job" cannot mean two
  * successful commits on one job id. This suite proves the underlying LOCK-B3 claim two ways: two

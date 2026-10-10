@@ -1329,6 +1329,22 @@ const INTEGRATION_WRITER = Object.freeze({ id: 'u_write', tenantId: TENANT_ID, p
 const PLATFORM_ADMIN = Object.freeze({ id: 'u_admin', tenantId: TENANT_ID, roles: ['admin'], permissions: ['integration:admin'] })
 const STOCK_PREP_OPERATOR = Object.freeze({ id: 'u_sp', tenantId: TENANT_ID, permissions: [STOCK_PREP_READ, STOCK_PREP_ADMIN] })
 
+// THE VERIFIED TENANT CLAIM EACH PRINCIPAL'S TOKEN CARRIES — what the host sets as
+// `req.authenticatedTenantId`, and only when the token really has one. The route proves its tenant
+// from this claim (or, for a claimless token, from a carried tenant the host directory vouches for),
+// so a principal that is meant to be tenant-bound names its claim HERE, per principal. It is
+// deliberately not derived from `user.tenantId`: that field is what the host fills from the
+// `x-tenant-id` header for a claimless token, and a harness that promoted it to a claim would pass
+// the very gate it is supposed to exercise. The claimless and cross-tenant principals live in
+// stock-preparation-source-preflight-tenant-scope.test.cjs.
+const TOKEN_TENANT_CLAIMS = new Map([
+  [LOGGED_IN, TENANT_ID],
+  [INTEGRATION_READER, TENANT_ID],
+  [INTEGRATION_WRITER, TENANT_ID],
+  [PLATFORM_ADMIN, TENANT_ID],
+  [STOCK_PREP_OPERATOR, TENANT_ID],
+])
+
 function inertService(methods) {
   const service = {}
   for (const method of methods) {
@@ -1354,7 +1370,9 @@ function boundSystem(id, overrides = {}) {
     id,
     kind: 'data-source:sql-readonly',
     connectionId: `conn_${id}`,
-    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner' },
+    // `lookupProjection` is the PRIVATE subtree for this kind: present on the adapter-ready row,
+    // deleted from the public projection. It is what makes the two accessors distinguishable.
+    config: { schema: 'dbo', dataSourceOwnerId: 'u_binding_owner', lookupProjection: { table: 'dbo.parts' } },
     ...overrides,
   }
 }
@@ -1363,20 +1381,33 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
   const routes = new Map()
   const reader = catalog ? createReader(catalog) : null
   const loaded = []
+  const storedSystem = (input) => {
+    const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
+    if (!system) {
+      const error = new Error('external system not found')
+      error.name = 'ExternalSystemNotFoundError'
+      throw error
+    }
+    return system
+  }
+  // G4/M2 (#5553 §3). These used to be ONE function under two names, which is the shape the design
+  // rules out: with an alias, a call site that degraded from the decrypting accessor back to the
+  // public projection returns the identical object and every assertion here still passes. They are
+  // now distinct — `getExternalSystem` deletes the private config subtree that `publicRow()` deletes
+  // for this kind (external-systems.cjs PRIVATE_CONFIG_KEYS_BY_KIND: `lookupProjection`) — and
+  // `loaded` counts the DECRYPTING loads only.
   const registry = {
     ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
     async getExternalSystem(input) {
+      const system = storedSystem(input)
+      const { lookupProjection, ...publicConfig } = system.config || {}
+      return { ...system, config: publicConfig }
+    },
+    async getExternalSystemForAdapter(input) {
       loaded.push(input)
-      const system = (systems || { [SYSTEM_ID]: boundSystem(SYSTEM_ID) })[input.id]
-      if (!system) {
-        const error = new Error('external system not found')
-        error.name = 'ExternalSystemNotFoundError'
-        throw error
-      }
-      return system
+      return storedSystem(input)
     },
   }
-  registry.getExternalSystemForAdapter = registry.getExternalSystem
   const adapterRegistry = {
     listAdapterKinds() { return ['data-source:sql-readonly'] },
     createAdapter() {
@@ -1407,6 +1438,13 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
       readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
       bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+      // The host membership directory the route's tenant proof asks (resolveProvenOwnTenant). Every
+      // principal this suite names is a member of TENANT_ID and of nothing else; the claimless,
+      // cross-tenant and directory-absent principals live in
+      // stock-preparation-source-preflight-tenant-scope.test.cjs.
+      tenantPrincipalDirectory: {
+        async verifyTenantMembership({ tenantId }) { return { member: tenantId === TENANT_ID } },
+      },
     },
     // A caller may inject a recording logger (see `createRecordingLogger` below, R-08) to observe
     // what `routeLogger` is wired with, or explicitly pass `logger: null` to mean NO logger at all
@@ -1441,7 +1479,14 @@ async function callRoute(routes, { user, query = {} } = {}) {
   const handler = routes.get(`GET ${SOURCE_PREFLIGHT_ROUTE_PATH}`)
   assert.ok(handler, `route GET ${SOURCE_PREFLIGHT_ROUTE_PATH} is registered`)
   const res = createResponse()
-  await handler({ user, body: {}, query, params: {} }, res)
+  const authenticatedTenantId = TOKEN_TENANT_CLAIMS.get(user)
+  await handler({
+    user,
+    body: {},
+    query,
+    params: {},
+    ...(authenticatedTenantId ? { authenticatedTenantId } : {}),
+  }, res)
   assert.notEqual(res.body, undefined)
   return res
 }

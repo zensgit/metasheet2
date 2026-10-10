@@ -40,19 +40,182 @@
         :disabled="!canSubmit"
         @click="onRun"
       >
-        {{ busy ? bi(...runningLabel) : bi(...runLabel) }}
+        {{ busy && !targetPrompt ? bi(...runningLabel) : bi(...runLabel) }}
       </button>
       <!-- R-11: a control the caller cannot exercise is ABSENT, and the reason is said in words.
-           一线自己拉数据 widened who may press it — a stock-prep operator now can — so this line no
-           longer says "only a platform administrator": it names both tiers, because sending someone
-           to the wrong person is its own kind of dead end. -->
+           R-33 (2026-10-08) moved the pull to the 拉取人员 (`stock-prep:pull`): a floor operator
+           sees this line instead of the button. It names the 拉取人员 first and the platform
+           administrator second, because sending someone to the wrong person is its own kind of
+           dead end — and it does NOT say 「备料操作权限」, which the reader already holds. -->
       <p v-else class="sp-sync__hint" data-testid="stock-prep-project-sync-denied">
         {{ bi(
-          '从 PLM 拉数据要有备料操作权限,或者是平台管理员。您可以看这里的结果,同步请找有权限的同事或平台管理员执行。',
-          'Pulling data from PLM needs the stock-preparation operator permission, or a platform administrator. You can read the results here; ask a colleague who has it, or a platform administrator, to run the sync.',
+          '从 PLM 拉数据由拉取人员负责。您可以看这里的结果,需要拉取请联系拉取人员(或平台管理员)。',
+          'Pulling data from PLM is done by a pull operator (拉取人员). You can read the results here; to pull, please contact a pull operator — or a platform administrator.',
         ) }}
       </p>
     </div>
+
+    <!-- 一个项目一张备料表 (S2, R-36) — THE QUESTION THE PROJECT-SHEET FLOW IS WAITING ON. Rendered only
+         while `runStockPreparationProjectPull` (projectTarget.ts) has asked and nobody has answered:
+         create the sheet (absent), pull again (active), or write what the preview showed (a sheet this
+         run just created). With the server's switch off the flow never asks, so this never renders.
+         No 「撤销新建」 anywhere: declining after the create leaves the sheet (「还没拉过」). -->
+    <div
+      v-if="targetPrompt"
+      class="sp-sync__target-prompt"
+      role="group"
+      data-testid="stock-prep-project-sync-target-prompt"
+      :data-prompt="targetPrompt.request.kind"
+    >
+      <template v-if="targetPrompt.request.kind === 'create'">
+        <p class="sp-sync__target-line">
+          {{ bi(targetPlain('confirm_create').zh, targetPlain('confirm_create').en) }}
+          <strong data-testid="stock-prep-project-sync-target-prompt-project-no">{{ submittedProjectNo }}</strong>
+        </p>
+        <p class="sp-sync__hint">{{ bi(targetPlain('confirm_create').zhNext ?? '', targetPlain('confirm_create').enNext ?? '') }}</p>
+        <div class="sp-sync__target-actions">
+          <!-- The projectTarget.create control (manifest, PULL tier): the flow only asks a caller who
+               passes `canRunStockPrepProjectSync` AND whose sheet the server says `may.create`. -->
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-target-create"
+            @click="answerTargetPrompt(true)"
+          >{{ bi(targetPlain('confirm_create_action').zh, targetPlain('confirm_create_action').en) }}</button>
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-target-prompt-cancel"
+            @click="answerTargetPrompt(false)"
+          >{{ bi(targetPlain('confirm_create_cancel').zh, targetPlain('confirm_create_cancel').en) }}</button>
+        </div>
+      </template>
+      <template v-else-if="targetPrompt.request.kind === 'repull'">
+        <p class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-rows">
+          {{ promptRowsText }}{{ bi(targetPlain('confirm_repull').zh, targetPlain('confirm_repull').en) }}
+        </p>
+        <p class="sp-sync__hint">{{ bi(targetPlain('confirm_repull').zhNext ?? '', targetPlain('confirm_repull').enNext ?? '') }}</p>
+        <div class="sp-sync__target-actions">
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-target-prompt-confirm"
+            @click="answerTargetPrompt(true)"
+          >{{ bi(targetPlain('confirm_repull_action').zh, targetPlain('confirm_repull_action').en) }}</button>
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-target-prompt-cancel"
+            @click="answerTargetPrompt(false)"
+          >{{ bi(targetPlain('confirm_repull_cancel').zh, targetPlain('confirm_repull_cancel').en) }}</button>
+        </div>
+      </template>
+      <template v-else>
+        <p class="sp-sync__target-line" data-testid="stock-prep-project-sync-target-prompt-preview">{{ promptPreviewText }}</p>
+        <div class="sp-sync__target-actions">
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-target-prompt-confirm"
+            @click="answerTargetPrompt(true)"
+          >{{ bi(targetPlain('confirm_write_action').zh, targetPlain('confirm_write_action').en) }}</button>
+          <button
+            type="button"
+            class="sp-sync__link"
+            data-testid="stock-prep-project-sync-target-prompt-cancel"
+            @click="answerTargetPrompt(false)"
+          >{{ bi(targetPlain('confirm_write_cancel').zh, targetPlain('confirm_write_cancel').en) }}</button>
+        </div>
+      </template>
+    </div>
+
+    <!-- S2: how a project-sheet run ended when it did NOT reach the four steps — declined, no sheet
+         and no pull right, archived, or the create refused. Each says who acts next. -->
+    <p
+      v-if="targetNotice"
+      class="sp-sync__target-notice"
+      role="status"
+      data-testid="stock-prep-project-sync-target-notice"
+      :data-notice="targetNotice.kind"
+    >
+      {{ bi(targetNoticeText.zh, targetNoticeText.en) }}
+      <span v-if="targetNoticeText.zhNext" class="sp-sync__verdict-next">{{ bi(targetNoticeText.zhNext, targetNoticeText.enNext ?? '') }}</span>
+      <code
+        v-if="(targetNotice.kind === 'create_refused' || targetNotice.kind === 'probe_failed') && targetNotice.code"
+        class="sp-sync__token"
+      >{{ targetNotice.code }}</code>
+      <!-- S2 fix round 1: a state read that failed for any reason but switch-off stops the run; the
+           operator reads again from here instead of being pulled on a guess. -->
+      <button
+        v-if="targetNotice.kind === 'probe_failed'"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-target-retry"
+        :disabled="busy"
+        @click="onRun"
+      >{{ bi(targetPlain('retry_action').zh, targetPlain('retry_action').en) }}</button>
+      <!-- S4 (ADR §4 archived row / §6, register R-38): 「恢复并重新拉取」 — only for a caller with the
+           pull right on a sheet the server says may be restored. It asks for the project number to be
+           TYPED, restores, then runs this same pull again (which now finds the sheet active and asks
+           the 「重新拉取」 question). Anyone else reads 「请联系拉取人员恢复」 in the line above. -->
+      <button
+        v-if="targetNotice.kind === 'archived' && targetNotice.mayRestore && canRun && !restorePrompt"
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-restore"
+        :disabled="busy"
+        @click="openRestorePrompt"
+      >{{ bi(targetPlain('restore_and_repull_action').zh, targetPlain('restore_and_repull_action').en) }}</button>
+    </p>
+    <div
+      v-if="restorePrompt"
+      class="sp-sync__target-prompt"
+      role="group"
+      data-testid="stock-prep-project-sync-restore-prompt"
+    >
+      <p class="sp-sync__target-line">{{ bi(targetPlain('confirm_restore').zh, targetPlain('confirm_restore').en) }}</p>
+      <label class="sp-sync__field">
+        <span class="sp-sync__label">
+          {{ bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en) }}
+          <strong data-testid="stock-prep-project-sync-restore-project-no">{{ submittedProjectNo }}</strong>
+        </span>
+        <input
+          v-model="restoreTyped"
+          type="text"
+          class="sp-sync__input"
+          data-testid="stock-prep-project-sync-restore-input"
+          :disabled="busy"
+          :aria-label="bi(targetPlain('confirm_type_project_no').zh, targetPlain('confirm_type_project_no').en)"
+        />
+      </label>
+      <div class="sp-sync__target-actions">
+        <button
+          type="button"
+          class="sp-sync__link"
+          data-testid="stock-prep-project-sync-restore-confirm"
+          :disabled="busy || !restoreTypedMatches"
+          @click="onRestoreAndRepull"
+        >{{ bi(targetPlain('confirm_restore_action').zh, targetPlain('confirm_restore_action').en) }}</button>
+        <button
+          type="button"
+          class="sp-sync__link"
+          data-testid="stock-prep-project-sync-restore-cancel"
+          :disabled="busy"
+          @click="closeRestorePrompt"
+        >{{ bi(targetPlain('confirm_lifecycle_cancel').zh, targetPlain('confirm_lifecycle_cancel').en) }}</button>
+      </div>
+    </div>
+    <p
+      v-if="restoreRefusal"
+      class="sp-sync__target-notice"
+      role="status"
+      data-testid="stock-prep-project-sync-restore-refused"
+      :data-result="restoreRefusal.kind"
+    >
+      {{ bi(restoreRefusalText.zh, restoreRefusalText.en) }}
+      <span v-if="restoreRefusalText.zhNext" class="sp-sync__verdict-next">{{ bi(restoreRefusalText.zhNext, restoreRefusalText.enNext ?? '') }}</span>
+      <code v-if="restoreRefusal.kind === 'refused' && restoreRefusal.code" class="sp-sync__token">{{ restoreRefusal.code }}</code>
+    </p>
 
     <!-- The row-refresh explanation. It appears only when a row's 刷新 armed this panel, because
          otherwise it is an answer to a question nobody asked. -->
@@ -91,6 +254,27 @@
     <!-- What the plan found, as a sentence rather than five chips. -->
     <p v-if="report && report.planned" class="sp-sync__counts" data-testid="stock-prep-project-sync-counts">
       {{ countsSentence }}
+    </p>
+    <!-- ADR §7 (S2): after a project-sheet run, how many rows the sheet holds NOW — re-read from the
+         server, bounded, values-free. Absent on the old (switch-off) path and when it could not count. -->
+    <p v-if="report && afterRowsText" class="sp-sync__counts" data-testid="stock-prep-project-sync-target-rows">
+      {{ afterRowsText }}
+    </p>
+    <!-- S2 fix round 1 (refuter #1): the project sheet is missing the customer's extension columns
+         (dry run / write refused 422 TARGET_SCHEMA_INCOMPLETE on a project sheet). A puller repairs
+         it in place — the create route's replay re-installs the pack — and the pull runs again;
+         anyone else is told whom to ask. Never shown off a project sheet. -->
+    <p v-if="repairAffordance === 'repair'" class="sp-sync__target-notice" data-testid="stock-prep-project-sync-repair">
+      <button
+        type="button"
+        class="sp-sync__link"
+        data-testid="stock-prep-project-sync-repair-action"
+        :disabled="busy"
+        @click="onRepair"
+      >{{ bi(targetPlain('repair_action').zh, targetPlain('repair_action').en) }}</button>
+    </p>
+    <p v-else-if="repairAffordance === 'contact_puller'" class="sp-sync__target-notice" data-testid="stock-prep-project-sync-repair-contact">
+      {{ bi(targetPlain('repair_contact_puller').zh, targetPlain('repair_contact_puller').en) }}
     </p>
 
     <!-- B1 — the add-on's own OPT-IN was refused for THIS caller specifically (403 OPERATOR_SCOPE_*):
@@ -307,6 +491,12 @@
             'Drives four EXISTING routes and adds no new write authority: dry-run (read), reconcile (admin or floor operator), apply (write), mvp-persist (admin, behind a deployment flag). No ERP/K3 write, no material creation, no SQL entry point.',
           ) }}
         </dd>
+        <dd>
+          {{ bi(
+            '开启「一个项目一张备料表」的部署上,同步前先读这个项目的备料表状态(GET …/projects/:projectNo/target);没有表时经您确认由拉取人员新建(POST 同一路径,拉取人员档)。开关关着时这两步都不发生。',
+            'On a deployment with "one stock-preparation sheet per project" switched on, the run first reads this project’s sheet state (GET …/projects/:projectNo/target); with no sheet yet, a pull operator creates it after confirming (POST, same path, pull tier). With the switch off neither step happens.',
+          ) }}
+        </dd>
       </dl>
     </StockPrepTechnicalDetails>
   </section>
@@ -353,10 +543,28 @@ import { canRunStockPrepProjectSync } from '../../../services/integration/stockP
 import {
   STOCK_PREP_MISSING_COMPONENTS_RESYNC_HINT,
   STOCK_PREP_TOOLTIP_MISSING_COMPONENTS,
+  stockPrepErrorPlain,
+  stockPrepProjectTargetPlain,
+  stockPrepProjectTargetRowCountText,
+  stockPrepProjectTargetWritePreviewText,
   stockPrepStepOutcomeText,
   stockPrepSyncReasonPlain,
   stockPrepSyncVerdictPlain,
+  type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
+import {
+  changeStockPreparationProjectTargetLifecycle,
+  createStockPreparationProjectTargetApi,
+  repairStockPreparationProjectSheet,
+  runStockPreparationProjectPull,
+  stockPrepProjectNumbersMatch,
+  stockPrepProjectSheetRepairAffordance,
+  type StockPrepProjectLifecycleOutcome,
+  type StockPrepProjectPullOutcome,
+  type StockPrepProjectTargetConfirmRequest,
+  type StockPrepProjectTargetState,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 import { downloadCsvFile, escapeTsvCell } from '../../../services/integration/stockPreparation/stockPrepCsv'
 import { stockPrepPosture, type StockPrepPosture } from '../../../services/integration/stockPreparation/projectPosture'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
@@ -420,6 +628,13 @@ const props = withDefaults(
      * of the two true sentences the button says about where the click will land.
      */
     fillTarget?: StockPreparationFillTarget | null
+    /**
+     * Test seam ONLY (S2): an injected project-target client. Production builds its own from
+     * `scope` — EXCEPT when a sync-API double is injected without one: a mount that injects the run's
+     * client controls the whole pipeline, so it gets no extra request it did not ask for (every
+     * pre-S2 suite keeps its exact request set). No production mount injects either.
+     */
+    targetApi?: StockPreparationProjectTargetApi | null
   }>(),  {
     runEmphasis: 'primary',
     scope: () => ({}),
@@ -430,6 +645,7 @@ const props = withDefaults(
     largeBomPollWait: null,
     runVariant: 'sync',
     fillTarget: null,
+    targetApi: null,
   },
 )
 
@@ -452,6 +668,11 @@ const emit = defineEmits<{
   (e: 'synced', report: StockPreparationProjectSyncReport | null): void
   /** P0-3: whether a run is in flight right now — lets the workspace title badge show 🔵正在跑. */
   (e: 'busy-changed', busy: boolean): void
+  /**
+   * S2: the project's sheet as this run last read it (after a create or a re-pull), so 项目备料页 can
+   * refresh its own sheet-state line without a second read. Never fired on the switch-off path.
+   */
+  (e: 'project-target-changed', state: StockPrepProjectTargetState | null): void
 }>()
 
 const { locale } = useLocale()
@@ -513,22 +734,207 @@ watch(() => props.armedAt, async (next, previous) => {
   projectNoEl.value?.focus()
 })
 
+// ── 一个项目一张备料表 (S2, R-36) — the project-sheet half of a run ─────────────────────────────────
+//
+// `runStockPreparationProjectPull` (projectTarget.ts) decides the order; this panel only renders the
+// question it asks and the way it ended. With the server's switch off the probe answers DISABLED and
+// the run below is the pre-S2 run, unchanged.
+
+interface TargetPrompt {
+  request: StockPrepProjectTargetConfirmRequest
+  resolve: (answer: boolean) => void
+}
+const targetPrompt = ref<TargetPrompt | null>(null)
+type TargetNotice = Exclude<StockPrepProjectPullOutcome, { kind: 'synced' }>
+const targetNotice = ref<TargetNotice | null>(null)
+/** The sheet as re-read after a project-sheet run (counts for the result line). */
+const afterState = ref<StockPrepProjectTargetState | null>(null)
+
+function targetPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectTargetPlain(id) ?? { zh: id, en: id }
+}
+
+function resolveTargetApi(): StockPreparationProjectTargetApi | null {
+  if (props.targetApi) return props.targetApi
+  // See the prop's comment: an injected sync double owns the pipeline.
+  if (props.api) return null
+  return createStockPreparationProjectTargetApi(props.scope)
+}
+
+/** Ask, and wait for one of the prompt's two buttons. */
+function askOperator(request: StockPrepProjectTargetConfirmRequest): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    targetPrompt.value = { request, resolve }
+  })
+}
+
+function answerTargetPrompt(answer: boolean): void {
+  const prompt = targetPrompt.value
+  targetPrompt.value = null
+  prompt?.resolve(answer)
+}
+
+// #3365「卸载即作废」: a question nobody can answer any more is a no, never a hang.
+onUnmounted(() => {
+  if (targetPrompt.value) answerTargetPrompt(false)
+})
+
+const promptRowsText = computed<string>(() => {
+  const request = targetPrompt.value?.request
+  if (!request || request.kind !== 'repull') return ''
+  const text = stockPrepProjectTargetRowCountText(request)
+  return text ? `${bi(text.zh, text.en)}${bi('。', '. ')}` : ''
+})
+
+const promptPreviewText = computed<string>(() => {
+  const request = targetPrompt.value?.request
+  if (!request || request.kind !== 'write') return ''
+  const text = stockPrepProjectTargetWritePreviewText(request.planned)
+  return bi(text.zh, text.en)
+})
+
+const targetNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = targetNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'cancelled') return targetPlain(notice.stage === 'create' ? 'cancelled_create' : 'cancelled_repull')
+  if (notice.kind === 'contact_puller') return targetPlain('contact_puller_create')
+  if (notice.kind === 'archived') {
+    const status = targetPlain('status_archived')
+    const next = targetPlain(notice.mayRestore ? 'restore_pending' : 'contact_puller_restore')
+    return { zh: status.zh, en: status.en, zhNext: next.zh, enNext: next.en }
+  }
+  if (notice.kind === 'probe_failed') return targetPlain('probe_failed')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
+
+/** Whether the last run went through the project-sheet flow (switch on, the project's own sheet). */
+const lastRunOnProjectSheet = ref(false)
+
+/** S2 fix round 1: repair the project sheet (puller) / say whom to ask (anyone else) / nothing. */
+const repairAffordance = computed(() => stockPrepProjectSheetRepairAffordance(report.value, {
+  projectSheet: lastRunOnProjectSheet.value,
+  canPull: canRun.value,
+}))
+
+function syncRunner(api: StockPreparationProjectSyncApi, target: string) {
+  return (hooks: Parameters<typeof runStockPreparationProjectSync>[3]) => runStockPreparationProjectSync(api, target, (step) => {
+    // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
+    results.value = [...results.value, step]
+  }, hooks)
+}
+
+/** One way a run ends, whichever entry (run / repair) started it. */
+function applyPullOutcome(outcome: StockPrepProjectPullOutcome): void {
+  if (outcome.kind !== 'synced') {
+    targetNotice.value = outcome
+    return
+  }
+  report.value = outcome.report
+  afterState.value = outcome.after
+  lastRunOnProjectSheet.value = outcome.mode !== 'legacy'
+  armedNote.value = false
+  if (outcome.mode !== 'legacy') emit('project-target-changed', outcome.after)
+  emit('synced', report.value)
+}
+
+function resetRunState(): void {
+  results.value = []
+  report.value = null
+  targetNotice.value = null
+  afterState.value = null
+  lastRunOnProjectSheet.value = false
+  missingComponentsCopyState.value = 'idle'
+  restorePrompt.value = false
+  restoreTyped.value = ''
+  restoreRefusal.value = null
+}
+
+// ── S4 (R-38) — 「恢复并重新拉取」 ───────────────────────────────────────────────────────────────────
+const restorePrompt = ref(false)
+const restoreTyped = ref('')
+const restoreRefusal = ref<Exclude<StockPrepProjectLifecycleOutcome, { kind: 'done' }> | null>(null)
+const restoreTypedMatches = computed<boolean>(() => stockPrepProjectNumbersMatch(submittedProjectNo.value, restoreTyped.value))
+
+function openRestorePrompt(): void {
+  restorePrompt.value = true
+  restoreTyped.value = ''
+  restoreRefusal.value = null
+}
+
+function closeRestorePrompt(): void {
+  restorePrompt.value = false
+  restoreTyped.value = ''
+}
+
+const restoreRefusalText = computed<StockPrepPlainEntry>(() => {
+  const refusal = restoreRefusal.value
+  if (!refusal) return { zh: '', en: '' }
+  if (refusal.kind === 'mismatch') return stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH')
+  if (refusal.kind === 'contact_puller') return targetPlain('contact_puller_restore')
+  return stockPrepErrorPlain(refusal.code ?? '')
+})
+
+/** RESTORE, then this same pull again — the restored sheet is active, so the run asks 「重新拉取」. */
+async function onRestoreAndRepull(): Promise<void> {
+  const target = submittedProjectNo.value
+  if (!target || busy.value || !canRun.value) return
+  busy.value = true
+  let outcome: StockPrepProjectLifecycleOutcome
+  try {
+    outcome = await changeStockPreparationProjectTargetLifecycle({ targetApi: resolveTargetApi(), canPull: canRun.value }, 'restore', target, restoreTyped.value)
+  } finally {
+    busy.value = false
+  }
+  if (outcome.kind !== 'done') {
+    restoreRefusal.value = outcome
+    return
+  }
+  closeRestorePrompt()
+  emit('project-target-changed', outcome.state)
+  projectNo.value = target
+  await onRun()
+}
+
+const afterRowsText = computed<string>(() => {
+  const state = afterState.value
+  if (!state) return ''
+  const text = stockPrepProjectTargetRowCountText(state)
+  return text ? `${bi(text.zh, text.en)}${bi('。', '.')}` : ''
+})
+
 async function onRun(): Promise<void> {
   if (!canSubmit.value) return
   const target = projectNo.value.trim()
   submittedProjectNo.value = target
-  results.value = []
-  report.value = null
-  missingComponentsCopyState.value = 'idle'
+  resetRunState()
   busy.value = true
   try {
     const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
-    report.value = await runStockPreparationProjectSync(api, target, (step) => {
-      // Render each step AS IT LANDS: a run that stops at the plan must still show the plan's counts.
-      results.value = [...results.value, step]
-    })
-    armedNote.value = false
-    emit('synced', report.value)
+    applyPullOutcome(await runStockPreparationProjectPull({
+      targetApi: resolveTargetApi(),
+      canPull: canRun.value,
+      confirm: askOperator,
+      runSync: syncRunner(api, target),
+    }, target))
+  } finally {
+    targetPrompt.value = null
+    busy.value = false
+  }
+}
+
+/** 「修复项目表（重装客户包）」: the create route's replay heals the pack, then the four steps again. */
+async function onRepair(): Promise<void> {
+  const target = submittedProjectNo.value
+  if (!target || busy.value || !canRun.value) return
+  resetRunState()
+  busy.value = true
+  try {
+    const api = props.api ?? createStockPreparationProjectSyncApi(props.scope)
+    applyPullOutcome(await repairStockPreparationProjectSheet({
+      targetApi: resolveTargetApi(),
+      canPull: canRun.value,
+      runSync: syncRunner(api, target),
+    }, target))
   } finally {
     busy.value = false
   }
@@ -975,6 +1381,34 @@ function onExportMissingComponents(): void {
   border-radius: 6px;
   background: var(--ms-bg-page);
   color: var(--ms-text-2);
+}
+
+/* S2: the project-sheet question and how a run ended without reaching the four steps. Outlined, never
+   a filled primary — G1 keeps the one filled button where it is. */
+.sp-sync__target-prompt,
+.sp-sync__target-notice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  margin: 0;
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 6px;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sp-sync__target-line {
+  margin: 0;
+  color: var(--ms-text-1);
+}
+
+.sp-sync__target-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-2);
 }
 
 .sp-sync__verdict {

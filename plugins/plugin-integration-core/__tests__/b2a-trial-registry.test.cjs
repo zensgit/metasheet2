@@ -74,6 +74,8 @@ const {
   B2A_CONFIG_BOUND_LOOKUP_KINDS,
   lookupProjectionSourceObject,
   resolveB2aSourceObjects,
+  // R-02, contract half: the route-resolved list is the one list the wrapper guards and pins.
+  requireResolvedB2aSourceObjects,
   B2A_AUTHORIZED_RUN_ID,
   C6_WRITE_LIFECYCLE_CONTEXT,
   refuseRunnerWriteOutsideC6Lifecycle,
@@ -1109,6 +1111,64 @@ async function R02_theConfigBoundLookupObjectJoinsTheObjectList() {
   }
 }
 
+// ── R-02, CONTRACT HALF: THE RESOLVED LIST IS THE ONE LIST, OR THE READ IS REFUSED ─
+//
+// `requireResolvedB2aSourceObjects` is what the stock-preparation table-action wrappers call with the
+// ROUTE's resolved list, ahead of their guard and their schema contract, so both consume one array.
+// Unit half of what the wiring suite drives end-to-end (`R02L_*`): the list is the union of what the
+// route resolved and what the plan names; absent, a kind whose config can hide an object is refused
+// fail-closed with the resolver's own reason, and a kind that cannot keeps the plan's list unchanged.
+function R02_theResolvedListIsRequiredWhereTheConfigCanHideAnObject() {
+  const plan = ['base_items', 'base_paths']
+  const ROSTER_KIND = 'data-source:sql-readonly'
+
+  // Resolved: union with the plan, de-duplicated, trimmed, sorted, frozen — the array both seams use.
+  const resolved = requireResolvedB2aSourceObjects({
+    resolvedSourceObjects: ['lookup_items', 'base_items', ' lookup_items '],
+    planSourceObjects: plan,
+    sourceSystemType: ROSTER_KIND,
+  })
+  assert.deepEqual([...resolved], ['base_items', 'base_paths', 'lookup_items'])
+  assert.ok(Object.isFrozen(resolved))
+
+  // The plan's objects are unioned IN, never trusted to be present: a resolved list can widen the
+  // contract but cannot narrow it below what the expansion reads.
+  assert.deepEqual([...requireResolvedB2aSourceObjects({
+    resolvedSourceObjects: ['lookup_items'], planSourceObjects: plan, sourceSystemType: ROSTER_KIND,
+  })], ['base_items', 'base_paths', 'lookup_items'])
+
+  // An EMPTY resolved array is still "resolved": the plan's list is what remains.
+  assert.deepEqual([...requireResolvedB2aSourceObjects({
+    resolvedSourceObjects: [], planSourceObjects: plan, sourceSystemType: ROSTER_KIND,
+  })], ['base_items', 'base_paths'])
+
+  // ABSENT (or not an array), kind ON the roster: refused — the resolver's own code and reason, a
+  // count and no name.
+  for (const resolvedSourceObjects of [undefined, null, 'base_items', { 0: 'lookup_items', length: 1 }]) {
+    const error = captured(() => requireResolvedB2aSourceObjects({
+      resolvedSourceObjects, planSourceObjects: plan, sourceSystemType: ROSTER_KIND,
+    }))
+    assert.equal(error.name, 'B2aReadAuthorizationError', `${JSON.stringify(resolvedSourceObjects)}: wrong error class`)
+    assert.equal(error.status, 403)
+    assert.equal(error.code, B2A_SCOPE_MISMATCH)
+    assert.deepEqual(error.details, { reason: 'config_bound_object_unresolvable', objectCount: 2 })
+  }
+
+  // ABSENT, kind OFF the roster: the plan's list — unchanged behaviour for a kind with no hidden object.
+  assert.deepEqual([...requireResolvedB2aSourceObjects({
+    planSourceObjects: plan, sourceSystemType: 'bridge:legacy-sql-readonly',
+  })], ['base_items', 'base_paths'])
+  // No kind at all is not on the roster either: the GUARD refuses that call as `missing_scope`, and
+  // this function does not pre-empt it with a different reason.
+  assert.deepEqual([...requireResolvedB2aSourceObjects({ planSourceObjects: plan })], ['base_items', 'base_paths'])
+
+  // The SAME roster the resolver consults — one place decides which kinds must arrive resolved.
+  for (const kind of B2A_CONFIG_BOUND_LOOKUP_KINDS) {
+    const error = captured(() => requireResolvedB2aSourceObjects({ planSourceObjects: plan, sourceSystemType: kind }))
+    assert.equal(error.details.reason, 'config_bound_object_unresolvable', `${kind} requires the resolved list`)
+  }
+}
+
 // ── FINDING 4: THE TWO SERVER-ONLY MARKERS ARE DISTINCT AND UNFORGEABLE ──────
 function theServerOnlyMarkersAreSymbolsAndDistinct() {
   for (const marker of [B2A_AUTHORIZED_RUN_ID, C6_WRITE_LIFECYCLE_CONTEXT]) {
@@ -1553,6 +1613,7 @@ const TESTS = [
   theBuiltRegistryIsImmutable,
   theReadPlanNamesItsOwnObjects,
   R02_theConfigBoundLookupObjectJoinsTheObjectList,
+  R02_theResolvedListIsRequiredWhereTheConfigCanHideAnObject,
   theServerOnlyMarkersAreSymbolsAndDistinct,
   R05_theCauseClassRostersAreClosedAndRestated,
   R05_theCauseClassIsStructuralNeverTheMessage,

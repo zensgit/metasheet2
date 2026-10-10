@@ -140,6 +140,48 @@ class CellVersionConflictError extends Error {
   }
 }
 
+/**
+ * #5828 — the parent-liveness gate of the LEGACY spreadsheet API.
+ *
+ * `:sheetId` names a row of the legacy `sheets` table, which carries no `deleted_at` of its own: soft
+ * delete lives on its parent `spreadsheets` row (`DELETE /api/spreadsheets/:id` sets
+ * `spreadsheets.deleted_at` and leaves every child row in place). A legacy sheet is therefore reachable
+ * only when the spreadsheet `:id` names is NOT soft-deleted AND the sheet belongs to it — so this also
+ * binds `:sheetId` to `:id`, which the cell-write route never did (one spreadsheet's path could write
+ * another spreadsheet's cells).
+ *
+ * Every miss answers with this entity's own miss (404 NOT_FOUND / 'Sheet not found', the shape
+ * `PUT`/`DELETE /api/spreadsheets/:id` already use), so a caller cannot tell "deleted parent" from
+ * "wrong parent" from "no such sheet" — no existence oracle. A query that throws propagates to the
+ * caller's catch, which answers 500 without reading or writing a sheet-keyed row (fail-closed).
+ *
+ * "Fail-closed" here is scoped to the REFUSAL: on a refusal (or a throw) no sheet-keyed row is read or
+ * written. It is NOT a claim about concurrency — this is two reads, not one joined read, and the write
+ * each caller then makes is a further statement/transaction (the same read-then-write shape as the rest
+ * of this file), so a parent soft-deleted in the window between them is still served. Closing that would
+ * need the liveness re-checked under the writing transaction (row lock / conditional write); out of
+ * scope for #5828, whose subject is that the check was ABSENT.
+ *
+ * Callers must run this AFTER their rbacGuard and refuse on a falsy result before reading or writing
+ * any sheet-keyed row.
+ */
+async function loadLiveSpreadsheetSheet(db: SpreadsheetDb, id: string, sheetId: string) {
+  const parent = await db
+    .selectFrom('spreadsheets')
+    .select('id')
+    .where('id', '=', id)
+    .where('deleted_at', 'is', null)
+    .executeTakeFirst()
+  if (!parent) return undefined
+
+  return await db
+    .selectFrom('sheets')
+    .selectAll()
+    .where('id', '=', sheetId)
+    .where('spreadsheet_id', '=', id)
+    .executeTakeFirst()
+}
+
 export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRouterOptions = {}): Router {
   const r = Router()
   const db = options.db ?? defaultDb
@@ -430,12 +472,8 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
     }
 
     try {
-      const existing = await db
-        .selectFrom('sheets')
-        .selectAll()
-        .where('id', '=', sheetId)
-        .where('spreadsheet_id', '=', id)
-        .executeTakeFirst()
+      // #5828 — parent must be live and the sheet must belong to it.
+      const existing = await loadLiveSpreadsheetSheet(db, id, sheetId)
 
       if (!existing) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
@@ -477,12 +515,8 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
     const { limit, offset, startRow, endRow } = cellQuery.value ?? {}
 
     try {
-      const sheet = await db
-        .selectFrom('sheets')
-        .selectAll()
-        .where('id', '=', sheetId)
-        .where('spreadsheet_id', '=', id)
-        .executeTakeFirst()
+      // #5828 — parent must be live and the sheet must belong to it.
+      const sheet = await loadLiveSpreadsheetSheet(db, id, sheetId)
 
       if (!sheet) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
@@ -518,7 +552,7 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
   })
 
   r.put('/api/spreadsheets/:id/sheets/:sheetId/cells', rbacGuard('spreadsheets', 'write'), async (req: Request, res: Response) => {
-    const sheetId = req.params.sheetId
+    const { id, sheetId } = req.params
     const schema = z.object({
       cells: z.array(z.object({
         row: z.number().int().nonnegative(),
@@ -540,6 +574,13 @@ export function spreadsheetsRouter(_injector?: Injector, options: SpreadsheetRou
     }
 
     try {
+      // #5828 — parent must be live and the sheet must belong to it; before this, :sheetId was
+      // never bound to :id at all, so one spreadsheet's path could write another's cells.
+      const sheet = await loadLiveSpreadsheetSheet(db, id, sheetId)
+      if (!sheet) {
+        return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Sheet not found' } })
+      }
+
       const updatedCells = await db.transaction().execute(async (trx) => {
         const results = []
         for (const cell of parse.data.cells) {

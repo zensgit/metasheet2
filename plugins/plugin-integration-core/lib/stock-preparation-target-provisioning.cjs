@@ -29,6 +29,17 @@ const {
 // W2 canonical repair: namespace positive control for a repaired-in field.
 const { assertExtensionFieldIdValid } = require('./stock-preparation-extension-namespace.cjs')
 
+// B3: the own-base resolver shared with the confirmation ledger (see its module header for the
+// resolution order). It resolves lazily back to this module for the error class, so this require
+// must stay top-level and that one must stay lazy.
+const {
+  STOCK_PREP_OWN_BASE_ENV,
+  STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  stockPreparationOwnBaseEnabled,
+  deriveStockPreparationBaseId,
+  resolveStockPreparationOwnBase,
+} = require('./stock-preparation-own-base.cjs')
+
 const CANONICAL_FIELD_MAP_MODE = 'canonical'
 const SANDBOX_FIELD_MAP_MODE = 'sandbox'
 const CANONICAL_KEY_FIELD = 'idempotencyKey'
@@ -486,6 +497,12 @@ async function inspectStockPreparationTarget(input = {}) {
 async function ensureStockPreparationCanonicalTarget(input = {}) {
   return ensureStockPreparationTarget({
     ...input,
+    // B3: own-base resolution is a ROUTE decision, opted into per call. This wrapper forwards the
+    // flag and the authenticated tenant and hard-codes NEITHER, so every module-level caller that
+    // does not pass `resolveOwnBase: true` keeps today's `baseId || null` byte for byte.
+    tenantId: input.tenantId,
+    resolveOwnBase: input.resolveOwnBase === true,
+    env: input.env,
     template: normalizeStockPreparationTemplate(input.template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE),
     modePrefix: 'canonical',
     fieldMapMode: CANONICAL_FIELD_MAP_MODE,
@@ -671,6 +688,98 @@ async function ensureStockPreparationFillView({ provisioning, projectId, objectI
   }
 }
 
+// ---------------------------------------------------------------------------
+// 待填写视图 — S1 (ADR adr-stock-prep-project-sheets-20261008 §2 O1): the view a PROJECT SHEET gets
+// beside its fill view, and the one the (S3) overview deep-links to per project.
+//
+// WHAT IT SHOWS: live rows (`active` is true) on which the human band is still open — 采购完成 is not
+// true OR 仓库完成 is not true (`templates.cjs` `procurementDone` / `warehouseDone`, the two boolean
+// human_preserved columns the ADR names). It is DISPLAY, NOT PERMISSION, exactly like the fill view
+// above; and like it, it is the plugin's OWN view id and refuses the host default-view id.
+//
+// WHY A NESTED GROUP. "live AND (a OR b)" is not expressible as one flat conjunction; the host filter
+// model is a recursive AND/OR tree (`apps/web/src/multitable/composables/useMultitableGrid.ts`
+// FilterGroup, mirrored from the backend), so the inner OR rides as a sub-group of the root AND.
+//
+// ONLY CALLED FROM THE PROJECT-SHEET CREATE PATH (stock-preparation-project-targets.cjs). It is not
+// wired into `ensureStockPreparationTarget`, so the canonical and sandbox create legs are byte-
+// identical to what they were before S1.
+// ---------------------------------------------------------------------------
+const STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID = 'prep-todo'
+const STOCK_PREPARATION_TODO_VIEW_LABEL = Object.freeze({ label: 'Stock Preparation To Fill', labelZh: '待填写' })
+const STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS = Object.freeze(['procurementDone', 'warehouseDone'])
+
+function pickTodoViewName({ locale } = {}) {
+  const resolved = locale === undefined ? resolveTemplateLabelLocale() : locale
+  return String(resolved).toLowerCase().startsWith('zh') ? STOCK_PREPARATION_TODO_VIEW_LABEL.labelZh : STOCK_PREPARATION_TODO_VIEW_LABEL.label
+}
+
+function buildStockPreparationTodoViewDescriptor({ provisioning, projectId, objectId, locale } = {}) {
+  const physical = (fieldId) => provisioning.getFieldId(projectId, objectId, fieldId)
+  return {
+    id: STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+    objectId,
+    name: pickTodoViewName({ locale }),
+    type: 'grid',
+    hiddenFieldIds: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.map(physical),
+    sortInfo: { rules: STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS.map((fieldId) => ({ fieldId: physical(fieldId), desc: false })) },
+    filterInfo: {
+      conjunction: 'and',
+      conditions: [
+        { fieldId: physical(STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID), operator: 'is', value: true },
+        {
+          conjunction: 'or',
+          conditions: STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS.map((fieldId) => ({
+            fieldId: physical(fieldId),
+            operator: 'isNot',
+            value: true,
+          })),
+        },
+      ],
+    },
+    // Values-free provenance: ids and counts only.
+    config: {
+      stockPreparation: {
+        todoView: {
+          logicalId: STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+          hiddenFieldCount: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.length,
+          openFlagFieldCount: STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS.length,
+          filtersActiveOnly: true,
+        },
+      },
+    },
+  }
+}
+
+async function ensureStockPreparationTodoView({ provisioning, projectId, objectId, sheetId, locale, template } = {}) {
+  if (!provisioning || typeof provisioning.ensureView !== 'function' || typeof provisioning.getFieldId !== 'function') {
+    return { created: false, skipped: 'api_unavailable', viewId: null }
+  }
+  if (!sheetId) return { created: false, skipped: 'sheet_unknown', viewId: null }
+  const resolvedTemplate = template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+  const templateIds = new Set((resolvedTemplate.fields || []).map((field) => field.id))
+  const requiredIds = [
+    ...STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+    STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+    ...STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS,
+  ]
+  if (requiredIds.some((fieldId) => !templateIds.has(fieldId))) {
+    return { created: false, skipped: 'template_mismatch', viewId: null }
+  }
+  const descriptor = buildStockPreparationTodoViewDescriptor({ provisioning, projectId, objectId, locale })
+  if (descriptor.id === STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID || descriptor.id === STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'TODO_VIEW_MUST_NOT_OVERWRITE_SIBLING',
+      'the stock-preparation to-fill view may never be upserted onto the default or fill view id',
+      { objectId },
+    )
+  }
+  const view = await provisioning.ensureView({ projectId, sheetId, descriptor })
+  return { created: true, skipped: null, viewId: view && view.id ? String(view.id) : null }
+}
+
 // ONE CLASSIFIER FOR A FILL-VIEW FAILURE, shared by the create leg and the repair leg so the two
 // cannot drift on the question "is a failed display view worth failing a committed schema write?".
 //
@@ -739,9 +848,29 @@ async function ensureStockPreparationTarget(input = {}) {
     )
   }
 
+  // B3: which base the NEW table lands in. Resolved here — after the inspect branch above, so an
+  // existing table (ready or incomplete) never reaches it and is never moved — and only when the
+  // caller opted in; otherwise today's value, untouched. The tenant is whatever the caller passed
+  // explicitly (the route passes the authenticated principal's); never read from a request or a
+  // projectId here. The table's own objectId is what lets the resolver anchor this table to its
+  // pair partner (the confirmation ledger) when that already exists — the symmetric half of the
+  // ledger's anchor to the main table (round-1 refutation: without it a pre-existing ledger and
+  // a later main table split across two bases). A sandbox template's objectId is not a pair
+  // member and never anchors.
+  const ownBase = input.resolveOwnBase === true
+    ? await resolveStockPreparationOwnBase({
+        provisioning,
+        projectId,
+        objectId: template.objectId,
+        tenantId: input.tenantId,
+        explicitBaseId: input.baseId,
+        locale: input.locale,
+        env: input.env,
+      })
+    : { baseId: input.baseId || null, source: 'unchanged' }
   const ensured = await provisioning.ensureObject({
     projectId,
-    baseId: input.baseId || null,
+    baseId: ownBase.baseId,
     descriptor: buildStockPreparationTargetDescriptor({ template, description: input.description, locale: input.locale }),
   })
   const resolvedAfterCreate = await provisioning.resolveFieldIds({
@@ -825,6 +954,10 @@ async function ensureStockPreparationTarget(input = {}) {
       // or a column id.
       fillViewCreated: fillView.created === true,
       fillViewSkipped: fillView.skipped || null,
+      // B3, values-free: which rule picked the base (a source token) and whether the own base was
+      // created by THIS call — never the base id itself.
+      ownBaseSource: ownBase.source,
+      ownBaseCreated: ownBase.created === true,
     },
   }
 }
@@ -1127,6 +1260,32 @@ const CARRY_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
   [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
 })
 
+// The SAME verdict, answered by the materials export (按项目导出物料) in its OWN vocabulary. The
+// export reads the very sheet the carry writes, so it asks the very same ownership question
+// (`decideCarryTargetOwnership` above, facts gathered by the one wall in http-routes.cjs) — but an
+// operator who clicked 导出 must not be shown a 结转 code, and a dashboard that counts carry
+// refusals must not start counting export clicks. One decision, two refusal vocabularies; the
+// preflight quotes both so "what the deployer was warned about" and "what either click returned"
+// stay the same strings. Values-free, like the carry codes: no sheet id, no project id.
+const PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'PREP_LINE_EXPORT_TARGET_OWNER_UNKNOWN',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+})
+
+// The SAME verdict, answered by 通知下一步 (the handoff ADVANCE) in the handoff route's own
+// STOCK_PREPARATION_HANDOFF_* family. Before the advance writes a cursor row, an audit row and a
+// DingTalk ping, it proves the project exists by probing the very sheet the carry writes and the
+// export reads, through the same deploy-global binding — so it must first ask the same ownership
+// question, or the probe itself answers "does this project number exist in that sheet" to a caller
+// whose sheet it is not (#6121). Closed and values-free like the other two families; a handoff click
+// is never reported as a 结转 or an 导出 refusal.
+const STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES = Object.freeze({
+  [CARRY_TARGET_OWNERSHIP_STATES.NOT_OWNED]: 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNDECIDABLE]: 'STOCK_PREPARATION_HANDOFF_TARGET_OWNER_UNKNOWN',
+  [CARRY_TARGET_OWNERSHIP_STATES.UNBOUND]: 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+})
+
 /**
  * @param {string}  boundSheetId    the action target's sheetId
  * @param {string}  objectId        the action target's objectId
@@ -1154,6 +1313,8 @@ function decideCarryTargetOwnership({ boundSheetId, objectId, ownedByProject, de
 module.exports = {
   CARRY_TARGET_OWNERSHIP_STATES,
   CARRY_TARGET_OWNERSHIP_REFUSAL_CODES,
+  PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES,
+  STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES,
   decideCarryTargetOwnership,
   CANONICAL_FIELD_MAP_MODE,
   repairStockPreparationCanonicalTarget,
@@ -1174,13 +1335,28 @@ module.exports = {
   ensureManagedTableDefaultView,
   ensureStockPreparationFillView,
   buildStockPreparationFillViewDescriptor,
+  // S1 待填写视图 (project sheets only; see its header).
+  STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS,
+  ensureStockPreparationTodoView,
+  buildStockPreparationTodoViewDescriptor,
   summarizeStockPreparationTargetReadiness,
+  // THE ONE field-existence probe (db / computed / computed_scope_unavailable), exported so the
+  // dry-run/apply plan layer runs the SAME probe readiness runs instead of growing a second "does
+  // this column still exist" judgement (stock-preparation-table-actions.cjs `assertTargetFieldsExist`).
+  resolveFieldExistence,
   hashEvidenceValue,
   sandboxStockPreparationTemplate,
   inspectStockPreparationCanonicalTarget,
   inspectStockPreparationSandboxTarget,
   ensureStockPreparationCanonicalTarget,
   ensureStockPreparationSandboxTarget,
+  // B3 own-base surface, re-exported from its own module.
+  STOCK_PREP_OWN_BASE_ENV,
+  STOCK_PREPARATION_OWN_BASE_ID_PREFIX,
+  stockPreparationOwnBaseEnabled,
+  deriveStockPreparationBaseId,
+  resolveStockPreparationOwnBase,
   __internals: {
     isPlainObject,
     templateFieldIds,
@@ -1194,5 +1370,8 @@ module.exports = {
     assertAdminPermission,
     getProvisioningApi,
     assertNoExistingFieldMutated,
+    // 反驳 r1: the MVP repair verb maps the host's MultitableObjectScopeError through THIS predicate
+    // (readiness degrades it to computed_scope_unavailable; repair refuses it typed + values-free).
+    isObjectScopeError,
   },
 }

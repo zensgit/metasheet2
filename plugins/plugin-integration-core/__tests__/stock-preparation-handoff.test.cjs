@@ -209,6 +209,22 @@ function makeMemoryDb() {
 // is ever read by the handoff, which is the point of the existence check being `limit: 1`.
 const HANDOFF_SHEET = 'sheet_handoff_main'
 
+/**
+ * #6121 — the host provisioning surface the advance's target tenant wall asks before its existence
+ * probe. The bound sheet is registered to `${ownerTenantId}:integration-core`: a correctly provisioned
+ * deployment, which is what every witness in this file was written against. The wall's own witnesses
+ * (foreign sheet, claimless shape, missing port) live in
+ * stock-preparation-handoff-advance-tenant-wall.test.cjs.
+ */
+function ownedProvisioning(ownerTenantId = TENANT_ID) {
+  return {
+    ...inertService(['resolveFieldIds']),
+    async isSheetOwnedByProject(sheetId, projectId) {
+      return sheetId === HANDOFF_SHEET && projectId === `${ownerTenantId}:integration-core`
+    },
+  }
+}
+
 /** The deploy-time table-action binding the advance route's existence check resolves through. */
 function tableActionConfig() {
   return {
@@ -285,7 +301,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -322,6 +338,9 @@ function mount({
   auditProbe = async () => ({ supported: true, reason: 'check_constraint_accepts' }),
   // G3: `null` is the no-SQL-db deployment.
   handoffStore,
+  // #6121: who the bound sheet is registered to (see ownedProvisioning). Default: the tenant the chain
+  // is bound to.
+  sheetOwnerTenantId = (config && config[HANDOFF_CONFIG_KEY] && config[HANDOFF_CONFIG_KEY].tenantId) || TENANT_ID,
 } = {}) {
   const routes = new Map()
   const auditAppends = []
@@ -336,7 +355,7 @@ function mount({
         },
       },
       multitable: {
-        provisioning: inertService(['resolveFieldIds']),
+        provisioning: ownedProvisioning(sheetOwnerTenantId),
         records,
       },
     },
@@ -694,7 +713,7 @@ async function g4AuditFailureStopsTheNotification() {
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -839,7 +858,7 @@ async function g5NoNotifierInjectedStillMovesTheTurn() {
   const context = {
     api: {
       http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1613,7 +1632,7 @@ async function f6TheStoreCommitsBeforeTheAuditAppend() {
     const context = {
       api: {
         http: { addRoute(method, routePath, handler) { routeMap.set(`${method.toUpperCase()} ${routePath}`, handler) } },
-        multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+        multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
       },
       storage: new Map(),
       config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1877,7 +1896,7 @@ async function rc1AnAuditFailureLeavesTheClaimUnspentAndTheHopRecoverable() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -1951,7 +1970,7 @@ async function rc1AMissingAuditVocabularyIsANamed503BeforeAnyWrite() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -2885,9 +2904,45 @@ async function g2TheWebWitnessesAreEnrolledInTheRequiredGate() {
     path.join(__dirname, '..', '..', '..', 'apps', 'web', 'scripts', 'run-required-web-tests.sh'),
     'utf8',
   )
-  const execLine = gate.split(String.fromCharCode(10)).find((line) => line.startsWith('exec npx vitest run '))
-  assert.ok(execLine, 'G2: the required gate still runs vitest with a token filter')
-  const tokens = execLine.slice('exec npx vitest run '.length).split(/\s+/).filter((t) => t && !t.startsWith('--'))
+  // Q8 (2026-09-21): that filter is no longer ONE physical line. It is one token per line,
+  // backslash-continued and alphabetised, so that n concurrent spec-adding branches stop
+  // conflicting pairwise on a single 11 KB line. The parse must therefore strip whole-line `#`
+  // comments (this gate carries a lot of prose naming files it does NOT run), JOIN continuations
+  // into logical lines, and only then tokenize. The old `line.startsWith('exec npx vitest run ')`
+  // form would now match the header alone and yield the continuation backslash as its only
+  // "token" — i.e. it would report both web witnesses as unenrolled and red this suite.
+  const NL = String.fromCharCode(10)
+  const BACKSLASH = String.fromCharCode(92)
+  const logicalLines = []
+  {
+    let buf = null
+    for (const raw of gate.split(NL)) {
+      const line = raw.replace(/\r$/, '')
+      if (/^\s*#/.test(line)) continue
+      const trimmedRight = line.replace(/\s+$/, '')
+      const continued = trimmedRight.endsWith(BACKSLASH)
+      const body = continued ? trimmedRight.slice(0, -1).trim() : trimmedRight.trim()
+      buf = buf === null ? body : `${buf} ${body}`.trim()
+      if (!continued) {
+        logicalLines.push(buf)
+        buf = null
+      }
+    }
+    if (buf !== null) logicalLines.push(buf)
+  }
+  const execLines = logicalLines.filter((line) => /^exec\s+npx\s+vitest\s+run\b/.test(line))
+  assert.equal(
+    execLines.length,
+    1,
+    'G2: the required gate must have exactly one exec vitest invocation — bash replaces the process '
+    + 'at the first one, so tokens on any later copy run in no CI job',
+  )
+  const execLine = execLines[0]
+  const tokens = execLine
+    .replace(/^exec\s+npx\s+vitest\s+run\s*/, '')
+    .split(/\s+/)
+    .filter((t) => t && !t.startsWith('-'))
+  assert.ok(tokens.length > 300, 'G2: the token filter parsed to a plausible size, so the check below is not vacuous')
   const webDir = path.join(__dirname, '..', '..', '..', 'apps', 'web', 'tests')
   for (const spec of ['StockPreparationHandoff.spec.ts', 'stockPreparationConfirmationQueue.spec.ts']) {
     assert.ok(fs.existsSync(path.join(webDir, spec)), `G2: ${spec} exists`)
@@ -2989,8 +3044,12 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // show up HERE, as a failure, rather than quietly becoming the nth thing the header does not
   // mention. It cuts both ways: a call site that DISAPPEARS lands here too, which is how this line
   // and the header list stayed in step through the deletion above.
-  assert.equal(callSites, 10, 'G9: ten call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
+  // 一个项目一张备料表 (S1) added THREE — the project-target GET, CREATE and LIST (the scope header's
+  // section D, items 11–13): the registry they read is keyed by the tenant this scope proves.
+  // S4 (R-38) added TWO — ARCHIVE and RESTORE (section D, items 14–15): the row they flip is keyed by
+  // the same proven tenant.
+  assert.equal(callSites, 15, 'G9: fifteen call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name
@@ -3027,7 +3086,7 @@ async function driveASupersededLostHop() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -3117,7 +3176,7 @@ async function j1PressingAgainInTheResendableStateActuallySendsIt() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },
@@ -3163,7 +3222,7 @@ async function j1TheInvitationIsOnlyShownToTheHandlerWhoCanAct() {
   const context = {
     api: {
       http: { addRoute(m, rp, h) { routes.set(`${m.toUpperCase()} ${rp}`, h) } },
-      multitable: { provisioning: inertService(['resolveFieldIds']), records: makeRecordsApi() },
+      multitable: { provisioning: ownedProvisioning(), records: makeRecordsApi() },
     },
     storage: new Map(),
     config: { ...chainConfig(), stockPreparationTableActions: [tableActionConfig()] },

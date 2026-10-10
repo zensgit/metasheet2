@@ -65,6 +65,11 @@ const {
   STOCK_PREP_OPERATE,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
 const { OUTBOUND_HTTP_WRITE_TARGETS_ENV } = require(path.join(LIB, 'outbound-http-write-gate.cjs'))
+const {
+  PROJECT_SHEETS_ENABLED_ENV,
+  PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+  MAX_PROJECT_TARGETS_PER_TENANT,
+} = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
 
 const TENANT_ID = 'tenant-a'
 const STAGING_PROJECT_ID = `${TENANT_ID}:integration-core`
@@ -225,7 +230,7 @@ function inertService(methods) {
 
 function baseServices() {
   return {
-    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
+    externalSystemRegistry: inertService(['upsertExternalSystem', 'getExternalSystem', 'getExternalSystemForAdapter', 'deleteExternalSystem', 'listExternalSystems']),
     adapterRegistry: inertService(['createAdapter', 'listAdapterKinds']),
     pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),
     pipelineRunner: inertService(['runPipeline']),
@@ -246,7 +251,7 @@ function baseServices() {
  * the duration of the call (the route reads the sandbox gate from the live environment, exactly as
  * the apply gate does).
  */
-function mount({ packs, extFieldMapping, objects, config = {}, ownedSheetIds } = {}) {
+function mount({ packs, extFieldMapping, objects, config = {}, ownedSheetIds, services: serviceExtras = {} } = {}) {
   const routes = new Map()
   const provisioning = createFakeProvisioning({ objects, ownedSheetIds })
   const records = createFakeRecordsApi()
@@ -268,7 +273,7 @@ function mount({ packs, extFieldMapping, objects, config = {}, ownedSheetIds } =
   }
   httpRoutes.registerIntegrationRoutes({
     context,
-    services: baseServices(),
+    services: Object.assign(baseServices(), serviceExtras),
     logger: { info() {}, warn() {}, error() {} },
   })
   return { routes, provisioning, records, context }
@@ -306,6 +311,8 @@ async function preflight(harness, options = {}) {
     SANDBOX_MODE_ENV,
     SANDBOX_TARGET_OBJECT_IDS_ENV,
     OUTBOUND_HTTP_WRITE_TARGETS_ENV,
+    // S1: every case runs with the project-sheets switch OFF unless it sets it explicitly.
+    PROJECT_SHEETS_ENABLED_ENV,
     ...Object.keys(env),
   ]
   for (const key of managed) saved.set(key, process.env[key])
@@ -982,6 +989,12 @@ const APPROVED_WHAT_INTERPOLATIONS = Object.freeze([
   'target.objectId',
   // The refusal code the carry route will return — a closed server constant, not a value.
   'carryBinding.ownership.refusalCode',
+  // ...and the one the materials export will return for the SAME verdict (its own vocabulary,
+  // PREP_LINE_EXPORT_TARGET_OWNERSHIP_REFUSAL_CODES) — likewise a closed server constant.
+  'exportRefusalCode',
+  // ...and the one 通知下一步 (the handoff advance) will return for it (#6121,
+  // STOCK_PREPARATION_HANDOFF_TARGET_OWNERSHIP_REFUSAL_CODES) — a closed server constant too.
+  'handoffRefusalCode',
   // Counts.
   'carryBinding.missingHumanFields.length',
   'checks.confirmationLedger.missingFieldCount',
@@ -1199,6 +1212,18 @@ async function carryBindingReportsWhatTheWallWillDo() {
     assert.equal(found.detail.carryRouteCode, 'CONFIRM_CARRY_TARGET_TENANT_MISMATCH',
       'and must quote the EXACT code the click returns')
     assert.ok(found.what.includes('CONFIRM_CARRY_TARGET_TENANT_MISMATCH'))
+    // The materials export runs the same wall on the same binding, so the same blocker must also
+    // quote the code an export click returns — and must no longer claim the export keeps working.
+    assert.equal(found.detail.exportRouteCode, 'PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH',
+      'the export refuses this binding too, in its own vocabulary')
+    assert.ok(found.what.includes('PREP_LINE_EXPORT_TARGET_TENANT_MISMATCH'))
+    // 通知下一步 runs the same wall before its existence probe (#6121), so the blocker quotes the code
+    // a handoff click returns as well.
+    assert.equal(found.detail.handoffRouteCode, 'STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH',
+      'the handoff advance refuses this binding too, in its own vocabulary')
+    assert.ok(found.what.includes('STOCK_PREPARATION_HANDOFF_TARGET_TENANT_MISMATCH'))
+    assert.equal(found.what.includes('the export do not ask this question'), false,
+      'the blocker must not tell a deployer the export is unaffected')
     assert.equal(res.body.data.ready, false)
     assert.equal(res.body.data.checks.carryTargetBinding.ownershipState, 'not_owned_by_this_project')
     // ...and the posture note must no longer tell the operator that nothing refuses it.
@@ -1218,8 +1243,77 @@ async function carryBindingReportsWhatTheWallWillDo() {
 
 // ---------------------------------------------------------------------------
 
+/**
+ * S1 fix round 1 — R3 and R2 together.
+ *
+ * R3: the `projectSheets` section is emitted ONLY while the switch is on (ADR §3: the switch-off
+ * preflight is byte-identical to pre-S1), and the registry is not even COUNTED while off. On, it
+ * carries two env KEY names and three integers.
+ *
+ * R2: with the switch on, the carry-binding probe is a READINESS lookup, so the env binding still
+ * reports `configured: true` — before R2 the lookup threw PROJECT_NO_REQUIRED and the probe's catch
+ * silently turned that into `configured: false`.
+ */
+async function projectSheetsSectionOnlyWhileTheSwitchIsOn() {
+  let counts = 0
+  const projectTargetStore = {
+    async count() { counts += 1; return 3 },
+    async get() { throw new Error('the preflight must not read a registry row') },
+    async list() { throw new Error('the preflight must not list the registry') },
+    async create() { throw new Error('the preflight must not write the registry') },
+  }
+  const withRegistry = () => ({
+    harness: mount({
+      packs: { [PACK_ID]: packDeclaring(DECLARED_SANDBOX_OBJECT_ID) },
+      extFieldMapping: EXT_FIELD_MAPPING_CONFIG,
+      objects: readyObjects(DECLARED_SANDBOX_OBJECT_ID),
+      config: tableActionConfig(),
+      services: { stockPreparationProjectTargetStore: projectTargetStore },
+    }),
+    env: sandboxEnv([DECLARED_SANDBOX_OBJECT_ID]),
+  })
+  const strip = (body) => JSON.parse(JSON.stringify(body).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/g, '<ts>'))
+
+  // OFF (unset): no key, no count — and the whole response deep-equals a deployment with NO registry.
+  {
+    const { harness, env } = withRegistry()
+    const off = await preflight(harness, { env })
+    assert.equal(off.statusCode, 200, JSON.stringify(off.body))
+    assert.ok(!('projectSheets' in off.body.data.checks), 'R3: switch off → no projectSheets section')
+    assert.equal(counts, 0, 'R3: switch off → the registry is not counted')
+    const { harness: bare } = greenDeploymentWithAction(tableActionConfig())
+    const bareRes = await preflight(bare, { env })
+    assert.deepEqual(strip(off.body), strip(bareRes.body), 'R3: switch off → byte-identical to a deployment without the registry')
+  }
+  // ON: the section, the count, env KEY names only — and the carry binding still resolves (R2).
+  {
+    const { harness, env } = withRegistry()
+    const on = await preflight(harness, { env: { ...env, [PROJECT_SHEETS_ENABLED_ENV]: 'true' } })
+    assert.equal(on.statusCode, 200, JSON.stringify(on.body))
+    assert.deepEqual(on.body.data.checks.projectSheets, {
+      enabled: true,
+      switchEnv: PROJECT_SHEETS_ENABLED_ENV,
+      grantRolesEnv: PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
+      grantRoleCount: 0,
+      registeredCount: 3,
+      registeredLimit: MAX_PROJECT_TARGETS_PER_TENANT,
+    })
+    assert.equal(counts, 1, 'R3: switch on → counted exactly once')
+    assert.equal(on.body.data.checks.carryTargetBinding.configured, true, 'R2: the env-binding probe is a readiness lookup; the switch does not blank it')
+    assert.equal(on.body.data.ready, true, 'R2: a green deployment stays green with the switch on')
+  }
+  // Not the exact literal: off.
+  {
+    const { harness, env } = withRegistry()
+    const near = await preflight(harness, { env: { ...env, [PROJECT_SHEETS_ENABLED_ENV]: 'TRUE' } })
+    assert.ok(!('projectSheets' in near.body.data.checks))
+    assert.equal(counts, 1)
+  }
+}
+
 async function main() {
   await routeIsRegisteredAndReadGated()
+  await projectSheetsSectionOnlyWhileTheSwitchIsOn()
   await fullyConfiguredDeploymentIsReady()
   await missingLedgerNamesItsEnsureCall()
   await noCustomerPackNamesTheEnvVar()

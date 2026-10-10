@@ -50,6 +50,28 @@ vi.mock('vue-router', async () => {
 })
 
 // ---------------------------------------------------------------------------
+// ElMessage stub. A real ElMessage mounts its own toast into document.body (outside `app`, so the
+// afterEach unmount never reaches it) with a ~3 s auto-close timer. On a slow runner that timer
+// fires after this file's jsdom environment is torn down; the toast's leave transition then calls
+// requestAnimationFrame, which no longer exists, and vitest records an unhandled ReferenceError
+// that fails the whole lane although every test passed. No test here asserts on toast DOM, so
+// only ElMessage is replaced; every other export (ElMessageBox, ElSkeleton, ElIcon, …) stays real.
+// ---------------------------------------------------------------------------
+vi.mock('element-plus', async () => {
+  const actual = await vi.importActual<typeof import('element-plus')>('element-plus')
+  return {
+    ...actual,
+    ElMessage: Object.assign(vi.fn(), {
+      success: vi.fn(),
+      warning: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
+      closeAll: vi.fn(),
+    }),
+  }
+})
+
+// ---------------------------------------------------------------------------
 // Approval store mock
 // ---------------------------------------------------------------------------
 const mockActiveApproval = ref<any>(null)
@@ -150,7 +172,11 @@ const mockTemplateLoading = ref(false)
 const mockTemplateError = ref<string | null>(null)
 const mockTemplateTotal = ref(0)
 
-const loadTemplatesSpy = vi.fn().mockResolvedValue(undefined)
+// Resolves 'applied' because that is what the real `templateStore.loadTemplates` resolves when
+// the read it issued is still the current one and succeeded (`ApprovalTemplateListOutcome`).
+// TemplateCenterView lowers its flat-list stale bit only for that value, so a mock that
+// resolved `undefined` would be a mock of a contract this store does not have.
+const loadTemplatesSpy = vi.fn().mockResolvedValue('applied')
 const loadTemplateSpy = vi.fn().mockResolvedValue(undefined)
 const loadVersionSpy = vi.fn().mockResolvedValue(undefined)
 
@@ -655,7 +681,7 @@ describe('Approval E2E Lifecycle', () => {
     it('renders template center with header', async () => {
       await mountTemplateCenterView()
       const header = container!.querySelector('.template-center__header h1')
-      expect(header?.textContent).toBe('审批模板')
+      expect(header?.textContent).toBe('审批表单')
     })
 
     it('renders status tabs (all / published / draft / archived)', async () => {
@@ -1210,8 +1236,10 @@ describe('Approval E2E Lifecycle', () => {
     // path implements — §0.1: both arms seat co-signers at the CURRENT node in the SAME epoch, so
     // outside a parallel region they were byte-identical (now pinned by a real-DB test). A radio
     // whose arms cannot be told apart is a fake switch, so the arm is retired and the dialog states
-    // what add-sign really does. Asserting the radio still exists would be asserting the defect.
-    it('clicking "加签" opens the add-sign dialog with the honest mode hint and NO mode radio (B-2)', async () => {
+    // what add-sign really does. Asserting the `前加签` arm still exists would be asserting the defect.
+    // F4-S1 (Lock-5 L5-B, OD-L5-4(b)) brings the choice back with the two arms that genuinely differ
+    // — 并加签 (`'parallel'`, the default) and 后加签 (`'after'`) — and STILL no 前加签 arm.
+    it('clicking "加签" opens the add-sign dialog with the honest mode hint, a 并加签/后加签 choice, and NO 前加签 arm (B-2, F4-S1)', async () => {
       routeParams = { id: 'apv_pending_1' }
       mockActiveApproval.value = mockPendingApproval()
       await mountDetailView()
@@ -1224,8 +1252,10 @@ describe('Approval E2E Lifecycle', () => {
 
       const dialog = container!.querySelector('[data-dialog-visible="true"][data-el-dialog="加签"]')
       expect(dialog).toBeTruthy()
-      // B-2: no mode radio at all — the inert choice is gone.
-      expect(dialog!.querySelectorAll('[data-el-radio-value]').length).toBe(0)
+      // B-2: the inert 前加签 arm is gone; F4-S1: exactly the two arms that differ at runtime.
+      const arms = Array.from(dialog!.querySelectorAll('[data-el-radio-value]'))
+        .map((arm) => arm.getAttribute('data-el-radio-value'))
+      expect(arms).toEqual(['parallel', 'after'])
       expect(dialog!.textContent).not.toContain('前加签')
       // …replaced by copy that describes the ONE semantic we implement (corpus C-5 并加签).
       const hint = dialog!.querySelector('[data-testid="approval-add-sign-mode-hint"]')

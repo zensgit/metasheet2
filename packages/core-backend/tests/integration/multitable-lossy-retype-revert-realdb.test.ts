@@ -14,7 +14,7 @@
  * | L1 | both flags off / lossy-only / base-only → 403 · 403 · today's gated-preview + 422    |
  * | L2 | scalar-safe type revert with BOTH flags on → schema-only, ZERO value rewrite         |
  * | L3 | oracle three buckets exact (incl. a rating case that pins `before.property` as input)|
- * | L4 | no full-table read (row-deny switch OR field mask) → 403 preview AND execute, 0 leak |
+ * | L4 | no full-table read (row-deny switch OR field mask OR no read plane, L4c) → 403 preview AND execute, 0 leak |
  * | L5 | a cell moves bucket after preview → execute 409 PLAN_DRIFT, DB untouched             |
  * | L5b| a cell moves WITHIN its bucket → no drift (the token binds MAGNITUDE, §2.3) — regression |
  * | L6 | over `SHEET_REVERT_MAX_RECORDS` → 413 on BOTH sides, DB untouched                    |
@@ -28,11 +28,14 @@
  * afterAll deletes every child row this file creates.
  */
 import express, { type Express } from 'express'
+import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest'
 
 import { poolManager } from '../../src/integration/db/connection-pool'
+import { mintConfigRestorePreviewIdentity } from '../../src/multitable/restore-preview-identity'
 import { univerMetaRouter } from '../../src/routes/univer-meta'
+import { defineFieldRetypeConvertRealDbCases } from './multitable-field-retype-convert-realdb.cases'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -42,6 +45,8 @@ const FIELD = `fld_lrr_${TS}`
 const OTHER_FIELD = `fld_lrr_other_${TS}`
 const ERA_FIELD = `fld_lrr_era_${TS}`
 const U_FULL = `u_lrr_full_${TS}` // multitable:manage-schema -> canManageFields
+const U_SCHEMA_ONLY = `u_lrr_schema_only_${TS}` // L4c: canManageFields WITHOUT canRead
+const U_SCHEMA_READ = `u_lrr_schema_read_${TS}` // L4c control: the same grant + read
 const BASE_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT'
 const LOSSY_FLAG = 'MULTITABLE_ENABLE_FIELD_RETYPE_REVERT_LOSSY'
 const CAP_ENV = 'MULTITABLE_SHEET_REVERT_MAX_RECORDS'
@@ -53,13 +58,16 @@ let app: Express
 let actor: { id: string; roles: string[]; perms: string[] }
 // canManageFields now requires multitable:manage-schema (src/multitable/manage-schema-permission.ts)
 const FULL = { id: U_FULL, roles: ['member'], perms: ['multitable:read', 'multitable:write', 'multitable:manage-schema'] }
+// L4c: `multitable:manage-schema` ALONE yields canManageFields but no read plane (access.ts deriveCapabilities).
+const SCHEMA_ONLY = { id: U_SCHEMA_ONLY, roles: ['member'], perms: ['multitable:manage-schema'] }
+const SCHEMA_READ = { id: U_SCHEMA_READ, roles: ['member'], perms: ['multitable:read', 'multitable:manage-schema'] }
 
 const rid = (n: number) => `rec_lrr_${TS}_${n}`
 
-const preview = (revisionId: string) => { actor = FULL; return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId }) }
+const preview = (revisionId: string, as: typeof FULL = FULL) => { actor = as; return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-preview`).send({ revisionId }) }
 /** `confirm: null` OMITS the key entirely (an explicit `undefined` would re-trigger the default parameter). */
-const execute = (revisionId: string, previewToken: string, confirm: string | null = CONFIRM) => {
-  actor = FULL
+const execute = (revisionId: string, previewToken: string, confirm: string | null = CONFIRM, as: typeof FULL = FULL) => {
+  actor = as
   const body: Record<string, unknown> = { revisionId, previewToken }
   if (confirm !== null) body.confirm = confirm
   return request(app).post(`/api/multitable/sheets/${SHEET}/config-restore-execute`).send(body)
@@ -109,7 +117,9 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     app.use('/api/multitable', univerMetaRouter())
     await q('INSERT INTO meta_bases (id, name) VALUES ($1,$2)', [BASE, 'LRR Base'])
     await q('INSERT INTO meta_sheets (id, base_id, name) VALUES ($1,$2,$3)', [SHEET, BASE, SHEET])
-    await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [U_FULL])
+    for (const id of [U_FULL, U_SCHEMA_ONLY, U_SCHEMA_READ]) {
+      await q("INSERT INTO users (id, password_hash) VALUES ($1,'x') ON CONFLICT (id) DO NOTHING", [id])
+    }
   })
   afterAll(async () => {
     await q('DELETE FROM meta_field_value_tombstones WHERE sheet_id = $1', [SHEET]).catch(() => {})
@@ -121,7 +131,7 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     await q('DELETE FROM meta_fields WHERE sheet_id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_sheets WHERE id = $1', [SHEET]).catch(() => {})
     await q('DELETE FROM meta_bases WHERE id = $1', [BASE]).catch(() => {})
-    await q('DELETE FROM users WHERE id = $1', [U_FULL]).catch(() => {})
+    await q('DELETE FROM users WHERE id = ANY($1::text[])', [[U_FULL, U_SCHEMA_ONLY, U_SCHEMA_READ]]).catch(() => {})
   })
   afterEach(async () => {
     delete process.env[BASE_FLAG]
@@ -273,6 +283,45 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     expect(x.status).toBe(403)
     expect(x.body?.error?.code).toBe('FULL_TABLE_READ_REQUIRED')
     expect(await restoreConfigRevisions()).toEqual([])
+  })
+
+  // L4c (Refs #6139): canManageFields WITHOUT canRead. The capability gate of both routes is canManageFields, which
+  // `multitable:manage-schema` grants alone; the full-read gate's three axes only look for restrictions, so on this
+  // UNRESTRICTED sheet it used to pass an actor who cannot read the sheet at all. The execute leg presents a token
+  // that is VALID for that actor (the control's claims re-signed for it), so only the read precondition stands
+  // between it and the whole-table rewrite.
+  test('L4c multitable:manage-schema WITHOUT read -> 403 on preview AND execute, zero leak, DB untouched; + read -> 200', async () => {
+    bothFlagsOn()
+    const rev = await seedCurrencyFixture()
+    const before = await cellValues()
+    const beforeVersions = await versions()
+    const p = await preview(rev, SCHEMA_ONLY)
+    expect(p.status).toBe(403)
+    expect(p.body?.error?.code).toBe('FULL_TABLE_READ_REQUIRED')
+    expect(p.body).not.toHaveProperty('data')
+    expectNoLeak(p.body)
+    // Control preview (a pure read) → the claims a preview would have minted, re-signed for SCHEMA_ONLY.
+    const cp = await preview(rev, SCHEMA_READ)
+    expect(cp.status).toBe(200)
+    expect(cp.body?.data?.lossSummary).toEqual(EXPECTED_SUMMARY)
+    const { iat: _iat, exp: _exp, type: _type, ...claims } = jwt.decode(cp.body.data.previewToken) as Record<string, unknown>
+    const schemaOnlyToken = mintConfigRestorePreviewIdentity({ ...claims, actorId: U_SCHEMA_ONLY } as unknown as Parameters<typeof mintConfigRestorePreviewIdentity>[0])
+    const x = await execute(rev, schemaOnlyToken, CONFIRM, SCHEMA_ONLY)
+    expect(x.status).toBe(403)
+    expect(x.body?.error?.code).toBe('FULL_TABLE_READ_REQUIRED')
+    expect(x.body).not.toHaveProperty('data')
+    expectNoLeak(x.body)
+    expect(await cellValues()).toEqual(before)
+    expect(await versions()).toEqual(beforeVersions)
+    expect(await fieldProperty()).toEqual({ precision: 0 })
+    expect(await restoreConfigRevisions()).toEqual([])
+    expect(await recordRevisions()).toEqual([])
+    // Control execute: the same grant with read added keeps the lossy surface (no write grant needed).
+    const cx = await execute(rev, cp.body.data.previewToken, CONFIRM, SCHEMA_READ)
+    expect(cx.status).toBe(200)
+    expect(cx.body?.data?.lossSummary).toEqual(EXPECTED_SUMMARY)
+    expect(await fieldProperty()).toEqual({ precision: 2 })
+    expect(await recordRevisions()).toHaveLength(EXPECTED_SUMMARY.coerced + EXPECTED_SUMMARY.dropped)
   })
 
   // ── L5 / L5b ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -678,3 +727,10 @@ describeIfDatabase('4c-1 lossy retype revert (real DB)', () => {
     }
   })
 })
+
+// Field retype CONVERT slice 3 — execute + whole-column undo real-DB cases (ADR
+// docs/development/multitable-field-retype-first-batch-adr-20260926.md §6 row 3). They ride in this already-wired
+// real-DB host so they execute in the existing "Run multitable real-DB integration" step without a new lane file and
+// without touching the workflow. Self-contained fixtures (own base / users / sheets, unique ids), own cleanup, and a
+// fail-not-skip sentinel OUTSIDE the DB-gated describe.
+defineFieldRetypeConvertRealDbCases()

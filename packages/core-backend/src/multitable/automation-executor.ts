@@ -71,6 +71,11 @@ import { isRichLongTextProperty, normalizeJson, sanitizeRichLongText } from './f
 import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntriesInOrder, isWriterFenceEnabled } from './canonical-sheet-fence'
 import {
+  assertFieldSchemaUnchangedAfterFence,
+  loadFieldSchemaSnapshot,
+  validateAutomationOptionValues,
+} from './field-schema-fence-recheck'
+import {
   assertRecordLinkDeleteFencePlanCurrent,
   prepareRecordLinkDeleteFencePlan,
 } from './link-writer-fence'
@@ -126,13 +131,40 @@ import type {
   SendDingTalkGroupMessageConfig,
   SendDingTalkPersonMessageConfig,
 } from './automation-actions'
-import type { ConditionGroup } from './automation-conditions'
-import { evaluateConditions } from './automation-conditions'
+import type {
+  AutomationConditionField,
+  ConditionEvaluationOptions,
+  ConditionGroup,
+  ConditionUnreadableValueInfo,
+} from './automation-conditions'
+import { evaluateConditions, normalizeConditionFields } from './automation-conditions'
 import type { AutomationTrigger } from './automation-triggers'
 import type { Notification, NotificationResult, NotificationService } from '../types/plugin'
 import { WebhookService } from './webhook-service'
 
 const logger = new Logger('AutomationExecutor')
+
+// 客户反馈 2026-09-24 #4b — ONE values-free warning per rule when a stored cell or a condition value cannot be
+// read as its field's type (a legacy free-text string in a date field, …). The condition then evaluates as
+// unmatched instead of throwing. Bounded so a long-lived process never grows the registry without limit.
+const UNREADABLE_CONDITION_VALUE_WARNED_RULES = new Set<string>()
+const UNREADABLE_CONDITION_VALUE_WARN_CAP = 5_000
+
+function warnUnreadableConditionValueOnce(ruleId: string, sheetId: string, info: ConditionUnreadableValueInfo): void {
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.has(ruleId)) return
+  if (UNREADABLE_CONDITION_VALUE_WARNED_RULES.size >= UNREADABLE_CONDITION_VALUE_WARN_CAP) {
+    UNREADABLE_CONDITION_VALUE_WARNED_RULES.clear()
+  }
+  UNREADABLE_CONDITION_VALUE_WARNED_RULES.add(ruleId)
+  logger.warn('Automation condition value could not be read as the field type; the condition evaluated as unmatched', {
+    ruleId,
+    sheetId,
+    fieldId: info.fieldId,
+    fieldType: info.fieldType,
+    operator: info.operator,
+    side: info.side,
+  })
+}
 
 const DEFAULT_WEBHOOK_TIMEOUT_MS = 5_000
 const DEFAULT_MAX_WEBHOOK_RETRIES = 2
@@ -1512,6 +1544,12 @@ export interface ExecutionContext {
   ledgerKind?: ExecutionLedgerKind
   /** #4196 Q2/Q6: simulate derives control flow but dispatches no business action. */
   dispatchMode?: AutomationDispatchMode
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields for TYPED condition evaluation, loaded lazily once per
+   * execution through `AutomationDeps.loadConditionFields` and cached here. `undefined` = not loaded yet;
+   * `null` = no loader / load failed ⇒ legacy untyped evaluation.
+   */
+  conditionFields?: ReadonlyMap<string, AutomationConditionField> | null
 }
 
 // ── Dependencies interface for action executors ───────────────────────────
@@ -1622,6 +1660,13 @@ export interface AutomationDeps {
    * authorization read shares the write transaction; a fixed `fwbGateChecks` remains a test seam.
    */
   fwbGateChecksFactory?: (queryFn: AutomationDeps['queryFn']) => FwbGateChecks
+  /**
+   * 客户反馈 2026-09-24 #4b — the sheet's fields (`id`, `type`, `property`) so rule and condition_branch
+   * conditions compare by FIELD TYPE (dates by calendar day in the business timezone, person/link/multiSelect
+   * as id sets, numbers numerically, …). OMITTED ⇒ the legacy untyped evaluation and NO field query — the
+   * zero-DB executor test seams stay zero-DB. Production (`AutomationService`) binds it to `meta_fields`.
+   */
+  loadConditionFields?: (sheetId: string) => Promise<ReadonlyArray<AutomationConditionField>>
 }
 
 /** FWB fail-closed default: every gate denies. Production binds real checks at AutomationService
@@ -1642,6 +1687,40 @@ export type CrossBaseWriteGate =
   | { crossBase: true; ok: true }
   | { crossBase: true; ok: false; error: string }
 
+/**
+ * The addressing verdict `AutomationExecutor.resolveCrossBaseWriteTarget` returns — the first half of
+ * {@link CrossBaseWriteGate}, before any authority / quota check. `crossBase: false` ⇒ update / delete / lock
+ * address the TRIGGER record (`context.sheetId` / `context.recordId`), whatever the config's target ids say.
+ */
+export type CrossBaseWriteTarget =
+  | { crossBase: false }
+  | { crossBase: true; resolved: false; error: string }
+  | { crossBase: true; resolved: true; targetBaseId: string | null; declaredBaseClaim: string | null }
+
+/**
+ * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — a SAME-BASE record-mutating action whose target is the TRIGGER
+ * record, and that record is already gone (the canonical case: a `record.deleted` rule whose action is
+ * `delete_record` on the same table — the trigger record cannot exist any more by definition).
+ *
+ * Before this fix the 0-row DELETE was reported as `success` AND still emitted a fresh
+ * `multitable.record.deleted` (new `_eventId`, depth+1) — which re-triggered the same rule until the depth
+ * guard (MAX_AUTOMATION_DEPTH = 3) dropped it: ONE user delete ⇒ THREE execution logs, and up to four
+ * webhook deliveries (the webhook bridge has no depth guard). Deleting nothing must publish nothing.
+ *
+ * Thrown INSIDE the write transaction so everything taken so far rolls back — including the #4196 Class-A
+ * claim (a committed claim for a no-op would turn a legitimate retry into a false duplicate) — and caught
+ * by the action method, which converts it into a values-free `skipped` step. Control flow, never a failure.
+ */
+export class SameBaseTargetRecordMissingSignal extends Error {
+  constructor(readonly actionType: AutomationActionType) {
+    super(`${actionType}: same-base target (trigger) record no longer exists`)
+    this.name = 'SameBaseTargetRecordMissingSignal'
+  }
+}
+
+/** Values-free reason carried by a step skipped through {@link SameBaseTargetRecordMissingSignal}. */
+export const TARGET_RECORD_MISSING_SKIP_REASON = 'target_record_missing'
+
 // ── Executor class ────────────────────────────────────────────────────────
 
 export class AutomationExecutor {
@@ -1659,6 +1738,38 @@ export class AutomationExecutor {
     this.crossBaseQuotaWindowMs = override?.windowMs ?? def.windowMs
     // Injected store wins (test isolation); else the module-level singleton default.
     this.crossBaseQuotaStore = override?.store ?? defaultCrossBaseWriteQuotaStore
+  }
+
+  /**
+   * 客户反馈 2026-09-24 #4b — the typed-evaluation options for `evaluateConditions`: the sheet's field types
+   * (loaded once per execution via `deps.loadConditionFields`, cached on the context so the top-level
+   * conditions and every condition_branch share ONE read) plus the once-per-rule values-free warning for
+   * values that cannot be read as their field's type. Never throws: no loader or a failing loader ⇒ `null`
+   * fields ⇒ the legacy untyped evaluation, so a field-table hiccup can never fail a run.
+   */
+  private async conditionEvaluationOptions(context: ExecutionContext): Promise<ConditionEvaluationOptions> {
+    if (context.conditionFields === undefined) {
+      context.conditionFields = await this.loadConditionFieldMap(context.sheetId, context.ruleId)
+    }
+    return {
+      fields: context.conditionFields,
+      onUnreadableValue: (info) => warnUnreadableConditionValueOnce(context.ruleId, context.sheetId, info),
+    }
+  }
+
+  private async loadConditionFieldMap(
+    sheetId: string,
+    ruleId: string,
+  ): Promise<ReadonlyMap<string, AutomationConditionField> | null> {
+    const loader = this.deps.loadConditionFields
+    if (!loader) return null
+    try {
+      return normalizeConditionFields(await loader(sheetId))
+    } catch {
+      // Values-free: the failure reason is not logged (it may echo connection details); ids only.
+      logger.warn('Automation condition field types unavailable; evaluating conditions untyped', { ruleId, sheetId })
+      return null
+    }
   }
 
   /**
@@ -1718,9 +1829,10 @@ export class AutomationExecutor {
       dispatchMode,
     }
 
-    // Evaluate conditions
+    // Evaluate conditions — typed by the sheet's field types when the wiring provides them (#4b).
     if (rule.conditions) {
-      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData)
+      const conditionOptions = await this.conditionEvaluationOptions(context)
+      const conditionsPassed = evaluateConditions(rule.conditions, context.recordData, conditionOptions)
       if (!conditionsPassed) {
         execution.status = 'skipped'
         execution.duration = Date.now() - startTime
@@ -2350,8 +2462,10 @@ export class AutomationExecutor {
     let matched = false
 
     try {
+      // #4b: branch conditions compare by field type exactly like the rule's top-level conditions.
+      const conditionOptions = await this.conditionEvaluationOptions(context)
       for (const branch of branches) {
-        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData)) {
+        if (branch.conditions && evaluateConditions(branch.conditions, context.recordData, conditionOptions)) {
           selected = branch
           matched = true
           break
@@ -2848,19 +2962,21 @@ export class AutomationExecutor {
   }
 
   /**
-   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
-   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
-   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
-   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
-   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   * The ADDRESSING half of the ②b write gate, and the ONLY place that decides it: is a write addressed at
+   * `targetSheetId` (with the raw `declaredTargetBaseId` claim) a same-base write relative to
+   * `triggerSheetId`, a cross-base write, or unresolvable? Read-only (at most two `meta_sheets` lookups), no
+   * authority check, no quota slot. `evaluateCrossBaseWriteGate` consumes it first; the rule-save check
+   * for 客户反馈 2026-09-24 #3 (`validateDeletedTriggerSelfMutationTargets` in automation-service.ts) consumes
+   * it too, because a same-base verdict means update/delete/lock address `context.recordId` — the TRIGGER
+   * record — whatever `targetSheetId` / `targetRecordId` say (executeUpdateRecord / executeDeleteRecord /
+   * executeLockRecord only retarget when `gate.crossBase`).
    */
-  async evaluateCrossBaseWriteGate(
+  async resolveCrossBaseWriteTarget(
     queryFn: AutomationDeps['queryFn'],
-    actorId: string | null,
     triggerSheetId: string,
     targetSheetId: string,
     declaredTargetBaseId: string | undefined,
-  ): Promise<CrossBaseWriteGate> {
+  ): Promise<CrossBaseWriteTarget> {
     // Fast-path: a write to the SAME sheet as the trigger, with no explicit cross-base `targetBaseId`,
     // is DEFINITIONALLY same-base — a sheet cannot exist in two bases — so skip the base lookups
     // entirely. This keeps a legitimate same-sheet write from fail-closing when the sheet row is
@@ -2884,7 +3000,7 @@ export class AutomationExecutor {
     if (rawTargetBaseId === undefined) {
       return {
         crossBase: true,
-        ok: false,
+        resolved: false,
         error: `Cross-base write target sheet ${targetSheetId} is missing or soft-deleted (no resolvable base)`,
       }
     }
@@ -2896,11 +3012,36 @@ export class AutomationExecutor {
     // same-set are same-base; a null/legacy base vs a set base is cross-base.
     if (triggerBaseId === targetBaseId) return { crossBase: false }
 
+    return { crossBase: true, resolved: true, targetBaseId, declaredBaseClaim }
+  }
+
+  /**
+   * ②b write-gate, CONTEXT-AGNOSTIC "new shape" (queryFn, actorId, triggerSheetId, targetSheetId,
+   * declaredTargetBaseId). The record-mutating executors delegate here via `evaluateCrossBaseWrite`, and the
+   * T3-5 approval cross-base resultWriteback backwrite calls it directly on the SAME executor instance so it
+   * shares the per-target-base write QUOTA (Q5) with update/create/delete/lock. Behaviour is unchanged from
+   * the pre-T3-5 method; only the trigger sheet/actor + queryFn are now explicit params instead of `context`.
+   */
+  async evaluateCrossBaseWriteGate(
+    queryFn: AutomationDeps['queryFn'],
+    actorId: string | null,
+    triggerSheetId: string,
+    targetSheetId: string,
+    declaredTargetBaseId: string | undefined,
+  ): Promise<CrossBaseWriteGate> {
+    // Addressing half (same-base vs cross-base vs unresolvable) — shared, byte-for-byte, with the rule-save
+    // check `validateDeletedTriggerSelfMutationTargets` (see resolveCrossBaseWriteTarget). Same queries in the
+    // same order as before the extraction.
+    const target = await this.resolveCrossBaseWriteTarget(queryFn, triggerSheetId, targetSheetId, declaredTargetBaseId)
+    if (!target.crossBase) return { crossBase: false }
+    if (target.resolved === false) return { crossBase: true, ok: false, error: target.error }
+    const { targetBaseId, declaredBaseClaim } = target
+
     // Cross-base AUTHORITY decision — claim==truth then base-write — via the shared, context-agnostic primitive
     // (C1: `resolveCrossBaseWriteAuthority`, the SAME primitive the cross-base mirror write-through consumes; see
     // the design-lock §3/§10). The primitive returns a structured reason; this adapter maps it back to the EXACT,
     // unchanged `CrossBaseWriteGate` error strings (order preserved: claim before writable). (`declaredBaseClaim`
-    // computed at the top, reused here.)
+    // is the trimmed claim computed by resolveCrossBaseWriteTarget, reused here.)
     const claimed = declaredBaseClaim
     const authority = await resolveCrossBaseWriteAuthority({
       actorId,
@@ -3085,6 +3226,10 @@ export class AutomationExecutor {
       // read-only field-config lookup — never touches `meta_records` — so it stays OUTSIDE the
       // transaction below (same placement as before this slice).
       await this.sanitizeRichLongTextInWritePayload(effectiveSheetId, patch)
+      // Field retype slice 3a (ADR §3.11 row 6): this writer keeps no field-type snapshot of its own, so take one
+      // here, BEFORE the fence (gated: conversion flag or writer fence off ⇒ null, no query). The handler below re-reads the
+      // same fields after the fence and refuses if a conversion retyped one while this write was queued.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, effectiveSheetId, Object.keys(patch))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3103,6 +3248,9 @@ export class AutomationExecutor {
       // `poolManager.get().transaction(...)` — is re-verified for THIS slice by the atomicity golden,
       // not assumed from D-1). A failed revision INSERT rolls the UPDATE back too — no half-write (an
       // updated `meta_records` row with no matching `meta_record_revisions` row) is possible.
+      // 客户反馈 2026-09-24 #3: did the UPDATE touch a row? Decided INSIDE the transaction (RETURNING), read
+      // after it: a 0-row update publishes NO chain event and NO real-time invalidation (see below).
+      let recordUpdated = false
       const txResult = await this.withTransaction(effectiveSheetId, async (query) => {
         // #4196 Class-A claim — FIRST statement, SAME transaction as the mutation+revision below. A
         // duplicate (retry/replay) short-circuits: return the already-applied success and skip the UPDATE
@@ -3110,6 +3258,14 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'update_record', config) === 'duplicate') {
           return this.alreadyAppliedResult('update_record')
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read of the patched fields; a type / option
+        // change since `schemaSnapshot` throws (rolls back the claim too) ⇒ the step fails, zero writes.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, effectiveSheetId, schemaSnapshot, Object.keys(patch))
+        // ADR §3.12, gated (Decision Register R-22): select / multiSelect values are validated against the same
+        // read with the record write paths' rules; a value outside the options fails the step (values-free), zero
+        // writes. multiSelect values are written normalised, as the record write paths write them. Gate off ⇒
+        // `currentFields` is null ⇒ `{}` ⇒ the patch is untouched (today's behaviour).
+        Object.assign(patch, validateAutomationOptionValues(currentFields, patch))
         // Record-lock guard (rank-8 review B1; decisions d/e/f). An automation acting on behalf of its
         // actor is NOT implicitly the locker/owner — overwriting a locked record is blocked. To write
         // through a lock the rule must first run a `lock_record{locked:false}` action (decision f). The
@@ -3190,18 +3346,37 @@ export class AutomationExecutor {
             snapshot: normalizeJson(updatedRow.data),
           })
         }
+        recordUpdated = updatedRow !== undefined
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // UPDATE + revision (any throw above rolls it back; the duplicate-claim early-return above skips it,
-        // exactly as it skips the legacy emit). Unconditional on `updatedRow` to mirror the legacy emit
-        // 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op (legacy emit below fires).
-        await enqueueRecordEventIfDurable(
-          { query, isTransaction: true } as unknown as TransactionalQueryable,
-          'multitable.record.updated',
-          chainEventPayload,
-        )
+        // exactly as it skips the legacy emit). Flag OFF ⇒ no-op (legacy emit below fires).
+        // 客户反馈 2026-09-24 #3: GATED on `updatedRow` (was "unconditional … to mirror the legacy emit").
+        // A 0-row same-base UPDATE (trigger record already gone — e.g. a `record.deleted` rule) changed
+        // nothing, so it must not manufacture a `multitable.record.updated` for downstream rules/webhooks:
+        // that ghost event re-fires record.updated rules on a record that does not exist, depth by depth.
+        // The step's reported status is unchanged (same-base 0-row leniency, see the comment above) — the
+        // defect was the emit, and `output.noop` now says so in the execution log.
+        if (updatedRow) {
+          await enqueueRecordEventIfDurable(
+            { query, isTransaction: true } as unknown as TransactionalQueryable,
+            'multitable.record.updated',
+            chainEventPayload,
+          )
+        }
         return null
       })
       if (txResult) return txResult
+
+      if (!recordUpdated) {
+        // 客户反馈 2026-09-24 #3: nothing changed ⇒ no legacy emit, no real-time invalidation. Same
+        // leniency on the reported status as before (pinned by the executor unit suites); the log carries a
+        // values-free marker instead of a bare success.
+        return {
+          actionType: 'update_record',
+          status: 'success',
+          output: { updatedFields: Object.keys(fields), noop: true, reason: TARGET_RECORD_MISSING_SKIP_REASON },
+        }
+      }
 
       // P1#2c REPLACE: flag OFF ⇒ legacy post-commit emit (byte-identical); flag ON ⇒ SUPPRESSED (the
       // same-txn enqueue above is the delivery path — keep-both would double-deliver the webhook sink).
@@ -3233,11 +3408,12 @@ export class AutomationExecutor {
     // shared per-target-base quota bucket).
     const targetSheetId = (config.targetSheetId as string) || context.sheetId
     const declaredTargetBaseId = typeof config.targetBaseId === 'string' ? config.targetBaseId : undefined
+    // Hoisted out of the try so the catch below can name the addressed record in the `skipped` result.
+    let effectiveSheetId = context.sheetId
+    let effectiveRecordId = context.recordId
 
     try {
       const gate = await this.evaluateCrossBaseWrite(targetSheetId, declaredTargetBaseId, context)
-      let effectiveSheetId = context.sheetId
-      let effectiveRecordId = context.recordId
       if (gate.crossBase) {
         if (gate.ok === false) {
           return { actionType: 'delete_record', status: 'failed', error: gate.error }
@@ -3311,21 +3487,28 @@ export class AutomationExecutor {
           | undefined
         // ②b claim==truth for the record: a cross-base delete must address a record that ACTUALLY lives in
         // `targetSheetId`. No row → the targetRecordId does not exist there → fail-closed (never a silent
-        // no-op success). Same-base keeps its leniency (a missing trigger record yields a 0-row DELETE
-        // reported as success) to avoid any behavior regression vs the other same-base sinks.
-        if (gate.crossBase && !lockRow) {
-          // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
-          // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
-          // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
-          // ledger exists to prevent). The method's outer catch reports the identical failed result.
-          // Consistent with the lock-conflict check just below, which already throws to roll back.
-          throw new Error(
-            `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
-          )
+        // no-op success).
+        // 客户反馈 2026-09-24 #3 (裁定 PR #6074): a SAME-BASE delete of a missing trigger record used to keep a
+        // "0-row DELETE reported as success" leniency — and still emitted a fresh `multitable.record.deleted`
+        // (new `_eventId`, depth+1), so a `record.deleted → delete_record` rule re-triggered itself until the
+        // depth guard cut it: ONE user delete ⇒ THREE execution logs. Now: no row ⇒ nothing to delete ⇒ the
+        // step is `skipped` (values-free reason) and NOTHING is published — no outbox row, no legacy emit, no
+        // real-time invalidation, no revision. The signal THROWS for the same reason the cross-base branch
+        // does: the transaction, and the Class-A claim taken above, roll back (no claim for a no-op).
+        if (!lockRow) {
+          if (gate.crossBase) {
+            // #4196 atomicity: THROW (not return) so this transaction — and the Class-A claim taken above —
+            // ROLLS BACK. A non-throwing `return {failed}` would COMMIT the claim for an action that never
+            // deleted anything, so a legitimate retry would skip as a FALSE duplicate (the exact hazard this
+            // ledger exists to prevent). The method's outer catch reports the identical failed result.
+            // Consistent with the lock-conflict check just below, which already throws to roll back.
+            throw new Error(
+              `Cross-base delete_record target record not found in target sheet: ${effectiveRecordId} ∉ ${effectiveSheetId}`,
+            )
+          }
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
         }
-        if (lockRow) {
-          ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
-        }
+        ensureRecordNotLocked(context.actorId ?? null, lockRow, () => new Error('Record is locked'))
 
         // D-2 (side-door delete recoverability, #4004; default OFF ⇒ every `sideDoorTrash` branch below is
         // dead and this method behaves byte-identically to D-1, §1.9). §1.2 anchor: ONE pre-generated uuid
@@ -3344,9 +3527,9 @@ export class AutomationExecutor {
         // §1.3: capture the INBOUND edges BEFORE the links DELETE below destroys both directions. No-op
         // unless BOTH the D-2 flag and the capture flag are on (§1.5 nesting). Over-cap ⇒
         // TombstoneCaptureCapExceededError propagates out of withTransaction to this method's catch ⇒ step
-        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). Skipped when
-        // there is no row: a same-base delete of a missing record must not anchor tombstones to a delete
-        // revision that will never be written.
+        // `failed`, whole txn rolled back, record NOT deleted (fail-closed, §1.4 / golden G7). (`lockRow` is
+        // always present from here on — the no-row case threw above; the guard is kept so the D-2 block
+        // reads as written and audited.)
         if (lockRow) {
           await captureSideDoorInboundTombstones(query, {
             sheetId: effectiveSheetId,
@@ -3414,15 +3597,24 @@ export class AutomationExecutor {
         // delete is rejected before this DELETE unless claim==truth + trigger-actor base-write.
         // lock-guarded: automation delete_record (C2a) — ensureRecordNotLocked enforced just above.
         // revision-emitted: automation delete_record, D-1 — recordRecordRevision(action:'delete') @2365.
-        await query(
+        const deleteRes = await query(
           'DELETE FROM meta_records WHERE id = $1 AND sheet_id = $2',
           [effectiveRecordId, effectiveSheetId],
         )
+        // 客户反馈 2026-09-24 #3 belt-and-braces: the row was locked FOR UPDATE above, so inside a real
+        // transaction this DELETE always removes it. On the autocommit fallback (no `deps.transaction`) a
+        // concurrent delete can land between the SELECT and this statement — a driver-reported 0 rows then
+        // means nothing was deleted, and nothing may be published (the throw also drops the revision written
+        // above when a real transaction is present). A driver that reports no rowCount is trusted.
+        if (typeof deleteRes.rowCount === 'number' && deleteRes.rowCount === 0) {
+          throw new SameBaseTargetRecordMissingSignal('delete_record')
+        }
 
         // P1#2c REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the
         // link cleanup + revision + DELETE (any throw above rolls it back; the duplicate-claim early-return
-        // above skips it, exactly as it skips the legacy emit). Unconditional on `lockRow` to mirror the
-        // legacy emit 1:1 (the 0-row same-base leniency still emitted). Flag OFF ⇒ no-op.
+        // above skips it, exactly as it skips the legacy emit). Reached ONLY when a row was actually deleted
+        // (客户反馈 2026-09-24 #3 — the former "unconditional on lockRow" 0-row emit was the self-chain).
+        // Flag OFF ⇒ no-op.
         await enqueueRecordEventIfDurable(
           { query, isTransaction: true } as unknown as TransactionalQueryable,
           'multitable.record.deleted',
@@ -3443,7 +3635,30 @@ export class AutomationExecutor {
 
       return { actionType: 'delete_record', status: 'success', output: { recordId: effectiveRecordId, sheetId: effectiveSheetId } }
     } catch (err) {
+      // 客户反馈 2026-09-24 #3: the transaction rolled back with nothing deleted and nothing published —
+      // report `skipped`, not `failed` (a missing trigger record is the expected state under `record.deleted`).
+      if (err instanceof SameBaseTargetRecordMissingSignal) {
+        return this.targetRecordMissingSkippedResult('delete_record', effectiveSheetId, effectiveRecordId)
+      }
       return { actionType: 'delete_record', status: 'failed', error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /**
+   * 客户反馈 2026-09-24 #3: the step result for a same-base record action whose target — the trigger record —
+   * no longer exists. `skipped` (so the execution log says what happened and a whole-rule run of only such
+   * steps reads `skipped`, not `success`), with a values-free reason and the ids the success path already
+   * reports. NO mutation, NO revision, NO event/outbox row, NO real-time fan-out ran.
+   */
+  private targetRecordMissingSkippedResult(
+    actionType: AutomationActionType,
+    sheetId: string,
+    recordId: string,
+  ): AutomationStepResult {
+    return {
+      actionType,
+      status: 'skipped',
+      output: { recordId, sheetId, reason: TARGET_RECORD_MISSING_SKIP_REASON },
     }
   }
 
@@ -3554,6 +3769,8 @@ export class AutomationExecutor {
       // validators, so sanitize any rich-longText value in `data` against the target sheet's
       // field config before it reaches the DB (inert-by-construction at every writer).
       await this.sanitizeRichLongTextInWritePayload(targetSheetId, data)
+      // Field retype slice 3a (ADR §3.11 row 6): pre-fence snapshot, same as executeUpdateRecord.
+      const schemaSnapshot = await loadFieldSchemaSnapshot(this.deps.queryFn, targetSheetId, Object.keys(data))
 
       // P1#2c REPLACE — build the chaining-event payload ONCE (stable `_eventId`) so the same-txn durable
       // enqueue (flag ON, inside the txn below) and the legacy post-commit emit (flag OFF) share one identity.
@@ -3586,6 +3803,11 @@ export class AutomationExecutor {
         if (await this.claimClassAOrSkip(query, identity, 'create_record', config) === 'duplicate') {
           return 'duplicate' as const
         }
+        // Field retype slice 3a (ADR §3.11 row 6): post-fence re-read before the INSERT.
+        const currentFields = await assertFieldSchemaUnchangedAfterFence(query, targetSheetId, schemaSnapshot, Object.keys(data))
+        // ADR §3.12, gated (R-22): same validation as update_record, on the same read. `data` is normalised in place,
+        // as sanitizeRichLongTextInWritePayload above already does; gate off ⇒ `{}` ⇒ untouched.
+        Object.assign(data, validateAutomationOptionValues(currentFields, data))
         // xbase-write-gated: routes through evaluateCrossBaseWrite (gate computed above) — a cross-base
         // create is rejected before this INSERT unless claim==truth + trigger-actor base-write (§1.3 vector).
         // revision-emitted: D-1c slice ③ (A4) — recordRecordRevision(action:'create') below, same txn.

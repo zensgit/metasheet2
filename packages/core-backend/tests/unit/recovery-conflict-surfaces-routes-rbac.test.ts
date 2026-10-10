@@ -34,6 +34,16 @@ const auditMocks = vi.hoisted(() => ({
   auditLog: vi.fn(),
 }))
 
+// #5829 — routes/spreadsheet-permissions.ts now runs a sheet AUTHORITY + LIVENESS gate before it
+// touches the grant table, and that gate is FAIL-CLOSED: an unstubbed capability lookup answers 403
+// and this file's subject (the 40001 → uniform 409 mapping at the db seam) would never be reached.
+// Stubbing only `resolveSheetCapabilities` keeps the gate's own behaviour out of scope here — it is
+// proven in tests/unit/spreadsheet-permissions-authority-liveness.test.ts — while letting these legs
+// reach the transaction they are about. Everything else in permission-service stays real.
+const permissionServiceMocks = vi.hoisted(() => ({
+  resolveSheetCapabilities: vi.fn(),
+}))
+
 vi.mock('../../src/db/pg', () => ({
   query: pgMocks.query,
   transaction: pgMocks.transaction,
@@ -49,6 +59,11 @@ vi.mock('../../src/rbac/service', () => ({
 
 vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
+}))
+
+vi.mock('../../src/multitable/permission-service', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../src/multitable/permission-service')>()),
+  resolveSheetCapabilities: permissionServiceMocks.resolveSheetCapabilities,
 }))
 
 // attendance-admin's module graph (not exercised here) — same seams as the
@@ -155,11 +170,21 @@ beforeEach(() => {
   rbacServiceMocks.invalidateUserPerms.mockReset()
   auditMocks.auditLog.mockReset()
   auditMocks.auditLog.mockResolvedValue(undefined)
+  // #5829 gate satisfied by default: a sheet-access manager acting on a LIVE sheet. Any leg that
+  // wanted a refusal instead would have to say so — and none here does; refusals are that spec's job.
+  permissionServiceMocks.resolveSheetCapabilities.mockReset()
+  permissionServiceMocks.resolveSheetCapabilities.mockResolvedValue({
+    capabilities: { canManageSheetAccess: true },
+    sheetLiveness: 'live',
+  })
 })
 
 describe('routes/roles.ts', () => {
   it('[recovery-census:roles:create] POST /api/roles: marker 40001 on the write → exact uniform retryable 409', async () => {
-    pgMocks.poolQuery.mockRejectedValue(markerError())
+    // The role row and its grants now share ONE transaction (so a refused or failed grant
+    // cannot leave a half-created role behind), so the marker surfaces out of
+    // `transaction()` rather than out of a bare `pool.query`.
+    pgMocks.transaction.mockRejectedValueOnce(markerError())
     const res = mockResponse()
     await invokeHandler(rolesRouter(), 'post', '/api/roles', {
       body: { id: 'role-1', name: 'Role', permissions: ['p:read'] },
@@ -169,15 +194,17 @@ describe('routes/roles.ts', () => {
     census.record('roles:create')
   })
 
-  it('POST /api/roles: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
+  it('POST /api/roles: non-40001 error → an ANSWER (500), not the old unhandled rejection', async () => {
+    // This router has no async error wrapper, so the previous rethrow reached nobody: the
+    // caller got no response at all and hung until its own timeout. Values-free body.
     const original = otherDbError()
-    pgMocks.poolQuery.mockRejectedValue(original)
+    pgMocks.transaction.mockRejectedValueOnce(original)
     const res = mockResponse()
-    await expect(invokeHandler(rolesRouter(), 'post', '/api/roles', {
-      body: { id: 'role-1', name: 'Role' },
-    }, res)).rejects.toBe(original)
-    // And nothing was written to the response — the original semantics exactly.
-    expect(res.body).toBeUndefined()
+    await invokeHandler(rolesRouter(), 'post', '/api/roles', {
+      body: { id: 'role-1', name: 'Role', permissions: ['p:read'] },
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
   })
 
   it('[recovery-census:roles:delete] DELETE /api/roles/:id: marker 40001 (FK cascade into role_permissions/user_roles) → 409', async () => {
@@ -193,31 +220,34 @@ describe('routes/roles.ts', () => {
     census.record('roles:delete')
   })
 
-  it('[recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the UPDATE → exact uniform retryable 409', async () => {
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] }) // SELECT before
-      .mockRejectedValueOnce(markerError()) // UPDATE roles
+  it('[recovery-census:roles:update] PUT /api/roles/:id: marker 40001 on the write → exact uniform retryable 409', async () => {
+    // Lookup, rename and permission replacement all run inside ONE transaction (the row
+    // lock is only a lock if the read that takes it is inside it), so the marker surfaces
+    // out of `transaction()` rather than out of a bare `pool.query`.
+    pgMocks.transaction.mockRejectedValueOnce(markerError())
     const res = mockResponse()
     await invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
       params: { id: 'role-1' },
-      body: { name: 'Renamed' },
+      body: { name: 'Renamed', permissions: ['p:read'] },
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
     census.record('roles:update')
   })
 
-  it('PUT /api/roles/:id: non-40001 error → the SAME rejection as before (no catch existed)', async () => {
+  it('PUT /api/roles/:id: non-40001 error → an ANSWER (500), not the old unhandled rejection', async () => {
+    // Before: the rejection escaped an async handler with no error wrapper and the caller
+    // saw NO response at all. The 4xx classifier above is worthless if every other cause —
+    // a concurrent role delete, a dropped connection — still hangs the request.
     const original = otherDbError()
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
-      .mockRejectedValueOnce(original)
+    pgMocks.transaction.mockRejectedValueOnce(original)
     const res = mockResponse()
-    await expect(invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
+    await invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
       params: { id: 'role-1' },
       body: { name: 'Renamed' },
-    }, res)).rejects.toBe(original)
-    expect(res.body).toBeUndefined()
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
   })
 })
 

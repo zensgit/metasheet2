@@ -624,3 +624,182 @@ describe('ApprovalCenterView — desktop empty-text i18n (report item O-8)', () 
     expect(empty?.textContent).toBe('暂无待处理审批')
   })
 })
+
+// ---------------------------------------------------------------------------------------------
+// O-8 / slice F8-1, acceptance gate 2 — English render scan of ApprovalCenterView with rows in
+// every tab, the "more filters" row open, a 我发起的 row carrying the 催办 (urge) button (before and
+// after a successful remind), and the row-reject and batch-reject dialogs open. ASCII fixtures;
+// whole `container` subtree (text + every attribute value) must carry no CJK outside the named
+// exceptions. The file's shared stubs above stay as they are (the tests above depend on them);
+// this describe registers local variants where a shared stub declares a copy prop but never
+// renders it: table-column label, select placeholder, popconfirm confirm/cancel text, tooltip.
+// The shared popconfirm stub teleports a confirm button into document.body — only `container`
+// is scanned, and this describe does not use that stub.
+// ---------------------------------------------------------------------------------------------
+describe('O-8 / F8-1 — ApprovalCenterView English render scan (urge row, filters, reject dialogs)', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  const ScanElTableColumn = defineComponent({
+    name: 'ElTableColumn',
+    props: { prop: String, label: String, width: [String, Number], minWidth: [String, Number], fixed: String, type: String, selectable: Function },
+    setup(props, { slots }) {
+      const registry = inject<ColumnRegistry | null>(COLUMN_REGISTRY_KEY, null)
+      if (registry) registry.register({ key: `col-${columnSeq++}`, prop: props.prop, label: props.label, defaultSlot: slots.default })
+      // Rendered inside the table stub's hidden column host, so the header label reaches the scan.
+      return () => h('span', { 'data-col-label': props.prop ?? '' }, props.label ?? '')
+    },
+  })
+  const ScanElSelect = defineComponent({
+    name: 'ElSelect',
+    props: { modelValue: [String, Array], placeholder: String, clearable: Boolean, multiple: Boolean, filterable: Boolean },
+    emits: ['update:modelValue', 'change'],
+    setup(props, { slots }) {
+      return () => h('select', { 'data-el-select': 'true', placeholder: props.placeholder }, slots.default?.())
+    },
+  })
+  const ScanElPopconfirm = defineComponent({
+    name: 'ElPopconfirm',
+    props: { title: String, confirmButtonText: String, cancelButtonText: String },
+    emits: ['confirm', 'cancel'],
+    setup(props, { slots }) {
+      return () => h('span', { 'data-el-popconfirm': 'scan' }, [
+        h('span', props.title ?? ''),
+        h('span', props.confirmButtonText ?? ''),
+        h('span', props.cancelButtonText ?? ''),
+        ...(slots.reference ? slots.reference() : []),
+      ])
+    },
+  })
+
+  function asciiRow(id: string, overrides: Record<string, unknown> = {}) {
+    return {
+      id,
+      sourceSystem: 'platform',
+      externalApprovalId: null,
+      workflowKey: null,
+      businessKey: null,
+      title: `Request ${id}`,
+      status: 'pending',
+      requester: { id: 'user_req', name: 'Requester One' },
+      subject: null,
+      policy: { rejectCommentRequired: true, allowRevoke: true, sourceOfTruth: 'platform' },
+      currentStep: 1,
+      totalSteps: 2,
+      templateId: null,
+      templateVersionId: null,
+      publishedDefinitionId: null,
+      requestNo: `AP-${id}`,
+      formSnapshot: {},
+      currentNodeKey: 'approval_1',
+      assignments: [],
+      createdAt: new Date(Date.now() - 5 * 24 * 3600 * 1000).toISOString(),
+      updatedAt: new Date().toISOString(),
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    window.localStorage.setItem('metasheet_locale', 'en')
+    useLocale().setLocale('en')
+    mockPendingApprovals.value = [asciiRow('p1'), asciiRow('p2')]
+    mockMyApprovals.value = [asciiRow('m1')]
+    mockCcApprovals.value = [asciiRow('c1', { status: 'approved', currentStep: null, currentNodeKey: null })]
+    mockCompletedApprovals.value = [asciiRow('d1', { status: 'rejected', currentStep: null, currentNodeKey: null })]
+    mockProcessedApprovals.value = [asciiRow('x1', { status: 'revoked', currentStep: null, currentNodeKey: null })]
+    mockLoading.value = false
+    mockError.value = null
+    mockRoute.name = 'approval-list'
+    mockRoute.query = {}
+    getPendingCountSpy.mockResolvedValue({ count: 2, unreadCount: 2 })
+    remindApprovalSpy.mockResolvedValue({ ok: true, data: {} })
+    getTemplateSpy.mockResolvedValue({ formSchema: { fields: [] } })
+    listTemplatesSpy.mockResolvedValue({ data: [], total: 0 })
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+    window.localStorage.setItem('metasheet_locale', 'zh-CN')
+    useLocale().setLocale('zh-CN')
+  })
+
+  async function mountForScan() {
+    const { surfacingElementStubs } = await import('./helpers/approvalLocaleScan')
+    const { default: ApprovalCenterView } = await import('../src/views/approval/ApprovalCenterView.vue')
+    app = createApp(defineComponent({ setup() { return () => h(ApprovalCenterView as any) } }))
+    const surfacing = surfacingElementStubs()
+    for (const name of ['ElAlert', 'ElDialog', 'ElEmpty', 'ElBadge', 'ElIcon', 'ElSkeleton', 'ElTooltip']) {
+      app.component(name, surfacing[name]!)
+    }
+    app.component('ElTabs', ElTabs)
+    app.component('ElTabPane', ElTabPane)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ScanElTableColumn)
+    app.component('ElTag', ElTag)
+    app.component('ElInput', ElInput)
+    app.component('ElSelect', ScanElSelect)
+    app.component('ElOption', ElOption)
+    app.component('ElDatePicker', ElDatePicker)
+    app.component('ElPagination', ElPagination)
+    app.component('ElButton', ElButton)
+    app.component('ElPopconfirm', ScanElPopconfirm)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi(6)
+  }
+
+  // Rendered CJK this slice does not convert (source file:line). None so far.
+  const EXCEPTIONS: Array<{ text: string; count: number; source: string }> = []
+
+  const q = (testid: string) => container!.querySelector(`[data-testid="${testid}"]`) as HTMLElement | null
+
+  it('urge row, filters and both reject dialogs render English chrome only; en -> zh -> en restores', async () => {
+    const { CJK, expectNoCjkOutside, renderedTextAndAttributes } = await import('./helpers/approvalLocaleScan')
+    await mountForScan()
+
+    // 催办 row present, English label, no title before a remind (urgeButtonState.ts).
+    const urge = q('approval-urge-m1')
+    expect(urge, 'the 我发起的 pending row must render its urge button').toBeTruthy()
+    expect(urge!.textContent?.trim()).toBe('Remind')
+    ;(q('approval-more-filters') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-template-filter'), 'more-filters row open').toBeTruthy()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en, before remind)')
+
+    // After a successful remind: reminded label + its English title.
+    urge!.click()
+    await flushUi(6)
+    expect(remindApprovalSpy).toHaveBeenCalled()
+    expect(elSuccessSpy, 'the remind toast follows the locale too').toHaveBeenCalledWith('Reminder sent')
+    const reminded = q('approval-urge-m1')!
+    expect(reminded.textContent?.trim()).toBe('Reminded')
+    expect(reminded.getAttribute('title')).toBe('Reminder sent (the server allows one per hour)')
+
+    // Row-reject dialog and batch-reject dialog open.
+    ;(q('approval-row-reject-p1') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-row-reject-dialog'), 'row-reject dialog open').toBeTruthy()
+    ;(q('test-select-all-rows') as HTMLButtonElement).click()
+    await flushUi()
+    ;(q('approval-batch-reject') as HTMLButtonElement).click()
+    await flushUi()
+    expect(q('approval-batch-reject-dialog'), 'batch-reject dialog open').toBeTruthy()
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en, reminded + dialogs open)')
+
+    useLocale().setLocale('zh-CN')
+    await flushUi()
+    expect(q('approval-urge-m1')!.textContent?.trim()).toBe('已催办')
+    expect(CJK.test(renderedTextAndAttributes(container!))).toBe(true)
+
+    useLocale().setLocale('en')
+    await flushUi()
+    expect(q('approval-urge-m1')!.textContent?.trim()).toBe('Reminded')
+    expectNoCjkOutside(renderedTextAndAttributes(container!), EXCEPTIONS, 'center (en again)')
+  })
+})

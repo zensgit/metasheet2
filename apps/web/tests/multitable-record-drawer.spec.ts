@@ -1,7 +1,13 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick } from 'vue'
 import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import { recordLabel } from '../src/multitable/utils/meta-record-labels'
+import * as authenticatedApi from '../src/utils/api'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  vi.unstubAllGlobals()
+})
 
 async function flushUi(cycles = 4) {
   for (let i = 0; i < cycles; i += 1) {
@@ -429,6 +435,11 @@ describe('MetaRecordDrawer', () => {
   })
 
   it('shows attachment filenames from attachment summaries', async () => {
+    vi.spyOn(authenticatedApi, 'apiFetch').mockResolvedValue(new Response(new Uint8Array([1]), { status: 200 }))
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = () => 'blob:drawer-thumbnail'
+      static revokeObjectURL = () => {}
+    })
     const container = document.createElement('div')
     document.body.appendChild(container)
 
@@ -471,7 +482,7 @@ describe('MetaRecordDrawer', () => {
     expect(container.textContent).not.toContain('att_2')
     const image = container.querySelector('img') as HTMLImageElement | null
     expect(image).not.toBeNull()
-    expect(image?.getAttribute('src')).toContain('thumbnail=true')
+    await vi.waitFor(() => expect(image?.getAttribute('src')).toBe('blob:drawer-thumbnail'))
 
     app.unmount()
     container.remove()

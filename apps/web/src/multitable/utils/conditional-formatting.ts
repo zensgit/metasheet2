@@ -19,6 +19,14 @@ import type {
   MetaRecord,
 } from '../types'
 import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
+import {
+  businessTodayKey,
+  dateTimeValueDayKey,
+  dayKeyOrdinal,
+  formatDateOnlyValue,
+  getBusinessTimezone,
+  resolveDateTimeTimezone,
+} from './business-timezone'
 
 // Single hex-validation surface, shared with the scale-rule authoring dialog
 // (ScaleFormattingDialog.vue) so editor-side validation matches the sanitizer.
@@ -161,6 +169,36 @@ function startOfDay(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
+/**
+ * 客户反馈 2026-09-24 #4c follow-up: the day-relative operators (is_today / is_in_last_n_days /
+ * is_in_next_n_days / is_overdue) compare CALENDAR DAYS, never the browser's day:
+ *   - a date-time field (dateTime / createdTime / modifiedTime) → the day its cell shows (the field's zone
+ *     rule: explicit non-`UTC` zone, else the business timezone), against today in that zone;
+ *   - a `date` field holding a string → the day its cell shows (`formatDateOnlyValue`, the grid's own day key,
+ *     #6204): a day as written keeps that day (floating day, #3417); a stored instant (`2026-09-17T16:00:00.000Z`)
+ *     is the day it falls on in the business timezone (`2026-09-18` in Asia/Shanghai), never its UTC day —
+ *     against the business today (the calendar views' "today").
+ * `null` for every other case (other field types, numbers / Dates in a `date` field, text that names no day)
+ * — the caller keeps the legacy local-day math. Zone rule mirrored from field-display `viewDayZone`
+ * (not imported: field-display imports this module).
+ */
+function dayOrdinals(value: unknown, field: MetaField | undefined, nowMs: number): { cell: number; today: number } | null {
+  if (!field) return null
+  let cellKey: string | null = null
+  let zone: string | null = null
+  if (field.type === 'dateTime' || field.type === 'createdTime' || field.type === 'modifiedTime') {
+    zone = field.type === 'dateTime' ? resolveDateTimeTimezone(field.property) : getBusinessTimezone()
+    cellKey = dateTimeValueDayKey(value, zone)
+  } else if (field.type === 'date' && typeof value === 'string') {
+    zone = getBusinessTimezone()
+    cellKey = formatDateOnlyValue(value)
+  }
+  if (!cellKey || !zone) return null
+  const cell = dayKeyOrdinal(cellKey)
+  const today = dayKeyOrdinal(businessTodayKey(zone, nowMs))
+  return cell === null || today === null ? null : { cell, today }
+}
+
 function toDateMs(value: unknown): number | null {
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.getTime() : null
   if (typeof value === 'number' && Number.isFinite(value)) return value
@@ -263,33 +301,43 @@ export function evaluateRule(
       return rule.operator === 'contains' ? matches : !matches
     }
     case 'is_today': {
+      const now = options.now ?? Date.now()
+      const days = dayOrdinals(cellValue, field, now)
+      if (days) return days.cell === days.today
       const cellMs = toDateMs(cellValue)
       if (cellMs === null) return false
-      const now = options.now ?? Date.now()
       return startOfDay(new Date(cellMs)) === startOfDay(new Date(now))
     }
     case 'is_in_last_n_days': {
-      const cellMs = toDateMs(cellValue)
       const days = toComparableNumber(rule.value)
-      if (cellMs === null || days === null || days <= 0) return false
+      if (days === null || days <= 0) return false
       const now = options.now ?? Date.now()
+      const ordinals = dayOrdinals(cellValue, field, now)
+      if (ordinals) return ordinals.cell >= ordinals.today - (days - 1) && ordinals.cell <= ordinals.today
+      const cellMs = toDateMs(cellValue)
+      if (cellMs === null) return false
       const startMs = startOfDay(new Date(now)) - (days - 1) * 86_400_000
       const endMs = startOfDay(new Date(now)) + 86_400_000
       return cellMs >= startMs && cellMs < endMs
     }
     case 'is_in_next_n_days': {
-      const cellMs = toDateMs(cellValue)
       const days = toComparableNumber(rule.value)
-      if (cellMs === null || days === null || days <= 0) return false
+      if (days === null || days <= 0) return false
       const now = options.now ?? Date.now()
+      const ordinals = dayOrdinals(cellValue, field, now)
+      if (ordinals) return ordinals.cell >= ordinals.today && ordinals.cell < ordinals.today + days
+      const cellMs = toDateMs(cellValue)
+      if (cellMs === null) return false
       const startMs = startOfDay(new Date(now))
       const endMs = startMs + days * 86_400_000
       return cellMs >= startMs && cellMs < endMs
     }
     case 'is_overdue': {
+      const now = options.now ?? Date.now()
+      const days = dayOrdinals(cellValue, field, now)
+      if (days) return days.cell < days.today
       const cellMs = toDateMs(cellValue)
       if (cellMs === null) return false
-      const now = options.now ?? Date.now()
       return cellMs < startOfDay(new Date(now))
     }
     default:

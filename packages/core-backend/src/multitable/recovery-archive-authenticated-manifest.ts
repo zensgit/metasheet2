@@ -19,7 +19,7 @@ import {
   RECOVERY_ARCHIVE_AEAD_ALGORITHM,
   RECOVERY_ARCHIVE_AEAD_NONCE_BYTES,
   RECOVERY_ARCHIVE_AEAD_TAG_BYTES,
-  type RecoveryArchiveKeyCustodyAdapter,
+  type RecoveryArchiveCustodyInput,
   type RecoveryArchiveTransactionDepthProbe,
 } from './recovery-archive-crypto'
 import {
@@ -73,7 +73,7 @@ export class RecoveryArchiveAuthenticatedManifestError extends Error {
 
 export interface RecoveryArchiveAuthenticatedManifestInput {
   readonly sealedManifest: RecoveryArchiveSealedSnapshotManifestResult
-  readonly keyCustody: RecoveryArchiveKeyCustodyAdapter
+  readonly keyCustody: RecoveryArchiveCustodyInput
   readonly transactionDepth: RecoveryArchiveTransactionDepthProbe
 }
 
@@ -119,7 +119,7 @@ export async function authenticateRecoveryArchiveSealedSnapshotManifest(
     'RECOVERY_ARCHIVE_AUTHENTICATED_MANIFEST_INVALID_INPUT',
     () =>
       createTransactionGuardedKeyCustody(
-        admitted.keyCustody as RecoveryArchiveKeyCustodyAdapter,
+        admitted.keyCustody as RecoveryArchiveCustodyInput,
         admitted.transactionDepth as RecoveryArchiveTransactionDepthProbe,
       ),
   )

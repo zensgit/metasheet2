@@ -138,18 +138,42 @@ describe('W4C-5 repository inventory: rollout-state/event DML has exactly one wr
   })
 
   it('NIT-3: an untracked scratch file matching the pattern is NOT walked by the real gate (git-tracked only)', () => {
-    // Positive proof the fix actually changed behavior: write a real untracked file INSIDE the
-    // repo tree (not an isolated os.tmpdir() decoy) containing an offending pattern, confirm the
-    // real gate's file list does not include it, then clean up. If this ever regresses back to
-    // a raw filesystem walk, this file WOULD appear in `files` and the assertion below reds.
-    const scratchPath = path.join(ROOT, 'packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts')
-    fs.writeFileSync(scratchPath, "export const x = 'UPDATE attendance_calculation_rollout_state SET state = 1'\n")
+    // CI flake fix (20260919, docs/development/ci-flake-scratch-file-in-source-tree-20260919.md):
+    // this used to write the scratch file INSIDE the live repo tree at
+    // `packages/core-backend/src/attendance/`. Under the full-suite `pool: 'forks'` run, that
+    // directory is also walked (concurrently, in a sibling fork) by
+    // `tests/unit/role-assignment-boundary.test.ts`'s writer census (`collectSweptFiles()` over
+    // `packages/core-backend/src`), which lists the directory, THEN reads every listed file a
+    // moment later. If its listing lands while this scratch file transiently exists but the read
+    // lands after this test's own `finally` has already deleted it, that sibling test gets
+    // `ENOENT: no such file or directory` on a file it never wrote and has no business touching —
+    // reproduced deterministically with a cross-process handshake (see the doc above); this test
+    // itself passed every time run alone, so the failure was purely a shared-filesystem race, not
+    // a defect in either test's own logic.
+    //
+    // Fixed by never writing into the live tree at all: an isolated, throwaway `git init`
+    // repository under `os.tmpdir()` (mkdtemp'd, single-use, always torn down) is not on any
+    // other test's walked path, so this and every sibling directory-walking gate are structurally
+    // decoupled — not just less likely to collide, incapable of colliding. `listGitTrackedFiles`
+    // already takes an arbitrary `rootDir` (never hardcoded to ROOT), so this needs no production
+    // code change: the isolated repo is exactly the same "git-tracked files only" code path this
+    // test exists to pin, just pointed at a directory the untracked-scratch-file regression this
+    // guards against (a reversion to a raw filesystem walk) would still be caught by: a raw walk
+    // over the isolated repo would list the untracked file too, where `git ls-files --cached`
+    // correctly reports none.
+    const isolatedRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'w4c5-nit3-isolated-repo-'))
     try {
-      const files = listGitTrackedFiles(ROOT)
-      const relatives = files.map((absolute) => path.relative(ROOT, absolute).split(path.sep).join('/'))
-      expect(relatives).not.toContain('packages/core-backend/src/attendance/zz-nit3-untracked-scratch.ts')
+      execFileSync('git', ['init', '-q'], { cwd: isolatedRepo })
+      const scratchPath = path.join(isolatedRepo, 'zz-nit3-untracked-scratch.ts')
+      fs.writeFileSync(scratchPath, "export const x = 'UPDATE attendance_calculation_rollout_state SET state = 1'\n")
+      // NON-VACUITY: the untracked file really is on disk in this repo, so an empty result below
+      // comes from git's tracking filter, not from a misrooted or empty directory.
+      expect(fs.existsSync(scratchPath)).toBe(true)
+
+      const files = listGitTrackedFiles(isolatedRepo)
+      expect(files).toEqual([])
     } finally {
-      fs.rmSync(scratchPath, { force: true })
+      fs.rmSync(isolatedRepo, { recursive: true, force: true })
     }
   })
 

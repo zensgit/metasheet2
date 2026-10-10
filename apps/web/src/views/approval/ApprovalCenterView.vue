@@ -2,20 +2,20 @@
   <PageShell width="wide">
     <PageHeader
       class="approval-center__header"
-      title="审批中心"
-      subtitle="集中处理待办、跟进我发起的申请，并快速识别超时事项"
+      :title="t.title"
+      :subtitle="t.subtitle"
     >
       <template #meta>
         <span class="approval-center__stat">
-          <span>待办</span>
+          <span>{{ t.statPending }}</span>
           <strong>{{ pendingTotalCount }}</strong>
         </span>
         <span class="approval-center__stat approval-center__stat--unread">
-          <span>未读</span>
+          <span>{{ t.statUnread }}</span>
           <strong>{{ pendingBadgeCount }}</strong>
         </span>
         <span v-if="activeFilterCount > 0" class="approval-center__filter-summary">
-          已启用 {{ activeFilterCount }} 项筛选
+          {{ filterSummaryText }}
         </span>
       </template>
       <template #actions>
@@ -25,16 +25,16 @@
           class="approval-center__create-button"
           @click="router.push({ name: 'approval-template-list' })"
         >
-          发起审批
+          {{ t.create }}
         </el-button>
       </template>
     </PageHeader>
 
-    <section class="approval-center__filters" aria-label="审批筛选">
+    <section class="approval-center__filters" :aria-label="t.filtersLabel">
       <div class="approval-center__filters-primary">
           <el-input
             v-model="searchText"
-            placeholder="搜索标题或审批编号"
+            :placeholder="t.searchPlaceholder"
             clearable
             class="approval-center__toolbar-search"
             data-testid="approval-search-input"
@@ -47,14 +47,14 @@
           </el-input>
           <el-select
             v-model="sourceSystemFilter"
-            placeholder="来源系统"
+            :placeholder="t.sourcePlaceholder"
             class="approval-center__toolbar-select"
             data-testid="approval-source-filter"
             @change="handleSourceSystemChange"
           >
-            <el-option label="全部来源" value="all" />
-            <el-option label="平台审批" value="platform" />
-            <el-option label="PLM 审批" value="plm" />
+            <el-option :label="t.sourceAll" value="all" />
+            <el-option :label="t.sourcePlatform" value="platform" />
+            <el-option :label="t.sourcePlm" value="plm" />
           </el-select>
           <el-button
             class="approval-center__filter-toggle"
@@ -63,25 +63,59 @@
             data-testid="approval-more-filters"
             @click="filtersExpanded = !filtersExpanded"
           >
-            {{ filtersExpanded ? '收起筛选' : '更多筛选' }}
+            {{ filtersExpanded ? t.filtersCollapse : t.filtersExpand }}
             <span v-if="advancedFilterCount > 0" class="approval-center__filter-count">
               {{ advancedFilterCount }}
             </span>
           </el-button>
+          <!-- F3-E1: server-side CSV export of the list on screen (current tab + applied filters).
+               Desktop chrome only, like the batch toolbar below: the mobile action set (ballot Q8)
+               is approve/reject/comment/initiate. Disabled for the PLM source, which the server
+               refuses for CSV; the reason is the visible hint line right under this row, not a
+               hover-only tooltip (a disabled button does not fire one). -->
+          <el-button
+            v-if="!isMobileLayout"
+            class="approval-center__export-button"
+            :disabled="exportDisabled"
+            :loading="exporting"
+            aria-describedby="approval-center-export-hint"
+            data-testid="approval-export-csv"
+            @click="handleExportCsv"
+          >
+            {{ exportCopy.button }}
+          </el-button>
       </div>
+      <p
+        v-if="!isMobileLayout"
+        id="approval-center-export-hint"
+        class="approval-center__export-hint"
+        data-testid="approval-export-hint"
+      >
+        {{ exportPlmBlocked ? exportCopy.plmBlocked : exportCopy.scopeHint }}
+      </p>
+      <p
+        v-if="!isMobileLayout && exportNotice"
+        class="approval-center__export-notice"
+        :class="`approval-center__export-notice--${exportNotice.tone}`"
+        :role="exportNotice.tone === 'error' ? 'alert' : 'status'"
+        :data-export-outcome="exportNotice.kind"
+        data-testid="approval-export-notice"
+      >
+        {{ exportNotice.text }}
+      </p>
 
       <div v-show="filtersExpanded" class="approval-center__filters-advanced">
           <el-select
             v-model="statusFilter"
-            placeholder="状态筛选"
+            :placeholder="t.statusPlaceholder"
             clearable
             class="approval-center__toolbar-select"
             @change="handleSearch"
           >
-            <el-option label="待处理" value="pending" />
-            <el-option label="已通过" value="approved" />
-            <el-option label="已驳回" value="rejected" />
-            <el-option label="已撤回" value="revoked" />
+            <el-option :label="t.statusPending" value="pending" />
+            <el-option :label="t.statusApproved" value="approved" />
+            <el-option :label="t.statusRejected" value="rejected" />
+            <el-option :label="t.statusRevoked" value="revoked" />
           </el-select>
           <!-- B3-03 (模板/时间筛选): additive filters composing with the existing status/source
                filters above — templateId + a created-at window, mirroring the backend's own
@@ -90,7 +124,7 @@
                via the route query (see `applyDeepLinkFilters` below). -->
           <el-select
             v-model="templateFilter"
-            placeholder="模板筛选"
+            :placeholder="t.templatePlaceholder"
             clearable
             filterable
             class="approval-center__toolbar-select approval-center__toolbar-select--wide"
@@ -108,9 +142,9 @@
             v-model="createdRange"
             type="daterange"
             unlink-panels
-            range-separator="至"
-            start-placeholder="发起开始日期"
-            end-placeholder="发起结束日期"
+            :range-separator="t.rangeSeparator"
+            :start-placeholder="t.rangeStartPlaceholder"
+            :end-placeholder="t.rangeEndPlaceholder"
             value-format="YYYY-MM-DD"
             class="approval-center__toolbar-daterange"
             data-testid="approval-created-range-filter"
@@ -123,7 +157,7 @@
             data-testid="approval-clear-filters"
             @click="clearFilters"
           >
-            清空筛选
+            {{ t.clearFilters }}
           </el-button>
       </div>
     </section>
@@ -138,7 +172,7 @@
       @close="store.error = null"
     >
       <template #default>
-        <el-button type="primary" link @click="loadCurrentTab">重新加载</el-button>
+        <el-button type="primary" link @click="loadCurrentTab">{{ t.reload }}</el-button>
       </template>
     </el-alert>
 
@@ -160,10 +194,10 @@
              tab switch (slice 1) plus after 全部标记已读 (slice 2). -->
         <template #label>
           <span class="approval-center__tab-label">
-            <span>待我处理</span>
+            <span>{{ t.tabPending }}</span>
             <el-tooltip
               v-if="pendingBadgeCount > 0"
-              :content="`待办 ${pendingTotalCount} / 其中 ${pendingBadgeCount} 未读`"
+              :content="pendingBadgeTooltip"
               placement="top"
             >
               <el-badge
@@ -189,7 +223,7 @@
           data-testid="approval-new-todo-pill"
           @click="handleNewTodoPillClick"
         >
-          {{ newTodoPill.delta }} 条新待办 · 点击刷新
+          {{ newTodoPillText }}
         </button>
         <!-- Wave 2 WP3 slice 2 — bulk 全部标记已读. Disabled until the server
              reports at least one unread row for the current filter so clicking
@@ -204,7 +238,7 @@
             v-if="selectedPending.length > 0"
             class="approval-center__selection-count"
             data-testid="approval-selection-count"
-          >已选 {{ selectedPending.length }} 项</span>
+          >{{ selectionCountText }}</span>
           <el-button
             type="success"
             plain
@@ -213,7 +247,7 @@
             data-testid="approval-batch-approve"
             @click="handleBatchApprove"
           >
-            批量通过
+            {{ t.batchApprove }}
           </el-button>
           <el-button
             type="danger"
@@ -223,7 +257,7 @@
             data-testid="approval-batch-reject"
             @click="openBatchReject"
           >
-            批量驳回
+            {{ t.batchReject }}
           </el-button>
           <el-button
             type="primary"
@@ -233,7 +267,7 @@
             data-testid="approval-mark-all-read"
             @click="handleMarkAllRead"
           >
-            全部标记已读
+            {{ t.markAllRead }}
           </el-button>
         </div>
         <div
@@ -241,13 +275,13 @@
           data-testid="attendance-approval-queue-entry"
         >
           <div class="approval-center__attendance-entry-copy">
-            <strong>考勤审批</strong>
+            <strong>{{ t.attendanceTitle }}</strong>
             <p>
-              补卡、请假、加班审批当前在考勤模块处理，不计入平台/PLM 待办列表。
+              {{ t.attendanceBody }}
             </p>
           </div>
           <el-button type="primary" plain @click="openAttendanceApprovalQueue">
-            待处理考勤审批
+            {{ t.attendanceOpen }}
           </el-button>
         </div>
         <ApprovalMobileList
@@ -284,9 +318,9 @@
           <template #actions="{ row }">
             <template v-if="isRowBatchSelectable(row)">
               <el-popconfirm
-                :title="`确认通过「${row.title}」？`"
-                confirm-button-text="确认"
-                cancel-button-text="取消"
+                :title="inlineApproveConfirmTitle(row.title)"
+                :confirm-button-text="t.confirm"
+                :cancel-button-text="t.cancel"
                 @confirm="handleInlineApprove(row)"
               >
                 <template #reference>
@@ -298,7 +332,7 @@
                     :data-testid="`approval-row-approve-${row.id}`"
                     @click.stop
                   >
-                    通过
+                    {{ t.approve }}
                   </el-button>
                 </template>
               </el-popconfirm>
@@ -309,7 +343,7 @@
                 :data-testid="`approval-row-reject-${row.id}`"
                 @click.stop="openRowReject(row)"
               >
-                驳回
+                {{ t.reject }}
               </el-button>
             </template>
           </template>
@@ -325,7 +359,28 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="我发起的" name="mine">
+      <el-tab-pane :label="t.tabMine" name="mine">
+        <!-- Test report 2026-10-08 (T6): new-outcome badge — the viewer's own requests decided by
+             someone else and not opened since — ONLY while the server's outcome-badge switch is on
+             (session feature `approvalMineOutcomeBadge`); off ⇒ the plain `t.tabMine` label above
+             and no count request. Its own count — never folded into 待办/未读 (lock B). -->
+        <template v-if="mineOutcomeBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabMine }}</span>
+            <el-tooltip
+              v-if="mineOutcomeUnseenCount > 0"
+              :content="mineOutcomeBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="mineOutcomeUnseenCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-mine-outcome-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.myApprovals"
@@ -345,6 +400,7 @@
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'mine' ? selectedApprovalId : null"
           :actions-width="170"
+          :unread-dot-for="mineOutcomeBadgeEnabled ? isOutcomeUnseenRow : undefined"
           @row-click="handleRowClick"
         >
           <!-- 催办: a requester nudge to the current approver, only meaningful while the instance is
@@ -353,7 +409,7 @@
                motivates the requester to actually click 催办. -->
           <template #actions="{ row }">
             <span v-if="row.status === 'pending'" :class="waitClass(row.createdAt)">
-              已等待 {{ formatRelativeWait(row.createdAt) }}
+              {{ waitingPhrase(formatRelativeWait(row.createdAt, isZh), isZh) }}
             </span>
             <el-button
               v-if="row.status === 'pending'"
@@ -380,7 +436,27 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="抄送我的" name="cc">
+      <el-tab-pane :label="t.tabCc" name="cc">
+        <!-- Test report 2026-10-08 (T3): unread-CC badge, ONLY while the server's CC-badge switch is
+             on (session feature `approvalCcUnreadBadge`); off ⇒ the plain `t.tabCc` label above, and
+             no count request at all. Its own count — never folded into 待办/未读 above (lock B). -->
+        <template v-if="ccUnreadBadgeEnabled" #label>
+          <span class="approval-center__tab-label">
+            <span>{{ t.tabCc }}</span>
+            <el-tooltip
+              v-if="ccUnreadCount > 0"
+              :content="ccUnreadBadgeTooltip"
+              placement="top"
+            >
+              <el-badge
+                :value="ccUnreadCount"
+                :max="99"
+                class="approval-center__tab-badge"
+                data-testid="approval-cc-unread-badge"
+              />
+            </el-tooltip>
+          </span>
+        </template>
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.ccApprovals"
@@ -399,6 +475,7 @@
           :empty-text="tabEmptyText.cc"
           :summary-line-for="summaryLineFor"
           :selected-row-id="masterDetailEnabled && activeTab === 'cc' ? selectedApprovalId : null"
+          :unread-dot-for="ccUnreadBadgeEnabled ? isCcUnreadRow : undefined"
           @row-click="handleRowClick"
         />
         <el-pagination
@@ -412,7 +489,7 @@
         />
       </el-tab-pane>
 
-      <el-tab-pane label="已完成" name="completed">
+      <el-tab-pane :label="t.tabCompleted" name="completed">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.completedApprovals"
@@ -448,7 +525,7 @@
            lookup, distinct from 已完成 (which is scoped to non-pending instances only). Shares the
            same read-only table shape as 抄送我的/已完成 (no selection/wait/actions column: the
            actor already acted, there is nothing left to do here). -->
-      <el-tab-pane label="我已处理" name="processed">
+      <el-tab-pane :label="t.tabProcessed" name="processed">
         <ApprovalMobileList
           v-if="isMobileLayout"
           :approvals="store.processedApprovals"
@@ -502,22 +579,22 @@
          in the manifest rather than aborting the batch). -->
     <el-dialog
       v-model="batchRejectDialogVisible"
-      title="批量驳回"
+      :title="t.batchRejectTitle"
       width="440px"
       data-testid="approval-batch-reject-dialog"
     >
       <p class="approval-center__batch-reject-summary">
-        将驳回所选的 {{ selectedPending.length }} 项审批。
+        {{ batchRejectSummaryText }}
       </p>
       <el-input
         v-model="batchRejectComment"
         type="textarea"
         :rows="3"
-        :placeholder="batchRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
+        :placeholder="batchRejectCommentRequired ? t.rejectReasonRequired : t.rejectOpinionOptional"
         data-testid="approval-batch-reject-comment"
       />
       <template #footer>
-        <el-button data-testid="approval-batch-reject-cancel" @click="batchRejectDialogVisible = false">取消</el-button>
+        <el-button data-testid="approval-batch-reject-cancel" @click="batchRejectDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="danger"
           :loading="batchRunning"
@@ -525,7 +602,7 @@
           data-testid="approval-batch-reject-confirm"
           @click="handleBatchReject"
         >
-          确认驳回
+          {{ t.confirmReject }}
         </el-button>
       </template>
     </el-dialog>
@@ -535,7 +612,7 @@
          dialog's own state so the two flows never cross-contaminate each other's comment/error. -->
     <el-dialog
       v-model="rowRejectDialogVisible"
-      title="驳回审批"
+      :title="t.rowRejectTitle"
       width="440px"
       data-testid="approval-row-reject-dialog"
     >
@@ -549,17 +626,17 @@
         class="approval-center__row-reject-error"
       />
       <p v-if="rowRejectTarget" class="approval-center__row-reject-summary">
-        确认驳回「{{ rowRejectTarget.title }}」？
+        {{ rowRejectSummaryText(rowRejectTarget.title) }}
       </p>
       <el-input
         v-model="rowRejectComment"
         type="textarea"
         :rows="3"
-        :placeholder="rowRejectCommentRequired ? '驳回原因（必填）' : '驳回意见（选填）'"
+        :placeholder="rowRejectCommentRequired ? t.rejectReasonRequired : t.rejectOpinionOptional"
         data-testid="approval-row-reject-comment"
       />
       <template #footer>
-        <el-button data-testid="approval-row-reject-cancel" @click="rowRejectDialogVisible = false">取消</el-button>
+        <el-button data-testid="approval-row-reject-cancel" @click="rowRejectDialogVisible = false">{{ t.cancel }}</el-button>
         <el-button
           type="danger"
           :loading="rowRejectSubmitting"
@@ -567,7 +644,7 @@
           data-testid="approval-row-reject-confirm"
           @click="submitRowReject"
         >
-          确认驳回
+          {{ t.confirmReject }}
         </el-button>
       </template>
     </el-dialog>
@@ -577,33 +654,38 @@
          the failed subset (same action + comment) without re-selecting anything. -->
     <el-dialog
       v-model="batchResultDialogVisible"
-      title="批量处理结果"
+      :title="t.batchResultTitle"
       width="480px"
       data-testid="approval-batch-result-dialog"
     >
       <p class="approval-center__batch-result-summary">
-        <template v-if="batchSucceededCount > 0">成功 {{ batchSucceededCount }} 项，失败 {{ batchFailureRows.length }} 项：</template>
-        <template v-else>全部 {{ batchFailureRows.length }} 项处理失败：</template>
+        <!-- 撤销轮: a decision the server accepted for a round other than the one confirmed on screen is
+             counted on its own — it is not a failure (the row's own line says to refresh and check). -->
+        {{ batchResultSummaryText }}
       </p>
       <ul class="approval-center__batch-result-list">
         <li
           v-for="row in batchFailureRows"
           :key="row.id"
           class="approval-center__batch-result-item"
+          :data-batch-result-kind="row.unconfirmed ? 'unconfirmed' : 'failed'"
         >
           <div class="approval-center__batch-result-item-title">{{ row.requestNo }} · {{ row.title }}</div>
           <div class="approval-center__batch-result-item-message">{{ row.message }}</div>
         </li>
       </ul>
       <template #footer>
-        <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">关闭</el-button>
+        <el-button data-testid="approval-batch-result-close" @click="batchResultDialogVisible = false">{{ t.close }}</el-button>
+        <!-- 撤销轮: an accepted-but-unconfirmed row is not a failure, so it is never retried; with no true
+             failure left the button is disabled. -->
         <el-button
           type="primary"
           :loading="batchRunning"
+          :disabled="batchTrueFailureCount === 0"
           data-testid="approval-batch-retry"
           @click="retryBatchFailures"
         >
-          重试失败项
+          {{ t.retryFailed }}
         </el-button>
       </template>
     </el-dialog>
@@ -618,17 +700,42 @@ import { ElMessage } from 'element-plus'
 import type { UnifiedApprovalDTO, ApprovalStatus } from '../../types/approval'
 import { useApprovalStore } from '../../approvals/store'
 import { useApprovalPermissions } from '../../approvals/permissions'
-import { dispatchAction, getApproval, getPendingCount, markAllApprovalsRead, remindApproval, listTemplates } from '../../approvals/api'
+import {
+  APPROVAL_EXPORT_UNEXPECTED_RESPONSE,
+  ApprovalApiError,
+  dispatchAction,
+  exportApprovalsCsv,
+  getApproval,
+  getCcUnreadCount,
+  getMineOutcomesUnseenCount,
+  getPendingCount,
+  markAllApprovalsRead,
+  markApprovalRead,
+  remindApproval,
+  listTemplates,
+  type ApprovalCsvExportResult,
+  type ApprovalExportQuery,
+} from '../../approvals/api'
+import { isNetworkUnavailableError, networkUnavailableMessage } from '../../utils/networkErrors'
 import { urgeButtonState } from '../../approvals/urgeButtonState'
 import { runApprovalBatchAction, type ApprovalBatchActionResult } from '../../approvals/useApprovalBatchActions'
+import {
+  canDecideCancelRoundWith,
+  dispatchApprovalDecision,
+  isCancelRoundActedRoundUnconfirmed,
+  isCancelRoundClientRefusal,
+  isCancelRoundWorkflow,
+} from '../../approvals/cancelRound'
 import { useApprovalCountsRealtime, type ApprovalCountsUpdatedPayload } from '../../approvals/useApprovalCountsRealtime'
 import { useApprovalListFieldSummary } from '../../approvals/useApprovalListFieldSummary'
+import { ensureUserNamesResolved } from '../../approvals/directoryResolve'
 import { createDetailPaneController } from '../../approvals/approvalCenterDetailPaneController'
 import { newTodoPillState } from '../../approvals/newTodoPill'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { useMobileViewport } from '../../composables/useMobileViewport'
 import { useLocale } from '../../composables/useLocale'
-import { formatRelativeWait, waitSeverity } from '../../approvals/relativeWait'
+import { formatRelativeWait, waitingPhrase, waitSeverity } from '../../approvals/relativeWait'
+import { CENTER_EN, CENTER_ZH } from './approvalCenterLabels'
 import ApprovalMobileList from './ApprovalMobileList.vue'
 import ApprovalCenterTable from './ApprovalCenterTable.vue'
 import ApprovalCenterDetailPane from './ApprovalCenterDetailPane.vue'
@@ -638,14 +745,14 @@ import PageHeader from '../../components/layout/PageHeader.vue'
 const router = useRouter()
 const route = useRoute()
 const store = useApprovalStore()
-const { canWrite } = useApprovalPermissions()
+const { canWrite, permissions: approvalAccess } = useApprovalPermissions()
 
 // B2-01 (待办列表关键字段摘要) — lazy per-templateId FormSchema cache + row summary-line lookup,
 // shared by the desktop table below (all four tabs) and ApprovalMobileList (passed the raw
 // `templateSchemas` cache as a prop). See `useApprovalListFieldSummary.ts` for the full rationale
 // (live-template substitute for the list DTO's missing frozen formSchema, the live-label drift
 // tradeoff, and the session-scoped negative caching on fetch failure).
-const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor } = useApprovalListFieldSummary()
+const { schemas: templateSchemas, ensureLoadedForRows, summaryLineFor, summaryUserIdsFor } = useApprovalListFieldSummary()
 const allVisibleApprovals = computed<UnifiedApprovalDTO[]>(() => [
   ...store.pendingApprovals,
   ...store.myApprovals,
@@ -669,6 +776,12 @@ watch(allVisibleApprovals, (rows) => {
 const { hasFeature } = useFeatureFlags()
 const { isMobile } = useMobileViewport()
 const isMobileLayout = computed(() => hasFeature('approvalMobile') && isMobile.value)
+
+// Test report 2026-10-08 (T3): the 抄送我的 unread badge + row dots. Mirrors the server switch the
+// count endpoint is gated on; while false nothing below issues a request or renders anything.
+const ccUnreadBadgeEnabled = computed(() => hasFeature('approvalCcUnreadBadge'))
+// Test report 2026-10-08 (T6): the 我发起的 new-outcome badge + row dots, same discipline.
+const mineOutcomeBadgeEnabled = computed(() => hasFeature('approvalMineOutcomeBadge'))
 
 // UI-7 (approval-parity-master-design-lock-20260817.md §4 UI-7) — desktop master-detail pane.
 // Reuses the SAME matchMedia-based composable/pattern as `isMobileLayout` above (a second,
@@ -726,7 +839,7 @@ const paneController = createDetailPaneController((id: string) => getApproval(id
   if ('approval' in patch) paneApproval.value = patch.approval ?? null
   if (patch.loading !== undefined) paneLoading.value = patch.loading
   if (patch.error !== undefined) paneError.value = patch.error
-})
+}, () => isZh.value)
 
 // Prefers the already-known list row (zero cost, immediate paint); falls back to the fetched
 // detail once available so the pane still renders after the id has paged/filtered off-screen or
@@ -741,6 +854,17 @@ const paneShowQuickActions = computed(() => {
   return activeTab.value === 'pending' && !!row && isRowBatchSelectable(row)
 })
 const paneSummaryLine = computed(() => (paneDisplayRow.value ? summaryLineFor(paneDisplayRow.value) : ''))
+// Test report 2026-10-08 T4b (gate r1 P3-4): the pane's row is not always a list row. A `?detail=`
+// deep link to an instance that is not on the loaded page renders the single-fetch `paneApproval`,
+// which `allVisibleApprovals` (and so `ensureLoadedForRows`' resolve) never sees, so its summary's
+// 人员 ids were never queued. This reads the pane row against the CACHED schema only: it re-fires when
+// a list row sharing the template loads that schema after the pane opened, and it never fetches a
+// template for the pane (the B2-01 summary stays cache-only).
+watch(
+  () => summaryUserIdsFor(paneDisplayRow.value),
+  (ids) => ensureUserNamesResolved(ids),
+  { immediate: true },
+)
 // Reuses the EXACT same shared gate the row-level inline approve button already reads
 // (`inlineApprovingId`) — never a second, independently-tracked loading flag. This is also the
 // mechanism that makes a "pane bypasses the shared handler" mutation mechanically detectable: if
@@ -825,6 +949,32 @@ function handleDetailPaneKeydown(event: KeyboardEvent): void {
 // though the mobile-layout path was already correct. Renamed (was `mobileEmptyText`) and reused
 // for both paths — one source, not two copies that can drift again.
 const { isZh } = useLocale()
+// O-8 / F8-1: the rest of this view's chrome reads the same locale through approvalCenterLabels.ts
+// (flat strings) and the small interpolating helpers below (counts / titles).
+const t = computed(() => (isZh.value ? CENTER_ZH : CENTER_EN))
+const filterSummaryText = computed(() => (isZh.value ? `已启用 ${activeFilterCount.value} 项筛选` : `${activeFilterCount.value} filter(s) active`))
+const pendingBadgeTooltip = computed(() => (isZh.value ? `待办 ${pendingTotalCount.value} / 其中 ${pendingBadgeCount.value} 未读` : `${pendingTotalCount.value} to-do / ${pendingBadgeCount.value} unread`))
+const ccUnreadBadgeTooltip = computed(() => `${ccUnreadCount.value} ${t.value.ccUnreadBadgeSuffix}`)
+const mineOutcomeBadgeTooltip = computed(() => `${mineOutcomeUnseenCount.value} ${t.value.mineOutcomeBadgeSuffix}`)
+const newTodoPillText = computed(() => (isZh.value ? `${newTodoPill.value.delta} 条新待办 · 点击刷新` : `${newTodoPill.value.delta} new to-do(s) · click to refresh`))
+const selectionCountText = computed(() => (isZh.value ? `已选 ${selectedPending.value.length} 项` : `${selectedPending.value.length} selected`))
+const batchRejectSummaryText = computed(() => (isZh.value ? `将驳回所选的 ${selectedPending.value.length} 项审批。` : `The ${selectedPending.value.length} selected approval(s) will be rejected.`))
+function inlineApproveConfirmTitle(title: string | null): string {
+  return isZh.value ? `确认通过「${title}」？` : `Approve "${title}"?`
+}
+function rowRejectSummaryText(title: string | null): string {
+  return isZh.value ? `确认驳回「${title}」？` : `Reject "${title}"?`
+}
+function batchDoneToast(action: 'approve' | 'reject', count: number): string {
+  if (action === 'approve') return isZh.value ? `已通过 ${count} 项` : `Approved ${count} item(s)`
+  return isZh.value ? `已驳回 ${count} 项` : `Rejected ${count} item(s)`
+}
+function urgeRetryAfterToast(minutes: number): string {
+  return isZh.value ? `催办过于频繁，请 ${minutes} 分钟后再试` : `Too many reminders. Try again in ${minutes} min.`
+}
+function markedReadToast(count: number): string {
+  return isZh.value ? `已标记 ${count} 条为已读` : `Marked ${count} as read`
+}
 const tabEmptyText = computed(() => {
   if (isZh.value) {
     return {
@@ -859,7 +1009,7 @@ const remindingIds = ref<Set<string>>(new Set())
 const remindedIds = ref<Set<string>>(new Set())
 
 function urgeState(rowId: string) {
-  return urgeButtonState(rowId, remindingIds.value, remindedIds.value)
+  return urgeButtonState(rowId, remindingIds.value, remindedIds.value, isZh.value)
 }
 
 // B1-03: 已等待 aging severity class — the 我发起的 tab's inline hint next to 催办 (same
@@ -879,8 +1029,12 @@ function waitClass(createdAt: string): string {
 function isHandlerNodeRow(row: UnifiedApprovalDTO): boolean {
   return row.currentNodeType === 'handler'
 }
+// 撤销轮 rows decide through the attendance route, so their approve / reject affordances (inline,
+// pane, batch) follow the grant that route checks (`canDecideCancelRoundWith`) — the same predicate
+// the detail view uses. Display only; the route remains the authority.
 function isRowBatchSelectable(row: UnifiedApprovalDTO): boolean {
   return row.status === 'pending' && !isAttendanceApproval(row) && !isHandlerNodeRow(row)
+    && (!isCancelRoundWorkflow(row) || canDecideCancelRoundWith(approvalAccess?.value))
 }
 
 // UF-8 (design-lock §3.6 "状态 = 首屏骨架屏"): first paint only — `store.loading` is a single
@@ -914,15 +1068,36 @@ interface ApprovalBatchFailureRow {
   title: string
   requestNo: string
   message: string
+  /** 撤销轮: accepted by the server, but not confirmed to be the round on screen — not a failure. */
+  unconfirmed: boolean
 }
 const batchResultDialogVisible = ref(false)
 const batchFailureRows = ref<ApprovalBatchFailureRow[]>([])
 const batchSucceededCount = ref(0)
+const batchUnconfirmedCount = computed(() => batchFailureRows.value.filter((row) => row.unconfirmed).length)
+const batchTrueFailureCount = computed(() => batchFailureRows.value.length - batchUnconfirmedCount.value)
+// O-8 / F8-1: the batch-result summary line, one locale at a time (was three inline templates).
+const batchResultSummaryText = computed(() => {
+  const succeeded = batchSucceededCount.value
+  const unconfirmed = batchUnconfirmedCount.value
+  const failed = batchTrueFailureCount.value
+  const total = batchFailureRows.value.length
+  if (unconfirmed > 0) {
+    return isZh.value
+      ? `成功 ${succeeded} 项，已提交但未能确认 ${unconfirmed} 项，失败 ${failed} 项：`
+      : `${succeeded} succeeded, ${unconfirmed} submitted but not confirmed, ${failed} failed:`
+  }
+  if (succeeded > 0) return isZh.value ? `成功 ${succeeded} 项，失败 ${total} 项：` : `${succeeded} succeeded, ${total} failed:`
+  return isZh.value ? `全部 ${total} 项处理失败：` : `All ${total} item(s) failed:`
+})
 const lastBatchAction = ref<'approve' | 'reject'>('approve')
 const lastBatchComment = ref('')
 let batchRowSnapshot = new Map<string, UnifiedApprovalDTO>()
 
-function buildFailureRows(failed: ApprovalBatchActionResult['failed']): ApprovalBatchFailureRow[] {
+function buildFailureRows(
+  failed: ApprovalBatchActionResult['failed'],
+  unconfirmedIds: ReadonlySet<string>,
+): ApprovalBatchFailureRow[] {
   return failed.map(({ id, message }) => {
     const row = batchRowSnapshot.get(id)
     return {
@@ -930,6 +1105,7 @@ function buildFailureRows(failed: ApprovalBatchActionResult['failed']): Approval
       title: row?.title ?? id,
       requestNo: row?.requestNo ?? '-',
       message,
+      unconfirmed: unconfirmedIds.has(id),
     }
   })
 }
@@ -938,15 +1114,31 @@ async function dispatchBatchAndHandleResult(
   ids: string[],
   action: 'approve' | 'reject',
   comment: string,
+  // 撤销轮: accepted-but-unconfirmed rows from the previous pass — not re-sent, kept in the manifest.
+  carriedUnconfirmed: ApprovalBatchFailureRow[] = [],
 ): Promise<void> {
   const trimmed = comment.trim()
+  const unconfirmedIds = new Set<string>()
   const result = await runApprovalBatchAction(
     ids,
     () => (trimmed ? { action, comment: trimmed } : { action }),
-    (id, req) => dispatchAction(id, req),
+    // 撤销轮 rows decide through the attendance route (approvals/cancelRound.ts); the snapshot taken
+    // at launch carries each row's workflowKey / businessKey for that decision. Every id comes from
+    // that snapshot, so a missing entry is refused — it is never re-sent as a generic decision.
+    async (id, req) => {
+      const row = batchRowSnapshot.get(id)
+      if (!row) throw new Error(t.value.actionFailedRefresh)
+      try {
+        return await dispatchApprovalDecision(row, req, dispatchAction)
+      } catch (error) {
+        // accepted but not confirmed to be this row's round: still listed, counted apart from failures
+        if (isCancelRoundActedRoundUnconfirmed(error)) unconfirmedIds.add(id)
+        throw error
+      }
+    },
   )
-  if (result.failed.length === 0) {
-    ElMessage.success(`已${action === 'approve' ? '通过' : '驳回'} ${result.succeeded.length} 项`)
+  if (result.failed.length === 0 && carriedUnconfirmed.length === 0) {
+    ElMessage.success(batchDoneToast(action, result.succeeded.length))
     batchResultDialogVisible.value = false
     batchFailureRows.value = []
   } else {
@@ -955,7 +1147,7 @@ async function dispatchBatchAndHandleResult(
     lastBatchAction.value = action
     lastBatchComment.value = comment
     batchSucceededCount.value = result.succeeded.length
-    batchFailureRows.value = buildFailureRows(result.failed)
+    batchFailureRows.value = [...carriedUnconfirmed, ...buildFailureRows(result.failed, unconfirmedIds)]
     batchResultDialogVisible.value = true
   }
   clearPendingSelection()
@@ -980,14 +1172,17 @@ async function runBatch(action: 'approve' | 'reject', comment: string): Promise<
 // `batchRowSnapshot` already carries these rows' title/requestNo from the original launch, so a
 // still-failing row keeps its label; `dispatchBatchAndHandleResult` overwrites `batchFailureRows`
 // in place with whatever is left (or closes the dialog on full success).
+// 撤销轮: a row the server accepted but the page could not confirm is not a failure — it is not
+// re-sent, and it stays in the manifest (with its own "refresh and check" line) after the retry.
 async function retryBatchFailures(): Promise<void> {
   if (batchRunning.value) return
-  const ids = batchFailureRows.value.map((row) => row.id)
+  const ids = batchFailureRows.value.filter((row) => !row.unconfirmed).map((row) => row.id)
   if (ids.length === 0) return
+  const carried = batchFailureRows.value.filter((row) => row.unconfirmed)
   batchRunning.value = true
   batchAction.value = lastBatchAction.value
   try {
-    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value)
+    await dispatchBatchAndHandleResult(ids, lastBatchAction.value, lastBatchComment.value, carried)
   } finally {
     batchRunning.value = false
     batchAction.value = null
@@ -1051,11 +1246,13 @@ async function handleInlineApprove(row: UnifiedApprovalDTO): Promise<void> {
   if (inlineApprovingId.value) return
   inlineApprovingId.value = row.id
   try {
-    await dispatchAction(row.id, { action: 'approve' })
-    ElMessage.success('审批已通过')
+    await dispatchApprovalDecision(row, { action: 'approve' }, dispatchAction)
+    ElMessage.success(t.value.toastApproved)
     loadCurrentTab()
   } catch (error) {
-    ElMessage.error(error instanceof Error && error.message ? error.message : '操作失败，请重试')
+    ElMessage.error(error instanceof Error && error.message ? error.message : t.value.actionFailedRetry)
+    // 撤销轮: the row was not (or could not be confirmed as) the leave's pending round — reload the list.
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     inlineApprovingId.value = null
   }
@@ -1090,14 +1287,15 @@ async function submitRowReject(): Promise<void> {
   rowRejectSubmitting.value = true
   rowRejectError.value = null
   try {
-    await dispatchAction(target.id, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' })
-    ElMessage.success('审批已驳回')
+    await dispatchApprovalDecision(target, trimmed ? { action: 'reject', comment: trimmed } : { action: 'reject' }, dispatchAction)
+    ElMessage.success(t.value.toastRejected)
     rowRejectDialogVisible.value = false
     loadCurrentTab()
   } catch (error) {
     // Mirrors B1-04's dialog-scoped inline error: keep the dialog open with the server's own
     // reason instead of a toast, so the typed comment is never lost on a retry-in-place.
-    rowRejectError.value = error instanceof Error && error.message ? error.message : '操作失败，请重试'
+    rowRejectError.value = error instanceof Error && error.message ? error.message : t.value.actionFailedRetry
+    if (isCancelRoundClientRefusal(error)) loadCurrentTab()
   } finally {
     rowRejectSubmitting.value = false
   }
@@ -1111,18 +1309,18 @@ async function handleUrge(row: UnifiedApprovalDTO): Promise<void> {
     const result = await remindApproval(row.id)
     if (result.ok) {
       remindedIds.value.add(row.id)
-      ElMessage.success('已发送催办提醒')
+      ElMessage.success(t.value.urgeSent)
     } else if (result.status === 429) {
       // 429 means the server's hourly window already holds a nudge for this instance+user, so the
       // row genuinely IS 已催办 — recording it stops the user re-clicking into the same rejection.
       remindedIds.value.add(row.id)
       const retry = result.error.retryAfterSeconds
-      ElMessage.warning(retry ? `催办过于频繁，请 ${Math.ceil(retry / 60)} 分钟后再试` : '催办过于频繁，请稍后再试')
+      ElMessage.warning(retry ? urgeRetryAfterToast(Math.ceil(retry / 60)) : t.value.urgeTooFrequent)
     } else {
-      ElMessage.error(result.error.message || '催办失败，请重试')
+      ElMessage.error(result.error.message || t.value.urgeFailed)
     }
   } catch {
-    ElMessage.error('催办失败，请重试')
+    ElMessage.error(t.value.urgeFailed)
   } finally {
     remindingIds.value.delete(row.id)
   }
@@ -1163,6 +1361,65 @@ function handleRealtimeCountsUpdated(payload: ApprovalCountsUpdatedPayload): voi
   // surface the G-B2-11 pill below) without ever moving `pendingCountAtLoad` — the whole point of
   // the pill is to notice this push happened while the list itself sat unrefreshed.
   applyPendingBadgeCount(scopedCounts.count, scopedCounts.unreadCount)
+  // The tab badges have no event of their own (test report 2026-10-08: no new realtime event in
+  // this slice). An existing counts frame — e.g. the one the server sends this user after their
+  // own mark-read — is used as a cue to re-ask; the frame's payload is never read for them.
+  void refreshTabBadgeCounts()
+}
+
+// Test report 2026-10-08 — tab read-state badges. Each is its OWN count from its own endpoint,
+// requested only while its session feature is on, and never mixed into 待办 / 未读 above (todo-center
+// lock B keeps those on active seats). Refreshed on every list (re)load, on tab switch (both go
+// through loadCurrentTab), after a pane read, and on an existing approval counts frame — there is
+// no dedicated realtime event, so a CC that arrives while the page sits idle shows on the next of
+// those. Decorative like the pending badge: a failed or disabled count hides the badge (0).
+// The NEWEST request wins: several refreshes can be in flight at once (a list reload, a counts
+// frame, a pane read, a source change), and an older answer that lands last — e.g. the previous
+// source's count arriving after a source change — must not overwrite the newer one.
+const ccUnreadCount = ref(0)
+let ccUnreadCountRequest = 0
+async function refreshCcUnreadCount(): Promise<void> {
+  const request = ++ccUnreadCountRequest
+  if (!ccUnreadBadgeEnabled.value) {
+    ccUnreadCount.value = 0
+    return
+  }
+  try {
+    // Read through a closure (never at setup): several approval-center specs mock the api module
+    // with an explicit export list that does not name this function.
+    const result = await Promise.resolve().then(() => getCcUnreadCount(sourceSystemFilter.value))
+    if (request !== ccUnreadCountRequest) return
+    ccUnreadCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    if (request !== ccUnreadCountRequest) return
+    ccUnreadCount.value = 0
+  }
+}
+const mineOutcomeUnseenCount = ref(0)
+let mineOutcomeUnseenCountRequest = 0
+async function refreshMineOutcomeUnseenCount(): Promise<void> {
+  const request = ++mineOutcomeUnseenCountRequest
+  if (!mineOutcomeBadgeEnabled.value) {
+    mineOutcomeUnseenCount.value = 0
+    return
+  }
+  try {
+    const result = await Promise.resolve().then(() => getMineOutcomesUnseenCount(sourceSystemFilter.value))
+    if (request !== mineOutcomeUnseenCountRequest) return
+    mineOutcomeUnseenCount.value = Number.isFinite(result?.count) ? result.count : 0
+  } catch {
+    if (request !== mineOutcomeUnseenCountRequest) return
+    mineOutcomeUnseenCount.value = 0
+  }
+}
+async function refreshTabBadgeCounts(): Promise<void> {
+  await Promise.all([refreshCcUnreadCount(), refreshMineOutcomeUnseenCount()])
+}
+function isCcUnreadRow(row: UnifiedApprovalDTO): boolean {
+  return row.ccUnread === true
+}
+function isOutcomeUnseenRow(row: UnifiedApprovalDTO): boolean {
+  return row.outcomeUnseen === true
 }
 
 useApprovalCountsRealtime({
@@ -1203,11 +1460,11 @@ async function handleMarkAllRead(): Promise<void> {
   try {
     const result = await markAllApprovalsRead(sourceSystemFilter.value)
     ElMessage.success(result.markedCount > 0
-      ? `已标记 ${result.markedCount} 条为已读`
-      : '当前范围内无未读审批')
+      ? markedReadToast(result.markedCount)
+      : t.value.markAllReadNone)
     await refreshPendingBadgeCount()
   } catch {
-    ElMessage.error('标记已读失败，请重试')
+    ElMessage.error(t.value.markAllReadFailed)
   } finally {
     markingAllRead.value = false
   }
@@ -1249,6 +1506,159 @@ const createdFromQuery = computed(() => (createdRange.value?.[0] ? `${createdRan
 const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange.value[1]}T23:59:59Z` : undefined))
 
 // ---------------------------------------------------------------------------
+// F3-E1: 导出 CSV
+// ---------------------------------------------------------------------------
+// What the list on screen was LAST LOADED with: the tab plus its filters, no paging. Written only
+// by `loadCurrentTab()` — the one place every list reload passes through — so an export always asks
+// the server for the feed the user is looking at. Reading the filter refs live would not: the
+// search box, for one, reaches the list only on Enter / clear, so a half-typed term would narrow
+// the export to something the list is not showing.
+const appliedListFilters = ref<ApprovalExportQuery | null>(null)
+
+// The server refuses `format=csv` for the PLM source (400); the button is disabled up front so the
+// user gets the reason before clicking rather than an error after.
+const exportPlmBlocked = computed(() => appliedListFilters.value?.sourceSystem === 'plm')
+const exportDisabled = computed(() => exportPlmBlocked.value || appliedListFilters.value === null)
+const exporting = ref(false)
+
+// The outcome is stored as DATA (kind + the numbers the server reported), never as finished text,
+// so the notice follows a runtime locale switch like every other string in `exportCopy`.
+type ApprovalExportOutcome =
+  | { kind: 'complete'; rowCount: number }
+  | { kind: 'capped'; rowCount: number | null; rowLimit: number | null }
+  // The export headers could not be read. NOT the same as "complete": the file may be cut short
+  // and this page has no way to tell, so it says exactly that.
+  | { kind: 'unknown' }
+  | { kind: 'failed'; reason: 'plm' | 'unexpected' | 'forbidden' | 'network' | 'status' | 'other'; status?: number }
+const exportOutcome = ref<ApprovalExportOutcome | null>(null)
+
+// Same construct as `tabEmptyText` above (an `isZh` branch returning a table) — the only copy this
+// slice adds; the rest of this view's hardcoded chrome is converted separately.
+const exportCopy = computed(() => {
+  if (isZh.value) {
+    return {
+      button: '导出 CSV',
+      scopeHint: '导出当前标签页与已应用筛选下、你可以打开详情的审批；PLM 来源的审批不在导出范围内。单次导出有行数上限，导出行数可能少于列表显示的总数。',
+      plmBlocked: 'PLM 来源的审批不支持导出 CSV。请把来源筛选切换为全部来源或平台审批后再导出。',
+      complete: (rows: number) => (rows === 0
+        ? '没有可导出的审批，已下载的文件只包含表头。'
+        : `已导出 ${rows} 行。`),
+      capped: (rows: number | null, limit: number | null) => [
+        rows === null ? '文件已下载，但不完整：' : `已导出 ${rows} 行，但文件不完整：`,
+        limit === null ? '符合条件的审批超过了单次导出的行数上限。' : `符合条件的审批超过了单次导出上限（${limit} 行）。`,
+        '请缩小筛选范围后分批导出。',
+      ].join(''),
+      unknown: '文件已下载，但未能读取服务器返回的行数与截断标记，无法确认文件是否完整。',
+      failedForbidden: '导出失败：当前账号没有导出审批的权限。',
+      failedUnexpected: '导出失败：服务器没有返回 CSV 文件，未保存任何内容。',
+      failedStatus: (status: number) => `导出失败（HTTP ${status}），未保存任何内容，请稍后重试。`,
+      failedOther: '导出失败，未保存任何内容，请稍后重试。',
+    }
+  }
+  return {
+    button: 'Export CSV',
+    scopeHint: 'Exports the approvals in the current tab and applied filters that you can open; PLM-sourced approvals are not included. Each export has a row limit, so the file may hold fewer rows than the total the list shows.',
+    plmBlocked: 'PLM-sourced approvals cannot be exported to CSV. Switch the source filter to all sources or platform approvals to export.',
+    complete: (rows: number) => (rows === 0
+      ? 'Nothing to export: the downloaded file contains the header row only.'
+      : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}.`),
+    capped: (rows: number | null, limit: number | null) => [
+      rows === null ? 'The file was downloaded but is incomplete: ' : `Exported ${rows} ${rows === 1 ? 'row' : 'rows'}, but the file is incomplete: `,
+      limit === null ? 'the matching approvals exceed the per-export row limit. ' : `the matching approvals exceed the per-export limit of ${limit} rows. `,
+      'Narrow the filters and export in batches.',
+    ].join(''),
+    unknown: 'The file was downloaded, but the row count and truncation flag returned by the server could not be read, so it cannot be confirmed that the file is complete.',
+    failedForbidden: 'Export failed: this account is not allowed to export approvals.',
+    failedUnexpected: 'Export failed: the server did not return a CSV file. Nothing was saved.',
+    failedStatus: (status: number) => `Export failed (HTTP ${status}). Nothing was saved; please try again later.`,
+    failedOther: 'Export failed. Nothing was saved; please try again later.',
+  }
+})
+
+const exportNotice = computed<{ kind: ApprovalExportOutcome['kind']; tone: 'success' | 'warning' | 'error'; text: string } | null>(() => {
+  const outcome = exportOutcome.value
+  if (!outcome) return null
+  const copy = exportCopy.value
+  switch (outcome.kind) {
+    case 'complete':
+      return { kind: outcome.kind, tone: 'success', text: copy.complete(outcome.rowCount) }
+    case 'capped':
+      return { kind: outcome.kind, tone: 'warning', text: copy.capped(outcome.rowCount, outcome.rowLimit) }
+    case 'unknown':
+      return { kind: outcome.kind, tone: 'warning', text: copy.unknown }
+    case 'failed': {
+      const text = outcome.reason === 'plm' ? copy.plmBlocked
+        : outcome.reason === 'unexpected' ? copy.failedUnexpected
+        : outcome.reason === 'forbidden' ? copy.failedForbidden
+        : outcome.reason === 'network' ? networkUnavailableMessage(isZh.value)
+        : outcome.reason === 'status' && outcome.status !== undefined ? copy.failedStatus(outcome.status)
+        : copy.failedOther
+      return { kind: outcome.kind, tone: 'error', text }
+    }
+  }
+  return null
+})
+
+function exportOutcomeOf(result: ApprovalCsvExportResult): ApprovalExportOutcome {
+  if (result.capped === true) {
+    return { kind: 'capped', rowCount: result.rowCount, rowLimit: result.rowLimit ?? result.rowCap }
+  }
+  if (result.capped === false && result.rowCount !== null) {
+    return { kind: 'complete', rowCount: result.rowCount }
+  }
+  return { kind: 'unknown' }
+}
+
+function exportFailureOf(error: unknown): ApprovalExportOutcome {
+  if (isNetworkUnavailableError(error)) return { kind: 'failed', reason: 'network' }
+  if (error instanceof ApprovalApiError) {
+    if (error.code === APPROVAL_EXPORT_UNEXPECTED_RESPONSE) return { kind: 'failed', reason: 'unexpected' }
+    if (error.code === 'APPROVAL_EXPORT_SOURCE_SYSTEM_UNSUPPORTED') return { kind: 'failed', reason: 'plm' }
+    if (error.status === 403) return { kind: 'failed', reason: 'forbidden' }
+    return { kind: 'failed', reason: 'status', status: error.status }
+  }
+  return { kind: 'failed', reason: 'other' }
+}
+
+// Hands the browser the server's bytes under the server's file name. The Blob is the one
+// `exportApprovalsCsv` returned — this view never builds, filters or re-encodes CSV itself.
+function saveExportFile(blob: Blob, fileName: string): void {
+  const objectUrl = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = fileName
+  link.rel = 'noopener'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0)
+}
+
+async function handleExportCsv(): Promise<void> {
+  const filters = appliedListFilters.value
+  if (exporting.value || !filters || filters.sourceSystem === 'plm') return
+  exporting.value = true
+  exportOutcome.value = null
+  // The result line describes the feed this click exported. If the list moved to another feed
+  // while the request was in flight, `loadCurrentTab()` has already dropped the line and replaced
+  // the snapshot object, so the late result is not posted under a list it does not describe. The
+  // file itself is still saved: it is exactly what was asked for at click time.
+  const stillSameFeed = () => appliedListFilters.value === filters
+  try {
+    // T1: ask the server for user-facing column labels and status words in the language the page
+    // shows RIGHT NOW (read at click time, not captured with the filter snapshot, so a runtime
+    // locale switch is honoured). The file is still the server's bytes, saved as they arrive.
+    const result = await exportApprovalsCsv(filters, { header: 'label', lang: isZh.value ? 'zh' : 'en' })
+    saveExportFile(result.blob, result.fileName)
+    if (stillSameFeed()) exportOutcome.value = exportOutcomeOf(result)
+  } catch (error) {
+    if (stillSameFeed()) exportOutcome.value = exportFailureOf(error)
+  } finally {
+    exporting.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 // UF-3: status coloring/labels now come from <StatusTag domain="approvalInstance"> (see
@@ -1270,15 +1680,29 @@ const createdToQuery = computed(() => (createdRange.value?.[1] ? `${createdRange
 let isInitialTabLoad = true
 
 function loadCurrentTab() {
-  const query = {
+  const filters = {
     search: searchText.value || undefined,
     status: (statusFilter.value || undefined) as ApprovalStatus | undefined,
-    page: currentPage.value,
-    pageSize: pageSize.value,
     sourceSystem: sourceSystemFilter.value,
     templateId: templateFilter.value || undefined,
     createdFrom: createdFromQuery.value,
     createdTo: createdToQuery.value,
+  }
+  const query = {
+    ...filters,
+    page: currentPage.value,
+    pageSize: pageSize.value,
+  }
+  // F3-E1: the export button reads this snapshot, so it exports what THIS load asked for. A result
+  // notice describes one export of one feed; once the feed on screen is a different one (another
+  // tab or filter set — a page change is not), the notice would describe a file the list no longer
+  // matches, so it is dropped. The snapshot object is replaced only in that case, so its identity
+  // changes exactly when the feed does — `handleExportCsv` relies on that to tell whether a late
+  // result still belongs to the list on screen (a page change or same-feed reload keeps it).
+  const nextAppliedFilters: ApprovalExportQuery = { ...filters, tab: activeTab.value }
+  if (JSON.stringify(nextAppliedFilters) !== JSON.stringify(appliedListFilters.value)) {
+    exportOutcome.value = null
+    appliedListFilters.value = nextAppliedFilters
   }
   switch (activeTab.value) {
     case 'pending': store.loadPending(query); break
@@ -1292,6 +1716,7 @@ function loadCurrentTab() {
   // handlePageChange() skip it — leaving a pill still urging "N 条新待办 · 点击刷新" for todos the
   // reload had already fetched. A choke point cannot be forgotten by the next call site.
   void refreshPendingBadgeCount({ resnapshot: true })
+  void refreshTabBadgeCounts()
   // UI-7: this is also the ONE place every list reload passes through — including a pane-triggered
   // 通过/驳回 (`handleInlineApprove`/`submitRowReject` both call `loadCurrentTab()` on success), and
   // filter/page/search changes. Re-run the pane's single-fetch detail here so an open pane never
@@ -1473,13 +1898,54 @@ watch(
   [selectedApprovalId, masterDetailEnabled],
   ([id, enabled]) => {
     if (enabled && id) {
-      void paneController.select(id)
+      void paneController.select(id).then(() => markPaneSelectionRead(id))
     } else {
       paneController.clear()
     }
   },
   { immediate: true },
 )
+
+// Opening an item in the wide-screen pane IS opening it. The full detail page records the read on
+// every load (ApprovalDetailView's `loadDetailPage` → `markApprovalRead`); the pane never did, so
+// a user at >= 1440px who only ever previewed items there produced no `approval_reads` row at all
+// and the 待我处理 unread dot / header 未读 count never cleared for them.
+//
+// Called ONLY from the selection watcher above, once the pane has actually rendered THIS
+// selection: a failed fetch, or one superseded by a later selection or a close, marks nothing.
+// The post-reload pane refresh inside `loadCurrentTab()` goes through `paneController.select`
+// directly and does not re-mark. Every selection made with Up/Down marks its row read too — it is
+// shown in the pane exactly like a clicked one. Fire-and-forget like the detail page: this is
+// presence data, a failure is silent and never a toast. On success the row's own dot is cleared in
+// place and the badge re-polled, so neither waits for the next list reload.
+function markPaneSelectionRead(id: string): void {
+  // The selection check is subsumed by the rendered-id check below today (the pane controller nulls
+  // `paneApproval` synchronously on every select/clear, and only a still-current fetch commits).
+  // Kept as the statement of intent, and for a controller that would keep the previous detail on
+  // screen while the next one loads.
+  if (selectedApprovalId.value !== id) return
+  if (paneApproval.value?.id !== id) return
+  void Promise.resolve()
+    .then(() => markApprovalRead(id))
+    .then(() => {
+      clearRowUnreadMarkers(id)
+      void refreshPendingBadgeCount()
+      void refreshTabBadgeCounts()
+    })
+    .catch(() => {})
+}
+
+// Clears the read-state marker(s) of the row just read in the pane, on the active tab's loaded
+// page, without reloading the list (a reload would drop the 批量 selection). Only ever flips a
+// marker the server set to "unread" to "read"; a row the server left unannotated stays so.
+function clearRowUnreadMarkers(id: string): void {
+  for (const row of activeTabRows.value) {
+    if (row.id !== id) continue
+    if (row.isRead === false) row.isRead = true
+    if (row.ccUnread === true) row.ccUnread = false
+    if (row.outcomeUnseen === true) row.outcomeUnseen = false
+  }
+}
 
 // B2-04-style id→name lookup so the filter dropdown shows readable template names rather than
 // raw ids. Best-effort: a failed fetch just leaves the select empty (no crash, no blocking the
@@ -1603,6 +2069,32 @@ onBeforeUnmount(() => {
 
 .approval-center__toolbar-daterange {
   width: 260px;
+}
+
+/* F3-E1: the export hint / result lines are rows of the filter card's own grid (`gap` above), so
+   they need no margin of their own. */
+.approval-center__export-hint,
+.approval-center__export-notice {
+  margin: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.approval-center__export-notice {
+  font-size: 13px;
+}
+
+.approval-center__export-notice--success {
+  color: var(--ms-color-success);
+}
+
+.approval-center__export-notice--warning {
+  color: var(--ms-color-warning);
+}
+
+.approval-center__export-notice--error {
+  color: var(--ms-color-danger);
 }
 
 .approval-center__error {
@@ -1833,6 +2325,7 @@ onBeforeUnmount(() => {
   .approval-center__toolbar-daterange,
   .approval-center__filter-toggle,
   .approval-center__clear-filters,
+  .approval-center__export-button,
   .approval-center__create-button {
     width: 100%;
   }

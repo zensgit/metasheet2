@@ -173,6 +173,42 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustNotContain: ['prop="delegateeUserId"'],
     }],
   },
+  // Test report 2026-10-08 T4cd: once the platform /history rows carry their camelCase actor fields,
+  // the stored actor reaches the timeline as written — engine sentinels, and a person stored with
+  // the id as the name. The actor label resolves the latter through the directory and maps every
+  // sentinel to the system label; it must never fall back to the stored id.
+  {
+    site: 'ApprovalDetailView.vue — 审批记录 actor label (historyActorName: id-only and system-sentinel rows)',
+    coverage: ['src/views/approval/ApprovalDetailView.vue', 'approval-detail-record-table.spec.ts', 'a row whose stored name is only the id shows the directory-resolved name, or 未知用户 — never the id'],
+    sourceChecks: [{
+      file: 'src/views/approval/ApprovalDetailView.vue',
+      mustContain: ['function historyActorIdToResolve', 'getResolvedUserName(unresolvedId)', 'function historySystemActorKind'],
+      mustNotContain: ['item.actorName ?? item.actorId', 'item.actorName || item.actorId'],
+    }],
+  },
+  // Test report 2026-10-08 T4b: the 表单信息 「人员」 (user) value — the site the 2026-08-19 sweep missed,
+  // because it rendered through a helper (`formatDisplayValue`'s `default: String(value)`), the
+  // census's documented KNOWN EVASION shape. Every surface that formats a form `user` value (the
+  // detail page's top-level fields and 明细 columns, and the list summary line) now goes through
+  // `formatUserFieldValue` with the directory lookup.
+  {
+    site: 'detailField.ts / ApprovalDetailView.vue / useApprovalListFieldSummary.ts — form user (人员) values (formatUserFieldValue)',
+    coverage: ['src/approvals/detailField.ts', 'approval-detail-record-table.spec.ts', 'the 表单信息 人员 field shows the directory-resolved name, and the stored id appears nowhere on the page'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/detailField.ts',
+        mustContain: ['export function formatUserFieldValue', "case 'user':", 'return formatUserFieldValue(value, resolveUserName, isZh)'],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: ['resolveUserName: getResolvedUserName', "if (column?.type === 'user') return formatUserFieldValue(value, getResolvedUserName, isZh.value)"],
+      },
+      {
+        file: 'src/approvals/useApprovalListFieldSummary.ts',
+        mustContain: ['summaryFields(schema, row.formSnapshot, limit, isZh, getResolvedUserName)'],
+      },
+    ],
+  },
   // raw-id-render fix (2026-08-19; census 3rd missed site) — the requester-choice submit-time
   // approver picker (Lock-1 §K2). The site the hand-list had NO entry for at all. Fixed to the
   // same contract as ApprovalUserPicker (values-free ordinal + disabled-when-unidentifiable), plus
@@ -309,17 +345,21 @@ function group(disposition: AllowlistEntry['disposition'], reason: string, entri
 
 const ALLOWLIST: AllowlistEntry[] = [
   // ---- VALUES-FREE-FIXED: the pattern IS the fix (an ordinal/resolver-backed fallback, not a leak) ----
+  // O-8 / F8-1 (approval member-surface locale): the ordinal is now locale-aware
+  // (`成员 N` / `Member N`) — same values-free fix, the entry follows the line.
   ...group('VALUES-FREE-FIXED', 'ApprovalUserPicker optionLabel -- values-free ordinal, the shipped fix itself', [
-    ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+    ['src/approvals/components/ApprovalUserPicker.vue', 'option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalNewView choiceOptionLabel -- values-free ordinal, this PR\'s fix (census 3rd missed site)', [
-    ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || `成员 ${index + 1}`'],
+    // O-8 / F8-1: same locale-aware ordinal as ApprovalUserPicker above; the entry follows the line.
+    ['src/views/approval/ApprovalNewView.vue', 'option.name?.trim() || (isZh.value ? `成员 ${index + 1}` : `Member ${index + 1}`)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'MyDelegationView delegateeDisplay -- resolver-wrapped, never the raw column value directly', [
     ['src/views/approval/MyDelegationView.vue', 'delegateeDisplay(row.delegateeUserId)'],
   ]),
   ...group('VALUES-FREE-FIXED', 'ApprovalDepartmentPicker tree heading -- directory-validated department name with a static root label fallback, never an id', [
-    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || '全部部门'"],
+    // O-8 / F8-1: the static root label is now locale-aware; same fallback, the entry follows the line.
+    ['src/approvals/components/ApprovalDepartmentPicker.vue', "browseStack.at(-1)?.name || (isZh ? '全部部门' : 'All departments')"],
   ]),
 
   // ---- OUT-OF-SCOPE: admin-only raw-id render, matches the pre-existing #5010/hand-list precedent ----
@@ -360,6 +400,14 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/assigneeSource.ts', "source.roleIds.join('、')"],
     ['src/approvals/assigneeSource.ts', "source.groupIds.join('、')"],
   ]),
+  // O-8 / F8-1 (approval member-surface locale): the English arm of the same summary
+  // (`assigneeSourceSummaryEn`) — identical posture, only the separator and wording differ. Same
+  // audience split: the viewer-facing path still intercepts static_user/static_role to counts.
+  ...group('OUT-OF-SCOPE', 'assigneeSource.ts English arm (assigneeSourceSummaryEn) of the three entries directly above -- same authoring-only raw-id join for static_user/static_role (intercepted to count-only for viewers by requesterFacingSourceSummary), same template-authored group references for user_group', [
+    ['src/approvals/assigneeSource.ts', "Users: ${source.userIds.join(', ')"],
+    ['src/approvals/assigneeSource.ts', "Roles: ${source.roleIds.join(', ')"],
+    ['src/approvals/assigneeSource.ts', "User groups: ${source.groupIds.join(', ')"],
+  ]),
   ...group('OUT-OF-SCOPE', 'authoring formula text under construction by the template author, not a viewer render', [
     ['src/views/approval/TemplateAuthoringView.vue', 'requester.role in [${JSON.stringify(roleId)}]'],
   ]),
@@ -386,6 +434,8 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/detailField.ts', 'errors.push(`明细字段 ${label} 的子字段 ${column.id.trim()'],
     ['src/approvals/detailField.ts', 'const fieldLabel = field.label || field.id'],
     ['src/approvals/detailField.ts', 'violations.push(`"${fieldLabel}" 第 ${index + 1} 行缺少 "${column.label || column.id}"`)'],
+    // O-8 / F8-1: the English arm of the same detail-row violation (same structural column id).
+    ['src/approvals/detailField.ts', 'violations.push(`"${fieldLabel}" row ${index + 1} is missing "${column.label || column.id}"`)'],
     ['src/approvals/detailField.ts', 'label: column.label || column.id,'],
     ['src/approvals/detailField.ts', 'result.push({ key: field.id, label: field.label || field.id, value: text })'],
     ['src/approvals/detailField.ts', 'label: field.label || field.id,'],
@@ -423,6 +473,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/approvals/components/ApprovalFlowCanvas.vue', "nodeTypeLabel(canvasNodeByKey(pos.key)?.type ?? 'approval')"],
     ['src/approvals/components/ApprovalFlowCanvas.vue', '{{ canvasNodeSummary(pos.key) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'conditionFormulaDryRunResult(node.key, branch.edgeKey)'],
+    // T5a (test report 2026-10-08): the branch-delete refusal reason — the node/edge keys are only
+    // the lookup arguments; the rendered text is a fixed business-language sentence
+    // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],
@@ -441,6 +495,13 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateAuthoringView.vue', 'section.label} ${section.description}${section.id'],
     ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-section-${section.id}'],
     ['src/views/approval/TemplateAuthoringView.vue', 'approval-template-preset-${preset.id}'],
+    // Approval form grouping lock v2.13 §6 phase 3 (A-4) — TemplateGroupSections.vue's per-item
+    // test hook (a TEMPLATE id, not a person id); the visible render one line below is
+    // `{{ item.name }}`, never `item.id`.
+    ['src/views/approval/TemplateGroupSections.vue', '`template-group-section-item-${item.id}`'],
+    // Same file, the per-item move-to-group `<select>`'s test hook — same TEMPLATE id, same
+    // reasoning (the visible option text is `target.label`, never a raw id).
+    ['src/views/approval/TemplateGroupSections.vue', ':data-testid="`template-group-section-move-${item.id}`"'],
   ]),
 
   // ---- OUT-OF-SCOPE: non-person entity ids (approval instance / template / version row) in a data-testid, route path, or a function-call argument (not a rendered id -- the FUNCTION'S RETURN is what renders) ----
@@ -476,6 +537,21 @@ const ALLOWLIST: AllowlistEntry[] = [
     ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${row.id}` })"],
     ['src/views/approval/TemplateCenterView.vue', "router.push({ path: `/approval-templates/${cloned.id}` })"],
     ['src/views/approval/TemplateAuthoringView.vue', 'id: `${next.id}_col1`,'],
+  ]),
+
+  // ---- OUT-OF-SCOPE: an APPROVAL TEMPLATE GROUP id (not a person id) embedded in a `section=`
+  // API filter token -- lock v2.13 §4 acceptance row C's `group:<id>` bucket token, sent to the
+  // backend as a query parameter, never rendered as visible text. The group's `name` (a resolved,
+  // authored label -- same audience/shape as the department/role names elsewhere in this
+  // allowlist) is what actually renders in the section header (`{{ section.title }}`, itself
+  // sourced from `g.name`, never `g.id`). ----
+  ...group('OUT-OF-SCOPE', 'an APPROVAL TEMPLATE GROUP id (not a person id) embedded in a `section=group:<id>` API filter token, never rendered as visible text -- only the group\'s `name` is displayed', [
+    ['src/views/approval/TemplateGroupSections.vue', '...groups.map((g) => ({ token: `${GROUP_TOKEN_PREFIX}${g.id}`, title: g.name, alwaysShow: true })),'],
+    // Same token shape, rebuilt from the reorder endpoint's response (`{id, sortOrder}[]`) to
+    // re-key `sections.value` by token after a move -- still the group id, still never rendered
+    // (the map's VALUE, `r.sortOrder`, drives a `.sort()`, and `.sort()` output is positional, not
+    // text).
+    ['src/views/approval/TemplateGroupSections.vue', 'const sortOrderByToken = new Map(results.map((r) => [`${GROUP_TOKEN_PREFIX}${r.id}`, r.sortOrder]))'],
   ]),
 
   // ---- OUT-OF-SCOPE: ids embedded in a non-rendered cache/storage/dedup key ----

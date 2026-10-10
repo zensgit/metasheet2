@@ -37,8 +37,20 @@
 export const STOCK_PREP_READ = 'stock-prep:read'
 /** Confirm a decision (frozen action vocabulary) + the O1'-A value-entry surface. */
 export const STOCK_PREP_OPERATE = 'stock-prep:operate'
-/** Workbench-scoped ceiling; deliberately BELOW platform admin (opens no provisioning, no pack install). */
+/**
+ * Workbench-scoped ceiling; deliberately BELOW platform admin (opens no provisioning, no pack
+ * install). It DOES carry one write: the 「把系统表的英文表头改成中文」 relabel of still-English
+ * managed-table headers — compare-and-set, bound to a preview, and default OFF behind the server's
+ * MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED switch (see stock-preparation-workbench-access.cjs).
+ */
 export const STOCK_PREP_ADMIN = 'stock-prep:admin'
+/**
+ * 拉取人员 — who may pull from PLM (and, in later slices, create / archive / restore project sheets).
+ * Owner ruling 2026-10-08 (ADR adr-stock-prep-project-sheets-20261008 addendum A; register R-33):
+ * the floor fills and decides, it no longer pulls. A CONJUNCTION with operate and read, mirrored
+ * from the plugin module's `STOCK_PREP_PULL` and asserted byte-equal to it.
+ */
+export const STOCK_PREP_PULL = 'stock-prep:pull'
 /** The gate the two owner-level capabilities keep: source-reading reconcile and provisioning ensure. */
 export const PLATFORM_ADMIN_GATE = 'admin'
 /** The code probed for the platform-admin capabilities on this surface. */
@@ -61,6 +73,7 @@ export const STOCK_PREP_PERMISSION_CODES: readonly string[] = Object.freeze([
   STOCK_PREP_READ,
   STOCK_PREP_OPERATE,
   STOCK_PREP_ADMIN,
+  STOCK_PREP_PULL,
 ])
 
 /** The route-meta gate for `/stock-prep`: reachability is exactly the queue READ code. */
@@ -74,7 +87,8 @@ export const STOCK_PREP_ROUTE_PERMISSION = STOCK_PREP_READ
 export const STOCK_PREP_OPERATOR_PULL_ACTION_ID = 'plm.stock-preparation.pull-bom.v1'
 
 /**
- * The pull steps that MOVED to the operator tier, each naming the legacy gate it also still keeps.
+ * The pull steps that ride the split (the PULL tier since R-33, 2026-10-08; the operator tier
+ * before), each naming the legacy gate it also still keeps.
  *
  * The eight `large-bom-*` members are the BOUNDED BACKGROUND CHANNEL — the same pull, taken in
  * pieces because the BOM is too big to expand in one request. The panel switches to them BY ITSELF,
@@ -265,6 +279,47 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/board',
     control: 'stock-prep-operator-project-board',
   }),
+  // 一个项目一张备料表 (S2, R-36) — byte-equal to the plugin manifest's three project-sheet rows. None
+  // of their controls lives on the confirmation-queue view; stockPrepPermissionMatrix.spec.ts lists
+  // them as such and StockPreparationProjectTarget.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.create',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-create',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.list',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    control: 'stock-prep-project-target-list',
+  }),
+  // S4 (R-38) — 归档代替删除 (Q2): byte-equal to the plugin manifest's two lifecycle rows. PULL tier,
+  // like the create. Their controls live on 项目备料页's sheet-state line, not on the confirmation-queue
+  // view; StockPreparationProjectArchive.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.archive',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/archive',
+    control: 'stock-prep-project-target-archive',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.restore',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/restore',
+    control: 'stock-prep-project-target-restore',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -323,9 +378,10 @@ export function holdsPlatformAdmin(snapshot: StockPrepAccessSnapshot): boolean {
  *
  * The ladder, in the server's own order:
  *   `role:admin` | `integration:admin`  -> every code
- *   `stock-prep:admin`                  -> read AND operate
+ *   `stock-prep:admin`                  -> read, operate AND pull
  *   `stock-prep:read`                   -> read
  *   `stock-prep:operate` AND `:read`    -> operate
+ *   `stock-prep:pull` AND operate AND read -> pull   (R-33, 2026-10-08)
  *
  * The OPERATE tier is a CONJUNCTION of operate AND read, exactly as the server computes it. This is
  * not belt-and-braces: `/stock-prep` is reachable on READ alone, so an operate-WITHOUT-read grant
@@ -349,7 +405,10 @@ export function satisfiesStockPrepAccess(snapshot: StockPrepAccessSnapshot, code
   if (code === STOCK_PREP_ADMIN) return false
   if (code === STOCK_PREP_READ) return held.includes(STOCK_PREP_READ)
   // See above: a CONJUNCTION, never an implication.
-  return held.includes(STOCK_PREP_OPERATE) && held.includes(STOCK_PREP_READ)
+  const operate = held.includes(STOCK_PREP_OPERATE) && held.includes(STOCK_PREP_READ)
+  if (code === STOCK_PREP_OPERATE) return operate
+  // PULL — one rung up, the same shape: pull AND the whole operate conjunction (R-33, 2026-10-08).
+  return operate && held.includes(STOCK_PREP_PULL)
 }
 
 /**
@@ -398,6 +457,12 @@ export function canUseLegacyMvpTabs(snapshot: StockPrepAccessSnapshot): boolean 
  * `stock-prep:admin` satisfies). Nothing behind this gate can 403, so R-11's "visible must be
  * actionable" holds for the panel as a whole.
  *
+ * ONE CONTROL ON THIS TAB WRITES: 「把系统表的英文表头改成中文」 renames still-English managed-table
+ * headers. Its route is gated on exactly this code (`requireAccess(req, STOCK_PREP_ADMIN)`), so it
+ * too cannot 403 for anyone who sees it; what CAN stop it is the server's default-OFF switch
+ * MULTITABLE_MANAGED_TABLE_RELABEL_ENABLED, which the panel reports in words (preview still works)
+ * rather than offering a confirm button that would be refused.
+ *
  * Deliberately NOT a member of STOCK_PREP_WORKBENCH_CAPABILITIES: that manifest is the
  * confirmation-queue control set, asserted control-for-control against the queue view by the
  * permission-matrix suites on both sides. Adding a control that lives in a different component would
@@ -432,23 +497,29 @@ export function canRunStockPrepInstall(snapshot: StockPrepAccessSnapshot): boole
  *   reconcile   'admin'  platform admin ONLY
  *   mvp-persist 'admin'  platform admin ONLY
  *
- * 一线自己拉数据 CHANGED THAT, by the owner's ruling. Round-1 additionally admitted the stock-prep
- * operator tier (operate ∧ read) on the two routes that DO the pull, for the pull-bom action id
- * only; round-2 (decision C13, #5460) additionally moved reconcile, because leaving it admin-only
- * put an operator whose plan had human-confirm rows into a closed loop. mvp-persist alone stayed
- * platform-admin — the one step the run can finish without —
+ * 一线自己拉数据 CHANGED THAT, by the owner's first ruling. Round-1 additionally admitted the
+ * stock-prep operator tier (operate ∧ read) on the two routes that DO the pull, for the pull-bom
+ * action id only; round-2 (decision C13, #5460) additionally moved reconcile, because leaving it
+ * admin-only put an operator whose plan had human-confirm rows into a closed loop. mvp-persist alone
+ * stayed platform-admin — the one step the run can finish without.
  *
- *   dry-run     'read'  OR stock-prep operate ∧ read     <- the operator's step 1
- *   reconcile   'admin' OR stock-prep operate ∧ read     <- the operator's step 2 (round-2 C13)
- *   apply       'write' OR stock-prep operate ∧ read     <- the operator's step 3
- *   mvp-persist 'admin'                                  <- SKIPPED with a reason for them
+ * 拉取人员拉数据 REVERSED THE TIER (owner ruling 2026-10-08, ADR adr-stock-prep-project-sheets-20261008
+ * addendum A, register R-33): the floor fills the sheet and decides held rows, but does NOT pull.
+ * The split's routes are unchanged; the tier they admit is now PULL (`stock-prep:pull` ∧ operate ∧
+ * read, satisfied through the ladder by `stock-prep:admin`) —
  *
- * — so an operator's run reaches 「导进去了吗?」 honestly rather than 403-ing partway. R-11's
- * "visible must be actionable" therefore still holds for this control: what the operator can press,
- * the server answers; the one step they cannot run is not a control at all, it is a line in the
- * step list that says who runs it (`BATCH_ARCHIVE_NOT_PERMITTED` in plainLanguage.ts;
- * `RECONCILE_NOT_PERMITTED` still exists for a caller in neither tier, or an operator refused by the
- * tenant-scope door).
+ *   dry-run     'read'  OR stock-prep pull ∧ operate ∧ read   <- the puller's step 1
+ *   reconcile   'admin' OR stock-prep pull ∧ operate ∧ read   <- the puller's step 2 (round-2 C13)
+ *   apply       'write' OR stock-prep pull ∧ operate ∧ read   <- the puller's step 3
+ *   mvp-persist 'admin'                                        <- SKIPPED with a reason for them
+ *
+ * — so a puller's run reaches 「导进去了吗?」 honestly rather than 403-ing partway, and a floor
+ * operator (operate ∧ read, no pull) is shown no button at all: the panel and the board's empty
+ * state say 「请联系拉取人员」 instead. R-11's "visible must be actionable" therefore still holds for
+ * this control: what the puller can press, the server answers; the one step they cannot run is not
+ * a control at all, it is a line in the step list that says who runs it
+ * (`BATCH_ARCHIVE_NOT_PERMITTED` in plainLanguage.ts; `RECONCILE_NOT_PERMITTED` still exists for a
+ * caller in neither tier, or a puller refused by the tenant-scope door).
  *
  * The disjunction is written out here rather than delegated because it is a disjunction of two
  * different vocabularies — the legacy `integration:*` tier and the stock-prep tier — and neither
@@ -458,13 +529,14 @@ export function canRunStockPrepInstall(snapshot: StockPrepAccessSnapshot): boole
  * `canRunStockPrepInstall` is not: that manifest is the confirmation-queue control set, asserted
  * control-for-control against the queue view by the permission-matrix suites on both sides.
  *
- * The stock-prep half delegates to `satisfiesStockPrepAccess`, which is precisely what the server's
- * own `operatorMayRunStockPrepPull` delegates to — so the operator arm of this disjunction is the
- * server's arm, not a second reading of it.
+ * The stock-prep half delegates to `satisfiesStockPrepAccess` at the PULL tier, which is precisely
+ * what the server's own `operatorMayRunStockPrepPull` delegates to — so the pull arm of this
+ * disjunction is the server's arm, not a second reading of it (StockPreparationProjectBoard.spec.ts
+ * B-01 asserts the two agree for every actor).
  */
 export function canRunStockPrepProjectSync(snapshot: StockPrepAccessSnapshot): boolean {
   if (holdsPlatformAdmin(snapshot)) return true
-  return satisfiesStockPrepAccess(snapshot, STOCK_PREP_OPERATE)
+  return satisfiesStockPrepAccess(snapshot, STOCK_PREP_PULL)
 }
 
 /**
@@ -473,8 +545,9 @@ export function canRunStockPrepProjectSync(snapshot: StockPrepAccessSnapshot): b
  * Exactly the tier the board READ is gated on server-side (`stock-prep:operate` ∧ `stock-prep:read`,
  * satisfied through the ladder by `stock-prep:admin` and by a platform admin). For a TENANT-BOUND
  * holder of that tier every control the tab carries is answerable — the board read itself, the pull
- * (see above), the export (already on the operator tier), and the handoff button, which hides itself
- * when its route is absent or unconfigured — so R-11's "visible must be actionable" holds.
+ * (see above; ABSENT, with a 「请联系拉取人员」 line in its place, for a holder without
+ * `stock-prep:pull`), the export (already on the operator tier), and the handoff button, which hides
+ * itself when its route is absent or unconfigured — so R-11's "visible must be actionable" holds.
  *
  * ONE PRINCIPAL IS THE EXCEPTION, and it is an inherited one rather than a new one: a TENANTLESS
  * platform admin passes the RBAC ladder here and is then refused by the server for having no tenant
@@ -650,6 +723,40 @@ export function canOpenStockPrepOpsPanel(snapshot: StockPrepAccessSnapshot): boo
  * request, so the gate is exactly reachability: whoever can open `/stock-prep` can read it.
  */
 export function canOpenStockPrepHelp(snapshot: StockPrepAccessSnapshot): boolean {
+  return satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
+}
+
+/**
+ * WHO MAY REACH `/stock-prep` AT ALL — the ONE predicate the nav link and the route guard now share
+ * with every panel behind them.
+ *
+ * WHY THIS EXISTS. The shell used to ask `useAuth().hasPermission('stock-prep:read')` while
+ * everything inside the page asked `satisfiesStockPrepAccess`. Those two answer DIFFERENTLY, and the
+ * gap was documented rather than closed (`stockPrepPermissionMatrix.spec.ts` F-03's four annotated
+ * rows). It ran in BOTH directions:
+ *
+ *   · `integration:admin` WITHOUT the admin role — a platform admin to the server and to every
+ *     predicate in this file, yet `hasPermission` derives no `stock-prep:read` from it, so the nav
+ *     link was hidden and the guard redirected a principal the server serves in full. That is
+ *     PERMITTED-BUT-HIDDEN, the half of R-11 no gate inside the page can fix.
+ *   · `*:*` on a non-admin role, `stock-prep:*`, `stock-prep:write` — all three are EXPANDED by
+ *     `hasPermission` and all three are refused LITERALLY by the server, so they reached the page
+ *     and found every panel and control empty. That is VISIBLE-BUT-NOT-ACTIONABLE, the other half.
+ *
+ * Pointing the shell at this predicate closes both, and it is not a widening dressed as an
+ * alignment: this is `satisfiesStockPrepAccess` unchanged, so the browser now answers exactly what
+ * `plugins/plugin-integration-core/lib/stock-preparation-workbench-access.cjs` answers for the same
+ * principal. The three expansion cases become STRICTLY NARROWER (the server already refused them),
+ * and the `integration:admin` case stops hiding a page the server already serves. No principal gains
+ * a byte of data: the route guard is a shell affordance, and every route behind it is gated
+ * server-side by this same ladder.
+ *
+ * DELIBERATELY NOT `hasPermission(STOCK_PREP_ROUTE_PERMISSION)`. The app-wide probe expands
+ * wildcards, derives `:read` from `:write`, and treats `users:write` as admin — three rules the
+ * server does not have. Reintroducing it here restores the divergence this closes, which is what
+ * `StockPreparationWorkspace.spec.ts`'s gate-alignment pin exists to catch.
+ */
+export function canReachStockPrepWorkbench(snapshot: StockPrepAccessSnapshot): boolean {
   return satisfiesStockPrepAccess(snapshot, STOCK_PREP_ROUTE_PERMISSION)
 }
 
