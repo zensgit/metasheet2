@@ -1,7 +1,7 @@
 import type { ComputedRef, InjectionKey, Ref } from 'vue'
 import type {
   ApprovalAssigneeSourceKind,
-  ApprovalAssigneeType,
+  ApprovalCcTargetType,
   ApprovalMode,
   ApprovalNode,
   ApprovalType,
@@ -71,7 +71,7 @@ export interface ApprovalNodeConfigEditorApi {
   graphEdgeTargetLabel: (nodeKey: string, edgeKey: string) => string
   graphNodeLabel: (nodeKey: string) => string
   parallelJoinModeLabel: (mode: ParallelJoinMode) => string
-  ccTargetTypeLabel: (targetType: ApprovalAssigneeType) => string
+  ccTargetTypeLabel: (targetType: ApprovalCcTargetType) => string
   setCcTargetIds: (nodeKey: string, ids: string[]) => void
   syncCcOptions: (nodeKey: string) => void
   // P1-B: every per-source accessor takes an explicit `sourceIndex` — one card in the multi-source

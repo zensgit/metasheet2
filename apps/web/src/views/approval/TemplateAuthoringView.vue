@@ -182,6 +182,13 @@
             <div>
               <strong>{{ preset.title }}</strong>
               <p>{{ preset.description }}</p>
+              <p
+                v-if="presetBoundaryNote(preset.id)"
+                class="template-authoring__preset-note"
+                :data-testid="`approval-template-preset-${preset.id}-boundary-note`"
+              >
+                {{ presetBoundaryNote(preset.id) }}
+              </p>
             </div>
             <el-button
               type="primary"
@@ -1677,12 +1684,14 @@ import {
 import {
   buildCommonApprovalTemplatePresetPayload,
   COMMON_APPROVAL_TEMPLATE_PRESETS,
+  presetBoundaryNote,
+  presetCreatedMessage,
   type CommonApprovalTemplatePresetId,
 } from '../../approvals/commonTemplatePresets'
 import type {
   ApprovalAssigneeSource,
   ApprovalAssigneeSourceKind,
-  ApprovalAssigneeType,
+  ApprovalCcTargetType,
   ApprovalGraph,
   ApprovalMode,
   ApprovalNode,
@@ -2193,7 +2202,7 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
     // H2: CC still has no directory picker — targetIds remain the only carrier. Show type only
     // so ordinary DOM does not dump raw assignee IDs; the editable picker still holds the values.
     return [
-      `抄送类型：${cfg.targetType === 'role' ? '角色' : '用户'}`,
+      `抄送类型：${ccTargetTypeLabel(cfg.targetType)}`,
       `抄送对象：${(cfg.targetIds ?? []).length ? `已选 ${(cfg.targetIds ?? []).length} 个` : '（无）'}`,
     ]
   }
@@ -2460,12 +2469,20 @@ function parallelJoinModeLabel(mode: ParallelJoinMode): string {
 // ── G-4 cc editor (targetType + targetIds; the cc node's edges/position are preserved topology) ──
 // Editable model on `draft.ccEdits[nodeKey]`, seeded 1:1 from the preserved cc nodes. The controls
 // mutate ONLY targetType/targetIds; `buildApprovalGraph` re-applies onto a COPY (every non-cc node +
-// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role}, non-empty targetIds).
+// all edges untouched). Matches the backend cc rule (targetType ∈ {user,role,group}, non-empty
+// targetIds — Lock-1 OD-L1-7(a) added 'group', the "`user_group` (cc) | 用户组" registry row).
 function ccEditFor(nodeKey: string): CcNodeEdit | undefined {
   return draft.value.ccEdits?.[nodeKey]
 }
-function ccTargetTypeLabel(targetType: ApprovalAssigneeType): string {
-  return targetType === 'role' ? '角色' : '用户'
+function ccTargetTypeLabel(targetType: ApprovalCcTargetType): string {
+  switch (targetType) {
+    case 'role': return '角色'
+    case 'group': return '用户组'
+    case 'user': return '用户'
+    default:
+      // G-16: an off-enum persisted value is shown as-is (never relabelled as a known kind).
+      return String(targetType)
+  }
 }
 
 // ── G-5 approval-node editor (approver SOURCE only; the node's mode/policy + edges are preserved) ──
@@ -2761,7 +2778,7 @@ function approvalSourceCount(nodeKey: string): number {
 }
 // P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
 // editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
-// button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
+// button never seeds a kind outside its handler roster). Delegates to the pure, independently
 // unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
 // kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
 // the end), so a card the author already configured-then-switched-away-from keeps its cached
@@ -3755,6 +3772,10 @@ function syncCcOptions(nodeKey: string): void {
   if (!edit) return
   if (edit.targetType === 'user') {
     for (const id of edit.targetIds) directory.ensureUserOptionVisible(id)
+  } else if (edit.targetType === 'group') {
+    // Lock-1 OD-L1-7(a): a persisted bound-group id stays visible as a chip even when the bound
+    // list no longer carries it (unbound after save) — no silent drop; publish is the arbiter.
+    for (const id of edit.targetIds) directory.ensureMemberGroupOptionVisible(id)
   } else {
     for (const id of edit.targetIds) directory.ensureRoleOptionVisible(id)
   }
@@ -4387,7 +4408,12 @@ async function createFromPreset(presetId: CommonApprovalTemplatePresetId) {
     reseedFormBuilderSessionIfActive()
     snapshotDraft() // before the route replace so the leave guard stays quiet
     await router.replace({ path: `/approval-templates/${created.id}/edit` })
-    ElMessage.success('表单草稿已创建')
+    if (presetBoundaryNote(presetId)) {
+      // A1: a preset with a boundary note (请假审批) says so at creation, and stays up long enough to be read.
+      ElMessage.success({ message: presetCreatedMessage(presetId), duration: 8000, showClose: true })
+    } else {
+      ElMessage.success(presetCreatedMessage(presetId))
+    }
   } catch (error: unknown) {
     loadError.value = describeTemplateAuthoringError(error, '创建常用表单失败')
   } finally {
@@ -4845,6 +4871,12 @@ onUnmounted(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+/* A1: the boundary note must read as a caveat, not as one more description line. */
+.template-authoring__preset p.template-authoring__preset-note {
+  color: var(--el-color-warning-dark-2);
+  font-weight: 600;
 }
 
 .template-authoring__visibility {

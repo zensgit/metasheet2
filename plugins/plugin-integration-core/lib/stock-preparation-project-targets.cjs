@@ -464,7 +464,24 @@ function wrapPackInstallError(error, packId) {
 async function packColumnsPresent({ provisioning, projectId, objectId, pack }) {
   const fieldIds = pack.extensionFields.map((field) => field.id)
   if (fieldIds.length === 0 || !provisioning || typeof provisioning.resolveFieldIds !== 'function') return true
-  const verdict = await resolveFieldExistence({ provisioning, projectId, objectId, fieldIds })
+  let verdict
+  try {
+    verdict = await resolveFieldExistence({ provisioning, projectId, objectId, fieldIds })
+  } catch (error) {
+    // S3 carry-over (S4 review): the probe degrades an OBJECT-SCOPE refusal itself, so anything that
+    // escapes it is the host failing the read (a pool error, a half-migrated table). The readiness
+    // path answers that with a typed, values-free 503 TARGET_SCHEMA_UNAVAILABLE; the replay must do
+    // the same rather than let a raw host error surface as an opaque 500 off a 200-replay POST.
+    if (error instanceof StockPreparationProjectTargetError || error instanceof StockPreparationTargetProvisioningError) throw error
+    const wrapped = new StockPreparationProjectTargetError(
+      503,
+      'TARGET_SCHEMA_UNAVAILABLE',
+      'the project sheet\'s column probe could not be read; retry the same request once the host answers',
+      { objectId, packId: pack.packId },
+    )
+    wrapped.cause = error
+    throw wrapped
+  }
   if (verdict.fieldExistenceMode !== 'db') return true
   const resolved = verdict.resolved || {}
   return fieldIds.every((id) => typeof resolved[id] === 'string' && resolved[id].length > 0)

@@ -11,8 +11,12 @@ const SECRET_PREFIX = 'enc:'
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm'
 const KEY_ITERATIONS = 100_000
 const KEY_LENGTH = 32
+const KEY_DIGEST = 'sha256'
 const IV_LENGTH = 16
 const AUTH_TAG_LENGTH = 16
+
+/** The `enc:` marker every platform-material ciphertext is stored behind (see isEncryptedSecretValue). */
+export const STORED_SECRET_PREFIX = SECRET_PREFIX
 
 /**
  * Historic built-in fallbacks. They are PUBLIC (they live in this repository), so anything
@@ -197,8 +201,30 @@ export function deriveEncryptionKey(
     getEncryptionSalt(material),
     KEY_ITERATIONS,
     KEY_LENGTH,
-    'sha256',
+    KEY_DIGEST,
   )
+}
+
+/**
+ * deriveEncryptionKey()'s pbkdf2 on the libuv threadpool instead of the event loop: same raw
+ * master key, same Buffer.from(salt), same iterations / length / digest — so the key is
+ * byte-identical to the one decryptStoredSecretValue() derives for the same material.
+ *
+ * It takes RESOLVED material on purpose: the caller runs resolveEncryptionMaterial() (and with it
+ * the production gate) itself and derives once per run. That is the point of this function — a
+ * bulk reader (security/encrypted-store-probe.ts) must not pay 100,000 iterations per value.
+ */
+export function deriveEncryptionKeyFromMaterial(material: EncryptionMaterial): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    crypto.pbkdf2(
+      material.masterKey,
+      getEncryptionSalt(material),
+      KEY_ITERATIONS,
+      KEY_LENGTH,
+      KEY_DIGEST,
+      (error, key) => (error ? reject(error) : resolve(key)),
+    )
+  })
 }
 
 export function isEncryptedSecretValue(value: unknown): value is string {
@@ -218,19 +244,30 @@ function encryptRawSecretValue(plaintext: string): string {
   return Buffer.concat([iv, authTag, ciphertext]).toString('base64')
 }
 
-function decryptRawSecretValue(ciphertext: string): string {
-  const payload = Buffer.from(ciphertext, 'base64')
+/**
+ * The ONE decode of a stored payload — base64 of iv(16) | authTag(16) | AES-256-GCM ciphertext —
+ * under an already-derived key. decryptStoredSecretValue() reaches it with a key derived per call
+ * (unchanged behaviour); security/encrypted-store-probe.ts reaches it with a key derived once per
+ * run. Throws when the key is not the one the payload was sealed under (GCM authentication) or the
+ * payload is malformed. The return value is PLAINTEXT: never log it, never put it in a response.
+ */
+export function decryptSecretPayloadWithKey(payloadBase64: string, key: Buffer): string {
+  const payload = Buffer.from(payloadBase64, 'base64')
   const iv = payload.subarray(0, IV_LENGTH)
   const authTag = payload.subarray(IV_LENGTH, IV_LENGTH + AUTH_TAG_LENGTH)
   const encrypted = payload.subarray(IV_LENGTH + AUTH_TAG_LENGTH)
 
-  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, deriveEncryptionKey(), iv)
+  const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv)
   decipher.setAuthTag(authTag)
 
   return Buffer.concat([
     decipher.update(encrypted),
     decipher.final(),
   ]).toString('utf8')
+}
+
+function decryptRawSecretValue(ciphertext: string): string {
+  return decryptSecretPayloadWithKey(ciphertext, deriveEncryptionKey())
 }
 
 export function encryptStoredSecretValue(plaintext: string): string {

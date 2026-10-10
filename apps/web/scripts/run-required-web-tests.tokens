@@ -64,6 +64,7 @@ approval-graph-summary
 approval-graph-topology-edit
 approval-handler-node-authoring
 approval-handler-node-config
+approval-leave-preset-boundary-note
 approval-lock8-field-type-census
 approval-member-action-dialog-grammar
 approval-member-bar-operation-policy
@@ -138,11 +139,15 @@ approvalTemplateVersionHistory
 approvalUserPicker
 asyncStateBlock
 attendance-admin-regressions
+attendance-approval-option-hint
+attendance-approval-option-wiring
 attendance-date-only-format
 attendance-experience-entrypoints
 attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
 attendance-records-route-redirect
+attendance-scheduled-feature-status-wiring
+attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
 attendanceAdminEndpointCompatibility
 attendanceCapabilityUnavailable
@@ -154,6 +159,7 @@ attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
 attendanceOverviewRequestReveal
 attendanceRequestReviewEntitlement
+AttendanceScheduledFeatureStatus
 attendanceUserPickerEndpoint
 automation-action-summary
 automation-condition-legacy-person-picker
@@ -358,6 +364,10 @@ multitable-phase7
 multitable-phase8
 multitable-phase9
 multitable-qrcode-field
+multitable-range-fill-flag
+multitable-range-fill-interaction
+multitable-range-fill-planner
+multitable-range-fill-writer
 multitable-record-approval-panel
 multitable-record-approval-progress
 multitable-record-approval-submit
@@ -461,6 +471,7 @@ StockPreparationLargeBomPull.spec.ts
 StockPreparationLargeBomPullPanel.spec.ts
 StockPreparationManagedTableRelabelPanel
 StockPreparationMappingConfirmView
+StockPreparationMembers
 StockPreparationMissingComponents
 StockPreparationOnboardingReadiness
 StockPreparationOperatorHome
@@ -470,6 +481,7 @@ StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
 StockPreparationProjectArchive
 StockPreparationProjectBoard
+StockPreparationProjectOverview
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts

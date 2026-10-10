@@ -3255,6 +3255,7 @@ export interface paths {
                         "application/json": {
                             ok?: boolean;
                             data?: components["schemas"]["AttendanceSettings"];
+                            runtimeGates?: components["schemas"]["AttendanceRuntimeGates"];
                         };
                     };
                 };
@@ -18886,6 +18887,17 @@ export interface components {
                 swap?: "clock-plus" | "calendar" | "moon" | "swap" | "plus" | "user" | "briefcase" | "pin";
             };
         };
+        /** @description Read-only report of the server-side run switches that the two scheduled attendance features need in addition to their saved org-side settings. Present only as a sibling of `data` on GET /api/attendance/settings (omitted by older servers); never part of the persisted settings document and never on the PUT response. It carries symbolic gate ids and booleans only, no environment variable names or values. An open gate means "not blocked by these switches", not that the feature is running. The report is the switch snapshot of the one process that answered this request; another instance may be configured differently, so it is never a cluster-wide state. */
+        AttendanceRuntimeGates: {
+            reportDigest: components["schemas"]["AttendanceRuntimeGateEntry"];
+            annualLeaveAccrualScheduled: components["schemas"]["AttendanceRuntimeGateEntry"];
+        };
+        AttendanceRuntimeGateEntry: {
+            /** @description True when none of the feature's server run switches is closed. Not "running". */
+            gatesOpen: boolean;
+            /** @description Symbolic ids of the closed switches, in the server's order. Currently digestProducer, accrualTrigger, scheduler and deliveryWorker; open-ended, so a newer server may add ids. */
+            closedGates: string[];
+        };
         Spreadsheet: {
             id?: string;
             name?: string;
@@ -19425,9 +19437,14 @@ export interface components {
             branches: components["schemas"]["ApprovalConditionBranch"][];
             defaultEdgeKey?: string;
         };
+        /**
+         * @description Lock-1 OD-L1-7(a): `targetType: group` names member-group ids in `targetIds`; the template
+         *     keeps the group reference and the executor expands it into one user cc record per frozen
+         *     member at dispatch, so persisted cc records stay user/role.
+         */
         ApprovalCcNodeConfig: {
             /** @enum {string} */
-            targetType: "user" | "role";
+            targetType: "user" | "role" | "group";
             targetIds: string[];
         };
         /**

@@ -545,8 +545,8 @@ export function validateApprovalNodeEdits(
       continue
     }
     for (const source of omitsAssigneeSources ? [] : edit.assigneeSources) {
-      // Lock-3 §1.5 / G-13: a handler admits ONLY the seven-member registry kinds (backend
-      // APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED). Mirror it in the FE preview.
+      // Lock-3 §1.5 / G-13: a handler admits ONLY the HANDLER_ASSIGNEE_SOURCE_KINDS registry kinds
+      // (backend APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED). Mirror it in the FE preview.
       if (isHandler && !HANDLER_ASSIGNEE_SOURCE_KIND_SET.has(source.kind)) {
         errors.push(`${nodeLabel} ${edit.nodeKey} 的办理人来源（${source.kind}）不支持`)
         continue

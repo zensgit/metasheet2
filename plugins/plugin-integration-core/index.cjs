@@ -517,6 +517,12 @@ module.exports = {
         // adopted.
         stockPreparationFieldPermissions:
           (context.services && context.services.stockPreparationFieldPermissions) || null,
+        // 备料「成员与权限」(S5b, register R-39): the host's NARROW members port (packages/core-backend
+        // services/stock-preparation-members.ts), injected for this plugin only — same INJECTED-per-plugin
+        // shape as the ports above. It creates / updates server-generated `stock-prep_c_…` roles with
+        // `stock-prep:*` codes only and audits every change; the four members routes are 501 without it.
+        // Duck-typed to { describe, createCustomRole, updateCustomRole, grantCustomRoleProjectSheets }.
+        stockPreparationMembers: (context.services && context.services.stockPreparationMembers) || null,
         // 通知下一步: the DingTalk seam, injected by the host for this plugin only — the same
         // INJECTED-per-plugin shape as governedAi and stockPreparationXlsxExport above, and for the
         // same reason: the plugin has no DingTalk client of its own and must not grow one. The host

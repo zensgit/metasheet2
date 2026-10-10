@@ -48,6 +48,7 @@ export interface TasksClient {
   get: (path: string) => supertest.Test
   post: (path: string) => supertest.Test
   patch: (path: string) => supertest.Test
+  put: (path: string) => supertest.Test
   delete: (path: string) => supertest.Test
 }
 
@@ -60,18 +61,20 @@ export function tasksClient(baseUrl: string): TasksClient {
     get: (path) => wrap(agent.get(path)),
     post: (path) => wrap(agent.post(path)),
     patch: (path) => wrap(agent.patch(path)),
+    put: (path) => wrap(agent.put(path)),
     delete: (path) => wrap(agent.delete(path)),
   }
 }
 
-/** Sends the path bytes exactly as written. */
+/** Sends the path bytes exactly as written. `text` is the response body as received, for byte
+ * comparisons; `body` is its JSON when it parses. */
 export function rawRequest(
   port: number,
   method: string,
   path: string,
   bearer: string,
   body?: unknown,
-): Promise<{ status: number; body: unknown }> {
+): Promise<{ status: number; body: unknown; text: string }> {
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body), 'utf8')
     const headers: Record<string, string> = { Authorization: `Bearer ${bearer}`, Connection: 'close' }
@@ -86,7 +89,7 @@ export function rawRequest(
         const text = Buffer.concat(chunks).toString('utf8')
         let parsed: unknown = undefined
         try { parsed = text.length > 0 ? JSON.parse(text) : undefined } catch { parsed = text }
-        resolve({ status: res.statusCode ?? 0, body: parsed })
+        resolve({ status: res.statusCode ?? 0, body: parsed, text })
       })
     })
     req.on('error', reject)
