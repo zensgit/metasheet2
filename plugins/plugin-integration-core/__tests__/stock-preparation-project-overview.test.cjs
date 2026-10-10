@@ -94,6 +94,11 @@
 //         still leaves no cooldown.
 //   O-31  (item 4) the INCOMPLETE warn (O-31) and the per-event warn (O-31b) name the last failure that still stands,
 //         never an earlier one the same run healed.
+//   O-24b (item 5) the runner's MAIN form (`runFailClosedMain`): a drained hang inside main exits 1, a main that only
+//         sets process.exitCode exits 1 and is never "all assertions passed", a live hang is bounded, a pass exits 0.
+//   O-24c (item 5) adoption guard: every stock-prep suite with `async function main()` / a `tests` array runs on the
+//         fail-closed runner under its own file name; no bare main() call or hand-rolled async loop is left (the suites
+//         of the parallel S5b members work, `stock-preparation-members*`, are skipped while they are not on the runner).
 //
 // Synthetic values only.
 
@@ -1541,6 +1546,94 @@ test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with no
   const passing = probe(`runFailClosedSuite('probe-ok', [['passes', async () => {}]])`)
   assert.equal(passing.status, 0, passing.stderr)
   assert.match(passing.stdout, /probe-ok: all assertions passed/)
+})
+
+// S3 follow-ups 2 (item 5): the runner's MAIN adoption form and its reported-exit-code rule.
+test('O-24b (follow-ups 2, item 5) runFailClosedMain: a main that hangs with nothing alive exits 1 (sentinel); a main that reports failure through process.exitCode exits 1 and is never "all assertions passed"; a passing main exits 0', () => {
+  const { spawnSync } = require('node:child_process')
+  const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
+  const runner = require(runnerPath)
+  assert.equal(runner.WHOLE_SUITE_TIMEOUT_MS, 5 * 60 * 1000, 'the whole-suite bound stated in the PR body')
+  const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedMain } = require(${JSON.stringify(runnerPath)});\n${body}`], { encoding: 'utf8', timeout: 20000 })
+  // (1) The S3 review's hang, inside a main(): nothing keeps the loop alive.
+  const drained = probe(`runFailClosedMain('probe-main-drain', async function main() { console.log('before the hang'); await new Promise(() => {}) })`)
+  assert.equal(drained.status, 1, `a drained hang inside main must exit 1 (status ${drained.status}, signal ${drained.signal}); stderr: ${drained.stderr}`)
+  assert.match(drained.stderr, /probe-main-drain FAILED: the event loop drained before every test settled/)
+  assert.ok(!drained.stdout.includes('all assertions passed'))
+  // (2) A main that counts its own failures and only sets process.exitCode (seven stock-prep suites do).
+  const reported = probe(`runFailClosedMain('probe-main-exitcode', async function main() { console.error('1 guard(s) FAILED'); process.exitCode = 1 })`)
+  assert.equal(reported.status, 1, `a main that set process.exitCode must exit 1 (status ${reported.status}); stderr: ${reported.stderr}`)
+  assert.match(reported.stderr, /probe-main-exitcode FAILED \(process\.exitCode 1 was set by the suite\)/)
+  assert.ok(!reported.stdout.includes('all assertions passed'), 'never "all assertions passed" over a reported failure')
+  // (3) A main that throws: FAIL + exit 1.
+  const thrown = probe(`runFailClosedMain('probe-main-throw', async function main() { throw new Error('synthetic failure') })`)
+  assert.equal(thrown.status, 1)
+  assert.match(thrown.stderr, /FAIL: main/)
+  assert.match(thrown.stderr, /probe-main-throw FAILED \(1\)/)
+  // (4) A live hang inside main is bounded by the (overridable) whole-suite timeout.
+  const alive = probe(`runFailClosedMain('probe-main-alive', () => new Promise(() => { setInterval(() => {}, 50) }), { testTimeoutMs: 300 })`)
+  assert.equal(alive.status, 1, `a live hang inside main must time out and exit 1 (status ${alive.status}, signal ${alive.signal})`)
+  assert.match(alive.stderr, /timed out after 300 ms/)
+  // (5) Control: a passing main exits 0 and says so; an exitCode of 0 is not a failure.
+  const passing = probe(`runFailClosedMain('probe-main-ok', async function main() { process.exitCode = 0 })`)
+  assert.equal(passing.status, 0, passing.stderr)
+  assert.match(passing.stdout, / {2}main OK/)
+  assert.match(passing.stdout, /probe-main-ok: all assertions passed/)
+  // (6) `passLine` — the line a converted suite's old tail printed — is kept on a pass (right before the runner's own
+  // line) and never printed over a failure.
+  const kept = probe(`runFailClosedMain('probe-main-passline', async function main() {}, { passLine: 'probe-main-passline.test.cjs OK' })`)
+  assert.equal(kept.status, 0, kept.stderr)
+  assert.match(kept.stdout, /probe-main-passline\.test\.cjs OK\nprobe-main-passline: all assertions passed/)
+  const keptOnFail = probe(`runFailClosedMain('probe-main-passline-fail', async function main() { throw new Error('synthetic failure') }, { passLine: 'probe-main-passline-fail.test.cjs OK' })`)
+  assert.equal(keptOnFail.status, 1)
+  assert.ok(!keptOnFail.stdout.includes('probe-main-passline-fail.test.cjs OK'), 'no pass line over a failure')
+  assert.throws(() => runner.runFailClosedSuite('x', [], { passLine: '' }), TypeError)
+})
+
+// S3 follow-ups 2 (item 5): every stock-prep suite with a hand-rolled ASYNC runner is on the fail-closed runner.
+test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `async function main()` ends in runFailClosedMain(<its file>, main), every `tests` array suite in runFailClosedSuite(<its file>, tests); no bare main() / async-IIFE loop is left', () => {
+  const dir = __dirname
+  const files = fs.readdirSync(dir).filter((name) => /^stock-preparation-.*\.test\.cjs$/.test(name)).sort()
+  // Left to its owners ON PURPOSE: the suites of the S5b members work (`stock-preparation-members*`), which another
+  // line of work is rewriting right now. A file there that is NOT on the runner is skipped (that line adopts it when
+  // it lands — and may add, split or rename suites meanwhile without turning this guard red); a file there that IS on
+  // the runner is held to the same exact form as every other suite. Nothing outside that prefix is exempt.
+  const PENDING_ADOPTION_PREFIX = 'stock-preparation-members'
+  const pendingSkipped = []
+  const viaMain = []
+  const viaTests = []
+  const problems = []
+  const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  // The one option a converted tail may pass: the pass line its old tail printed (a single-quoted literal).
+  const PASS_LINE_OPTION = "(?:, \\{ passLine: '[^'\\n]+' \\})?"
+  for (const file of files) {
+    const text = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n')
+    const hasAsyncMain = /^async function main\(\) \{$/m.test(text)
+    const hasTestsArray = /^const tests = \[\]$/m.test(text)
+    if (file.startsWith(PENDING_ADOPTION_PREFIX) && !text.includes('fail-closed-suite-runner')) {
+      pendingSkipped.push(file)
+      continue
+    }
+    // A SYNCHRONOUS `function main()` cannot await anything, so it cannot hang on a promise: only the async one counts.
+    if (hasAsyncMain && /^main\(/m.test(text)) problems.push(`${file}: a bare top-level call of the async main() (exits 0 past a hang)`)
+    if (/^;?\(async \(\) => \{$/m.test(text) && /for \(const \[name, fn\] of tests\)/.test(text)) problems.push(`${file}: a hand-rolled async test loop (exits 0 past a hang)`)
+    if (hasAsyncMain) {
+      // A top-level STATEMENT (anchored to its own line), never a mention in a comment.
+      if (new RegExp(`^require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.runFailClosedMain\\('${escapeRe(file)}', main${PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaMain.push(file)
+      else problems.push(`${file}: async main() is not run by runFailClosedMain('${file}', main)`)
+    }
+    if (hasTestsArray) {
+      if (new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosedSuite\\('${escapeRe(file)}', tests${PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaTests.push(file)
+      else problems.push(`${file}: its tests array is not run by runFailClosedSuite('${file}', tests)`)
+    }
+  }
+  assert.deepEqual(problems, [], problems.join('\n'))
+  // Only the S5b area is ever skipped (today: the one members suite this PR leaves untouched).
+  assert.ok(pendingSkipped.every((file) => file.startsWith(PENDING_ADOPTION_PREFIX)), pendingSkipped.join(', '))
+  // Not vacuous: the 65 main() suites and the 6 tests-array suites (5 converted here + this one) this PR stands on.
+  assert.ok(viaMain.length >= 65, `runFailClosedMain adopters: ${viaMain.length}`)
+  assert.ok(viaTests.length >= 6, `runFailClosedSuite adopters: ${viaTests.length}`)
+  assert.ok(viaTests.includes('stock-preparation-project-overview.test.cjs'))
 })
 
 // ── O-25 ───────────────────────────────────────────────────────────────────────────────────────────
