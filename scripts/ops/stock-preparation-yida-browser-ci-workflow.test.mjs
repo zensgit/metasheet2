@@ -42,7 +42,7 @@ function extractStep(source) {
 
 const step = extractStep(workflow)
 
-function withProbe(callback) {
+function withProbe(callback, pgConfigMode = 'wrong-directory') {
   const temporaryRoot = path.join(root, 'tmp')
   const fixture = path.join(temporaryRoot, 'yida-workflow-caller-' + randomUUID())
   const bin = path.join(fixture, 'bin')
@@ -50,6 +50,7 @@ function withProbe(callback) {
   const adapter = path.join(fixture, 'node-adapter.cjs')
   const preload = path.join(fixture, 'ambient-preload.cjs')
   const marker = path.join(fixture, 'preload-executed')
+  const pgConfigMarker = path.join(fixture, 'pg-config-executed')
   const ownership = JSON.stringify({ owner: 'yida-workflow-caller-contract', pid: process.pid, fixture })
   mkdirSync(bin, { recursive: true, mode: 0o700 })
   mkdirSync(home, { mode: 0o700 })
@@ -61,12 +62,12 @@ function withProbe(callback) {
     chmodSync(adapter, 0o700)
     symlinkSync(adapter, path.join(bin, 'node'))
     writeFileSync(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'synthetic preload ran before callback\\n')\n`, { mode: 0o600 })
-    const pg = spawnSync('/usr/bin/pg_config', ['--bindir'], {
-      env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, encoding: 'utf8', timeout: 5000,
-    })
-    assert.ifError(pg.error)
-    assert.equal(pg.status, 0, 'Linux caller fixture requires pg_config, as the workflow does')
-    const pgBin = realpathSync(pg.stdout.trim())
+    const pgBin = realpathSync('/usr/lib/postgresql/14/bin')
+    // The workflow installs PG14 explicitly; an ambient pg_config must never select its server tools.
+    assert.ok(['wrong-directory', 'broken'].includes(pgConfigMode))
+    const pgConfig = path.join(bin, 'pg_config')
+    writeFileSync(pgConfig, `#!${executable}\nrequire('node:fs').writeFileSync(${JSON.stringify(pgConfigMarker)}, 'called\\n')\n${pgConfigMode === 'broken' ? 'process.exit(1)' : "process.stdout.write('/synthetic/wrong-pg-bin\\n')"}\n`, { mode: 0o700 })
+    chmodSync(pgConfig, 0o700)
     const ambient = {
       HOME: home, PATH: bin + ':/usr/bin:/bin', LANG: 'ambient-locale', LC_ALL: 'ambient-locale', TZ: 'Pacific/Honolulu',
       NODE_OPTIONS: '--require ' + JSON.stringify(preload), DATABASE_URL: 'synthetic-db-url', EXPECT_DB: '1',
@@ -89,12 +90,13 @@ function withProbe(callback) {
       assert.ifError(result.error)
       const receipts = result.stdout.split('\n').filter(line => line.startsWith(probePrefix))
         .map(line => JSON.parse(line.slice(probePrefix.length)))
-      return { ...result, receipts, preloadExecuted: existsSync(marker) }
+      return { ...result, receipts, preloadExecuted: existsSync(marker), pgConfigExecuted: existsSync(pgConfigMarker) }
     }
     function assertClean(result) {
       assert.equal(result.status, 0, 'CALLER_EXIT: ' + result.stderr)
       assert.equal(result.receipts.length, 2, 'CALLER_COUNT: contract and launcher must both execute')
       assert.equal(result.preloadExecuted, false, 'CALLER_PRELOAD: ambient NODE_OPTIONS executed before callback')
+      assert.equal(result.pgConfigExecuted, false, 'CALLER_PG_CONFIG: ambient pg_config must not select server binaries')
       for (const receipt of result.receipts) {
         assert.equal(receipt.executable, adapter, 'CALLER_EXECUTABLE: resolved canonical Node must execute')
         assert.deepEqual(receipt.env, expectedEnvironment, 'CALLER_ENVIRONMENT: callback must start with only allowlisted variables')
@@ -115,8 +117,11 @@ function withProbe(callback) {
 test('required owner step resolves Node and PG before two clean-environment calls', () => {
   assert.match(step.header, /^        if: matrix\.node-version == '20\.x'$/mu)
   assert.doesNotMatch(step.header, /^        (?:env|continue-on-error|working-directory):/mu)
-  assert.match(step.run, /^yida_node="\$\(\/usr\/bin\/readlink -f "\$\(command -v node\)"\)"$/mu)
-  assert.match(step.run, /^yida_pg_bin="\$\(\/usr\/bin\/readlink -f "\$\(\/usr\/bin\/pg_config --bindir\)"\)"$/mu)
+  assert.match(workflow, /uses: ankane\/setup-postgres@v1\n        with:\n          postgres-version: 14\n/u)
+  assert.match(step.run, /^if ! yida_node_command="\$\(command -v node 2>\/dev\/null\)" \|\| test -z "\$yida_node_command"; then$/mu)
+  assert.match(step.run, /^if ! yida_node="\$\(\/usr\/bin\/readlink -f "\$yida_node_command" 2>\/dev\/null\)" \|\| test -z "\$yida_node"; then$/mu)
+  assert.match(step.run, /^if ! yida_pg_bin="\$\(\/usr\/bin\/readlink -f \/usr\/lib\/postgresql\/14\/bin 2>\/dev\/null\)" \|\| test -z "\$yida_pg_bin"; then$/mu)
+  assert.doesNotMatch(step.run, /pg_config --bindir/u)
   assert.equal((step.run.match(/\/usr\/bin\/env -i HOME="\$HOME" PATH=\/usr\/bin:\/bin LANG=C\.UTF-8 LC_ALL=C\.UTF-8 TZ=UTC/gu) ?? []).length, 2)
   assert.ok(step.run.indexOf('test -x "$yida_tool"') < step.run.indexOf('/usr/bin/env -i '), 'preflight must finish before the first Node callback')
   assert.doesNotMatch(step.run, /DATABASE_URL|EXPECT_DB|\|\|\s*true/u)
@@ -125,6 +130,12 @@ test('required owner step resolves Node and PG before two clean-environment call
 test('actual workflow bash clears hostile ambient state before either Node callback', linuxShell, () => {
   withProbe(({ execute, assertClean }) => assertClean(execute(step.run)))
 })
+
+for (const mode of ['wrong-directory', 'broken']) {
+  test(`actual workflow selects installed PG14 with ${mode} ambient pg_config`, linuxShell, () => {
+    withProbe(({ execute, assertClean }) => assertClean(execute(step.run)), mode)
+  })
+}
 
 for (const index of [0, 1]) {
   test(`removing env -i from Node call ${index + 1} executes ambient preload before the callback`, linuxShell, () => {
@@ -160,13 +171,43 @@ for (const [name, mutate] of [
   })
 }
 
-test('missing executable in the actual preflight stops before any Node callback', linuxShell, () => {
-  withProbe(({ execute }) => {
-    const mutation = step.run.replace('"$yida_pg_bin/initdb"', '"$yida_pg_bin/synthetic-missing-initdb"')
-    assert.notEqual(mutation, step.run)
-    const result = execute(mutation)
-    assert.notEqual(result.status, 0)
-    assert.deepEqual(result.receipts, [])
-    assert.equal(result.preloadExecuted, false)
+for (const [role, executable] of [
+  ['node', '$yida_node'], ['initdb', '$yida_pg_bin/initdb'], ['pg_ctl', '$yida_pg_bin/pg_ctl'],
+  ['postgres', '$yida_pg_bin/postgres'], ['unshare', '/usr/bin/unshare'],
+  ['setpriv', '/usr/bin/setpriv'], ['python3', '/usr/bin/python3'], ['ip', '/usr/sbin/ip'],
+]) {
+  test(`missing ${role} in the actual preflight stops with a fixed role before any Node callback`, linuxShell, () => {
+    withProbe(({ execute }) => {
+      const mutation = step.run.replace(`${role}:${executable}`, `${role}:/synthetic/missing-executable`)
+      assert.notEqual(mutation, step.run)
+      const result = execute(mutation)
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, new RegExp(`^YIDA_CALLER_PREFLIGHT: ${role}$`, 'mu'))
+      assert.doesNotMatch(result.stderr, /\/synthetic\/missing-executable/u)
+      assert.deepEqual(result.receipts, [])
+      assert.equal(result.preloadExecuted, false)
+      assert.equal(result.pgConfigExecuted, false)
+    })
   })
-})
+}
+
+for (const [role, resolution] of [
+  ['node-resolution', 'command -v node'],
+  ['node-canonical', '/usr/bin/readlink -f "$yida_node_command"'],
+  ['pg-bin-canonical', '/usr/bin/readlink -f /usr/lib/postgresql/14/bin'],
+]) {
+  for (const replacement of ['/bin/false', '/bin/true']) {
+    test(`${role} rejects ${replacement === '/bin/false' ? 'failed' : 'empty'} resolution before any Node callback`, linuxShell, () => {
+      withProbe(({ execute }) => {
+        const mutation = step.run.replace(resolution, replacement)
+        assert.notEqual(mutation, step.run)
+        const result = execute(mutation)
+        assert.notEqual(result.status, 0)
+        assert.match(result.stderr, new RegExp(`^YIDA_CALLER_PREFLIGHT: ${role}$`, 'mu'))
+        assert.deepEqual(result.receipts, [])
+        assert.equal(result.preloadExecuted, false)
+        assert.equal(result.pgConfigExecuted, false)
+      })
+    })
+  }
+}
