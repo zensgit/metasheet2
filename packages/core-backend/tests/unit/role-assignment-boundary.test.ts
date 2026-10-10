@@ -703,6 +703,13 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
   /** Serves the seam's reads by SQL shape, so neither leg depends on a call-ordering count. */
   function installDelegationPg(seen: string[], actorRoleId: string, targetRoleId: string) {
     pgMocks.query.mockReset()
+    // The seam writes inside `transaction()` (the delegated platform-code check reads the role's
+    // codes under a row lock in the same transaction as the write); serve it from the same SQL
+    // router so the write is observable here.
+    pgMocks.transaction.mockReset()
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.query }) => unknown) => (
+      handler({ query: pgMocks.query })
+    ))
     rbacServiceMocks.isAdmin.mockResolvedValue(false)
     pgMocks.query.mockImplementation(async (sql: string) => {
       seen.push(sql)

@@ -32,11 +32,21 @@
  *     (`SELECT id FROM roles WHERE id = $1` → 404). Keeping this boundary DB-free keeps
  *     it a pure, cheaply-testable predicate and keeps it out of every caller's error
  *     taxonomy.
+ *
+ * DELEGATED-ADMIN AUDIENCE FOLLOWS THE MAIN-ADMIN ROLE. When the role written derives a
+ * delegated-admin namespace (`deriveDelegatedAdminNamespace`, the same predicate that makes
+ * its holders delegated admins), the writers also remove that user's
+ * `delegated_role_admin_scopes` and `delegated_role_admin_member_groups` rows for the
+ * namespace once no role deriving it remains (revoke), or when the user did not already hold
+ * one (fresh appointment). It runs on the caller's executor, so a caller that passes its
+ * `transaction()` client gets the membership change and the cleanup atomically; every caller
+ * that can write such a role does.
  */
 import type { Response } from 'express'
 import { query as poolQuery } from '../db/pg'
 import { jsonError } from '../util/response'
 import {
+  deriveDelegatedAdminNamespace,
   isNamespaceAdmissionControlledResource,
   normalizeNamespace,
   roleIdMatchesNamespaces,
@@ -183,11 +193,32 @@ export function isRoleAssignable(roleId: string, scope: RoleAssignmentScope): bo
   }
 }
 
+/**
+ * One user's delegated-admin audience for one namespace, removed because the user no longer
+ * holds (on revoke) or did not already hold (on a fresh appointment) any role that derives
+ * that namespace. Counts only — the rows themselves name departments and member groups.
+ */
+export type DelegatedAdminScopeCleanup = {
+  userId: string
+  namespace: string
+  /** Rows removed from `delegated_role_admin_scopes` (department audience). */
+  scopeRows: number
+  /** Rows removed from `delegated_role_admin_member_groups` (member-group audience). */
+  groupScopeRows: number
+}
+
 export type RoleAssignmentResult = {
   /** User ids whose membership actually changed. */
   affectedUserIds: string[]
   /** Rows reported changed by the driver, preserving each caller's prior `updated` value. */
   rowCount: number
+  /**
+   * Delegated-admin audience removed in the SAME statement sequence (and, when the caller
+   * passed its transaction client, the same transaction) as the membership change. Empty
+   * unless `roleId` derives a delegated-admin namespace. Callers audit the non-empty entries
+   * after commit with `auditDelegatedAdminScopeCleanup`.
+   */
+  delegatedAdminScopeCleanup: DelegatedAdminScopeCleanup[]
 }
 
 function normalizeUserIds(userIds: readonly string[]): string[] {
@@ -207,6 +238,119 @@ function executorOf(executor?: RoleAssignmentExecutor): RoleAssignmentExecutor {
   return executor ?? { query: (sql, params) => poolQuery(sql, params as unknown[]) }
 }
 
+function countRowsByAdminUser(rows: Array<Record<string, unknown>> | unknown[]): Map<string, number> {
+  const counts = new Map<string, number>()
+  for (const row of rows as Array<Record<string, unknown>>) {
+    const userId = normalizeRoleId(row?.admin_user_id)
+    if (userId) counts.set(userId, (counts.get(userId) ?? 0) + 1)
+  }
+  return counts
+}
+
+/**
+ * Remove the delegated-admin audience (department scopes AND member-group scopes) that
+ * `namespace` grants to each of `userIds`, for every user that holds no role deriving that
+ * namespace once `ignoreRoleId` is set aside.
+ *
+ * WHY THIS LIVES AT THE WRITER. A user is a delegated admin of `<ns>` exactly when one of their
+ * role ids derives `<ns>` through `deriveDelegatedAdminNamespace` — the predicate the route-side
+ * identity check (`ensureRoleDelegationAdmin` → `deriveDelegableNamespaces`) uses. The audience
+ * rows are keyed by user and namespace only, so before this they outlived the role: revoking
+ * `<ns>_admin` left them in place and re-appointing the same user silently restored the old
+ * audience. Doing the cleanup inside `assignUserRoles` / `unassignUserRoles` gives every seam
+ * that changes membership — platform user admin, the delegation route, the attendance admin
+ * router — the behaviour by construction, on the caller's own executor.
+ *
+ * The SAME predicate is used here as for identity, in-process, so "lost the namespace" and
+ * "is a delegated admin of the namespace" cannot drift apart.
+ */
+async function clearDelegatedAdminScopesWhereNamespaceLost(
+  executor: RoleAssignmentExecutor,
+  options: { userIds: readonly string[]; namespace: string; ignoreRoleId?: string },
+): Promise<DelegatedAdminScopeCleanup[]> {
+  const userIds = normalizeUserIds(options.userIds)
+  const namespace = options.namespace
+  if (userIds.length === 0 || !namespace) return []
+
+  const held = await executor.query(
+    `SELECT user_id, role_id
+     FROM user_roles
+     WHERE user_id = ANY($1::text[])`,
+    [userIds],
+  )
+  const stillDelegated = new Set<string>()
+  for (const row of held.rows as Array<Record<string, unknown>>) {
+    const heldRoleId = normalizeRoleId(row?.role_id)
+    if (!heldRoleId || heldRoleId === options.ignoreRoleId) continue
+    if (deriveDelegatedAdminNamespace(heldRoleId) === namespace) {
+      stillDelegated.add(normalizeRoleId(row?.user_id))
+    }
+  }
+  const lostUserIds = userIds.filter((userId) => !stillDelegated.has(userId))
+  if (lostUserIds.length === 0) return []
+
+  const scopes = await executor.query(
+    `DELETE FROM delegated_role_admin_scopes
+     WHERE admin_user_id = ANY($1::text[])
+       AND namespace = $2
+     RETURNING admin_user_id`,
+    [lostUserIds, namespace],
+  )
+  const groupScopes = await executor.query(
+    `DELETE FROM delegated_role_admin_member_groups
+     WHERE admin_user_id = ANY($1::text[])
+       AND namespace = $2
+     RETURNING admin_user_id`,
+    [lostUserIds, namespace],
+  )
+  const scopeCounts = countRowsByAdminUser(scopes.rows)
+  const groupScopeCounts = countRowsByAdminUser(groupScopes.rows)
+  return lostUserIds.map((userId) => ({
+    userId,
+    namespace,
+    scopeRows: scopeCounts.get(userId) ?? 0,
+    groupScopeRows: groupScopeCounts.get(userId) ?? 0,
+  }))
+}
+
+/**
+ * Audit the delegated-admin audience a membership change removed. Call it AFTER the
+ * transaction that carried the change has committed, so the entry never describes a removal
+ * that rolled back. One entry per user and namespace that actually lost rows; counts only.
+ *
+ * The audit module is imported lazily, and only when there is something to record (the
+ * `directory/directory-sync.ts` precedent): `audit/audit` builds its repository at module load
+ * and needs a live pool, and this module is imported by callers — `AuthService` among them —
+ * whose own suites mock the database without one.
+ */
+export async function auditDelegatedAdminScopeCleanup(options: {
+  actorId: string | null | undefined
+  roleId: string
+  trigger: 'role_unassigned' | 'role_appointed'
+  cleanup: readonly DelegatedAdminScopeCleanup[] | null | undefined
+}): Promise<void> {
+  const entries = (options.cleanup ?? []).filter((entry) => entry.scopeRows + entry.groupScopeRows > 0)
+  if (entries.length === 0) return
+  const { auditLog } = await import('../audit/audit')
+  for (const entry of entries) {
+    await auditLog({
+      actorId: options.actorId ?? undefined,
+      actorType: 'user',
+      action: 'revoke',
+      resourceType: 'delegated-admin-scope',
+      resourceId: `${entry.userId}:${entry.namespace}`,
+      meta: {
+        userId: entry.userId,
+        namespace: entry.namespace,
+        roleId: options.roleId,
+        trigger: options.trigger,
+        scopeRows: entry.scopeRows,
+        groupScopeRows: entry.groupScopeRows,
+      },
+    })
+  }
+}
+
 export async function assignUserRoles(options: {
   userIds: readonly string[]
   roleId: string
@@ -216,9 +360,10 @@ export async function assignUserRoles(options: {
   assertRoleAssignable(options.roleId, options.scope)
   const roleId = normalizeRoleId(options.roleId)
   const userIds = normalizeUserIds(options.userIds)
-  if (userIds.length === 0) return { affectedUserIds: [], rowCount: 0 }
+  if (userIds.length === 0) return { affectedUserIds: [], rowCount: 0, delegatedAdminScopeCleanup: [] }
 
-  const result = await executorOf(options.executor).query(
+  const executor = executorOf(options.executor)
+  const result = await executor.query(
     `INSERT INTO user_roles (user_id, role_id)
      SELECT unnest($1::text[]), $2
      ON CONFLICT DO NOTHING
@@ -226,7 +371,24 @@ export async function assignUserRoles(options: {
     [userIds, roleId],
   )
   const affectedUserIds = readAffectedUserIds(result.rows)
-  return { affectedUserIds, rowCount: result.rowCount ?? affectedUserIds.length }
+  // A FRESH appointment to a namespace's main-admin role starts with no audience. Only users
+  // whose membership actually changed are considered, and of those only the ones that held no
+  // OTHER role deriving the namespace — so re-sending an existing appointment is a no-op, and
+  // audience left behind by any earlier removal path (including rows that predate this check)
+  // cannot come back with the role.
+  const namespace = deriveDelegatedAdminNamespace(roleId)
+  const delegatedAdminScopeCleanup = namespace && affectedUserIds.length > 0
+    ? await clearDelegatedAdminScopesWhereNamespaceLost(executor, {
+      userIds: affectedUserIds,
+      namespace,
+      ignoreRoleId: roleId,
+    })
+    : []
+  return {
+    affectedUserIds,
+    rowCount: result.rowCount ?? affectedUserIds.length,
+    delegatedAdminScopeCleanup,
+  }
 }
 
 export async function unassignUserRoles(options: {
@@ -240,14 +402,25 @@ export async function unassignUserRoles(options: {
   assertRoleAssignable(options.roleId, options.scope)
   const roleId = normalizeRoleId(options.roleId)
   const userIds = normalizeUserIds(options.userIds)
-  if (userIds.length === 0) return { affectedUserIds: [], rowCount: 0 }
+  if (userIds.length === 0) return { affectedUserIds: [], rowCount: 0, delegatedAdminScopeCleanup: [] }
 
-  const result = await executorOf(options.executor).query(
+  const executor = executorOf(options.executor)
+  const result = await executor.query(
     `DELETE FROM user_roles
      WHERE role_id = $2 AND user_id = ANY($1::text[])
      RETURNING user_id`,
     [userIds, roleId],
   )
   const affectedUserIds = readAffectedUserIds(result.rows)
-  return { affectedUserIds, rowCount: result.rowCount ?? affectedUserIds.length }
+  // Losing a namespace's main-admin role ends the delegation, so the audience it was scoped to
+  // goes with it — unless the user still holds another role deriving the same namespace.
+  const namespace = deriveDelegatedAdminNamespace(roleId)
+  const delegatedAdminScopeCleanup = namespace && affectedUserIds.length > 0
+    ? await clearDelegatedAdminScopesWhereNamespaceLost(executor, { userIds: affectedUserIds, namespace })
+    : []
+  return {
+    affectedUserIds,
+    rowCount: result.rowCount ?? affectedUserIds.length,
+    delegatedAdminScopeCleanup,
+  }
 }

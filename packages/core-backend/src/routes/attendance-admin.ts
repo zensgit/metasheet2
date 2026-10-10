@@ -11,6 +11,7 @@ import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import {
   assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
   isRoleAssignable,
   sendIfRoleAssignmentRefused,
   unassignUserRoles,
@@ -1223,6 +1224,14 @@ export function attendanceAdminRouter(): Router {
         })
         return { insert: result, resolvedUsers: resolved }
       })
+      // Post-commit: a fresh `attendance_admin` appointment drops audience left from an earlier
+      // tenure inside the transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: insert?.delegatedAdminScopeCleanup,
+      })
 
       const affectedUserIdsRaw = insert.affectedUserIds
       const affectedSet = new Set(affectedUserIdsRaw)
@@ -1286,6 +1295,14 @@ export function attendanceAdminRouter(): Router {
           executor: client,
         })
         return { del: result, resolvedUsers: resolved }
+      })
+      // Post-commit: revoking `attendance_admin` dropped the delegated audience inside the
+      // transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: del?.delegatedAdminScopeCleanup,
       })
 
       const affectedUserIdsRaw = del.affectedUserIds
@@ -1371,6 +1388,7 @@ export function attendanceAdminRouter(): Router {
       }
       const finalRoleId = roleResolution.roleId
 
+      let membership: Awaited<ReturnType<typeof assignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
@@ -1378,13 +1396,19 @@ export function attendanceAdminRouter(): Router {
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
         await ensureAttendanceRoleTemplates(runQuery)
-        await assignUserRoles({
+        membership = await assignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
           scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
           executor: client,
         })
         return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: membership?.delegatedAdminScopeCleanup,
       })
 
       const [roles, permissions, isAdmin] = await Promise.all([
@@ -1424,19 +1448,26 @@ export function attendanceAdminRouter(): Router {
       }
       const finalRoleId = roleResolution.roleId
 
+      let membership: Awaited<ReturnType<typeof unassignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
         assertGlobalAttendanceRoleWriteScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
-        await unassignUserRoles({
+        membership = await unassignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
           scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
           executor: client,
         })
         return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
       })
 
       const [roles, permissions, isAdmin] = await Promise.all([
