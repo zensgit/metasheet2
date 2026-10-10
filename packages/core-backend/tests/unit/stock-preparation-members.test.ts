@@ -214,6 +214,9 @@ function harness(options: { env?: Record<string, string>; world?: World; randomS
     if (text.startsWith('SELECT user_id FROM user_roles WHERE role_id')) {
       return { rows: world.userRoles.filter((row) => row.role_id === params[0]).map((row) => ({ user_id: row.user_id })) }
     }
+    if (text.startsWith('SELECT COUNT(*)::int AS c FROM roles WHERE id LIKE $1')) {
+      return { rows: [{ c: Array.from(world.roles.keys()).filter((id) => id.startsWith('stock-prep_c_')).length }] }
+    }
     if (text.startsWith('SELECT id FROM roles WHERE id = $1')) {
       return { rows: world.roles.has(params[0] as string) ? [{ id: params[0] }] : [] }
     }
@@ -632,5 +635,64 @@ describe('stock-prep members port (S5b, R-39)', () => {
     const source = readFileSync(path.join(__dirname, '..', '..', 'src', 'index.ts'), 'utf8').split('\r\n').join('\n')
     expect(source).toContain("stockPreparationMembers: manifest.name === 'plugin-integration-core'\n          ? createStockPrepMembersHostPort()\n          : undefined,")
     expect(source.match(/createStockPrepMembersHostPort\(\)/g)).toHaveLength(1)
+  })
+
+  it('SM-17: a delegated admin may not change what a role grants while it has members outside their scope', async () => {
+    const h = harness()
+    h.world.userRoles.push({ user_id: MEMBER_OUT, role_id: CUSTOM })
+    const update = await refusal(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+    expect([update.status, update.code, update.details]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE', { outOfScopeCount: 1 }])
+    const t = targets([SHEET_A])
+    const grant = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+    expect([grant.status, grant.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE'])
+    expect(t.granted).toEqual([])
+    expect(h.calls.transaction).toBe(0)
+    expect(h.audits).toEqual([])
+    expect(h.world.rolePermissions.filter((row) => row.role_id === CUSTOM && row.permission_code === 'stock-prep:operate')).toEqual([])
+    // A rename changes nobody's access and stays possible.
+    await expect(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '改名' })).resolves.toMatchObject({ name: '改名' })
+    // The platform admin is unbounded here, exactly as on the delegation routes.
+    await expect(h.port.updateCustomRole({ actorId: PLATFORM_ADMIN, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })).resolves.toMatchObject({ added: ['stock-prep:operate'] })
+    // Members all in scope: the delegated admin may change it.
+    const inScope = harness()
+    await expect(inScope.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })).resolves.toBeTruthy()
+  })
+
+  it('SM-18: at most STOCK_PREP_CUSTOM_ROLE_MAX custom roles — the 101st is 409 before any write', async () => {
+    const h = harness()
+    for (let i = 1; i < 100; i += 1) {
+      const id = `stock-prep_c_${i.toString(16).padStart(8, '0')}`
+      h.world.roles.set(id, { id, name: id })
+    }
+    const error = await refusal(h.port.createCustomRole({ actorId: DELEGATED, name: 'x', permissionCodes: ['stock-prep:read'] }))
+    expect([error.status, error.code, error.details]).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_LIMIT', { limit: 100 }])
+    expect(h.calls.transaction).toBe(0)
+    expect(h.audits).toEqual([])
+    // One fewer and the create goes through.
+    h.world.roles.delete('stock-prep_c_00000001')
+    await expect(h.port.createCustomRole({ actorId: DELEGATED, name: 'x', permissionCodes: ['stock-prep:read'] })).resolves.toBeTruthy()
+  })
+
+  it('SM-19: appoint / revoke / admission stay on the delegation routes, which audit in the shape this port copies', () => {
+    // Static pin of the EXISTING writers this page relies on (routes/admin-users.ts, not modified here):
+    // removing either auditLog — or the delegated flag in its meta — reddens this line, not only the
+    // admin-users suite.
+    const source = readFileSync(path.join(__dirname, '..', '..', 'src', 'routes', 'admin-users.ts'), 'utf8').split('\r\n').join('\n')
+    const handler = (route: string): string => {
+      const start = source.indexOf(route)
+      expect(start, route).toBeGreaterThan(0)
+      const end = source.indexOf('\n  r.', start + route.length)
+      return source.slice(start, end > 0 ? end : undefined)
+    }
+    const admission = handler("r.patch('/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission'")
+    expect(admission).toMatch(/await auditLog\(\{\s*actorId: delegation\.actorId,\s*actorType: 'user',\s*action: enabled \? 'grant' : 'revoke',\s*resourceType: 'user-namespace-admission',/)
+    expect(admission).toMatch(/delegated: !delegation\.isPlatformAdmin,\s*delegableNamespaces: delegation\.delegableNamespaces,/)
+    const roles = handler("r.post('/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)'")
+    expect(roles).toMatch(/await auditLog\(\{\s*actorId: delegation\.actorId,\s*actorType: 'user',\s*action: action === 'assign' \? 'grant' : 'revoke',\s*resourceType: 'user-role',/)
+    expect(roles).toMatch(/delegated: !delegation\.isPlatformAdmin,\s*delegableNamespaces: delegation\.delegableNamespaces,/)
+    // ...and both still refuse a delegated admin without a scope with the code this port reuses.
+    for (const body of [admission, roles]) {
+      expect(body).toContain("jsonError(res, 403, 'ROLE_DELEGATION_SCOPE_REQUIRED'")
+    }
   })
 })

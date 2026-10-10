@@ -350,6 +350,8 @@ export const STOCK_PREP_MEMBERS_ERROR_PLAIN: Readonly<Record<string, { zh: strin
   STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR: { zh: '不能给出您自己没有的权限。', en: 'You cannot grant a permission you do not hold yourself.' },
   STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE: { zh: '只能授权您自己能打开的项目表。', en: 'You can only grant project sheets you can open yourself.' },
   STOCK_PREP_BUILTIN_ROLE_READ_ONLY: { zh: '内置角色在这里只能查看。', en: 'Built-in roles are read-only here.' },
+  STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE: { zh: '这个角色里有您管理范围以外的成员，它的权限和项目表只能由平台管理员改。', en: 'This role has members outside your delegated scope; only a platform administrator can change what it grants.' },
+  STOCK_PREP_CUSTOM_ROLE_LIMIT: { zh: '自定义角色已经到上限（100 个）。', en: 'The custom role limit (100) has been reached.' },
   STOCK_PREPARATION_PROJECT_ABSENT: { zh: '有项目还没有备料表。', en: 'A project has no stock-prep sheet yet.' },
   STOCK_PREPARATION_PROJECT_ARCHIVED: { zh: '有项目的备料表已归档，请先恢复。', en: 'A project\'s sheet is archived; restore it first.' },
   STOCK_PREPARATION_PROJECT_SHEETS_DISABLED: { zh: '本部署没有开启「一个项目一张备料表」，暂时不能按项目表授权。', en: 'Per-project sheets are off on this deployment, so project sheets cannot be granted yet.' },

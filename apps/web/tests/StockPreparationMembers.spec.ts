@@ -248,7 +248,7 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
     h.apiFetch.mockResolvedValueOnce(ok({})).mockResolvedValueOnce(refused(403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'))
     expect(await appointStockPrepMember('u_x', 'stock-prep_puller')).toEqual({ admitted: false })
     // Every code this page can meet has its own plain sentence.
-    for (const code of ['STOCK_PREP_MEMBERS_FORBIDDEN', 'ROLE_DELEGATION_SCOPE_REQUIRED', 'STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN', 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE', 'STOCK_PREP_BUILTIN_ROLE_READ_ONLY']) {
+    for (const code of ['STOCK_PREP_MEMBERS_FORBIDDEN', 'ROLE_DELEGATION_SCOPE_REQUIRED', 'STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN', 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE', 'STOCK_PREP_BUILTIN_ROLE_READ_ONLY', 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE', 'STOCK_PREP_CUSTOM_ROLE_LIMIT']) {
       expect(STOCK_PREP_MEMBERS_ERROR_PLAIN[code], code).toBeTruthy()
     }
   })

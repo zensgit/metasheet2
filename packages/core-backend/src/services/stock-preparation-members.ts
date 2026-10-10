@@ -30,6 +30,11 @@
  *   * `stock-prep:admin` IS NOT SELECTABLE for a custom role. A custom role carrying it would hand
  *     its members the workbench-admin tier — a second 主管理员 by code, which §11.7's last bullet
  *     keeps off the page. This is a TIGHTENING of the ADR's "the four codes" (owner may relax it).
+ *   * NO CROSS-SCOPE EFFECT (tightening): a delegated admin may change a custom role's codes or add
+ *     project sheets to it only while EVERY current member is inside their delegated scope — a role's
+ *     grants reach all of its members, and the delegation routes would not let this admin appoint the
+ *     others. A platform admin is unbounded, as on the delegation routes. A rename is not refused.
+ *   * AT MOST 100 CUSTOM ROLES (tightening), counted before any write.
  *   * PROJECT SHEETS: ADD-ONLY, WRITE LEVEL, THROUGH G1. This port never writes a sheet grant
  *     itself; the plugin hands it the G1 port call (`grantSheetRoleWrite` via the plugin-scope
  *     wrapper: plugin-owned project sheets only, role subjects only, `spreadsheet:write` literal,
@@ -89,6 +94,8 @@ export const STOCK_PREP_CUSTOM_ROLE_SELECTABLE_CODES = Object.freeze([
 
 export const STOCK_PREP_CUSTOM_ROLE_NAME_MAX = 64
 export const STOCK_PREP_CUSTOM_ROLE_MAX_SHEETS_PER_CALL = 50
+/** At most this many custom roles per deployment — a delegated admin cannot grow the role table without bound. */
+export const STOCK_PREP_CUSTOM_ROLE_MAX = 100
 export const STOCK_PREP_MEMBERS_AUDIT_LIMIT = 50
 const CUSTOM_ROLE_ID_ATTEMPTS = 5
 const AUDIT_SOURCE = 'stock-prep-members'
@@ -379,6 +386,26 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
     }
   }
 
+  /**
+   * NO CROSS-SCOPE EFFECT. A role's codes and project sheets reach EVERY member of it, so a delegated
+   * admin may change them only while every current member is inside their own delegated scope — the
+   * same audience the delegation routes let them appoint. Otherwise a delegated admin could raise the
+   * access of people they may not manage (members a platform admin or another delegated admin
+   * appointed). A platform admin is unbounded here, as on the delegation routes. A rename alone
+   * changes nobody's access and is not refused.
+   */
+  async function assertRoleMembersWithinScope(caller: StockPrepMembersCaller, roleId: string): Promise<void> {
+    if (!caller.delegated) return
+    const members = await deps.query('SELECT user_id FROM user_roles WHERE role_id = $1', [roleId])
+    const memberIds = Array.from(new Set((members.rows as Array<{ user_id?: unknown }>).map((row) => String(row.user_id ?? '')).filter(Boolean)))
+    if (memberIds.length === 0) return
+    const inScope = await loadScopedUserIds(caller, memberIds)
+    const outside = memberIds.filter((userId) => !inScope.has(userId))
+    if (outside.length > 0) {
+      throw new StockPrepMembersError(403, 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE', 'this role has members outside your delegated scope; only a platform administrator may change what it grants', { outOfScopeCount: outside.length })
+    }
+  }
+
   async function assertCodesInCatalog(query: StockPrepMembersQueryFn, codes: readonly string[]): Promise<void> {
     if (codes.length === 0) return
     const known = await query('SELECT code FROM permissions WHERE code = ANY($1::text[])', [codes])
@@ -611,6 +638,14 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       const codes = normalizeStockPrepCustomRoleCodes(permissionCodes)
       const caller = await resolveCaller(actorId)
       await assertCodesWithinGrantor(caller, codes)
+      const existing = await deps.query(
+        `SELECT COUNT(*)::int AS c FROM roles WHERE id LIKE $1 ESCAPE '\\'`,
+        [`${STOCK_PREP_CUSTOM_ROLE_ID_PREFIX.replace(/_/g, '\\_')}%`],
+      )
+      const existingCount = Number((existing.rows as Array<{ c?: unknown }>)[0]?.c ?? 0)
+      if (!Number.isFinite(existingCount) || existingCount >= STOCK_PREP_CUSTOM_ROLE_MAX) {
+        throw new StockPrepMembersError(409, 'STOCK_PREP_CUSTOM_ROLE_LIMIT', `at most ${STOCK_PREP_CUSTOM_ROLE_MAX} custom roles`, { limit: STOCK_PREP_CUSTOM_ROLE_MAX })
+      }
       let roleId: string | null = null
       for (let attempt = 0; attempt < CUSTOM_ROLE_ID_ATTEMPTS && roleId === null; attempt += 1) {
         const candidate = assertStockPrepCustomRoleIdWritable(`${STOCK_PREP_CUSTOM_ROLE_ID_PREFIX}${randomSuffix()}`)
@@ -648,7 +683,10 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
         throw new StockPrepMembersError(400, 'STOCK_PREP_CUSTOM_ROLE_PATCH_EMPTY', 'name or permissionCodes is required')
       }
       const caller = await resolveCaller(actorId)
-      if (nextCodes !== undefined) await assertCodesWithinGrantor(caller, nextCodes)
+      if (nextCodes !== undefined) {
+        await assertCodesWithinGrantor(caller, nextCodes)
+        await assertRoleMembersWithinScope(caller, id)
+      }
       const outcome = await runWrite(async (query) => {
         const locked = await query('SELECT id, name FROM roles WHERE id = $1 FOR UPDATE', [id])
         const lockedRow = (locked.rows as Array<{ id?: unknown; name?: unknown }>)[0]
@@ -712,6 +750,7 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       if ((exists.rows as unknown[]).length === 0) {
         throw new StockPrepMembersError(404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND', 'custom role not found', { field: 'roleId' })
       }
+      await assertRoleMembersWithinScope(caller, id)
       const targets = await resolveTargets()
       if (!Array.isArray(targets) || targets.length === 0 || targets.length > STOCK_PREP_CUSTOM_ROLE_MAX_SHEETS_PER_CALL) {
         throw new StockPrepMembersError(400, 'STOCK_PREP_CUSTOM_ROLE_SHEETS_INVALID', `1-${STOCK_PREP_CUSTOM_ROLE_MAX_SHEETS_PER_CALL} project sheets per call`, { field: 'projectNos' })
