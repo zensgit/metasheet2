@@ -6,10 +6,12 @@
   cards (leave / makeup / overtime / shift-swap) are mutually exclusive.
   First viewport is untouched.
 
-  Duration follows start/end after a manual edit (0.5-hour steps). Existing
-  overtime rules (min / rounding / max) stay server-side — this card does not
-  invent a client rounding policy. Hours display reuses the leave-card 0.5
-  step because the shared overtime form has no tighter hour increment.
+  Duration follows start/end after a manual edit (0.5-hour steps). Min / daily
+  max are hard limits: the card shows the selected rule's contract, and submit
+  uses the same reject-not-rewrite check as the server. Rounding of an accepted
+  duration stays the server's ceil step; this card does not invent a second one.
+  Hours display reuses the leave-card 0.5 step because the shared overtime form
+  has no tighter hour increment.
 -->
 <template>
   <section
@@ -51,6 +53,9 @@
             '请联系考勤管理员启用可用加班规则后再提交加班申请。',
           )
         }}
+      </small>
+      <small v-else-if="boundsHint" class="overtime-card__hint" data-overtime-card-bounds>
+        {{ boundsHint }}
       </small>
     </label>
 
@@ -144,12 +149,16 @@ import {
   workDateFromDateTimeLocal,
   type LeaveDurationDisplayUnit,
 } from './leaveRequestDurationDisplay'
+import { overtimeRuleBoundsHintCopy } from './overtimeWriteBounds'
 
 type TranslateFn = (en: string, zh: string) => string
 
 interface OvertimeRuleOption {
   id: string
   name: string
+  minMinutes?: number
+  roundingMinutes?: number
+  maxMinutesPerDay?: number
 }
 
 interface OvertimeRequestFormFields {
@@ -174,6 +183,17 @@ const emit = defineEmits<{
 }>()
 
 const durationUnit = ref<LeaveDurationDisplayUnit>('hours')
+
+const selectedRule = computed(() => (
+  props.overtimeRules.find(rule => rule.id === props.requestForm.overtimeRuleId) ?? null
+))
+
+const boundsHint = computed(() => {
+  const rule = selectedRule.value
+  if (!rule) return ''
+  const copy = overtimeRuleBoundsHintCopy(rule)
+  return props.tr(copy.en, copy.zh)
+})
 
 const parsedMinutes = computed(() => {
   const text = String(props.requestForm.minutes ?? '').trim()
