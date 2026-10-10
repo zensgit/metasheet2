@@ -323,3 +323,38 @@ describe('P1-C timeout controls (M7 wired, not inert)', () => {
     expect(api.approvalNodeTimeout('approval_1')?.unit).toBeUndefined()
   })
 })
+
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — direct-mount wiring of the component's reveal for BOTH hidden
+// blocks, keyed only by the api's `approvalNodeHiddenBlockErrors`. The policy block has no mounted
+// path in the full view on this branch (the threshold setter clamps and an invalid persisted
+// threshold opens read-only), so this is where its reveal is pinned.
+describe('F4-A hidden-block guard: a hidden block is revealed exactly while it has a live error', () => {
+  function autoApproveApi(liveErrors: Record<string, string[]>) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    ;(api as { approvalNodeHiddenBlockErrors?: unknown }).approvalNodeHiddenBlockErrors = () => liveErrors
+    return api
+  }
+
+  it('no live error ⇒ the policy grid and the timeout section stay hidden (values preserved, not rendered)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({}))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+  })
+
+  it('a live POLICY error reveals the policy grid only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ policy: ['审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'] }))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-threshold"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('a live TIMEOUT error reveals the timeout section only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ timeout: ['审批节点 approval_1 的超时转交需要选择接收人'] }))
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+  })
+})

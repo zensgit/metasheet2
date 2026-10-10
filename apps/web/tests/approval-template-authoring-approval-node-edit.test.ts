@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalAssigneeSource, ApprovalAssigneeSourceKind, ApprovalGraph, ApprovalTemplateDetailDTO } from '../src/types/approval'
 import {
+  approvalNodeEditHiddenBlockLiveErrors,
   buildApprovalGraph,
   draftFromTemplate,
   isComplexApprovalGraph,
+  setStepApprovalType,
+  stepHiddenBlockLiveErrors,
   unsupportedTemplateAuthoringReason,
+  validateTemplateApprovalFlow,
   validateTemplateDraft,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
@@ -16,6 +20,7 @@ import {
   approvalNodeEditsFromGraph,
   isSourcelessAutoApproveNode,
   legalPriorApproverNodeKeys,
+  multisetDifference,
   placeholderRoleNodeKeys,
   removeAssigneeSourceCard,
   validateApprovalNodeEdits,
@@ -1032,5 +1037,85 @@ describe('Lock-4 §1 F4-A — validateApprovalNodeEdits and the publish placehol
     expect(placeholderRoleNodeKeys(edits)).toEqual([])
     applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
     expect(placeholderRoleNodeKeys(edits)).toEqual(['manual_1'])
+  })
+})
+
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — a hidden block (policy / timeout) on a sourceless auto_approve
+// node/step is still saved and validated, so its live errors are attributed to it (validator diff,
+// no second copy of any rule) and the editors render it again. These pin the attribution itself;
+// the mounted pins (visibility, save blocked, fix ⇒ save) live in approvalTemplateAuthoring.spec.ts.
+describe('Lock-4 §1 F4-A — hidden-block guard: attributing live errors to hidden blocks', () => {
+  const F4A_LINEAR_GRAPH: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  }
+
+  it('multisetDifference keeps duplicates one-for-one (two same-named steps yield identical messages)', () => {
+    expect(multisetDifference(['a', 'a', 'b'], ['a'])).toEqual(['a', 'b'])
+    expect(multisetDifference(['a', 'a'], ['a', 'a'])).toEqual([])
+    expect(multisetDifference([], ['a'])).toEqual([])
+  })
+
+  it('CANVAS: a transfer timeout with no target on a sourceless auto_approve node is attributed to the timeout block, exactly as the save validator words it', () => {
+    const draft = draftFromTemplate(buildTemplate(F4A_EDIT_GRAPH))
+    draft.approvalNodeEdits!.auto_1!.timeout = { afterMinutes: 60, effect: 'transfer' }
+    const flowErrors = validateTemplateApprovalFlow(draft)
+    const live = approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')
+    expect(live).toEqual({ timeout: ['审批节点 auto_1 的超时转交需要选择接收人'] })
+    expect(flowErrors).toContain(live.timeout![0])
+    // POSITIVE CONTROLS: a valid hidden timeout is NOT live (stays hidden, preserved verbatim) …
+    draft.approvalNodeEdits!.auto_1!.timeout = { afterMinutes: 60, effect: 'remind' }
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')).toEqual({})
+    // … and a manual node's blocks are never "hidden", so the guard does not judge them.
+    draft.approvalNodeEdits!.manual_1!.timeout = { afterMinutes: 60, effect: 'transfer' }
+    expect(validateTemplateApprovalFlow(draft).some((error) => error.includes('manual_1'))).toBe(true)
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'manual_1')).toEqual({})
+  })
+
+  it('CANVAS: an invalid threshold on a sourceless auto_approve node is attributed to the policy block', () => {
+    const draft = draftFromTemplate(buildTemplate(F4A_EDIT_GRAPH))
+    draft.approvalNodeEdits!.auto_1!.approvalMode = 'threshold'
+    draft.approvalNodeEdits!.auto_1!.approvalThreshold = 0
+    expect(approvalNodeEditHiddenBlockLiveErrors(draft, 'auto_1')).toEqual({
+      policy: ['审批节点 auto_1 的门槛会签人数必须是不小于 1 的整数'],
+    })
+  })
+
+  it('LINEAR: an enabled-but-empty timeout on a sourceless auto_approve step is attributed to the timeout block; a valid one is not', () => {
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(F4A_LINEAR_GRAPH))
+    expect(draft.steps).toHaveLength(1)
+    const step = draft.steps[0]!
+    step.timeoutEnabled = true
+    setStepApprovalType(step, 'auto_approve')
+    const live = stepHiddenBlockLiveErrors(draft, step)
+    expect(Object.keys(live)).toEqual(['timeout'])
+    expect(live.timeout).toHaveLength(2)
+    for (const message of live.timeout!) expect(validateTemplateApprovalFlow(draft)).toContain(message)
+    step.timeoutAfterMinutesText = '30'
+    step.timeoutEffect = 'remind'
+    expect(stepHiddenBlockLiveErrors(draft, step)).toEqual({})
+    // POSITIVE CONTROL: the same broken timeout on a MANUAL step is not the guard's business.
+    step.timeoutAfterMinutesText = ''
+    setStepApprovalType(step, 'manual')
+    expect(stepHiddenBlockLiveErrors(draft, step)).toEqual({})
+  })
+
+  it('LINEAR: an invalid threshold on a sourceless auto_approve step is attributed to the policy block', () => {
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(F4A_LINEAR_GRAPH))
+    const step = draft.steps[0]!
+    step.approvalMode = 'threshold'
+    step.approvalThreshold = 0
+    setStepApprovalType(step, 'auto_approve')
+    const live = stepHiddenBlockLiveErrors(draft, step)
+    expect(Object.keys(live)).toEqual(['policy'])
+    expect(live.policy).toHaveLength(1)
+    expect(live.policy![0]).toContain('门槛会签人数')
   })
 })

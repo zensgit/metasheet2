@@ -2093,6 +2093,52 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(saved.edges).toEqual(graph.edges)
   })
 
+  it('F4-A HIDDEN-BLOCK GUARD (Canvas-first inspector): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {
+    setRouteParams({ id: 'tpl_f4a_hidden_timeout' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const pick = (testId: string, value: string) => {
+      const el = inspector().querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement
+      el.value = value
+      el.dispatchEvent(new Event('change'))
+    }
+    const enable = inspector().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    enable.checked = true
+    enable.dispatchEvent(new Event('change'))
+    await flushUi()
+    pick('approval-node-timeout-effect', 'transfer')
+    await flushUi()
+    ;(inspector().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+
+    expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-transfer-target"]')).not.toBeNull()
+    const notice = inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]') as HTMLElement
+    expect(notice).not.toBeNull()
+    expect(notice.textContent).toContain('审批节点 approval_high 的超时转交需要选择接收人')
+    expect(notice.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    pick('approval-node-timeout-effect', 'remind')
+    await flushUi()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_high').config
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+
   // The canvas flag is the Canvas-first surface: entering 流程 PROMOTES a linear draft onto the
   // canvas model (`promoteLinearDraftToGraphAuthoring` → `approvalNodeEditsFromGraph`), so a linear
   // template is authored through THIS inspector, not the step cards. A sourceless auto_approve node
