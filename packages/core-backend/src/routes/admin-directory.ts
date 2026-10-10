@@ -302,6 +302,13 @@ export function adminDirectoryRouter(): Router {
   router.get('/dingtalk/work-notification', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    // Optional filter: blank means "the preferred integration" (the service trims it); anything else must be a
+    // uuid, like the path ids above, or it reaches `WHERE id = $1` and fails with 22P02.
+    const requestedIntegrationId = typeof req.query.integrationId === 'string' ? req.query.integrationId.trim() : ''
+    if (requestedIntegrationId && !UUID_SHAPE_RE.test(requestedIntegrationId)) {
+      jsonError(res, 400, ID_PARAM_INVALID.integrationId.code, ID_PARAM_INVALID.integrationId.message)
+      return
+    }
 
     try {
       const integrationId = typeof req.query.integrationId === 'string' ? req.query.integrationId : undefined

@@ -3009,7 +3009,10 @@ describe('adminDirectoryRouter', () => {
       const out: Array<{ method: 'get' | 'post' | 'put'; path: string; params: string[] }> = []
       for (const layer of router.stack) {
         const route = layer.route as { path?: unknown; methods?: Record<string, boolean> } | undefined
-        if (!route || typeof route.path !== 'string') continue
+        // Fail closed: a middleware, a nested router or a regex / array path could carry one of the ids without
+        // this enumeration seeing it. Today the router has none; adding one must revisit this test.
+        if (!route) throw new Error(`unexpected non-route layer "${String((layer as { name?: unknown }).name)}" in the directory router`)
+        if (typeof route.path !== 'string') throw new Error('unexpected non-string route path in the directory router')
         const params = Object.keys(EXPECTED).filter((name) => route.path!.toString().includes(`:${name}`))
         if (params.length === 0) continue
         for (const [method, on] of Object.entries(route.methods ?? {})) {
@@ -3081,6 +3084,30 @@ describe('adminDirectoryRouter', () => {
         const nonAdmin = await invokeRoute(method, path, { params: { ...VALID_PARAMS, ...malformed }, user: { id: 'user-1', role: 'user' } })
         expect({ path, status: nonAdmin.statusCode }).toEqual({ path, status: 403 })
       }
+    })
+
+    it('GET /dingtalk/work-notification: a malformed integrationId filter answers 400; blank still means "no filter"', async () => {
+      workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockReset()
+      workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore.mockResolvedValue({ configured: false })
+
+      for (const bad of ['not-a-uuid', 'dir-1', "1' OR '1'='1", '{d1000000-0000-4000-8000-000000000001}']) {
+        const response = await invokeRoute('get', '/dingtalk/work-notification', { query: { integrationId: bad }, user: ADMIN })
+        expect({ bad, status: response.statusCode, body: response.body }).toEqual({
+          bad,
+          status: 400,
+          body: { ok: false, error: { code: 'DIRECTORY_INTEGRATION_ID_INVALID', message: 'integrationId must be a UUID', details: undefined } },
+        })
+      }
+      expect(workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore).not.toHaveBeenCalled()
+
+      for (const ok of [undefined, '', '   ', VALID_PARAMS.integrationId]) {
+        const response = await invokeRoute('get', '/dingtalk/work-notification', {
+          query: ok === undefined ? {} : { integrationId: ok },
+          user: ADMIN,
+        })
+        expect({ ok, status: response.statusCode }).toEqual({ ok, status: 200 })
+      }
+      expect(workNotificationMocks.getDingTalkWorkNotificationRuntimeStatusFromStore).toHaveBeenCalledTimes(4)
     })
 
     it('an uppercase uuid passes the shape check and reaches the service as sent', async () => {
