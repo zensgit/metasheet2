@@ -609,6 +609,69 @@
             <el-form-item label="步骤名称">
               <el-input v-model="step.name" :disabled="readOnly" />
             </el-form-item>
+            <!-- Lock-4 §1 F4-A — 审批类型 on each linear step. OD-L4-2(a): exactly TWO options (人工审批 /
+                 自动通过), no inert 自动拒绝. A linear graph is never inside a parallel region, so 自动通过 is
+                 always offered here (contrast the canvas inspector, which disables it per node). The
+                 radio `name` carries the step's localId because several step cards render at once. -->
+            <el-form-item label="审批类型">
+              <div
+                class="approval-node-source-roster"
+                role="radiogroup"
+                aria-label="审批类型"
+                data-testid="approval-step-approval-type"
+              >
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="manual"
+                    :checked="step.approvalType !== 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-manual"
+                    @change="() => onStepApprovalTypeChange(step, 'manual')"
+                  />
+                  <span>人工审批</span>
+                </label>
+                <label class="approval-node-source-roster-option">
+                  <input
+                    type="radio"
+                    :name="`approval-step-approval-type-${step.localId}`"
+                    value="auto_approve"
+                    :checked="step.approvalType === 'auto_approve'"
+                    :disabled="readOnly"
+                    data-testid="approval-step-approval-type-auto-approve"
+                    @change="() => onStepApprovalTypeChange(step, 'auto_approve')"
+                  />
+                  <span>自动通过</span>
+                </label>
+              </div>
+              <p
+                v-if="step.approvalType === 'auto_approve'"
+                class="template-authoring__hint"
+                data-testid="approval-step-approval-type-auto-hint"
+              >流程到达此步骤时由系统自动通过，不分配审批人</p>
+              <!-- Only reachable for a template saved through the API: the step still CARRIES a source,
+                   which is saved and validated, so it stays visible; the action drops it. -->
+              <p
+                v-if="step.approvalType === 'auto_approve' && !stepOmitsAssigneeSources(step)"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-live-sources-hint"
+              >
+                该步骤仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+                <el-button
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-drop-sources"
+                  @click="onStepApprovalTypeChange(step, 'auto_approve')"
+                >移除审批人来源</el-button>
+              </p>
+            </el-form-item>
+            <!-- Lock-4 §1 F4-A: a step whose sources are omitted saves NONE, so the source controls
+                 (hidden scratch, restored on 人工审批) and every control that only matters when a person
+                 approves are not rendered; their values are preserved verbatim. Same predicate as
+                 `buildStepConfig` and `validateTemplateApprovalFlow` (`stepOmitsAssigneeSources`). -->
+            <template v-if="!stepOmitsAssigneeSources(step)">
             <el-form-item label="审批人来源">
               <el-select v-model="step.sourceKind" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
                 <el-option label="指定用户" value="static_user" />
@@ -930,11 +993,13 @@
                 发起人自动通过（自审合并）
               </el-checkbox>
             </el-form-item>
+            </template>
           </div>
           <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
-               (see the mode-picker comment above), so this section renders unconditionally per step,
-               no gating needed. -->
-          <div class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+               (see the mode-picker comment above), so this section needs no parallel gating. Lock-4
+               §1 F4-A: not rendered for a step whose sources are omitted (an auto_approve step never
+               waits, so a timeout there is inert); the persisted value is preserved verbatim. -->
+          <div v-if="!stepOmitsAssigneeSources(step)" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
             <el-form-item label="节点超时">
               <el-checkbox
                 v-model="step.timeoutEnabled"
@@ -3454,6 +3519,12 @@ const routingDriverFieldIds = computed(() => {
 })
 function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, access: NodeFieldAccess): void {
   step.fieldPermissions = setStepFieldPermission(step.fieldPermissions, fieldId, access)
+}
+// Lock-4 §1 F4-A — the linear 审批类型 radio. The mutation and its owner-visible defaults live in the
+// pure `setStepApprovalType` (templateAuthoring.ts).
+function onStepApprovalTypeChange(step: ApprovalStepDraft, type: ApprovalType): void {
+  if (readOnly.value) return
+  setStepApprovalType(step, type)
 }
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
