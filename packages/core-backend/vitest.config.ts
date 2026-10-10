@@ -1864,6 +1864,15 @@ export default defineConfig({
       'tests/integration/task-m3-tree.db.test.ts',
       'tests/integration/task-m3-membership.db.test.ts',
       'tests/integration/task-m3-comments-deletion.db.test.ts',
+      'tests/integration/task-m4-schema.db.test.ts',
+      'tests/integration/task-m4-list-roles.db.test.ts',
+      'tests/integration/task-m4-paging-settings.db.test.ts',
+      'tests/integration/task-m4-dates.db.test.ts',
+      'tests/integration/task-m4-lists.db.test.ts',
+      'tests/integration/task-m4-list-members.db.test.ts',
+      'tests/integration/task-m4-list-items.db.test.ts',
+      'tests/integration/task-m4-groups.db.test.ts',
+      'tests/integration/task-m4-org-members.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

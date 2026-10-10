@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -79,6 +79,26 @@ test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact
   )
   assert.equal(isActivated(spec, 'true'), true)
   assert.equal(isActivated(spec, 'True'), false)
+})
+
+// ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
+// M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
+test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.danger, 'medium')
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/routes/tasks.ts#tasksRouter; packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled',
+  )
+  const migrationsDir = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'packages/core-backend/src/db/migrations')
+  const m4 = readdirSync(migrationsDir).filter((name) => /^zzzz\d{14}_create_task_m4_tables\.ts$/.test(name))
+  assert.equal(m4.length, 1)
+  assert.ok(spec.purpose.includes(m4[0].replace(/\.ts$/, '')), 'purpose names the M4 migration')
+  assert.ok(spec.purpose.includes('task_list_items, task_list_members and task_user_settings'), 'purpose names the M4 tables the routes read')
+  for (const prefix of ['/api/tasks ', '/api/task-settings', '/api/task-lists', '/api/task-groups']) {
+    assert.ok(spec.purpose.includes(prefix), `purpose names the ${prefix.trim()} prefix`)
+  }
 })
 
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
