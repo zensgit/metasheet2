@@ -2185,6 +2185,13 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
 //     entry once a joinMode-'all' sibling has finished — and never `currentNodeType`.
 // Hence (a) and (b) read whichever carrier is present, and the cursor's type falls back to this
 // instance's own graph when the DTO does not carry it.
+//
+// THE SERVER'S OWN LIST COMES FIRST. Both builders now also ship `returnableNodeKeys`: the targets
+// the return gate would accept right now, walked server-side on the instance's FROZEN graph (the
+// graph the gate itself walks, which an ordinary member can never load here — the version endpoint
+// is admin-gated). When the DTO carries that array it is the candidate list, verbatim, and every
+// mirror below is bypassed; `[]` hides 退回. The mirrors remain the fallback for a DTO without it:
+// an older server, or a bridged / legacy instance with no frozen graph.
 
 // The graph the candidates are judged by: this instance's OWN frozen graph, or none. Two store
 // slots can hold it, and each is accepted only when it provably IS the version this instance is
@@ -2311,6 +2318,14 @@ const returnEligibleGraphKeys = computed<Set<string> | null>(() => {
 // when the DTO carries their field. Until the template load settles the list is this legacy one
 // too, so the button can show briefly before it is filtered.
 const returnableNodes = computed(() => {
+  // The server's list, when the DTO carries one (`returnableNodeKeys`, see the header above): the
+  // legal targets in the gate's own trail order, offered verbatim — no client-side gate applies, so
+  // a key the mirrors would drop (or history never held) is still offered, and `[]` offers nothing.
+  // `Array.isArray`, not truthiness: `null` / absent is "not computed" and falls through.
+  const serverKeys = approval.value?.returnableNodeKeys
+  if (Array.isArray(serverKeys)) {
+    return serverKeys.map((key) => ({ key, label: nodeLabel(key) }))
+  }
   if (!approval.value || approval.value.status !== 'pending') return []
   if (returnCursorNodeType.value === 'handler') return []
   if (returnBlockedByParallelRegion.value) return []

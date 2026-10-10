@@ -32,6 +32,14 @@ import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from
  * (T13, T13b); with the template drifted, an admin's pinned version still judges (T10). T1 is the
  * positive control every "hidden" assertion leans on.
  *
+ * THE SERVER'S OWN LIST (TS1–TS4): both DTO builders now ship `returnableNodeKeys`, the targets the
+ * return gate would accept right now, walked server-side on the frozen graph. When the DTO carries
+ * that array the view offers it verbatim and bypasses every mirror above — a strict subset of what
+ * history + graph would offer is all that appears (TS1), `[]` hides 退回 even where the mirrors would
+ * offer a target (TS2), a key the mirrors would drop, or that history never held, is still offered
+ * because the server wins (TS3, TS3b) — while `null` / absent means "not computed" and falls through
+ * to the mirrors, which every other test here exercises (TS4).
+ *
  * NOT mirrored (no test can pin a gate that does not exist; recorded in the view): an approval node
  * on a condition branch the form no longer resolves to is still offered, and a trail node nobody
  * visited (an admin forward jump skipped it) is never offered.
@@ -731,5 +739,66 @@ describe('退回 candidates mirror the server return gate (mounted ApprovalDetai
     await mountView()
     await openReturnDialog()
     expect(offeredKeys()).toEqual(['approval_1', 'approval_2', 'approval_3'])
+  })
+
+  it('TS1 server list preferred: history + graph would offer approval_2 and approval_1; only the server\'s key appears', async () => {
+    // Linear graph, cursor at approval_3, both earlier approvals in history: the client mirror would
+    // offer ['approval_2', 'approval_1'] (history order). The server's list is a strict subset.
+    mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
+    mockActiveApproval.value = detailRead({
+      currentNodeKey: 'approval_3',
+      currentNodeType: 'approval',
+      assignments: [seat('approval_3')],
+      returnableNodeKeys: ['approval_1'],
+    })
+    mockHistory.value = [historyRow('h2', 'approval_2'), historyRow('h1', 'approval_1')]
+    await mountView()
+    await openReturnDialog()
+    expect(offered()).toEqual([['approval_1', '一级审批']])
+  })
+
+  it('TS2 server []: 退回 is hidden even though history + graph would offer approval_1', async () => {
+    // Same fixture as T1 (the positive control), with the server's empty list as the ONLY difference.
+    mockActiveApproval.value = detailRead({ returnableNodeKeys: [] })
+    await mountView()
+    expectNoReturnOffered('the server computed no legal target')
+  })
+
+  it('TS3 server wins over the client filter: a key the mirrors would drop (approval_p1, inside a parallel region) is offered', async () => {
+    // T4 pins that the client filter drops approval_p1 from exactly this history + graph; the server's
+    // list carries it, so it is offered, in the server's order, labelled from the own template.
+    mockActiveApproval.value = detailRead({ returnableNodeKeys: ['approval_1', 'approval_p1'] })
+    await mountView()
+    await openReturnDialog()
+    expect(offered()).toEqual([['approval_1', '一级审批'], ['approval_p1', '并行审批 1']])
+  })
+
+  it('TS3b server wins over history: a trail node nobody visited (an admin forward jump skipped approval_2) is offered', async () => {
+    // The #6291 residual in the other direction: history never held approval_2, so the mirrors could
+    // not offer it; the server's walk lists it, and the view offers the server's list verbatim.
+    mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
+    mockActiveApproval.value = detailRead({
+      currentNodeKey: 'approval_3',
+      currentNodeType: 'approval',
+      assignments: [seat('approval_3')],
+      returnableNodeKeys: ['approval_1', 'approval_2'],
+    })
+    mockHistory.value = [historyRow('h1', 'approval_1')]
+    await mountView()
+    await openReturnDialog()
+    expect(offered()).toEqual([['approval_1', '一级审批'], ['approval_2', '二级审批']])
+  })
+
+  it('TS4 null / absent is "not computed": the mirrors still decide (same answer as T1 and T4)', async () => {
+    mockActiveApproval.value = detailRead({ returnableNodeKeys: null })
+    await mountView()
+    await openReturnDialog()
+    expect(offeredKeys()).toEqual(['approval_1'])
+  })
+
+  it('TS2b the server list is read on the action-response shape too (no currentNodeType; the store publishes it into the same slot)', async () => {
+    mockActiveApproval.value = actionResponse({ returnableNodeKeys: [] })
+    await mountView()
+    expectNoReturnOffered('an action response carrying an empty server list')
   })
 })
