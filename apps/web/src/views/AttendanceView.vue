@@ -2595,11 +2595,14 @@
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.settings)"
             >
               <h4>{{ tr('Settings', '设置') }}</h4>
-              <div class="attendance__admin-grid">
+              <div class="attendance__form-stack">
+              <section class="attendance__form-card">
+                <h5>{{ tr('Auto absence', '自动缺勤') }}</h5>
+                <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-auto-absence-enabled">
                   <span>{{ tr('Auto absence', '自动缺勤') }}</span>
                   <input
@@ -2628,6 +2631,11 @@
                     min="1"
                   />
                 </label>
+                </div>
+              </section>
+              <section class="attendance__form-card">
+                <h5>{{ tr('Holiday hours', '节假日工时') }}</h5>
+                <div class="attendance__admin-grid">
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-first-day-enabled">
                   <span>{{ tr('Holiday first-day base hours', '节假日首日基准工时') }}</span>
                   <input
@@ -2669,7 +2677,9 @@
                     <option value="both">{{ tr('Both', '两者') }}</option>
                   </select>
                 </label>
-                <div class="attendance__field attendance__field--full">
+                </div>
+              </section>
+              <section class="attendance__form-card">
                   <div class="attendance__admin-subsection">
                     <div class="attendance__admin-subsection-header">
                       <h5>{{ tr('Holiday overrides', '节假日覆盖规则') }}</h5>
@@ -2791,156 +2801,26 @@
                       </table>
                     </div>
                   </div>
+              </section>
+              <aside class="attendance__form-callout" data-attendance-calendar-policy-jump>
+                <div class="attendance__form-callout-copy">
+                  <strong>{{ tr('Calendar overrides', '日历覆盖规则') }}</strong>
+                  <p>
+                    {{ tr('Group holiday-length quick add and effective calendar overrides now live on the Holidays page.', '班组节假日时长快捷配置与有效日历覆盖规则已移至节假日页面。') }}
+                  </p>
                 </div>
-                <div class="attendance__field attendance__field--full">
-                  <div class="attendance__admin-subsection">
-                    <div class="attendance__admin-subsection-header">
-                      <h5>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</h5>
-                      <button class="attendance__btn" type="button" @click="addCalendarPolicyOverride">
-                        {{ tr('Add calendar override', '新增日历覆盖') }}
-                      </button>
-                    </div>
-                    <p class="attendance__field-hint">
-                      {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
-                    </p>
-                    <p class="attendance__field-hint attendance__field-hint--warn">
-                      {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
-                    </p>
-                    <AttendanceCalendarPolicyQuickAdd
-                      :attendance-group-options="attendanceGroupOptions"
-                      :tr="tr"
-                      @append="appendCalendarPolicyQuickAdd"
-                    />
-                    <AttendanceCalendarPolicyPreviewPanel
-                      :tr="tr"
-                      :draft-overrides="calendarPolicyPreviewDraftOverrides"
-                    />
-                    <div
-                      v-if="calendarPolicyOverrideDiagnostics.length"
-                      class="attendance__calendar-policy-diagnostics"
-                      data-attendance-calendar-policy-diagnostics
-                      role="alert"
-                    >
-                      <strong>{{ tr('Calendar rule checks', '日历规则检查') }}</strong>
-                      <ul>
-                        <li
-                          v-for="diagnostic in calendarPolicyOverrideDiagnostics"
-                          :key="diagnostic.key"
-                          :data-calendar-policy-diagnostic="diagnostic.code"
-                        >
-                          {{ calendarPolicyDiagnosticMessage(diagnostic) }}
-                        </li>
-                      </ul>
-                    </div>
-                    <div v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__empty">
-                      {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
-                    </div>
-                    <div v-else class="attendance__table-wrapper">
-                      <table class="attendance__table">
-                        <thead>
-                          <tr>
-                            <th>{{ tr('Date / range', '日期 / 范围') }}</th>
-                            <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
-                            <th>{{ tr('Scope', '范围') }}</th>
-                            <th>{{ tr('Effective day', '生效日类型') }}</th>
-                            <th>{{ tr('Label', '标签') }}</th>
-                            <th></th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
-                            <tr>
-                              <td>
-                                <div class="attendance__inline-fields">
-                                  <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
-                                  <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
-                                  <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
-                                </div>
-                              </td>
-                              <td>
-                                <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
-                                <select v-model="override.match" class="attendance__table-input">
-                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
-                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
-                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
-                                </select>
-                              </td>
-                              <td>
-                                <select v-model="override.source" class="attendance__table-input">
-                                  <option value="org">{{ tr('Organization', '组织') }}</option>
-                                  <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
-                                  <option value="user">{{ tr('User', '用户') }}</option>
-                                  <option value="role">{{ tr('Role', '角色') }}</option>
-                                </select>
-                              </td>
-                              <td>
-                                <select v-model="override.isWorkingDay" class="attendance__table-input">
-                                  <option :value="true">{{ tr('Working day', '工作日') }}</option>
-                                  <option :value="false">{{ tr('Rest day', '休息日') }}</option>
-                                </select>
-                              </td>
-                              <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
-                              <td>
-                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
-                                  {{ tr('Remove', '移除') }}
-                                </button>
-                              </td>
-                            </tr>
-                            <tr class="attendance__table-row--meta">
-                              <td colspan="6">
-                                <div class="attendance__override-filters">
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
-                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
-                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
-                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
-                                    </small>
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Roles', '角色') }}</span>
-                                    <input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Role tags', '角色标签') }}</span>
-                                    <input v-model="override.roleTags" type="text" placeholder="attendance_admin,班组长" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User IDs', '用户ID') }}</span>
-                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('User names', '用户名') }}</span>
-                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
-                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
-                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
-                                    <input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
-                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end />
-                                  </label>
-                                  <label class="attendance__override-field">
-                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
-                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
-                                  </label>
-                                </div>
-                              </td>
-                            </tr>
-                          </template>
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
+                <a
+                  class="attendance__btn"
+                  href="#attendance-admin-holidays"
+                  data-attendance-calendar-policy-open-holidays
+                  @click.prevent="openHolidayCalendarPolicyFromSettings"
+                >
+                  {{ tr('Open on Holidays', '前往节假日') }}
+                </a>
+              </aside>
+              <section class="attendance__form-card">
+                <h5>{{ tr('Punch and geofence', '打卡与围栏') }}</h5>
+                <div class="attendance__admin-grid">
                 <label class="attendance__field" for="attendance-min-punch-interval">
                   <span>{{ tr('Min punch interval (min)', '最小打卡间隔（分钟）') }}</span>
                   <input
@@ -2949,6 +2829,16 @@
                     v-model.number="settingsForm.minPunchIntervalMinutes"
                     type="number"
                     min="0"
+                  />
+                </label>
+                <label class="attendance__field" for="attendance-geo-radius">
+                  <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
+                  <input
+                    id="attendance-geo-radius"
+                    name="geoFenceRadius"
+                    v-model="settingsForm.geoFenceRadius"
+                    type="number"
+                    min="1"
                   />
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-ip-allowlist">
@@ -2981,24 +2871,20 @@
                     step="0.000001"
                   />
                 </label>
-                <label class="attendance__field" for="attendance-geo-radius">
-                  <span>{{ tr('Geo fence radius (m)', '地理围栏半径（米）') }}</span>
-                  <input
-                    id="attendance-geo-radius"
-                    name="geoFenceRadius"
-                    v-model="settingsForm.geoFenceRadius"
-                    type="number"
-                    min="1"
-                  />
-                </label>
+                </div>
+              </section>
+              <section class="attendance__form-card">
                 <AttendanceEmployeeQuickActionIconsField
                   v-model="adminConfig.settingsForm.employeeQuickActionIcons"
                   :tr="tr"
                 />
-              </div>
+              </section>
+              <div class="attendance__form-actions">
               <button class="attendance__btn attendance__btn--primary" :disabled="settingsLoading" @click="saveSettings">
                 {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
               </button>
+              </div>
+              </div>
 
               <div class="attendance__admin-subsection" data-admin-card="shift-compliance">
                 <h4>{{ tr('Shift compliance', '排班合规') }}</h4>
@@ -9805,7 +9691,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.holidays)"
             >
               <AttendanceHolidayDataSection
@@ -9814,6 +9700,176 @@
                 :show-lunar-calendar="showLunarLabel"
                 :tr="tr"
               />
+                <div
+                  id="attendance-effective-calendar-overrides"
+                  class="attendance__form-stack"
+                  data-attendance-calendar-policy-host="holidays"
+                >
+                    <section class="attendance__form-card">
+                    <div class="attendance__admin-subsection-header">
+                      <div>
+                        <h5>{{ tr('Effective calendar overrides', '有效日历覆盖规则') }}</h5>
+                        <p class="attendance__field-hint">
+                          {{ tr('These overrides drive the effective-calendar API and attendance calculation chain. Rest-to-work changes can create auto-absence rows after the auto-absence job runs.', '这些规则会影响有效日历 API 与考勤计算链。休息日改为工作日后，自动缺勤任务运行时可能生成缺勤记录。') }}
+                        </p>
+                      </div>
+                      <button class="attendance__btn" type="button" @click="addCalendarPolicyOverride">
+                        {{ tr('Add calendar override', '新增日历覆盖') }}
+                      </button>
+                    </div>
+                    <p class="attendance__field-hint attendance__field-hint--warn">
+                      {{ tr('Role matching uses the platform user role plus assigned RBAC role IDs/names; role tags use the same resolver aliases until a dedicated role-tag catalog exists.', '角色匹配使用用户平台角色及已分配 RBAC 角色 ID/名称；在独立角色标签目录落地前，角色标签使用同一解析别名。') }}
+                    </p>
+                    </section>
+                    <AttendanceCalendarPolicyQuickAdd
+                      :attendance-group-options="attendanceGroupOptions"
+                      :tr="tr"
+                      @append="appendCalendarPolicyQuickAdd"
+                    />
+                    <AttendanceCalendarPolicyPreviewPanel
+                      :tr="tr"
+                      :draft-overrides="calendarPolicyPreviewDraftOverrides"
+                    />
+                    <div
+                      v-if="calendarPolicyOverrideDiagnostics.length"
+                      class="attendance__calendar-policy-diagnostics"
+                      data-attendance-calendar-policy-diagnostics
+                      role="alert"
+                    >
+                      <strong>{{ tr('Calendar rule checks', '日历规则检查') }}</strong>
+                      <ul>
+                        <li
+                          v-for="diagnostic in calendarPolicyOverrideDiagnostics"
+                          :key="diagnostic.key"
+                          :data-calendar-policy-diagnostic="diagnostic.code"
+                        >
+                          {{ calendarPolicyDiagnosticMessage(diagnostic) }}
+                        </li>
+                      </ul>
+                    </div>
+                    <section v-if="settingsForm.calendarPolicyOverrides.length === 0" class="attendance__form-card">
+                      <p class="attendance__empty">
+                        {{ tr('No effective calendar overrides configured.', '暂无有效日历覆盖规则。') }}
+                      </p>
+                    </section>
+                    <div v-else class="attendance__form-card attendance__table-wrapper">
+                      <table class="attendance__table">
+                        <thead>
+                          <tr>
+                            <th>{{ tr('Date / range', '日期 / 范围') }}</th>
+                            <th>{{ tr('Holiday name match', '节假日名称匹配') }}</th>
+                            <th>{{ tr('Scope', '范围') }}</th>
+                            <th>{{ tr('Effective day', '生效日类型') }}</th>
+                            <th>{{ tr('Label', '标签') }}</th>
+                            <th></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <template v-for="(override, index) in settingsForm.calendarPolicyOverrides" :key="`calendar-policy-override-${override.id || index}`">
+                            <tr>
+                              <td>
+                                <div class="attendance__inline-fields">
+                                  <input v-model="override.date" class="attendance__table-input" type="date" :aria-label="tr('Single date', '单日')" data-calendar-policy-override-date />
+                                  <input v-model="override.from" class="attendance__table-input" type="date" :aria-label="tr('From date', '开始日期')" data-calendar-policy-override-from />
+                                  <input v-model="override.to" class="attendance__table-input" type="date" :aria-label="tr('To date', '结束日期')" data-calendar-policy-override-to />
+                                </div>
+                              </td>
+                              <td>
+                                <input v-model="override.name" class="attendance__table-input" type="text" placeholder="春节" />
+                                <select v-model="override.match" class="attendance__table-input">
+                                  <option value="contains">{{ tr('Contains', '包含') }}</option>
+                                  <option value="equals">{{ tr('Equals', '等于') }}</option>
+                                  <option value="regex">{{ tr('Regex', '正则') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.source" class="attendance__table-input">
+                                  <option value="org">{{ tr('Organization', '组织') }}</option>
+                                  <option value="group">{{ tr('Attendance group', '考勤组') }}</option>
+                                  <option value="user">{{ tr('User', '用户') }}</option>
+                                  <option value="role">{{ tr('Role', '角色') }}</option>
+                                </select>
+                              </td>
+                              <td>
+                                <select v-model="override.isWorkingDay" class="attendance__table-input">
+                                  <option :value="true">{{ tr('Working day', '工作日') }}</option>
+                                  <option :value="false">{{ tr('Rest day', '休息日') }}</option>
+                                </select>
+                              </td>
+                              <td><input v-model="override.label" class="attendance__table-input" type="text" :placeholder="tr('Policy label', '规则标签')" /></td>
+                              <td>
+                                <button class="attendance__btn attendance__btn--danger" type="button" @click="removeCalendarPolicyOverride(index)">
+                                  {{ tr('Remove', '移除') }}
+                                </button>
+                              </td>
+                            </tr>
+                            <tr class="attendance__table-row--meta">
+                              <td colspan="6">
+                                <div class="attendance__override-filters">
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Attendance groups', '考勤组') }}</span>
+                                    <input v-model="override.attendanceGroups" type="text" placeholder="单休办公,白班" data-calendar-policy-override-attendance-groups />
+                                    <small v-if="attendanceGroupOptions.length" class="attendance__field-hint">
+                                      {{ tr('Known groups', '已知分组') }}: {{ attendanceGroupOptions.join(', ') }}
+                                    </small>
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Roles', '角色') }}</span>
+                                    <input v-model="override.roles" type="text" placeholder="attendance_admin,班组长" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Role tags', '角色标签') }}</span>
+                                    <input v-model="override.roleTags" type="text" placeholder="attendance_admin,班组长" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('User IDs', '用户ID') }}</span>
+                                    <input v-model="override.userIds" type="text" placeholder="uuid1,uuid2" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('User names', '用户名') }}</span>
+                                    <input v-model="override.userNames" type="text" placeholder="张三,李四" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Exclude user IDs', '排除用户ID') }}</span>
+                                    <input v-model="override.excludeUserIds" type="text" placeholder="uuid3" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Exclude user names', '排除用户名') }}</span>
+                                    <input v-model="override.excludeUserNames" type="text" placeholder="王五" />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index start', '节假日序号起始') }}</span>
+                                    <input v-model.number="override.dayIndexStart" type="number" min="1" data-calendar-policy-override-day-index-start />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index end', '节假日序号结束') }}</span>
+                                    <input v-model.number="override.dayIndexEnd" type="number" min="1" data-calendar-policy-override-day-index-end />
+                                  </label>
+                                  <label class="attendance__override-field">
+                                    <span>{{ tr('Day index list', '节假日序号列表') }}</span>
+                                    <input v-model="override.dayIndexList" type="text" placeholder="1,2,3" />
+                                  </label>
+                                </div>
+                              </td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div class="attendance__form-actions">
+                    <button
+                      class="attendance__btn attendance__btn--primary"
+                      type="button"
+                      data-attendance-calendar-policy-save
+                      :disabled="settingsLoading"
+                      @click="saveSettings"
+                    >
+                      {{ settingsLoading ? tr('Saving...', '保存中...') : tr('Save settings', '保存设置') }}
+                    </button>
+                    </div>
+                </div>
+
             </div>
             </div>
             </div>
@@ -15825,6 +15881,13 @@ function selectAdminSection(id: string): void {
   focusAdminSectionGroup(id)
   void nextTick(() => {
     scrollToAdminSection(id)
+  })
+}
+
+function openHolidayCalendarPolicyFromSettings(): void {
+  selectAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.holidays)
+  void nextTick(() => {
+    document.getElementById('attendance-effective-calendar-overrides')?.scrollIntoView({ behavior: 'auto', block: 'start' })
   })
 }
 
@@ -30279,17 +30342,17 @@ defineExpose({
 .attendance {
   display: flex;
   flex-direction: column;
-  gap: 24px;
-  padding: 24px;
-  color: #2b2b2b;
+  gap: var(--ms-space-5);
+  padding: var(--ms-space-5);
+  color: var(--ms-text-1);
+  background: var(--ms-bg-page);
   min-width: 0;
 }
 
 .attendance--overview {
-  gap: 16px;
-  padding: 16px 20px 24px;
-  background-color: #f4f6fa;
-  background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
+  gap: var(--ms-space-4);
+  padding: var(--ms-space-4) var(--ms-space-5) var(--ms-space-5);
+  background: var(--ms-bg-page);
 }
 
 .attendance__header {
@@ -30314,16 +30377,18 @@ defineExpose({
 }
 
 .attendance__title {
-  font-size: 18px;
+  font-size: var(--ms-font-size-page-title);
+  font-weight: var(--ms-font-weight-title);
   line-height: 1.25;
-  margin: 0 0 2px;
+  margin: 0 0 var(--ms-space-1);
+  color: var(--ms-text-1);
 }
 
 .attendance__subtitle {
   margin: 0;
-  color: #666;
-  font-size: 12px;
-  line-height: 1.35;
+  color: var(--ms-text-2);
+  font-size: 14px;
+  line-height: 1.45;
 }
 
 .attendance__actions {
@@ -30579,15 +30644,16 @@ defineExpose({
 
 .attendance__btn {
   padding: 8px 14px;
-  border-radius: 6px;
-  border: 1px solid #d0d0d0;
-  background: #fff;
+  border-radius: var(--ms-radius-md);
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   cursor: pointer;
 }
 
 .attendance__btn--primary {
-  background: #1976d2;
-  border-color: #1976d2;
+  background: var(--ms-color-primary);
+  border-color: var(--ms-color-primary);
   color: #fff;
 }
 
@@ -30653,11 +30719,11 @@ defineExpose({
 }
 
 .attendance__card {
-  background: #fff;
-  border: 1px solid #e0e0e0;
-  border-radius: 12px;
-  padding: 16px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.04);
+  background: var(--ms-bg-card);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  padding: var(--ms-space-4);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__card--empty {
@@ -30722,13 +30788,13 @@ defineExpose({
 }
 
 .attendance__selfservice-callout {
-  border: 1px solid #dbe4f0;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #f8fbff, #eef6ff);
-  padding: 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-page);
+  padding: var(--ms-space-3);
   display: flex;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--ms-space-3);
   align-items: center;
 }
 
@@ -30777,10 +30843,10 @@ defineExpose({
 }
 
 .attendance__status-guide-item {
-  border: 1px solid #e2e8f0;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #f8fafc;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-3);
+  background: var(--ms-bg-page);
 }
 
 .attendance__status-guide-item p {
@@ -30806,15 +30872,20 @@ defineExpose({
 .attendance__summary-item {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  background: #f7f9fb;
-  border-radius: 8px;
-  padding: 10px;
+  gap: var(--ms-space-1);
+  background: var(--ms-bg-page);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-3);
 }
 
 .attendance__summary-item span {
   font-size: 12px;
-  color: #666;
+  color: var(--ms-text-3);
+}
+
+.attendance__summary-item strong {
+  color: var(--ms-text-1);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__grid--reports-insights {
@@ -30837,9 +30908,9 @@ defineExpose({
 }
 
 .attendance__filter-pill {
-  border: 1px solid #d6dbe3;
-  background: #f8fafc;
-  color: #334155;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
   border-radius: 999px;
   padding: 6px 12px;
   font-size: 12px;
@@ -30848,9 +30919,9 @@ defineExpose({
 }
 
 .attendance__filter-pill--active {
-  border-color: #1976d2;
-  background: #e3f2fd;
-  color: #0f4c81;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
 }
 
 .attendance__card--calendar {
@@ -30872,7 +30943,7 @@ defineExpose({
 
 .attendance__card--request-tools:not([open]) {
   box-shadow: none;
-  background: #f8fafc;
+  background: var(--ms-bg-page);
 }
 
 .attendance__request-tools-summary {
@@ -30948,13 +31019,13 @@ defineExpose({
 
 .attendance__calendar-cell {
   min-height: 72px;
-  border: 1px solid #e3e3e3;
-  border-radius: 10px;
-  padding: 8px;
-  background: #fafafa;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  padding: var(--ms-space-2);
+  background: var(--ms-bg-page);
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--ms-space-1);
   font-size: 12px;
 }
 
@@ -31178,76 +31249,89 @@ defineExpose({
 }
 
 .attendance__status-chip {
-  margin-left: 8px;
+  margin-left: var(--ms-space-2);
   font-size: 12px;
+  font-weight: 500;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #f0f0f0;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
+  border: 1px solid var(--ms-border-light);
 }
 
 .attendance__status-chip--pending {
-  background: #fff3e0;
-  color: #ef6c00;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--focus {
-  background: #e3f2fd;
-  color: #1565c0;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--approved {
-  background: #e8f5e9;
-  color: #2e7d32;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--normal {
-  background: #e8f5e9;
-  color: #2e7d32;
+  background: var(--el-color-success-light-9);
+  color: var(--el-color-success-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--late {
-  background: #fff3e0;
-  color: #ef6c00;
+  background: var(--el-color-warning-light-9);
+  color: var(--el-color-warning-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--early_leave {
-  background: #ede7f6;
-  color: #6a1b9a;
+  background: var(--el-color-info-light-9);
+  color: var(--el-color-info-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--late_early {
-  background: #ffebee;
-  color: #c62828;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--partial {
-  background: #e3f2fd;
-  color: #1565c0;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--adjusted {
-  background: #e0f7fa;
-  color: #006064;
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--off {
-  background: #eceff1;
-  color: #546e7a;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__status-chip--absent {
-  background: #f5f5f5;
-  color: #616161;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__status-chip--rejected {
-  background: #ffebee;
-  color: #c62828;
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger-dark-2);
+  border-color: transparent;
 }
 
 .attendance__status-chip--cancelled {
-  background: #eceff1;
-  color: #546e7a;
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
 }
 
 .attendance__table {
@@ -31542,26 +31626,35 @@ defineExpose({
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--ms-space-3);
+  margin-bottom: var(--ms-space-4);
+}
+
+.attendance__admin-header h3,
+.attendance__admin-section-header h4 {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-shell {
   display: grid;
-  grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  gap: var(--ms-space-5);
   align-items: start;
 }
 
 .attendance__admin-shortcuts {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border: 1px solid #dbeafe;
-  border-radius: 16px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  gap: var(--ms-space-3);
+  margin-bottom: var(--ms-space-4);
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__admin-shortcuts-header {
@@ -31579,14 +31672,15 @@ defineExpose({
 }
 
 .attendance__admin-shortcuts-title strong {
-  color: #1f2937;
-  font-size: 13px;
+  color: var(--ms-text-1);
+  font-size: 14px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-shortcuts-title span {
-  color: #6b7280;
+  color: var(--ms-text-3);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .attendance__admin-shortcuts-items {
@@ -31597,27 +31691,26 @@ defineExpose({
 
 .attendance__admin-shortcut {
   padding: 8px 12px;
-  border: 1px solid #cbd5e1;
+  border: 1px solid var(--ms-border);
   border-radius: 999px;
-  background: #ffffff;
-  color: #334155;
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
   font-size: 12px;
   line-height: 1.4;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
 .attendance__admin-shortcut:hover {
-  border-color: #93c5fd;
-  background: #eff6ff;
-  color: #1d4ed8;
+  border-color: var(--el-color-primary-light-5);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
 .attendance__admin-shortcut--active {
-  border-color: #93c5fd;
-  background: #dbeafe;
-  color: #1d4ed8;
-  font-weight: 600;
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-home-context {
@@ -31630,19 +31723,18 @@ defineExpose({
 
 .attendance__admin-current-section {
   position: sticky;
-  top: 12px;
+  top: var(--ms-space-3);
   z-index: 6;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 16px;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  border: 1px solid #bfdbfe;
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.94);
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
-  backdrop-filter: blur(10px);
+  gap: var(--ms-space-4);
+  margin-bottom: var(--ms-space-4);
+  padding: var(--ms-space-4);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
 }
 
 .attendance__admin-current-section-copy {
@@ -31653,16 +31745,15 @@ defineExpose({
 }
 
 .attendance__admin-current-section-copy strong {
-  color: #0f172a;
-  font-size: 15px;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-current-section-eyebrow {
-  color: #2563eb;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-home-action {
@@ -31689,22 +31780,20 @@ defineExpose({
 .attendance__admin-current-section-jump {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: var(--ms-space-1);
   min-width: 164px;
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-current-section-select {
   min-width: 164px;
   padding: 7px 10px;
-  border: 1px solid #bfdbfe;
-  border-radius: 10px;
-  background: #ffffff;
-  color: #0f172a;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
   font-size: 13px;
   font-weight: 500;
 }
@@ -31722,11 +31811,9 @@ defineExpose({
 }
 
 .attendance__admin-current-section-nav-direction {
-  color: #64748b;
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  font-weight: var(--ms-font-weight-title);
 }
 
 .attendance__admin-current-section-nav--disabled {
@@ -33382,6 +33469,335 @@ defineExpose({
 
   .attendance__hero-timeline {
     flex-wrap: wrap;
+  }
+}
+
+/* Holidays + Settings form chrome. Scoped to those two admin sections so
+   employee overview and the other admin editors keep their existing layout. */
+.attendance__form-sheet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-4);
+}
+
+.attendance__form-sheet > h4,
+.attendance__form-sheet :deep(h4) {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: var(--ms-font-size-section-title);
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.3;
+}
+
+.attendance__form-stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-4);
+}
+
+.attendance__form-card,
+.attendance__form-sheet > .attendance__admin-subsection,
+.attendance__form-sheet :deep(.attendance__admin-subsection),
+.attendance__form-sheet :deep(.attendance__calendar-preview) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-4);
+  margin: 0;
+  padding: var(--ms-space-5);
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-lg);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+#attendance-admin-settings.attendance__form-sheet .attendance__form-card > .attendance__admin-subsection {
+  display: flex;
+  gap: var(--ms-space-3);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > h4,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__admin-section-header,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__field-hint,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__admin-grid,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__table-wrapper,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__empty,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > .attendance__actions,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > fieldset,
+#attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection > [data-leave-offset-rule] {
+  grid-column: 1 / -1;
+}
+
+.attendance__form-sheet h5,
+.attendance__form-sheet :deep(h5) {
+  margin: 0;
+  color: var(--ms-text-1);
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
+  line-height: 1.35;
+}
+
+.attendance__form-sheet .attendance__admin-subsection-header,
+.attendance__form-sheet :deep(.attendance__admin-subsection-header),
+.attendance__form-sheet :deep(.attendance__calendar-preview-header) {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ms-space-4);
+}
+
+.attendance__form-sheet .attendance__admin-grid,
+.attendance__form-sheet :deep(.attendance__admin-grid),
+.attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+.attendance__form-sheet .attendance__override-filters {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ms-space-4) var(--ms-space-5);
+}
+
+.attendance__form-sheet .attendance__admin-grid--thirds {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.attendance__form-sheet .attendance__field,
+.attendance__form-sheet :deep(.attendance__field),
+.attendance__form-sheet .attendance__override-field {
+  min-width: 0;
+  gap: 6px;
+}
+
+.attendance__form-sheet .attendance__field > span,
+.attendance__form-sheet :deep(.attendance__field > span),
+.attendance__form-sheet .attendance__override-field > span {
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.attendance__form-sheet .attendance__field--full,
+.attendance__form-sheet :deep(.attendance__field--full) {
+  grid-column: 1 / -1;
+}
+
+.attendance__form-sheet .attendance__field input:not([type="checkbox"]):not([type="radio"]),
+.attendance__form-sheet .attendance__field select,
+.attendance__form-sheet .attendance__field textarea,
+.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+.attendance__form-sheet :deep(.attendance__field select),
+.attendance__form-sheet :deep(.attendance__field textarea),
+.attendance__form-sheet .attendance__override-field input,
+.attendance__form-sheet .attendance__table input:not([type="checkbox"]),
+.attendance__form-sheet .attendance__table select,
+.attendance__form-sheet [data-leave-offset-rule] input,
+.attendance__form-sheet [data-leave-offset-rule] select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.attendance__form-sheet .attendance__field textarea,
+.attendance__form-sheet :deep(.attendance__field textarea) {
+  min-height: 84px;
+  resize: vertical;
+}
+
+.attendance__form-sheet .attendance__field input:not([type="checkbox"]):focus,
+.attendance__form-sheet .attendance__field select:focus,
+.attendance__form-sheet .attendance__field textarea:focus,
+.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):focus),
+.attendance__form-sheet :deep(.attendance__field select:focus),
+.attendance__form-sheet :deep(.attendance__field textarea:focus) {
+  outline: none;
+  border-color: var(--ms-color-primary);
+  box-shadow: 0 0 0 3px var(--el-color-primary-light-9);
+}
+
+.attendance__form-sheet .attendance__field--checkbox,
+.attendance__form-sheet :deep(.attendance__field--checkbox),
+.attendance__form-sheet .attendance__field--inline,
+.attendance__form-sheet :deep(.attendance__field--inline) {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.attendance__form-sheet .attendance__field--checkbox input,
+.attendance__form-sheet .attendance__field--inline input[type="checkbox"],
+.attendance__form-sheet :deep(.attendance__field--checkbox input),
+.attendance__form-sheet :deep(.attendance__field--inline input[type="checkbox"]) {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  accent-color: var(--ms-color-primary);
+}
+
+.attendance__form-sheet fieldset.attendance__field {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+}
+
+.attendance__form-sheet fieldset.attendance__field legend {
+  padding: 0 6px;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__form-sheet .attendance__field-hint,
+.attendance__form-sheet :deep(.attendance__field-hint) {
+  margin: 0;
+  max-width: 72ch;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.attendance__form-sheet .attendance__field-hint--warn,
+.attendance__form-sheet :deep(.attendance__field-hint--warn) {
+  color: var(--ms-color-warning);
+}
+
+.attendance__form-sheet .attendance__empty,
+.attendance__form-sheet :deep(.attendance__empty) {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-3);
+}
+
+.attendance__form-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ms-space-4);
+  padding: var(--ms-space-4) var(--ms-space-5);
+  border: 1px solid var(--el-color-primary-light-7);
+  border-radius: var(--ms-radius-lg);
+  background: var(--el-color-primary-light-9);
+}
+
+.attendance__form-callout-copy {
+  min-width: 0;
+}
+
+.attendance__form-callout-copy strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ms-text-1);
+  font-size: 14px;
+}
+
+.attendance__form-callout-copy p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--ms-text-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.attendance__form-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.attendance__form-sheet .attendance__btn,
+.attendance__form-sheet :deep(.attendance__btn) {
+  align-self: flex-start;
+  width: auto;
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 13px;
+}
+
+.attendance__form-sheet .attendance__btn--primary,
+.attendance__form-sheet :deep(.attendance__btn--primary) {
+  border-color: var(--ms-color-primary);
+  background: var(--ms-color-primary);
+  color: var(--ms-bg-card);
+}
+
+.attendance__form-sheet .attendance__btn--danger,
+.attendance__form-sheet :deep(.attendance__btn--danger) {
+  border-color: var(--ms-color-danger);
+  color: var(--ms-color-danger);
+  background: var(--ms-bg-card);
+}
+
+#attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule] {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-side .attendance__admin-grid) {
+  grid-template-columns: 1fr;
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .attendance__form-sheet .attendance__admin-grid,
+  .attendance__form-sheet .attendance__admin-grid--thirds,
+  .attendance__form-sheet :deep(.attendance__admin-grid),
+  .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+  #attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection,
+  #attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule] {
+    grid-template-columns: 1fr;
+  }
+
+  .attendance__form-callout {
+    flex-direction: column;
+    align-items: flex-start;
   }
 }
 </style>
