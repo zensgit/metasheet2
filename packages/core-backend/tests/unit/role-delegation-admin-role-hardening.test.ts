@@ -344,6 +344,32 @@ describe('R2 — a delegate cannot assign a role carrying codes outside its name
     expect(db.userRoles.get(TARGET)?.has('stock-prep_frontline')).toBe(true)
   })
 
+  it('revoking a platform-coded role is refused too (a platform-managed grant, either direction); the row stays', async () => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.userRoles.set(TARGET, new Set(['attendance_platformish']))
+
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_platformish' } })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+    expect(db.userRoles.get(TARGET)?.has('attendance_platformish')).toBe(true)
+  })
+
+  it('KNOWN CONSEQUENCE (e-learning): role ids `plugin_elearning_*` carry `elearning:*` codes, a different namespace, so its delegate is refused', async () => {
+    // The e-learning templates deliberately use role namespace `plugin_elearning` and code
+    // namespace `elearning` (zzzz20260826140000_add_elearning_role_templates.ts; ADR §11.2-2).
+    // Under the strict rule those codes are outside the delegate's namespace. Pinned so the
+    // outcome is visible; an alias between the two would be a separate owner decision.
+    db.roles.set('plugin_elearning_admin', ['elearning:admin'])
+    db.roles.set('plugin_elearning_viewer', ['elearning:read'])
+    seedDelegate('delegate-el', 'plugin_elearning_admin', 'plugin_elearning')
+
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-el', params: { userId: TARGET, action: 'assign' }, body: { roleId: 'plugin_elearning_viewer' } })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+  })
+
   it('the codes are read INSIDE the write transaction, after the role row is held FOR SHARE', async () => {
     seedDelegate('delegate-1', 'attendance_admin', 'attendance')
 
