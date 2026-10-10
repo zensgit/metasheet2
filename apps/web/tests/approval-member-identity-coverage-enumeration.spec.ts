@@ -477,6 +477,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     // the lookup arguments; the rendered text is a fixed business-language sentence
     // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
+    // Lock-1 OD-L1-7(a) (cc 用户组 target), G-16 unknown-value line: the mustaches render the
+    // persisted `targetType` STRING and an id COUNT (`.targetIds.length`); `node.key` is only the
+    // lookup argument to `ccEditFor`, never rendered — same disposition as the entry above.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ ccEditFor(node.key)!.targetType }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],

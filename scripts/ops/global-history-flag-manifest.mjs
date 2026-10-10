@@ -751,6 +751,17 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled',
   },
   {
+    key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Opt-in UI gate for multitable rectangular copy and fill. Default OFF; enabled only by the exact build-time string true.',
+    source: 'apps/web/src/multitable/utils/grid-range-fill-flags.ts#isGridRangeFillEnabled',
+  },
+  {
     key: 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED',
     type: 'boolean',
     activationValue: 'true',

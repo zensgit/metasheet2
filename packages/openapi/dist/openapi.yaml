@@ -4799,12 +4799,21 @@ components:
         - branches
     ApprovalCcNodeConfig:
       type: object
+      description: >
+        Lock-1 OD-L1-7(a): `targetType: group` names member-group ids in
+        `targetIds`; the template
+
+        keeps the group reference and the executor expands it into one user cc
+        record per frozen
+
+        member at dispatch, so persisted cc records stay user/role.
       properties:
         targetType:
           type: string
           enum:
             - user
             - role
+            - group
         targetIds:
           type: array
           items:

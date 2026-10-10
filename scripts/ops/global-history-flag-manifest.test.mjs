@@ -110,6 +110,50 @@ test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+function hasVerifiedViteFlagSource(spec) {
+  if (!/^VITE_[A-Z0-9_]+$/.test(spec.key)) return false
+  const match = /^apps\/web\/src\/[A-Za-z0-9_./-]+\.ts#([A-Za-z_$][\w$]*)$/.exec(spec.source)
+  if (!match) return false
+
+  const webSourceRoot = path.join(REPO_ROOT, 'apps/web/src')
+  const sourcePath = path.resolve(REPO_ROOT, spec.source.split('#')[0])
+  const relativeSourcePath = path.relative(webSourceRoot, sourcePath)
+  if (
+    relativeSourcePath === '..'
+    || relativeSourcePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativeSourcePath)
+  ) return false
+  let source
+  try {
+    source = readFileSync(sourcePath, 'utf8')
+  } catch {
+    return false
+  }
+  return source.includes(`export function ${match[1]}(`)
+    && source.includes(`import.meta.env.${spec.key}`)
+}
+
+test('VITE manifest entries require an exact frontend source binding', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.VITE_MULTITABLE_RANGE_FILL_ENABLED
+  assert.ok(spec)
+  assert.equal(hasVerifiedViteFlagSource(spec), true)
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, key: 'VITE_UNREGISTERED_EXAMPLE' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, source: 'packages/core-backend/src/example.ts#isEnabled' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({
+      ...spec,
+      source: 'apps/web/src/../../packages/core-backend/src/example.ts#isEnabled',
+    }),
+    false,
+  )
+})
+
 // Non-boolean e-learning env reads that belong in the manifest, by exact name. A suffix rule such
 // as *_MS would also catch source constants (ELEARNING_MEDIA_FFPROBE_TIMEOUT_MS and friends are
 // not env reads). #6175: the audience catalog scan timeout.
@@ -343,7 +387,9 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
     `source reads Global-History flags MISSING from the manifest — add each to global-history-flag-manifest.mjs (or, if genuinely out of scope, to NON_GH_PREFIXES/NON_GH_EXACT with a reason): ${missing.join(', ')}`,
   )
   const sourceSet = new Set(sourceGH)
-  const phantom = GLOBAL_HISTORY_FLAG_KEYS.filter((k) => !sourceSet.has(k))
+  const phantom = GLOBAL_HISTORY_FLAG_MANIFEST
+    .filter((spec) => !sourceSet.has(spec.key) && !hasVerifiedViteFlagSource(spec))
+    .map((spec) => spec.key)
   assert.deepEqual(
     phantom,
     [],
