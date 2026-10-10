@@ -5,6 +5,7 @@ import * as manualRequests from '../../src/db/migrations/zzzz20260918140000_crea
 import * as attachmentStages from '../../src/db/migrations/zzzz20260919160000_create_archive_attachment_restore_stages'
 
 import * as abandonedBindings from '../../src/db/migrations/zzzz20261001120000_add_archive_abandoned_object_bindings'
+import * as cleanupAnchor from '../../src/db/migrations/zzzz20261007120000_amend_recovery_archive_cleanup_anchor'
 
 const suspended = new WeakSet<Kysely<unknown>>()
 
@@ -15,6 +16,7 @@ export async function suspendPreparedMigrationLayer(db: Kysely<unknown>): Promis
   if (!result.rows[0]?.present) return
   // The production down refuses populated storage; never force-drop test or retained payloads.
   await db.transaction().execute(async (tx) => {
+    await cleanupAnchor.down(tx)
     await abandonedBindings.down(tx)
     await attachmentStages.down(tx)
     await manualRequests.down(tx)
@@ -39,6 +41,7 @@ export async function restorePreparedMigrationLayer(db: Kysely<unknown>): Promis
     await manualRequests.up(tx)
     await attachmentStages.up(tx)
     await abandonedBindings.up(tx)
+    await cleanupAnchor.up(tx)
   })
   suspended.delete(db)
 }
