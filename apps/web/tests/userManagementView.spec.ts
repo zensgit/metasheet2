@@ -1896,6 +1896,22 @@ describe('UserManagementView', () => {
       })
     }
 
+    // Reconcile §5.3 acceptance: picking only an attendance group must not drag an org along (on an
+    // anchorless upgrade install an added attendanceOrgId would turn today's 200 into a 404).
+    it('does not add attendanceOrgId when only an attendance group is picked', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'], sessionCurrentOrgId: 'org-alpha' })
+      await flushUi(20)
+
+      const groupSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+      if (!groupSelect) throw new Error('Attendance group select not found')
+      await setSelectValue(groupSelect, '11111111-1111-4111-8111-111111111111')
+      expect(orgSelect().value).toBe('')
+
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceGroupId).toBe('11111111-1111-4111-8111-111111111111')
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
     it('sends attendanceOrgId only when an org is chosen, and the clear button drops it again', async () => {
       mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta' })
       await flushUi(20)
