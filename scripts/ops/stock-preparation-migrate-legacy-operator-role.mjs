@@ -22,9 +22,9 @@
  *      created_at). Rows with a user or member-group subject, and rows of any other role, are never
  *      written;
  *   3. with the separate, exact flag `--delete-empty-old-role` only: if the old role is then left
- *      with zero members and zero role-subject rows anywhere this script knows of, its
- *      `role_permissions` rows and its `roles` row are deleted. Without that flag the (empty) old role
- *      stays.
+ *      with zero members, zero role-subject rows anywhere this script knows of and zero pending
+ *      invites naming it, its `role_permissions` rows and its `roles` row are deleted. Without that
+ *      flag the (empty) old role stays.
  * Without `--apply` nothing is written: the dry run opens a READ ONLY transaction, prints counts and
  * the verdict `--apply` would reach, and rolls back.
  *
@@ -32,13 +32,27 @@
  * silently change what someone may do, which is the owner's call, not this script's:
  *   - `stock-prep_frontline` does not exist (the S5a migration has not run yet);
  *   - the old role holds permission codes the target role does not, while it still has members (they
- *     would lose those codes — e.g. approval codes granted to the old role by hand). Resolve in
- *     角色管理 first: grant the codes to the target role, or remove them from the old role;
+ *     would LOSE those codes — e.g. approval codes granted to the old role by hand). Resolve in
+ *     角色管理 first: move the codes to a separate platform role given to the same members, grant
+ *     them to the target role, or remove them from the old role;
+ *   - the target role holds what the old role does not — permission codes, role-subject grant rows
+ *     (table grants on other sheets; view / field / record permissions; history-audit grants) or
+ *     active role-assigned approval tasks — while old-role members not already in the target would
+ *     move (they would GAIN all of that). A freshly seeded `stock-prep_frontline` holds nothing
+ *     beyond `read` + `operate` and no grant row, so this only fires once the target was widened;
  *   - the old role is the subject of rows this script does not move (view / field / record
  *     permissions, history-audit grants) — moving the members would drop those rows' effect;
  *   - the old role has active role-assigned approval tasks — moving the members would strand them;
  *   - the target role already has members who are not in the old role while there are table grants
- *     to move — the moved grants would extend to them.
+ *     to move — the moved grants would extend to them;
+ *   - with `--delete-empty-old-role`: a pending `user_invites` row still names the old role (the
+ *     invite list would point at a deleted role). The dry run prints that count.
+ *
+ * NOT DONE BY THIS SCRIPT: approval templates / definitions that name the old role id as an assignee
+ * are not rewritten — re-point them in the approval designer. TIMING: a role assignment, a role edit
+ * or a table grant committed by another session between this script's census and its move statements
+ * (`assignUserRoles` inserts into `user_roles` without locking the role row) is not seen by the
+ * checks above — a small window, but run `--apply` in a maintenance window with nobody editing roles.
  *
  * VALUES-FREE OUTPUT: role ids (this file's own literals), table names, counts, and permission codes
  * (platform vocabulary). Never a user id, a name, a sheet id, a host or a credential. Database errors
@@ -93,8 +107,10 @@ Usage:
 Reads DATABASE_URL from the environment. Exit: 0 done · 1 usage/execution failure · 2 refused.
 `
 
-// Every statement this script can issue. Parameters: $1 is always OLD_ROLE_ID; $2, where present,
-// is always TARGET_ROLE_ID. Nothing else is ever bound.
+// Every statement this script can issue. Parameters: $1 is OLD_ROLE_ID and $2, where present, is
+// TARGET_ROLE_ID — except that `unmovedRoleRows` and `activeRoleApprovals` are also run with
+// TARGET_ROLE_ID alone as $1, to count what the target holds (the gains check). Nothing else is ever
+// bound.
 export const SQL = Object.freeze({
   begin: 'BEGIN',
   readOnly: 'SET TRANSACTION READ ONLY',
@@ -121,6 +137,24 @@ export const SQL = Object.freeze({
    AND NOT EXISTS (SELECT 1 FROM role_permissions t WHERE t.role_id = $2 AND t.permission_code = o.permission_code)
  ORDER BY o.permission_code`,
   oldCodeCount: `SELECT count(*)::int AS count FROM role_permissions WHERE role_id = $1`,
+  targetCodesMissingOnOld: `SELECT t.permission_code
+  FROM role_permissions t
+ WHERE t.role_id = $2
+   AND NOT EXISTS (SELECT 1 FROM role_permissions o WHERE o.role_id = $1 AND o.permission_code = t.permission_code)
+ ORDER BY t.permission_code`,
+  targetSheetGrantsMissingOnOld: `SELECT count(*)::int AS count
+  FROM spreadsheet_permissions t
+ WHERE t.subject_type = 'role'
+   AND t.subject_id = $2
+   AND NOT EXISTS (
+     SELECT 1 FROM spreadsheet_permissions o
+      WHERE o.subject_type = 'role' AND o.subject_id = $1
+        AND o.sheet_id = t.sheet_id AND o.perm_code = t.perm_code
+   )`,
+  pendingOldRoleInvites: `SELECT count(*)::int AS count
+  FROM user_invites
+ WHERE role_id = $1
+   AND status = 'pending'`,
   oldSheetGrants: `SELECT count(*)::int AS count
   FROM spreadsheet_permissions
  WHERE subject_type = 'role'
@@ -169,6 +203,7 @@ SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM inserte
 
 const BOTH = Object.freeze([OLD_ROLE_ID, TARGET_ROLE_ID])
 const OLD = Object.freeze([OLD_ROLE_ID])
+const TARGET = Object.freeze([TARGET_ROLE_ID])
 
 export class UsageError extends Error {}
 /** A refusal or precondition stated in this file's own values-free words. */
@@ -225,22 +260,53 @@ export async function readCensus(client, { lock }) {
     sharedSheetGrants: 0,
     unmoved: {},
     activeRoleApprovals: 0,
+    // What the target holds beyond the old role — the moved members would gain it.
+    gains: {
+      codes: (await client.query(SQL.targetCodesMissingOnOld, BOTH)).rows.map((row) => row.permission_code),
+      sheetGrants: 0,
+      unmoved: {},
+      activeRoleApprovals: 0,
+    },
+    pendingInvites: 0,
   }
   if (await tableExists(client, 'spreadsheet_permissions')) {
     census.oldSheetGrants = await count(client, SQL.oldSheetGrants, OLD)
     census.sharedSheetGrants = await count(client, SQL.sharedSheetGrants, BOTH)
+    census.gains.sheetGrants = await count(client, SQL.targetSheetGrantsMissingOnOld, BOTH)
   }
   for (const table of UNMOVED_ROLE_SUBJECT_TABLES) {
-    census.unmoved[table] = (await tableExists(client, table)) ? await count(client, SQL.unmovedRoleRows(table), OLD) : 0
+    const present = await tableExists(client, table)
+    census.unmoved[table] = present ? await count(client, SQL.unmovedRoleRows(table), OLD) : 0
+    census.gains.unmoved[table] = present ? await count(client, SQL.unmovedRoleRows(table), TARGET) : 0
   }
   if (await tableExists(client, 'approval_assignments')) {
     census.activeRoleApprovals = await count(client, SQL.activeRoleApprovals, OLD)
+    census.gains.activeRoleApprovals = await count(client, SQL.activeRoleApprovals, TARGET)
+  }
+  if (await tableExists(client, 'user_invites')) {
+    census.pendingInvites = await count(client, SQL.pendingOldRoleInvites, OLD)
   }
   return census
 }
 
-/** The verdict `--apply` reaches on this census. Pure. */
-export function decide(census) {
+/** Old-role members not already in the target: the people a move would actually change. */
+function movingNewMembers(census) {
+  return Math.max(0, census.oldMembers - census.sharedMembers)
+}
+
+function gainedGrantRows(census) {
+  return census.gains.sheetGrants + Object.values(census.gains.unmoved).reduce((sum, rows) => sum + rows, 0)
+}
+
+function hasGains(census) {
+  return census.gains.codes.length > 0 || gainedGrantRows(census) > 0 || census.gains.activeRoleApprovals > 0
+}
+
+/**
+ * The verdict `--apply` (with `--delete-empty-old-role` when `deleteEmptyOldRole`) reaches on this
+ * census. Pure.
+ */
+export function decide(census, { deleteEmptyOldRole = false } = {}) {
   const refusals = []
   if (!census.targetRoleExists) {
     refusals.push(`${TARGET_ROLE_ID} does not exist — run the S5a migration (the upgrade) first`)
@@ -250,7 +316,18 @@ export function decide(census) {
     refusals.push(
       `${OLD_ROLE_ID} holds ${census.oldCodesMissingOnTarget.length} code(s) ${TARGET_ROLE_ID} does not `
       + `(${census.oldCodesMissingOnTarget.join(', ')}); its ${census.oldMembers} member(s) would lose them — `
-      + 'decide in 角色管理 first (grant them to the target role, or remove them from the old role)',
+      + 'decide in 角色管理 first (move them to a separate platform role given to the same members, grant them '
+      + 'to the target role, or remove them from the old role)',
+    )
+  }
+  const gainers = movingNewMembers(census)
+  if (gainers > 0 && hasGains(census)) {
+    refusals.push(
+      `${TARGET_ROLE_ID} holds what ${OLD_ROLE_ID} does not — ${census.gains.codes.length} code(s)`
+      + `${census.gains.codes.length > 0 ? ` (${census.gains.codes.join(', ')})` : ''}, `
+      + `${gainedGrantRows(census)} role-subject grant row(s), ${census.gains.activeRoleApprovals} active role-assigned approval task(s); `
+      + `${gainers} member(s) of ${OLD_ROLE_ID} not already in ${TARGET_ROLE_ID} would gain them — `
+      + `decide in 角色管理 first (a freshly seeded ${TARGET_ROLE_ID} holds none of these)`,
     )
   }
   for (const [table, rows] of Object.entries(census.unmoved)) {
@@ -265,6 +342,12 @@ export function decide(census) {
       + `moving ${census.oldSheetGrants} table grant(s) would extend them to those members`,
     )
   }
+  if (deleteEmptyOldRole && census.oldRoleExists && census.pendingInvites > 0) {
+    refusals.push(
+      `--delete-empty-old-role: ${census.pendingInvites} pending invite(s) still name ${OLD_ROLE_ID}; `
+      + 'resend them with another role or revoke them first (or run without --delete-empty-old-role)',
+    )
+  }
   return { refusals, moveMembers: census.oldMembers > 0, moveSheetGrants: census.oldSheetGrants > 0 }
 }
 
@@ -272,6 +355,7 @@ function oldRoleIsEmpty(census) {
   return census.oldMembers === 0
     && census.oldSheetGrants === 0
     && census.activeRoleApprovals === 0
+    && census.pendingInvites === 0
     && Object.values(census.unmoved).every((rows) => rows === 0)
 }
 
@@ -283,6 +367,14 @@ function describeCensus(census, write) {
   write(`role-subject table grants of ${OLD_ROLE_ID}: ${census.oldSheetGrants} (already on ${TARGET_ROLE_ID}: ${census.sharedSheetGrants})`)
   for (const [table, rows] of Object.entries(census.unmoved)) write(`role-subject rows in ${table}: ${rows}`)
   write(`active role-assigned approval tasks: ${census.activeRoleApprovals}`)
+  // The gains: what moved members not already in the target would newly hold.
+  const gainedCodes = census.gains.codes
+  write(`gains — codes on ${TARGET_ROLE_ID} not held by ${OLD_ROLE_ID}: ${gainedCodes.length}${gainedCodes.length > 0 ? ` (${gainedCodes.join(', ')})` : ''}`)
+  write(`gains — role-subject table grants of ${TARGET_ROLE_ID} not held by ${OLD_ROLE_ID}: ${census.gains.sheetGrants}`)
+  for (const [table, rows] of Object.entries(census.gains.unmoved)) write(`gains — role-subject rows of ${TARGET_ROLE_ID} in ${table}: ${rows}`)
+  write(`gains — active role-assigned approval tasks of ${TARGET_ROLE_ID}: ${census.gains.activeRoleApprovals}`)
+  write(`gains — members who would gain them (in ${OLD_ROLE_ID}, not yet in ${TARGET_ROLE_ID}): ${movingNewMembers(census)}`)
+  write(`pending invites naming ${OLD_ROLE_ID}: ${census.pendingInvites}`)
 }
 
 /**
@@ -300,7 +392,7 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, m
     const census = await readCensus(client, { lock: apply })
     summary.census = census
     describeCensus(census, write)
-    const verdict = decide(census)
+    const verdict = decide(census, { deleteEmptyOldRole: apply && deleteEmptyOldRole })
     summary.refusals = verdict.refusals
     if (verdict.refusals.length > 0) {
       for (const reason of verdict.refusals) write(`${apply ? 'REFUSED' : '--apply would refuse'}: ${reason}`)
@@ -310,7 +402,11 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, m
     const nothingToMove = !verdict.moveMembers && !verdict.moveSheetGrants
     if (!apply) {
       write(nothingToMove ? 'dry run: nothing to move' : `dry run: --apply would move ${census.oldMembers} membership(s) and ${census.oldSheetGrants} table grant(s)`)
-      if (census.oldRoleExists) write(`dry run: with --apply --delete-empty-old-role, ${OLD_ROLE_ID} would then be deleted`)
+      if (census.oldRoleExists) {
+        write(census.pendingInvites > 0
+          ? `dry run: --apply --delete-empty-old-role would refuse: ${census.pendingInvites} pending invite(s) still name ${OLD_ROLE_ID}`
+          : `dry run: with --apply --delete-empty-old-role, ${OLD_ROLE_ID} would then be deleted`)
+      }
       write('dry run: nothing written')
       return summary
     }

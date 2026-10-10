@@ -42,6 +42,9 @@ const G = {
   targetOnlyMembers: 'SELECT count(*)::int AS count FROM user_roles t WHERE t.role_id = $2 AND NOT EXISTS (SELECT 1 FROM user_roles o WHERE o.role_id = $1 AND o.user_id = t.user_id)',
   oldCodesMissingOnTarget: 'SELECT o.permission_code FROM role_permissions o WHERE o.role_id = $1 AND NOT EXISTS (SELECT 1 FROM role_permissions t WHERE t.role_id = $2 AND t.permission_code = o.permission_code) ORDER BY o.permission_code',
   oldCodeCount: 'SELECT count(*)::int AS count FROM role_permissions WHERE role_id = $1',
+  targetCodesMissingOnOld: 'SELECT t.permission_code FROM role_permissions t WHERE t.role_id = $2 AND NOT EXISTS (SELECT 1 FROM role_permissions o WHERE o.role_id = $1 AND o.permission_code = t.permission_code) ORDER BY t.permission_code',
+  targetSheetGrantsMissingOnOld: "SELECT count(*)::int AS count FROM spreadsheet_permissions t WHERE t.subject_type = 'role' AND t.subject_id = $2 AND NOT EXISTS ( SELECT 1 FROM spreadsheet_permissions o WHERE o.subject_type = 'role' AND o.subject_id = $1 AND o.sheet_id = t.sheet_id AND o.perm_code = t.perm_code )",
+  pendingOldRoleInvites: "SELECT count(*)::int AS count FROM user_invites WHERE role_id = $1 AND status = 'pending'",
   oldSheetGrants: "SELECT count(*)::int AS count FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1",
   sharedSheetGrants: "SELECT count(*)::int AS count FROM spreadsheet_permissions o WHERE o.subject_type = 'role' AND o.subject_id = $1 AND EXISTS ( SELECT 1 FROM spreadsheet_permissions t WHERE t.subject_type = 'role' AND t.subject_id = $2 AND t.sheet_id = o.sheet_id AND t.perm_code = o.perm_code )",
   activeRoleApprovals: "SELECT count(*)::int AS count FROM approval_assignments WHERE assignment_type = 'role' AND assignee_id = $1 AND is_active = TRUE",
@@ -55,9 +58,11 @@ const unmovedGolden = (table) => `SELECT count(*)::int AS count FROM ${table} WH
 const WRITE_KEYS = new Set(['moveMembers', 'moveSheetGrants', 'deleteOldRoleCodes', 'deleteOldRole'])
 
 // ── the fake ───────────────────────────────────────────────────────────────────────────────────
+// The target is a freshly seeded stock-prep_frontline (read + operate, no grant row, no approval
+// task), so moving the old role's members gains them nothing; the gains tests widen it.
 function baseState() {
   return {
-    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments']),
+    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'user_invites']),
     roles: [
       { id: OLD, name: 'legacy floor' },
       { id: TARGET, name: '一线填写' },
@@ -84,13 +89,19 @@ function baseState() {
       { sheet_id: 'sheet-legacy', user_id: 'user-z', subject_type: 'user', subject_id: 'user-z', perm_code: 'spreadsheet:write', created_at: 't2' },
       { sheet_id: 'sheet-legacy', user_id: null, subject_type: 'member-group', subject_id: OLD, perm_code: 'spreadsheet:read', created_at: 't3' },
       { sheet_id: 'sheet-project', user_id: null, subject_type: 'role', subject_id: OTHER, perm_code: 'spreadsheet:write', created_at: 't4' },
-      { sheet_id: 'sheet-project', user_id: null, subject_type: 'role', subject_id: TARGET, perm_code: 'spreadsheet:write', created_at: 't5' },
     ],
     unmoved: Object.fromEntries(UNMOVED_TABLES.map((table) => [table, [{ subject_type: 'role', subject_id: OTHER }]])),
     approvalAssignments: [
       { assignment_type: 'role', assignee_id: OLD, is_active: false },
       { assignment_type: 'role', assignee_id: OTHER, is_active: true },
       { assignment_type: 'user', assignee_id: OLD, is_active: true },
+    ],
+    // Only a PENDING invite naming the old role blocks the delete: accepted / revoked ones and other
+    // roles' pending ones do not.
+    invites: [
+      { role_id: OLD, status: 'accepted' },
+      { role_id: OLD, status: 'revoked' },
+      { role_id: OTHER, status: 'pending' },
     ],
   }
 }
@@ -126,9 +137,12 @@ function makeFakeClient(state, { failOn = null, afterWrite = null } = {}) {
   const codesOf = (role) => state.rolePermissions.filter((r) => r.role_id === role).map((r) => r.permission_code)
   on(G.oldCodesMissingOnTarget, ([old, target]) => ({ rows: codesOf(old).filter((c) => !codesOf(target).includes(c)).sort().map((permission_code) => ({ permission_code })) }))
   on(G.oldCodeCount, ([old]) => countRows(codesOf(old).length))
+  on(G.targetCodesMissingOnOld, ([old, target]) => ({ rows: codesOf(target).filter((c) => !codesOf(old).includes(c)).sort().map((permission_code) => ({ permission_code })) }))
   const roleGrants = (role) => state.sheetGrants.filter((g) => g.subject_type === 'role' && g.subject_id === role)
   on(G.oldSheetGrants, ([old]) => countRows(roleGrants(old).length))
   on(G.sharedSheetGrants, ([old, target]) => countRows(roleGrants(old).filter((o) => roleGrants(target).some((t) => t.sheet_id === o.sheet_id && t.perm_code === o.perm_code)).length))
+  on(G.targetSheetGrantsMissingOnOld, ([old, target]) => countRows(roleGrants(target).filter((t) => !roleGrants(old).some((o) => o.sheet_id === t.sheet_id && o.perm_code === t.perm_code)).length))
+  on(G.pendingOldRoleInvites, ([old]) => countRows(state.invites.filter((i) => i.role_id === old && i.status === 'pending').length))
   for (const table of UNMOVED_TABLES) {
     on(unmovedGolden(table), ([old]) => countRows(state.unmoved[table].filter((r) => r.subject_type === 'role' && r.subject_id === old).length))
   }
@@ -247,6 +261,16 @@ test('dry run: zero write statements, READ ONLY transaction, rolled back, state 
   assert.equal(snapshot(state), before)
   assert.ok(out.some((line) => line.includes('--apply would move 2 membership(s) and 1 table grant(s)')))
   assert.ok(out.some((line) => line === 'dry run: nothing written'))
+  // a freshly seeded target: the dry run shows the gains, all zero, and who they would reach
+  for (const line of [
+    `gains — codes on ${TARGET} not held by ${OLD}: 0`,
+    `gains — role-subject table grants of ${TARGET} not held by ${OLD}: 0`,
+    ...UNMOVED_TABLES.map((table) => `gains — role-subject rows of ${TARGET} in ${table}: 0`),
+    `gains — active role-assigned approval tasks of ${TARGET}: 0`,
+    `gains — members who would gain them (in ${OLD}, not yet in ${TARGET}): 1`,
+    `pending invites naming ${OLD}: 0`,
+    `dry run: with --apply --delete-empty-old-role, ${OLD} would then be deleted`,
+  ]) assert.ok(out.includes(line), `dry-run output must carry: ${line}`)
   assertValuesFree(out)
   assert.equal(client.ended, true)
 })
@@ -349,6 +373,110 @@ test('refuses to move table grants onto a target role that already has members o
   assert.deepEqual(writes, [])
   assert.equal(snapshot(state), before)
   assert.ok(out.some((line) => line.includes('1 member(s) outside')))
+})
+
+test('refuses when the target holds a code and a table grant the old role lacks (moved members would GAIN them); the dry run shows them', async () => {
+  // The verifier's scenario: the seeded target was widened since — an extra stock-prep:pull and a
+  // table grant on a sheet the old role has no grant on.
+  const widen = (state) => {
+    state.rolePermissions.push({ role_id: TARGET, permission_code: 'stock-prep:pull' })
+    state.sheetGrants.push({ sheet_id: 'sheet-other', user_id: null, subject_type: 'role', subject_id: TARGET, perm_code: 'spreadsheet:write', created_at: 't6' })
+  }
+  for (const argv of [['--apply'], ['--apply', '--delete-empty-old-role']]) {
+    const state = baseState()
+    widen(state)
+    const before = snapshot(state)
+    const { code, out, writes } = await runMain(argv, state)
+    assert.equal(code, EXIT_REFUSED, argv.join(' '))
+    assert.deepEqual(writes, [])
+    assert.equal(snapshot(state), before)
+    const refusal = out.find((line) => line.startsWith('REFUSED') && line.includes('would gain'))
+    assert.ok(refusal, 'a gains refusal is printed')
+    assert.ok(refusal.includes('1 code(s) (stock-prep:pull)'))
+    assert.ok(refusal.includes('1 role-subject grant row(s)'))
+    assert.ok(refusal.includes(`1 member(s) of ${OLD} not already in ${TARGET}`), 'user-b is already in the target and gains nothing')
+    assertValuesFree(out)
+  }
+  const state = baseState()
+  widen(state)
+  const before = snapshot(state)
+  const dry = await runMain([], state)
+  assert.equal(dry.code, EXIT_REFUSED)
+  assert.deepEqual(dry.writes, [])
+  assert.equal(snapshot(state), before)
+  assert.ok(dry.out.includes(`gains — codes on ${TARGET} not held by ${OLD}: 1 (stock-prep:pull)`))
+  assert.ok(dry.out.includes(`gains — role-subject table grants of ${TARGET} not held by ${OLD}: 1`))
+  assert.ok(dry.out.some((line) => line.startsWith('--apply would refuse') && line.includes('would gain')))
+  assertValuesFree(dry.out)
+})
+
+test('refuses when the target is the subject of view / field / record / history-audit rows or of active role approvals the old role lacks', async () => {
+  for (const table of UNMOVED_TABLES) {
+    const state = baseState()
+    state.unmoved[table].push({ subject_type: 'role', subject_id: TARGET })
+    const before = snapshot(state)
+    const { code, out, writes } = await runMain(['--apply'], state)
+    assert.equal(code, EXIT_REFUSED, table)
+    assert.deepEqual(writes, [])
+    assert.equal(snapshot(state), before)
+    assert.ok(out.includes(`gains — role-subject rows of ${TARGET} in ${table}: 1`), table)
+    assert.ok(out.some((line) => line.startsWith('REFUSED') && line.includes('1 role-subject grant row(s)')), table)
+  }
+  const state = baseState()
+  state.approvalAssignments.push({ assignment_type: 'role', assignee_id: TARGET, is_active: true })
+  const { code, out, writes } = await runMain(['--apply'], state)
+  assert.equal(code, EXIT_REFUSED)
+  assert.deepEqual(writes, [])
+  assert.ok(out.some((line) => line.startsWith('REFUSED') && line.includes('1 active role-assigned approval task(s)')))
+})
+
+test('gains do not refuse when every old-role member is already in the target (nobody gains anything)', async () => {
+  const state = baseState()
+  state.userRoles = state.userRoles.filter((r) => !(r.user_id === 'user-a' && r.role_id === OLD))
+  state.rolePermissions.push({ role_id: TARGET, permission_code: 'stock-prep:pull' })
+  const { code, out, writes } = await runMain(['--apply'], state)
+  assert.equal(code, EXIT_OK)
+  assert.deepEqual(writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'])
+  assert.ok(out.includes(`gains — members who would gain them (in ${OLD}, not yet in ${TARGET}): 0`))
+  assert.deepEqual(state.userRoles.filter((r) => r.role_id === TARGET).map((r) => r.user_id), ['user-b'])
+})
+
+test('--delete-empty-old-role refuses (nothing written) while a pending invite still names the old role; the dry run reports the count', async () => {
+  const state = baseState()
+  state.invites.push({ role_id: OLD, status: 'pending' })
+  const before = snapshot(state)
+  const refused = await runMain(['--apply', '--delete-empty-old-role'], state)
+  assert.equal(refused.code, EXIT_REFUSED)
+  assert.deepEqual(refused.writes, [], 'refused before any move, not after')
+  assert.equal(snapshot(state), before)
+  assert.ok(refused.out.some((line) => line.startsWith('REFUSED') && line.includes('1 pending invite(s) still name')))
+  assertValuesFree(refused.out)
+
+  const dry = await runMain([], state)
+  assert.equal(dry.code, EXIT_OK)
+  assert.ok(dry.out.includes(`pending invites naming ${OLD}: 1`))
+  assert.ok(dry.out.includes(`dry run: --apply --delete-empty-old-role would refuse: 1 pending invite(s) still name ${OLD}`))
+  assert.ok(!dry.out.some((line) => line.includes('would then be deleted')))
+
+  // the move alone is not blocked by an invite; the old role stays
+  const moved = await runMain(['--apply'], state)
+  assert.equal(moved.code, EXIT_OK)
+  assert.deepEqual(moved.writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'])
+  assert.ok(state.roles.some((r) => r.id === OLD))
+})
+
+test('--delete-empty-old-role re-checks invites after the move: one created meanwhile refuses the delete and rolls everything back', async () => {
+  const state = baseState()
+  const before = snapshot(state)
+  const late = (key, current) => {
+    if (key === 'moveSheetGrants') current.invites.push({ role_id: OLD, status: 'pending' })
+  }
+  const { code, out, client, writes } = await runMain(['--apply', '--delete-empty-old-role'], state, { afterWrite: late })
+  assert.equal(code, EXIT_REFUSED)
+  assert.deepEqual(writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'], 'no delete statement is issued')
+  assert.equal(client.calls.at(-1).key, 'rollback')
+  assert.equal(snapshot(state), before)
+  assert.ok(out.some((line) => line.includes('is not empty after the move')))
 })
 
 test('--delete-empty-old-role deletes only the emptied old role and its codes; a rerun is a no-op', async () => {

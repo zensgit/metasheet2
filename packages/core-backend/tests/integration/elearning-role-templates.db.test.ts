@@ -696,4 +696,95 @@ describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
       if (error !== rollback) throw error
     }
   })
+
+  it('move script refuses when the target was widened (members would GAIN a code and a table grant) and refuses the delete while an invite is pending — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback S5a move-script gains test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const baseId = `base_s5a_g_${suffix}`
+    const otherSheet = `sheet_s5a_other_${suffix}`
+    const members = [`s5a-gain-1-${suffix}`, `s5a-gain-2-${suffix}`]
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = {
+          query: async (text: string, params: unknown[] = []) => {
+            const result = await trx.executeQuery(CompiledQuery.raw(text, params))
+            return { rows: result.rows as Array<Record<string, unknown>> }
+          },
+        }
+        await s5aResetTemplates(trx)
+        await sql`DELETE FROM user_roles WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM roles WHERE id = 'stock-prep-operator'`.execute(trx)
+        await sql`UPDATE user_invites SET status = 'revoked' WHERE role_id = 'stock-prep-operator' AND status = 'pending'`.execute(trx)
+
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'S5a legacy floor')`.execute(trx)
+        await sql`
+          INSERT INTO role_permissions (role_id, permission_code)
+          VALUES ('stock-prep-operator', 'stock-prep:read'), ('stock-prep-operator', 'stock-prep:operate')
+        `.execute(trx)
+        for (const member of members) {
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep-operator')`.execute(trx)
+        }
+        const membership = async () => (await sql<{ user_id: string; role_id: string }>`
+          SELECT user_id, role_id FROM user_roles WHERE user_id IN (${members[0]}, ${members[1]}) ORDER BY user_id, role_id
+        `.execute(trx)).rows
+
+        // a freshly seeded target gains nothing: the dry run says so, with zeros
+        const freshLines: string[] = []
+        const fresh = await script.run({ client, apply: false, manageTransaction: false, write: (line) => freshLines.push(line) })
+        expect(fresh.exitCode).toBe(0)
+        expect(freshLines).toContain('gains — codes on stock-prep_frontline not held by stock-prep-operator: 0')
+        expect(freshLines).toContain('gains — role-subject table grants of stock-prep_frontline not held by stock-prep-operator: 0')
+
+        // the target is widened: an extra stock-prep:pull and a table grant on a sheet the old role lacks
+        await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep_frontline', 'stock-prep:pull')`.execute(trx)
+        await sql`INSERT INTO meta_bases (id, name, owner_id) VALUES (${baseId}, 'S5a gains base', ${members[0]})`.execute(trx)
+        await sql`INSERT INTO meta_sheets (id, base_id, name) VALUES (${otherSheet}, ${baseId}, 'S5a other')`.execute(trx)
+        await sql`
+          INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+          VALUES (${otherSheet}, NULL, 'role', 'stock-prep_frontline', 'spreadsheet:write')
+        `.execute(trx)
+        const before = await membership()
+
+        const dryLines: string[] = []
+        const dry = await script.run({ client, apply: false, manageTransaction: false, write: (line) => dryLines.push(line) })
+        expect(dry.exitCode).toBe(2)
+        expect(dryLines).toContain('gains — codes on stock-prep_frontline not held by stock-prep-operator: 1 (stock-prep:pull)')
+        expect(dryLines).toContain('gains — role-subject table grants of stock-prep_frontline not held by stock-prep-operator: 1')
+        const applyLines: string[] = []
+        const applied = await script.run({ client, apply: true, manageTransaction: false, write: (line) => applyLines.push(line) })
+        expect(applied.exitCode).toBe(2)
+        expect(applied.membersMoved).toBe(0)
+        expect(applyLines.some((line) => line.startsWith('REFUSED') && line.includes('2 member(s) of stock-prep-operator not already in stock-prep_frontline would gain them'))).toBe(true)
+        expect(await membership()).toEqual(before)
+        for (const line of [...dryLines, ...applyLines]) {
+          expect(line).not.toContain(suffix)
+        }
+
+        // undo the widening; a pending invite naming the old role now blocks only the delete
+        await sql`DELETE FROM spreadsheet_permissions WHERE sheet_id = ${otherSheet}`.execute(trx)
+        await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep_frontline' AND permission_code = 'stock-prep:pull'`.execute(trx)
+        await sql`
+          INSERT INTO user_invites (user_id, email, role_id, invite_token)
+          VALUES (${`s5a-invitee-${suffix}`}, ${`s5a-${suffix}@example.invalid`}, 'stock-prep-operator', ${`s5a-token-${suffix}`})
+        `.execute(trx)
+        const inviteDryLines: string[] = []
+        expect((await script.run({ client, apply: false, manageTransaction: false, write: (line) => inviteDryLines.push(line) })).exitCode).toBe(0)
+        expect(inviteDryLines).toContain('pending invites naming stock-prep-operator: 1')
+        const refusedDelete = await script.run({ client, apply: true, deleteEmptyOldRole: true, manageTransaction: false })
+        expect(refusedDelete).toMatchObject({ exitCode: 2, membersMoved: 0, oldRoleDeleted: false })
+        expect(await membership()).toEqual(before)
+        const moved = await script.run({ client, apply: true, manageTransaction: false })
+        expect(moved).toMatchObject({ exitCode: 0, membersMoved: 2, oldRoleDeleted: false })
+        expect(await s5aRoleRows(trx, ['stock-prep-operator'])).toEqual([{ id: 'stock-prep-operator', name: 'S5a legacy floor' }])
+
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
 })
