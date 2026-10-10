@@ -2464,7 +2464,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     },
   }
 
-  it('OD-L1-7(a) registry row: the cc roster is exactly the single user_group row; the cc editor offers 用户组 only while that row is present, and renders the bound-group picker for a persisted group target', () => {
+  it('OD-L1-7(a) registry row: the cc roster is exactly the single user_group row; the cc editor offers 用户组 AND renders the bound-group picker only while that row is present (without it a persisted group target is read-only, G-16)', () => {
     expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'cc')).toEqual([{ kind: 'user_group', label: '用户组' }])
 
     const node = makeCcNode('cc_g', 'group', ['grp-1'])
@@ -2483,17 +2483,49 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(editor.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
     withRow.unmount()
 
-    // Positive control (M4): without the cc row, 用户组 is NOT offered — while the persisted 'group'
-    // value is untouched (G-16: still rendered through the group branch, never re-typed).
+    // Positive control (M4) + G-16 parity (Lock-1 §2.3: a persisted kind OUTSIDE the registry
+    // renders READ-ONLY and round-trips unchanged): without the cc row, 用户组 is NOT offered, the
+    // persisted 'group' value renders the read-only unknown line (count shown, NO picker, no
+    // empty-group hint), and the edit model is untouched — never re-typed, ids preserved.
+    const apiNoRow = ccStubApi({ targetType: 'group', targetIds: ['grp-1'] })
     const noRow = mountDirectInspector({
       node,
       registry: REGISTRY_WITHOUT_CC_ROW,
-      api: ccStubApi({ targetType: 'group', targetIds: ['grp-1'] }),
+      api: apiNoRow,
     })
     const editorNoRow = noRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
     expect(editorNoRow.getAttribute('data-cc-target-types')).toBe('user,role')
-    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    const unknownNoRow = editorNoRow.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknownNoRow).not.toBeNull()
+    expect(unknownNoRow.textContent).toContain('group')
+    expect(unknownNoRow.textContent).toContain('1 个对象')
+    expect(apiNoRow.ccEditFor('cc_g')).toMatchObject({ targetType: 'group', targetIds: ['grp-1'] })
     noRow.unmount()
+  })
+
+  it('OD-L1-7(a) type switch: changing the cc target type clears the previous type\'s ids (setCcTargetIds(key, []) — user ids never land under 用户组)', async () => {
+    const node = makeCcNode('cc_g', 'user', ['u-1'])
+    const setCcTargetIds = vi.fn()
+    const syncCcOptions = vi.fn()
+    const api = ccStubApi({ targetType: 'user', targetIds: ['u-1'] }, { setCcTargetIds, syncCcOptions })
+    const { container: c, unmount } = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const select = c.querySelector('[data-testid="approval-cc-target-type"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['user', 'role', 'group'])
+    select.value = 'group'
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    // v-model wrote the new type; the change handler cleared the ids THROUGH the shared draft API
+    // (the production handler sets `edit.targetIds = []` and re-syncs the picker options).
+    expect(api.ccEditFor('cc_g')?.targetType).toBe('group')
+    expect(setCcTargetIds).toHaveBeenCalledTimes(1)
+    expect(setCcTargetIds).toHaveBeenCalledWith('cc_g', [])
+    // Negative control: a bare options re-sync (the pre-fix wiring, which kept the stale ids) is
+    // NOT what the type change calls.
+    expect(syncCcOptions).not.toHaveBeenCalled()
+    unmount()
   })
 
   it('OD-L1-7(a) group picker: an empty bound-group list shows the honest empty hint (proves the group branch rendered, not the role branch)', () => {

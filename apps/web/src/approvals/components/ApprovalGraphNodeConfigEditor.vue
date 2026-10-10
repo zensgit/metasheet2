@@ -350,6 +350,10 @@
       :data-cc-node="node.key"
       :data-cc-target-types="ccTargetTypeOptions.join(',')"
     >
+      <!-- targetIds are typed per target type (user ids / role ids / bound-group ids), so switching
+           the type CLEARS them (`setCcTargetIds(key, [])`, which also re-syncs the picker options):
+           ids of the previous type must never land under the new one — a user id under 'group'
+           would render as a placeholder chip and fail publish as an unbound group. -->
       <el-form-item label="抄送类型">
         <el-select
           v-model="ccEditFor(node.key)!.targetType"
@@ -357,7 +361,7 @@
           :disabled="readOnly"
           class="ms-w-240"
           data-testid="approval-cc-target-type"
-          @change="syncCcOptions(node.key)"
+          @change="setCcTargetIds(node.key, [])"
         >
           <el-option
             v-for="targetType in ccTargetTypeOptions"
@@ -414,9 +418,12 @@
         <!-- Lock-1 OD-L1-7(a) (用户组 cc target): the SAME typed, org-scoped bound-group multi-select
              the approver user_group sub-form uses (D0 §10.2 — never a free-text/raw-id input). An
              unbound group fails PUBLISH (values-free 400, `assertUserGroupSourcesBoundToOrg`), never
-             at dispatch; the picker only OFFERS bound candidates. -->
+             at dispatch; the picker only OFFERS bound candidates. The branch is gated on the SAME
+             registry row that offers 用户组 (`ccGroupTargetOffered`): without the row a persisted
+             'group' value is outside this editor's registry and falls to the read-only unknown line
+             below (Lock-1 §2.3 / G-16 — read-only, ids preserved, round-trips unchanged). -->
         <el-select
-          v-else-if="ccEditFor(node.key)!.targetType === 'group'"
+          v-else-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered"
           :model-value="ccEditFor(node.key)!.targetIds"
           multiple
           filterable
@@ -444,7 +451,7 @@
           data-testid="approval-cc-target-unknown"
         >未知的抄送类型「{{ ccEditFor(node.key)!.targetType }}」，已保留原值（{{ ccEditFor(node.key)!.targetIds.length }} 个对象）；请选择已知类型后再保存</p>
         <p
-          v-if="ccEditFor(node.key)!.targetType === 'group' && !readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+          v-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered && !readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
           class="template-authoring__hint template-authoring__hint--warn"
           data-testid="approval-cc-target-group-empty"
         >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
@@ -1264,6 +1271,9 @@ const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_RE
 const ccTargetTypeOptions = computed(() =>
   CC_TARGET_TYPES.filter((targetType) => targetType !== 'group' || isRegisteredAssigneeSourceKind(registry.value, 'cc', 'user_group')),
 )
+// The same admission gates RENDERING a persisted 'group' target (picker + empty hint), not only
+// offering it: outside the registry the value is read-only (unknown line), never re-typed.
+const ccGroupTargetOffered = computed(() => ccTargetTypeOptions.value.includes('group'))
 const assigneeSourceRosterForNode = computed(() => {
   const roster = assigneeSourceRoster(registry.value, props.node.type)
   // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
