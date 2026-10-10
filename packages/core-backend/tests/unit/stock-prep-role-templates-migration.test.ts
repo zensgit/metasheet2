@@ -20,6 +20,13 @@
  *        ignores an ADOPTED role's members; deletes only ledger ids; no ledger → no-op.
  *   T-09 FAIL-CLOSED PRECONDITIONS: missing RBAC tables or a missing catalogue code throw before any
  *        write.
+ *   T-10 ORPHAN ROWS (fix round 1): `user_roles` and/or `role_permissions` rows under a template id
+ *        that has no `roles` row → that template is skipped (no role row, no code, not in the
+ *        ledger), the rows are left as found, one values-free line (id + two counts); a later down()
+ *        leaves them alone. One case per table, so dropping either count turns a case red.
+ *   T-11 ADOPTION LOG says whether the adopted role's code set equals the template's (T-05: no).
+ *   T-12 down() ignores a ledger id that is not a template id (the filter that only a real-DB
+ *        scenario caught before).
  *
  * The fake answers ONLY the statements the migration is expected to issue (shape-matched after
  * whitespace normalisation) and throws on anything else; every answer is computed over in-memory
@@ -116,6 +123,13 @@ function createFakeDb(state: FakeState, recorded: Recorded[] = []): Kysely<unkno
       state.ledger ??= []
       return []
     }],
+    [/^SELECT 1 AS present FROM roles WHERE id = \$1$/, (_m, p) => (state.roles.some((r) => r.id === p[0]) ? [{ present: 1 }] : [])],
+    [/^SELECT \(SELECT count\(\*\)::int FROM user_roles WHERE role_id = \$1\) AS members, \(SELECT count\(\*\)::int FROM role_permissions WHERE role_id = \$2\) AS codes$/, (_m, p) => [{
+      members: state.userRoles.filter((r) => r.role_id === p[0]).length,
+      codes: state.rolePermissions.filter((r) => r.role_id === p[1]).length,
+    }]],
+    [/^SELECT permission_code FROM role_permissions WHERE role_id = \$1$/, (_m, p) =>
+      state.rolePermissions.filter((r) => r.role_id === p[0]).map((r) => ({ permission_code: r.permission_code }))],
     [/^SELECT 1 AS taken FROM roles WHERE id <> \$1 AND btrim\(name\) = \$2 LIMIT 1$/, (_m, p) =>
       state.roles.some((r) => r.id !== p[0] && r.name.trim() === p[1]) ? [{ taken: 1 }] : []],
     [/^INSERT INTO roles \(id, name\) VALUES \(\$1, \$2\) ON CONFLICT \(id\) DO NOTHING RETURNING id$/, (_m, p) => {
@@ -264,8 +278,10 @@ describe('S5a stock-prep role templates — up() / down() against a fake databas
     await up(createFakeDb(state, recorded))
 
     const log = loggedSince(logStart)
+    // Item 4 of fix round 1: the adoption line says whether the code set equals the template's —
+    // here it holds read (template) + approvals:read (extra) and lacks pull and operate.
     expect(log.filter((line) => line.includes('stock-prep_puller'))).toEqual([
-      '[zzzz20261010124500_seed_stock_prep_role_templates] role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change)',
+      '[zzzz20261010124500_seed_stock_prep_role_templates] role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change); code set equals the template: no (template codes missing: 2, extra codes: 1)',
     ])
     for (const siteValue of ['备料拉取人员', 'user-p1', 'user-p2', 'approvals:read']) {
       expect(log.join('\n')).not.toContain(siteValue)
@@ -274,7 +290,7 @@ describe('S5a stock-prep role templates — up() / down() against a fake databas
     expect(codesOf(state, 'stock-prep_puller')).toEqual(before.codes)
     expect(state.userRoles.filter((r) => r.role_id === 'stock-prep_puller')).toEqual(before.members)
     const writesBoundToPuller = recorded.filter((r) => WRITE.test(r.sql) && r.parameters.includes('stock-prep_puller'))
-    expect(writesBoundToPuller.map((r) => r.sql)).toEqual(['INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING id'])
+    expect(writesBoundToPuller.map((r) => r.sql)).toEqual([])
     expect(state.ledger).not.toContain('stock-prep_puller')
     for (const expected of EXPECTED.filter((t) => t.id !== 'stock-prep_puller')) {
       expect(roleOf(state, expected.id)).toEqual({ id: expected.id, name: expected.name })
@@ -368,5 +384,93 @@ describe('S5a stock-prep role templates — up() / down() against a fake databas
     const recordedB: Recorded[] = []
     await expect(up(createFakeDb(noPull, recordedB))).rejects.toThrow('every stock-prep permission code')
     expect(recordedB.filter((r) => WRITE.test(r.sql))).toEqual([])
+  })
+})
+
+describe('S5a stock-prep role templates — fix round 1 (T-10..T-12)', () => {
+  const PREFIX = '[zzzz20261010124500_seed_stock_prep_role_templates] '
+  const skippedLine = (id: string, members: number, codes: number) =>
+    `${PREFIX}role ${id} NOT created: ${members} user_roles row(s) and ${codes} role_permissions row(s) already reference this id with no roles row (left behind by a deleted role); creating it would hand them the template codes, so it is skipped and those rows are left as found for the site to resolve; the role can then be created by hand under this id`
+
+  /** up() on a state whose `id` has leftover rows; asserts the skip contract for that id. */
+  async function expectSkipped(state: FakeState, id: string, members: number, codes: number) {
+    const leftoverMembers = state.userRoles.filter((r) => r.role_id === id)
+    const leftoverCodes = state.rolePermissions.filter((r) => r.role_id === id)
+    const recorded: Recorded[] = []
+    const logStart = logSpy.mock.calls.length
+    await up(createFakeDb(state, recorded))
+    const log = loggedSince(logStart)
+
+    expect(roleOf(state, id)).toBeUndefined()
+    expect(state.userRoles.filter((r) => r.role_id === id)).toEqual(leftoverMembers)
+    expect(state.rolePermissions.filter((r) => r.role_id === id)).toEqual(leftoverCodes)
+    expect(state.ledger).not.toContain(id)
+    expect(recorded.filter((r) => WRITE.test(r.sql) && r.parameters.includes(id))).toEqual([])
+    expect(log.filter((line) => line.includes(id))).toEqual([skippedLine(id, members, codes)])
+    for (const siteValue of ['user-orphan-1', 'user-orphan-2', 'approvals:read']) expect(log.join('\n')).not.toContain(siteValue)
+    // the other three are created normally
+    for (const expected of EXPECTED.filter((t) => t.id !== id)) {
+      expect(roleOf(state, expected.id)).toEqual({ id: expected.id, name: expected.name })
+      expect(codesOf(state, expected.id)).toEqual(expected.permissions)
+      expect(state.ledger).toContain(expected.id)
+    }
+  }
+
+  it('T-10a: leftover user_roles rows under an absent template id (no roles row) → that template is skipped, nothing bound', async () => {
+    const state = freshState()
+    state.userRoles.push({ user_id: 'user-orphan-1', role_id: 'stock-prep_admin' }, { user_id: 'user-orphan-2', role_id: 'stock-prep_admin' })
+    await expectSkipped(state, 'stock-prep_admin', 2, 0)
+    // nobody holds stock-prep:admin through user_roles → role_permissions after the upgrade
+    const holders = state.userRoles.filter((ur) => state.rolePermissions.some((rp) => rp.role_id === ur.role_id && rp.permission_code === 'stock-prep:admin'))
+    expect(holders).toEqual([])
+  })
+
+  it('T-10b: leftover role_permissions rows only (no member yet) → that template is skipped too', async () => {
+    const state = freshState()
+    state.rolePermissions.push({ role_id: 'stock-prep_developer', permission_code: 'approvals:read' })
+    await expectSkipped(state, 'stock-prep_developer', 0, 1)
+  })
+
+  it('T-10c: leftover rows in both tables → skipped; a later down() leaves the leftovers alone', async () => {
+    const state = freshState()
+    state.userRoles.push({ user_id: 'user-orphan-1', role_id: 'stock-prep_frontline' })
+    state.rolePermissions.push({ role_id: 'stock-prep_frontline', permission_code: 'stock-prep:read' }, { role_id: 'stock-prep_frontline', permission_code: 'approvals:read' })
+    await expectSkipped(state, 'stock-prep_frontline', 1, 2)
+    const leftovers = {
+      members: state.userRoles.filter((r) => r.role_id === 'stock-prep_frontline'),
+      codes: state.rolePermissions.filter((r) => r.role_id === 'stock-prep_frontline'),
+    }
+    await down(createFakeDb(state))
+    expect(state.userRoles.filter((r) => r.role_id === 'stock-prep_frontline')).toEqual(leftovers.members)
+    expect(state.rolePermissions.filter((r) => r.role_id === 'stock-prep_frontline')).toEqual(leftovers.codes)
+    expect(state.roles.map((r) => r.id)).toEqual(['admin'])
+  })
+
+  it('T-11: an adopted role whose codes equal the template logs "yes (0, 0)"', async () => {
+    const state = freshState()
+    state.roles.push({ id: 'stock-prep_puller', name: '数据管理员（拉取人员）' })
+    for (const code of ['stock-prep:pull', 'stock-prep:operate', 'stock-prep:read']) state.rolePermissions.push({ role_id: 'stock-prep_puller', permission_code: code })
+    const logStart = logSpy.mock.calls.length
+    await up(createFakeDb(state))
+    expect(loggedSince(logStart).filter((line) => line.includes('stock-prep_puller'))).toEqual([
+      `${PREFIX}role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change); code set equals the template: yes (template codes missing: 0, extra codes: 0)`,
+    ])
+  })
+
+  it('T-12: down() acts only on ledger ids that are ALSO template ids — a foreign ledger id is never deleted', async () => {
+    const state = freshState()
+    await up(createFakeDb(state))
+    // a foreign id in the ledger (hand-edited, or a later migration's bug): an existing site role
+    // with a code, no member and no grant — exactly what down() would delete if it trusted the ledger.
+    state.roles.push({ id: 'site-foreign', name: 'site role' })
+    state.rolePermissions.push({ role_id: 'site-foreign', permission_code: 'approvals:read' })
+    state.ledger?.push('site-foreign')
+    const recorded: Recorded[] = []
+    await down(createFakeDb(state, recorded))
+    expect(roleOf(state, 'site-foreign')).toEqual({ id: 'site-foreign', name: 'site role' })
+    expect(codesOf(state, 'site-foreign')).toEqual(['approvals:read'])
+    expect(recorded.filter((r) => r.parameters.includes('site-foreign'))).toEqual([])
+    expect(state.roles.map((r) => r.id).sort()).toEqual(['admin', 'site-foreign'])
+    expect(state.ledger).toBeNull()
   })
 })

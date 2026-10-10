@@ -15,18 +15,33 @@ import { checkTableExists } from './_patterns'
  *
  * THE COEXISTENCE RULES (an upgrade must not fail because of site data):
  *   1. ADOPT, NEVER MODIFY. A template whose id already exists in `roles` is left exactly as found:
- *      no rename, no code added or removed, no member touched. The adoption is logged by id only
- *      (the ids are this file's own literals; no site value is printed).
+ *      no rename, no code added or removed, no member touched. The adoption is logged by id, plus
+ *      whether the adopted role's code set equals the template's (yes / no and two counts — never a
+ *      code name, a member or a display name; the ids are this file's own literals).
  *   2. DISPLAY-NAME CLASH → SUFFIX. If a DIFFERENT role (another id) already uses the template's
  *      display name (compared after trimming), the template is created under the name suffixed
- *      `（内置）`. It is never skipped: G1 (`MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS`)
- *      and the S5b members page address these four ids, so each id must exist after the upgrade.
- *      The other role is not touched.
+ *      `（内置）`. A name clash never skips a template: G1
+ *      (`MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS`) and the S5b members page address
+ *      these four ids, so each id should exist after the upgrade. The other role is not touched.
  *   3. A template this migration CREATES gets exactly its template codes and no member, and its id is
  *      recorded in `stock_prep_role_template_seeds`. That ledger is how `down()` tells a role it
  *      created from a role it adopted; the e-learning precedent
  *      (`zzzz20260826140000_add_elearning_role_templates.ts`) has an inert `down()` and needed no
  *      ledger, but it also fails the upgrade on any id conflict, which this migration must not do.
+ *   4. ORPHAN ROWS → SKIP (the one case where a template id stays absent). On a database built by the
+ *      Kysely migration set, `user_roles.role_id` and `role_permissions.role_id` carry NO foreign key
+ *      to `roles` (033_create_rbac_core is a superseded no-op, `migration-provider.ts`), and
+ *      `DELETE /api/roles/:id` deletes only the `roles` row. So a template id that someone created
+ *      by hand, gave members or codes, and then deleted can still have `user_roles` /
+ *      `role_permissions` rows with no `roles` row. Permission resolution joins `user_roles` →
+ *      `role_permissions` without `roles` (`rbac/service.ts`), so creating the role and binding its
+ *      codes would silently hand those leftover members the template's codes (for `stock-prep_admin`:
+ *      `stock-prep:admin`). Before creating a template whose id is absent from `roles`, the leftover
+ *      rows in BOTH tables are counted; if either count is non-zero the template is skipped entirely
+ *      (no role row, no code bound, not in the ledger), one line with the id and the two counts is
+ *      logged, and the upgrade carries on. The leftover rows are neither deleted nor changed: who
+ *      they belong to is the site's call (they are invisible in 角色管理, which lists `roles` rows).
+ *      Once they are dealt with, the role can be created by hand under the same id.
  *
  * THE IDS ARE LITERALS (ADR §11.2-2). `buildPluginRoleId` would turn `stock-prep` into
  * `stock_prep_<kind>`, which matches neither `roleIdMatchesNamespace('stock-prep', …)` (delegated
@@ -183,6 +198,46 @@ async function ensureLedger(db: Kysely<unknown>): Promise<void> {
   `.execute(db)
 }
 
+async function roleExists(db: Kysely<unknown>, roleId: string): Promise<boolean> {
+  const found = await sql<{ present: number }>`
+    SELECT 1 AS present
+      FROM roles
+     WHERE id = ${roleId}
+  `.execute(db)
+  return found.rows.length > 0
+}
+
+/**
+ * Rows that already reference a role id with no `roles` row (rule 4). Both tables are counted: a
+ * leftover member would gain the codes this migration binds, and a leftover code would reach whoever
+ * is later assigned the role this migration would have created.
+ */
+async function countOrphanRows(db: Kysely<unknown>, roleId: string): Promise<{ members: number; codes: number }> {
+  const counted = await sql<{ members: number; codes: number }>`
+    SELECT (SELECT count(*)::int FROM user_roles WHERE role_id = ${roleId}) AS members,
+           (SELECT count(*)::int FROM role_permissions WHERE role_id = ${roleId}) AS codes
+  `.execute(db)
+  const row = counted.rows[0]
+  return { members: Number(row?.members ?? 0), codes: Number(row?.codes ?? 0) }
+}
+
+/** Rule 1's log line: the id, and whether the adopted role's codes equal the template's (counts only). */
+async function logAdoption(db: Kysely<unknown>, template: StockPrepRoleTemplate): Promise<void> {
+  const held = await sql<{ permission_code: string }>`
+    SELECT permission_code
+      FROM role_permissions
+     WHERE role_id = ${template.id}
+  `.execute(db)
+  const heldCodes = new Set(held.rows.map((row) => row.permission_code))
+  const missing = template.permissions.filter((code) => !heldCodes.has(code)).length
+  const extra = [...heldCodes].filter((code) => !template.permissions.includes(code)).length
+  const equal = missing === 0 && extra === 0
+  log(
+    `role ${template.id} already exists; adopted unchanged (no rename, no code change, no member change); `
+    + `code set equals the template: ${equal ? 'yes' : 'no'} (template codes missing: ${missing}, extra codes: ${extra})`,
+  )
+}
+
 async function displayNameTakenByAnotherRole(db: Kysely<unknown>, template: StockPrepRoleTemplate): Promise<boolean> {
   const clash = await sql<{ taken: number }>`
     SELECT 1 AS taken
@@ -201,6 +256,23 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await ensureLedger(db)
 
   for (const template of STOCK_PREP_ROLE_TEMPLATES) {
+    if (await roleExists(db, template.id)) {
+      // Rule 1: the role already exists (e.g. created by hand at R63). Left exactly as found.
+      await logAdoption(db, template)
+      continue
+    }
+
+    // Rule 4: rows left behind by a deleted role under this id → skip the template, touch nothing.
+    const orphans = await countOrphanRows(db, template.id)
+    if (orphans.members > 0 || orphans.codes > 0) {
+      log(
+        `role ${template.id} NOT created: ${orphans.members} user_roles row(s) and ${orphans.codes} role_permissions row(s) `
+        + 'already reference this id with no roles row (left behind by a deleted role); creating it would hand them '
+        + 'the template codes, so it is skipped and those rows are left as found for the site to resolve; the role can then be created by hand under this id',
+      )
+      continue
+    }
+
     const nameTaken = await displayNameTakenByAnotherRole(db, template)
     const name = nameTaken ? `${template.name}${STOCK_PREP_ROLE_TEMPLATE_NAME_CLASH_SUFFIX}` : template.name
 
@@ -212,8 +284,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     `.execute(db)
 
     if (created.rows.length === 0) {
-      // Rule 1: the role already exists (e.g. created by hand at R63). Left exactly as found.
-      log(`role ${template.id} already exists; adopted unchanged (no rename, no code change, no member change)`)
+      // Created concurrently between the existence read and this insert: rule 1 again.
+      await logAdoption(db, template)
       continue
     }
 

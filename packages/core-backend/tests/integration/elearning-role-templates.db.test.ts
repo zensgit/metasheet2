@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { CompiledQuery, Kysely, PostgresDialect, sql, type Transaction } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 
@@ -389,7 +389,7 @@ const S5A_EXPECTED = [
 const S5A_SCRIPT_PATH = path.resolve(__dirname, '../../../../scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs')
 
 type S5aScript = {
-  run: (options: { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> }; apply?: boolean; deleteEmptyOldRole?: boolean; manageTransaction?: boolean }) => Promise<{ exitCode: number; membersMoved: number; sheetGrantsMoved: number; oldRoleDeleted: boolean; refusals: string[] }>
+  run: (options: { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> }; apply?: boolean; deleteEmptyOldRole?: boolean; manageTransaction?: boolean; write?: (line: string) => void }) => Promise<{ exitCode: number; membersMoved: number; sheetGrantsMoved: number; oldRoleDeleted: boolean; refusals: string[] }>
 }
 
 async function s5aRoleRows(trx: Transaction<unknown>, ids: readonly string[]) {
@@ -534,6 +534,71 @@ describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
       })
     } catch (error) {
       if (error !== rollback) throw error
+    }
+  })
+
+  it('leftover user_roles / role_permissions rows under an absent template id: that template is skipped, nothing bound; adoption logs code equality — rolled back', async () => {
+    // No FK from user_roles.role_id / role_permissions.role_id to roles on a Kysely-built database
+    // (this one): a role deleted through DELETE /api/roles/:id leaves these rows behind.
+    const rollback = new Error('rollback S5a orphan-rows test')
+    const orphanUser = `s5a-orphan-${randomUUID()}`
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    try {
+      await db.transaction().execute(async (trx) => {
+        await s5aResetTemplates(trx)
+        await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${orphanUser}, 'stock-prep_admin')`.execute(trx)
+        await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep_developer', 'stock-prep:read')`.execute(trx)
+        // an R63-style hand-made puller with exactly the template codes
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep_puller', 'S5a 现场手建的拉取人员')`.execute(trx)
+        await sql`
+          INSERT INTO role_permissions (role_id, permission_code)
+          VALUES ('stock-prep_puller', 'stock-prep:read'), ('stock-prep_puller', 'stock-prep:operate'), ('stock-prep_puller', 'stock-prep:pull')
+        `.execute(trx)
+
+        await stockPrepTemplatesUp(trx)
+
+        expect(await s5aRoleRows(trx, STOCK_PREP_ROLE_TEMPLATE_IDS)).toEqual([
+          { id: 'stock-prep_frontline', name: '一线填写' },
+          { id: 'stock-prep_puller', name: 'S5a 现场手建的拉取人员' },
+        ])
+        expect(await s5aCodes(trx, 'stock-prep_admin')).toEqual([])
+        expect(await s5aCodes(trx, 'stock-prep_developer')).toEqual(['stock-prep:read'])
+        const members = await sql<{ user_id: string }>`SELECT user_id FROM user_roles WHERE role_id = 'stock-prep_admin'`.execute(trx)
+        expect(members.rows).toEqual([{ user_id: orphanUser }])
+        // the resolution query of rbac/service.ts: the leftover member holds no code through the role
+        const effective = await sql<{ code: string }>`
+          SELECT DISTINCT rp.permission_code AS code
+            FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id
+           WHERE ur.user_id = ${orphanUser}
+        `.execute(trx)
+        expect(effective.rows).toEqual([])
+        expect(await s5aLedger(trx)).toEqual(['stock-prep_frontline'])
+
+        const log = logSpy.mock.calls.map((args) => args.join(' '))
+        expect(log.filter((line) => line.includes('stock-prep_admin'))).toEqual([
+          expect.stringContaining('role stock-prep_admin NOT created: 1 user_roles row(s) and 0 role_permissions row(s)'),
+        ])
+        expect(log.filter((line) => line.includes('stock-prep_developer'))).toEqual([
+          expect.stringContaining('role stock-prep_developer NOT created: 0 user_roles row(s) and 1 role_permissions row(s)'),
+        ])
+        expect(log.filter((line) => line.includes('stock-prep_puller'))).toEqual([
+          expect.stringContaining('code set equals the template: yes (template codes missing: 0, extra codes: 0)'),
+        ])
+        expect(log.join('\n')).not.toContain(orphanUser)
+        expect(log.join('\n')).not.toContain('S5a 现场手建的拉取人员')
+
+        // down() acts on the ledger only: the leftovers and the adopted puller stay
+        await stockPrepTemplatesDown(trx)
+        expect(await s5aRoleRows(trx, STOCK_PREP_ROLE_TEMPLATE_IDS)).toEqual([{ id: 'stock-prep_puller', name: 'S5a 现场手建的拉取人员' }])
+        expect((await sql<{ user_id: string }>`SELECT user_id FROM user_roles WHERE role_id = 'stock-prep_admin'`.execute(trx)).rows).toEqual([{ user_id: orphanUser }])
+        expect(await s5aCodes(trx, 'stock-prep_developer')).toEqual(['stock-prep:read'])
+
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    } finally {
+      logSpy.mockRestore()
     }
   })
 
