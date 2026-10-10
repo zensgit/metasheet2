@@ -349,6 +349,8 @@ import {
   SheetSystemKindConflictError,
   // S3 fix round 2 (F3): the stamp lookup index.ts wires as the wrapper's hook, and the generic-write refusal.
   StockPreparationOverviewRecordsWriteError,
+  // S3 follow-up E: the plugin-scope refusal of a structural write to the overview.
+  StockPreparationOverviewStructureWriteError,
   loadStockPreparationOverviewSheetIds,
 } from '../../src/multitable/stock-preparation-overview-contract'
 
@@ -1066,6 +1068,197 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     // Control: an ordinary sheet of the same id shape, registered to the plugin, still takes a generic write.
     const ordinary = await wrapper.records.createRecord({ sheetId: sheetA, data: {} })
     expect(ordinary.sheetId).toBe(sheetA)
+    // S3 follow-up E — the REAL stamp lookup (index.ts's hook over this database) decides an unmarked ensureView:
+    // refused on the stamped overview, admitted on an ordinary derived-shape sheet; the overview module's own marked
+    // call reaches the host without the marker.
+    const viewDescriptor = { id: 'overview-active', objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'Active', type: 'grid' }
+    const hostEnsureView = vi.fn(async (input: { sheetId: string }) => ({ id: 'view_e', sheetId: input.sheetId }))
+    const structural = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, PLUGIN, {
+      assertSheetScope: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+        return { registered: true }
+      },
+      isStockPreparationOverviewSheet: async ({ sheetId }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId),
+    })
+    const unmarked = await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+    expect(unmarked).toBeInstanceOf(StockPreparationOverviewStructureWriteError)
+    expect(unmarked).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'structure_write' } })
+    expect(hostEnsureView).not.toHaveBeenCalled()
+    await structural.provisioning.ensureView({ projectId, sheetId: sheetA, descriptor: viewDescriptor } as never)
+    await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND } as never)
+    expect(hostEnsureView.mock.calls.map((call) => (call[0] as { sheetId: string }).sheetId)).toEqual([sheetA, overviewSheet])
+    expect(hostEnsureView.mock.calls[1][0]).not.toHaveProperty('systemKind')
+    // S3 follow-ups, fix round 1 (no ordering oracle) — a FOREIGN plugin's unmarked ensureView meets the REAL owner
+    // check (the registry rows of this database) before anything else: the overview and an ordinary integration-core
+    // sheet answer the same scope refusal, and the stamp lookup is never asked.
+    const foreignLookup = vi.fn(async ({ sheetId }: { sheetId: string }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId))
+    const foreign = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, 'plugin-after-sales', {
+      assertSheetScope: async ({ pluginName, sheetId }) => ({ registered: await assertPluginOwnsSheet(q as never, { pluginName, sheetId }) }),
+      isStockPreparationOverviewSheet: foreignLookup,
+    })
+    const probeForeign = async (sheetId: string) => {
+      const error = await foreign.provisioning.ensureView({ projectId: `${tenantId}:after-sales`, sheetId, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(MultitableSheetScopeError)
+      const e = error as MultitableSheetScopeError
+      return { name: e.name, code: e.code, message: e.message.split(sheetId).join('<sheet>') }
+    }
+    expect(await probeForeign(overviewSheet)).toStrictEqual(await probeForeign(sheetA))
+    expect(foreignLookup).not.toHaveBeenCalled()
+    expect(hostEnsureView).toHaveBeenCalledTimes(2)
+  })
+})
+
+// S3 follow-up B (register R-37), against real PostgreSQL: the CROSS-PROCESS refresh BUSY at the ROUTE. Another
+// database session (a plain pool client — nothing shared with the plugin's in-process writer state, exactly what
+// another app process is) holds the tenant's overview advisory lock in an open transaction. The OPERATE refresh
+// route, over the REAL registry store and the plugin's REAL db helper:
+//   * answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once (it does not wait for the holder), with no
+//     overview write and no audit row;
+//   * CLEARS its cooldown — so once the other session commits, the very next click refreshes for real (200
+//     `fresh: true`) instead of answering the 60-second cooldown (`fresh: false`).
+// The multitable host is a minimal stamped fake: the lock, the registry reads and the route are what this pins.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuHttpRoutes = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'http-routes.cjs'),
+)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuHarness = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', '__tests__', 'support', 'stock-preparation-project-sheet-harness.cjs'),
+)
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const s3fuAccess = require(
+  path.join(__dirname, '..', '..', '..', '..', 'plugins', 'plugin-integration-core', 'lib', 'stock-preparation-workbench-access.cjs'),
+)
+
+describeDb('S3 follow-up B: cross-process overview refresh BUSY at the route (real registry store, real advisory lock, real DB)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10)
+  const tenantId = `s3fub_${suffix}`
+  const stagingProjectId = `${tenantId}:integration-core`
+  const OVERVIEW_SHEET = `sheet_s3fub_overview_${suffix}`
+  const SWITCH = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+  const LOCK_KEY = `stock-prep-project-overview:${tenantId}`
+  const FLOOR = { id: `s3fub_floor_${suffix}`, tenantId, permissions: [s3fuAccess.STOCK_PREP_READ, s3fuAccess.STOCK_PREP_OPERATE] }
+  let pool: Pool
+  let previousSwitch: string | undefined
+
+  beforeAll(() => {
+    pool = new Pool({ connectionString: dbUrl })
+    previousSwitch = process.env[SWITCH]
+    process.env[SWITCH] = 'true'
+  })
+
+  afterAll(async () => {
+    if (previousSwitch === undefined) delete process.env[SWITCH]
+    else process.env[SWITCH] = previousSwitch
+    await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+    await pool.end()
+  })
+
+  it('another session holds the overview lock: 409 BUSY at once, nothing written or audited, cooldown CLEARED — the first click after it commits refreshes (fresh: true)', async () => {
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    // The stamped host (minimal): the overview exists and is stamped; every overview write goes through the port.
+    const portWrites: string[] = []
+    const provisioning = {
+      supportsSystemKindStamp: true,
+      findObjectSheet: async (input: { projectId: string; objectId: string }) => (
+        input.projectId === stagingProjectId && input.objectId === STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID
+          ? { id: OVERVIEW_SHEET, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND }
+          : null
+      ),
+      ensureObject: async () => { throw new Error('the refresh never provisions') },
+      resolveFieldIds: async (input: { objectId: string; fieldIds: string[] }) => Object.fromEntries(input.fieldIds.map((id) => [id, `fld_${id}`])),
+      getFieldId: (_projectId: string, _objectId: string, fieldId: string) => `fld_${fieldId}`,
+      getObjectViewId: (_projectId: string, objectId: string, viewId: string) => `view_${objectId.slice(-6)}_${viewId}`,
+    }
+    const records = {
+      queryRecords: async () => [],
+      createRecord: async () => { throw new Error('generic write') },
+      patchRecord: async () => { throw new Error('generic write') },
+      deleteRecord: async () => { throw new Error('generic write') },
+      stockPreparationOverview: {
+        createRecord: async () => { portWrites.push('create'); return { id: 'rec_x', version: 1, data: {} } },
+        patchRecord: async () => { portWrites.push('patch'); return { id: 'rec_x', version: 2, data: {} } },
+        deleteRecord: async () => { portWrites.push('delete'); return { id: 'rec_x', version: 1 } },
+      },
+    }
+    const audits: Array<{ action: string; mode: string }> = []
+    const routes = new Map<string, unknown>()
+    s3fuHttpRoutes.registerIntegrationRoutes({
+      context: {
+        api: { http: { addRoute(method: string, routePath: string, handler: unknown) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } },
+        storage: new Map(),
+        config: {},
+      },
+      services: {
+        ...Object.fromEntries(['externalSystemRegistry', 'adapterRegistry', 'pipelineRegistry', 'pipelineRunner', 'deadLetterStore', 'stagingInstaller', 'templateRegistry', 'readSourceConfigStore', 'readSourceCompositionConfigStore', 'bridgeAgentChecklistStore']
+          .map((name) => [name, new Proxy({}, { get: (_target, method) => async () => { throw new Error(`unexpected ${name}.${String(method)}`) } })])),
+        stockPreparationAuditStore: {
+          append: async (entry: { action: string; mode: string }) => { audits.push({ action: entry.action, mode: entry.mode }); return { ok: true } },
+          supportsAction: async () => ({ supported: true }),
+        },
+        stockPreparationProjectTargetStore: store,
+        tenantPrincipalDirectory: { verifyTenantMembership: async () => ({ member: true }) },
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })
+    const refresh = () => s3fuHarness.call(routes, 'POST', '/api/integration/stock-preparation/project-overview/refresh', { user: FLOOR, body: {} }) as Promise<{ statusCode: number; body: { ok: boolean; data?: { fresh?: boolean }; error?: { code: string } } }>
+
+    // ANOTHER SESSION takes the tenant's overview lock (the same key derivation the plugin's db helper uses) and holds it.
+    const other = await pool.connect()
+    try {
+      await other.query('BEGIN')
+      const taken = await other.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [LOCK_KEY])
+      expect(taken.rows[0].locked, 'the other session holds the overview lock').toBe(true)
+      const started = Date.now()
+      const busy = await refresh()
+      expect(Date.now() - started, 'the busy refresh did not wait for the other session').toBeLessThan(3000)
+      expect(busy.statusCode, JSON.stringify(busy.body)).toBe(409)
+      expect(busy.body.ok).toBe(false)
+      expect(busy.body.error?.code).toBe('STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
+      expect(portWrites, 'nothing was written').toEqual([])
+      expect(audits, 'nothing was audited').toEqual([])
+      await other.query('COMMIT')
+    } finally {
+      other.release()
+    }
+    // The lock is free. NO clock step: the BUSY answer must have cleared the cooldown, so this is a real refresh.
+    const next = await refresh()
+    expect(next.statusCode, JSON.stringify(next.body)).toBe(200)
+    expect(next.body.data?.fresh, 'the BUSY click left no cooldown behind').toBe(true)
+    expect(audits).toEqual([{ action: 'project_overview_refresh', mode: 'refreshed' }])
+    // …and a click right after a refresh that DID run is the cooldown (the control: the cooldown itself works).
+    const cooled = await refresh()
+    expect(cooled.statusCode).toBe(200)
+    expect(cooled.body.data?.fresh).toBe(false)
   })
 })
 

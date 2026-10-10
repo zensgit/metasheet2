@@ -33,11 +33,17 @@ import type { ResolvedRequestAccess } from '../../src/multitable/access'
 import { SYSTEM_SHEET_KINDS as CHECKPOINT_SYSTEM_SHEET_KINDS } from '../../src/multitable/history-trust-checkpoint'
 import { MULTITABLE_MANAGE_SCHEMA_PERMISSION } from '../../src/multitable/manage-schema-permission'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { deriveRecordPermissions } from '../../src/multitable/permission-derivation'
 import { resolveSheetCapabilitiesForAccess, type QueryFn } from '../../src/multitable/permission-service'
-import { MultitableProjectNamespaceError, createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
+import {
+  MultitableProjectNamespaceError,
+  MultitableSheetScopeError,
+  assertPluginOwnsSheet,
+  createPluginScopedMultitableApi,
+} from '../../src/multitable/plugin-scope'
 import {
   createSheet,
   ensureObject,
@@ -55,6 +61,7 @@ import {
   STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
   STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
   SheetSystemKindConflictError,
+  StockPreparationOverviewStructureWriteError,
   StockPreparationOverviewSystemKindError,
   isStockPreparationOverviewGrantableAccessLevel,
   isStockPreparationOverviewSheetIdCandidate,
@@ -855,5 +862,267 @@ describe('S3 fix round 1 — index.ts wires systemKind, the stamp declaration an
   it('the host declares supportsSystemKindStamp: true once, and wires the READ port to the overview grant service', () => {
     expect(code.match(/supportsSystemKindStamp:\s*true\b/g)).toHaveLength(1)
     expect(code).toMatch(/grantOverviewRoleRead: async \(\{ sheetId, roleIds, actorId \}\) => \{[\s\S]{0,800}?grantStockPreparationOverviewRoleRead\(txQuery, \{ sheetId, roleIds, actorId \}\)/)
+  })
+})
+
+// ── S3 follow-up E (register R-37): STRUCTURAL writes to the overview, at the plugin-scope layer ────────────
+//
+// The overview's structure (columns, field properties, display names, views) is written only by the overview
+// module's own provisioning: `ensureObject` with the overview kind (the gate above) and `ensureView` with the same
+// marker. Every other structural write naming the overview is a values-free 403 STOCK_PREP_OVERVIEW_READ_ONLY
+// before the host is reached:
+//   E-01 object-keyed writes naming the overview OBJECT (ensureMissingObjectFields, the repair transaction's
+//        ensureMissingObjectFields, ensureObjectDefaultView, patchObjectFieldProperty, relabelObjectDisplayNames)
+//        are refused PURELY — no hook, no host call — for the port plugin too; an unstamped ensureObject of the
+//        overview object is refused the same way; other objects pass unchanged (control);
+//   E-02 ensureView on the STAMPED overview without the marker is refused (the host's stamp decides; no hook →
+//        `unverifiable`); an ordinary derived-shape sheet and a non-derived id pass, the latter with no lookup;
+//   E-03 the overview module's own call — port plugin + marker + this project's derived overview sheet — reaches
+//        the host WITHOUT the marker; a misused marker (another plugin / kind / sheet) is the systemKind 403.
+describe('S3 follow-up E — structural writes to the overview are refused at the plugin-scope layer', () => {
+  const PROJECT = OV_PROJECT
+  const OTHER_TENANT_OVERVIEW = getObjectSheetId('tenant_2:integration-core', STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID)
+  const build = (pluginName = 'plugin-integration-core', { stamped = [OV_SHEET, OTHER_TENANT_OVERVIEW], withStampHook = true } = {}) => {
+    const host = {
+      getObjectSheetId,
+      ensureObject: vi.fn(async () => ({ baseId: 'b', sheet: { id: OV_SHEET, baseId: 'b', name: 'x', description: null, systemKind: null }, fields: [] })),
+      ensureView: vi.fn(async (input: { sheetId: string }) => ({ id: 'view_x', sheetId: input.sheetId, name: 'v', type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [], config: {} })),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })),
+      ensureObjectDefaultView: vi.fn(async () => ({})),
+      patchObjectFieldProperty: vi.fn(async () => ({})),
+      relabelObjectDisplayNames: vi.fn(async () => ({})),
+      runObjectFieldsRepairTransaction: vi.fn(async (fn: (surface: Record<string, unknown>) => Promise<unknown>) => fn({
+        findObjectSheet: vi.fn(async () => null),
+        resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+        readObjectFieldsContent: vi.fn(async () => ({})),
+        ensureMissingObjectFields: txEnsureMissing,
+      })),
+    }
+    const txEnsureMissing = vi.fn(async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] }))
+    const hooks = {
+      assertObjectScope: vi.fn(async () => {}),
+      assertSheetScope: vi.fn(async () => ({ registered: true })),
+      ...(withStampHook ? { isStockPreparationOverviewSheet: vi.fn(async ({ sheetId }: { sheetId: string }) => stamped.includes(sheetId)) } : {}),
+    }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, pluginName, hooks as never)
+    const projectId = pluginName === 'plugin-integration-core' ? PROJECT : 'tenant_1:after-sales'
+    return { api, host, hooks, txEnsureMissing, projectId }
+  }
+  const refusedWith = async (promise: Promise<unknown>, reason: 'structure_write' | 'unverifiable') => {
+    const error = await promise.then(() => null, (e: unknown) => e)
+    expect(error).toBeInstanceOf(StockPreparationOverviewStructureWriteError)
+    expect(error).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason } })
+    expect(JSON.stringify((error as { details: unknown }).details)).toBe(JSON.stringify({ reason }))
+  }
+  const viewDescriptor = { id: 'overview-active', objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'Active', type: 'grid' }
+
+  it('E-01 every object-keyed structural write naming the overview object is refused purely — no hook, no host — for every plugin; other objects pass (control)', async () => {
+    for (const pluginName of ['plugin-integration-core', 'plugin-after-sales']) {
+      const s = build(pluginName)
+      const o = { projectId: s.projectId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }
+      await refusedWith(s.api.provisioning.ensureMissingObjectFields({ ...o, fields: [{ id: 'extra', name: 'Extra', type: 'string' }] } as never), 'structure_write')
+      await refusedWith(s.api.provisioning.ensureObjectDefaultView!({ ...o, viewId: 'default' } as never), 'structure_write')
+      await refusedWith(s.api.provisioning.patchObjectFieldProperty({ ...o, fieldId: 'status', property: { options: [] } } as never), 'structure_write')
+      await refusedWith(s.api.provisioning.relabelObjectDisplayNames!({ ...o, sheetName: 'x', fields: [], apply: true } as never), 'structure_write')
+      await refusedWith(s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.ensureMissingObjectFields({ ...o, fields: [] } as never)), 'structure_write')
+      // An UNSTAMPED ensure of the overview object (would create an ordinary sheet at its id or add columns to it).
+      await refusedWith(s.api.provisioning.ensureObject({ projectId: s.projectId, descriptor: { id: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'x', fields: [] } } as never), 'structure_write')
+      await refusedWith(s.api.provisioning.ensureObject({ projectId: s.projectId, descriptor: { id: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'x', fields: [] }, systemKind: null } as never), 'structure_write')
+      expect(s.hooks.assertObjectScope).not.toHaveBeenCalled()
+      for (const method of ['ensureObject', 'ensureMissingObjectFields', 'ensureObjectDefaultView', 'patchObjectFieldProperty', 'relabelObjectDisplayNames'] as const) {
+        expect(s.host[method], method).not.toHaveBeenCalled()
+      }
+      expect(s.txEnsureMissing).not.toHaveBeenCalled()
+    }
+    // Control: the same calls on another object reach the host.
+    const c = build('plugin-integration-core')
+    const main = { projectId: PROJECT, objectId: 'plm_stock_preparation_main' }
+    await c.api.provisioning.ensureMissingObjectFields({ ...main, fields: [] } as never)
+    await c.api.provisioning.patchObjectFieldProperty({ ...main, fieldId: 'status', property: {} } as never)
+    await c.api.provisioning.relabelObjectDisplayNames!({ ...main, sheetName: 'x', fields: [], apply: false } as never)
+    await c.api.provisioning.ensureObjectDefaultView!({ ...main, viewId: 'default' } as never)
+    await c.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.ensureMissingObjectFields({ ...main, fields: [] } as never))
+    await c.api.provisioning.ensureObject({ projectId: PROJECT, descriptor: { id: 'plm_stock_preparation_main', name: 'x', fields: [] } } as never)
+    for (const method of ['ensureObject', 'ensureMissingObjectFields', 'ensureObjectDefaultView', 'patchObjectFieldProperty', 'relabelObjectDisplayNames'] as const) {
+      expect(c.host[method], method).toHaveBeenCalledTimes(1)
+    }
+    expect(c.txEnsureMissing).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-02 ensureView on the STAMPED overview without the marker is refused (this tenant\'s and another\'s); no stamp hook → unverifiable; ordinary sheets pass, a non-derived id with no lookup', async () => {
+    for (const pluginName of ['plugin-integration-core', 'plugin-after-sales']) {
+      const s = build(pluginName)
+      for (const sheetId of [OV_SHEET, OTHER_TENANT_OVERVIEW]) {
+        await refusedWith(s.api.provisioning.ensureView({ projectId: s.projectId, sheetId, descriptor: viewDescriptor } as never), 'structure_write')
+      }
+      expect(s.host.ensureView).not.toHaveBeenCalled()
+      // Fix round 1 (no oracle): the refusal runs AFTER the sheet-scope check (here a scope hook that admits every
+      // sheet — the observe-mode tolerance — so the refusal is what stops the write; E-05 is the foreign-plugin case).
+      expect(s.hooks.assertSheetScope).toHaveBeenCalledTimes(2)
+    }
+    const blind = build('plugin-integration-core', { withStampHook: false })
+    await refusedWith(blind.api.provisioning.ensureView({ projectId: PROJECT, sheetId: DERIVED_PLAIN_SHEET, descriptor: viewDescriptor } as never), 'unverifiable')
+    expect(blind.host.ensureView).not.toHaveBeenCalled()
+    // Control: an ordinary derived-shape sheet (the lookup answers "not the overview") and a non-derived id pass.
+    const c = build('plugin-integration-core')
+    await c.api.provisioning.ensureView({ projectId: PROJECT, sheetId: DERIVED_PLAIN_SHEET, descriptor: viewDescriptor } as never)
+    await c.api.provisioning.ensureView({ projectId: PROJECT, sheetId: 'sheet_hand_named', descriptor: viewDescriptor } as never)
+    expect(c.host.ensureView).toHaveBeenCalledTimes(2)
+    expect(c.hooks.isStockPreparationOverviewSheet).toHaveBeenCalledTimes(1)
+    expect(c.hooks.isStockPreparationOverviewSheet).toHaveBeenCalledWith({ sheetId: DERIVED_PLAIN_SHEET })
+  })
+
+  it('E-03 the overview module\'s own view provisioning (port plugin + marker + this project\'s derived overview sheet) reaches the host WITHOUT the marker; a misused marker is the systemKind 403', async () => {
+    const s = build('plugin-integration-core')
+    await s.api.provisioning.ensureView({ projectId: PROJECT, sheetId: OV_SHEET, descriptor: viewDescriptor, systemKind: KIND })
+    expect(s.host.ensureView).toHaveBeenCalledTimes(1)
+    expect(s.host.ensureView.mock.calls[0][0]).toStrictEqual({ projectId: PROJECT, sheetId: OV_SHEET, descriptor: viewDescriptor })
+    expect(s.hooks.assertSheetScope).toHaveBeenCalledWith({ pluginName: 'plugin-integration-core', sheetId: OV_SHEET })
+    const misuse = async (pluginName: string, input: Record<string, unknown>, reason: 'plugin' | 'kind' | 'object') => {
+      const m = build(pluginName)
+      const error = await m.api.provisioning.ensureView({ projectId: m.projectId, descriptor: viewDescriptor, ...input } as never).then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(StockPreparationOverviewSystemKindError)
+      expect(error).toMatchObject({ status: 403, code: 'MULTITABLE_SYSTEM_KIND_FORBIDDEN', details: { reason } })
+      expect(m.host.ensureView).not.toHaveBeenCalled()
+    }
+    await misuse('plugin-after-sales', { sheetId: OV_SHEET, systemKind: KIND }, 'plugin')
+    await misuse('plugin-integration-core', { sheetId: OV_SHEET, systemKind: 'people_directory' }, 'kind')
+    // Another tenant's overview, and an ordinary sheet, under this project with the marker.
+    await misuse('plugin-integration-core', { sheetId: OTHER_TENANT_OVERVIEW, systemKind: KIND }, 'object')
+    await misuse('plugin-integration-core', { sheetId: DERIVED_PLAIN_SHEET, systemKind: KIND }, 'object')
+  })
+
+  // ── S3 follow-ups, fix round 1 ─────────────────────────────────────────────────────────────────────────────────
+  //   E-05 (no ordering oracle): a FOREIGN plugin's ensureView on the overview id meets the scope refusal it meets on
+  //        any other sheet integration-core owns — the REAL owner check (`assertPluginOwnsSheet`) over a registry
+  //        fake — and the stamp lookup is never asked, so the probe cannot tell the overview from an ordinary sheet.
+  //   E-06 (read-once): a getter-bearing input that answers a harmless object first and the overview afterwards
+  //        reaches the scope hook AND the host with the harmless value it was checked with, read exactly once.
+  it('E-05 a foreign plugin probing the overview id gets the same scope refusal as for any foreign sheet; the stamp lookup is never asked', async () => {
+    const registry = new Map<string, string>([
+      [OV_SHEET, 'plugin-integration-core'],
+      [DERIVED_PLAIN_SHEET, 'plugin-integration-core'],
+    ])
+    const registryQuery = vi.fn(async (_sql: string, params?: unknown[]) => {
+      const owner = registry.get(String((params ?? [])[0]))
+      return { rows: owner ? [{ plugin_name: owner }] : [] }
+    })
+    const isStockPreparationOverviewSheet = vi.fn(async ({ sheetId }: { sheetId: string }) => sheetId === OV_SHEET)
+    const host = { getObjectSheetId, ensureView: vi.fn(async () => ({ id: 'view_x' })) }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-after-sales', {
+      assertSheetScope: async ({ pluginName, sheetId }: { pluginName: string; sheetId: string }) => {
+        const registered = await assertPluginOwnsSheet(registryQuery as never, { pluginName, sheetId })
+        return { registered }
+      },
+      isStockPreparationOverviewSheet,
+    } as never)
+    const probe = async (sheetId: string) => {
+      const error = await api.provisioning.ensureView({ projectId: 'tenant_1:after-sales', sheetId, descriptor: viewDescriptor } as never)
+        .then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(MultitableSheetScopeError)
+      const e = error as MultitableSheetScopeError
+      // The message names the probed id; with the id masked, the two refusals are the same refusal.
+      return { name: e.name, code: e.code, message: e.message.split(sheetId).join('<sheet>'), keys: Object.keys(e).sort() }
+    }
+    const onOverview = await probe(OV_SHEET)
+    const onOrdinary = await probe(DERIVED_PLAIN_SHEET)
+    expect(onOverview).toStrictEqual(onOrdinary)
+    expect(onOverview.code).toBe('MULTITABLE_SHEET_SCOPE_FORBIDDEN')
+    expect(isStockPreparationOverviewSheet).not.toHaveBeenCalled()
+    expect(host.ensureView).not.toHaveBeenCalled()
+  })
+
+  it('E-06 read-once: a getter-bearing input is checked and forwarded with ONE read — the hook and the host see the value that was checked, never the overview', async () => {
+    const OV = STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID
+    const HARMLESS = 'plm_stock_preparation_main'
+    const flipping = <T extends Record<string, unknown>>(base: T, key: string, first: unknown, later: unknown) => {
+      let reads = 0
+      const input: Record<string, unknown> = { ...base }
+      Object.defineProperty(input, key, { enumerable: true, get() { reads += 1; return reads === 1 ? first : later } })
+      return { input, reads: () => reads }
+    }
+    const s = build('plugin-integration-core')
+    const objectIdSeen = (fn: { mock: { calls: unknown[][] } }) => (fn.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId
+    // The four object-keyed writes: the getter answers the harmless object first, the overview afterwards.
+    const cases: Array<[string, () => Promise<unknown>, () => unknown, () => number]> = []
+    {
+      const f = flipping({ projectId: PROJECT, fields: [] }, 'objectId', HARMLESS, OV)
+      cases.push(['ensureMissingObjectFields', () => s.api.provisioning.ensureMissingObjectFields(f.input as never), () => objectIdSeen(s.host.ensureMissingObjectFields), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, name: 'n' }, 'objectId', HARMLESS, OV)
+      cases.push(['ensureObjectDefaultView', () => s.api.provisioning.ensureObjectDefaultView!(f.input as never), () => objectIdSeen(s.host.ensureObjectDefaultView), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, fieldId: 'status', propertyPatch: {} }, 'objectId', HARMLESS, OV)
+      cases.push(['patchObjectFieldProperty', () => s.api.provisioning.patchObjectFieldProperty(f.input as never), () => objectIdSeen(s.host.patchObjectFieldProperty), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, fields: [] }, 'objectId', HARMLESS, OV)
+      cases.push(['repair-tx ensureMissingObjectFields', () => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.ensureMissingObjectFields(f.input as never)), () => objectIdSeen(s.txEnsureMissing), f.reads])
+    }
+    for (const [name, run, hostSaw, reads] of cases) {
+      await run()
+      expect(hostSaw(), `${name}: the host gets the checked value`).toBe(HARMLESS)
+      expect(reads(), `${name}: objectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId, `${name}: the scope hook gets the checked value`).toBe(HARMLESS)
+    }
+    // ensureObject without a kind: the descriptor's id getter answers the harmless object first.
+    let idReads = 0
+    const descriptor: Record<string, unknown> = { name: 'x', fields: [] }
+    Object.defineProperty(descriptor, 'id', { enumerable: true, get() { idReads += 1; return idReads === 1 ? HARMLESS : OV } })
+    await s.api.provisioning.ensureObject({ projectId: PROJECT, descriptor } as never)
+    const ensured = s.host.ensureObject.mock.calls.at(-1)?.[0] as unknown as { descriptor: { id: unknown } }
+    expect(ensured.descriptor.id, 'ensureObject: the host gets the checked descriptor id').toBe(HARMLESS)
+    expect(idReads, 'ensureObject: the descriptor id is read once').toBe(1)
+    expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId).toBe(HARMLESS)
+  })
+})
+
+describe('S3 follow-up E — the overview MODULE still provisions through the real wrapper', () => {
+  it('E-04 the plugin\'s ensureProjectOverviewSheet: stamped ensureObject + both views reach the host (the marker is wired, and stripped); a second ensure writes nothing', async () => {
+    const pluginRequire = createRequire(import.meta.url)
+    const overviewLib = pluginRequire('../../../../plugins/plugin-integration-core/lib/stock-preparation-project-overview.cjs') as {
+      ensureProjectOverviewSheet: (input: Record<string, unknown>) => Promise<{ created: boolean; sheetId: string; views?: { created: number } }>
+    }
+    const kinds = new Map<string, string | null>()
+    const host = {
+      supportsSystemKindStamp: true,
+      getObjectSheetId,
+      getFieldId: (_p: string, _o: string, fieldId: string) => `fld_${fieldId}`,
+      getObjectViewId: (_p: string, _o: string, viewId: string) => `view_${viewId}`,
+      findObjectSheet: vi.fn(async ({ projectId, objectId }: { projectId: string; objectId: string }) => {
+        const id = getObjectSheetId(projectId, objectId)
+        return kinds.has(id) ? { id, baseId: null, name: 'x', description: null, systemKind: kinds.get(id) ?? null } : null
+      }),
+      ensureObject: vi.fn(async ({ projectId, descriptor, systemKind }: { projectId: string; descriptor: { id: string }; systemKind?: string | null }) => {
+        const id = getObjectSheetId(projectId, descriptor.id)
+        kinds.set(id, systemKind ?? null)
+        return { baseId: 'b', sheet: { id, baseId: 'b', name: 'x', description: null, systemKind: systemKind ?? null }, fields: [] }
+      }),
+      resolveFieldIds: vi.fn(async ({ fieldIds }: { fieldIds: string[] }) => Object.fromEntries(fieldIds.map((fieldId) => [fieldId, `fld_${fieldId}`]))),
+      ensureView: vi.fn(async (input: { sheetId: string; descriptor: { id: string } }) => ({ id: input.descriptor.id, sheetId: input.sheetId, name: 'v', type: 'grid', filterInfo: {}, sortInfo: {}, groupInfo: {}, hiddenFieldIds: [], config: {} })),
+    }
+    const hooks = {
+      assertObjectScope: vi.fn(async () => {}),
+      claimObjectScope: vi.fn(async () => {}),
+      assertSheetScope: vi.fn(async () => ({ registered: true })),
+      isStockPreparationOverviewSheet: vi.fn(async ({ sheetId }: { sheetId: string }) => kinds.get(sheetId) === KIND),
+    }
+    const scoped = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-integration-core', hooks as never)
+    const ensured = await overviewLib.ensureProjectOverviewSheet({ provisioning: scoped.provisioning, projectId: OV_PROJECT, tenantId: 'tenant_1', locale: 'en', env: {} })
+    expect(ensured.created).toBe(true)
+    expect(ensured.sheetId).toBe(OV_SHEET)
+    expect(ensured.views?.created).toBe(2)
+    expect(host.ensureObject).toHaveBeenCalledWith(expect.objectContaining({ systemKind: KIND }))
+    expect(host.ensureView).toHaveBeenCalledTimes(2)
+    for (const call of host.ensureView.mock.calls) {
+      expect(call[0]).not.toHaveProperty('systemKind')
+      expect((call[0] as { sheetId: string }).sheetId).toBe(OV_SHEET)
+    }
+    const again = await overviewLib.ensureProjectOverviewSheet({ provisioning: scoped.provisioning, projectId: OV_PROJECT, tenantId: 'tenant_1', locale: 'en', env: {} })
+    expect(again.created).toBe(false)
+    expect(host.ensureObject).toHaveBeenCalledTimes(1)
+    expect(host.ensureView).toHaveBeenCalledTimes(2)
   })
 })

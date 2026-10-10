@@ -217,6 +217,27 @@ export class StockPreparationOverviewRecordsWriteError extends Error {
 }
 
 /**
+ * S3 follow-up E (register R-37): the plugin-scope refusal of a STRUCTURAL write — columns, field properties,
+ * display names, views, or an unstamped ensure — that would reach the read-only overview outside the overview
+ * module's own provisioning path. Values-free: only which rule refused.
+ *   - `structure_write`: a field / view / relabel / unstamped-ensure write named the overview object, or an
+ *     ensureView named the stamped overview without the overview module's `systemKind` marker;
+ *   - `unverifiable`: the host wiring cannot say whether a derived-shape sheet is the overview (a missing hook) —
+ *     refused rather than guessed, the records port's posture.
+ */
+export class StockPreparationOverviewStructureWriteError extends Error {
+  readonly status = 403
+  readonly code = STOCK_PREP_OVERVIEW_READ_ONLY_CODE
+  readonly details: { reason: 'structure_write' | 'unverifiable' }
+
+  constructor(reason: 'structure_write' | 'unverifiable') {
+    super('The structure of the read-only stock-preparation project overview is changed only by its own provisioning')
+    this.name = 'StockPreparationOverviewStructureWriteError'
+    this.details = { reason }
+  }
+}
+
+/**
  * Thrown by provisioning when a caller asks to stamp a sheet that ALREADY exists with a different kind
  * (most often: an unstamped sheet at the overview's derived id). Raised inside the provisioning
  * transaction, BEFORE any field or view is written, so the host never adopts an ordinary sheet as a
