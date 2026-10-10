@@ -152,6 +152,9 @@
         {{ attendanceSetupLoadError }}
       </p>
       <p class="user-admin__hint" data-create-user-org-hint>{{ attendanceOrgHint }}</p>
+      <p v-if="attendanceOnboardingOrgNote" class="user-admin__hint" data-create-user-attendance-org-note>
+        {{ attendanceOnboardingOrgNote }}
+      </p>
       <div class="user-admin__role-actions">
         <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
           创建用户
@@ -1019,6 +1022,8 @@ type AttendanceGroupOption = {
   id: string
   name: string
   code: string
+  /** The org the group belongs to, as the group list reports it; '' when the payload has none. */
+  orgId: string
 }
 
 type AttendanceShiftOption = {
@@ -1026,6 +1031,8 @@ type AttendanceShiftOption = {
   name: string
   workStartTime: string
   workEndTime: string
+  /** The org the shift belongs to, as the shift list reports it; '' when the payload has none. */
+  orgId: string
 }
 
 type AccessPreset = {
@@ -1191,6 +1198,34 @@ const attendanceOrgHint = computed(() => {
     return '当前账号没有可选的组织；不指定组织时不会写入组织归属。'
   }
   return '所属组织：选择后新用户会加入该组织；不指定则不写入组织归属。'
+})
+// W1-6 (owner ruling 2026-10-10, "顺带显示考勤组所属组织"): when an attendance group or default shift is
+// picked, the create route's existing group/shift branch (unchanged) writes the new user's org
+// membership into the org that group / shift belongs to -- it looks the group / shift up inside that
+// org and refuses the create otherwise. Say which org that is, from the group / shift list's own
+// `orgId`. Display only: the value is never copied into `createForm.attendanceOrgId`, so nothing is
+// sent that the admin did not pick. If a picked item's org is unknown, say nothing rather than guess.
+const attendanceOnboardingOrgNote = computed(() => {
+  const { attendanceGroupId, defaultShiftId, attendanceOrgId } = createForm.value
+  if (!attendanceGroupId && !defaultShiftId) return ''
+  const groupOrgId = attendanceGroupId
+    ? attendanceGroups.value.find((group) => group.id === attendanceGroupId)?.orgId ?? ''
+    : ''
+  const shiftOrgId = defaultShiftId
+    ? attendanceShifts.value.find((shift) => shift.id === defaultShiftId)?.orgId ?? ''
+    : ''
+  if ((attendanceGroupId && !groupOrgId) || (defaultShiftId && !shiftOrgId)) return ''
+  if (groupOrgId && shiftOrgId && groupOrgId !== shiftOrgId) {
+    return '所选考勤组和默认班次属于不同的组织，创建会被拒绝；请改选其中之一。'
+  }
+  const onboardingOrgId = groupOrgId || shiftOrgId
+  const source = attendanceGroupId && defaultShiftId
+    ? '所选考勤组和默认班次'
+    : attendanceGroupId ? '所选考勤组' : '所选默认班次'
+  if (attendanceOrgId && attendanceOrgId !== onboardingOrgId) {
+    return `${source}属于组织 ${onboardingOrgId}，与上面选择的组织不一致，创建会被拒绝；请改选组织或清除组织。`
+  }
+  return `新用户将加入组织 ${onboardingOrgId}（${source}所属的组织）。`
 })
 const createdAttendanceOnboardingSummary = computed(() => {
   const target = createdAttendanceOnboardingTarget.value
@@ -2008,6 +2043,7 @@ function normalizeAttendanceGroupOptions(payload: Record<string, unknown>): Atte
       id: readOptionalString(item.id),
       name: firstOptionalString(item.name, item.code, item.id),
       code: readOptionalString(item.code),
+      orgId: firstOptionalString(item.orgId, item.org_id),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
@@ -2021,6 +2057,7 @@ function normalizeAttendanceShiftOptions(payload: Record<string, unknown>): Atte
       name: firstOptionalString(item.name, item.id),
       workStartTime: firstOptionalString(item.workStartTime, item.work_start_time),
       workEndTime: firstOptionalString(item.workEndTime, item.work_end_time),
+      orgId: firstOptionalString(item.orgId, item.org_id),
     }))
     .filter((item) => item.id.length > 0 && item.name.length > 0)
 }
