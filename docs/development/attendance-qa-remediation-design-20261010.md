@@ -2,7 +2,7 @@
 
 ## 状态与依据
 
-2026-10-10，用户已明确批准恢复目标、推送公开分支、创建 Draft PR 与运行 CI。PR 合并、部署及真实数据操作仍需另行批准。
+2026-10-10，用户已明确批准恢复目标、推送公开分支、创建 Draft PR 与运行 CI。[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布，最终提交上的远端 CI 待结果。PR 合并、部署及真实数据操作仍需另行批准。
 
 本文记录针对 QA 问题（#5986、#5990、#5558）的有限修复范围。依据包括冻结的本地验收回执 [`artifacts/attendance-qa-fix-20261009/verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)、既有[今日状态设计](attendance-no-historical-today-fallback-design-20260923.md)，以及规范员工总览交互的[任务优先 design-lock](attendance-employee-overview-task-first-design-lock-20260716.md)。
 

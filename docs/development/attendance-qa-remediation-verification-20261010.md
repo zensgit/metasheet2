@@ -2,7 +2,7 @@
 
 ## 当前结论
 
-2026-10-10 已获得公开 Draft PR 与 CI 的明确授权；本次发布正在执行，远端 CI 尚未出结果。此前各轮“待发布授权”记录保留为当次冻结状态。PR 合并、部署与真实数据操作继续 HOLD。
+2026-10-10 已获得公开 Draft PR 与 CI 的明确授权；[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布，最终提交上的远端 CI 尚未出结果。此前各轮“待发布授权”记录保留为当次冻结状态。PR 合并、部署与真实数据操作继续 HOLD。
 
 冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支当前正常对齐固定 main 快照 `00caf5f639`；历次 main 合并均无冲突，测试链并集无丢项，本地检查结果及各批冻结身份见下文。
 
@@ -16,7 +16,7 @@
 
 在上述树上 Node 20 / pnpm 10.33 新跑两个受影响审批 spec **20 通过、0 失败/跳过**（return candidates 11、can-decide 9），完整 Web 类型脚本、provenance 与 **3 项审批 CI 接线契约**通过。守卫首次调用因 PATH 先匹配 Corepack pnpm 而报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`；改为优先现有 pnpm 10.33 后通过，未改 package/lockfile。Playwright `--list` 收集 **9 文件、60 项**，其中 return-candidates 6 项；这是收集证明，未执行浏览器用例。未改动的考勤、backend/数据库及此前浏览器结果保留原冻结身份，未重复执行。
 
-证据：[`approval-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/approval-main-alignment.json)。日志为 `approval-main-affected-frontend.log`、`approval-main-web-typecheck.log`、`approval-main-ci-contract.log`、`approval-main-browser-list.log` 和 `approval-main-provenance.log`；首次环境失败留在 `approval-main-ci-contract-initial.log`。公开 Draft PR 与最终 head 远端 CI 已获授权，发布和检查正在推进；PR 合并、部署、真实历史操作及原 QA/性能验收保持各自授权边界。
+证据：[`approval-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/approval-main-alignment.json)。日志为 `approval-main-affected-frontend.log`、`approval-main-web-typecheck.log`、`approval-main-ci-contract.log`、`approval-main-browser-list.log` 和 `approval-main-provenance.log`；首次环境失败留在 `approval-main-ci-contract-initial.log`。公开 Draft PR 已发布，最终 head 远端 CI 正在推进；PR 合并、部署、真实历史操作及原 QA/性能验收保持各自授权边界。
 
 ## #6285 考勤代码对齐
 
@@ -156,7 +156,7 @@ Astra 在冻结代码 `62d6801c5f` 的独立临时副本复现：新一天的本
 
 冻结回执记载当时为 `DRAFT_HOLD`、无已发布 PR、远端 CI 未运行、未合并、未部署、生产未变化、真实历史未修复。上述为冻结回执状态；本轮 main merge 状态已在前文单列。本轮 CI guard、unit guard 与 wiring 检查是本地证据，不能替代最终提交上的远端 required CI。
 
-尚未完成：已授权的 Draft PR 发布及最终 head 上的 fresh required CI；原 QA 环境构建/组织/用户/日期范围识别、历史调查、延迟测量和业务验收。2026-10-10 的发布/CI 授权见当前结论；PR 合并、部署与真实历史仍保持 HOLD。未获得真实历史范围时，不使用附件凭证代替授权。
+Draft PR #6300 已发布；尚未完成最终 head 上的 fresh required CI，以及另行验收的原 QA 环境构建/组织/用户/日期范围识别、历史调查、延迟测量和业务验收。2026-10-10 的发布/CI 授权见当前结论；PR 合并、部署与真实历史仍保持 HOLD。未获得真实历史范围时，不使用附件凭证代替授权。
 
 ## 重现命令
 
