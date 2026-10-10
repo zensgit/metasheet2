@@ -250,6 +250,23 @@ const ROUTES = [
   // binding is resolved per request inside the table-action registry, not captured at activation.
   ['GET', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingGet'],
   ['POST', '/api/integration/stock-preparation/source-binding', 'stockPreparationSourceBindingSet'],
+  // 备料「成员与权限」— S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6; register R-39). ALL
+  // FOUR answer 404 STOCK_PREP_MEMBERS_PAGE_DISABLED, with ZERO IO, unless STOCK_PREP_MEMBERS_PAGE_ENABLED
+  // is the exact literal 'true'; the WORKBENCH_ADMIN gate runs first. Past both, the host's narrow members
+  // port decides: platform admin or the admitted `stock-prep` delegated admin with a stock-prep scope.
+  //   GET   members                     the four built-in roles (read-only), custom roles, their
+  //                                     scope-visible members, this app's audit (read-only)
+  //   POST  members/custom-roles        create — the id is server-generated (stock-prep_c_<8 hex>); the
+  //                                     body is the closed allowlist { name, permissionCodes }
+  //   PATCH members/custom-roles/:roleId  rename / change a CUSTOM role's stock-prep:* codes
+  //   POST  members/custom-roles/:roleId/project-targets  add project sheets of the caller's own tenant
+  //                                     (registered + active) through G1 — add-only, write level; also
+  //                                     needs MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  // Appoint / revoke / admission are the EXISTING /api/admin/role-delegation/... routes (core-backend).
+  ['GET', '/api/integration/stock-preparation/members', 'stockPreparationMembersRead'],
+  ['POST', '/api/integration/stock-preparation/members/custom-roles', 'stockPreparationMembersCustomRoleCreate'],
+  ['PATCH', '/api/integration/stock-preparation/members/custom-roles/:roleId', 'stockPreparationMembersCustomRoleUpdate'],
+  ['POST', '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets', 'stockPreparationMembersCustomRoleProjectTargets'],
   // B-stage confirmation-decision LEDGER surfaces. Static literal segments precede the bare
   // collection GET so they can never be mis-read as ids. The GET list is the AUTHORITATIVE
   // values-free exception queue of the takeover line (converged ruling); canonical-sheet filter
@@ -519,6 +536,19 @@ const {
   installProjectSheetCustomerPacks,
 } = require('./stock-preparation-project-targets.cjs')
 const { StockPreparationProjectTargetStoreError } = require('./stock-preparation-project-target-store.cjs')
+// 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
+// decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
+const {
+  STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS,
+  STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS,
+  STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE,
+  STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
+  STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS,
+  STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE,
+  StockPrepMembersRequestError,
+  normalizeStockPrepMembersProjectNos,
+  stockPrepMembersPageEnabled,
+} = require('./stock-preparation-members.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
 // yet" condition and names the literal fix for each. It reuses the inspection functions the four
 // readiness routes already call — it re-derives no notion of "ready" — and it writes nothing.
@@ -1768,6 +1798,10 @@ const VALID_TABLE_ACTION_LARGE_BOM_START_BODY_KEYS = new Set(['parameters'])
 const VALID_TABLE_ACTION_LARGE_BOM_PLAN_BODY_KEYS = new Set(['conflictPolicyReview'])
 const VALID_TABLE_ACTION_LARGE_BOM_APPLY_START_BODY_KEYS = new Set(['confirm'])
 const VALID_EMPTY_REQUEST_KEYS = new Set()
+// S5b (R-39): the members routes' closed body allowlists (stock-preparation-members.cjs owns the lists).
+const VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS = new Set(STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS)
+const VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS = new Set(STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS)
+const VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS = new Set(STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS)
 const VALID_C6_WRITE_DRY_RUN_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'maxRows'])
 const VALID_C6_WRITE_APPLY_BODY_KEYS = new Set(['tenantId', 'workspaceId', 'confirm'])
 // S3-2: instantiate binds to caller-supplied systems by id only. The write profile / credentials
@@ -4116,6 +4150,31 @@ function requireStockPreparationAudit() {
   // DOES declare policies and finds no port makes the installer fail closed rather than
   // report a complete install whose scoping would not be enforced.
   const stockPreparationFieldPermissions = (services && services.stockPreparationFieldPermissions) || null
+
+  // 备料「成员与权限」(S5b, register R-39): the host's NARROW members port (packages/core-backend
+  // services/stock-preparation-members.ts), injected for this plugin only. It owns every decision the
+  // four members routes need — the caller tier (platform admin or the admitted stock-prep delegated
+  // admin), the delegation scope, the three invariants and the audit — so these routes add only the
+  // WORKBENCH_ADMIN gate, the switch, the closed bodies and (for project sheets) the tenant-bound
+  // registry lookup and the G1 call. REQUIRED where used: absent → 501, never a fallback.
+  // Duck-typed to { describe, createCustomRole, updateCustomRole, grantCustomRoleProjectSheets }.
+  const stockPreparationMembers = (services && services.stockPreparationMembers) || null
+  function requireStockPreparationMembers() {
+    if (!stockPreparationMembers
+      || typeof stockPreparationMembers.describe !== 'function'
+      || typeof stockPreparationMembers.createCustomRole !== 'function'
+      || typeof stockPreparationMembers.updateCustomRole !== 'function'
+      || typeof stockPreparationMembers.grantCustomRoleProjectSheets !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_PORT_UNAVAILABLE', 'the stock-prep members port is not available on this host')
+    }
+    return stockPreparationMembers
+  }
+  /** The S5b switch, read PER REQUEST, exact literal only. Every members route refuses before any IO. */
+  function requireMembersPageEnabled() {
+    if (!stockPrepMembersPageEnabled(process.env)) {
+      throw new HttpRouteError(404, STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE, `the stock-prep members page is disabled on this deployment (${STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV} is not 'true')`)
+    }
+  }
 
   // 按项目导出物料 Excel: the xlsx BUFFER BUILDER is INJECTED (packages/core-backend xlsx-service.ts
   // buildXlsxBuffer, wrapped around a lazily-imported `xlsx` module), same INJECTED-per-plugin shape as
@@ -9512,6 +9571,138 @@ function requireStockPreparationAudit() {
         // front end asserting a backend property on its own authority.
         takesEffectWithoutRestart: true,
       })
+    },
+
+    // ── 备料「成员与权限」 S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, register R-39) ───
+    //
+    // ORDER, pinned by the members route suite exactly as for the S1/S4 routes: THE WORKBENCH_ADMIN GATE
+    // (a pure read of the principal) → THE SWITCH (404 STOCK_PREP_MEMBERS_PAGE_DISABLED) → the closed
+    // request (pure) → the host's narrow members port, which re-derives the caller from the database
+    // (platform admin, or the admitted `stock-prep` delegated admin with a stock-prep scope) before it
+    // reads or writes anything. The plugin gate is therefore necessary and never sufficient: a
+    // `stock-prep:admin` code holder who is not the delegated admin passes here and is refused there.
+    //
+    // NO TENANT on three of the four: roles and memberships are platform-global, and the port decides
+    // its own visibility (the delegated scope). The project-sheet add DOES resolve the caller's tenant
+    // (the host-vouched operator scope, like every project-target route) because it names project
+    // sheets, and only the caller's OWN tenant's registered, active sheets can be named.
+
+    async stockPreparationMembersRead(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      normalizeStockPreparationConfirmBody(requestQuery(req), VALID_EMPTY_REQUEST_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+      const members = requireStockPreparationMembers()
+      return sendOk(res, await members.describe({ actorId: user.id }))
+    },
+
+    async stockPreparationMembersCustomRoleCreate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+      const members = requireStockPreparationMembers()
+      const created = await members.createCustomRole({ actorId: user.id, name: body.name, permissionCodes: body.permissionCodes })
+      return sendOk(res, created, 201)
+    },
+
+    async stockPreparationMembersCustomRoleUpdate(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+      const roleId = firstString(requestParams(req).roleId)
+      const members = requireStockPreparationMembers()
+      const updated = await members.updateCustomRole({
+        actorId: user.id,
+        roleId,
+        ...(Object.prototype.hasOwnProperty.call(body, 'name') ? { name: body.name } : {}),
+        ...(Object.prototype.hasOwnProperty.call(body, 'permissionCodes') ? { permissionCodes: body.permissionCodes } : {}),
+      })
+      return sendOk(res, updated)
+    },
+
+    // ADD project sheets to a custom role's scope (§11.5). Add-only: there is no remove route (ADR
+    // §11.7 — a table comes off a role only through the platform's own sheet permissions, G2). Both
+    // switches must be on: this page's, and the project-sheets switch whose registry names the sheets.
+    // The port runs the caller tier and the role checks BEFORE it asks for the targets, so the
+    // registry is read only for an admitted caller and an existing custom role; it then requires every
+    // sheet to be readable by the grantor, and runs each target's G1 call — the SAME host port the
+    // create route uses (`grantSheetRoleWrite` through plugin-scope: plugin-owned project sheets only,
+    // role subjects only, `spreadsheet:write`, ON CONFLICT DO NOTHING). Each landed call also appends
+    // the plugin audit row `project_target_grant` (mode custom_role_granted / _already_granted).
+    async stockPreparationMembersCustomRoleProjectTargets(req, res) {
+      const user = requireAccess(req, STOCK_PREP_ADMIN)
+      requireMembersPageEnabled()
+      requireProjectSheetsEnabled()
+      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+      let projectNos
+      try {
+        projectNos = normalizeStockPrepMembersProjectNos(body.projectNos)
+      } catch (error) {
+        if (error instanceof StockPrepMembersRequestError) throw new HttpRouteError(400, error.code, error.message, error.details)
+        throw error
+      }
+      const roleId = firstString(requestParams(req).roleId)
+      const members = requireStockPreparationMembers()
+      const actor = user.id
+      const result = await members.grantCustomRoleProjectSheets({
+        actorId: actor,
+        roleId,
+        resolveTargets: async () => {
+          const scope = await resolveOperatorValueScope({
+            user,
+            authenticatedTenantId: req.authenticatedTenantId,
+            explicitTenantIds: collectExplicitTenantIds(req, {}),
+            tenantPrincipalDirectory,
+          })
+          const tenantId = scope.tenantId
+          const store = requireStockPreparationProjectTargets()
+          const audit = requireStockPreparationAudit()
+          await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION, '088', tenantId)
+          const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+          // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+          const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+          const rows = []
+          // Only the CALLER's tenant's registry rows can be named (`store.get` is keyed by the
+          // host-vouched tenant), and only active ones — a write to an archived project's table is a
+          // §6 write-purpose action and refuses like the others.
+          for (const projectNo of projectNos) {
+            const row = await store.get({ tenantId, projectNo })
+            if (!row) {
+              throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'a named project has no registered stock-preparation sheet in your tenant', { field: 'projectNos' })
+            }
+            if (row.status !== 'active') {
+              throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'a named project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNos' })
+            }
+            rows.push({ projectNo, row })
+          }
+          return rows.map(({ projectNo, row }) => ({
+            sheetId: row.sheetId,
+            grant: async () => {
+              const outcome = await grantProjectSheetRoles({
+                provisioning,
+                projectId: targetProjectId,
+                sheetId: row.sheetId,
+                objectId: row.objectId,
+                roleIds: [roleId],
+                actorId: actor,
+              })
+              if (!outcome.attempted) {
+                throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_GRANT_PORT_UNAVAILABLE', 'the host does not expose the project-sheet grant port here')
+              }
+              await audit.append({
+                tenantId,
+                projectId: projectNo,
+                action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+                subjectId: row.sheetId,
+                mode: outcome.granted > 0 ? 'custom_role_granted' : 'custom_role_already_granted',
+                actor,
+                detail: { roleId, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
+              })
+              return { granted: outcome.granted > 0 }
+            },
+          }))
+        },
+      })
+      return sendOk(res, result)
     },
 
     // B-stage confirmation-decision LEDGER surfaces (first cut) — all admin-gated; the staging
