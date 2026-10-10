@@ -241,6 +241,8 @@ function createApiState(): UserFixture[] {
 interface ApiImplementationOptions {
   /** Limit the default user list to the first N rows so deep-link pinning can be exercised. */
   paginatedPageSize?: number
+  /** W1-6: org ids GET /api/auth/session-orgs returns, or 'fail' for a 503. Default: one org. */
+  sessionOrgs?: string[] | 'fail'
 }
 
 function createApiImplementation(
@@ -421,6 +423,16 @@ function createApiImplementation(
       return createJsonResponse({
         ok: true,
         data: { items: [] },
+      })
+    }
+
+    if (pathname === '/api/auth/session-orgs') {
+      if (options.sessionOrgs === 'fail') {
+        return createJsonResponse({ success: false, error: 'Organization list unavailable', code: 'SESSION_ORGS_UNAVAILABLE' }, 503)
+      }
+      return createJsonResponse({
+        success: true,
+        data: { orgs: options.sessionOrgs ?? ['org-alpha'], currentOrgId: null },
       })
     }
 
@@ -1810,6 +1822,101 @@ describe('UserManagementView', () => {
       expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
       expect(describeCreateUserError({ code: 'USER_ALREADY_EXISTS', message: 'x' }, 'zh')).toBeNull()
       expect(describeCreateUserError(undefined, 'zh')).toBeNull()
+    })
+  })
+
+  describe('W1-6: create-form org selector (owner ruling 2026-10-10)', () => {
+    function mountWith(options: ApiImplementationOptions): void {
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, createApiState(), options))
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+    }
+
+    function orgSelect(): HTMLSelectElement {
+      const select = container!.querySelector<HTMLSelectElement>('select[aria-label="所属组织（可选）"]')
+      if (!select) throw new Error('Org select not found')
+      return select
+    }
+
+    async function fillRequiredAndSubmit(): Promise<Record<string, unknown>> {
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      if (!nameInput || !usernameInput) throw new Error('Create-user form inputs not found')
+      nameInput.value = '组织测试'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      usernameInput.value = 'org.tester'
+      usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
+      await flushUi(8)
+      const createCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST')
+      if (!createCall) throw new Error('Create-user request not found')
+      return JSON.parse(String((createCall[1] as RequestInit | undefined)?.body)) as Record<string, unknown>
+    }
+
+    it('lists the session orgs but never pre-selects one, even when it is the only option', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'] })
+      await flushUi(20)
+
+      expect(callLog).toContain('/api/auth/session-orgs')
+      const select = orgSelect()
+      expect(Array.from(select.options).map((option) => option.value)).toEqual(['', 'org-alpha'])
+      expect(select.options[0].textContent?.trim()).toBe('不指定组织（不写入组织归属）')
+      expect(select.value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('sends attendanceOrgId only when an org is chosen, and the clear button drops it again', async () => {
+      mountWith({ sessionOrgs: ['org-alpha', 'org-beta'] })
+      await flushUi(20)
+
+      await setSelectValue(orgSelect(), 'org-beta')
+      const clear = container!.querySelector<HTMLButtonElement>('[data-create-user-org-clear]')
+      expect(clear?.textContent?.trim()).toBe('清除组织')
+      clear!.click()
+      await flushUi(2)
+      expect(orgSelect().value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      await setSelectValue(orgSelect(), 'org-alpha')
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceOrgId).toBe('org-alpha')
+      // The form resets after a successful create: the org choice does not leak into the next user.
+      expect(orgSelect().value).toBe('')
+    })
+
+    it('keeps the form usable with no org when the org list cannot be loaded', async () => {
+      mountWith({ sessionOrgs: 'fail' })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('组织列表暂不可用；不指定组织时不会写入组织归属。')
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('says so when the signed-in admin has no org to offer', async () => {
+      mountWith({ sessionOrgs: [] })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('当前账号没有可选的组织；不指定组织时不会写入组织归属。')
+    })
+
+    it('renders the org validation failures as values-free Chinese sentences', () => {
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND', message: 'attendanceOrgId does not match a known org' }, 'zh'))
+        .toBe('所选组织尚未在目录中建立，未创建用户；请改选其他组织或不指定组织')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_CONFLICT' }, 'zh'))
+        .toBe('所选组织与考勤组/默认班次所属的组织不一致，未创建用户')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND' }, 'en')).toContain('not set up in the directory')
     })
   })
 

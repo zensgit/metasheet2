@@ -100,6 +100,29 @@
           aria-label="默认班次生效日期（可选）"
           :disabled="!createForm.defaultShiftId"
         />
+        <div class="user-admin__org-field" data-create-user-org-field>
+          <select
+            v-model="createForm.attendanceOrgId"
+            class="user-admin__select"
+            :disabled="attendanceOrgOptionsLoading"
+            aria-label="所属组织（可选）"
+            data-create-user-org-select
+          >
+            <option value="">不指定组织（不写入组织归属）</option>
+            <option v-for="orgId in attendanceOrgOptions" :key="orgId" :value="orgId">
+              {{ orgId }}
+            </option>
+          </select>
+          <button
+            v-if="createForm.attendanceOrgId"
+            class="user-admin__button user-admin__button--secondary"
+            type="button"
+            data-create-user-org-clear
+            @click="createForm.attendanceOrgId = ''"
+          >
+            清除组织
+          </button>
+        </div>
         <input v-model.trim="createForm.password" class="user-admin__search" type="text" placeholder="可选：初始密码" />
         <select v-model="presetModeFilter" class="user-admin__select">
           <option value="">预设模式（全部）</option>
@@ -128,6 +151,7 @@
       <p v-if="attendanceSetupLoadError" class="user-admin__hint">
         {{ attendanceSetupLoadError }}
       </p>
+      <p class="user-admin__hint" data-create-user-org-hint>{{ attendanceOrgHint }}</p>
       <div class="user-admin__role-actions">
         <button class="user-admin__button" type="button" :disabled="busy" @click="void createUser()">
           创建用户
@@ -983,6 +1007,7 @@ type CreateUserForm = {
   attendanceGroupId: string
   defaultShiftId: string
   defaultShiftStartDate: string
+  attendanceOrgId: string
   password: string
   presetId: string
   role: string
@@ -1104,6 +1129,14 @@ const accessPresets = ref<AccessPreset[]>([])
 const attendanceGroups = ref<AttendanceGroupOption[]>([])
 const attendanceShifts = ref<AttendanceShiftOption[]>([])
 const attendanceSetupLoadError = ref('')
+// W1-6 (owner ruling 2026-10-10): the create form's org selector. Options come from the EXISTING
+// read endpoint GET /api/auth/session-orgs (the signed-in admin's own active memberships). The
+// selector is never pre-filled -- not even with a single option -- and an empty choice sends no
+// `attendanceOrgId`, so no org membership is written. The server still validates the chosen org
+// against an existing org anchor (404 ATTENDANCE_ORG_NOT_FOUND otherwise).
+const attendanceOrgOptions = ref<string[]>([])
+const attendanceOrgOptionsLoading = ref(false)
+const attendanceOrgOptionsFailed = ref(false)
 const presetModeFilter = ref<'' | 'platform' | 'attendance' | 'plm-workbench'>('')
 const selectedNamespace = ref('')
 const selectedUserId = ref('')
@@ -1144,6 +1177,7 @@ const createForm = ref<CreateUserForm>({
   attendanceGroupId: '',
   defaultShiftId: '',
   defaultShiftStartDate: '',
+  attendanceOrgId: '',
   password: '',
   presetId: '',
   role: 'user',
@@ -1151,6 +1185,13 @@ const createForm = ref<CreateUserForm>({
   isActive: true,
 })
 const selectedPreset = computed(() => accessPresets.value.find((preset) => preset.id === createForm.value.presetId) || null)
+const attendanceOrgHint = computed(() => {
+  if (attendanceOrgOptionsFailed.value) return '组织列表暂不可用；不指定组织时不会写入组织归属。'
+  if (!attendanceOrgOptionsLoading.value && attendanceOrgOptions.value.length === 0) {
+    return '当前账号没有可选的组织；不指定组织时不会写入组织归属。'
+  }
+  return '所属组织：选择后新用户会加入该组织；不指定则不写入组织归属。'
+})
 const createdAttendanceOnboardingSummary = computed(() => {
   const target = createdAttendanceOnboardingTarget.value
   if (!target) return ''
@@ -2019,6 +2060,36 @@ async function loadAttendanceOnboardingOptions(): Promise<void> {
   }
 }
 
+function normalizeAttendanceOrgOptions(payload: Record<string, unknown>): string[] | null {
+  if (payload.success !== true) return null
+  const data = payload.data as Record<string, unknown> | undefined
+  const orgs = data?.orgs
+  if (!Array.isArray(orgs)) return null
+  const normalized = orgs.filter((orgId): orgId is string => typeof orgId === 'string' && orgId.trim().length > 0)
+  return Array.from(new Set(normalized))
+}
+
+async function loadAttendanceOrgOptions(): Promise<void> {
+  attendanceOrgOptionsLoading.value = true
+  attendanceOrgOptionsFailed.value = false
+  try {
+    const response = await apiFetch('/api/auth/session-orgs')
+    const payload = await readJson(response)
+    const options = response.ok ? normalizeAttendanceOrgOptions(payload) : null
+    if (!options) throw new Error('SESSION_ORGS_UNAVAILABLE')
+    attendanceOrgOptions.value = options
+  } catch {
+    attendanceOrgOptions.value = []
+    attendanceOrgOptionsFailed.value = true
+  } finally {
+    // A previously chosen org that is no longer offered is cleared, never swapped for another.
+    if (createForm.value.attendanceOrgId && !attendanceOrgOptions.value.includes(createForm.value.attendanceOrgId)) {
+      createForm.value.attendanceOrgId = ''
+    }
+    attendanceOrgOptionsLoading.value = false
+  }
+}
+
 async function loadUsers(): Promise<void> {
   loading.value = true
   try {
@@ -2508,6 +2579,7 @@ async function createUser(): Promise<void> {
         attendanceGroupId: createForm.value.attendanceGroupId || undefined,
         defaultShiftId: createForm.value.defaultShiftId || undefined,
         defaultShiftStartDate: createForm.value.defaultShiftStartDate || undefined,
+        attendanceOrgId: createForm.value.attendanceOrgId || undefined,
         password: createForm.value.password || undefined,
         presetId: createForm.value.presetId || undefined,
         role: createForm.value.role || undefined,
@@ -2544,6 +2616,7 @@ async function createUser(): Promise<void> {
       attendanceGroupId: '',
       defaultShiftId: '',
       defaultShiftStartDate: '',
+      attendanceOrgId: '',
       password: '',
       presetId: '',
       role: 'user',
@@ -2860,7 +2933,7 @@ const stopUserLocationSync = subscribeToLocationChanges(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions()])
+  await Promise.all([loadRoles(), loadUsers(), loadAccessPresets(), loadInviteRecords(), loadAttendanceOnboardingOptions(), loadAttendanceOrgOptions()])
 })
 
 onUnmounted(() => {
@@ -2869,6 +2942,17 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.user-admin__org-field {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-admin__org-field .user-admin__select {
+  flex: 1;
+  min-width: 0;
+}
+
 .user-admin {
   display: grid;
   gap: 16px;
