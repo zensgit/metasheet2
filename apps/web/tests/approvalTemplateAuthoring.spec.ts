@@ -5213,6 +5213,97 @@ describe('TemplateAuthoringView', () => {
       await flushUi()
       expect(updateTemplateSpy).not.toHaveBeenCalled()
     })
+
+    // Gate r3 P3-1: the linear sticky reveal is per step and per block. X1/X2 pin step isolation
+    // (a reveal or a 审批类型 change on one step never touches another); X3 pins that 关闭超时 releases only `timeout`.
+    const gateR3TwoSteps = () => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '审批人 2', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error', timeout: { afterMinutes: 30, effect: 'remind' } } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ],
+    })
+    const gateR3Rows = () => Array.from(container!.querySelectorAll<HTMLElement>('[data-testid="approval-template-step-row"]'))
+    const gateR3In = <T extends Element = HTMLElement>(row: HTMLElement | undefined, testId: string) => row!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function gateR3BreakThenFixStep1(): Promise<HTMLInputElement> {
+      expect(gateR3Rows()).toHaveLength(2)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const enable = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      select(gateR3In<HTMLSelectElement>(gateR3Rows()[0], 'approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      return minutes
+    }
+
+    it('GATE-R3 X1: a sticky reveal on step 1 never reveals step 2 (valid hidden timeout stays hidden)', async () => {
+      await loadEditable('tpl_gate_r3_x1', gateR3TwoSteps())
+      await gateR3BreakThenFixStep1()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(1)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+    })
+
+    it('GATE-R3 X2: a 审批类型 change on step 2 never releases step 1 (the field being edited stays mounted)', async () => {
+      await loadEditable('tpl_gate_r3_x2', gateR3TwoSteps())
+      const minutes = await gateR3BreakThenFixStep1()
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const approvals = payload.approvalGraph.nodes.filter((n: any) => n.type === 'approval')
+      expect(approvals.map((n: any) => n.config.timeout)).toEqual([{ afterMinutes: 45, effect: 'remind' }, { afterMinutes: 30, effect: 'remind' }])
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(0)
+    })
+
+    it('GATE-R3 X3: 关闭超时 releases only the timeout block; a sticky policy block stays mounted', async () => {
+      await loadEditable('tpl_gate_r3_x3', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'threshold', approvalThreshold: 3, emptyAssigneePolicy: 'error' }))
+      const threshold = q<HTMLInputElement>('approval-step-threshold')!
+      threshold.value = '0'
+      threshold.dispatchEvent(new Event('input'))
+      await flushUi()
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-threshold')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const fixed = q<HTMLInputElement>('approval-step-threshold')!
+      fixed.value = '2'
+      fixed.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!.click()
+      await flushUi()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+    })
   })
   })
 
