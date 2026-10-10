@@ -20,6 +20,8 @@
     "./start-recovery-local.mts",
     "./verify-recovery-local-manual-http.ts",
     "./verify-recovery-local-manual-target.mts",
-    "./verify-recovery-local-rollback.mts"
+    "./verify-recovery-local-rollback.mts",
+    "./verify-recovery-local-scenarios.ts",
+    "./verify-recovery-local-stale-worker.ts"
   ]
 }

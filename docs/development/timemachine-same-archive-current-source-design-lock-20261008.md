@@ -44,3 +44,10 @@ The previously reported old owned-composer task/runner restriction remains in
 force while its precise saved rejection is unverified. This source-only port is
 not permission to reactivate it, rename an equivalent execution or replace its
 profile. No executable native attempt is authorized by this lock itself.
+
+On 2026-10-10 the owner approved the local two-scenario acceptance repair in
+`timemachine-same-archive-two-scenario-design-lock-20261010.md`. That contract
+supersedes the impossible requirement to reuse a dead process's in-memory
+genuine claim. It preserves real process-death recovery as scenario A and adds
+genuine stale-claim refusal in scenario B from the same immutable backup.
+The unresolved historical native-execution review and staging gates remain HOLD.

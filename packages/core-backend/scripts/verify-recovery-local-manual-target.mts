@@ -12,6 +12,7 @@ import type { Pool } from 'pg'
 import type { LocalCustodyReceipt } from '../src/multitable/recovery-local-custody-store'
 import type { RecoveryArchiveRestoreJobQuery } from '../src/multitable/recovery-archive-restore-jobs'
 import type { ManualRollbackInput, ManualRollbackResult } from './verify-recovery-local-rollback.mts'
+import type { ManualTargetResult, ManualTargetScenario } from './verify-recovery-local-scenarios'
 
 const require = createRequire(import.meta.url)
 const backend = fileURLToPath(new URL('../', import.meta.url))
@@ -46,6 +47,8 @@ async function onParentDisconnect(): Promise<void> {
 }
 
 export interface ManualTargetInput {
+  readonly scenario: ManualTargetScenario
+  readonly backupDigest: string
   readonly databaseName: string
   readonly local: {
     readonly archivePath: string
@@ -66,15 +69,18 @@ export interface ManualTargetInput {
   readonly attachmentBytes: Uint8Array
 }
 
-async function send(message: { kind: 'manual-target-done'; rollbackTableCount: number } | { kind: 'manual-target-error'; code: string; frames: string[] }): Promise<void> {
+async function send(message: ({ kind: 'manual-target-done' } & ManualTargetResult) | { kind: 'manual-target-error'; code: string; frames: string[] }): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     if (!process.send) return reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_IPC_MISSING'))
     process.send(message, undefined, undefined, (error) => error ? reject(error) : resolve())
   })
 }
 
-async function run(input: ManualTargetInput): Promise<number> {
+async function run(input: ManualTargetInput): Promise<ManualTargetResult> {
   assertParentAttached()
+  assert.ok(input.scenario === 'process-crash' || input.scenario === 'stale-worker',
+    'RECOVERY_LOCAL_BACKUP_MANUAL_SCENARIO_REFUSED')
+  assert.match(input.backupDigest, /^[0-9a-f]{64}$/, 'RECOVERY_LOCAL_BACKUP_MANUAL_BACKUP_REFUSED')
   assert.equal(process.env.NODE_ENV, 'test')
   assert.equal(process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED, 'true')
   assert.equal(process.env.MULTITABLE_ENABLE_WRITER_FENCE, 'true')
@@ -97,7 +103,8 @@ async function run(input: ManualTargetInput): Promise<number> {
   }
   let service: ChildProcess | undefined
   try {
-    const identity = await query('SELECT current_database() AS database_name')
+    const identity = await query(`SELECT current_database() AS database_name,
+      (SELECT oid::text FROM pg_catalog.pg_database WHERE datname=current_database()) AS database_oid`)
     assert.equal((identity.rows[0] as { database_name?: string } | undefined)?.database_name, input.databaseName)
     const appConfig = join(targetRoot, 'application-config.json')
     const recoveryConfig = join(targetRoot, 'recovery-config.json')
@@ -107,7 +114,8 @@ async function run(input: ManualTargetInput): Promise<number> {
       custodyId: input.local.custodyId, storeId: input.local.storeId,
       maxObjectBytes: 16 * 1024 * 1024, receipt: input.local.receipt,
       auditedReplayHorizonMs: 60_000, asyncResumeHorizonMs: 600_000,
-      workerIntervalMs: 60_000, leaseMs: 60_000, replayHorizonMs: 60_000,
+      workerIntervalMs: input.scenario === 'stale-worker' ? 600_000 : 60_000,
+      leaseMs: 60_000, replayHorizonMs: 60_000,
       sweepLimit: 100, maxChunksPerRun: 1,
     }
     await writeFile(recoveryConfig, `${JSON.stringify(recoveryProfile)}\n`, { flag: 'wx', mode: 0o600 })
@@ -135,55 +143,84 @@ async function run(input: ManualTargetInput): Promise<number> {
       fieldId: input.fieldId, attachmentFieldId: input.attachmentFieldId,
       attachmentId: input.attachmentId,
     }, origin, { 'content-type': 'application/json', authorization: `Bearer ${loginBody.data.token}` })
-    const first = await waitForJob(query, jobId, row => row.completed_count === '5000')
-    assert.equal(first.state, 'applying')
-    assert.equal(first.archive_generation_id, input.generationId)
-    assert.equal(first.total_count, '5001')
-    assert.equal(first.terminal_operation_id, null)
-    const firstChunks = await readChunks(query, jobId)
-    assert.deepEqual(firstChunks.map(row => [row.chunk_index, row.state, row.committed_count]),
-      [[0, 'committed', '5000'], [1, 'pending', null]])
-    assert.equal(typeof service.pid, 'number')
-    assert.equal(service.exitCode, null)
-    assert.equal(service.signalCode, null)
-    assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'ppid='], { encoding: 'utf8' }).trim()), process.pid)
-    assert.equal(typeof process.getuid, 'function')
-    assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'uid='], { encoding: 'utf8' }).trim()), process.getuid!())
-    const killed = new Promise<NodeJS.Signals | null>(resolve => service!.once('exit', (_code, signal) => resolve(signal)))
-    assert.equal(service.kill('SIGKILL'), true)
-    assert.equal(await killed, 'SIGKILL')
-    service = undefined
-    await waitForNoListener(port)
-    const stopped = await readJob(query, jobId)
-    assert.equal(stopped.completed_count, '5000')
-    assert.equal(stopped.block_fence, first.block_fence)
-    assert.equal(stopped.worker_fence, first.worker_fence)
-    assert.equal(stopped.worker_owner_id, first.worker_owner_id)
-    await assertOrdinaryWriterBlocked(pool, input)
-    // Wait on database time, not a host-clock guess. No lease mutation or HTTP /resume.
-    await waitForJob(query, jobId, row => row.lease_expired === true)
-    service = launch(recoveryConfig, appConfig, targetRoot, port)
-    await waitForLocked(service)
-    assert.equal(await canConnect(port), false)
-    await writePipeSecret(service, input.local.recoverySecret)
-    await waitForListener(port)
-    const takenOver = await waitForJob(query, jobId, row => BigInt(row.worker_fence) > BigInt(stopped.worker_fence))
-    assert.equal(takenOver.state, 'applying')
-    assert.equal(typeof takenOver.worker_owner_id, 'string')
-    assert.notEqual(takenOver.worker_owner_id, null)
-    assert.equal(takenOver.block_fence, stopped.block_fence)
-    assert.notEqual(takenOver.worker_owner_id, stopped.worker_owner_id)
-    assert.equal(takenOver.archive_generation_id, input.generationId)
-    // This tuple-only diagnostic does not exercise a process-local branded worker claim.
-    const stale = await query(`UPDATE public.meta_recovery_archive_jobs SET row_version=row_version+1
-      WHERE id=$1::uuid AND state='applying' AND worker_owner_id=$2
-        AND worker_fence=$3::bigint AND block_fence=$4::bigint
-        AND lease_until=$5::timestamptz AND lease_until>clock_timestamp() RETURNING id`,
-      [jobId, stopped.worker_owner_id, stopped.worker_fence, stopped.block_fence, stopped.lease_until])
-    assert.equal(stale.rowCount, 0, 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_TUPLE_CAS_WRITES')
+    let firstChunks: Awaited<ReturnType<typeof readChunks>>
+    let expectedBlockFence: string
+    if (input.scenario === 'stale-worker') {
+      await stopLauncher(service, true)
+      service = undefined
+      await waitForNoListener(port)
+      const planned = await readJob(query, jobId)
+      assert.equal(planned.state, 'planned', 'RECOVERY_LOCAL_STALE_WORKER_SETUP_ALREADY_CLAIMED')
+      assert.equal(planned.completed_count, '0')
+      assert.equal(planned.worker_owner_id, null)
+      const { prepareRecoveryLocalStartup } = require('../src/multitable/recovery-local-startup.ts') as typeof import('../src/multitable/recovery-local-startup')
+      const { resolveRecoveryArchiveMainPoolRuntime } = require('../src/index.ts') as typeof import('../src/index')
+      const { runGenuineStaleWorkerScenario } = require('./verify-recovery-local-stale-worker.ts') as typeof import('./verify-recovery-local-stale-worker')
+      const database = resolveRecoveryArchiveMainPoolRuntime()
+      const local = await prepareRecoveryLocalStartup({
+        env: process.env, configPath: recoveryConfig, signal: parentCancellation.signal,
+        readSecret: async () => Buffer.from(input.local.recoverySecret),
+        resolveDatabase: () => database, resolveAttachmentStorage: getAttachmentStorageService,
+      })
+      assert.ok(local, 'RECOVERY_LOCAL_STALE_WORKER_STARTUP_REFUSED')
+      try {
+        const witness = await runGenuineStaleWorkerScenario({ database, composition: local.composition,
+          jobId, generationId: input.generationId, signal: parentCancellation.signal })
+        firstChunks = witness.firstChunks
+        expectedBlockFence = witness.blockFence
+      } finally { local.releaseCustody() }
+    } else {
+      const first = await waitForJob(query, jobId, row => row.completed_count === '5000')
+      assert.equal(first.state, 'applying')
+      assert.equal(first.archive_generation_id, input.generationId)
+      assert.equal(first.total_count, '5001')
+      assert.equal(first.terminal_operation_id, null)
+      firstChunks = await readChunks(query, jobId)
+      assert.deepEqual(firstChunks.map(row => [row.chunk_index, row.state, row.committed_count]),
+        [[0, 'committed', '5000'], [1, 'pending', null]])
+      assert.equal(typeof service.pid, 'number')
+      assert.equal(service.exitCode, null)
+      assert.equal(service.signalCode, null)
+      assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'ppid='], { encoding: 'utf8' }).trim()), process.pid)
+      assert.equal(typeof process.getuid, 'function')
+      assert.equal(Number(execFileSync('ps', ['-p', String(service.pid), '-o', 'uid='], { encoding: 'utf8' }).trim()), process.getuid!())
+      const killed = new Promise<NodeJS.Signals | null>(resolve => service!.once('exit', (_code, signal) => resolve(signal)))
+      assert.equal(service.kill('SIGKILL'), true)
+      assert.equal(await killed, 'SIGKILL')
+      service = undefined
+      await waitForNoListener(port)
+      const stopped = await readJob(query, jobId)
+      assert.equal(stopped.completed_count, '5000')
+      assert.equal(stopped.block_fence, first.block_fence)
+      assert.equal(stopped.worker_fence, first.worker_fence)
+      assert.equal(stopped.worker_owner_id, first.worker_owner_id)
+      await assertOrdinaryWriterBlocked(pool, input)
+      // Wait on database time, not a host-clock guess. No lease mutation or HTTP /resume.
+      await waitForJob(query, jobId, row => row.lease_expired === true)
+      service = launch(recoveryConfig, appConfig, targetRoot, port)
+      await waitForLocked(service)
+      assert.equal(await canConnect(port), false)
+      await writePipeSecret(service, input.local.recoverySecret)
+      await waitForListener(port)
+      const takenOver = await waitForJob(query, jobId, row => BigInt(row.worker_fence) > BigInt(stopped.worker_fence))
+      assert.equal(takenOver.state, 'applying')
+      assert.equal(typeof takenOver.worker_owner_id, 'string')
+      assert.notEqual(takenOver.worker_owner_id, null)
+      assert.equal(takenOver.block_fence, stopped.block_fence)
+      assert.notEqual(takenOver.worker_owner_id, stopped.worker_owner_id)
+      assert.equal(takenOver.archive_generation_id, input.generationId)
+      // This tuple-only diagnostic does not exercise a process-local branded worker claim.
+      const stale = await query(`UPDATE public.meta_recovery_archive_jobs SET row_version=row_version+1
+        WHERE id=$1::uuid AND state='applying' AND worker_owner_id=$2
+          AND worker_fence=$3::bigint AND block_fence=$4::bigint
+          AND lease_until=$5::timestamptz AND lease_until>clock_timestamp() RETURNING id`,
+        [jobId, stopped.worker_owner_id, stopped.worker_fence, stopped.block_fence, stopped.lease_until])
+      assert.equal(stale.rowCount, 0, 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_TUPLE_CAS_WRITES')
+      expectedBlockFence = stopped.block_fence
+    }
     const done = await waitForJob(query, jobId, row => row.state === 'done')
     assert.equal(done.completed_count, '5001')
-    assert.equal(done.block_fence, stopped.block_fence)
+    assert.equal(done.block_fence, expectedBlockFence)
     assert.equal(done.archive_generation_id, input.generationId)
     const chunks = await readChunks(query, jobId)
     assert.deepEqual(chunks.map(row => [row.chunk_index, row.state, row.committed_count]),
@@ -200,7 +237,7 @@ async function run(input: ManualTargetInput): Promise<number> {
     assert.deepEqual((await query('SELECT recovery_writer_state FROM public.meta_sheets WHERE id=$1',
       [input.identity.sheetId])).rows, [{ recovery_writer_state: null }])
     await assertRestoredRows(query, input)
-    await stopLauncher(service, true)
+    if (service) await stopLauncher(service, true)
     service = undefined
     await waitForNoListener(port)
     // The slow lease/takeover profile is immutable. C drains terminal derived effects only.
@@ -237,7 +274,11 @@ async function run(input: ManualTargetInput): Promise<number> {
     const offAfter = await probeFlagOff(rollbackInput, appConfig, targetRoot)
     assert.deepEqual(offAfter.responses, offBefore.responses, 'RECOVERY_LOCAL_ROLLBACK_HTTP_PARITY_FAILED')
     assert.equal(offAfter.tableCount, offBefore.tableCount)
-    return offBefore.tableCount
+    const databaseOid = (identity.rows[0] as { database_oid: string }).database_oid
+    assert.match(databaseOid, /^[1-9][0-9]*$/)
+    return { scenario: input.scenario, generationId: input.generationId, databaseOid,
+      backupDigest: input.backupDigest, rollbackTableCount: offBefore.tableCount,
+      staleWorkerClaimQualified: input.scenario === 'stale-worker' }
   } finally {
     try {
       if (service) await stopLauncher(service, false)
@@ -498,9 +539,9 @@ process.once('message', (input: ManualTargetInput) => {
     activeSecret = input.local.recoverySecret
     try {
       assertParentAttached()
-      const rollbackTableCount = await run(input)
+      const result = await run(input)
       assertParentAttached()
-      await send({ kind: 'manual-target-done', rollbackTableCount })
+      await send({ kind: 'manual-target-done', ...result })
     } catch (error) {
       process.exitCode = 1
       const code = error instanceof Error && /^RECOVERY_[A-Z0-9_]+$/.test(error.message)

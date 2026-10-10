@@ -68,7 +68,9 @@ function fixture(mode: 'starting' | 'rollback' | 'normal' = 'starting', connecte
   const fork = vi.fn(() => child)
   const writeFile = vi.fn(async () => undefined)
   const query = vi.fn(async () => ({ rows: [{ database_name: 'synthetic_target' }], rowCount: 1 }))
-  const run = vi.fn(async () => 6)
+  const result = { scenario: 'process-crash', generationId: 'generation', databaseOid: '11',
+    backupDigest: 'a'.repeat(64), rollbackTableCount: 6, staleWorkerClaimQualified: false }
+  const run = vi.fn(async () => result)
   class Pool { query = query; end = poolEnd }
   const context = {
     process: parent, assert, setTimeout, clearTimeout, AbortController,
@@ -93,9 +95,9 @@ function fixture(mode: 'starting' | 'rollback' | 'normal' = 'starting', connecte
     parentSignal?: AbortSignal
   }
   const secret = new Uint8Array(32).fill(7)
-  const input = { databaseName: 'synthetic_target', local: { archivePath: '/synthetic/target/archive',
+  const input = { scenario: 'process-crash', backupDigest: 'a'.repeat(64), databaseName: 'synthetic_target', local: { archivePath: '/synthetic/target/archive',
     custodyPath: '/synthetic/target/custody', recoverySecret: secret } }
-  return { parent, child, secret, input, api, run, spawn, fork, poolEnd, poolClose, writeFile }
+  return { parent, child, secret, input, result, api, run, spawn, fork, poolEnd, poolClose, writeFile }
 }
 
 describe('local manual target parent-disconnect lifecycle', () => {
@@ -148,7 +150,7 @@ describe('local manual target parent-disconnect lifecycle', () => {
     const f = fixture('normal')
     f.parent.emit('message', f.input)
     await vi.advanceTimersByTimeAsync(0)
-    expect(f.parent.messages).toEqual([{ kind: 'manual-target-done', rollbackTableCount: 6 }])
+    expect(f.parent.messages).toEqual([{ kind: 'manual-target-done', ...f.result }])
     expect(f.parent.connected).toBe(false)
     expect(f.parent.exitCode).toBe(0)
     f.parent.emit('disconnect')

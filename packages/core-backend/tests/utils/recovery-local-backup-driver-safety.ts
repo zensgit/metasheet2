@@ -91,6 +91,7 @@ export function admitRecoveryLocalBackupWorkRoot(value: string): string {
 export function recoveryLocalBackupDatabaseNames(runToken: string): {
   readonly source: string
   readonly target: string
+  readonly staleTarget: string
 } {
   if (!/^[a-f0-9]{16}$/.test(runToken)) {
     throw new Error('RECOVERY_LOCAL_BACKUP_RUN_TOKEN_REFUSED')
@@ -98,6 +99,7 @@ export function recoveryLocalBackupDatabaseNames(runToken: string): {
   return Object.freeze({
     source: `tm_local_backup_${runToken}_source`,
     target: `tm_local_backup_${runToken}_target`,
+    staleTarget: `tm_local_backup_${runToken}_stale_target`,
   })
 }
 

@@ -19,6 +19,7 @@ function fixture(failAt: 'load' | 'capture') {
   const failure = new Error('synthetic backup failure')
   const secret = new Uint8Array(32).fill(1)
   const sessions: Array<ReturnType<typeof createLocalCustodySession>> = []
+  const dropped: string[] = []
   const poolObservations: Array<{ locked: boolean; secretScrubbed: boolean }> = []
   const probe = { currentTransactionDepth: () => 0 }
   const args = { workRoot: '/synthetic-owned', pgdata: '/synthetic-pgdata',
@@ -38,17 +39,17 @@ function fixture(failAt: 'load' | 'capture') {
   })
   const run = new Script(program.outputText).runInNewContext({
     assert, randomUUID, args, prefix: 'synthetic', process: { env: { NODE_ENV: 'test' } },
-    names: { source: 'synthetic_source', target: 'synthetic_target' }, sourceUrl: args.adminUrl,
-    targetUrl: args.adminUrl, recoverySecret: secret, PgPool: Admin,
+    names: { source: 'synthetic_source', target: 'synthetic_target', staleTarget: 'synthetic_stale_target' }, sourceUrl: args.adminUrl,
+    targetUrl: args.adminUrl, staleTargetUrl: args.adminUrl, recoverySecret: secret, PgPool: Admin,
     RECOVERY_ARCHIVE_V1_SECTION_NAMES: Array.from({ length: 10 }, (_, index) => `section${index}`),
-    children: new Set(), custodySessions: new Set(), sourceCreated: false, targetCreated: false,
-    sourceRuntime: undefined, targetRuntime: undefined, workRootCreated: false,
+    children: new Set(), custodySessions: new Set(), sourceCreated: false, targetCreated: false, staleTargetCreated: false,
+    sourceRuntime: undefined, targetRuntime: undefined, staleTargetRuntime: undefined, workRootCreated: false,
     loadRuntimeDependencies: async () => { if (failAt === 'load') throw failure },
     assertPathMissing: async () => {}, mkdir: async () => {}, rm: async () => {},
     assertOwnedPrivateDirectory: async (value: string) => ({ realPath: value }),
     assertDistinctDirectoryIdentities: () => {}, realpath: async (value: string) => value,
     databaseCount: async () => 0, backendCount: async () => 0, existingPathCount: async () => 0,
-    createOwnedDatabase: async () => {}, dropOwnedDatabase: async () => {}, assertDatabaseOwner: async () => {},
+    createOwnedDatabase: async () => {}, dropOwnedDatabase: async (_admin: unknown, name: string) => { dropped.push(name) }, assertDatabaseOwner: async () => {},
     createDatabaseRuntime: runtime, databaseIdentity: async () => ({ name: 'synthetic_source' }),
     userTableCount: async () => 0, runChecked: () => {},
     join: (...parts: string[]) => parts.join('/'), provisionRecoveryArchiveFileRoot: async () => {},
@@ -61,7 +62,7 @@ function fixture(failAt: 'load' | 'capture') {
     },
     createRecoveryArchiveLocalBackupFixture: async () => { throw failure },
   }) as () => Promise<unknown>
-  return { run, failure, secret, sessions, poolObservations }
+  return { run, failure, secret, sessions, poolObservations, dropped }
 }
 
 describe('local backup custody cleanup', () => {
@@ -71,6 +72,8 @@ describe('local backup custody cleanup', () => {
       await expect(f.run()).rejects.toBe(f.failure)
       expect(f.secret.every(byte => byte === 0)).toBe(true)
       expect(f.sessions).toHaveLength(failAt === 'capture' ? 1 : 0)
+      expect(f.dropped).toEqual(failAt === 'capture'
+        ? ['synthetic_source', 'synthetic_target', 'synthetic_stale_target'] : [])
       expect(f.sessions.every(session => !session.isUnlocked())).toBe(true)
       expect(f.poolObservations).toEqual(failAt === 'capture' ? [{ locked: true, secretScrubbed: true }] : [])
     } finally {

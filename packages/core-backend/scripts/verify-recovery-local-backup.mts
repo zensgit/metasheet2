@@ -1,4 +1,4 @@
-/** Test-only two-database backup-set recovery acceptance. Never targets DATABASE_URL. */
+/** Test-only three-database, two-scenario backup-set recovery acceptance. Never targets DATABASE_URL. */
 import assert from 'node:assert/strict'
 import { fork, spawnSync, type ChildProcess } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
@@ -23,6 +23,8 @@ import type {
   RecoveryArchiveRestoreJobQuery,
   RecoveryArchiveRestoreJobTransaction,
 } from '../src/multitable/recovery-archive-restore-jobs'
+import type { ManualTargetInput } from './verify-recovery-local-manual-target.mts'
+import type { ManualTargetResult } from './verify-recovery-local-scenarios'
 import type { LocalCustodyReceipt } from '../src/multitable/recovery-local-custody-store'
 import type { RecoveryArchiveLocalBackupFixture } from '../tests/utils/recovery-archive-local-backup-fixture'
 import type {
@@ -30,6 +32,7 @@ import type {
   ArchiveProcessWorkerMessage,
 } from '../tests/utils/recovery-archive-process-worker'
 const require = createRequire(import.meta.url)
+const { qualifyManualTargetPair } = require('./verify-recovery-local-scenarios.ts') as typeof import('./verify-recovery-local-scenarios')
 const { createAndCaptureManualFixture } = require('./verify-recovery-local-manual-http.ts') as typeof import('./verify-recovery-local-manual-http')
 const {
   assertDistinctDirectoryIdentities,
@@ -49,6 +52,7 @@ const args = parseRecoveryLocalBackupCli(process.argv.slice(2))
 const names = recoveryLocalBackupDatabaseNames(runToken)
 const sourceUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.source)
 const targetUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.target)
+const staleTargetUrl = recoveryLocalBackupDatabaseUrl(args.adminUrl, names.staleTarget)
 const sourceAttachmentPath = join(args.workRoot, 'source', 'attachments')
 const targetAttachmentPath = join(args.workRoot, 'target', 'attachments')
 const recoverySecret = randomBytes(32)
@@ -60,8 +64,10 @@ const ownedDatabases = new Map<string, OwnedDatabaseIdentity>()
 let workRootCreated = false
 let sourceCreated = false
 let targetCreated = false
+let staleTargetCreated = false
 let sourceRuntime: DatabaseRuntime | undefined
 let targetRuntime: DatabaseRuntime | undefined
+let staleTargetRuntime: DatabaseRuntime | undefined
 
 const inheritedEnvironment = process.env
 const safeEnvironment: NodeJS.ProcessEnv = {}
@@ -173,20 +179,23 @@ async function main(): Promise<Record<string, unknown>> {
     const serverRow = server.rows[0] as { database_name: string; owner: string; data_directory: string }
     assert.equal(serverRow.database_name, 'postgres', 'RECOVERY_LOCAL_BACKUP_ADMIN_DATABASE_REFUSED')
     assert.equal(await realpath(serverRow.data_directory), canonicalPgdata, 'RECOVERY_LOCAL_BACKUP_PGDATA_MISMATCH')
-    assert.equal(await databaseCount(admin, [names.source, names.target]), 0, 'RECOVERY_LOCAL_BACKUP_DATABASE_ALREADY_EXISTS')
+    assert.equal(await databaseCount(admin, [names.source, names.target, names.staleTarget]), 0, 'RECOVERY_LOCAL_BACKUP_DATABASE_ALREADY_EXISTS')
 
     await createOwnedDatabase(admin, names.source, serverRow.owner)
     sourceCreated = true
     await createOwnedDatabase(admin, names.target, serverRow.owner)
     targetCreated = true
+    await createOwnedDatabase(admin, names.staleTarget, serverRow.owner)
+    staleTargetCreated = true
     await assertDatabaseOwner(admin, names.source, serverRow.owner)
     await assertDatabaseOwner(admin, names.target, serverRow.owner)
+    await assertDatabaseOwner(admin, names.staleTarget, serverRow.owner)
 
-    const emptyTarget = createDatabaseRuntime(targetUrl, `${prefix}_empty_target`)
-    try {
-      assert.equal(await userTableCount(emptyTarget.query), 0, 'RECOVERY_LOCAL_BACKUP_TARGET_NOT_EMPTY')
-    } finally {
-      await emptyTarget.pool.end()
+    for (const url of [targetUrl, staleTargetUrl]) {
+      const emptyTarget = createDatabaseRuntime(url, `${prefix}_empty_target`)
+      try {
+        assert.equal(await userTableCount(emptyTarget.query), 0, 'RECOVERY_LOCAL_BACKUP_TARGET_NOT_EMPTY')
+      } finally { await emptyTarget.pool.end() }
     }
 
     runChecked('pnpm', ['--filter', '@metasheet/core-backend', 'migrate'], {
@@ -306,14 +315,14 @@ async function main(): Promise<Record<string, unknown>> {
     assert.ok((await stat(dumpPath)).size > 0, 'RECOVERY_LOCAL_BACKUP_DUMP_EMPTY')
     await assertBackendCount(admin, names.source, 0)
 
-    runChecked('pg_restore', [
-      '--exit-on-error',
-      '--single-transaction',
-      '--no-owner',
-      '--no-privileges',
-      `--dbname=${names.target}`,
-      dumpPath,
-    ], { ...process.env, ...recoveryLocalBackupPgEnv(targetUrl) }, 'RECOVERY_LOCAL_BACKUP_RESTORE_FAILED', 240_000)
+    const backupDigest = createHash('sha256').update(await readFile(dumpPath))
+      .update(JSON.stringify(sourceCapturedAuthority)).update(JSON.stringify(rotatedReceipt)).digest('hex')
+    for (const url of [targetUrl, staleTargetUrl]) {
+      runChecked('pg_restore', [
+        '--exit-on-error', '--single-transaction', '--no-owner', '--no-privileges',
+        `--dbname=${url.pathname.slice(1)}`, dumpPath,
+      ], { ...process.env, ...recoveryLocalBackupPgEnv(url) }, 'RECOVERY_LOCAL_BACKUP_RESTORE_FAILED', 240_000)
+    }
 
     const targetRoot = join(args.workRoot, 'target')
     const targetArchive = join(targetRoot, 'archive')
@@ -328,6 +337,20 @@ async function main(): Promise<Record<string, unknown>> {
     assertDistinctDirectoryIdentities(sourceCustodyIdentity, targetCustodyIdentity)
     assert.equal((await readFile(join(targetArchive, '.metasheet-archive-root'), 'utf8')), storeId)
     await assertReceiptRetained(sourceCustody, targetCustody, custodyId, rotatedReceipt)
+
+    const staleTargetRoot = join(args.workRoot, 'stale-target')
+    const staleTargetArchive = join(staleTargetRoot, 'archive')
+    const staleTargetCustody = join(staleTargetRoot, 'custody')
+    await mkdir(staleTargetRoot, { mode: 0o700 })
+    await cp(sourceArchive, staleTargetArchive, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true })
+    await cp(sourceCustody, staleTargetCustody, { recursive: true, errorOnExist: true, force: false, preserveTimestamps: true })
+    const staleArchiveIdentity = await assertOwnedPrivateDirectory(staleTargetArchive)
+    const staleCustodyIdentity = await assertOwnedPrivateDirectory(staleTargetCustody)
+    for (const identity of [sourceArchiveIdentity, targetArchiveIdentity]) assertDistinctDirectoryIdentities(identity, staleArchiveIdentity)
+    for (const identity of [sourceCustodyIdentity, targetCustodyIdentity]) assertDistinctDirectoryIdentities(identity, staleCustodyIdentity)
+    assertDistinctDirectoryIdentities(staleArchiveIdentity, staleCustodyIdentity)
+    assert.equal(await readFile(join(staleTargetArchive, '.metasheet-archive-root'), 'utf8'), storeId)
+    await assertReceiptRetained(sourceCustody, staleTargetCustody, custodyId, rotatedReceipt)
 
     await dropOwnedDatabase(admin, names.source)
     sourceCreated = false
@@ -521,8 +544,8 @@ async function main(): Promise<Record<string, unknown>> {
     assert.equal(await exactOnceRecordCount(targetRuntime.query, fixture.fixture.sheetId), recoveryLocalBackupRecordCount())
 
     await assertPathMissing(targetAttachmentPath)
-    const rollbackTableCount = await runManualTargetChild({
-      databaseName: names.target,
+    const manualCrash = await runManualTargetChild({
+      scenario: 'process-crash', backupDigest, databaseName: names.target,
       local: {
         archivePath: targetArchive, custodyPath: targetCustody, custodyId, storeId,
         receipt: rotatedReceipt, recoverySecret: Uint8Array.from(recoverySecret),
@@ -538,6 +561,33 @@ async function main(): Promise<Record<string, unknown>> {
       attachmentBytes: Uint8Array.from(manual.attachmentBytes),
     }, targetUrl)
 
+    assert.equal(manualCrash.databaseOid, targetDatabaseIdentity.oid)
+    staleTargetRuntime = createDatabaseRuntime(staleTargetUrl, `${prefix}_stale_target_parent`)
+    const staleDatabaseIdentity = await databaseIdentity(staleTargetRuntime.query)
+    assert.equal(staleDatabaseIdentity.name, names.staleTarget)
+    assert.notEqual(staleDatabaseIdentity.oid, sourceDatabaseIdentity.oid)
+    assert.notEqual(staleDatabaseIdentity.oid, targetDatabaseIdentity.oid)
+    assert.deepEqual(await readLiveRows(staleTargetRuntime.query, manual.sheetId), manualSourceLiveRows)
+    assert.deepEqual(await readNonceTuples(staleTargetRuntime.query, manual.generationId), manualSourceNonces)
+    await assertSourceUnavailable(admin, sourceUrl, names.source, sourceArchive, sourceCustody)
+    await assertPathMissing(join(staleTargetRoot, 'attachments'))
+    const manualStale = await runManualTargetChild({
+      scenario: 'stale-worker', backupDigest, databaseName: names.staleTarget,
+      local: { archivePath: staleTargetArchive, custodyPath: staleTargetCustody, custodyId, storeId,
+        receipt: rotatedReceipt, recoverySecret: Uint8Array.from(recoverySecret) },
+      identity: { sheetId: manual.sheetId, actorId: manual.actorId }, password: manual.password,
+      generationId: manual.generationId, recordId: manual.recordId, recordIds: manual.recordIds,
+      fieldId: manual.fieldId, attachmentFieldId: manual.attachmentFieldId,
+      attachmentId: manual.attachmentId, attachmentBytes: Uint8Array.from(manual.attachmentBytes),
+    }, staleTargetUrl)
+    assert.equal(manualStale.databaseOid, staleDatabaseIdentity.oid)
+    assert.deepEqual(await readNonceTuples(staleTargetRuntime.query, manual.generationId), manualSourceNonces)
+    assert.equal(await readFile(join(staleTargetArchive, '.metasheet-archive-root'), 'utf8'), storeId)
+    const staleCustodyStore = await createLocalCustodyStore({ archivePath: staleTargetArchive,
+      custodyPath: staleTargetCustody, custodyId, transactionDepth: staleTargetRuntime.depth })
+    assert.deepEqual(await staleCustodyStore.readBackup(rotatedReceipt), copiedBackup)
+    const manualQualification = qualifyManualTargetPair(manualCrash, manualStale, manual.generationId, backupDigest)
+    const rollbackTableCount = manualCrash.rollbackTableCount
     assert.deepEqual(await readNonceTuples(targetRuntime.query, manual.generationId), manualSourceNonces)
     const finalNonces = await readNonceTuples(targetRuntime.query, fixture.fixture.generationId)
     assert.deepEqual(finalNonces, sourceNonces)
@@ -546,9 +596,9 @@ async function main(): Promise<Record<string, unknown>> {
     assert.deepEqual(await targetCustodyStore.readBackup(rotatedReceipt), copiedBackup,
       'RECOVERY_LOCAL_BACKUP_CUSTODY_BACKUP_CHANGED')
     result = {
-      result: 'HOLD',
-      holdReason: 'RECOVERY_LOCAL_BACKUP_MANUAL_STALE_WORKER_CLAIM_UNQUALIFIED',
-      fixture: 'synthetic-owned-two-database-backup-set',
+      result: manualQualification.result,
+      ...(manualQualification.result === 'HOLD' ? { holdReason: manualQualification.holdReason } : {}),
+      fixture: 'synthetic-owned-three-database-backup-set',
       records: recoveryLocalBackupRecordCount(),
       nonceSections: finalNonces.length,
       receiptRetained: true,
@@ -566,7 +616,9 @@ async function main(): Promise<Record<string, unknown>> {
         sameJobLeaseTakeover: true,
         higherWorkerFenceSameBlockFence: true,
         staleTupleCasWrites: 0,
-        staleWorkerClaimQualified: false,
+        staleWorkerClaimQualified: manualQualification.staleWorkerClaimQualified,
+        acceptanceScenarios: ['process-crash', 'stale-worker'],
+        sameBackupDistinctTargets: manualQualification.result === 'PASS',
         aggregateMembers: 2,
         exactOnceScalarRestoreRevisions: 5001,
         separateSyncAttachmentRestoreRevisions: 1,
@@ -583,6 +635,7 @@ async function main(): Promise<Record<string, unknown>> {
         flagOffRollbackNoWrites: true,
         flagOffFreshProcesses: 2,
         flagOffComparedTables: rollbackTableCount,
+        staleTargetFlagOffComparedTables: manualStale.rollbackTableCount,
       },
       writerBlockReleased: true,
       derivedEffectsDrained: recoveryLocalBackupRecordCount(),
@@ -602,7 +655,7 @@ async function main(): Promise<Record<string, unknown>> {
       cleanupFailures.push('worker')
     }
   }
-  for (const runtime of [sourceRuntime, targetRuntime]) {
+  for (const runtime of [sourceRuntime, targetRuntime, staleTargetRuntime]) {
     if (!runtime) continue
     try {
       await runtime.pool.end()
@@ -612,6 +665,7 @@ async function main(): Promise<Record<string, unknown>> {
   }
   sourceRuntime = undefined
   targetRuntime = undefined
+  staleTargetRuntime = undefined
   if (admin && cleanupFailures.length === 0) {
     if (sourceCreated) {
       try {
@@ -629,6 +683,12 @@ async function main(): Promise<Record<string, unknown>> {
         cleanupFailures.push('target_database')
       }
     }
+    if (staleTargetCreated) {
+      try {
+        await dropOwnedDatabase(admin, names.staleTarget)
+        staleTargetCreated = false
+      } catch { cleanupFailures.push('stale_target_database') }
+    }
   }
   if (workRootCreated && cleanupFailures.length === 0) {
     try {
@@ -641,8 +701,8 @@ async function main(): Promise<Record<string, unknown>> {
   let residue: { databases: number; backends: number; paths: number; workers: number } | undefined
   try {
     residue = {
-      databases: admin ? await databaseCount(admin, [names.source, names.target]) : Number(sourceCreated || targetCreated),
-      backends: admin ? await backendCount(admin, [names.source, names.target]) : Number(sourceCreated || targetCreated),
+      databases: admin ? await databaseCount(admin, [names.source, names.target, names.staleTarget]) : Number(sourceCreated || targetCreated || staleTargetCreated),
+      backends: admin ? await backendCount(admin, [names.source, names.target, names.staleTarget]) : Number(sourceCreated || targetCreated || staleTargetCreated),
       paths: await existingPathCount([args.workRoot]),
       workers: [...children].filter((child) => child.exitCode === null && child.signalCode === null).length,
     }
@@ -892,30 +952,14 @@ function createDatabaseRuntime(url: URL, applicationName: string): DatabaseRunti
   }
 }
 
-async function runManualTargetChild(input: {
-  readonly databaseName: string
-  readonly local: {
-    readonly archivePath: string
-    readonly custodyPath: string
-    readonly custodyId: string
-    readonly storeId: string
-    readonly receipt: LocalCustodyReceipt
-    readonly recoverySecret: Uint8Array
-  }
-  readonly identity: { readonly sheetId: string; readonly actorId: string }
-  readonly password: string
-  readonly generationId: string
-  readonly recordId: string
-  readonly recordIds: readonly string[]
-  readonly fieldId: string
-  readonly attachmentFieldId: string
-  readonly attachmentId: string
-  readonly attachmentBytes: Uint8Array
-}, targetDatabaseUrl: URL): Promise<number> {
+async function runManualTargetChild(input: ManualTargetInput, targetDatabaseUrl: URL): Promise<ManualTargetResult> {
   let child: ChildProcess
   try {
-    assert.equal(input.local.archivePath.startsWith(`${args.workRoot}/target/`), true)
-    assert.equal(input.local.custodyPath.startsWith(`${args.workRoot}/target/`), true)
+    assert.ok(input.scenario === 'process-crash' || input.scenario === 'stale-worker',
+      'RECOVERY_LOCAL_BACKUP_MANUAL_SCENARIO_REFUSED')
+    const targetDirectory = input.scenario === 'process-crash' ? 'target' : 'stale-target'
+    assert.equal(input.local.archivePath, join(args.workRoot, targetDirectory, 'archive'))
+    assert.equal(input.local.custodyPath, join(args.workRoot, targetDirectory, 'custody'))
     child = fork(manualTargetPath, [], {
       execArgv: ['--require', require.resolve('tsx/cjs')],
       serialization: 'advanced',
@@ -925,7 +969,7 @@ async function runManualTargetChild(input: {
         TMPDIR: process.env.TMPDIR,
         NODE_ENV: 'test',
         DATABASE_URL: targetDatabaseUrl.href,
-        ATTACHMENT_PATH: targetAttachmentPath,
+        ATTACHMENT_PATH: join(args.workRoot, input.scenario === 'process-crash' ? 'target' : 'stale-target', 'attachments'),
         JWT_SECRET: jwtSecret,
         MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'true',
         MULTITABLE_ENABLE_WRITER_FENCE: 'true',
@@ -939,7 +983,7 @@ async function runManualTargetChild(input: {
   }
   children.add(child)
   try {
-    return await new Promise<number>((resolvePromise, reject) => {
+    return await new Promise<ManualTargetResult>((resolvePromise, reject) => {
       const timer = setTimeout(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_TIMEOUT')), 600_000)
       const finish = (work: () => void) => {
         clearTimeout(timer)
@@ -947,10 +991,16 @@ async function runManualTargetChild(input: {
       }
       child.once('error', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_SPAWN_FAILED'))))
       child.once('exit', () => finish(() => reject(new Error('RECOVERY_LOCAL_BACKUP_MANUAL_TARGET_EXITED_WITHOUT_RESULT'))))
-      child.on('message', (message: { kind?: string; code?: string; frames?: string[]; rollbackTableCount?: number }) => {
+      child.on('message', (message: Partial<ManualTargetResult> & { kind?: string; code?: string; frames?: string[] }) => {
         if (message.kind === 'manual-target-done') {
           finish(() => Number.isSafeInteger(message.rollbackTableCount) && (message.rollbackTableCount ?? 0) >= 6
-            ? resolvePromise(message.rollbackTableCount!)
+            && message.scenario === input.scenario && message.generationId === input.generationId
+            && message.backupDigest === input.backupDigest && typeof message.databaseOid === 'string'
+            && /^[1-9][0-9]*$/.test(message.databaseOid)
+            && message.staleWorkerClaimQualified === (input.scenario === 'stale-worker')
+            ? resolvePromise({ scenario: message.scenario, generationId: message.generationId,
+              backupDigest: message.backupDigest, databaseOid: message.databaseOid,
+              rollbackTableCount: message.rollbackTableCount!, staleWorkerClaimQualified: message.staleWorkerClaimQualified })
             : reject(new Error('RECOVERY_LOCAL_ROLLBACK_RESULT_INVALID')))
         }
         else if (message.kind === 'manual-target-error') {
@@ -1086,7 +1136,7 @@ async function createOwnedDatabase(admin: Pool, name: string, owner: string): Pr
 
 async function dropOwnedDatabase(admin: Pool, name: string): Promise<void> {
   const registered = ownedDatabases.get(name)
-  assert.ok(registered && (name === names.source || name === names.target), 'RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
+  assert.ok(registered && (name === names.source || name === names.target || name === names.staleTarget), 'RECOVERY_LOCAL_BACKUP_DATABASE_IDENTITY_REFUSED')
   const identity = await admin.query<OwnedDatabaseIdentity>(
     `SELECT d.datname AS name,d.oid::text AS oid,pg_catalog.pg_get_userbyid(d.datdba) AS owner,
       c.system_identifier::text AS system_identifier
