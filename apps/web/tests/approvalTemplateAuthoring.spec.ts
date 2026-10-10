@@ -3016,6 +3016,100 @@ describe('TemplateAuthoringView', () => {
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
+  // Gate r1 P3-1 — X-3 says read-only "on BOTH the linear and canvas paths"; the linear test above is
+  // the mounted linear pin, this is the mounted CANVAS pin (flag-off structured list hosting the same
+  // ApprovalGraphNodeConfigEditor the Canvas inspector hosts). The component's own belt (an unknown
+  // value disables the control even under an editable host) is pinned separately by a direct mount
+  // with `readOnly: false` in approval-template-authoring-canvas-inspector.spec.ts.
+  it('W1-1a canvas (gate X-3): an off-enum persisted samePersonPolicy opens the complex template read-only, the node control shows an honest label — never the raw value', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_x3' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        autoApprovalPolicy: { samePersonPolicy: 'transfer_to_ceo' },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.disabled).toBe(true)
+    expect(samePerson.value).toBe('__unknown__')
+    expect(samePerson.textContent).not.toContain('transfer_to_ceo')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('W1-1a canvas (gate X-3 positive control): the same complex fixture with a KNOWN samePersonPolicy opens editable', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_x3_known' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(false)
+    expect(samePerson.value).toBe('transfer_dept_head')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  // Gate r1 NIT-1 / NIT-2 on the LINEAR path: a node that already carries another node-level
+  // auto-approval key (API-authored; allowlisted, so the template stays editable) overrides the
+  // template tier whatever the same-person control shows — the 默认 label and the hint say so, and
+  // an untouched save keeps the sibling (no flatten).
+  it('W1-1a linear (gate r1 NIT-1/NIT-2): a node with a sibling auto-approval key shows the neutral 默认 label + the already-overrides hint, and re-saves the sibling untouched', async () => {
+    setRouteParams({ id: 'tpl_w11a_linear_sibling' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: { dedupeHistoricalApprover: true },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(false)
+    expect(samePerson.value).toBe('default')
+    expect(samePerson.options[0]!.textContent).toBe('默认（本节点已有单独的自动审批设置）')
+    expect(container!.querySelector('[data-testid="approval-step-same-person-hint"]')!.textContent)
+      .toBe('本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes[1].config
+    expect(config.autoApprovalPolicy).toEqual({ dedupeHistoricalApprover: true })
+  })
+
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
     setRouteParams({ id: 'tpl_formula_condition' })
     const graph = {
@@ -3903,6 +3997,19 @@ describe('TemplateAuthoringView', () => {
       // theater that happens to still fire jsdom's change handler. This is the ONLY assertion that
       // distinguishes "editable" from "renders disabled".
       radios.forEach((radio) => expect(radio.disabled).toBe(false))
+    })
+
+    // Gate r1 P3-2: the W1-1a slice corrected this sentence (the old copy said the tier applied to
+    // nodes without their own DEDUP rule; the backend `getEffectiveAutoApprovalPolicy` skips the
+    // template tier at ANY node carrying a node-level `autoApprovalPolicy` key). Pinned verbatim so the
+    // precedence copy cannot silently regress; whether it ships in this slice stays an owner call.
+    it('M8: the dedup-tier hint states the node-over-template precedence exactly', async () => {
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+      const hint = container!.querySelector('[data-testid="approval-template-dedup-tier-hint"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent!.trim()).toBe('同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；审批节点单独设置了自动审批规则（例如「审批人与发起人为同一人时」选择了默认以外的选项）时，该节点不再沿用本设置；返回上一节点后该节点重新计入本轮去重历史。')
     })
 
     it('defaults to 不去重 (none) for a brand-new template — §2.2 no shipped default may change', async () => {

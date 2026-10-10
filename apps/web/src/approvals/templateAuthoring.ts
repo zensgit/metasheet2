@@ -96,13 +96,13 @@ export type { SamePersonChoice, SamePersonControlState } from './approvalNodeEdi
 export {
   EMPTY_ASSIGNEE_DESIGNATED_HINT,
   EMPTY_ASSIGNEE_DESIGNATED_LABEL,
-  SAME_PERSON_OVERRIDE_HINT,
   SAME_PERSON_TRANSFER_HINT,
   applySamePersonChoice,
   emptyAssigneeFallbackHasTarget,
   samePersonChoiceFromSelectValue,
   samePersonChoiceOptions,
   samePersonControlState,
+  samePersonOverrideHint,
   samePersonSelectValue,
   withEmptyAssigneeFallbackIds,
 } from './approvalNodeEdit'

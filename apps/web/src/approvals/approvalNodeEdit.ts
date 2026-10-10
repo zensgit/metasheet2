@@ -199,8 +199,11 @@ export function applySamePersonChoice(
 
 /**
  * True when the node policy carries a key OTHER than the two the same-person control owns. Then the
- * node already overrides the template-level policy no matter what this control shows, so the 默认
- * label must not claim 跟随模板 (M8 honesty).
+ * node already overrides the template-level policy no matter what this control shows, so neither the
+ * 默认 label nor the override hint may imply the template tier applies here (M8 honesty). KEY
+ * PRESENCE, not truthiness: an all-false `{ mergeAdjacentApprover: false }` or an `actorMode`-only
+ * object enables no rule, yet its mere presence still suppresses the template tier at this node
+ * (`getEffectiveAutoApprovalPolicy` returns the node policy or `null`, never the template's).
  */
 export function autoApprovalPolicyHasNonSamePersonKeys(policy: AutoApprovalPolicy | null | undefined): boolean {
   if (!policy) return false
@@ -221,10 +224,16 @@ export const SAME_PERSON_EXPLICIT_CHOICE_LABELS: Record<SamePersonPolicy, string
 /**
  * 默认 label, M8-honest about precedence: it only "跟随模板" when the node carries NO other
  * node-level auto-approval key — otherwise the node already overrides the template-level policy
- * (Lock-4 §0 precedence row) and the label must not claim it follows the template.
+ * (Lock-4 §0 precedence row) and the label must not claim it follows the template. The sibling-key
+ * wording is deliberately neutral ("已有单独的…设置", not "已设置…规则"): it must stay true for an
+ * all-false or `actorMode`-only object, which enables no rule (gate r1 NIT-1).
  */
+export const SAME_PERSON_DEFAULT_FOLLOWS_TEMPLATE_LABEL = '默认（跟随模板设置）'
+export const SAME_PERSON_DEFAULT_NODE_OVERRIDES_LABEL = '默认（本节点已有单独的自动审批设置）'
 export function samePersonDefaultChoiceLabel(policy: AutoApprovalPolicy | null | undefined): string {
-  return autoApprovalPolicyHasNonSamePersonKeys(policy) ? '默认（本节点不单独设置）' : '默认（跟随模板设置）'
+  return autoApprovalPolicyHasNonSamePersonKeys(policy)
+    ? SAME_PERSON_DEFAULT_NODE_OVERRIDES_LABEL
+    : SAME_PERSON_DEFAULT_FOLLOWS_TEMPLATE_LABEL
 }
 
 /**
@@ -278,6 +287,18 @@ export const EMPTY_ASSIGNEE_DESIGNATED_HINT =
  */
 export const SAME_PERSON_OVERRIDE_HINT =
   '选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。'
+/**
+ * - override, node ALREADY overrides (gate r1 NIT-2): when the node carries another node-level
+ *   auto-approval key (`autoApprovalPolicyHasNonSamePersonKeys`), the template tier is suppressed at
+ *   this node whatever this control shows, so the conditional "将不再作用" sentence above would imply
+ *   it currently applies. Same neutral wording as the 默认 label (true for all-false / `actorMode`-only).
+ */
+export const SAME_PERSON_OVERRIDE_ACTIVE_HINT =
+  '本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。'
+/** The precedence hint both editors render under the control (M8: never implies a tier that is off). */
+export function samePersonOverrideHint(policy: AutoApprovalPolicy | null | undefined): string {
+  return autoApprovalPolicyHasNonSamePersonKeys(policy) ? SAME_PERSON_OVERRIDE_ACTIVE_HINT : SAME_PERSON_OVERRIDE_HINT
+}
 /**
  * - transfer: OD-L4-5(a) — an absent transfer target means the seat is not produced and
  *   `emptyAssigneePolicy` governs; it must NEVER fall back to self_approve (gate C-3).

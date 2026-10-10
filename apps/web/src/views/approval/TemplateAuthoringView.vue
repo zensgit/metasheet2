@@ -992,7 +992,7 @@
                   :value="option.value"
                 />
               </el-select>
-              <p class="template-authoring__hint" data-testid="approval-step-same-person-hint">{{ SAME_PERSON_OVERRIDE_HINT }}</p>
+              <p class="template-authoring__hint" data-testid="approval-step-same-person-hint">{{ stepSamePersonOverrideHint(step) }}</p>
               <p
                 v-if="isSamePersonTransferValue(stepSamePersonSelectValue(step))"
                 class="template-authoring__hint"
@@ -1173,7 +1173,7 @@
                 仅连续节点自动同意
               </el-radio>
             </el-radio-group>
-            <p class="template-authoring__hint">
+            <p class="template-authoring__hint" data-testid="approval-template-dedup-tier-hint">
               同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；审批节点单独设置了自动审批规则（例如「审批人与发起人为同一人时」选择了默认以外的选项）时，该节点不再沿用本设置；返回上一节点后该节点重新计入本轮去重历史。
             </p>
             <!-- M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover has a second,
@@ -1589,11 +1589,11 @@ import {
   // W1-1a (Lock-4 F4-B / F4-C) — shared same-person / designated-fallback helpers + copy.
   EMPTY_ASSIGNEE_DESIGNATED_HINT,
   EMPTY_ASSIGNEE_DESIGNATED_LABEL,
-  SAME_PERSON_OVERRIDE_HINT,
   SAME_PERSON_TRANSFER_HINT,
   applySamePersonChoice,
   samePersonChoiceFromSelectValue,
   samePersonChoiceOptions,
+  samePersonOverrideHint,
   samePersonSelectValue,
   setStepEmptyAssigneeFallbackIds,
   setStepSamePersonChoice,
@@ -3546,6 +3546,9 @@ function stepSamePersonSelectValue(step: ApprovalStepDraft): string {
 }
 function stepSamePersonOptions(step: ApprovalStepDraft): Array<{ value: string; label: string }> {
   return samePersonChoiceOptions(stepAutoApprovalPolicy(step))
+}
+function stepSamePersonOverrideHint(step: ApprovalStepDraft): string {
+  return samePersonOverrideHint(stepAutoApprovalPolicy(step))
 }
 function onStepSamePersonSelect(step: ApprovalStepDraft, value: string): void {
   if (readOnly.value) return

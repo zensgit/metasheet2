@@ -2354,6 +2354,56 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     plain.unmount()
   })
 
+  // Gate r1 P3-1: inside TemplateAuthoringView an off-enum samePersonPolicy already makes the whole
+  // template read-only (so the view-level X-3 test cannot tell the component's own clause apart from
+  // the host's readOnly). This direct mount keeps the HOST editable (`readOnly: false`) to pin the
+  // component-level contract: an unknown persisted value is never offered as an editable control.
+  it('W1-1a (gate r1 P3-1): an off-enum samePersonPolicy renders the control disabled even when the host is EDITABLE — positive control: a known value stays enabled', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    expect(api.readOnly).toBe(false)
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_to_ceo' }
+    const offEnum = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const offEnumSelect = offEnum.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(offEnumSelect.disabled).toBe(true)
+    expect(offEnumSelect.value).toBe('__unknown__')
+    expect(offEnumSelect.textContent).not.toContain('transfer_to_ceo')
+    offEnum.unmount()
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_dept_head' }
+    const known = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const knownSelect = known.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(knownSelect.disabled).toBe(false)
+    expect(knownSelect.value).toBe('transfer_dept_head')
+    known.unmount()
+  })
+
+  it('W1-1a (gate r1 NIT-1/NIT-2): a node that already carries another node-level auto-approval key gets the neutral 默认 label and the already-overrides hint — positive control: no sibling key keeps 跟随模板 + the conditional hint', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    // All-false sibling: enables no rule, yet its presence suppresses the template tier at this node.
+    edit.autoApprovalPolicy = { mergeAdjacentApprover: false }
+    const sibling = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const siblingSelect = sibling.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(siblingSelect.value).toBe('default')
+    expect(siblingSelect.options[0]!.textContent).toBe('默认（本节点已有单独的自动审批设置）')
+    expect(sibling.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。')
+    sibling.unmount()
+
+    delete edit.autoApprovalPolicy
+    const plain = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const plainSelect = plain.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(plainSelect.options[0]!.textContent).toBe('默认（跟随模板设置）')
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。')
+    plain.unmount()
+  })
+
   it('A-1 positive control: a registry WITH a ratified operation policy renders a third 操作权限 tab', () => {
     const node = makeApprovalNode('approval_x')
     const registry: ApprovalCapabilityRegistry = {

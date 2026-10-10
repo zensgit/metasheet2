@@ -24,6 +24,7 @@ import {
   samePersonChoiceFromSelectValue,
   samePersonChoiceOptions,
   samePersonControlState,
+  samePersonOverrideHint,
   samePersonSelectValue,
   validateApprovalNodeEdits,
   withEmptyAssigneeFallbackIds,
@@ -815,7 +816,29 @@ describe('W1-1a — Lock-4 F4-C: option rendering (M8 honesty — business label
     expect(samePersonChoiceOptions(undefined)[0]!.label).toBe('默认（跟随模板设置）')
     expect(samePersonChoiceOptions({ mergeWithRequester: true })[0]!.label).toBe('默认（跟随模板设置）')
     // A sibling key means the node ALREADY overrides the template-level policy (Lock-4 §0 precedence).
-    expect(samePersonChoiceOptions({ mergeAdjacentApprover: true })[0]!.label).toBe('默认（本节点不单独设置）')
+    // Gate r1 NIT-1: neutral wording — KEY PRESENCE suppresses the template tier even when the
+    // sibling enables no rule (all-false, actorMode-only), so the label must not claim a rule is set.
+    for (const policy of [
+      { mergeAdjacentApprover: true },
+      { mergeAdjacentApprover: false },
+      { dedupeHistoricalApprover: true, samePersonPolicy: 'transfer_dept_head' as const },
+      { actorMode: 'system' as const },
+    ]) {
+      expect(samePersonChoiceOptions(policy)[0]!.label, JSON.stringify(policy)).toBe('默认（本节点已有单独的自动审批设置）')
+    }
+  })
+
+  it('gate r1 NIT-2: the precedence hint never implies the template tier applies at a node that already overrides it', () => {
+    const conditional = '选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。'
+    const alreadyOverrides = '本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。'
+    // No sibling key: the node follows the template tier until a non-默认 pick — the conditional copy.
+    for (const policy of [undefined, null, { mergeWithRequester: true }, { samePersonPolicy: 'auto_skip' as const, mergeWithRequester: true }, { samePersonPolicy: 'self_approve' as const }]) {
+      expect(samePersonOverrideHint(policy), JSON.stringify(policy)).toBe(conditional)
+    }
+    // A sibling key (present, even all-false / actorMode-only): the tier is already off at this node.
+    for (const policy of [{ mergeAdjacentApprover: true }, { mergeAdjacentApprover: false }, { actorMode: 'original_approver' as const }, { dedupeHistoricalApprover: true, samePersonPolicy: 'auto_skip' as const, mergeWithRequester: true }]) {
+      expect(samePersonOverrideHint(policy), JSON.stringify(policy)).toBe(alreadyOverrides)
+    }
   })
 
   it('gate X-3: an unknown persisted value gets ONE leading read-only option with an honest label (never the raw string)', () => {

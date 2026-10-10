@@ -961,7 +961,7 @@
               :value="option.value"
             />
           </el-select>
-          <p class="template-authoring__hint" data-testid="approval-node-same-person-hint">{{ SAME_PERSON_OVERRIDE_HINT }}</p>
+          <p class="template-authoring__hint" data-testid="approval-node-same-person-hint">{{ approvalNodeSamePersonOverrideHint }}</p>
           <p
             v-if="isSamePersonTransferValue(approvalNodeSamePersonValue(node.key))"
             class="template-authoring__hint"
@@ -1253,10 +1253,10 @@ import {
   // W1-1a (Lock-4 F4-B / F4-C) — the SAME helpers + copy the linear editor uses.
   EMPTY_ASSIGNEE_DESIGNATED_HINT,
   EMPTY_ASSIGNEE_DESIGNATED_LABEL,
-  SAME_PERSON_OVERRIDE_HINT,
   SAME_PERSON_TRANSFER_HINT,
   samePersonChoiceOptions,
   samePersonControlState,
+  samePersonOverrideHint,
   samePersonSelectValue,
 } from '../templateAuthoring'
 import {
@@ -1487,7 +1487,22 @@ function approvalNodeSamePersonValue(nodeKey: string): string {
 function approvalNodeSamePersonOptions(nodeKey: string): Array<{ value: string; label: string }> {
   return samePersonChoiceOptions(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
 }
-/** False for an X-3 unknown persisted value — the control renders read-only (never re-projected). */
+/**
+ * Precedence hint — never implies the template tier applies at a node that already overrides it. A
+ * computed over `props.node`, not a template interpolation that passes the node's key to a helper:
+ * the raw-id census (approval-member-identity-coverage-enumeration.spec.ts, `mustache-id`) flags any
+ * key token inside an interpolation, even one that only feeds a lookup.
+ */
+const approvalNodeSamePersonOverrideHint = computed(() =>
+  samePersonOverrideHint(approvalNodeEditFor(props.node.key)?.autoApprovalPolicy),
+)
+/**
+ * False for an X-3 unknown persisted value — the control renders read-only (never re-projected).
+ * Component-level contract, independent of the host's `readOnly`: inside TemplateAuthoringView an
+ * off-enum value already makes the whole template read-only, so this clause is a belt for any other
+ * host of this reusable editor; it is pinned by a direct mount with `readOnly: false`
+ * (approval-template-authoring-canvas-inspector.spec.ts, gate r1 P3-1).
+ */
 function approvalNodeSamePersonEditable(nodeKey: string): boolean {
   return samePersonControlState(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy).kind === 'editable'
 }
