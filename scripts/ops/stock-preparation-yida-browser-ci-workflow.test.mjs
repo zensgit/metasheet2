@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { writeFile as writeFixtureFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { assertNoEnvironmentFiles } from './run-stock-preparation-yida-browser-ci.mjs'
 
 // Caller contracts only. The executable adapter records argv/environment; it never
 // runs the launcher, Vitest, PG or Chromium and does not produce a whole-70 receipt.
@@ -42,7 +44,102 @@ function extractStep(source) {
 
 const step = extractStep(workflow)
 
-function withProbe(callback) {
+function extractCheckoutPatterns(source) {
+  const lines = source.split('\n')
+  const jobs = lines.flatMap((line, index) => line === '  test:' ? [index] : [])
+  assert.equal(jobs.length, 1, 'required integration job must occur exactly once')
+  let end = jobs[0] + 1
+  while (end < lines.length && !/^  \S/u.test(lines[end])) end++
+  const job = lines.slice(jobs[0], end)
+  const checkout = job.indexOf('      - name: Checkout repository')
+  assert.ok(checkout >= 0)
+  let next = checkout + 1
+  while (next < job.length && !job[next].startsWith('      - name: ')) next++
+  const block = job.slice(checkout, next)
+  assert.ok(block.includes('        uses: actions/checkout@v4'))
+  assert.equal(block.filter(line => line === '          sparse-checkout-cone-mode: false').length, 1,
+    'exact file exclusion requires non-cone checkout')
+  const index = block.indexOf('          sparse-checkout: |')
+  assert.ok(index >= 0, 'checkout must select all source except the exact legacy env')
+  const patterns = []
+  for (const line of block.slice(index + 1)) {
+    if (!line.startsWith('            ')) break
+    patterns.push(line.slice(12))
+  }
+  assert.deepEqual(patterns, ['/*', '!/packages/core-backend/.env'],
+    'checkout cannot omit tests, sources, other env names or arbitrary trees')
+  return patterns
+}
+
+const checkoutPatterns = extractCheckoutPatterns(workflow)
+
+test('required job excludes only the exact tracked runtime env in its fresh checkout', () => {
+  assert.deepEqual(checkoutPatterns, ['/*', '!/packages/core-backend/.env'])
+  for (const mutation of [
+    workflow.replace('sparse-checkout-cone-mode: false', 'sparse-checkout-cone-mode: true'),
+    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/.env*'),
+    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/tests'),
+    workflow.replace('            /*\n', '            /scripts/\n'),
+  ]) {
+    assert.notEqual(mutation, workflow)
+    assert.throws(() => extractCheckoutPatterns(mutation))
+  }
+})
+
+test('actual Git sparse checkout preserves all fixture sources and still rejects another env', linuxShell, async () => {
+  const fixture = path.join(root, 'tmp', 'yida-workflow-checkout-' + randomUUID())
+  const seed = path.join(fixture, 'seed'), checkout = path.join(fixture, 'checkout')
+  const ownership = JSON.stringify({ owner: 'yida-workflow-checkout-contract', pid: process.pid, fixture })
+  const files = ['package.json', '.env.example', '.github/workflows/plugin-tests.yml',
+    'packages/core-backend/.env', 'packages/core-backend/.env.example', 'packages/core-backend/package.json',
+    'packages/core-backend/tests/synthetic.test.ts', 'packages/core-backend/src/synthetic.ts',
+    'apps/web/src/synthetic.ts', 'plugins/synthetic/index.cjs', 'scripts/ops/synthetic.mjs']
+  mkdirSync(seed, { recursive: true, mode: 0o700 })
+  writeFileSync(path.join(fixture, 'owner.json'), ownership, { mode: 0o600 })
+  const git = (cwd, args, input) => {
+    const result = spawnSync('/usr/bin/git', ['--no-optional-locks', '-c', 'core.autocrlf=false', ...args], {
+      cwd, input, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024,
+      env: { PATH: '/usr/bin:/bin', HOME: fixture, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8',
+        GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
+    })
+    assert.ifError(result.error)
+    assert.equal(result.status, 0, 'SYNTHETIC_CHECKOUT_GIT_FAILED')
+    return result.stdout
+  }
+  try {
+    for (const file of files) {
+      mkdirSync(path.dirname(path.join(seed, file)), { recursive: true, mode: 0o700 })
+      // Like the launcher filename contract, create only our owned synthetic fixtures;
+      // never open an env file for content verification or import it into a process.
+      await writeFixtureFile(path.join(seed, file), 'synthetic fixture only\n', { mode: 0o600 })
+    }
+    git(seed, ['init', '--quiet'])
+    git(seed, ['add', '--force', '--', ...files])
+    git(seed, ['-c', 'user.name=Synthetic Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--quiet', '-m', 'synthetic sparse checkout fixture'])
+    git(fixture, ['clone', '--quiet', '--local', '--no-hardlinks', '--no-checkout', '--', seed, checkout])
+    git(checkout, ['sparse-checkout', 'init', '--no-cone'])
+    git(checkout, ['sparse-checkout', 'set', '--no-cone', '--stdin'], checkoutPatterns.join('\n') + '\n')
+    git(checkout, ['checkout', '--quiet', 'HEAD'])
+    assert.equal(existsSync(path.join(checkout, 'packages/core-backend/.env')), false)
+    assert.equal(existsSync(path.join(seed, 'packages/core-backend/.env')), true, 'original env is untouched')
+    for (const file of files.filter(file => file !== 'packages/core-backend/.env')) {
+      if (path.basename(file).startsWith('.env')) assert.equal(existsSync(path.join(checkout, file)), true)
+      else assert.equal(readFileSync(path.join(checkout, file), 'utf8'), 'synthetic fixture only\n')
+    }
+    assertNoEnvironmentFiles([checkout, path.join(checkout, 'packages/core-backend'), path.join(checkout, 'apps/web')])
+    await writeFixtureFile(path.join(checkout, 'packages/core-backend/.env.local'), 'synthetic-unused\n', { mode: 0o600 })
+    assert.throws(() => assertNoEnvironmentFiles([path.join(checkout, 'packages/core-backend')]),
+      /YIDA_BROWSER_CI_ENVIRONMENT_FILE_PRESENT/u)
+  } finally {
+    assert.equal(path.dirname(fixture), path.join(root, 'tmp'))
+    assert.match(path.basename(fixture), /^yida-workflow-checkout-[a-f0-9-]{36}$/u)
+    assert.equal(readFileSync(path.join(fixture, 'owner.json'), 'utf8'), ownership)
+    rmSync(fixture, { recursive: true, force: false })
+  }
+})
+
+function withProbe(callback, pgConfigMode = 'wrong-directory') {
   const temporaryRoot = path.join(root, 'tmp')
   const fixture = path.join(temporaryRoot, 'yida-workflow-caller-' + randomUUID())
   const bin = path.join(fixture, 'bin')
@@ -50,6 +147,7 @@ function withProbe(callback) {
   const adapter = path.join(fixture, 'node-adapter.cjs')
   const preload = path.join(fixture, 'ambient-preload.cjs')
   const marker = path.join(fixture, 'preload-executed')
+  const pgConfigMarker = path.join(fixture, 'pg-config-executed')
   const ownership = JSON.stringify({ owner: 'yida-workflow-caller-contract', pid: process.pid, fixture })
   mkdirSync(bin, { recursive: true, mode: 0o700 })
   mkdirSync(home, { mode: 0o700 })
@@ -61,12 +159,12 @@ function withProbe(callback) {
     chmodSync(adapter, 0o700)
     symlinkSync(adapter, path.join(bin, 'node'))
     writeFileSync(preload, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'synthetic preload ran before callback\\n')\n`, { mode: 0o600 })
-    const pg = spawnSync('/usr/bin/pg_config', ['--bindir'], {
-      env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8' }, encoding: 'utf8', timeout: 5000,
-    })
-    assert.ifError(pg.error)
-    assert.equal(pg.status, 0, 'Linux caller fixture requires pg_config, as the workflow does')
-    const pgBin = realpathSync(pg.stdout.trim())
+    const pgBin = realpathSync('/usr/lib/postgresql/14/bin')
+    // The workflow installs PG14 explicitly; an ambient pg_config must never select its server tools.
+    assert.ok(['wrong-directory', 'broken'].includes(pgConfigMode))
+    const pgConfig = path.join(bin, 'pg_config')
+    writeFileSync(pgConfig, `#!${executable}\nrequire('node:fs').writeFileSync(${JSON.stringify(pgConfigMarker)}, 'called\\n')\n${pgConfigMode === 'broken' ? 'process.exit(1)' : "process.stdout.write('/synthetic/wrong-pg-bin\\n')"}\n`, { mode: 0o700 })
+    chmodSync(pgConfig, 0o700)
     const ambient = {
       HOME: home, PATH: bin + ':/usr/bin:/bin', LANG: 'ambient-locale', LC_ALL: 'ambient-locale', TZ: 'Pacific/Honolulu',
       NODE_OPTIONS: '--require ' + JSON.stringify(preload), DATABASE_URL: 'synthetic-db-url', EXPECT_DB: '1',
@@ -89,12 +187,13 @@ function withProbe(callback) {
       assert.ifError(result.error)
       const receipts = result.stdout.split('\n').filter(line => line.startsWith(probePrefix))
         .map(line => JSON.parse(line.slice(probePrefix.length)))
-      return { ...result, receipts, preloadExecuted: existsSync(marker) }
+      return { ...result, receipts, preloadExecuted: existsSync(marker), pgConfigExecuted: existsSync(pgConfigMarker) }
     }
     function assertClean(result) {
       assert.equal(result.status, 0, 'CALLER_EXIT: ' + result.stderr)
       assert.equal(result.receipts.length, 2, 'CALLER_COUNT: contract and launcher must both execute')
       assert.equal(result.preloadExecuted, false, 'CALLER_PRELOAD: ambient NODE_OPTIONS executed before callback')
+      assert.equal(result.pgConfigExecuted, false, 'CALLER_PG_CONFIG: ambient pg_config must not select server binaries')
       for (const receipt of result.receipts) {
         assert.equal(receipt.executable, adapter, 'CALLER_EXECUTABLE: resolved canonical Node must execute')
         assert.deepEqual(receipt.env, expectedEnvironment, 'CALLER_ENVIRONMENT: callback must start with only allowlisted variables')
@@ -115,8 +214,11 @@ function withProbe(callback) {
 test('required owner step resolves Node and PG before two clean-environment calls', () => {
   assert.match(step.header, /^        if: matrix\.node-version == '20\.x'$/mu)
   assert.doesNotMatch(step.header, /^        (?:env|continue-on-error|working-directory):/mu)
-  assert.match(step.run, /^yida_node="\$\(\/usr\/bin\/readlink -f "\$\(command -v node\)"\)"$/mu)
-  assert.match(step.run, /^yida_pg_bin="\$\(\/usr\/bin\/readlink -f "\$\(\/usr\/bin\/pg_config --bindir\)"\)"$/mu)
+  assert.match(workflow, /uses: ankane\/setup-postgres@v1\n        with:\n          postgres-version: 14\n/u)
+  assert.match(step.run, /^if ! yida_node_command="\$\(command -v node 2>\/dev\/null\)" \|\| test -z "\$yida_node_command"; then$/mu)
+  assert.match(step.run, /^if ! yida_node="\$\(\/usr\/bin\/readlink -f "\$yida_node_command" 2>\/dev\/null\)" \|\| test -z "\$yida_node"; then$/mu)
+  assert.match(step.run, /^if ! yida_pg_bin="\$\(\/usr\/bin\/readlink -f \/usr\/lib\/postgresql\/14\/bin 2>\/dev\/null\)" \|\| test -z "\$yida_pg_bin"; then$/mu)
+  assert.doesNotMatch(step.run, /pg_config --bindir/u)
   assert.equal((step.run.match(/\/usr\/bin\/env -i HOME="\$HOME" PATH=\/usr\/bin:\/bin LANG=C\.UTF-8 LC_ALL=C\.UTF-8 TZ=UTC/gu) ?? []).length, 2)
   assert.ok(step.run.indexOf('test -x "$yida_tool"') < step.run.indexOf('/usr/bin/env -i '), 'preflight must finish before the first Node callback')
   assert.doesNotMatch(step.run, /DATABASE_URL|EXPECT_DB|\|\|\s*true/u)
@@ -125,6 +227,12 @@ test('required owner step resolves Node and PG before two clean-environment call
 test('actual workflow bash clears hostile ambient state before either Node callback', linuxShell, () => {
   withProbe(({ execute, assertClean }) => assertClean(execute(step.run)))
 })
+
+for (const mode of ['wrong-directory', 'broken']) {
+  test(`actual workflow selects installed PG14 with ${mode} ambient pg_config`, linuxShell, () => {
+    withProbe(({ execute, assertClean }) => assertClean(execute(step.run)), mode)
+  })
+}
 
 for (const index of [0, 1]) {
   test(`removing env -i from Node call ${index + 1} executes ambient preload before the callback`, linuxShell, () => {
@@ -160,13 +268,43 @@ for (const [name, mutate] of [
   })
 }
 
-test('missing executable in the actual preflight stops before any Node callback', linuxShell, () => {
-  withProbe(({ execute }) => {
-    const mutation = step.run.replace('"$yida_pg_bin/initdb"', '"$yida_pg_bin/synthetic-missing-initdb"')
-    assert.notEqual(mutation, step.run)
-    const result = execute(mutation)
-    assert.notEqual(result.status, 0)
-    assert.deepEqual(result.receipts, [])
-    assert.equal(result.preloadExecuted, false)
+for (const [role, executable] of [
+  ['node', '$yida_node'], ['initdb', '$yida_pg_bin/initdb'], ['pg_ctl', '$yida_pg_bin/pg_ctl'],
+  ['postgres', '$yida_pg_bin/postgres'], ['unshare', '/usr/bin/unshare'],
+  ['setpriv', '/usr/bin/setpriv'], ['python3', '/usr/bin/python3'], ['ip', '/usr/sbin/ip'],
+]) {
+  test(`missing ${role} in the actual preflight stops with a fixed role before any Node callback`, linuxShell, () => {
+    withProbe(({ execute }) => {
+      const mutation = step.run.replace(`${role}:${executable}`, `${role}:/synthetic/missing-executable`)
+      assert.notEqual(mutation, step.run)
+      const result = execute(mutation)
+      assert.notEqual(result.status, 0)
+      assert.match(result.stderr, new RegExp(`^YIDA_CALLER_PREFLIGHT: ${role}$`, 'mu'))
+      assert.doesNotMatch(result.stderr, /\/synthetic\/missing-executable/u)
+      assert.deepEqual(result.receipts, [])
+      assert.equal(result.preloadExecuted, false)
+      assert.equal(result.pgConfigExecuted, false)
+    })
   })
-})
+}
+
+for (const [role, resolution] of [
+  ['node-resolution', 'command -v node'],
+  ['node-canonical', '/usr/bin/readlink -f "$yida_node_command"'],
+  ['pg-bin-canonical', '/usr/bin/readlink -f /usr/lib/postgresql/14/bin'],
+]) {
+  for (const replacement of ['/bin/false', '/bin/true']) {
+    test(`${role} rejects ${replacement === '/bin/false' ? 'failed' : 'empty'} resolution before any Node callback`, linuxShell, () => {
+      withProbe(({ execute }) => {
+        const mutation = step.run.replace(resolution, replacement)
+        assert.notEqual(mutation, step.run)
+        const result = execute(mutation)
+        assert.notEqual(result.status, 0)
+        assert.match(result.stderr, new RegExp(`^YIDA_CALLER_PREFLIGHT: ${role}$`, 'mu'))
+        assert.deepEqual(result.receipts, [])
+        assert.equal(result.preloadExecuted, false)
+        assert.equal(result.pgConfigExecuted, false)
+      })
+    })
+  }
+}

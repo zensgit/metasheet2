@@ -5,8 +5,8 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { assertNoEnvironmentFiles, cleanEnvironment, CONFIG, DEADLINE_MS, fileHash, MAX_OUTPUT, parsePublicArguments,
-  TEST_FILES, validateTaskReceipt } from './run-stock-preparation-yida-browser-ci.mjs'
+import { assertNoEnvironmentFiles, cleanEnvironment, CONFIG, DEADLINE_MS, fileHash, main, MAX_OUTPUT, parsePublicArguments,
+  reportStartupFailure, startupFailureDiagnostic, TEST_FILES, validateTaskReceipt } from './run-stock-preparation-yida-browser-ci.mjs'
 import { assertOwnedScratch, assertPlainOwnedTree, SCRATCH_OWNER } from './lib/stock-preparation-plm-owned-pg.mjs'
 
 // Synthetic contracts only: never spawn PG, Chromium, namespaces or a socket.
@@ -52,6 +52,90 @@ test('public entry accepts only one PG binary directory and no arbitrary command
   }
 })
 
+test('startup diagnostic accepts only private reason tags and fixed stage labels', () => {
+  let failure
+  try { parsePublicArguments(['--command', 'synthetic-private-path']) } catch (error) { failure = error }
+  const diagnostic = startupFailureDiagnostic(failure, 'ARGUMENTS')
+  assert.deepEqual(diagnostic, { stage: 'ARGUMENTS', reason: 'ARGUMENTS_INVALID' })
+  assert.equal(Object.isFrozen(diagnostic), true)
+  assert.deepEqual(startupFailureDiagnostic(failure, 'synthetic-private-stage'),
+    { stage: 'RUNTIME', reason: 'ARGUMENTS_INVALID' })
+  // Text and public properties cannot forge a private launcher tag.
+  for (const error of [new Error('YIDA_BROWSER_CI_ENVIRONMENT_FILE_PRESENT'),
+    { code: 'ENVIRONMENT_FILE_PRESENT', reason: 'PATH_INVALID', message: 'synthetic-secret' },
+    'synthetic-secret', null, undefined]) {
+    assert.deepEqual(startupFailureDiagnostic(error, 'ENVIRONMENT_FILES'),
+      { stage: 'ENVIRONMENT_FILES', reason: 'INTERNAL' })
+  }
+})
+
+test('startup diagnostic never reads hostile error properties, getters or proxy traps', () => {
+  let reads = 0, tagged
+  const hostileGetter = () => { reads++; throw new Error('synthetic-secret-getter') }
+  try { parsePublicArguments([]) } catch (error) { tagged = error }
+  // Replace V8's lazy stack before poisoning message, so test setup itself does
+  // not invoke Error's default stack formatter.
+  for (const property of ['stack', 'message', 'code', 'reason', 'stage', 'toJSON', 'toString']) {
+    Object.defineProperty(tagged, property, { configurable: true, get: hostileGetter })
+  }
+  const forged = Object.create(null)
+  for (const property of ['message', 'stack', 'code', 'reason', 'stage', 'toJSON', 'toString']) {
+    Object.defineProperty(forged, property, { get: hostileGetter })
+  }
+  const proxy = new Proxy(forged, { get: hostileGetter, ownKeys: hostileGetter,
+    getOwnPropertyDescriptor: hostileGetter, getPrototypeOf: hostileGetter })
+  assert.deepEqual(startupFailureDiagnostic(tagged, 'ARGUMENTS'),
+    { stage: 'ARGUMENTS', reason: 'ARGUMENTS_INVALID' })
+  assert.deepEqual(startupFailureDiagnostic(proxy, proxy), { stage: 'RUNTIME', reason: 'INTERNAL' })
+  const previousExitCode = process.exitCode, lines = []
+  try {
+    reportStartupFailure(tagged, 'ARGUMENTS', line => { lines.push(line) })
+    reportStartupFailure(proxy, proxy, line => { lines.push(line) })
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_FAILED',
+      'YIDA_BROWSER_CI_STARTUP_FAILED {"stage":"ARGUMENTS","reason":"ARGUMENTS_INVALID"}',
+      'YIDA_BROWSER_CI_FAILED', 'YIDA_BROWSER_CI_STARTUP_FAILED {"stage":"RUNTIME","reason":"INTERNAL"}'])
+  } finally { process.exitCode = previousExitCode }
+  assert.equal(reads, 0)
+})
+
+test('unexpected startup OS and assertion failures retain generic marker and exit one with INTERNAL', () => {
+  const previousExitCode = process.exitCode
+  try {
+    let assertion
+    try { assert.equal('synthetic-secret-actual', 'synthetic-private-expected') } catch (error) { assertion = error }
+    const osError = new Error('synthetic-private-path synthetic-secret')
+    osError.code = 'synthetic-private-code'
+    for (const error of [osError, assertion]) {
+      const lines = []
+      reportStartupFailure(error, 'PATHS', line => { lines.push(line) })
+      assert.equal(process.exitCode, 1)
+      assert.deepEqual(lines, ['YIDA_BROWSER_CI_FAILED',
+        'YIDA_BROWSER_CI_STARTUP_FAILED {"stage":"PATHS","reason":"INTERNAL"}'])
+    }
+  } finally { process.exitCode = previousExitCode }
+})
+
+test('real main startup catch records safe stage and preserves rejection without running launch work', async () => {
+  const previousUmask = process.umask, previousExitCode = process.exitCode
+  let reads = 0
+  const hostile = new Proxy({}, { get: () => { reads++; throw new Error('synthetic-secret') } })
+  const lines = []
+  try {
+    // Fail at the first OS operation, before filesystem, namespace or PG work.
+    process.umask = () => { throw hostile }
+    let failure
+    try { await main([]) } catch (error) { failure = error }
+    assert.equal(failure, hostile)
+    reportStartupFailure(failure, undefined, line => { lines.push(line) })
+    assert.equal(process.exitCode, 1)
+    assert.equal(reads, 0)
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_FAILED',
+      'YIDA_BROWSER_CI_STARTUP_FAILED {"stage":"RUNTIME","reason":"INTERNAL"}'])
+  } finally {
+    process.umask = previousUmask; process.exitCode = previousExitCode
+  }
+})
+
 test('implicit Vite env files are refused by filename without reading their values', async () => {
   const sandbox = path.join(root, 'tmp', 'yida-browser-contract-' + randomUUID())
   await fs.mkdir(sandbox, { recursive: true, mode: 0o700 })
@@ -60,7 +144,19 @@ test('implicit Vite env files are refused by filename without reading their valu
     assertNoEnvironmentFiles([sandbox])
     for (const name of ['.env', '.env.local', '.env.test', '.env.test.local']) {
       await fs.writeFile(path.join(sandbox, name), 'synthetic-unused-value', { mode: 0o000 })
-      assert.throws(() => assertNoEnvironmentFiles([sandbox]), /YIDA_BROWSER_CI_ENVIRONMENT_FILE_PRESENT/u)
+      assert.throws(() => assertNoEnvironmentFiles([sandbox]), error => {
+        assert.match(error.message, /YIDA_BROWSER_CI_ENVIRONMENT_FILE_PRESENT/u)
+        assert.deepEqual(startupFailureDiagnostic(error, 'ENVIRONMENT_FILES'),
+          { stage: 'ENVIRONMENT_FILES', reason: 'ENVIRONMENT_FILE_PRESENT' })
+        const previousExitCode = process.exitCode, lines = []
+        try {
+          reportStartupFailure(error, 'ENVIRONMENT_FILES', line => { lines.push(line) })
+          assert.equal(process.exitCode, 1)
+          assert.deepEqual(lines, ['YIDA_BROWSER_CI_FAILED',
+            'YIDA_BROWSER_CI_STARTUP_FAILED {"stage":"ENVIRONMENT_FILES","reason":"ENVIRONMENT_FILE_PRESENT"}'])
+        } finally { process.exitCode = previousExitCode }
+        return true
+      })
     }
   } finally {
     assert.equal(path.dirname(sandbox), path.join(root, 'tmp'))

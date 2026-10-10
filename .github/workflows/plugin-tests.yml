@@ -145,6 +145,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -1323,11 +1330,27 @@ jobs:
           # Clean before the FIRST Node exec, not only before its children.
           # The launcher owns a fresh local PG and a loopback-only USER/NET/PID tree;
           # All five whole files still exercise actual JWT/HTTP/Chromium.
-          yida_node="$(/usr/bin/readlink -f "$(command -v node)")"
-          yida_pg_bin="$(/usr/bin/readlink -f "$(/usr/bin/pg_config --bindir)")"
-          for yida_tool in "$yida_node" "$yida_pg_bin/initdb" "$yida_pg_bin/pg_ctl" \
-            "$yida_pg_bin/postgres" /usr/bin/unshare /usr/bin/setpriv /usr/bin/python3 /usr/sbin/ip; do
-            test -x "$yida_tool"
+          if ! yida_node_command="$(command -v node 2>/dev/null)" || test -z "$yida_node_command"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-resolution' >&2
+            exit 1
+          fi
+          if ! yida_node="$(/usr/bin/readlink -f "$yida_node_command" 2>/dev/null)" || test -z "$yida_node"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-canonical' >&2
+            exit 1
+          fi
+          # Match the PostgreSQL 14 installation above, independent of system pg_config.
+          if ! yida_pg_bin="$(/usr/bin/readlink -f /usr/lib/postgresql/14/bin 2>/dev/null)" || test -z "$yida_pg_bin"; then
+            echo 'YIDA_CALLER_PREFLIGHT: pg-bin-canonical' >&2
+            exit 1
+          fi
+          for yida_role_tool in "node:$yida_node" "initdb:$yida_pg_bin/initdb" "pg_ctl:$yida_pg_bin/pg_ctl" \
+            "postgres:$yida_pg_bin/postgres" unshare:/usr/bin/unshare setpriv:/usr/bin/setpriv python3:/usr/bin/python3 ip:/usr/sbin/ip; do
+            yida_role="${yida_role_tool%%:*}"
+            yida_tool="${yida_role_tool#*:}"
+            if ! test -x "$yida_tool"; then
+              echo "YIDA_CALLER_PREFLIGHT: $yida_role" >&2
+              exit 1
+            fi
           done
           /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
             "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
