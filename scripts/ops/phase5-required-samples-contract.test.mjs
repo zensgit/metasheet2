@@ -143,6 +143,28 @@ test('marks overall status fail when required latency samples are missing', asyn
   });
 });
 
+test('distinguishes registered histograms with no series while required latency remains blocking', async () => {
+  const secondBody = `${passingCounters}
+# TYPE metasheet_plugin_reload_duration_seconds histogram
+# TYPE\tmetasheet_snapshot_operation_duration_seconds\thistogram
+`;
+  const result = await runPhase5Validation([passingCounters, secondBody]);
+
+  assert.equal(result.code, 1);
+  assert.deepEqual(result.json.summary, { total_checks: 11, passed: 5, failed: 0, na: 6, overall_status: 'fail' });
+  assert.deepEqual(result.json.percentiles, {});
+  assert.deepEqual(result.json.sampling, {
+    source: 'SECOND_PERCENTILE_SCRAPE',
+    input_sha256: createHash('sha256').update(secondBody).digest('hex'),
+    parsed_histograms: 0,
+    relevant_histograms: 0,
+    thresholds: latencyIds.map(metric => ({
+      metric, raw_bucket_lines: 0, parsed_family_histograms: 0,
+      selected_count: null, reason: 'family_no_series',
+    })),
+  });
+});
+
 test('keeps overall status pass when required latency samples satisfy thresholds', async () => {
   const secondBody = `${passingCounters}\n${passingLatencySamples}`;
   const result = await runPhase5Validation([passingCounters, secondBody]);

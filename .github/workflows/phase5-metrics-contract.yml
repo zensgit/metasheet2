@@ -1,0 +1,45 @@
+name: Phase 5 Metrics Contract
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/phase5-metrics-contract.yml'
+      - 'scripts/phase5-*'
+      - 'scripts/ops/phase5-required-samples-contract.test.mjs'
+      - 'scripts/ops/phase5-cache-hit-rate-contract.test.mjs'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/phase5-metrics-contract.yml'
+      - 'scripts/phase5-*'
+      - 'scripts/ops/phase5-required-samples-contract.test.mjs'
+      - 'scripts/ops/phase5-cache-hit-rate-contract.test.mjs'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install validation tools
+        run: sudo apt-get update && sudo apt-get install -y jq bc
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck the percentile diagnostic
+        run: pnpm exec tsc --noEmit --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext scripts/phase5-metrics-percentiles.ts
+      - name: Verify required samples and cache-counter contracts
+        run: node --test scripts/ops/phase5-required-samples-contract.test.mjs scripts/ops/phase5-cache-hit-rate-contract.test.mjs

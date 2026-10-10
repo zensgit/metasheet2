@@ -54,7 +54,7 @@ interface MetricsOutput {
       raw_bucket_lines: number;
       parsed_family_histograms: number;
       selected_count: number | null;
-      reason: 'family_absent' | 'family_unparsed' | 'selector_missing' |
+      reason: 'family_absent' | 'family_no_series' | 'family_unparsed' | 'selector_missing' |
         'count_unparsed' | 'count_invalid' | 'zero_samples' | 'positive_samples' | 'percentile_unestimable';
     }>;
   };
@@ -365,6 +365,9 @@ async function main() {
         const rawBucketLines = rawLines.filter(line =>
           line.startsWith(`${family}_bucket{`) || line.startsWith(`${family}_bucket `),
         ).length;
+        const familyDeclared = rawLines.some(line =>
+          line.trim().split(/\s+/).join(' ') === `# TYPE ${family} histogram`,
+        );
         const parsedFamilyHistograms = allHistograms.filter(h => h.metric === family).length;
         // Keep the validator's exact key, including label order and every label.
         const selector = threshold.label_selector;
@@ -373,7 +376,7 @@ async function main() {
           : family;
         const selected = histogramsByKey.get(key);
         const percentile = threshold.metric.match(/p[0-9]+/g)?.pop() as 'p50' | 'p95' | 'p99';
-        const reason = rawBucketLines === 0 ? 'family_absent'
+        const reason = rawBucketLines === 0 ? (familyDeclared ? 'family_no_series' : 'family_absent')
           : parsedFamilyHistograms === 0 ? 'family_unparsed'
           : !selected ? 'selector_missing'
           : !countWitnesses.has(selected) ? 'count_unparsed'
