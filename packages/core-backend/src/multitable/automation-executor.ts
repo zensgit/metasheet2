@@ -3079,6 +3079,15 @@ export class AutomationExecutor {
     targetSheetId: string,
     declaredTargetBaseId: string | undefined,
   ): Promise<CrossBaseWriteGate> {
+    // S3 fix round 2 (F2; register R-37): the stock-preparation project overview is written ONLY by its plugin.
+    // Every consumer of this gate — update / create / delete / lock, the approval-form write-back and the
+    // approval RESULT write-back to another base (automation-service.ts `writeApprovalResultBackCrossBase`,
+    // whose only authority check is this gate) — is refused here when the target sheet carries the overview
+    // stamp, same-base or cross-base, BEFORE the addressing reads, the authority check and the quota slot.
+    // Values-free step error. An id outside the derived-id shape cannot be an overview: no statement.
+    if ((await loadStockPreparationOverviewSheetIds(queryFn, [targetSheetId])).size > 0) {
+      return { crossBase: true, ok: false, error: STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL }
+    }
     // Addressing half (same-base vs cross-base vs unresolvable) — shared, byte-for-byte, with the rule-save
     // check `validateDeletedTriggerSelfMutationTargets` (see resolveCrossBaseWriteTarget). Same queries in the
     // same order as before the extraction.
@@ -4276,6 +4285,14 @@ export class AutomationExecutor {
         && (derived.sheetId !== expectedTarget.sheetId || derived.baseId !== expectedTarget.baseId)
       ) {
         throw new Error('fwb_rejected:target_schema')
+      }
+      // S3 fix round 2 (F7a; register R-37): the record this update writes lives on the sheet the pinned FORM
+      // SCHEMA names — not the trigger sheet, `targetSheetId` or `sheetId` the pre-dispatch guard
+      // (`refuseRecordActionOnStockPrepOverview`) can see. Refuse the read-only stock-preparation overview
+      // here, inside the transaction, before the gates, the bound-record checks and any write (the cross-base
+      // gate below refuses it too; this holds for a same-base target the gate would wave through).
+      if ((await loadStockPreparationOverviewSheetIds(query as AutomationDeps['queryFn'], [derived.sheetId])).size > 0) {
+        throw new Error('fwb_rejected:stock_prep_overview_read_only')
       }
 
       if (this.deps.fwbGateChecksFactory) {

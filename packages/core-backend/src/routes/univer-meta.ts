@@ -127,6 +127,7 @@ import {
   STOCK_PREP_OVERVIEW_GRANT_REFUSAL,
   isStockPreparationOverviewGrantableAccessLevel,
   isStockPreparationOverviewSheetIdCandidate,
+  loadStockPreparationOverviewSheetIds,
   restrictStockPreparationOverviewCapabilities,
 } from '../multitable/stock-preparation-overview-contract'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
@@ -914,7 +915,11 @@ function buildPublicFormToken(): string {
   return buildId('pub')
 }
 
-function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined, publicToken: string): boolean {
+async function isPublicFormAccessAllowed(
+  query: QueryFn,
+  view: UniverMetaViewConfig | null | undefined,
+  publicToken: string,
+): Promise<boolean> {
   if (!view || !publicToken) return false
   if (isElearningProjectionSheetIdCandidate(view.sheetId)) return false
   const publicForm = getPublicFormConfig(view)
@@ -923,6 +928,13 @@ function isPublicFormAccessAllowed(view: UniverMetaViewConfig | null | undefined
   if (!configuredToken || configuredToken !== publicToken) return false
   const expiryMs = parsePublicFormExpiryMs(publicForm.expiresAt ?? publicForm.expiresOn)
   if (expiryMs !== null && Date.now() >= expiryMs) return false
+  // S3 fix round 2 (F7b; register R-37): a public form grants PUBLIC_FORM_CAPABILITIES (record create) to an
+  // anonymous token holder, bypassing the person-capability clamp. No form can be shared on the read-only
+  // stock-preparation project overview today (canManageViews is clamped, the share route needs it), so this
+  // is the SECOND barrier, like the e-learning refusal above: a public-form view on the overview never
+  // admits anyone. Checked LAST, so only a request that presented the right live token pays the one indexed
+  // lookup, and only for an id of the derived shape (others issue no statement).
+  if ((await loadStockPreparationOverviewSheetIds(query, [view.sheetId])).size > 0) return false
   return true
 }
 
@@ -18031,7 +18043,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!resolved) return
       const sheetId = resolved.sheetId
       const { access, capabilities, capabilityOrigin, sheetScope, sheetLiveness } = await resolveSheetReadableCapabilities(req, pool.query.bind(pool), sheetId)
-      const publicAccessAllowed = isPublicFormAccessAllowed(resolved.view, publicTokenParam)
+      const publicAccessAllowed = await isPublicFormAccessAllowed(pool.query.bind(pool), resolved.view, publicTokenParam)
       const protectedPublicAccess = publicAccessAllowed
         ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, resolved.view)
         : null
@@ -18237,7 +18249,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         : typeof req.query.publicToken === 'string'
           ? req.query.publicToken.trim()
           : ''
-      const publicAccessAllowed = isPublicFormAccessAllowed(view, publicTokenParam)
+      const publicAccessAllowed = await isPublicFormAccessAllowed(pool.query.bind(pool), view, publicTokenParam)
       const protectedPublicAccess = publicAccessAllowed
         ? await evaluateProtectedPublicFormAccess(pool.query.bind(pool), req, view)
         : null
