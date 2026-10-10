@@ -19,5 +19,5 @@ test('runs the whole Phase5 validity and sampling union without skipped cases', 
   const summary = Object.fromEntries([...stdout.matchAll(
     /^# (tests|pass|fail|cancelled|skipped|todo) (\d+)$/gm,
   )].map(match => [match[1], Number(match[2])]))
-  expect(summary).toEqual({ tests: 13, pass: 13, fail: 0, cancelled: 0, skipped: 0, todo: 0 })
+  expect(summary).toEqual({ tests: 14, pass: 14, fail: 0, cancelled: 0, skipped: 0, todo: 0 })
 }, 150_000)
