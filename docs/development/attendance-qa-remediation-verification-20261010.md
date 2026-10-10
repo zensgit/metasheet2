@@ -8,6 +8,16 @@
 
 首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。本轮合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，最终回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。本文件后续提交仅承载文档/计数回执，代码身份以上述提交和源文件哈希为准。
 
+## continue 后的最新 main 对齐
+
+当前正常合并快照为 `0f17cf6085c0c6e52a73a847e41e7f3525936120`（#6293，审批 DTO/服务与 OpenAPI）。合并提交 `c8f0a2e228729d9df6a4702dfb4b187a2b02f611`，树 `27a360c496f35d72e9244ac4d17db490945b82f4`；无冲突，未 rebase、未强推。下文 `548c1d5834` 的记录保留为上一轮冻结证据。
+
+考勤 View/dashboard 源码哈希与已独立审阅的修复相同，CI/manifest/test-chain 路径无改动或丢项。本轮在合并后的树上新跑 dashboard 102 + today helper 9，共 **111 通过、0 跳过**；provenance、完整 `validate:all` 与 Vite 构建通过。构建仍有原有 large-chunk 提示，plugin manifest 仍有 9 个既有警告。
+
+证据：[`continuation-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/continuation-main-alignment.json)。日志为 `continuation-dashboard-today-helper.log`、`continuation-provenance.log`、`continuation-validate-all.log` 和 `continuation-web-build.log`。此前 UTC 292、洛杉矶 149、浏览器 8、数据库 19 等结果保留其原冻结代码身份，本轮不将未重跑的批次伪称为本轮执行。
+
+公开 Draft PR 授权仍待对“continue”发布范围的明确答复；远端 CI 尚未运行，原 QA 范围与真实历史/性能验收仍未获得。合入、部署继续 HOLD。
+
 ## 本轮 merge 与守卫证据
 
 | 检查 | 结果 | 证据边界 |
