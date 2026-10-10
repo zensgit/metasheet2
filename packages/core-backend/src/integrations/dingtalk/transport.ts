@@ -87,6 +87,29 @@ export class DingTalkMalformedResponseError extends Error {
 }
 
 /**
+ * R-41: a 2xx response that passed the envelope checks above (for `'oapi'` endpoints: `errcode` 0) but lacks
+ * the one field the call exists to obtain — gettoken without `access_token`, the v1.0 userAccessToken
+ * exchange without `accessToken`, `contact/users/me` without `openId`. Thrown by client.ts AFTER the transport
+ * returned, so it is never retried and never carries the outcome-unknown marker.
+ *
+ * Deliberately NOT a DingTalkBusinessError: that type means "DingTalk rejected the request", and callers key
+ * retry / ledger / status decisions on it (AttendanceNotificationDeliveryWorker, dingtalk-todo-mirror-worker,
+ * elearning-notification-dingtalk, the container-login route's 401). These sites threw a plain Error before,
+ * and every such caller keeps treating this one exactly as it treated that. The message is the text the plain
+ * Error carried (it may be provider text — it is for the logs); the body rides along in `responseBody` so the
+ * provider's code survives for admin surfaces, which show only that code (directory/directory-failure-text.ts).
+ */
+export class DingTalkIncompleteResponseError extends Error {
+  readonly responseBody: Record<string, unknown>
+
+  constructor(message: string, responseBody: Record<string, unknown>) {
+    super(message)
+    this.name = 'DingTalkIncompleteResponseError'
+    this.responseBody = responseBody
+  }
+}
+
+/**
  * DT-HARDEN-06: every DingTalk call that is not the group-robot webhook goes through
  * here — gettoken, directory sync, work notifications, approval cards, container
  * login. They used a naked `fetch` with no timeout, so a hung connection blocked an
