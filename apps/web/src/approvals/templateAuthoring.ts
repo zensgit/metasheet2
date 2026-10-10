@@ -25,6 +25,7 @@ import type {
   CreateApprovalTemplateRequest,
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
+  SamePersonPolicy,
 } from '../types/approval'
 import { APPROVAL_TYPE_VALUES, NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
@@ -65,11 +66,17 @@ import {
   applyApprovalNodeEditsToGraph,
   approvalNodeEditOmitsAssigneeSources,
   approvalNodeEditsFromGraph,
+  emptyAssigneeFallbackHasTarget,
   hiddenBlockLiveErrors,
+  isKnownSamePersonPolicy,
+  samePersonControlState,
   validateApprovalNodeEdits,
+  withEmptyAssigneeFallbackIds,
   type ApprovalNodeEdits,
   type HiddenBlockLiveErrors,
   type HiddenBlockNeutralizers,
+  type SamePersonChoice,
+  type SamePersonControlState,
 } from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
@@ -90,6 +97,22 @@ export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit, AutoApproveHiddenBlockId, HiddenBlockLiveErrors } from './approvalNodeEdit'
 export { AUTO_APPROVE_HIDDEN_BLOCK_IDS } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources, applyApprovalTypeChoice } from './approvalNodeEdit'
+// W1-1a (Lock-4 F4-B / F4-C) — the shared same-person / designated-fallback vocabulary, re-exported
+// so the view and the canvas config editor read ONE set of helpers and labels.
+export type { SamePersonChoice, SamePersonControlState } from './approvalNodeEdit'
+export {
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_TRANSFER_HINT,
+  applySamePersonChoice,
+  emptyAssigneeFallbackHasTarget,
+  samePersonChoiceFromSelectValue,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonOverrideHint,
+  samePersonSelectValue,
+  withEmptyAssigneeFallbackIds,
+} from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -263,20 +286,25 @@ export interface ApprovalStepDraft {
   omitAssigneeSources?: boolean
   emptyAssigneePolicy: EmptyAssigneePolicy
   /**
-   * Fix-round P1-1 (gate P3A-F4B-20260819) — PRESERVE-VERBATIM carrier for `'designated'`'s target
-   * set. The linear editor has no typed userIds/roleIds picker yet (deferred follower work), so
-   * this field is never authored here; it exists so hydrate → `buildStepConfig` re-emits the
-   * persisted object unchanged instead of silently dropping it on save. Same role as
-   * `nodeOperationPolicy` / `originalAutoApprovalPolicy`. Absent unless `emptyAssigneePolicy` is
-   * `'designated'`, and omitted from the built config when absent (byte-stability).
+   * Lock-4 §3 F4-B — `'designated'`'s target set. Hydrated VERBATIM (so an untouched step re-emits
+   * the persisted object unchanged) and, since W1-1a, AUTHORED by the typed user/role pickers via
+   * `setStepEmptyAssigneeFallbackIds` (which prunes blanks/empty sides and drops the object when
+   * both sides are empty). Kept on the draft when the author switches the policy away so switching
+   * back restores the last-entered targets (the `approvalThreshold` posture); `buildStepConfig`
+   * emits it ONLY under `'designated'` (byte-stability, no orphaned key).
    */
   emptyAssigneeFallback?: EmptyAssigneeFallback
-  // Self-approver authoring: the editable toggle (merge the requester in as an
-  // auto-approval). `originalAutoApprovalPolicy` preserves the three non-merge
-  // sub-fields (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode),
-  // which are out of UI scope but must survive hydrate→rebuild (no silent flatten),
-  // mirroring `FieldAuthoringDraft.original`.
+  // Same-person (审批人与发起人为同一人时) authoring, W1-1a / Lock-4 §2 F4-C. The two RAW persisted
+  // fields are stored as-is — `mergeWithRequester` (the shipped 自动跳过 carrier) and
+  // `samePersonPolicy` (absent unless persisted/picked) — and the four-value control's displayed
+  // choice is DERIVED from them (`stepSamePersonControlState`), never stored as a separate
+  // "choice" that would be re-serialized: a bare legacy `{ mergeWithRequester: true }` step must
+  // re-save byte-identical (lock: "no existing graph changes shape"). `setStepSamePersonChoice`
+  // keeps both in sync. `originalAutoApprovalPolicy` preserves the sub-fields this editor does not
+  // own (mergeAdjacentApprover / dedupeHistoricalApprover / actorMode) across hydrate→rebuild (no
+  // silent flatten), mirroring `FieldAuthoringDraft.original`.
   mergeWithRequester: boolean
+  samePersonPolicy?: SamePersonPolicy
   originalAutoApprovalPolicy?: AutoApprovalPolicy
   // T1-4 node-level field permissions (linear editor). One entry per NON-editable form field
   // (`editable` is the absent default, so a field left editable carries no entry). Hydrated from
@@ -624,6 +652,65 @@ export function setStepFieldPermission(
   return [...permissions, { fieldId, access }]
 }
 
+// ── W1-1a (Lock-4 §2 F4-C / §3 F4-B) — linear-step adapters over the shared helpers in
+// approvalNodeEdit.ts, so BOTH editors project and write the same-person / designated-fallback
+// controls through ONE implementation. ────────────────────────────────────────────────────────────
+
+type StepAutoApprovalCarriers = Pick<ApprovalStepDraft, 'mergeWithRequester' | 'samePersonPolicy' | 'originalAutoApprovalPolicy'>
+
+/**
+ * The node-level `autoApprovalPolicy` a linear step EMITS (also what its controls read, so the
+ * displayed state and the saved shape cannot diverge). The same-person control owns
+ * `mergeWithRequester` + `samePersonPolicy`: both are stripped from the preserved original (every
+ * other sibling kept — no silent flatten) and re-added from the two raw draft fields. 'auto_skip'
+ * ALWAYS carries `mergeWithRequester: true`, the exact shape the backend `normalizeAutoApprovalPolicy`
+ * persists ("auto_skip WINS over an explicit mergeWithRequester"), so the FE never sends a shape the
+ * server would rewrite. Spread-only would resurrect a stale carrier (the shipped self-revert class).
+ */
+export function stepAutoApprovalPolicy(step: StepAutoApprovalCarriers): AutoApprovalPolicy {
+  const policy: AutoApprovalPolicy = { ...step.originalAutoApprovalPolicy }
+  delete policy.mergeWithRequester
+  delete policy.samePersonPolicy
+  if (step.mergeWithRequester || step.samePersonPolicy === 'auto_skip') policy.mergeWithRequester = true
+  if (step.samePersonPolicy !== undefined) policy.samePersonPolicy = step.samePersonPolicy
+  return policy
+}
+
+/** The four-value control's state for a linear step, derived from its two RAW carriers. */
+export function stepSamePersonControlState(step: StepAutoApprovalCarriers): SamePersonControlState {
+  return samePersonControlState(stepAutoApprovalPolicy(step))
+}
+
+/**
+ * Writes a pick onto the step's two raw carriers, keeping them in sync (implementer default (a):
+ * 'auto_skip' ⇒ `samePersonPolicy:'auto_skip'` + `mergeWithRequester:true`; every other pick clears
+ * `mergeWithRequester`; 'default' clears both). No-op for an `unknown` persisted value (X-3) and
+ * when the pick equals the current projection (an untouched legacy `{ mergeWithRequester: true }`
+ * keeps its shape).
+ */
+export function setStepSamePersonChoice(
+  step: StepAutoApprovalCarriers,
+  choice: SamePersonChoice,
+): void {
+  const current = stepSamePersonControlState(step)
+  if (current.kind !== 'editable' || current.choice === choice) return
+  if (choice !== 'default' && !isKnownSamePersonPolicy(choice)) return
+  step.mergeWithRequester = choice === 'auto_skip'
+  if (choice === 'default') delete step.samePersonPolicy
+  else step.samePersonPolicy = choice
+}
+
+/** Replaces one side (users / roles) of a linear step's `'designated'` targets from a typed picker. */
+export function setStepEmptyAssigneeFallbackIds(
+  step: Pick<ApprovalStepDraft, 'emptyAssigneeFallback'>,
+  side: 'user' | 'role',
+  ids: string[],
+): void {
+  const next = withEmptyAssigneeFallbackIds(step.emptyAssigneeFallback, side, ids)
+  if (next) step.emptyAssigneeFallback = next
+  else delete step.emptyAssigneeFallback
+}
+
 function fieldDraftFromField(field: FormField): FieldAuthoringDraft | null {
   if (!isAuthorableFieldType(field.type)) return null
   const props = field.props && typeof field.props === 'object' ? field.props as Record<string, unknown> : {}
@@ -785,10 +872,13 @@ function stepDraftFromApprovalNode(
     idsText = formatIds(legacyIds)
   }
 
-  // Hydrate the self-approver policy: surface `mergeWithRequester` as the editable
-  // toggle, and stash the full policy so non-merge sub-fields survive a rebuild.
+  // Hydrate the same-person policy's two RAW carriers (see `ApprovalStepDraft.samePersonPolicy`),
+  // and stash the full policy so the sub-fields this editor does not own survive a rebuild. An
+  // off-enum `samePersonPolicy` is carried verbatim too — `unsupportedTemplateAuthoringReason` is
+  // the single door that makes such a template read-only (gate X-3), never this line.
   const autoApprovalPolicy = config.autoApprovalPolicy as AutoApprovalPolicy | undefined
   const mergeWithRequester = autoApprovalPolicy?.mergeWithRequester === true
+  const samePersonPolicy = autoApprovalPolicy?.samePersonPolicy
 
   // T1-4: hydrate node-level field permissions. Only well-formed { fieldId, access-in-enum } entries
   // are carried; a malformed entry is separately caught by `unsupportedTemplateAuthoringReason`
@@ -869,6 +959,7 @@ function stepDraftFromApprovalNode(
     // a genuinely ABSENT `emptyAssigneePolicy` takes the documented `'error'` default.
     emptyAssigneePolicy: config.emptyAssigneePolicy === undefined ? 'error' : (config.emptyAssigneePolicy as EmptyAssigneePolicy),
     mergeWithRequester,
+    ...(samePersonPolicy !== undefined ? { samePersonPolicy } : {}),
     ...(autoApprovalPolicy ? { originalAutoApprovalPolicy: autoApprovalPolicy } : {}),
     fieldPermissions,
     timeoutEnabled,
@@ -1089,7 +1180,22 @@ function emptyAssigneeFallbackHasBackendDrop(value: unknown): boolean {
   if (value.roleIds !== undefined && !Array.isArray(value.roleIds)) return true
   return false
 }
-const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode']
+// W1-1a (Lock-4 §2 F4-C / §2.3) — `samePersonPolicy` joins the nested allowlist: the backend
+// `normalizeAutoApprovalPolicy` re-emits it, and BOTH editors now own it through the four-value
+// control (which owns `mergeWithRequester` with it, so the shipped self-revert class — a toggle that
+// clears only `mergeWithRequester` while a persisted 'auto_skip' re-synthesizes it — cannot recur).
+// A widened ENUM is a different hazard than a new key (§2.3): `samePersonPolicyIsOffEnum` below is
+// the VALUE-level door (gate X-3) that the key-only check here cannot provide.
+const BACKEND_AUTO_APPROVAL_POLICY_KEYS = ['mergeWithRequester', 'mergeAdjacentApprover', 'dedupeHistoricalApprover', 'actorMode', 'samePersonPolicy']
+
+/**
+ * Gate X-3 (Lock-4 §3): "a persisted `emptyAssigneePolicy` / `samePersonPolicy` outside the frontend
+ * enum renders read-only and saves unchanged on BOTH the linear and canvas paths". True for a
+ * policy object carrying an off-enum `samePersonPolicy` — both paths fail closed to read-only on it.
+ */
+function samePersonPolicyIsOffEnum(policy: unknown): boolean {
+  return isPlainRecord(policy) && policy.samePersonPolicy !== undefined && !isKnownSamePersonPolicy(policy.samePersonPolicy)
+}
 const BACKEND_FIELD_PERMISSION_KEYS = ['fieldId', 'access']
 // Lock-5 §1.1 / §2.2 — allowlist 4 of 4 (the NESTED one, beside BACKEND_AUTO_APPROVAL_POLICY_KEYS).
 // `nodeOperationPolicy` is an OBJECT, so a top-level allowlist entry alone is incomplete: the
@@ -1234,6 +1340,8 @@ function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): b
     }
   }
   if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+  // W1-1a gate X-3 (canvas path): an off-enum samePersonPolicy is read-only, never re-projected.
+  if (samePersonPolicyIsOffEnum(config.autoApprovalPolicy)) return true
   const perms = config.fieldPermissions
   if (Array.isArray(perms)) {
     for (const perm of perms) {
@@ -1423,17 +1531,17 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     // (same predicate, reused rather than duplicated).
     if (config.emptyAssigneeFallback !== undefined && emptyAssigneeFallbackHasBackendDrop(config.emptyAssigneeFallback)) return true
     if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
-    // P2-1 fix: `buildStepConfig` only AUTHORS `mergeWithRequester` — the three sibling
-    // `autoApprovalPolicy` fields (incl. `samePersonPolicy`) are preserved verbatim from
-    // `originalAutoApprovalPolicy` (:1673-1680) and re-spread on every save regardless of the
-    // 自动跳过 toggle's state. A node carrying a key `buildStepConfig`/backend's
-    // `normalizeAutoApprovalPolicy` don't jointly own (i.e. anything besides the four
-    // `BACKEND_AUTO_APPROVAL_POLICY_KEYS`) must fail closed to read-only here too — mirrors the
-    // complex path's identical check at `complexApprovalConfigHasBackendDrop` (:1067) — otherwise
-    // the shipped toggle silently self-reverts (turning it OFF never clears a persisted
-    // `samePersonPolicy` carrier such as `auto_skip`/`transfer_*`, which resynthesizes
-    // `mergeWithRequester:true` server-side on every save).
+    // P2-1 fix (amended by W1-1a): a node carrying an `autoApprovalPolicy` key that
+    // `buildStepConfig` + the backend's `normalizeAutoApprovalPolicy` don't jointly own (anything
+    // besides `BACKEND_AUTO_APPROVAL_POLICY_KEYS`) must fail closed to read-only here — mirrors the
+    // complex path's identical check in `complexApprovalConfigHasBackendDrop`. `samePersonPolicy`
+    // was the motivating case (the shipped toggle could not clear a persisted `auto_skip`/
+    // `transfer_*`, so it silently self-reverted); W1-1a makes it OWNED — the four-value control
+    // writes `samePersonPolicy` and `mergeWithRequester` together, and `buildStepConfig` strips both
+    // from the preserved original before re-adding them — so the key is now allowlisted, and only an
+    // OFF-ENUM value (gate X-3) still forces read-only, via the value check below.
     if (hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)) return true
+    if (samePersonPolicyIsOffEnum(config.autoApprovalPolicy)) return true
     // The linear path preserves the object verbatim, so a shape the backend would reject or
     // re-emit differently must still fail closed to read-only (same predicate as the complex path).
     if (
@@ -1871,8 +1979,8 @@ export function setStepApprovalType(step: ApprovalStepDraft, type: ApprovalType)
 }
 
 /**
- * Build the approval-node config for a step. The `mergeWithRequester` toggle is the
- * only authored sub-field of `autoApprovalPolicy`; the three non-merge sub-fields are
+ * Build the approval-node config for a step. The same-person control (W1-1a) owns
+ * `mergeWithRequester` + `samePersonPolicy` of `autoApprovalPolicy`; every other sub-field is
  * preserved verbatim from `originalAutoApprovalPolicy` (no silent flatten). The
  * `autoApprovalPolicy` key is OMITTED entirely when the effective policy is empty —
  * mirroring `buildFormSchema`'s `delete next.visibilityRule` omit-empty discipline so a
@@ -1939,15 +2047,8 @@ function buildStepConfig(
   allSteps: ApprovalStepDraft[],
   stepLocalIdToNodeKey: Map<string, string>,
 ): ApprovalNodeConfig {
-  const autoApprovalPolicy: AutoApprovalPolicy = {
-    ...step.originalAutoApprovalPolicy,
-    ...(step.mergeWithRequester ? { mergeWithRequester: true } : {}),
-  }
-  // The toggle owns `mergeWithRequester`: when OFF, drop the flag but keep preserved
-  // siblings. (Spread-only would resurrect a `mergeWithRequester:true` carrier.)
-  if (!step.mergeWithRequester) {
-    delete autoApprovalPolicy.mergeWithRequester
-  }
+  // W1-1a: see `stepAutoApprovalPolicy` — the same-person control owns BOTH carriers.
+  const autoApprovalPolicy = stepAutoApprovalPolicy(step)
   // T1-4: emit only NON-editable entries (editable === absent default) whose field still exists —
   // pruning an entry for a deleted field keeps the backend cross-reference
   // (`validateNodeFieldPermissionsAgainstFormSchema`) satisfied. Omit the key entirely when empty
@@ -1963,8 +2064,8 @@ function buildStepConfig(
   const nodeOperationPolicy = step.nodeOperationPolicy
     ? (JSON.parse(JSON.stringify(step.nodeOperationPolicy)) as NodeOperationPolicy)
     : undefined
-  // Fix-round P1-1 — re-emit the preserved `'designated'` target set VERBATIM (fresh deep copy,
-  // same discipline as `nodeOperationPolicy` immediately above).
+  // Lock-4 F4-B — re-emit the `'designated'` target set (hydrated verbatim, or authored through the
+  // W1-1a pickers) as a fresh deep copy, same discipline as `nodeOperationPolicy` immediately above.
   const emptyAssigneeFallback = step.emptyAssigneeFallback
     ? (JSON.parse(JSON.stringify(step.emptyAssigneeFallback)) as EmptyAssigneeFallback)
     : undefined
@@ -1983,12 +2084,11 @@ function buildStepConfig(
     ...(step.approvalType !== undefined ? { approvalType: step.approvalType } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     // Fix-round advisor catch (post-P1-1): emitted ONLY under `emptyAssigneePolicy === 'designated'`
-    // — mirrors `approvalThreshold`'s own conditional emission immediately above. The 空审批人策略
-    // `<el-select>` (TemplateAuthoringView.vue) offers only 报错/自动通过 as options but is bound
-    // directly to `step.emptyAssigneePolicy`, which P1-1 now preserves as `'designated'` verbatim;
-    // an author switching a designated node's select to either option must not leave an orphaned
-    // `emptyAssigneeFallback` behind — P2-3's own validator would then 400 the save on a key no
-    // linear UI can see or clear.
+    // — mirrors `approvalThreshold`'s own conditional emission immediately above. An author
+    // switching a designated step's 空审批人策略 select to 报错/自动通过 must not leave an orphaned
+    // `emptyAssigneeFallback` behind — the backend B-s10 validator would 400 the save
+    // (APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED). The draft keeps the targets so switching back
+    // restores them.
     ...(step.emptyAssigneePolicy === 'designated' && emptyAssigneeFallback ? { emptyAssigneeFallback } : {}),
     ...(Object.keys(autoApprovalPolicy).length > 0 ? { autoApprovalPolicy } : {}),
     ...(fieldPermissions.length > 0 ? { fieldPermissions } : {}),
@@ -2512,6 +2612,12 @@ export function validateTemplateApprovalFlow(
     if (sourceIsLive && step.sourceKind === 'user_group' && step.groupIds.length === 0) {
       errors.push(`${label} 需要选择至少一个用户组`)
     }
+    // W1-1a — FE mirror of the backend B-s10 authoring gate (`validateEmptyAssigneeFallbackConfigs`,
+    // APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED). That gate runs on create/update as well as publish,
+    // so this check is deliberately NOT minimal-gated: it blocks 保存草稿 exactly like the server.
+    if (step.emptyAssigneePolicy === 'designated' && !emptyAssigneeFallbackHasTarget(step.emptyAssigneeFallback)) {
+      errors.push(`${label} 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色`)
+    }
     // P1-C (T2-4) threshold PREVIEW: integer-only shape check, matching the ONE bound the backend
     // enforces UNCONDITIONALLY at publish for the `assigneeSources` shape this editor emits
     // (`APPROVAL_THRESHOLD_INVALID`, ApprovalProductService.ts :2282-2289). The backend's static
@@ -2566,6 +2672,7 @@ export const APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS: HiddenBlockNeutralizers<Ap
     approvalThreshold: 1,
     emptyAssigneePolicy: 'error',
     mergeWithRequester: false,
+    samePersonPolicy: undefined,
   }),
   timeout: (step) => ({ ...step, timeoutEnabled: false }),
 }
@@ -2745,9 +2852,9 @@ export function buildUpdateTemplatePayload(draft: TemplateAuthoringDraft): Updat
  * the template-level 审批人去重 tier. A 3-way projection over the SAME two booleans the backend
  * already server-enforces on `runtimeGraph.policy.autoApproval` (Lock-4 §2.6 /
  * `evaluateAutoApprovalAssignment`): `dedupeHistoricalApprover` (仅一次全自动同意) and
- * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` is deliberately NOT part of this
- * tier — it stays a NODE-level-only field authored via the existing per-step
- * `mergeWithRequester` / `originalAutoApprovalPolicy` pair, never through this template control.
+ * `mergeAdjacentApprover` (仅连续节点自动同意). `mergeWithRequester` / `samePersonPolicy` are
+ * deliberately NOT part of this tier — they stay NODE-level-only fields authored via the per-step
+ * same-person control (W1-1a), never through this template control.
  */
 export type TemplateDedupTier = 'none' | 'dedupe_historical' | 'merge_adjacent'
 

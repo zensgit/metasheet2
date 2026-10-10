@@ -2203,6 +2203,109 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(config).toEqual({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
     expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
   })
+
+  // W1-1a (merge-train r3 F9) — canvas STICKY REVEAL through the Canvas-first inspector, which reuses
+  // ONE ApprovalGraphNodeConfigEditor instance across node selections: the sticky state must live per
+  // node key in the view, so it can neither leak to another node nor be lost by re-selecting.
+  it('W1-1a canvas sticky reveal (Canvas-first inspector): the policy grid revealed by 转交指定人员 without a target stays mounted after the pick, never leaks to another node through the reused editor, survives another node\'s 审批类型 change, and is released by its own', async () => {
+    const roles = [{ id: 'role-pick', name: '审批管理员' }]
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => (
+      /\/api\/approval-templates\/directory\/roles(?:\?|$)/.test(String(input))
+        ? { ok: true, status: 200, json: async () => ({ roles }) }
+        : { ok: false, status: 503, json: async () => null }
+    )))
+    try {
+      setRouteParams({ id: 'tpl_w11a_canvas_sticky' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'app_a', type: 'approval', name: '审批 A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'cc_b', type: 'cc', name: '抄送 B', config: { targetType: 'user', targetIds: ['u_finance'] } },
+            // A sourceless auto_approve node whose hidden blocks are valid: its policy grid is hidden.
+            { key: 'app_c', type: 'approval', name: '审批 C', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-a', source: 'start', target: 'app_a' },
+            { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
+            { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
+            { key: 'e-c-end', source: 'app_c', target: 'end' },
+          ],
+        } as any,
+      }))
+      await mountView()
+      await flushUi()
+      const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+      const inInspector = <T extends Element = HTMLElement>(testId: string) => inspector().querySelector(`[data-testid="${testId}"]`) as T | null
+      const chooseType = async (type: 'manual' | 'auto-approve') => {
+        inInspector<HTMLInputElement>(`approval-node-approval-type-${type}`)!.click()
+        await flushUi()
+      }
+
+      // Positive control for the leak check: app_c on its own renders no policy grid.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector<HTMLInputElement>('approval-node-approval-type-auto-approve')!.checked).toBe(true)
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      // app_a: 转交指定人员 with no target, then 自动通过 → revealed by the live error, notice names it.
+      clickCanvasNode('app_a')
+      await flushUi()
+      const emptyPolicy = inInspector<HTMLSelectElement>('approval-node-empty-policy')!
+      emptyPolicy.value = 'designated'
+      emptyPolicy.dispatchEvent(new Event('change'))
+      await flushUi()
+      await chooseType('auto-approve')
+      expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')!.textContent)
+        .toContain('审批节点 app_a 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色')
+      const rolePicker = inInspector<HTMLSelectElement>('approval-node-empty-fallback-role-picker')!
+      expect(rolePicker).not.toBeNull()
+      await vi.waitFor(() => expect(Array.from(rolePicker.options).find((option) => option.value === 'role-pick')?.textContent).toBe('审批管理员'))
+      for (const option of Array.from(rolePicker.options)) option.selected = option.value === 'role-pick'
+      rolePicker.dispatchEvent(new Event('change'))
+      await flushUi()
+      // The pick clears the notice; the picker being edited stays mounted (STICKY: the same element).
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBe(rolePicker)
+
+      // NO LEAK: the same editor instance now shows app_c, whose policy grid stays hidden.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-policy')).toBeNull()
+      // app_c's own 审批类型 change (人工审批 shows its grid, 自动通过 hides it) never releases app_a.
+      await chooseType('manual')
+      expect(inInspector('approval-node-mode')).not.toBeNull()
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      clickCanvasNode('app_a')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_a')
+      expect(inInspector<HTMLSelectElement>('approval-node-empty-policy')!.value).toBe('designated')
+      expect(inInspector('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      // app_a's own 审批类型 change releases it: back on 自动通过 with a valid target, the grid is hidden.
+      await chooseType('manual')
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBeNull()
+
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const configA = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'app_a').config
+      expect(configA.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(configA, 'assigneeSources')).toBe(false)
+      expect(configA.emptyAssigneePolicy).toBe('designated')
+      expect(configA.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────
@@ -2356,8 +2459,12 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       timeoutJumpTargetOptions: () => [],
       approvalNodeEmptyPolicy: () => 'error',
       setApprovalNodeEmptyPolicy: () => {},
-      approvalNodeMergeWithRequester: () => false,
-      setApprovalNodeMergeWithRequester: () => {},
+      // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+      // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+      // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+      // full TemplateAuthoringView mounts.
+      setApprovalNodeSamePersonPolicy: () => {},
+      setApprovalNodeEmptyAssigneeFallbackIds: () => {},
       approvalNodeFieldAccess: (nodeKey: string, fieldId: string) =>
         (edits[nodeKey]?.fieldPermissions.find((p) => p.fieldId === fieldId)?.access as any) ?? 'editable',
       setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: any) => {
@@ -2500,7 +2607,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     // `querySelector` at the inspector root cannot distinguish from "moved to the wrong tab").
     const modeControl = tabbed.container.querySelector('[data-testid="approval-node-mode"]')
     const emptyPolicyControl = tabbed.container.querySelector('[data-testid="approval-node-empty-policy"]')
-    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-merge-with-requester"]')
+    // W1-1a: 自审策略 is now the four-value same-person select (Lock-0 L0-1 keeps it in 审批人设置).
+    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]')
     expect(modeControl).not.toBeNull()
     expect(emptyPolicyControl).not.toBeNull()
     expect(mergeControl).not.toBeNull()
@@ -2520,6 +2628,88 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(tabbedAssignee.contains(fieldPermRow)).toBe(false)
 
     tabbed.unmount()
+  })
+
+  it("W1-1a: the 'designated' fallback pickers + same-person hint render INSIDE 审批人设置 (Lock-0 L0-1) — positive control: no pickers under 报错", () => {
+    const node = makeApprovalNode('approval_x')
+    const baseApi = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const designatedApi: ApprovalNodeConfigEditorApi = { ...baseApi, approvalNodeEmptyPolicy: () => 'designated' }
+
+    const tabbed = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: designatedApi })
+    const assignee = tabbed.container.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const fieldPerms = tabbed.container.querySelector('[data-testid="approval-node-section-field-permissions"]') as HTMLElement
+    for (const testId of [
+      'approval-node-empty-fallback-user-picker',
+      'approval-node-empty-fallback-role-picker',
+      'approval-node-empty-fallback-hint',
+      'approval-node-same-person-policy',
+      'approval-node-same-person-hint',
+    ]) {
+      const control = tabbed.container.querySelector(`[data-testid="${testId}"]`)
+      expect(control, testId).not.toBeNull()
+      expect(assignee.contains(control), testId).toBe(true)
+      expect(fieldPerms.contains(control), testId).toBe(false)
+    }
+    // The 默认 option leads and is selected for a node with no policy (default (b): the key is omitted).
+    const samePerson = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    tabbed.unmount()
+
+    const plain = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: baseApi })
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-policy"]')).not.toBeNull()
+    plain.unmount()
+  })
+
+  // Gate r1 P3-1: inside TemplateAuthoringView an off-enum samePersonPolicy already makes the whole
+  // template read-only (so the view-level X-3 test cannot tell the component's own clause apart from
+  // the host's readOnly). This direct mount keeps the HOST editable (`readOnly: false`) to pin the
+  // component-level contract: an unknown persisted value is never offered as an editable control.
+  it('W1-1a (gate r1 P3-1): an off-enum samePersonPolicy renders the control disabled even when the host is EDITABLE — positive control: a known value stays enabled', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    expect(api.readOnly).toBe(false)
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_to_ceo' }
+    const offEnum = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const offEnumSelect = offEnum.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(offEnumSelect.disabled).toBe(true)
+    expect(offEnumSelect.value).toBe('__unknown__')
+    expect(offEnumSelect.textContent).not.toContain('transfer_to_ceo')
+    offEnum.unmount()
+
+    edit.autoApprovalPolicy = { samePersonPolicy: 'transfer_dept_head' }
+    const known = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const knownSelect = known.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(knownSelect.disabled).toBe(false)
+    expect(knownSelect.value).toBe('transfer_dept_head')
+    known.unmount()
+  })
+
+  it('W1-1a (gate r1 NIT-1/NIT-2): a node that already carries another node-level auto-approval key gets the neutral 默认 label and the already-overrides hint — positive control: no sibling key keeps 跟随模板 + the conditional hint', () => {
+    const node = makeApprovalNode('approval_x')
+    const api = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const edit = api.approvalNodeEditFor('approval_x') as unknown as { autoApprovalPolicy?: Record<string, unknown> }
+
+    // All-false sibling: enables no rule, yet its presence suppresses the template tier at this node.
+    edit.autoApprovalPolicy = { mergeAdjacentApprover: false }
+    const sibling = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const siblingSelect = sibling.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(siblingSelect.value).toBe('default')
+    expect(siblingSelect.options[0]!.textContent).toBe('默认（本节点已有单独的自动审批设置）')
+    expect(sibling.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。')
+    sibling.unmount()
+
+    delete edit.autoApprovalPolicy
+    const plain = mountDirectConfigEditorFlat({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const plainSelect = plain.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(plainSelect.options[0]!.textContent).toBe('默认（跟随模板设置）')
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-hint"]')!.textContent)
+      .toBe('选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。')
+    plain.unmount()
   })
 
   it('A-1 positive control: a registry WITH a ratified operation policy renders a third 操作权限 tab', () => {
