@@ -74,12 +74,26 @@ const PROJECT_FIELD_TEXT_LIMITS = Object.freeze({ responsibleLabel: 80, note: 50
 const PROJECT_FIELDS_INVALID_CODE = 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID'
 // `planned_finish_on` is a DATE column: a calendar day, never a timestamp, never free text.
 const PLANNED_FINISH_ON_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+// S3 fix round 1 (R13): the two free texts are single-line cell values. C0 / DEL / C1 control characters
+// (NUL included) and the two Unicode line / paragraph separators are refused (typed 400, the field named,
+// the value never echoed) — they would otherwise travel into a sheet cell, a CSV / xlsx export and a log
+// viewer as invisible or line-breaking bytes.
+const PROJECT_FIELD_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]/
 
 // S3: the closed outcome enum migration 087's CHECK admits on `last_pull_outcome`, and the shape a
 // `last_pull_code` must have (a closed error code — the same shape the pack-install wrapper admits —
 // never a message, never a value).
 const PROJECT_TARGET_PULL_OUTCOMES = Object.freeze(['applied', 'previewed', 'refused'])
 const PROJECT_TARGET_PULL_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
+// S3 fix round 1 (R10): what a refusal whose code does not have error-code shape is recorded as. The
+// stamp never throws over a shape it was handed — it records this closed word instead (the route logs it).
+const PROJECT_TARGET_PULL_CODE_UNKNOWN = 'UNKNOWN'
+
+// S3 fix round 1 (R3 / R5): the per-tenant advisory-lock key every WRITE of the project overview takes —
+// the full refresh and the per-event row update alike — so two writers of one tenant's overview never
+// interleave their read-then-create. A key of its own (not the registry's create/archive key): the
+// overview write makes host calls while it holds the lock, and registry transitions must not wait on it.
+const PROJECT_OVERVIEW_LOCK_PREFIX = 'stock-prep-project-overview:'
 
 class StockPreparationProjectTargetStoreError extends Error {
   constructor(status, code, message, details = {}) {
@@ -164,12 +178,27 @@ function intOrNull(value) {
   return Number.isFinite(number) ? number : null
 }
 
-/** A DATE column as the calendar day it holds (`YYYY-MM-DD`), or null. */
+/**
+ * A DATE column as the calendar day it holds (`YYYY-MM-DD`), or null.
+ *
+ * S3 fix round 1 (R2): node-postgres parses a DATE as LOCAL midnight (`new Date(y, m - 1, d)`,
+ * postgres-date), so the old `toISOString().slice(0, 10)` handed back the PREVIOUS day on every host east
+ * of UTC (Asia/Shanghai: local midnight is 16:00Z the day before). The day is read from the LOCAL calendar
+ * components — the exact inverse of that parse, in any process time zone — and never goes through UTC.
+ * (The plugin's db helper is `SELECT *` only, so a `::text` projection is not available here; a host
+ * whose driver hands DATE back as text takes the string branch.) Anything that is not a real calendar day
+ * — `Infinity` for PostgreSQL's 'infinity', a malformed string — reads as null, never as a guess.
+ */
 function dayOrNull(value) {
   if (value === null || value === undefined) return null
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10)
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null
+    const year = value.getFullYear()
+    if (year < 1 || year > 9999) return null
+    return `${String(year).padStart(4, '0')}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+  }
   const text = String(value)
-  return PLANNED_FINISH_ON_PATTERN.test(text) ? text : text.slice(0, 10)
+  return PLANNED_FINISH_ON_PATTERN.test(text) ? text : null
 }
 
 /**
@@ -220,9 +249,15 @@ function normalizeProjectFieldsPatch(input = {}) {
       const trimmed = raw.trim()
       if (trimmed) {
         if (key === 'plannedFinishOn') {
-          if (!PLANNED_FINISH_ON_PATTERN.test(trimmed) || Number.isNaN(Date.parse(`${trimmed}T00:00:00Z`)) || new Date(`${trimmed}T00:00:00Z`).toISOString().slice(0, 10) !== trimmed) {
-            throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'plannedFinishOn must be a calendar day (YYYY-MM-DD)', { field: key })
+          // S3 fix round 1 (R2): year 0000 is not a day PostgreSQL can store as given (there is no year 0
+          // AD); the shape, the year floor and the round trip are checked BEFORE any IO.
+          if (!PLANNED_FINISH_ON_PATTERN.test(trimmed) || Number(trimmed.slice(0, 4)) < 1 || Number.isNaN(Date.parse(`${trimmed}T00:00:00Z`)) || new Date(`${trimmed}T00:00:00Z`).toISOString().slice(0, 10) !== trimmed) {
+            throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'plannedFinishOn must be a calendar day (YYYY-MM-DD) in year 0001 or later', { field: key })
           }
+        } else if (PROJECT_FIELD_CONTROL_CHARACTER_PATTERN.test(raw)) {
+          // S3 fix round 1 (R13): tested on the RAW value — a control character is refused even where
+          // trimming would have removed it, so what the caller sent is what the rule judged.
+          throw new StockPreparationProjectTargetStoreError(400, PROJECT_FIELDS_INVALID_CODE, 'project field must not contain control characters', { field: key, reason: 'control_character' })
         } else if (trimmed.length > PROJECT_FIELD_TEXT_LIMITS[key]) {
           throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'project field exceeds its length limit', { field: key, limit: PROJECT_FIELD_TEXT_LIMITS[key] })
         }
@@ -236,6 +271,20 @@ function normalizeProjectFieldsPatch(input = {}) {
     throw new StockPreparationProjectTargetStoreError(422, PROJECT_FIELDS_INVALID_CODE, 'at least one project field is required', { field: 'body' })
   }
   return { set, changed }
+}
+
+/**
+ * S3 fix round 1 (R10): a pull's refusal code as the registry may store it. Absent / blank → null; an
+ * error-code-shaped string → itself; anything else (a message, an object, a code built from a value) → the
+ * closed word UNKNOWN, with `mapped: true` so the caller can log that a shape was replaced. Pure.
+ */
+function normalizeProjectPullCode(value) {
+  if (value === null || value === undefined) return { code: null, mapped: false }
+  if (typeof value !== 'string') return { code: PROJECT_TARGET_PULL_CODE_UNKNOWN, mapped: true }
+  const trimmed = value.trim()
+  if (!trimmed) return { code: null, mapped: false }
+  if (PROJECT_TARGET_PULL_CODE_PATTERN.test(trimmed)) return { code: trimmed, mapped: false }
+  return { code: PROJECT_TARGET_PULL_CODE_UNKNOWN, mapped: true }
 }
 
 function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.randomUUID, now = () => new Date() } = {}) {
@@ -526,13 +575,12 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     const { tenantId, projectNo } = scope(input)
     if (typeof db.updateRow !== 'function') return false
     const outcome = input.outcome
-    if (!PROJECT_TARGET_PULL_OUTCOMES.includes(outcome)) {
-      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'outcome must be applied, previewed or refused', { field: 'outcome' })
-    }
-    const code = optionalString(input.code)
-    if (code !== null && !PROJECT_TARGET_PULL_CODE_PATTERN.test(code)) {
-      throw new StockPreparationProjectTargetStoreError(422, 'STOCK_PREPARATION_PROJECT_TARGET_SCOPE_INVALID', 'code must be a closed error code', { field: 'code' })
-    }
+    // S3 fix round 1 (R10): a stamp is a by-product of a pull that already happened; it never throws over
+    // the SHAPE it was handed. An outcome outside the closed enum stamps nothing (false); a code that does
+    // not have error-code shape is recorded as the closed word UNKNOWN (`normalizeProjectPullCode`; the
+    // route logs that it happened, values-free).
+    if (!PROJECT_TARGET_PULL_OUTCOMES.includes(outcome)) return false
+    const code = normalizeProjectPullCode(input.code).code
     const at = input.at instanceof Date ? input.at : now()
     const set = { last_pull_at: at, last_pull_outcome: outcome, last_pull_code: code, updated_at: at }
     if (Number.isInteger(input.missingComponentsCount) && input.missingComponentsCount >= 0) {
@@ -573,7 +621,27 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
     return rows.length > 0
   }
 
-  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts }
+  /**
+   * S3 fix round 1 (R3 / R5): run `fn` holding the tenant's OVERVIEW advisory lock (`PROJECT_OVERVIEW_LOCK_PREFIX`),
+   * in one transaction that only holds the lock — `fn`'s own host calls are not part of it. Every writer of
+   * the overview (the refresh, the per-event row update) runs inside this, so two of them for one tenant
+   * never interleave a read-then-create and leave two rows for one project. Released when `fn` settles.
+   */
+  async function withOverviewLock(input = {}, fn) {
+    const tenantId = requiredString(input.tenantId, 'tenantId')
+    if (typeof fn !== 'function') {
+      throw new Error('withOverviewLock: a callback is required')
+    }
+    return db.transaction(async (trx) => {
+      if (!trx || typeof trx.advisoryXactLock !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock')
+      }
+      await trx.advisoryXactLock(`${PROJECT_OVERVIEW_LOCK_PREFIX}${tenantId}`)
+      return fn()
+    })
+  }
+
+  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, withOverviewLock }
 }
 
 module.exports = {
@@ -591,12 +659,16 @@ module.exports = {
   PROJECT_FIELD_TEXT_LIMITS,
   PROJECT_FIELDS_INVALID_CODE,
   PROJECT_TARGET_PULL_OUTCOMES,
+  PROJECT_TARGET_PULL_CODE_UNKNOWN,
+  PROJECT_OVERVIEW_LOCK_PREFIX,
   StockPreparationProjectTargetStoreError,
   createStockPreparationProjectTargetStore,
   normalizeProjectFieldsPatch,
+  normalizeProjectPullCode,
   __internals: {
     rowToPublicTarget,
     rowToProjectFields,
+    dayOrNull,
     isUniqueViolation,
   },
 }

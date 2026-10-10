@@ -124,7 +124,7 @@ function makeMemoryDb() {
  * merges, and the DB-backed reads answer from exactly what landed. `state.failFieldWrite` makes the
  * additive write throw (a genuine mid-install host failure).
  */
-function makeProvisioning() {
+function makeProvisioning({ stampsSystemKind = false } = {}) {
   const calls = []
   const objects = new Map()
   const state = { failFieldWrite: false }
@@ -136,6 +136,10 @@ function makeProvisioning() {
     objects,
     state,
     sheetIdOf,
+    // S3 fix round 1 (R8c): the host's declaration that it stamps `systemKind` at INSERT. OPT-IN here — a
+    // mount without it is an OLDER host, on which the overview legs refuse before any IO, so every suite
+    // that predates the overview sees exactly the host calls and audit rows it always saw.
+    ...(stampsSystemKind ? { supportsSystemKindStamp: true } : {}),
     getObjectSheetId: (projectId, objectId) => sheetIdOf(projectId, objectId),
     getFieldId: (_projectId, objectId, fieldId) => fieldIdOf(objectId, fieldId),
     getObjectViewId: (_projectId, objectId, viewId) => `view_${objectId.slice(-8)}_${viewId}`,
@@ -217,6 +221,21 @@ function makeProvisioning() {
       api.grantCalls.push(input)
       return { sheetId: input.sheetId, granted: api.grantCalls.length === 1 ? [...input.roleIds] : [], alreadyGranted: api.grantCalls.length === 1 ? [] : [...input.roleIds] }
     },
+    // S3 fix round 1 (R1): the overview's G1 READ port — add-only, idempotent per (sheet, role).
+    overviewGrantCalls: [],
+    overviewReadGrants: new Set(),
+    async grantOverviewRoleRead(input) {
+      calls.push(['grantOverviewRoleRead', input.sheetId])
+      api.overviewGrantCalls.push(input)
+      const granted = []
+      const alreadyGranted = []
+      for (const roleId of input.roleIds) {
+        const key = `${input.sheetId}::${roleId}`
+        if (api.overviewReadGrants.has(key)) alreadyGranted.push(roleId)
+        else { api.overviewReadGrants.add(key); granted.push(roleId) }
+      }
+      return { sheetId: input.sheetId, granted, alreadyGranted }
+    },
   }
   return api
 }
@@ -265,6 +284,13 @@ function makeRecordsApi() {
     async queryRecords(input = {}) { calls.push(['queryRecords', input.sheetId]); return rows.filter((row) => row.sheetId === input.sheetId).map(clone) },
     async createRecord(input = {}) { calls.push(['createRecord', input.sheetId]); const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }; rows.push(created); return clone(created) },
     async patchRecord(input = {}) { calls.push(['patchRecord', input.sheetId]); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
+    // S3 fix round 1 (R3): the plugin SDK delete the overview uses to remove duplicate / orphan rows.
+    async deleteRecord(input = {}) {
+      calls.push(['deleteRecord', input.sheetId])
+      const index = rows.findIndex((row) => row.id === input.recordId && row.sheetId === input.sheetId)
+      if (index >= 0) rows.splice(index, 1)
+      return { id: input.recordId, sheetId: input.sheetId, version: 1 }
+    },
   }
 }
 
@@ -322,6 +348,10 @@ function mountProjectSheetRoutes({
   tenantId,
   projectNo,
   switchOn = true,
+  // S3 fix round 1: a host that declares the overview stamp (see makeProvisioning). Off = an older host.
+  stampsSystemKind = false,
+  // S3 fix round 1: the route logger (default: silent) — a suite that pins a values-free warn passes its own.
+  logger = { info() {}, warn() {}, error() {} },
   grantRoleIds = null,
   envObjectId,
   envExtFieldIds = [],
@@ -336,7 +366,7 @@ function mountProjectSheetRoutes({
   const staging = `${tenantId}:integration-core`
   const routes = new Map()
   const auditAppends = []
-  const provisioning = makeProvisioning()
+  const provisioning = makeProvisioning({ stampsSystemKind })
   if (envObjectId) seedObject(provisioning, staging, envObjectId, envExtFieldIds)
   const records = makeRecordsApi()
   const source = makeSourceAdapter(projectNo)
@@ -391,9 +421,11 @@ function mountProjectSheetRoutes({
   }
   if (switchOn) process.env[PROJECT_SHEETS_ENABLED_ENV] = 'true'
   if (grantRoleIds) process.env[PROJECT_SHEET_GRANT_ROLE_IDS_ENV] = grantRoleIds.join(',')
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
     routes, auditAppends, provisioning, records, source, db, context, staging,
+    // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
+    projectTargetStore: services.stockPreparationProjectTargetStore,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
     registryRows: () => db.rowsOf(PROJECT_TARGET_TABLE),
     /**

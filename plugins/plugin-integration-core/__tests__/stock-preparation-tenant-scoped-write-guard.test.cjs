@@ -363,15 +363,17 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // sheet), so neither is in the inline-staging set below.
   'stockPreparationProjectTargetArchive',
   'stockPreparationProjectTargetRestore',
-  // S3 (ADR §5, register R-37). The project-fields GET / PUT are the ONLY surfaces that carry the
+  // S3 (ADR §5, register R-37). The project-fields GET / PATCH are the ONLY surfaces that carry the
   // three free-text project-level columns (负责人 / 备注 / 计划完成), so WHOSE registry row they read
   // or write must come from the host-vouched scope — a header-fillable tenant here would read or
   // overwrite another tenant's texts. Neither derives a staging project (they touch no sheet). The
-  // overview REFRESH derives the staging project the overview sheet is created in and every project
-  // sheet is counted through, so it IS in the inline-staging set below.
+  // overview REFRESH derives the staging project whose overview it projects into and every project
+  // sheet is counted through, so it IS in the inline-staging set below — and so is the fix-round-1
+  // overview ENSURE (PULL), which creates the overview in that staging project.
   'stockPreparationProjectFieldsGet',
   'stockPreparationProjectFieldsUpdate',
   'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
@@ -441,9 +443,11 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
-  // S3 (R-37): the overview refresh creates the overview sheet in, and counts every project sheet
-  // through, the staging project it derives — from the resolved scope with no request projectId.
+  // S3 (R-37): the overview refresh projects into the overview of, and counts every project sheet
+  // through, the staging project it derives — from the resolved scope with no request projectId. The
+  // fix-round-1 ENSURE creates the overview in that same staging project, derived the same way.
   'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
   // 通知下一步 (#6121). The advance probes the deploy-global bound sheet for "does this project have
   // rows" before it writes, so it now runs the shared target tenant wall first — and the staging
   // project that wall compares against must come from the resolved scope with no request projectId,

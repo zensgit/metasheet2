@@ -15,24 +15,42 @@
 //     view id the host derives for (staging project, objectId, 'prep-todo'). NEVER a request value.
 //
 // WHAT THIS IS NOT. Not a second writer of the project sheet (O3 was ruled out): nothing here reads
-// a row of the overview back into a project sheet, and the overview has no row events. Not a
-// permission mechanism: the HOST makes the overview read-only for every person (system kind
-// `stock_prep_overview`, stamped at provisioning; capability clamp in permission-service.ts), and
-// this module REFUSES to use a sheet the host does not report as stamped — fail-closed, so an older
-// host cannot leave an unclamped overview behind. The plugin's own records writes do not go through
-// people's capabilities, which is how the projection can be written at all.
+// a row of the overview back into a project sheet. Not a permission mechanism: the HOST makes the
+// overview read-only for every person (system kind `stock_prep_overview`, stamped at provisioning;
+// capability clamp; automations and comments refused), and this module REFUSES to use a sheet the host
+// does not report as stamped — fail-closed, so an older host cannot leave an unclamped overview behind.
+// The plugin's own records writes do not go through people's capabilities, which is how the
+// projection can be written at all.
 //
-// WHEN IT IS WRITTEN. `POST …/project-overview/refresh` (OPERATE, ADR §5) rebuilds every row within
-// bounds (at most the registry's 200 rows; each project's sheet read through at most
-// PULL_TARGET_MAX_PAGES pages — past that the counts are a floor and `countsBounded` says so, ADR §5
-// 「溢出时带「超过」」). The refresh ALSO stamps the registry's count columns (`recordCounts`) so the
-// GET target, the list and the home cards carry the same numbers the overview shows. Nothing here
-// runs on a timer; a write failure of the overview never fails a pull (the pull routes stamp
-// `last_pull_*` through `recordPullOutcome` in a try/catch of their own).
+// WHO CREATES IT (fix round 1, R6). Only the PULL tier: the project-target create route ensures it
+// (when a project is registered and the overview is absent) and so does the explicit
+// `POST …/project-overview/ensure`. Both grant the configured G1 roles READ on it through the host's
+// overview read port (`grantProjectOverviewRoles`). The OPERATE refresh never provisions: it projects
+// into an EXISTING overview and answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT otherwise.
 //
-// VALUES-FREE SURFACE. Refusals and the refresh summary carry ids, enums, counts and booleans. The
-// three project-level texts travel ONLY into the overview cells and the project-fields response —
-// never into an audit row, a refusal detail or a log line.
+// THE STAMP IS CHECKED BEFORE ANY WRITE (fix round 1, R8). The host must DECLARE that it stamps
+// (`provisioning.supportsSystemKindStamp === true`, 503 otherwise, before any IO); the derived id is
+// looked up first and an existing sheet that is not stamped is 409 NOT_STAMPED with nothing created; the
+// host stamps on INSERT and refuses — inside its own transaction — to adopt an existing sheet of another
+// kind (`SHEET_SYSTEM_KIND_CONFLICT`, mapped to the same 409). A database without the column (42703) is a
+// typed values-free 503.
+//
+// WHEN IT IS WRITTEN. Every write of the overview holds the tenant's OVERVIEW advisory lock
+// (`store.withOverviewLock`, fix round 1 R3):
+//   * the REFRESH (`refreshProjectOverview`, the OPERATE route) rebuilds every row within bounds (at most
+//     the registry's 200 rows; each project's sheet read through at most PULL_TARGET_MAX_PAGES pages —
+//     past that the counts are a floor and `countsBounded` says so), deletes duplicate rows per project
+//     and rows of projects no longer registered, and writes only rows whose projection changed — 「截至」
+//     alone never causes a write (R7). The registry's count columns are stamped only when the measured
+//     counts differ from what it holds, so the registry's `counts_at` and the overview's 「截至」 agree;
+//   * the PER-EVENT update (`updateProjectOverviewRow`, R5) does the same for ONE project after a create,
+//     archive, restore, project-fields change, dry-run / apply outcome or confirmation. Best-effort by
+//     contract: the caller never lets it fail the event, and a missing overview makes it a no-op.
+// Nothing here runs on a timer.
+//
+// VALUES-FREE SURFACE. Refusals and the summaries carry ids, enums, counts and booleans. The three
+// project-level texts travel ONLY into the overview cells and the project-fields response — never into
+// an audit row, a refusal detail or a log line.
 
 const {
   STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
@@ -61,15 +79,24 @@ const STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND = 'stock_prep_overview'
 const STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS = Object.freeze(TEMPLATE.fields.map((field) => field.id))
 // The overview never holds more rows than the registry may (archived included).
 const MAX_PROJECT_OVERVIEW_ROWS = MAX_PROJECT_TARGETS_PER_TENANT
-// Reading the overview back (to decide create vs patch) is bounded by the same number: two pages
-// of the host's page size cover 200 rows with room to spare, and a third page means the sheet holds
-// rows this plugin did not write.
+// Reading the overview back (to decide create vs patch, and which rows are duplicates / orphans) is
+// bounded: two pages of the host's page size cover 200 rows with room for the duplicates a race left.
 const OVERVIEW_READ_PAGE_LIMIT = 500
 const OVERVIEW_READ_MAX_PAGES = 2
+// The per-event update reads only ONE project's rows; more than this many is not a race residue.
+const OVERVIEW_PROJECT_ROW_READ_LIMIT = 50
+// Fix round 1 (R6): the OPERATE refresh is a bounded rebuild a floor operator can click; within this
+// window after a refresh started (per tenant, per process) another click answers 200 `fresh: false` with
+// no refresh IO. Stated in register R-37.
+const PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS = 60 * 1000
 
 // The main-template columns the per-project count reads (ADR §5): the project narrowing, the
 // validity flag, and the two 「完成」 booleans whose NOT-true rows are the two 未完成 counts.
 const PROJECT_SHEET_COUNT_FIELD_IDS = Object.freeze(['projectNo', 'active', 'procurementDone', 'warehouseDone'])
+
+const HOST_UNSUPPORTED_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED'
+const NOT_STAMPED_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED'
+const ABSENT_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT'
 
 class StockPreparationProjectOverviewError extends Error {
   constructor(status, code, message, details = {}) {
@@ -132,7 +159,7 @@ function projectOverviewPosture(input = {}) {
 // The SAME path shape the workbench shell pushes for 「打开」 (StockPreparationWorkspace.vue
 // `handleOpenFillTarget`: `/multitable/<sheetId>/<viewId>`). Two handles, URL-encoded; `null` when
 // either is missing so a cell never carries a half link. PURE, and its only inputs are the registry
-// row's sheet id and the host-derived view id — the refresh route hands it nothing from a request.
+// row's sheet id and the host-derived view id — no route hands it anything from a request.
 function buildProjectOverviewDeepLink({ sheetId, todoViewId } = {}) {
   const sheet = optionalString(sheetId)
   const view = optionalString(todoViewId)
@@ -210,41 +237,98 @@ function requireProvisioning(provisioning) {
 }
 
 /**
+ * Fix round 1 (R8c): the host must DECLARE that it stamps a requested `systemKind` at INSERT and reports
+ * it back (`supportsSystemKindStamp`, the `records.supportsFilterValueLists` idiom). Checked BEFORE any IO:
+ * an older host would create an ordinary, writable, deletable sheet where a read-only one was meant, and
+ * a write already made cannot be taken back by refusing afterwards.
+ */
+function assertHostStampsSystemKind(provisioning) {
+  if (provisioning && provisioning.supportsSystemKindStamp === true) return
+  throw new StockPreparationProjectOverviewError(
+    503,
+    HOST_UNSUPPORTED_CODE,
+    'this host cannot provision the project overview read-only; nothing was written',
+    { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, reason: 'stamp_not_declared' },
+  )
+}
+
+/**
  * THE STAMP IS THE PRECONDITION. The host reports `systemKind` on the sheet it found or created;
- * anything but the overview kind — including a host too old to report one — refuses, because an
- * overview the host does not clamp is a second, writable copy of every project's numbers.
+ * anything but the overview kind refuses, because an overview the host does not clamp is a second,
+ * writable copy of every project's numbers.
  */
 function assertOverviewStamped(sheet, mode) {
   const kind = sheet && typeof sheet.systemKind === 'string' ? sheet.systemKind : null
   if (kind === STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND) return
   throw new StockPreparationProjectOverviewError(
     409,
-    'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED',
+    NOT_STAMPED_CODE,
     mode === 'existing'
-      ? 'the project overview sheet exists but the host does not report it as a stock-prep overview system sheet; it must be removed by an administrator before the overview can be refreshed'
+      ? 'a sheet already sits at the project overview\'s id but the host does not report it as a stock-prep overview system sheet; nothing was written, and it must be removed by an administrator before the overview can be provisioned'
       : 'the host created the project overview sheet without the stock-prep overview system kind; this host cannot make the overview read-only',
     { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, mode, reportedKind: kind === null ? 'none' : 'other' },
   )
 }
 
 /**
- * ENSURE-IF-ABSENT by the derived objectId: the overview is created ONCE per tenant staging project,
- * in the pair's base (one-way anchor, own-base.cjs), stamped `stock_prep_overview` by the host, with
- * its two views; a later call finds it and writes nothing. Refuses unless the host reports the stamp.
+ * Host errors this module turns into its own values-free refusals (E2 / R8c). Anything else is returned
+ * as-is for the route's values-free wrapper to answer.
+ */
+function mapHostOverviewError(error) {
+  if (error instanceof StockPreparationProjectOverviewError) return error
+  const code = error && typeof error.code === 'string' ? error.code : null
+  if (code === 'SHEET_SYSTEM_KIND_CONFLICT') {
+    const mapped = new StockPreparationProjectOverviewError(409, NOT_STAMPED_CODE, 'a sheet already sits at the project overview\'s id without the overview system kind; the host refused to adopt it and nothing was written', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, mode: 'existing', reportedKind: 'other' })
+    mapped.cause = error
+    return mapped
+  }
+  if (code === '42703') {
+    const mapped = new StockPreparationProjectOverviewError(503, HOST_UNSUPPORTED_CODE, 'this database cannot record the project overview\'s system kind yet; nothing was written', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, reason: 'column_missing' })
+    mapped.cause = error
+    return mapped
+  }
+  return error
+}
+
+/**
+ * The overview as the host has it — or null when there is none — WITHOUT creating anything. A sheet at
+ * the derived id that the host does not report as stamped is 409 NOT_STAMPED; a host that returns a
+ * sheet without the `systemKind` key at all is the older-host 503.
+ */
+async function findProjectOverviewSheet({ provisioning, projectId } = {}) {
+  const api = requireProvisioning(provisioning)
+  assertHostStampsSystemKind(api)
+  const scopedProjectId = requiredString(projectId, 'projectId')
+  let existing
+  try {
+    existing = await api.findObjectSheet({ projectId: scopedProjectId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
+  } catch (error) {
+    throw mapHostOverviewError(error)
+  }
+  if (!existing) return null
+  if (!isPlainObject(existing) || !Object.prototype.hasOwnProperty.call(existing, 'systemKind')) {
+    throw new StockPreparationProjectOverviewError(503, HOST_UNSUPPORTED_CODE, 'this host does not report the project overview\'s system kind; nothing was written', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, reason: 'kind_not_reported' })
+  }
+  assertOverviewStamped(existing, 'existing')
+  return {
+    sheetId: String(existing.id),
+    ...projectOverviewViewHandles({ provisioning: api, projectId: scopedProjectId }),
+  }
+}
+
+/**
+ * ENSURE-IF-ABSENT by the derived objectId (the PULL tier's leg, R6): the overview is created ONCE per
+ * tenant staging project, in the pair's base (one-way anchor, own-base.cjs), stamped `stock_prep_overview`
+ * by the host on INSERT, with its two views; a later call finds it and writes nothing. Order, each step
+ * refusing before the next writes: the host's stamp declaration (no IO) → the lookup of the derived id
+ * (an unstamped sheet there is 409 with nothing created) → own-base → the stamped ensure.
  */
 async function ensureProjectOverviewSheet({ provisioning, projectId, tenantId, locale, env } = {}) {
   const api = requireProvisioning(provisioning)
+  assertHostStampsSystemKind(api)
   const scopedProjectId = requiredString(projectId, 'projectId')
-  const existing = await api.findObjectSheet({ projectId: scopedProjectId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
-  if (existing) {
-    assertOverviewStamped(existing, 'existing')
-    return {
-      sheetId: String(existing.id),
-      created: false,
-      ...projectOverviewViewHandles({ provisioning: api, projectId: scopedProjectId }),
-      ownBaseSource: 'unchanged',
-    }
-  }
+  const found = await findProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId })
+  if (found) return { ...found, created: false, ownBaseSource: 'unchanged' }
   const ownBase = await resolveStockPreparationOwnBase({
     provisioning: api,
     projectId: scopedProjectId,
@@ -254,14 +338,20 @@ async function ensureProjectOverviewSheet({ provisioning, projectId, tenantId, l
     locale,
     env,
   })
-  const ensured = await api.ensureObject({
-    projectId: scopedProjectId,
-    baseId: ownBase.baseId,
-    descriptor: buildProjectOverviewDescriptor({ locale }),
-    // The host-owned stamp (Q5). The plugin-scope wrapper admits it ONLY from this plugin, for this
-    // objectId and this kind; the host writes it on INSERT and reports it back.
-    systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
-  })
+  let ensured
+  try {
+    ensured = await api.ensureObject({
+      projectId: scopedProjectId,
+      baseId: ownBase.baseId,
+      descriptor: buildProjectOverviewDescriptor({ locale }),
+      // The host-owned stamp (Q5). The plugin-scope wrapper admits it ONLY from this plugin, for this
+      // objectId and this kind; the host writes it on INSERT, refuses to adopt an existing sheet of
+      // another kind inside its transaction, and reports it back.
+      systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+    })
+  } catch (error) {
+    throw mapHostOverviewError(error)
+  }
   const sheet = ensured && ensured.sheet
   assertOverviewStamped(sheet, 'created')
   const resolved = await api.resolveFieldIds({ projectId: scopedProjectId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, fieldIds: STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS })
@@ -284,6 +374,35 @@ async function ensureProjectOverviewSheet({ provisioning, projectId, tenantId, l
     views,
     ownBaseSource: ownBase.source,
     ownBaseCreated: ownBase.created === true,
+  }
+}
+
+/**
+ * Fix round 1 (R1): G1 for the overview — ask the host to grant the configured roles `spreadsheet:read`
+ * on it (the host port's literal; role subjects, add-only, the overview kind re-checked by the host).
+ * Values-free summary. `no_roles_configured` is G2 (an admin grants read by hand), `api_unavailable` an
+ * older host; a host REFUSAL (a role outside the namespace, an unknown role, a sheet the plugin does not
+ * own) propagates — configuration faults the puller must see, exactly as G1 on a project sheet.
+ */
+async function grantProjectOverviewRoles({ provisioning, projectId, sheetId, roleIds, actorId } = {}) {
+  const roles = Array.isArray(roleIds) ? roleIds.filter((id) => typeof id === 'string' && id.trim()) : []
+  if (roles.length === 0) return { attempted: false, skipped: 'no_roles_configured', roleCount: 0, granted: 0, alreadyGranted: 0 }
+  if (!provisioning || typeof provisioning.grantOverviewRoleRead !== 'function') {
+    return { attempted: false, skipped: 'api_unavailable', roleCount: roles.length, granted: 0, alreadyGranted: 0 }
+  }
+  const result = await provisioning.grantOverviewRoleRead({
+    projectId,
+    sheetId,
+    objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+    roleIds: roles,
+    actorId: actorId || null,
+  })
+  return {
+    attempted: true,
+    skipped: null,
+    roleCount: roles.length,
+    granted: Array.isArray(result && result.granted) ? result.granted.length : 0,
+    alreadyGranted: Array.isArray(result && result.alreadyGranted) ? result.alreadyGranted.length : 0,
   }
 }
 
@@ -349,12 +468,24 @@ async function countProjectSheetRows({ recordsApi, provisioning, projectId, row 
   return { ready: true, bounded, rowCount, activeRowCount, procurementOpenCount, warehouseOpenCount }
 }
 
+/** Do freshly measured counts differ from what the registry row holds? (R7: only then is anything stamped.) */
+function countsDifferFromRegistry(target, counts) {
+  if (!counts || counts.ready !== true) return false
+  return target.rowCount !== counts.rowCount
+    || target.activeRowCount !== counts.activeRowCount
+    || (target.countsBounded === true) !== (counts.bounded === true)
+    || target.procurementOpenCount !== counts.procurementOpenCount
+    || target.warehouseOpenCount !== counts.warehouseOpenCount
+    || !target.countsAt
+}
+
 // ── THE PROJECTION ─────────────────────────────────────────────────────────────────────────────────
 
 /**
  * ONE overview row, by logical field id, from: the registry row (`target`), its project-level texts
  * (`fields`), the bounded count just measured (`counts`, or null to keep the registry's own), the
- * ledger's pending count, and the derived deep link. Pure.
+ * ledger's pending count, and the derived deep link. `countsAt` is the 「截至」 of measured counts (the
+ * caller passes the registry's own clock when the measurement changed nothing). Pure.
  */
 function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount, todoViewId, locale, countsAt } = {}) {
   const archived = target.status === 'archived'
@@ -369,6 +500,7 @@ function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount,
   const posture = projectOverviewPosture({ archived, pendingDecisionCount: pending, missingComponentsCount: missing, pulledRowCount: nonNegativeInt(rowCount) })
   const resolvedLocale = locale === undefined ? resolveTemplateLabelLocale() : locale
   const zh = String(resolvedLocale).toLowerCase().startsWith('zh')
+  const measuredAt = countsAt instanceof Date ? countsAt.toISOString() : (countsAt ? String(countsAt) : null)
   return {
     projectNo: target.projectNo,
     sheetLink: buildProjectOverviewDeepLink({ sheetId: target.sheetId, todoViewId }),
@@ -387,7 +519,7 @@ function buildProjectOverviewRow({ target, fields, counts, pendingDecisionCount,
     missingComponentsCount: missing,
     lastPullAt: target.lastPullAt || null,
     lastPullOutcome: target.lastPullOutcome || null,
-    countsAt: measured ? (countsAt instanceof Date ? countsAt.toISOString() : String(countsAt)) : (target.countsAt || null),
+    countsAt: measured ? measuredAt : (target.countsAt || null),
   }
 }
 
@@ -397,8 +529,14 @@ function readLogicalCell(record, key) {
   return value
 }
 
+/**
+ * Fix round 1 (R7): the projection compared WITHOUT 「截至」 — a refresh that measured the same numbers
+ * must not rewrite every row just because the clock moved.
+ */
+const PROJECTION_COMPARED_FIELD_IDS = Object.freeze(STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS.filter((id) => id !== 'countsAt'))
+
 function sameProjection(existing, next) {
-  for (const key of STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS) {
+  for (const key of PROJECTION_COMPARED_FIELD_IDS) {
     const before = readLogicalCell(existing, key)
     const after = next[key]
     if ((before === null || before === undefined ? null : before) !== (after === null || after === undefined ? null : after)) return false
@@ -406,96 +544,250 @@ function sameProjection(existing, next) {
   return true
 }
 
+function requireOverviewStore(store) {
+  const required = ['list', 'get', 'listProjectFields', 'getProjectFields', 'recordCounts', 'withOverviewLock']
+  const missing = required.filter((method) => !store || typeof store[method] !== 'function')
+  if (missing.length) {
+    throw new StockPreparationProjectOverviewError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here', { requiredMethods: missing })
+  }
+  return store
+}
+
+/** Delete one overview row through the plugin's own records write port, fenced to the overview sheet. */
+async function deleteOverviewRow(recordsApi, overviewSheetId, record) {
+  await recordsApi.deleteRecord({ sheetId: overviewSheetId, recordId: record.id })
+}
+
 /**
- * THE REFRESH (ADR §5 「谁更新、什么时候更新」, the `POST …/project-overview/refresh` leg). Within bounds:
- *   1. the registry rows of the tenant (≤ 200; more is truncated and said);
- *   2. ensure the overview sheet (stamped, with its views) — ensure-if-absent;
- *   3. the ledger's pending counts, once for every project (degrades to zeros, `ledgerReady` says);
- *   4. per row: count the project sheet (bounded), stamp the registry's count columns, build the
- *      projection, create or patch the overview row by `projectNo` (unchanged rows cost no write).
- * Returns a values-free summary. The caller audits it (`project_overview_refresh`).
+ * Count, stamp the registry (only on change), build the projection and write ONE project's overview row
+ * — create when it has none, patch only when the projection (minus 「截至」) changed. `existingRecords`
+ * are this project's rows in the overview, oldest first; every one after the first is a race residue and
+ * is deleted. Runs under the caller's overview lock.
  */
-async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, env, now = () => new Date() } = {}) {
-  const api = requireProvisioning(provisioning)
-  const tenant = requiredString(tenantId, 'tenantId')
-  const scopedProjectId = requiredString(projectId, 'projectId')
-  if (!store || typeof store.list !== 'function' || typeof store.listProjectFields !== 'function' || typeof store.recordCounts !== 'function') {
-    throw new StockPreparationProjectOverviewError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the overview refresh here')
-  }
-  const allRows = await store.list({ tenantId: tenant })
-  const truncated = allRows.length > MAX_PROJECT_OVERVIEW_ROWS
-  const rows = truncated ? allRows.slice(0, MAX_PROJECT_OVERVIEW_ROWS) : allRows
-  const sheet = await ensureProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId, tenantId: tenant, locale, env })
-  const fieldsByProjectNo = await store.listProjectFields({ tenantId: tenant })
-  let pending = { ready: false, byProjectNo: new Map() }
-  try {
-    pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, null)
-  } catch (error) {
-    pending = { ready: false, byProjectNo: new Map() }
-  }
-  const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
-  const existingByProjectNo = new Map()
-  for (let page = 0; page < OVERVIEW_READ_MAX_PAGES; page += 1) {
-    const batch = await scoped.queryRecords({ filters: {}, limit: OVERVIEW_READ_PAGE_LIMIT, offset: page * OVERVIEW_READ_PAGE_LIMIT })
-    if (!Array.isArray(batch)) {
-      throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
-    }
-    for (const record of batch) {
-      const no = optionalString(readLogicalCell(record, 'projectNo'))
-      if (no && !existingByProjectNo.has(no)) existingByProjectNo.set(no, record)
-    }
-    if (batch.length < OVERVIEW_READ_PAGE_LIMIT) break
-  }
-  const countsAt = now()
-  const summary = { projectCount: rows.length, countedCount: 0, unreadableCount: 0, boundedCount: 0, rowsCreated: 0, rowsUpdated: 0, rowsUnchanged: 0 }
-  for (const target of rows) {
-    const counts = await countProjectSheetRows({ recordsApi, provisioning: api, projectId: scopedProjectId, row: target })
+async function writeProjectRow({ api, recordsApi, scoped, store, tenant, projectId, overviewSheetId, target, fields, pendingDecisionCount, existingRecords, recount, locale, now, summary }) {
+  let counts = { ready: false }
+  if (recount) {
+    counts = await countProjectSheetRows({ recordsApi, provisioning: api, projectId, row: target })
     if (counts.ready) {
       summary.countedCount += 1
       if (counts.bounded) summary.boundedCount += 1
-      await store.recordCounts({
-        tenantId: tenant,
-        projectNo: target.projectNo,
-        rowCount: counts.rowCount,
-        activeRowCount: counts.activeRowCount,
-        countsBounded: counts.bounded === true,
-        procurementOpenCount: counts.procurementOpenCount,
-        warehouseOpenCount: counts.warehouseOpenCount,
-        countsAt,
-      })
     } else {
       summary.unreadableCount += 1
     }
-    const data = buildProjectOverviewRow({
-      target,
-      fields: fieldsByProjectNo.get(target.projectNo) || null,
-      counts,
-      pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
-      todoViewId: projectTodoViewId({ provisioning: api, projectId: scopedProjectId, objectId: target.objectId }),
-      locale,
-      countsAt,
+  }
+  const changed = countsDifferFromRegistry(target, counts)
+  let measuredAt = target.countsAt
+  if (changed) {
+    measuredAt = now()
+    await store.recordCounts({
+      tenantId: tenant,
+      projectNo: target.projectNo,
+      rowCount: counts.rowCount,
+      activeRowCount: counts.activeRowCount,
+      countsBounded: counts.bounded === true,
+      procurementOpenCount: counts.procurementOpenCount,
+      warehouseOpenCount: counts.warehouseOpenCount,
+      countsAt: measuredAt,
     })
-    const existing = existingByProjectNo.get(target.projectNo)
-    if (!existing) {
-      await scoped.createRecord({ data })
-      summary.rowsCreated += 1
-    } else if (sameProjection(existing, data)) {
-      summary.rowsUnchanged += 1
-    } else {
-      await scoped.patchRecord({ recordId: existing.id, changes: data })
-      summary.rowsUpdated += 1
-    }
   }
+  const data = buildProjectOverviewRow({
+    target,
+    fields,
+    counts,
+    pendingDecisionCount,
+    todoViewId: projectTodoViewId({ provisioning: api, projectId, objectId: target.objectId }),
+    locale,
+    countsAt: measuredAt,
+  })
+  const [keep, ...duplicates] = existingRecords
+  for (const duplicate of duplicates) {
+    await deleteOverviewRow(recordsApi, overviewSheetId, duplicate)
+    summary.rowsRemovedDuplicate += 1
+  }
+  if (!keep) {
+    await scoped.createRecord({ data })
+    summary.rowsCreated += 1
+  } else if (sameProjection(keep, data)) {
+    summary.rowsUnchanged += 1
+  } else {
+    await scoped.patchRecord({ recordId: keep.id, changes: data })
+    summary.rowsUpdated += 1
+  }
+}
+
+function emptySummary(projectCount = 0) {
   return {
-    sheetId: sheet.sheetId,
-    sheetCreated: sheet.created === true,
-    activeViewId: sheet.activeViewId,
-    archivedViewId: sheet.archivedViewId,
-    truncated,
-    ledgerReady: pending.ready === true,
-    countsAt: countsAt.toISOString(),
-    ...summary,
+    projectCount,
+    countedCount: 0,
+    unreadableCount: 0,
+    boundedCount: 0,
+    rowsCreated: 0,
+    rowsUpdated: 0,
+    rowsUnchanged: 0,
+    rowsRemovedDuplicate: 0,
+    rowsRemovedOrphan: 0,
   }
+}
+
+function requireDeletePort(recordsApi) {
+  if (!recordsApi || typeof recordsApi.deleteRecord !== 'function') {
+    throw new StockPreparationProjectOverviewError(501, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'the records API cannot delete overview rows here; the overview cannot be kept at one row per project')
+  }
+}
+
+/**
+ * THE REFRESH (ADR §5, the `POST …/project-overview/refresh` leg; fix round 1 R3 / R6 / R7). Projects
+ * into an EXISTING stamped overview only (409 ABSENT otherwise — the PULL tier creates it). Under the
+ * tenant's overview lock, within bounds:
+ *   1. the registry rows of the tenant (≤ 200 projected; more is truncated and said);
+ *   2. the ledger's pending counts, once for every project (degrades to zeros, `ledgerReady` says);
+ *   3. the overview's own rows (bounded): rows of projects no longer registered (or without a project
+ *      number) are deleted, and per project only the first row is kept — the rest are race residue;
+ *   4. per registry row: count the project sheet (bounded), stamp the registry only when the counts
+ *      changed, create or patch the overview row only when its projection (minus 「截至」) changed.
+ * Returns a values-free summary. The caller audits it (`project_overview_refresh`).
+ */
+async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, now = () => new Date() } = {}) {
+  const api = requireProvisioning(provisioning)
+  assertHostStampsSystemKind(api)
+  const tenant = requiredString(tenantId, 'tenantId')
+  const scopedProjectId = requiredString(projectId, 'projectId')
+  const registry = requireOverviewStore(store)
+  requireDeletePort(recordsApi)
+  const sheet = await findProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId })
+  if (!sheet) {
+    throw new StockPreparationProjectOverviewError(409, ABSENT_CODE, 'the project overview has not been created yet; a puller creates it (it is also created with the first project sheet)', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
+  }
+  return registry.withOverviewLock({ tenantId: tenant }, async () => {
+    // The refresh's own clock — 「截至」 of the facts this run looked at (a row keeps the clock of its
+    // last CHANGED measurement, R7; this is when the overview was last checked against the registry).
+    const refreshedAt = now()
+    const allRows = await registry.list({ tenantId: tenant })
+    const truncated = allRows.length > MAX_PROJECT_OVERVIEW_ROWS
+    const rows = truncated ? allRows.slice(0, MAX_PROJECT_OVERVIEW_ROWS) : allRows
+    const registeredNos = new Set(allRows.map((row) => row.projectNo))
+    const fieldsByProjectNo = await registry.listProjectFields({ tenantId: tenant })
+    let pending = { ready: false, byProjectNo: new Map() }
+    try {
+      pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, null)
+    } catch (error) {
+      pending = { ready: false, byProjectNo: new Map() }
+    }
+    const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
+    const summary = emptySummary(rows.length)
+    const byProjectNo = new Map()
+    let overflow = false
+    for (let page = 0; page < OVERVIEW_READ_MAX_PAGES; page += 1) {
+      const batch = await scoped.queryRecords({ filters: {}, limit: OVERVIEW_READ_PAGE_LIMIT, offset: page * OVERVIEW_READ_PAGE_LIMIT })
+      if (!Array.isArray(batch)) {
+        throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
+      }
+      for (const record of batch) {
+        const no = optionalString(readLogicalCell(record, 'projectNo'))
+        if (!no || !registeredNos.has(no)) {
+          await deleteOverviewRow(recordsApi, sheet.sheetId, record)
+          summary.rowsRemovedOrphan += 1
+          continue
+        }
+        if (!byProjectNo.has(no)) byProjectNo.set(no, [])
+        byProjectNo.get(no).push(record)
+      }
+      if (batch.length < OVERVIEW_READ_PAGE_LIMIT) break
+      if (page === OVERVIEW_READ_MAX_PAGES - 1) overflow = true
+    }
+    for (const target of rows) {
+      await writeProjectRow({
+        api,
+        recordsApi,
+        scoped,
+        store: registry,
+        tenant,
+        projectId: scopedProjectId,
+        overviewSheetId: sheet.sheetId,
+        target,
+        fields: fieldsByProjectNo.get(target.projectNo) || null,
+        pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
+        existingRecords: byProjectNo.get(target.projectNo) || [],
+        recount: true,
+        locale,
+        now,
+        summary,
+      })
+    }
+    return {
+      sheetId: sheet.sheetId,
+      activeViewId: sheet.activeViewId,
+      archivedViewId: sheet.archivedViewId,
+      truncated,
+      overflow,
+      ledgerReady: pending.ready === true,
+      countsAt: refreshedAt instanceof Date ? refreshedAt.toISOString() : String(refreshedAt),
+      ...summary,
+    }
+  })
+}
+
+/**
+ * THE PER-EVENT UPDATE (fix round 1, R5; ADR §5 「插件在这些时刻对单个项目行做 upsert」). ONE project's
+ * overview row after a create, archive, restore, project-fields change, dry-run / apply outcome or
+ * confirmation. A no-op (`outcome: 'overview_absent'`) when there is no overview. Under the tenant's
+ * overview lock: the project's existing rows are read, duplicates deleted, and the row created / patched
+ * only when its projection changed; a project that is no longer registered has its rows removed.
+ * `recount` re-measures the project sheet (the pull outcomes change the rows; the others do not).
+ * BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's outcome.
+ */
+async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenantId, projectId, projectNo, recount = false, locale, now = () => new Date() } = {}) {
+  const api = requireProvisioning(provisioning)
+  const tenant = requiredString(tenantId, 'tenantId')
+  const scopedProjectId = requiredString(projectId, 'projectId')
+  const no = requiredString(projectNo, 'projectNo')
+  const registry = requireOverviewStore(store)
+  requireDeletePort(recordsApi)
+  const sheet = await findProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId })
+  if (!sheet) return { outcome: 'overview_absent' }
+  return registry.withOverviewLock({ tenantId: tenant }, async () => {
+    const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
+    const existing = await scoped.queryRecords({ filters: { projectNo: no }, limit: OVERVIEW_PROJECT_ROW_READ_LIMIT, offset: 0 })
+    if (!Array.isArray(existing)) {
+      throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
+    }
+    const mine = existing.filter((record) => optionalString(readLogicalCell(record, 'projectNo')) === no)
+    const summary = emptySummary(1)
+    const target = await registry.get({ tenantId: tenant, projectNo: no })
+    if (!target) {
+      for (const record of mine) {
+        await deleteOverviewRow(recordsApi, sheet.sheetId, record)
+        summary.rowsRemovedOrphan += 1
+      }
+      return { outcome: 'removed', sheetId: sheet.sheetId, ...summary }
+    }
+    const fields = await registry.getProjectFields({ tenantId: tenant, projectNo: no })
+    let pendingDecisionCount = 0
+    try {
+      const pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, no)
+      pendingDecisionCount = pending.byProjectNo.get(no) || 0
+    } catch (error) {
+      pendingDecisionCount = 0
+    }
+    await writeProjectRow({
+      api,
+      recordsApi,
+      scoped,
+      store: registry,
+      tenant,
+      projectId: scopedProjectId,
+      overviewSheetId: sheet.sheetId,
+      target,
+      fields,
+      pendingDecisionCount,
+      existingRecords: mine,
+      recount: recount === true,
+      locale,
+      now,
+      summary,
+    })
+    return { outcome: 'updated', sheetId: sheet.sheetId, ...summary }
+  })
 }
 
 module.exports = {
@@ -503,21 +795,32 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
   STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS,
   MAX_PROJECT_OVERVIEW_ROWS,
+  PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
   StockPreparationProjectOverviewError,
   projectOverviewPosture,
   buildProjectOverviewDeepLink,
   buildProjectOverviewDescriptor,
   buildProjectOverviewViewDescriptor,
   projectOverviewViewHandles,
+  findProjectOverviewSheet,
   ensureProjectOverviewSheet,
+  grantProjectOverviewRoles,
   countProjectSheetRows,
   buildProjectOverviewRow,
   refreshProjectOverview,
+  updateProjectOverviewRow,
   __internals: {
     assertOverviewStamped,
+    assertHostStampsSystemKind,
+    mapHostOverviewError,
+    countsDifferFromRegistry,
     projectTodoViewId,
     sameProjection,
+    PROJECTION_COMPARED_FIELD_IDS,
     PROJECT_SHEET_COUNT_FIELD_IDS,
     STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
+    HOST_UNSUPPORTED_CODE,
+    NOT_STAMPED_CODE,
+    ABSENT_CODE,
   },
 }

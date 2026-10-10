@@ -1291,8 +1291,10 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
   const pullTier = STOCK_PREP_WORKBENCH_CAPABILITIES.filter((entry) => entry.code === STOCK_PREP_PULL)
   assert.deepEqual(
     pullTier.map((entry) => entry.capability).sort(),
-    ['projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
-    'P-14: exactly three PULL-tier manifest capabilities — create, archive, restore',
+    // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
+    // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
+    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
+    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
   )
   for (const entry of pullTier) {
     for (const [user, expected, who] of [

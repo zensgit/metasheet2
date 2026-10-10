@@ -50,6 +50,24 @@
 //        object-scope refusal is 503 TARGET_SCHEMA_UNAVAILABLE (not a raw 500); a scope refusal still
 //        degrades to the ledger's word (200, already installed).
 //
+// FIX ROUND 1 (register R-37):
+//   O-07  (R6) only the PULL tier creates the overview (`ensure`, and the project-target create when it is
+//         absent), with the G1 READ grant; the OPERATE refresh never creates (409 ABSENT) and is cooled
+//         down (200 `fresh: false`, no refresh IO); O-07b the create's best-effort overview leg.
+//   O-08  (R8) an older host is 503 before ANY IO; an unstamped sheet at the derived id is 409 with nothing
+//         created and no list handle; the host's in-transaction adoption refusal and a column-less
+//         database (E2) are typed.
+//   O-10  (R7) a refresh that measures the same numbers writes nothing and leaves 「截至」 where it was.
+//   O-11  (R10) a refusal code without error-code shape is stored as UNKNOWN with one values-free warn.
+//   O-14  (R3) concurrent refreshes under the overview lock leave one row per project; duplicates and
+//         orphans (unregistered projects) are deleted through the plugin write port.
+//   O-15  (R5) create / archive / restore / project fields / dry-run / confirm update THAT project's row at
+//         once; an overview failure never changes the event's answer and logs a code only.
+//   O-16  (R2) the DATE column reads back as the stored day in UTC+ (and UTC−) processes.
+//   O-17  (R13) control characters / NUL in the free texts are a typed 400.
+//   O-18  (E2) unknown errors on the S3 routes are a fixed values-free 500; a column-less database a 503.
+//   O-19  (R10) the store maps a bad code shape to UNKNOWN and never throws over it.
+//
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -81,6 +99,9 @@ const KIND = overview.STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND
 
 const FIELDS_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/project-fields'
 const REFRESH_PATH = '/api/integration/stock-preparation/project-overview/refresh'
+const ENSURE_PATH = '/api/integration/stock-preparation/project-overview/ensure'
+const ARCHIVE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/archive'
+const RESTORE_PATH = '/api/integration/stock-preparation/projects/:projectNo/target/restore'
 const LIST_PATH = '/api/integration/stock-preparation/project-targets'
 const TARGET_PATH = '/api/integration/stock-preparation/projects/:projectNo/target'
 const DRY_RUN_PATH = '/api/integration/table-actions/:actionId/dry-run'
@@ -96,19 +117,37 @@ const NOTE = '一句自由文本备注'
 const DAY = '2026-12-24'
 
 const getFields = (h, user, projectNo = PROJECT) => projectSheet.call(h.routes, 'GET', FIELDS_PATH, { user, params: { projectNo }, query: { tenantId: TENANT } })
-const putFields = (h, user, body, projectNo = PROJECT) => projectSheet.call(h.routes, 'PUT', FIELDS_PATH, { user, params: { projectNo }, body })
+// Fix round 1 (R9): the project-level columns are a PARTIAL update — PATCH.
+const patchFields = (h, user, body, projectNo = PROJECT) => projectSheet.call(h.routes, 'PATCH', FIELDS_PATH, { user, params: { projectNo }, body })
 const refresh = (h, user = FLOOR) => projectSheet.call(h.routes, 'POST', REFRESH_PATH, { user, body: {} })
+const ensure = (h, user = PULLER) => projectSheet.call(h.routes, 'POST', ENSURE_PATH, { user, body: {} })
 const listTargets = (h, user = FLOOR) => projectSheet.call(h.routes, 'GET', LIST_PATH, { user, query: { tenantId: TENANT } })
 const getTarget = (h, user, projectNo = PROJECT) => projectSheet.call(h.routes, 'GET', TARGET_PATH, { user, params: { projectNo }, query: { tenantId: TENANT } })
+const createTarget = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', TARGET_PATH, { user, params: { projectNo }, body: {} })
+const archive = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', ARCHIVE_PATH, { user, params: { projectNo }, body: { confirmProjectNo: projectNo } })
+const restore = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', RESTORE_PATH, { user, params: { projectNo }, body: { confirmProjectNo: projectNo } })
 const dryRun = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', DRY_RUN_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
 const directory = (h, user = FLOOR) => projectSheet.call(h.routes, 'GET', DIRECTORY_PATH, { user, query: { includePullTargets: '1' } })
 
+/** The refresh cooldown is per tenant per process, on `Date.now()`; tests step a FAKE clock past it. */
+const realDateNow = Date.now
+let clockOffsetMs = 0
+Date.now = () => realDateNow() + clockOffsetMs
+const passCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS + 1000 }
+
+/** A logger that keeps what the routes warn, to pin that a warn is values-free. */
+function capturingLogger() {
+  const warnings = []
+  return { warnings, info() {}, error() {}, warn(message, meta) { warnings.push({ message, meta }) } }
+}
+
 function mount(options = {}) {
-  const h = projectSheet.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, ...options })
+  const h = projectSheet.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, stampsSystemKind: true, ...options })
   // The harness records fake ignores filters / offsets and does not persist a patch; the overview
   // needs both (it narrows a project sheet by project number and reads its own rows back), so the
   // fake is tightened HERE, on the same object the routes read through `context.api.multitable`.
   const rows = []
+  let seq = 0
   h.records.queryRecords = async (input = {}) => {
     h.records.calls.push(['queryRecords', input.sheetId])
     const filters = input.filters || {}
@@ -119,7 +158,8 @@ function mount(options = {}) {
   }
   h.records.createRecord = async (input = {}) => {
     h.records.calls.push(['createRecord', input.sheetId])
-    const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
+    seq += 1
+    const created = { id: `rec_${seq}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
     rows.push(created)
     return projectSheet.clone(created)
   }
@@ -130,6 +170,13 @@ function mount(options = {}) {
     Object.assign(row.data, input.changes || {})
     row.version += 1
     return projectSheet.clone(row)
+  }
+  h.records.deleteRecord = async (input = {}) => {
+    h.records.calls.push(['deleteRecord', input.sheetId])
+    const index = rows.findIndex((candidate) => candidate.id === input.recordId && candidate.sheetId === input.sheetId)
+    assert.ok(index >= 0, 'deleteRecord addresses a row the fake holds')
+    rows.splice(index, 1)
+    return { id: input.recordId, sheetId: input.sheetId, version: 1 }
   }
   h.rows = rows
   return h
@@ -162,7 +209,7 @@ function seedProjectRows(h, projectNo, { total, active, procurementDone = 0, war
 const overviewSheetId = (h) => h.provisioning.sheetIdOf(STAGING, OVERVIEW_OBJECT)
 const overviewRows = (h) => h.rows.filter((row) => row.sheetId === overviewSheetId(h))
 const logical = (row, key) => row.data[phys(OVERVIEW_OBJECT, key)]
-const hostWrites = (h) => h.provisioning.calls.filter((c) => ['ensureObject', 'ensureView', 'ensureMissingObjectFields', 'patchObjectFieldProperty', 'grantSheetRoleWrite'].includes(c[0]))
+const hostWrites = (h) => h.provisioning.calls.filter((c) => ['ensureObject', 'ensureView', 'ensureMissingObjectFields', 'patchObjectFieldProperty', 'grantSheetRoleWrite', 'grantOverviewRoleRead'].includes(c[0]))
 
 function registryRow(h, projectNo = PROJECT) {
   return h.registryRows().find((row) => row.project_no === projectNo)
@@ -223,11 +270,11 @@ test('O-03 the deep link is two encoded handles or null', () => {
 })
 
 // ── O-04 ───────────────────────────────────────────────────────────────────────────────────────────
-test('O-04 switch OFF: the three routes are 404 DISABLED with zero IO; the gate refuses first', async () => {
+test('O-04 switch OFF: the four routes are 404 DISABLED with zero IO; the gate refuses first', async () => {
   const h = mount({ switchOn: false })
   try {
     h.seedRegistryRow(PROJECT)
-    for (const [label, run] of [['get', () => getFields(h, FLOOR)], ['put', () => putFields(h, FLOOR, { note: NOTE })], ['refresh', () => refresh(h, FLOOR)]]) {
+    for (const [label, run] of [['get', () => getFields(h, FLOOR)], ['patch', () => patchFields(h, FLOOR, { note: NOTE })], ['refresh', () => refresh(h, FLOOR)], ['ensure', () => ensure(h, PULLER)]]) {
       const res = await run()
       assert.equal(res.statusCode, 404, `${label}: ${JSON.stringify(res.body)}`)
       assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')
@@ -236,11 +283,14 @@ test('O-04 switch OFF: the three routes are 404 DISABLED with zero IO; the gate 
     assert.deepEqual(h.provisioning.calls, [], 'no host call')
     assert.deepEqual(h.records.calls, [], 'no records call')
     assert.deepEqual(h.auditAppends, [])
-    for (const run of [() => getFields(h, READ_ONLY), () => putFields(h, READ_ONLY, { note: NOTE }), () => refresh(h, READ_ONLY)]) {
+    for (const run of [() => getFields(h, READ_ONLY), () => patchFields(h, READ_ONLY, { note: NOTE }), () => refresh(h, READ_ONLY), () => ensure(h, FLOOR)]) {
       const res = await run()
       assert.equal(res.statusCode, 403, JSON.stringify(res.body))
     }
     assert.deepEqual(h.db.calls, [])
+    // Fix round 1 (R9): the update verb is PATCH; there is no PUT route any more.
+    assert.equal(h.routes.has(`PUT ${FIELDS_PATH}`), false)
+    assert.equal(h.routes.has(`PATCH ${FIELDS_PATH}`), true)
   } finally { h.restore() }
 })
 
@@ -249,7 +299,7 @@ test('O-05 project fields: the closed whitelist, the caps, the calendar day, abs
   const h = mount()
   try {
     h.seedRegistryRow(PROJECT)
-    const unknown = await putFields(h, FLOOR, { note: NOTE, owner: 'x' })
+    const unknown = await patchFields(h, FLOOR, { note: NOTE, owner: 'x' })
     assert.equal(unknown.statusCode, 400, JSON.stringify(unknown.body))
     assert.equal(unknown.body.error.code, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID')
     const cases = [
@@ -258,25 +308,33 @@ test('O-05 project fields: the closed whitelist, the caps, the calendar day, abs
       [{ plannedFinishOn: '2026-13-01' }, 'plannedFinishOn'],
       [{ plannedFinishOn: '2026-02-30' }, 'plannedFinishOn'],
       [{ plannedFinishOn: '2026-12-24T00:00:00Z' }, 'plannedFinishOn'],
+      // Fix round 1 (R2): year 0000 (and so any year below 1) is not a storable day.
+      [{ plannedFinishOn: '0000-01-01' }, 'plannedFinishOn'],
+      [{ plannedFinishOn: '0000-02-29' }, 'plannedFinishOn'],
       [{ note: 42 }, 'note'],
       [{}, 'body'],
     ]
     for (const [body, field] of cases) {
-      const res = await putFields(h, FLOOR, body)
+      const res = await patchFields(h, FLOOR, body)
       assert.equal(res.statusCode, 422, `${JSON.stringify(body).slice(0, 40)}: ${JSON.stringify(res.body)}`)
       assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
       assert.equal(res.body.error.details.field, field)
       const serialized = JSON.stringify(res.body)
-      assert.ok(!serialized.includes('xxxxx') && !serialized.includes('yyyyy') && !serialized.includes('2026-13') && !serialized.includes('2026-02-30'), 'the refusal never echoes the value')
+      assert.ok(!serialized.includes('xxxxx') && !serialized.includes('yyyyy') && !serialized.includes('2026-13') && !serialized.includes('2026-02-30') && !serialized.includes('0000-0'), 'the refusal never echoes the value')
     }
-    assert.ok(!h.db.calls.some((c) => c.startsWith('updateRow')), 'no update statement for a refused patch')
-    assert.deepEqual(h.auditAppends, [])
+    // Year 0001 IS a day.
+    const yearOne = await patchFields(h, FLOOR, { plannedFinishOn: '0001-01-01' })
+    assert.equal(yearOne.statusCode, 200, JSON.stringify(yearOne.body))
+    assert.equal(yearOne.body.data.fields.plannedFinishOn, '0001-01-01')
+    assert.equal((await patchFields(h, FLOOR, { plannedFinishOn: null })).statusCode, 200)
+    h.auditAppends.length = 0
+    h.db.calls.length = 0
     // Absent (another project) and archived.
-    const absent = await putFields(h, FLOOR, { note: NOTE }, 'PRJ-S3-NOPE')
+    const absent = await patchFields(h, FLOOR, { note: NOTE }, 'PRJ-S3-NOPE')
     assert.equal(absent.statusCode, 409)
     assert.equal(absent.body.error.code, 'STOCK_PREPARATION_PROJECT_ABSENT')
     h.seedRegistryRow(PROJECT_B, { archived: true })
-    const archived = await putFields(h, FLOOR, { note: NOTE }, PROJECT_B)
+    const archived = await patchFields(h, FLOOR, { note: NOTE }, PROJECT_B)
     assert.equal(archived.statusCode, 409, JSON.stringify(archived.body))
     assert.equal(archived.body.error.code, 'STOCK_PREPARATION_PROJECT_ARCHIVED')
     assert.ok(!h.db.calls.some((c) => c.startsWith('updateRow')), 'an archived project is refused without an update statement')
@@ -299,14 +357,15 @@ test('O-06 project fields: the write is locked + compare-and-set, the GET reads 
   const h = mount()
   try {
     h.seedRegistryRow(PROJECT)
-    const res = await putFields(h, FLOOR, { responsibleLabel: ` ${RESPONSIBLE} `, note: NOTE, plannedFinishOn: DAY })
+    const res = await patchFields(h, FLOOR, { responsibleLabel: ` ${RESPONSIBLE} `, note: NOTE, plannedFinishOn: DAY })
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
     assert.deepEqual(res.body.data.fields, { responsibleLabel: RESPONSIBLE, note: NOTE, plannedFinishOn: DAY })
     assert.deepEqual(res.body.data.changed, ['responsibleLabel', 'note', 'plannedFinishOn'])
     assert.equal(res.body.data.status, 'active')
     assert.deepEqual(res.body.data.may, { update: true })
     assert.ok(typeof res.body.data.updatedAt === 'string')
-    // Order: transaction → the tenant lock → FOR UPDATE → the compare-and-set update.
+    // Order: transaction → the tenant lock → FOR UPDATE → the compare-and-set update. (No overview exists
+    // yet, so the per-event row update after it is a lookup and nothing else.)
     const writes = h.db.calls.filter((c) => /^(transaction|advisoryXactLock|selectOneForUpdate|updateRow)/.test(c))
     assert.deepEqual(writes, ['transaction', `advisoryXactLock:stock-prep-project-target:${TENANT}`, 'selectOneForUpdate:integration_stock_prep_project_target', 'updateRow:integration_stock_prep_project_target'])
     const row = registryRow(h)
@@ -330,11 +389,11 @@ test('O-06 project fields: the write is locked + compare-and-set, the GET reads 
       for (const forbidden of [RESPONSIBLE, NOTE, DAY]) assert.ok(!serialized.includes(forbidden), `${forbidden} must not leave the project-fields routes`)
     }
     // A partial patch changes exactly its keys; '' and null clear.
-    const partial = await putFields(h, FLOOR, { note: '' })
+    const partial = await patchFields(h, FLOOR, { note: '' })
     assert.equal(partial.statusCode, 200)
     assert.deepEqual(partial.body.data.changed, ['note'])
     assert.deepEqual(partial.body.data.fields, { responsibleLabel: RESPONSIBLE, note: null, plannedFinishOn: DAY })
-    const cleared = await putFields(h, WORKBENCH_ADMIN, { plannedFinishOn: null })
+    const cleared = await patchFields(h, WORKBENCH_ADMIN, { plannedFinishOn: null })
     assert.equal(cleared.statusCode, 200)
     assert.deepEqual(cleared.body.data.fields, { responsibleLabel: RESPONSIBLE, note: null, plannedFinishOn: null })
     assert.deepEqual(h.auditAppends.slice(1).map((e) => e.detail), [{ updatedFieldCount: 1, fields: { note: 1 } }, { updatedFieldCount: 1, fields: { plannedFinishOn: 1 } }])
@@ -342,60 +401,189 @@ test('O-06 project fields: the write is locked + compare-and-set, the GET reads 
 })
 
 // ── O-07 ───────────────────────────────────────────────────────────────────────────────────────────
-test('O-07 the refresh creates the overview once — stamped, with its two views — and never again', async () => {
-  const h = mount()
+test('O-07 (R6) only the PULL tier creates the overview — once, stamped, with its views and the G1 READ grant; the refresh never creates and is cooled down', async () => {
+  const h = mount({ grantRoleIds: ['stock-prep_frontline', 'stock-prep_puller'] })
   try {
-    const first = await refresh(h)
+    // The OPERATE refresh never provisions: no overview → 409 ABSENT, nothing written, nothing audited.
+    const early = await refresh(h, FLOOR)
+    assert.equal(early.statusCode, 409, JSON.stringify(early.body))
+    assert.equal(early.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT')
+    assert.deepEqual(hostWrites(h), [])
+    assert.deepEqual(h.records.calls, [])
+    assert.deepEqual(h.auditAppends, [])
+    // …and the floor cannot ensure it (PULL tier), at no cost.
+    h.provisioning.calls.length = 0
+    assert.equal((await ensure(h, FLOOR)).statusCode, 403)
+    assert.deepEqual(h.provisioning.calls, [])
+
+    const first = await ensure(h, PULLER)
     assert.equal(first.statusCode, 200, JSON.stringify(first.body))
-    assert.equal(first.body.data.sheetCreated, true)
+    assert.equal(first.body.data.created, true)
     assert.equal(first.body.data.sheetId, overviewSheetId(h))
     assert.equal(first.body.data.activeViewId, `view_${OVERVIEW_OBJECT.slice(-8)}_overview-active`)
     assert.equal(first.body.data.archivedViewId, `view_${OVERVIEW_OBJECT.slice(-8)}_overview-archived`)
-    assert.deepEqual(hostWrites(h).map((c) => c.slice(0, 2)), [['ensureObject', OVERVIEW_OBJECT], ['ensureView', 'overview-active'], ['ensureView', 'overview-archived']])
+    assert.deepEqual(first.body.data.grant, { attempted: true, skipped: null, roleCount: 2, granted: 2, alreadyGranted: 0 })
+    assert.deepEqual(hostWrites(h).map((c) => c.slice(0, 2)), [['ensureObject', OVERVIEW_OBJECT], ['ensureView', 'overview-active'], ['ensureView', 'overview-archived'], ['grantOverviewRoleRead', overviewSheetId(h)]])
+    // The lookup came FIRST (R8b) — before the ensure wrote anything.
+    assert.deepEqual(h.provisioning.calls[0], ['findObjectSheet', OVERVIEW_OBJECT])
     const object = h.provisioning.objects.get(`${STAGING}/${OVERVIEW_OBJECT}`)
     assert.equal(object.systemKind, KIND, 'the host was asked to stamp the overview kind')
     assert.deepEqual([...object.fields.keys()], [...overview.STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS])
-    assert.deepEqual(h.auditAppends.map((e) => [e.action, e.mode, e.subjectId]), [['project_overview_refresh', 'sheet_created', overviewSheetId(h)]])
-    assert.deepEqual(h.auditAppends[0].detail, { projectCount: 0, countedCount: 0, unreadableCount: 0, boundedCount: 0, rowsCreated: 0, rowsUpdated: 0, rowsUnchanged: 0, truncated: false, ledgerReady: false })
-    // The list now hands the home page the overview's handles.
+    // G1 READ: the configured roles, the overview object, the plugin's own staging project — nothing from the request.
+    assert.deepEqual(h.provisioning.overviewGrantCalls.map((c) => [c.projectId, c.sheetId, c.objectId, c.roleIds, c.actorId]), [[STAGING, overviewSheetId(h), OVERVIEW_OBJECT, ['stock-prep_frontline', 'stock-prep_puller'], PULLER.id]])
+    assert.deepEqual(h.auditAppends.map((e) => [e.action, e.mode, e.subjectId, e.projectId ?? null]), [
+      ['project_overview_refresh', 'sheet_created', overviewSheetId(h), null],
+      ['project_target_grant', 'overview_read_granted', overviewSheetId(h), null],
+    ])
+    assert.deepEqual(h.auditAppends[1].detail, { roleCount: 2, granted: 2, alreadyGranted: 0 })
+    // The list hands the home page the STAMPED overview's handles.
     const list = await listTargets(h)
-    assert.deepEqual(list.body.data.overview, { sheetId: overviewSheetId(h), activeViewId: first.body.data.activeViewId, archivedViewId: first.body.data.archivedViewId })
+    assert.deepEqual(list.body.data.overview, { status: 'ready', sheetId: overviewSheetId(h), activeViewId: first.body.data.activeViewId, archivedViewId: first.body.data.archivedViewId })
+    // A second ensure writes no sheet and no view; the grant re-runs (heals) and adds nothing.
     h.provisioning.calls.length = 0
-    const second = await refresh(h)
+    const second = await ensure(h, WORKBENCH_ADMIN)
     assert.equal(second.statusCode, 200)
-    assert.equal(second.body.data.sheetCreated, false)
-    assert.deepEqual(hostWrites(h), [], 'a second refresh writes no sheet and no view')
-    assert.equal(h.auditAppends[1].mode, 'refreshed')
+    assert.equal(second.body.data.created, false)
+    assert.deepEqual(hostWrites(h).map((c) => c[0]), ['grantOverviewRoleRead'])
+    assert.equal(h.auditAppends[2].mode, 'overview_read_already_granted')
+
+    // THE REFRESH projects into it; a second click inside the cooldown is 200 fresh:false with NO refresh IO.
+    const r1 = await refresh(h, FLOOR)
+    assert.equal(r1.statusCode, 200, JSON.stringify(r1.body))
+    assert.equal(r1.body.data.fresh, true)
+    assert.equal(r1.body.data.sheetId, overviewSheetId(h))
+    assert.equal(h.auditAppends.at(-1).mode, 'refreshed')
+    const audits = h.auditAppends.length
+    const dbCalls = h.db.calls.length
+    const hostCalls = h.provisioning.calls.length
+    const recordCalls = h.records.calls.length
+    const cooled = await refresh(h, FLOOR)
+    assert.equal(cooled.statusCode, 200)
+    assert.deepEqual(Object.keys(cooled.body.data).sort(), ['cooldownSeconds', 'fresh', 'retryAfterSeconds'])
+    assert.equal(cooled.body.data.fresh, false)
+    assert.equal(cooled.body.data.cooldownSeconds, 60)
+    assert.ok(cooled.body.data.retryAfterSeconds >= 1 && cooled.body.data.retryAfterSeconds <= 60)
+    assert.deepEqual([h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length], [audits, dbCalls, hostCalls, recordCalls], 'inside the cooldown: no registry, host, records or audit work')
+    passCooldown()
+    const r2 = await refresh(h, FLOOR)
+    assert.equal(r2.body.data.fresh, true)
+    assert.deepEqual(hostWrites(h).filter((c) => c[0] === 'ensureObject' || c[0] === 'ensureView'), [], 'the refresh never provisions')
   } finally { h.restore() }
 })
 
+test('O-07b (R6) the project-target create ensures the overview when it is absent (best-effort) and writes the project\'s row', async () => {
+  const h = mount({ grantRoleIds: ['stock-prep_frontline'] })
+  try {
+    const created = await createTarget(h, PULLER)
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+    assert.deepEqual(created.body.data.overview, { ensured: true, created: true, code: null })
+    assert.equal(h.provisioning.objects.get(`${STAGING}/${OVERVIEW_OBJECT}`).systemKind, KIND)
+    assert.equal(overviewRows(h).length, 1, 'the new project\'s row is written at once')
+    assert.equal(logical(overviewRows(h)[0], 'projectNo'), PROJECT)
+    assert.deepEqual(h.auditAppends.map((e) => [e.action, e.mode]), [
+      ['project_target_create', 'sheet_created'],
+      ['project_target_grant', 'granted'],
+      ['project_overview_refresh', 'sheet_created'],
+      ['project_target_grant', 'overview_read_granted'],
+    ])
+    // A second project: the overview exists, so it is not re-created; its row joins.
+    const second = await createTarget(h, PULLER, PROJECT_B)
+    assert.equal(second.statusCode, 201)
+    assert.deepEqual(second.body.data.overview, { ensured: true, created: false, code: null })
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
+  } finally { h.restore() }
+  // On an OLDER host the overview leg refuses before any IO and the create still answers 201.
+  const old = mount({ stampsSystemKind: false })
+  try {
+    const created = await createTarget(old, PULLER)
+    assert.equal(created.statusCode, 201, JSON.stringify(created.body))
+    assert.deepEqual(created.body.data.overview, { ensured: false, created: false, code: 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED' })
+    assert.ok(!old.provisioning.calls.some((c) => c[1] === OVERVIEW_OBJECT), 'no host call names the overview')
+  } finally { old.restore() }
+})
+
 // ── O-08 ───────────────────────────────────────────────────────────────────────────────────────────
-test('O-08 fail-closed on the stamp: an older host that does not report the kind, or an unstamped existing sheet, is 409 and nothing is written', async () => {
+test('O-08 (R8) fail-closed on the stamp: an older host is 503 before ANY IO; an unstamped sheet at the derived id is 409 with nothing created; the list issues no handle for it', async () => {
+  // (a) An older host: no stamp declaration → 503 before any host call, on ensure AND refresh.
+  const old = mount({ stampsSystemKind: false })
+  try {
+    for (const run of [() => ensure(old, PULLER), () => refresh(old, FLOOR)]) {
+      const res = await run()
+      assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED')
+    }
+    assert.deepEqual(old.provisioning.calls, [], 'no host call at all')
+    assert.deepEqual(old.records.calls, [])
+    assert.deepEqual(old.auditAppends, [])
+  } finally { old.restore() }
+
+  // (b) An UNSTAMPED sheet already at the derived id (made before the reservation, or by an older host).
   const h = mount()
   try {
-    const realEnsure = h.provisioning.ensureObject
-    h.provisioning.ensureObject = async (input) => {
-      const out = await realEnsure({ ...input, systemKind: undefined })
-      return out
-    }
-    const res = await refresh(h)
+    projectSheet.seedObject(h.provisioning, STAGING, OVERVIEW_OBJECT)
+    const res = await ensure(h, PULLER)
     assert.equal(res.statusCode, 409, JSON.stringify(res.body))
     assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED')
-    assert.deepEqual({ ...res.body.error.details }, { objectId: OVERVIEW_OBJECT, mode: 'created', reportedKind: 'none' })
-    assert.deepEqual(h.records.calls, [], 'no row written')
+    assert.deepEqual({ ...res.body.error.details }, { objectId: OVERVIEW_OBJECT, mode: 'existing', reportedKind: 'none' })
+    assert.deepEqual(hostWrites(h), [], 'nothing created, no field written onto it, no grant')
     assert.deepEqual(h.auditAppends, [])
-    // The unstamped sheet now EXISTS on the host; the next refresh refuses it too (an admin removes it).
-    h.provisioning.ensureObject = realEnsure
-    const again = await refresh(h)
-    assert.equal(again.statusCode, 409)
-    assert.deepEqual({ ...again.body.error.details }, { objectId: OVERVIEW_OBJECT, mode: 'existing', reportedKind: 'none' })
+    const list = await listTargets(h)
+    assert.deepEqual(list.body.data.overview, { status: 'not_stamped', sheetId: null, activeViewId: null, archivedViewId: null }, 'no handle for a sheet the plugin refuses')
+    const r = await refresh(h, FLOOR)
+    assert.equal(r.statusCode, 409)
+    assert.equal(r.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED')
     assert.deepEqual(h.records.calls, [])
     // A sheet reporting SOME OTHER kind is refused the same way.
     h.provisioning.objects.get(`${STAGING}/${OVERVIEW_OBJECT}`).systemKind = 'people_directory'
-    const other = await refresh(h)
+    const other = await ensure(h, PULLER)
     assert.equal(other.statusCode, 409)
     assert.equal(other.body.error.details.reportedKind, 'other')
   } finally { h.restore() }
+
+  // (c) The race the lookup cannot see: the HOST refuses to adopt inside its transaction → the same 409.
+  const raced = mount()
+  try {
+    raced.provisioning.ensureObject = async () => { throw Object.assign(new Error('A sheet already exists at this id without the requested system kind; it is not adopted'), { status: 409, code: 'SHEET_SYSTEM_KIND_CONFLICT' }) }
+    const res = await ensure(raced, PULLER)
+    assert.equal(res.statusCode, 409, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED')
+    assert.deepEqual(raced.auditAppends, [])
+  } finally { raced.restore() }
+
+  // (d) A host that creates WITHOUT stamping (declares, then does not) is refused at the read-back.
+  const liar = mount()
+  try {
+    const realEnsure = liar.provisioning.ensureObject
+    liar.provisioning.ensureObject = async (input) => realEnsure({ ...input, systemKind: undefined })
+    const res = await ensure(liar, PULLER)
+    assert.equal(res.statusCode, 409)
+    assert.deepEqual({ ...res.body.error.details }, { objectId: OVERVIEW_OBJECT, mode: 'created', reportedKind: 'none' })
+    assert.ok(!liar.provisioning.calls.some((c) => c[0] === 'ensureView'), 'no view on an unstamped sheet')
+  } finally { liar.restore() }
+
+  // (e) A host that answers WITHOUT the systemKind key at all, and (E2) a database without the column.
+  const silent = mount()
+  try {
+    projectSheet.seedObject(silent.provisioning, STAGING, OVERVIEW_OBJECT)
+    const realFind = silent.provisioning.findObjectSheet
+    silent.provisioning.findObjectSheet = async (input) => {
+      const found = await realFind(input)
+      if (!found) return found
+      const { systemKind, ...rest } = found
+      return rest
+    }
+    const res = await ensure(silent, PULLER)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED')
+  } finally { silent.restore() }
+  const columnless = mount()
+  try {
+    columnless.provisioning.ensureObject = async () => { throw Object.assign(new Error('column "system_kind" of relation "meta_sheets" does not exist'), { code: '42703' }) }
+    const res = await ensure(columnless, PULLER)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED')
+    assert.ok(!JSON.stringify(res.body).includes('meta_sheets'), 'the database message is not echoed')
+  } finally { columnless.restore() }
 })
 
 // ── O-09 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -426,13 +614,14 @@ test('O-09 the bounded count of one project sheet: active rule, two open counts,
 })
 
 // ── O-10 ───────────────────────────────────────────────────────────────────────────────────────────
-test('O-10 the projection end to end: one row per registry row, deep link, posture, texts, counts, 截至, registry stamped, unchanged rows cost no write', async () => {
+test('O-10 the projection end to end: one row per registry row, deep link, posture, texts, counts, 截至, registry stamped; (R7) an unchanged refresh writes NOTHING', async () => {
   const h = mount()
   try {
     h.seedRegistryRow(PROJECT)
     h.seedRegistryRow(PROJECT_B, { archived: true })
     seedProjectRows(h, PROJECT, { total: 4, active: 3, procurementDone: 1, warehouseDone: 3 })
-    assert.equal((await putFields(h, FLOOR, { responsibleLabel: RESPONSIBLE, note: NOTE, plannedFinishOn: DAY })).statusCode, 200)
+    assert.equal((await patchFields(h, FLOOR, { responsibleLabel: RESPONSIBLE, note: NOTE, plannedFinishOn: DAY })).statusCode, 200)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
     h.records.calls.length = 0
     const res = await refresh(h, FLOOR)
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
@@ -441,7 +630,6 @@ test('O-10 the projection end to end: one row per registry row, deep link, postu
     assert.equal(summary.countedCount, 2)
     assert.equal(summary.rowsCreated, 2)
     assert.equal(summary.ledgerReady, false, 'no ledger on this substrate → pending counts are zero and said so')
-    assert.ok(typeof summary.countsAt === 'string' && !Number.isNaN(Date.parse(summary.countsAt)))
     const rows = overviewRows(h)
     assert.equal(rows.length, 2)
     const a = rows.find((row) => logical(row, 'projectNo') === PROJECT)
@@ -462,12 +650,12 @@ test('O-10 the projection end to end: one row per registry row, deep link, postu
     assert.equal(logical(a, 'warehouseOpenCount'), 0)
     assert.equal(logical(a, 'pendingDecisionCount'), 0)
     assert.equal(logical(a, 'missingComponentsCount'), 0)
-    assert.equal(logical(a, 'countsAt'), summary.countsAt, '「截至」 is the refresh\'s clock')
     assert.equal(logical(b, 'status'), 'archived')
     assert.equal(logical(b, 'postureKey'), 'archived')
     assert.equal(logical(b, 'rowCount'), 0)
     assert.equal(logical(b, 'responsibleLabel'), null)
-    // The registry's count columns were stamped, and the list shows them (the home's 「共 N 行」).
+    // The registry's count columns were stamped (they changed: never counted before), and 「截至」 on the
+    // row IS the registry's counts_at — the two agree.
     const stamped = registryRow(h)
     assert.equal(stamped.row_count, 4)
     assert.equal(stamped.active_row_count, 3)
@@ -475,48 +663,57 @@ test('O-10 the projection end to end: one row per registry row, deep link, postu
     assert.equal(stamped.warehouse_open_count, 0)
     assert.equal(stamped.counts_bounded, false)
     assert.ok(stamped.counts_at instanceof Date)
+    assert.equal(logical(a, 'countsAt'), stamped.counts_at.toISOString())
     const list = await listTargets(h)
     const item = list.body.data.items.find((i) => i.projectNo === PROJECT)
     assert.deepEqual([item.rowCount, item.activeRowCount, item.procurementOpenCount, item.warehouseOpenCount, item.countsBounded], [4, 3, 2, 0, false])
-    const target = await getTarget(h, FLOOR)
-    assert.equal(target.body.data.rowCount, 4)
     // The audit: counts only.
-    const audit = h.auditAppends.find((e) => e.action === 'project_overview_refresh')
-    assert.deepEqual(audit.detail, { projectCount: 2, countedCount: 2, unreadableCount: 0, boundedCount: 0, rowsCreated: 2, rowsUpdated: 0, rowsUnchanged: 0, truncated: false, ledgerReady: false })
+    const audit = h.auditAppends.filter((e) => e.action === 'project_overview_refresh').at(-1)
+    assert.deepEqual(audit.detail, { projectCount: 2, countedCount: 2, unreadableCount: 0, boundedCount: 0, rowsCreated: 2, rowsUpdated: 0, rowsUnchanged: 0, rowsRemovedDuplicate: 0, rowsRemovedOrphan: 0, truncated: false, ledgerReady: false })
     for (const forbidden of [RESPONSIBLE, NOTE, DAY]) assert.ok(!JSON.stringify(h.auditAppends).includes(forbidden))
-    // A second refresh re-measures every readable sheet, so 「截至」 moves and every counted row is
-    // PATCHED (never re-created): 200 bounded writes at most, one per registry row.
+
+    // R7: a second refresh that MEASURES THE SAME NUMBERS writes nothing — no overview patch, no registry
+    // stamp — and 「截至」 stays where it was (the counts did not change after it).
+    passCooldown()
+    const countsAtBefore = stamped.counts_at
     h.records.calls.length = 0
+    h.db.calls.length = 0
     const again = await refresh(h, FLOOR)
-    assert.deepEqual([again.body.data.rowsCreated, again.body.data.rowsUpdated, again.body.data.rowsUnchanged], [0, 2, 0])
-    assert.equal(overviewRows(h).length, 2, 'patched in place, never a second row per project')
-    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'countsAt'), again.body.data.countsAt)
-    // A changed project field lands on the next refresh.
-    assert.equal((await putFields(h, FLOOR, { note: '改过的备注' })).statusCode, 200)
-    const third = await refresh(h, FLOOR)
-    assert.equal(third.statusCode, 200)
-    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'note'), '改过的备注')
-    // UNREADABLE sheets keep the registry's last stamped counts and 「截至」 — and, with nothing else
-    // changed, cost no write at all (the unchanged path).
+    assert.deepEqual([again.body.data.rowsCreated, again.body.data.rowsUpdated, again.body.data.rowsUnchanged], [0, 0, 2])
+    assert.ok(!h.records.calls.some((c) => c[0] === 'createRecord' || c[0] === 'patchRecord'), 'R7: nothing written when nothing changed')
+    assert.ok(!h.db.calls.some((c) => c.startsWith('updateRow')), 'R7: the registry is not re-stamped either')
+    assert.equal(registryRow(h).counts_at, countsAtBefore)
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'countsAt'), countsAtBefore.toISOString())
+    // A changed count re-stamps and patches exactly that row, with a new 「截至」.
+    seedProjectRows(h, PROJECT, { total: 1, active: 1 })
+    passCooldown()
+    const changed = await refresh(h, FLOOR)
+    assert.deepEqual([changed.body.data.rowsUpdated, changed.body.data.rowsUnchanged], [1, 1])
+    const aAfter = overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT)
+    assert.equal(logical(aAfter, 'rowCount'), 5)
+    assert.notEqual(logical(aAfter, 'countsAt'), countsAtBefore.toISOString())
+    assert.equal(logical(aAfter, 'countsAt'), registryRow(h).counts_at.toISOString())
+    // UNREADABLE sheets keep the registry's last stamped counts and 「截至」, and cost no write.
     const realQuery = h.records.queryRecords
     h.records.queryRecords = async (input = {}) => {
       if (input.sheetId !== overviewSheetId(h)) throw new Error('project sheets unreadable')
       return realQuery(input)
     }
+    passCooldown()
     h.records.calls.length = 0
     const fourth = await refresh(h, FLOOR)
     assert.equal(fourth.statusCode, 200, JSON.stringify(fourth.body))
     assert.deepEqual([fourth.body.data.countedCount, fourth.body.data.unreadableCount, fourth.body.data.rowsUpdated, fourth.body.data.rowsUnchanged], [0, 2, 0, 2])
     assert.ok(!h.records.calls.some((c) => c[0] === 'createRecord' || c[0] === 'patchRecord'), 'no overview write when nothing changed')
-    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'countsAt'), third.body.data.countsAt, '「截至」 keeps the last measurement')
-    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'rowCount'), 4)
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'rowCount'), 5)
     h.records.queryRecords = realQuery
   } finally { h.restore() }
 })
 
 // ── O-11 ───────────────────────────────────────────────────────────────────────────────────────────
-test('O-11 last_pull_*: a dry-run stamps previewed, a typed failure stamps refused + code, a stamp failure never fails the pull, switch off stamps nothing', async () => {
-  const h = mount()
+test('O-11 last_pull_*: a dry-run stamps previewed, a typed failure stamps refused + code, a stamp failure never fails the pull, switch off stamps nothing; (R10) a code without code shape is UNKNOWN + one values-free warn', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
   try {
     h.seedRegistryRow(PROJECT)
     const ok = await dryRun(h)
@@ -527,8 +724,7 @@ test('O-11 last_pull_*: a dry-run stamps previewed, a typed failure stamps refus
     assert.ok(row.last_pull_at instanceof Date)
     const list = await listTargets(h)
     assert.equal(list.body.data.items[0].lastPullOutcome, 'previewed')
-    // A run that throws a typed refusal (the DB-backed column probe finds the sheet incomplete →
-    // 422 TARGET_SCHEMA_INCOMPLETE): refused + its code, and the refusal still surfaces.
+    // A run that throws a typed refusal: refused + its code, and the refusal still surfaces.
     const realProbe = h.provisioning.resolveExistingObjectFieldIds
     h.provisioning.resolveExistingObjectFieldIds = async () => ({})
     const failed = await dryRun(h)
@@ -538,6 +734,19 @@ test('O-11 last_pull_*: a dry-run stamps previewed, a typed failure stamps refus
     assert.equal(row.last_pull_outcome, 'refused')
     assert.equal(row.last_pull_code, 'TARGET_SCHEMA_INCOMPLETE')
     h.provisioning.resolveExistingObjectFieldIds = realProbe
+    // R10: a run that throws with a code WITHOUT error-code shape — recorded as UNKNOWN, the pull's own
+    // answer unchanged, ONE warn that carries neither the code nor anything else from the error.
+    const realProbeAgain = h.records.queryRecords
+    h.records.queryRecords = async () => { throw Object.assign(new Error('host said something with a value in it'), { code: 'weird code: value-42' }) }
+    const warnsBefore = logger.warnings.length
+    const odd = await dryRun(h)
+    assert.notEqual(odd.statusCode, 200)
+    assert.equal(registryRow(h).last_pull_outcome, 'refused')
+    assert.equal(registryRow(h).last_pull_code, 'UNKNOWN')
+    const shapeWarns = logger.warnings.slice(warnsBefore).filter((w) => /without error-code shape/.test(w.message))
+    assert.equal(shapeWarns.length, 1)
+    assert.ok(!JSON.stringify(shapeWarns).includes('value-42') && !JSON.stringify(shapeWarns).includes('weird'), 'the warn is values-free')
+    h.records.queryRecords = realProbeAgain
     // A stamp that cannot be written never fails the pull.
     const realUpdate = h.db.updateRow
     h.db.updateRow = async (table, ...rest) => {
@@ -613,6 +822,283 @@ test('O-13 (S4 carry-over) the replay column probe: a host read failure is 503 T
     assert.equal(degraded.body.data.customerPacks.alreadyInstalled, 1)
     h.provisioning.resolveExistingObjectFieldIds = realProbe
   } finally { h.restore() }
+})
+
+// ── O-14 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-14 (R3) one row per project, always: concurrent refreshes under the overview lock, duplicates and orphans cleaned', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // A records API whose createRecord YIELDS before it lands — the window a read-then-create race needs.
+    const realCreate = h.records.createRecord
+    h.records.createRecord = async (input) => {
+      await new Promise((resolve) => setImmediate(resolve))
+      await new Promise((resolve) => setImmediate(resolve))
+      return realCreate(input)
+    }
+    const run = () => overview.refreshProjectOverview({
+      provisioning: h.provisioning,
+      recordsApi: h.records,
+      store: h.projectTargetStore,
+      tenantId: TENANT,
+      projectId: STAGING,
+    })
+    const [one, two] = await Promise.all([run(), run()])
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B], 'exactly one row per project')
+    assert.equal(one.rowsCreated + two.rowsCreated, 2)
+    assert.ok(h.db.calls.filter((c) => c === `advisoryXactLock:stock-prep-project-overview:${TENANT}`).length >= 2, 'both runs took the tenant\'s overview lock')
+    h.records.createRecord = realCreate
+
+    // Pre-existing residue: a duplicate row for one project and a row for a project nobody registered
+    // (and one with no project number at all) — the refresh deletes them through the plugin write port.
+    const dupe = overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT)
+    h.rows.push({ ...projectSheet.clone(dupe), id: 'rec_dupe' })
+    h.rows.push({ id: 'rec_orphan', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: 'PRJ-NOT-REGISTERED' } })
+    h.rows.push({ id: 'rec_blank', sheetId: overviewSheetId(h), version: 1, data: {} })
+    passCooldown()
+    const cleaned = await refresh(h, FLOOR)
+    assert.equal(cleaned.statusCode, 200, JSON.stringify(cleaned.body))
+    assert.equal(cleaned.body.data.rowsRemovedDuplicate, 1)
+    assert.equal(cleaned.body.data.rowsRemovedOrphan, 2)
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
+    assert.ok(h.records.calls.filter((c) => c[0] === 'deleteRecord').every((c) => c[1] === overviewSheetId(h)), 'deletes touch the overview sheet only')
+
+    // A project that LEAVES the registry has its row removed by the next refresh.
+    const rows = h.registryRows()
+    rows.splice(rows.findIndex((row) => row.project_no === PROJECT_B), 1)
+    passCooldown()
+    const pruned = await refresh(h, FLOOR)
+    assert.equal(pruned.body.data.rowsRemovedOrphan, 1)
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')), [PROJECT])
+  } finally { h.restore() }
+})
+
+// ── O-15 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-15 (R5) per-event: create, archive, restore, project fields and the dry-run outcome update THAT project\'s row at once — no refresh', async () => {
+  const h = mount()
+  try {
+    assert.equal((await createTarget(h, PULLER)).statusCode, 201)
+    const rowOf = () => overviewRows(h).filter((row) => logical(row, 'projectNo') === PROJECT)
+    assert.equal(rowOf().length, 1)
+    assert.equal(logical(rowOf()[0], 'status'), 'active')
+    // archive → 已归档 now
+    assert.equal((await archive(h)).statusCode, 200)
+    assert.equal(rowOf().length, 1)
+    assert.equal(logical(rowOf()[0], 'status'), 'archived')
+    assert.equal(logical(rowOf()[0], 'postureKey'), 'archived')
+    assert.equal(logical(rowOf()[0], 'posture'), 'Archived')
+    // restore → back to active
+    assert.equal((await restore(h)).statusCode, 200)
+    assert.equal(logical(rowOf()[0], 'status'), 'active')
+    // project fields → the texts
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE, plannedFinishOn: DAY })).statusCode, 200)
+    assert.equal(logical(rowOf()[0], 'note'), NOTE)
+    assert.equal(logical(rowOf()[0], 'plannedFinishOn'), DAY)
+    // dry-run outcome → the last pull + a recount
+    assert.equal((await dryRun(h)).statusCode, 200)
+    assert.equal(logical(rowOf()[0], 'lastPullOutcome'), 'previewed')
+    assert.equal(rowOf().length, 1, 'every event patched the same single row')
+    assert.equal(h.auditAppends.filter((e) => e.action === 'project_overview_refresh' && e.mode === 'refreshed').length, 0, 'none of it needed a refresh')
+  } finally { h.restore() }
+})
+
+test('O-15b (R5) the event still answers as before when the overview update throws; the warn carries a code only', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    assert.equal((await createTarget(h, PULLER)).statusCode, 201)
+    // Every overview write now fails.
+    const failing = async () => { throw Object.assign(new Error('overview write failed for PRJ-S3-O1 with a value'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
+    h.records.patchRecord = failing
+    h.records.createRecord = failing
+    const warnsBefore = logger.warnings.length
+    const archived = await archive(h)
+    assert.equal(archived.statusCode, 200, JSON.stringify(archived.body))
+    assert.equal(registryRow(h).status, 'archived', 'the archive itself happened')
+    // Restoring changes nothing the (stale) overview row does not already say, so it writes nothing.
+    const restored = await restore(h)
+    assert.equal(restored.statusCode, 200)
+    const fields = await patchFields(h, PULLER, { note: NOTE })
+    assert.equal(fields.statusCode, 200, JSON.stringify(fields.body))
+    assert.equal(registryRow(h).note, NOTE, 'the fields update itself happened')
+    const warns = logger.warnings.slice(warnsBefore).filter((w) => /overview row could not be updated/.test(w.message))
+    assert.equal(warns.length, 2)
+    for (const w of warns) {
+      assert.deepEqual(w.meta, { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      assert.ok(!JSON.stringify(w).includes(PROJECT) && !JSON.stringify(w).includes('with a value'), 'values-free')
+    }
+    // A thrown error WITHOUT code shape is logged as UNKNOWN.
+    h.records.patchRecord = async () => { throw new Error('no code here') }
+    assert.equal((await archive(h)).statusCode, 200)
+    assert.deepEqual(logger.warnings.at(-1).meta, { code: 'UNKNOWN' })
+  } finally { h.restore() }
+})
+
+test('O-15c (R5) the confirmation confirm updates its project\'s row (pending count) on a real ledger fake', async () => {
+  const fakes = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+  const { OBJECT_ID: LEDGER_OBJECT, FIRST_CUT_CONFLICT_TYPE, STATUSES, RESOLUTION_ACTIONS } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
+  const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+  const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  const LEDGER_SHEET = fakes.derivedSheetId ? fakes.derivedSheetId(STAGING, LEDGER_OBJECT) : 'sheet_ledger_s3'
+  const OVERVIEW_SHEET = 'sheet_overview_s3'
+  const ledgerRow = fakes.physicalRow(STAGING, LEDGER_OBJECT, {
+    decisionId: 'decision_s3_1', projectNo: PROJECT, conflictType: FIRST_CUT_CONFLICT_TYPE, status: STATUSES.PENDING,
+    inputFingerprint: 'sha16:0123456789abcdef', sourceRevision: 'rev-1',
+  }, 'rec_ledger_1')
+  ledgerRow.sheetId = LEDGER_SHEET
+  const base = fakes.makeFakeProvisioning({ stagingProjectId: STAGING, sheetIdByObjectId: { [LEDGER_OBJECT]: LEDGER_SHEET, [OVERVIEW_OBJECT]: OVERVIEW_SHEET } })
+  const provisioning = {
+    ...base,
+    supportsSystemKindStamp: true,
+    async findObjectSheet(input) {
+      const found = await base.findObjectSheet(input)
+      if (!found) return found
+      return { ...found, systemKind: input.objectId === OVERVIEW_OBJECT ? KIND : null }
+    },
+    async ensureObject() { throw new Error('unexpected provisioning write') },
+    getFieldId: (projectId, objectId, fieldId) => fakes.physicalFieldId(projectId, objectId, fieldId),
+    getObjectViewId: (projectId, objectId, viewId) => `view_${objectId.slice(-6)}_${viewId}`,
+  }
+  const records = fakes.makeStrictRecordsApi({ stagingProjectId: STAGING, objectIdBySheetId: { [LEDGER_SHEET]: LEDGER_OBJECT, [OVERVIEW_SHEET]: OVERVIEW_OBJECT }, rowsBySheet: { [LEDGER_SHEET]: [ledgerRow], [OVERVIEW_SHEET]: [] } })
+  records.deleteRecord = async () => { throw new Error('unexpected delete') }
+  const db = projectSheet.makeMemoryDb()
+  const store = createStockPreparationProjectTargetStore({ db, idGenerator: () => 'pt-1' })
+  db.rowsOf('integration_stock_prep_project_target').push({
+    id: 'seed', tenant_id: TENANT, project_no: PROJECT, sheet_id: 'sheet_project_s3', object_id: 'plm_stock_preparation_sandbox_p_0123456789abcdef01234567',
+    status: 'active', created_by: 'seed', created_at: new Date('2026-10-08T00:00:00Z'), archived_at: null, updated_at: new Date('2026-10-08T00:00:00Z'),
+  })
+  const routes = new Map()
+  const previous = process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = 'true'
+  try {
+    httpRoutes.registerIntegrationRoutes({
+      context: { api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } }, storage: new Map(), config: {} },
+      services: {
+        // The services registerIntegrationRoutes requires, inert: this test drives the confirm only.
+        ...Object.fromEntries(['externalSystemRegistry', 'adapterRegistry', 'pipelineRegistry', 'pipelineRunner', 'deadLetterStore', 'stagingInstaller', 'templateRegistry', 'readSourceConfigStore', 'readSourceCompositionConfigStore', 'bridgeAgentChecklistStore']
+          .map((name) => [name, new Proxy({}, { get: (_target, method) => async () => { throw new Error(`unexpected ${name}.${String(method)}`) } })])),
+        stockPreparationAuditStore: { async append() { return { ok: true } } },
+        stockPreparationProjectTargetStore: store,
+        tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+      },
+      logger: { info() {}, warn() {}, error() {} },
+    })
+    const res = await projectSheet.call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+      user: FLOOR,
+      body: { decisionId: 'decision_s3_1', inputFingerprint: 'sha16:0123456789abcdef', resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+    })
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const overviewRowsNow = records.rows(OVERVIEW_SHEET)
+    assert.equal(overviewRowsNow.length, 1, 'the confirm wrote its project\'s overview row')
+    const read = (key) => overviewRowsNow[0].data[fakes.physicalFieldId(STAGING, OVERVIEW_OBJECT, key)]
+    assert.equal(read('projectNo'), PROJECT)
+    assert.equal(read('pendingDecisionCount'), 0, 'the confirmed decision is no longer pending')
+  } finally {
+    if (previous === undefined) delete process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+    else process.env.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED = previous
+  }
+})
+
+// ── O-16 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-16 (R2) planned_finish_on reads back as the calendar day it holds on a UTC+ host — no UTC round trip', () => {
+  const { execFileSync } = require('node:child_process')
+  const storePath = path.join(LIB, 'stock-preparation-project-target-store.cjs')
+  // In a process whose local zone is Asia/Shanghai, node-postgres parses DATE '2026-12-24' as LOCAL
+  // midnight — 2026-12-23T16:00Z. The old toISOString() read handed back the day BEFORE.
+  const script = [
+    `const store = require(${JSON.stringify(storePath)})`,
+    `const d = new Date(2026, 11, 24)`,
+    `const e = new Date(1, 0, 1); e.setFullYear(1)`,
+    `process.stdout.write(JSON.stringify({ iso: d.toISOString(), day: store.__internals.dayOrNull(d), yearOne: store.__internals.dayOrNull(e), text: store.__internals.dayOrNull('2026-12-24'), infinity: store.__internals.dayOrNull(Infinity), junk: store.__internals.dayOrNull('2026-12-24T00:00:00Z') }))`,
+  ].join(';')
+  for (const tz of ['Asia/Shanghai', 'Pacific/Kiritimati', 'America/Los_Angeles', 'UTC']) {
+    const out = JSON.parse(execFileSync(process.execPath, ['-e', script], { env: { ...process.env, TZ: tz }, encoding: 'utf8' }))
+    assert.equal(out.day, '2026-12-24', `${tz}: the stored day, not its UTC shadow (local midnight was ${out.iso})`)
+    assert.equal(out.yearOne, '0001-01-01', `${tz}: year 0001 is padded, not 1901`)
+    assert.equal(out.text, '2026-12-24')
+    assert.equal(out.infinity, null)
+    assert.equal(out.junk, null, 'a non-day string reads as null, never as a guessed prefix')
+    if (tz === 'Asia/Shanghai') assert.equal(out.iso.slice(0, 10), '2026-12-23', 'the premise: the UTC slice IS the wrong day here')
+  }
+})
+
+// ── O-17 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-17 (R13) the free texts refuse control characters and NUL — a typed 400 naming the field, never the value', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    const bad = [
+      ['responsibleLabel', 'A\u0000B'],
+      ['responsibleLabel', 'line\nbreak'],
+      ['note', 'tab\tinside'],
+      ['note', 'trailing newline\n'],
+      ['note', 'bell\u0007'],
+      ['note', 'del\u007f'],
+      ['note', 'c1\u0085'],
+      ['note', 'sep\u2028arator'],
+    ]
+    for (const [field, value] of bad) {
+      const res = await patchFields(h, FLOOR, { [field]: value })
+      assert.equal(res.statusCode, 400, `${field} ${JSON.stringify(value)}: ${JSON.stringify(res.body)}`)
+      assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
+      assert.deepEqual({ ...res.body.error.details }, { field, reason: 'control_character' })
+      assert.ok(!JSON.stringify(res.body).includes(value.replace(/[\u0000-\u001f\u007f-\u009f\u2028]/g, '')), 'the value is not echoed')
+    }
+    assert.ok(!h.db.calls.some((c) => c.startsWith('updateRow')), 'no write for a refused text')
+    assert.deepEqual(h.auditAppends, [])
+    // Ordinary text — CJK, punctuation, spaces — passes; the caps still apply (422).
+    const ok = await patchFields(h, FLOOR, { responsibleLabel: '张三（采购）', note: '先到 A 区；再到 B 区！' })
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    const long = await patchFields(h, FLOOR, { responsibleLabel: '长'.repeat(PROJECT_FIELD_TEXT_LIMITS.responsibleLabel + 1) })
+    assert.equal(long.statusCode, 422)
+  } finally { h.restore() }
+})
+
+// ── O-18 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-18 (E2) the S3 routes never echo a database message or a submitted value: an unknown error is a fixed 500, a column-less database a typed 503', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    const secret = '负责人-私密值'
+    const realTransaction = h.db.transaction
+    h.db.transaction = async () => { throw Object.assign(new Error(`invalid input syntax for type date: "${secret}"`), { code: '22007' }) }
+    const res = await patchFields(h, FLOOR, { responsibleLabel: secret })
+    assert.equal(res.statusCode, 500, JSON.stringify(res.body))
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_ROUTE_FAILED')
+    assert.ok(!JSON.stringify(res.body).includes(secret), 'the submitted value is not echoed')
+    assert.ok(!JSON.stringify(res.body).includes('invalid input syntax'), 'the database message is not echoed')
+    h.db.transaction = realTransaction
+    const realSelect = h.db.selectOne
+    h.db.selectOne = async () => { throw Object.assign(new Error(`column "planned_finish_on" does not exist near ${secret}`), { code: '42703' }) }
+    const get = await getFields(h, FLOOR)
+    assert.equal(get.statusCode, 503, JSON.stringify(get.body))
+    assert.equal(get.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED')
+    assert.ok(!JSON.stringify(get.body).includes(secret))
+    h.db.selectOne = realSelect
+    // A TYPED refusal passes through as built.
+    const typed = await patchFields(h, FLOOR, { note: 'x'.repeat(PROJECT_FIELD_TEXT_LIMITS.note + 1) })
+    assert.equal(typed.body.error.code, 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
+  } finally { h.restore() }
+})
+
+// ── O-19 ───────────────────────────────────────────────────────────────────────────────────────────
+test('O-19 (R10) the store never throws over a pull code\'s shape: UNKNOWN for a non-code, nothing for a non-outcome', async () => {
+  const { createStockPreparationProjectTargetStore, normalizeProjectPullCode } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  const db = projectSheet.makeMemoryDb()
+  const store = createStockPreparationProjectTargetStore({ db })
+  db.rowsOf('integration_stock_prep_project_target').push({ tenant_id: TENANT, project_no: PROJECT, status: 'active' })
+  for (const code of ['lower', 'HAS SPACE', '1LEADING', 'A'.repeat(80), 42, { code: 'X' }]) {
+    assert.equal(await store.recordPullOutcome({ tenantId: TENANT, projectNo: PROJECT, outcome: 'refused', code }), true)
+    assert.equal(db.rowsOf('integration_stock_prep_project_target')[0].last_pull_code, 'UNKNOWN', JSON.stringify(code))
+  }
+  assert.equal(await store.recordPullOutcome({ tenantId: TENANT, projectNo: PROJECT, outcome: 'refused', code: 'TARGET_SCHEMA_INCOMPLETE' }), true)
+  assert.equal(db.rowsOf('integration_stock_prep_project_target')[0].last_pull_code, 'TARGET_SCHEMA_INCOMPLETE')
+  assert.equal(await store.recordPullOutcome({ tenantId: TENANT, projectNo: PROJECT, outcome: 'exploded' }), false)
+  assert.deepEqual(normalizeProjectPullCode(undefined), { code: null, mapped: false })
+  assert.deepEqual(normalizeProjectPullCode('  '), { code: null, mapped: false })
+  assert.deepEqual(normalizeProjectPullCode('weird code'), { code: 'UNKNOWN', mapped: true })
 })
 
 async function main() {

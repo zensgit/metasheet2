@@ -302,7 +302,7 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
   Object.freeze({
     capability: 'projectFields.update',
     code: STOCK_PREP_OPERATE,
-    method: 'PUT',
+    method: 'PATCH',
     path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
     control: 'stock-prep-project-fields-save',
   }),
@@ -312,6 +312,15 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     method: 'POST',
     path: '/api/integration/stock-preparation/project-overview/refresh',
     control: 'stock-prep-project-overview-refresh',
+  }),
+  // S3 fix round 1 (R6): only the 拉取人员 tier CREATES the read-only overview (the project-target create
+  // route does it too, best-effort); the OPERATE refresh projects into an existing one.
+  Object.freeze({
+    capability: 'projectOverview.ensure',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    control: 'stock-prep-project-overview-ensure',
   }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
