@@ -329,9 +329,11 @@ describe('P1-C timeout controls (M7 wired, not inert)', () => {
 })
 
 // Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — direct-mount wiring of the component's reveal for BOTH hidden
-// blocks, keyed only by the api's `approvalNodeHiddenBlockErrors`. The policy block has no mounted
-// path in the full view on this branch (the threshold setter clamps and an invalid persisted
-// threshold opens read-only), so this is where its reveal is pinned.
+// blocks, keyed only by the api's `approvalNodeHiddenBlockErrors` (the stub api below does not wire
+// the optional sticky `approvalNodeHiddenBlockRevealed`; the next describe does). Before W1-1a the
+// policy block had no mounted path in the full view (the threshold setter clamps and an invalid
+// persisted threshold opens read-only); W1-1a's 转交指定人员 without a target is one, pinned mounted in
+// approvalTemplateAuthoring.spec.ts ("W1-1a F1(b)").
 describe('F4-A hidden-block guard: a hidden block is revealed exactly while it has a live error', () => {
   function autoApproveApi(liveErrors: Record<string, string[]>) {
     const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } })
@@ -401,5 +403,37 @@ describe('F4-A hidden-block guard: a hidden block is revealed exactly while it h
     clear.click()
     await nextTick()
     expect(api.approvalNodeTimeout('approval_1')).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+})
+
+// W1-1a (merge-train r3 F9) — the canvas STICKY REVEAL contract on the component side: the view owns
+// the sticky state (per node key) and reports it through the OPTIONAL `approvalNodeHiddenBlockRevealed`;
+// the component renders a hidden block when that says so, per block, while the notice stays keyed on
+// live errors only. Absent method ⇒ live errors only (the describe above).
+describe('W1-1a canvas sticky reveal: the component renders what the api reports as revealed', () => {
+  function stickyApi(revealed: (nodeKey: string, blockId: string) => boolean) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } }) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    api.approvalNodeHiddenBlockErrors = () => ({})
+    api.setApprovalNodeApprovalType = () => {}
+    api.approvalNodeHiddenBlockRevealed = revealed
+    return api
+  }
+
+  it('a sticky POLICY reveal with no live error keeps the policy grid rendered (timeout stays hidden) and shows no notice', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi((nodeKey, blockId) => nodeKey === 'approval_1' && blockId === 'policy'))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-empty-policy"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('POSITIVE CONTROL: the same api reporting nothing revealed keeps both blocks hidden', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi(() => false))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
   })
 })

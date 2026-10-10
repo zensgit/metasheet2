@@ -8,6 +8,8 @@ import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.v
 import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 import {
+  APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS,
+  approvalNodeEditHiddenBlockLiveErrors,
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
@@ -17,6 +19,8 @@ import {
   draftFromTemplate,
   graphReadOnlyReason,
   setStepSamePersonChoice,
+  stepHiddenBlockLiveErrors,
+  stepOmitsAssigneeSources,
   stepSamePersonControlState,
   unsupportedTemplateAuthoringReason,
   validateTemplateApprovalFlow,
@@ -5955,6 +5959,123 @@ describe('TemplateAuthoringView', () => {
       await flushUi()
       expect(q('approval-step-timeout-section')).toBeNull()
       expect(q('approval-step-threshold')).toBe(fixed)
+    })
+
+    // ── W1-1a × F4-A, owner ruling 2026-10-10 「F1 选 b」: 转交指定人员 with no target on a sourceless
+    // auto_approve step / node is covered by the HIDDEN-BLOCK GUARD. The error is attributed to the
+    // `policy` block, that block is revealed WITH the fallback pickers inside it, and the save is blocked
+    // with a named cause; picking a target unblocks it and the save carries the fallback with NO assignee
+    // sources. The backend B-s10 rejects the untargeted state on every write, so the block is required.
+    const F1B_LINEAR_MSG = '审批人 1 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色'
+    const F1B_CANVAS_MSG = '审批节点 approval_1 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色'
+
+    it('W1-1a F1(b) pure: designated-without-target on a sourceless auto_approve step / node is attributed to the POLICY block only; the linear policy neutralizer also resets samePersonPolicy (B1)', () => {
+      const linear = draftFromTemplate(buildTemplate({
+        approvalGraph: f4aLinear({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'designated' }) as any,
+      }))
+      const step = linear.steps[0]!
+      expect(stepOmitsAssigneeSources(step)).toBe(true)
+      expect(step.emptyAssigneePolicy).toBe('designated')
+      expect(validateTemplateApprovalFlow(linear)).toContain(F1B_LINEAR_MSG)
+      expect(stepHiddenBlockLiveErrors(linear, step)).toEqual({ policy: [F1B_LINEAR_MSG] })
+
+      const complex = draftFromTemplate(buildTemplate({
+        approvalGraph: f4aComplex({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'designated' }) as any,
+      }))
+      expect(validateTemplateApprovalFlow(complex)).toContain(F1B_CANVAS_MSG)
+      expect(approvalNodeEditHiddenBlockLiveErrors(complex, 'approval_1')).toEqual({ policy: [F1B_CANVAS_MSG] })
+
+      // B1: every policy-row draft field is reset by the policy neutralizer. Behaviourally inert today
+      // (no validator rule reads samePersonPolicy), so the neutralizer's output is pinned directly.
+      const neutral = APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS.policy({ ...step, samePersonPolicy: 'auto_skip' })
+      expect(neutral.samePersonPolicy).toBeUndefined()
+      expect(neutral.emptyAssigneePolicy).toBe('error')
+    })
+
+    it('W1-1a F1(b) LINEAR: 转交指定人员 with no target, switched to 自动通过, REVEALS the policy rows with the pickers (source rows stay hidden), names the error and blocks save; a picked role clears the notice, the rows stay (sticky) and the save carries designated + fallback with NO assigneeSources', async () => {
+      stubDirectoryFetch({ users: [], roles: [{ id: 'role-pick', name: '审批管理员' }] })
+      await loadEditable('tpl_w11a_f1b_linear', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      select(q<HTMLSelectElement>('approval-step-empty-policy'), 'designated')
+      await flushUi()
+      expect(q('approval-step-empty-fallback-role-picker')).not.toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q<HTMLSelectElement>('approval-step-empty-policy')!.value).toBe('designated')
+      expect(q('approval-step-empty-fallback-user-picker')).not.toBeNull()
+      expect(q('approval-step-empty-fallback-role-picker')).not.toBeNull()
+      expect(q('approval-step-same-person-policy')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([F1B_LINEAR_MSG])
+      expect(q('approval-step-approval-type-clear-timeout')).toBeNull()
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain(F1B_LINEAR_MSG)
+
+      const rolePicker = q<HTMLSelectElement>('approval-step-empty-fallback-role-picker')!
+      await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+      pickOptions(rolePicker, ['role-pick'])
+      await flushUi()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-empty-fallback-role-picker')).toBe(rolePicker)
+      expect(q('approval-step-source-kind')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.type === 'approval').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.emptyAssigneePolicy).toBe('designated')
+      expect(config.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+      // The completed save re-baselines the draft: the sticky reveal is released and the rows hide again.
+      expect(q('approval-step-empty-policy')).toBeNull()
+    })
+
+    it('W1-1a F1(b) CANVAS: 转交指定人员 with no target, switched to 自动通过, REVEALS the policy grid with the pickers (cards stay hidden), names the error and blocks save; a picked role clears the notice, the grid STAYS mounted (sticky, train r3 F9) and the save carries designated + fallback with NO assigneeSources', async () => {
+      stubDirectoryFetch({ users: [], roles: [{ id: 'role-pick', name: '审批管理员' }] })
+      await loadEditable('tpl_w11a_f1b_canvas', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const inEditor = <T extends Element = HTMLElement>(testId: string) => editor().querySelector(`[data-testid="${testId}"]`) as T | null
+      select(inEditor<HTMLSelectElement>('approval-node-empty-policy'), 'designated')
+      await flushUi()
+      expect(inEditor('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      inEditor<HTMLInputElement>('approval-node-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(inEditor('approval-node-mode')).not.toBeNull()
+      expect(inEditor<HTMLSelectElement>('approval-node-empty-policy')!.value).toBe('designated')
+      expect(inEditor('approval-node-empty-fallback-user-picker')).not.toBeNull()
+      expect(inEditor('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      expect(inEditor('approval-node-same-person-policy')).not.toBeNull()
+      expect(inEditor('approval-node-timeout-section')).toBeNull()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-node-approval-type-hidden-error')).toEqual([F1B_CANVAS_MSG])
+      expect(inEditor('approval-node-approval-type-clear-timeout')).toBeNull()
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain(F1B_CANVAS_MSG)
+
+      const rolePicker = inEditor<HTMLSelectElement>('approval-node-empty-fallback-role-picker')!
+      await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+      pickOptions(rolePicker, ['role-pick'])
+      await flushUi()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      // STICKY: the pick made the block valid, and the picker being edited stays mounted (same element).
+      expect(inEditor('approval-node-empty-fallback-role-picker')).toBe(rolePicker)
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.emptyAssigneePolicy).toBe('designated')
+      expect(config.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+      // The completed save re-baselines the draft: the sticky reveal is released and the grid hides again.
+      expect(inEditor('approval-node-empty-policy')).toBeNull()
     })
   })
   })

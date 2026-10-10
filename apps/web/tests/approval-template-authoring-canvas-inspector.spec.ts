@@ -2203,6 +2203,109 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     expect(config).toEqual({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
     expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
   })
+
+  // W1-1a (merge-train r3 F9) — canvas STICKY REVEAL through the Canvas-first inspector, which reuses
+  // ONE ApprovalGraphNodeConfigEditor instance across node selections: the sticky state must live per
+  // node key in the view, so it can neither leak to another node nor be lost by re-selecting.
+  it('W1-1a canvas sticky reveal (Canvas-first inspector): the policy grid revealed by 转交指定人员 without a target stays mounted after the pick, never leaks to another node through the reused editor, survives another node\'s 审批类型 change, and is released by its own', async () => {
+    const roles = [{ id: 'role-pick', name: '审批管理员' }]
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => (
+      /\/api\/approval-templates\/directory\/roles(?:\?|$)/.test(String(input))
+        ? { ok: true, status: 200, json: async () => ({ roles }) }
+        : { ok: false, status: 503, json: async () => null }
+    )))
+    try {
+      setRouteParams({ id: 'tpl_w11a_canvas_sticky' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'app_a', type: 'approval', name: '审批 A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'cc_b', type: 'cc', name: '抄送 B', config: { targetType: 'user', targetIds: ['u_finance'] } },
+            // A sourceless auto_approve node whose hidden blocks are valid: its policy grid is hidden.
+            { key: 'app_c', type: 'approval', name: '审批 C', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-a', source: 'start', target: 'app_a' },
+            { key: 'e-a-b', source: 'app_a', target: 'cc_b' },
+            { key: 'e-b-c', source: 'cc_b', target: 'app_c' },
+            { key: 'e-c-end', source: 'app_c', target: 'end' },
+          ],
+        } as any,
+      }))
+      await mountView()
+      await flushUi()
+      const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+      const inInspector = <T extends Element = HTMLElement>(testId: string) => inspector().querySelector(`[data-testid="${testId}"]`) as T | null
+      const chooseType = async (type: 'manual' | 'auto-approve') => {
+        inInspector<HTMLInputElement>(`approval-node-approval-type-${type}`)!.click()
+        await flushUi()
+      }
+
+      // Positive control for the leak check: app_c on its own renders no policy grid.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector<HTMLInputElement>('approval-node-approval-type-auto-approve')!.checked).toBe(true)
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      // app_a: 转交指定人员 with no target, then 自动通过 → revealed by the live error, notice names it.
+      clickCanvasNode('app_a')
+      await flushUi()
+      const emptyPolicy = inInspector<HTMLSelectElement>('approval-node-empty-policy')!
+      emptyPolicy.value = 'designated'
+      emptyPolicy.dispatchEvent(new Event('change'))
+      await flushUi()
+      await chooseType('auto-approve')
+      expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')!.textContent)
+        .toContain('审批节点 app_a 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色')
+      const rolePicker = inInspector<HTMLSelectElement>('approval-node-empty-fallback-role-picker')!
+      expect(rolePicker).not.toBeNull()
+      await vi.waitFor(() => expect(Array.from(rolePicker.options).find((option) => option.value === 'role-pick')?.textContent).toBe('审批管理员'))
+      for (const option of Array.from(rolePicker.options)) option.selected = option.value === 'role-pick'
+      rolePicker.dispatchEvent(new Event('change'))
+      await flushUi()
+      // The pick clears the notice; the picker being edited stays mounted (STICKY: the same element).
+      expect(inInspector('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBe(rolePicker)
+
+      // NO LEAK: the same editor instance now shows app_c, whose policy grid stays hidden.
+      clickCanvasNode('app_c')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_c')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-policy')).toBeNull()
+      // app_c's own 审批类型 change (人工审批 shows its grid, 自动通过 hides it) never releases app_a.
+      await chooseType('manual')
+      expect(inInspector('approval-node-mode')).not.toBeNull()
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+
+      clickCanvasNode('app_a')
+      await flushUi()
+      expect(inspector().getAttribute('data-inspector-node')).toBe('app_a')
+      expect(inInspector<HTMLSelectElement>('approval-node-empty-policy')!.value).toBe('designated')
+      expect(inInspector('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      // app_a's own 审批类型 change releases it: back on 自动通过 with a valid target, the grid is hidden.
+      await chooseType('manual')
+      await chooseType('auto-approve')
+      expect(inInspector('approval-node-mode')).toBeNull()
+      expect(inInspector('approval-node-empty-fallback-role-picker')).toBeNull()
+
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const configA = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'app_a').config
+      expect(configA.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(configA, 'assigneeSources')).toBe(false)
+      expect(configA.emptyAssigneePolicy).toBe('designated')
+      expect(configA.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────

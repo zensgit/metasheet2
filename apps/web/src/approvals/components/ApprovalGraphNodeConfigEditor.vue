@@ -966,7 +966,7 @@
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -1118,7 +1118,7 @@
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1649,6 +1649,14 @@ const hiddenBlockLiveErrorList = computed(() =>
 )
 function hiddenBlockHasLiveErrors(blockId: AutoApproveHiddenBlockId): boolean {
   return (hiddenBlockLiveErrors.value[blockId]?.length ?? 0) > 0
+}
+// W1-1a (merge-train r3 F9) — STICKY REVEAL: whether a hidden block is rendered. The view owns the
+// sticky state, keyed by node key (this instance is reused across selections in the Canvas-first
+// inspector, so it must keep none). Absent api method ⇒ rendered exactly while it has a live error.
+const approvalNodeHiddenBlockRevealedApi = api.approvalNodeHiddenBlockRevealed
+function hiddenBlockRevealed(blockId: AutoApproveHiddenBlockId): boolean {
+  if (hiddenBlockHasLiveErrors(blockId)) return true
+  return props.node.type === 'approval' && Boolean(approvalNodeHiddenBlockRevealedApi?.(props.node.key, blockId))
 }
 function clearApprovalNodeTimeout(nodeKey: string): void {
   if (readOnly.value) return

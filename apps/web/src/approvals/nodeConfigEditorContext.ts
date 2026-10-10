@@ -20,6 +20,7 @@ import type {
   CcNodeEdit,
   ParallelNodeEdit,
   ApprovalNodeSourceEdit,
+  AutoApproveHiddenBlockId,
   HiddenBlockLiveErrors,
 } from './templateAuthoring'
 import type { FormulaInsertOption } from './conditionEdit'
@@ -124,6 +125,15 @@ export interface ApprovalNodeConfigEditorApi {
    * save can hit — the shipped app's api always provides it.
    */
   approvalNodeHiddenBlockErrors?: (nodeKey: string) => HiddenBlockLiveErrors
+  /**
+   * W1-1a (merge-train r3 F9) — canvas STICKY REVEAL: true while hidden block `blockId` of `nodeKey`
+   * must stay rendered, because it has a live error now OR had one since the node's 审批类型 last
+   * changed and the draft was last re-baselined (load / save). The shipped view keeps this per node
+   * key and scopes it to the policy grid; the notice stays keyed on `approvalNodeHiddenBlockErrors`
+   * alone. OPTIONAL: absent ⇒ a block is rendered exactly while it has a live error (no sticky), so
+   * harnesses that do not wire it are unaffected; the shipped app's api always provides it.
+   */
+  approvalNodeHiddenBlockRevealed?: (nodeKey: string, blockId: AutoApproveHiddenBlockId) => boolean
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
   /**

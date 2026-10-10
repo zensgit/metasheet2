@@ -2049,10 +2049,14 @@ const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaselin
 // Linear STICKY REVEAL state (see `stepHiddenBlockRevealed`): `${step.localId}:${blockId}` keys.
 // Declared here, before `snapshotDraft`, which resets it.
 const stickyStepHiddenBlockReveals = ref(new Set<string>())
+// Canvas STICKY REVEAL state (see `approvalNodeHiddenBlockRevealed`): `${nodeKey}:${blockId}` keys.
+// Declared here for the same reason.
+const stickyApprovalNodeHiddenBlockReveals = ref(new Set<string>())
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
   // A re-baselined draft (load / reload / save completed) starts with no sticky hidden-block reveal.
   stickyStepHiddenBlockReveals.value = new Set()
+  stickyApprovalNodeHiddenBlockReveals.value = new Set()
 }
 
 function promoteLinearDraftAndBaselineToGraphAuthoring(): void {
@@ -2634,11 +2638,59 @@ function approvalNodeInParallelRegion(nodeKey: string): boolean {
 function setApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
+  releaseApprovalNodeHiddenBlockReveals(nodeKey)
   applyApprovalTypeChoice(edit, type, approvalNodeInParallelRegion(nodeKey))
 }
-// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (canvas) — judged against the whole draft by the save validator.
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (canvas) — per sourceless auto_approve node, the live errors of
+// its hidden blocks, judged against the whole draft by the save validator
+// (`approvalNodeEditHiddenBlockLiveErrors`). Computed once per draft change: the editors read it and
+// the sticky watcher below reads the same map, so the validator runs once per node, not per reader.
+const approvalNodeHiddenBlockErrorsByKey = computed(() => {
+  const byKey = new Map<string, HiddenBlockLiveErrors>()
+  for (const [nodeKey, edit] of Object.entries(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalNodeEditOmitsAssigneeSources(edit)) byKey.set(nodeKey, approvalNodeEditHiddenBlockLiveErrors(draft.value, nodeKey))
+  }
+  return byKey
+})
 function approvalNodeHiddenBlockErrors(nodeKey: string): HiddenBlockLiveErrors {
-  return approvalNodeEditHiddenBlockLiveErrors(draft.value, nodeKey)
+  return approvalNodeHiddenBlockErrorsByKey.value.get(nodeKey) ?? {}
+}
+// Canvas STICKY REVEAL (W1-1a; merge-train r3 F9) — the canvas twin of the linear sticky reveal
+// (`stepHiddenBlockRevealed`), for the POLICY grid. Keyed on "failing now" alone, the grid revealed by
+// a 转交指定人员-without-target error unmounted on the first pick in its multi-select fallback picker,
+// so an author adding a second target lost the control mid-edit. Once a node's policy grid has been
+// revealed by a live error it STAYS rendered until (a) that node's 审批类型 changes
+// (`setApprovalNodeApprovalType`), or (b) the draft is re-baselined — template (re)load, or save
+// completes (`snapshotDraft`). Keyed by node key, never kept in the editor: the Canvas-first inspector
+// reuses ONE editor instance across node selections. The notice stays keyed on live errors only.
+// Display state only: never saved, never read by a validator. The timeout section stays live-keyed
+// (#6304 gate r3): every canvas timeout control is single-valued (a clamped number input, single
+// selects), so none goes valid mid-edit. Extending this to the timeout block means adding 'timeout'
+// below plus a release on 关闭超时, as the linear editor does.
+const CANVAS_STICKY_HIDDEN_BLOCK_IDS: readonly AutoApproveHiddenBlockId[] = ['policy']
+const stickyApprovalNodeHiddenBlockKey = (nodeKey: string, blockId: AutoApproveHiddenBlockId) => `${nodeKey}:${blockId}`
+watch(
+  approvalNodeHiddenBlockErrorsByKey,
+  (byKey) => {
+    for (const [nodeKey, errors] of byKey) {
+      for (const blockId of CANVAS_STICKY_HIDDEN_BLOCK_IDS) {
+        const key = stickyApprovalNodeHiddenBlockKey(nodeKey, blockId)
+        if ((errors[blockId]?.length ?? 0) > 0 && !stickyApprovalNodeHiddenBlockReveals.value.has(key)) {
+          stickyApprovalNodeHiddenBlockReveals.value = new Set(stickyApprovalNodeHiddenBlockReveals.value).add(key)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+function approvalNodeHiddenBlockRevealed(nodeKey: string, blockId: AutoApproveHiddenBlockId): boolean {
+  return (approvalNodeHiddenBlockErrors(nodeKey)[blockId]?.length ?? 0) > 0
+    || stickyApprovalNodeHiddenBlockReveals.value.has(stickyApprovalNodeHiddenBlockKey(nodeKey, blockId))
+}
+function releaseApprovalNodeHiddenBlockReveals(nodeKey: string): void {
+  const next = new Set(stickyApprovalNodeHiddenBlockReveals.value)
+  for (const id of AUTO_APPROVE_HIDDEN_BLOCK_IDS) next.delete(stickyApprovalNodeHiddenBlockKey(nodeKey, id))
+  if (next.size !== stickyApprovalNodeHiddenBlockReveals.value.size) stickyApprovalNodeHiddenBlockReveals.value = next
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
@@ -3722,8 +3774,9 @@ function clearStepTimeout(step: ApprovalStepDraft): void {
 // the save carried 6). So once a step's hidden block has been revealed by a live error it STAYS
 // rendered until (a) the step's 审批类型 changes, (b) 关闭超时 (timeout block only), or (c) the draft
 // is re-baselined — template (re)load, or save completes (`snapshotDraft`). The notice above stays
-// keyed on live errors only. Display state only: never saved, never read by a validator. Canvas needs
-// none: its timeout controls are discrete selects / a clamped number input, so no keystroke unmount.
+// keyed on live errors only. Display state only: never saved, never read by a validator. Canvas: the
+// policy grid has its own sticky reveal (`approvalNodeHiddenBlockRevealed`); its timeout section needs
+// none, since its timeout controls are discrete selects / a clamped number input (no keystroke unmount).
 const stickyStepHiddenBlockKey = (localId: string, blockId: AutoApproveHiddenBlockId) => `${localId}:${blockId}`
 watch(
   stepHiddenBlockErrorsByLocalId,
@@ -3995,6 +4048,7 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   // Lock-4 §1 F4-A — 审批类型 (OPTIONAL on the api; always present on the shipped app's object).
   setApprovalNodeApprovalType,
   approvalNodeHiddenBlockErrors,
+  approvalNodeHiddenBlockRevealed,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   // W1-1a: the four-value same-person control + the 'designated' fallback pickers (they replace the
