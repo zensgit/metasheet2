@@ -898,13 +898,14 @@ jobs:
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
       # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) = 51. Get each file's own count locally with
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (14) = 65. Get each file's own
+      # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=51
+          EXPECTED_OPS_TESTS_COUNT=65
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1151,6 +1152,9 @@ jobs:
       # Migrations above must already have applied the zzzz20260824*,
       # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
       # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39); every one
+      # of them runs inside a transaction it rolls back.
       # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate
