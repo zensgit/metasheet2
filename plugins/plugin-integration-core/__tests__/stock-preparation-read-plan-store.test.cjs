@@ -502,4 +502,3 @@ test('explicit activation replaces corrupt old pointer content only from a reche
   assert.equal(loaded.version.id, version.id)
   assert.deepEqual(loaded.sourceValidation, STATUS_FIXTURE_SOURCE)
 })
-
