@@ -4859,3 +4859,58 @@ describe('attendance UUID route validation', () => {
     expect(allowed.db.query.mock.calls.some(([sql]) => String(sql).includes('attendance_groups'))).toBe(true)
   })
 })
+
+// Reviewer finding F3 (2026-10-08): the leave cancel-round launch flag follows the AGENTS.md red line —
+// default OFF, ON only for the exact literal 'true' (no trim, no case folding, no '1' / 'yes'). The launch
+// route is the flag's gate; the summary read and the 201 body report the same function's value, so this
+// matrix pins the one reader every call site shares. Each spelling is its own case, so a lenient reader
+// shows WHICH spellings it lets through.
+describe('cancel-round launch flag ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED: exact literal true only', () => {
+  const FLAG = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const LAUNCH = 'POST /api/attendance/requests/:id/cancel-round'
+  const leaveRequestId = '00000000-0000-4000-8000-00000000c401'
+  const NOT_FOUND = { ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } }
+  const originalFlag = process.env[FLAG]
+
+  afterEach(() => {
+    restoreEnv(FLAG, originalFlag)
+  })
+
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['false', 'false'],
+    ['upper case TRUE', 'TRUE'],
+    ['title case True', 'True'],
+    ['leading space', ' true'],
+    ['trailing space', 'true '],
+    ['trailing newline', 'true\n'],
+    ['1', '1'],
+    ['yes', 'yes'],
+    ['YES', 'YES'],
+    ['on', 'on'],
+  ] as Array<[string, string | undefined]>)('%s keeps the launch OFF: the not-found body, before any read', async (_label, value) => {
+    const { db, routes } = await createHarness()
+    if (value === undefined) delete process.env[FLAG]
+    else process.env[FLAG] = value
+    const res = await invokeRoute(routes, LAUNCH, { params: { id: leaveRequestId }, body: { reason: 'plans changed' } })
+    expect(res.statusCode).toBe(404)
+    expect(res.body).toEqual(NOT_FOUND)
+    expect(db.query).not.toHaveBeenCalled()
+    expect(db.transaction).not.toHaveBeenCalled()
+  })
+
+  it('the exact literal true is the positive control: the gate is passed and the leave row is read', async () => {
+    const { db, routes } = await createHarness()
+    process.env[FLAG] = 'true'
+    const res = await invokeRoute(routes, LAUNCH, { params: { id: leaveRequestId }, body: { reason: 'plans changed' } })
+    // the first thing after the gate is the org-scoped read of the leave row
+    expect(db.query).toHaveBeenCalledTimes(1)
+    const [sql, params] = db.query.mock.calls[0] as unknown as [string, unknown[]]
+    expect(sql).toContain('FROM attendance_requests')
+    expect(params[0]).toBe(leaveRequestId)
+    // the unit harness's database refuses every query, so the route answers its own 500 — not the gate's 404
+    expect(res.statusCode).toBe(500)
+    expect(res.body).not.toEqual(NOT_FOUND)
+  })
+})

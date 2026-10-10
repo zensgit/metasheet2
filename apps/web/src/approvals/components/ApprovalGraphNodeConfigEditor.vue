@@ -339,14 +339,21 @@
       >共 {{ (node.config as ParallelNodeConfig).branches.length }} 个并行分支，点击上方「+添加分支」可再增加一路</p>
     </div>
 
-    <!-- G-4: editable cc node — targetType (用户/角色) + targetIds. The cc node's edges /
-         position are TOPOLOGY: preserved byte-for-byte on save. -->
+    <!-- G-4: editable cc node — targetType (用户/角色/用户组) + targetIds. The cc node's edges /
+         position are TOPOLOGY: preserved byte-for-byte on save. Lock-1 OD-L1-7(a): 用户组 is offered
+         only while the "`user_group` (cc)" capability-registry row is present (`ccTargetTypeOptions`);
+         `data-cc-target-types` exposes the offered set so a test can pin it without opening the popper. -->
     <div
       v-else-if="node.type === 'cc' && ccEditFor(node.key)"
       class="template-authoring__cc"
       data-testid="approval-cc-editor"
       :data-cc-node="node.key"
+      :data-cc-target-types="ccTargetTypeOptions.join(',')"
     >
+      <!-- targetIds are typed per target type (user ids / role ids / bound-group ids), so switching
+           the type CLEARS them (`setCcTargetIds(key, [])`, which also re-syncs the picker options):
+           ids of the previous type must never land under the new one — a user id under 'group'
+           would render as a placeholder chip and fail publish as an unbound group. -->
       <el-form-item label="抄送类型">
         <el-select
           v-model="ccEditFor(node.key)!.targetType"
@@ -354,10 +361,10 @@
           :disabled="readOnly"
           class="ms-w-240"
           data-testid="approval-cc-target-type"
-          @change="syncCcOptions(node.key)"
+          @change="setCcTargetIds(node.key, [])"
         >
           <el-option
-            v-for="targetType in CC_TARGET_TYPES"
+            v-for="targetType in ccTargetTypeOptions"
             :key="targetType"
             :label="ccTargetTypeLabel(targetType)"
             :value="targetType"
@@ -389,7 +396,7 @@
           />
         </el-select>
         <el-select
-          v-else
+          v-else-if="ccEditFor(node.key)!.targetType === 'role'"
           :model-value="ccEditFor(node.key)!.targetIds"
           multiple
           filterable
@@ -408,6 +415,46 @@
             :value="role.id"
           />
         </el-select>
+        <!-- Lock-1 OD-L1-7(a) (用户组 cc target): the SAME typed, org-scoped bound-group multi-select
+             the approver user_group sub-form uses (D0 §10.2 — never a free-text/raw-id input). An
+             unbound group fails PUBLISH (values-free 400, `assertUserGroupSourcesBoundToOrg`), never
+             at dispatch; the picker only OFFERS bound candidates. The branch is gated on the SAME
+             registry row that offers 用户组 (`ccGroupTargetOffered`): without the row a persisted
+             'group' value is outside this editor's registry and falls to the read-only unknown line
+             below (Lock-1 §2.3 / G-16 — read-only, ids preserved, round-trips unchanged). -->
+        <el-select
+          v-else-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered"
+          :model-value="ccEditFor(node.key)!.targetIds"
+          multiple
+          filterable
+          size="small"
+          :disabled="readOnly"
+          :loading="memberGroupOptionsLoading"
+          class="ms-w-360"
+          placeholder="选择已绑定的用户组"
+          data-testid="approval-cc-target-ids"
+          @update:model-value="(ids: string[]) => setCcTargetIds(node.key, ids)"
+          @visible-change="(visible: boolean) => visible && syncCcOptions(node.key)"
+        >
+          <el-option
+            v-for="group in memberGroupOptions"
+            :key="group.id"
+            :label="formatMemberGroupLabel(group)"
+            :value="group.id"
+          />
+        </el-select>
+        <!-- G-16 unknown-value safety: a persisted targetType this editor does not know renders
+             read-only (ids preserved, never re-typed); `validateCcEdits` flags it before save. -->
+        <p
+          v-else
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-unknown"
+        >未知的抄送类型「{{ ccEditFor(node.key)!.targetType }}」，已保留原值（{{ ccEditFor(node.key)!.targetIds.length }} 个对象）；请选择已知类型后再保存</p>
+        <p
+          v-if="ccEditFor(node.key)!.targetType === 'group' && ccGroupTargetOffered && !readOnly && memberGroupOptions.length === 0 && !memberGroupOptionsLoading"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-cc-target-group-empty"
+        >当前组织尚无已绑定的可用用户组（需管理员先绑定用户组才能选择）</p>
       </el-form-item>
     </div>
 
@@ -435,6 +482,104 @@
       class="template-authoring__approval-node-section"
       data-testid="approval-node-section-assignee"
     >
+      <!-- Lock-4 §1 F4-A — node-level 审批类型, placed in this 审批人设置 tab by L0-1. OD-L4-2(a): exactly
+           TWO options (人工审批 / 自动通过) — auto_reject is deferred and no inert third option renders.
+           A native radiogroup like the roster below (arrow keys move AND commit), which is why 自动通过
+           keeps the cards as hidden scratch instead of discarding them (`applyApprovalTypeChoice`).
+           Rendered only when the api provides the mutator (fail-closed for harnesses that omit it). -->
+      <el-form-item v-if="node.type === 'approval' && approvalTypeControlAvailable" label="审批类型">
+        <div
+          class="approval-node-source-roster"
+          role="radiogroup"
+          aria-label="审批类型"
+          data-testid="approval-node-approval-type"
+        >
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="manual"
+              :checked="!approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly"
+              data-testid="approval-node-approval-type-manual"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'manual')"
+            />
+            <span>人工审批</span>
+          </label>
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="auto_approve"
+              :checked="approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly || approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-approval-type-auto-approve"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+            />
+            <span>自动通过</span>
+          </label>
+        </div>
+        <!-- Backend APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED ("a non-manual node inside a parallel
+             region is rejected in v1"): disabled + this hint, same posture as the threshold hint below. -->
+        <p
+          v-if="approvalNodeInParallelRegion(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-parallel-hint"
+        >位于并行分支内，暂不支持自动通过（v1 仅支持线性路径）</p>
+        <p
+          v-else-if="approvalNodeIsAutoApprove(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-auto-hint"
+        >流程到达此节点时由系统自动通过，不分配审批人</p>
+        <!-- An auto_approve node that still CARRIES sources (only reachable from a template saved
+             through the API) keeps them visible: they are saved and validated, so hiding them would
+             let an error block save with no visible cause. The action drops them (sets the omit flag). -->
+        <p
+          v-if="approvalNodeIsAutoApprove(node.key) && !approvalNodeOmitsSources(node.key)"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-live-sources-hint"
+        >
+          该节点仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+          <el-button
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-drop-sources"
+            @click="chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+          >移除审批人来源</el-button>
+        </p>
+        <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD: a hidden block (policy grid / timeout section below) is
+             still saved and validated, so while its own values fail validation it is rendered again
+             and this notice names the failure — never an error about an invisible control. Clearing
+             the timeout is an explicit author action; nothing is rewritten at save time. -->
+        <div
+          v-if="approvalNodeOmitsSources(node.key) && hiddenBlockLiveErrorList.length > 0"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-hidden-errors-hint"
+        >
+          <p>该节点有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+          <ul>
+            <li
+              v-for="(message, messageIndex) in hiddenBlockLiveErrorList"
+              :key="messageIndex"
+              data-testid="approval-node-approval-type-hidden-error"
+            >{{ message }}</li>
+          </ul>
+          <el-button
+            v-if="hiddenBlockHasLiveErrors('timeout')"
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-clear-timeout"
+            @click="clearApprovalNodeTimeout(node.key)"
+          >关闭超时</el-button>
+        </div>
+      </el-form-item>
+      <!-- Lock-4 §1 F4-A: an auto_approve node whose sources are omitted saves NONE, so the cards (hidden
+           scratch, restored on 人工审批) and every control below that only matters when a person
+           approves are not rendered; their values are preserved verbatim. Same predicate as the save
+           and the validator (`approvalNodeEditOmitsAssigneeSources`), so nothing hidden is ever sent. -->
+      <template v-if="!approvalNodeOmitsSources(node.key)">
       <!-- P1-B: one card per assigneeSources[] entry, keyed by its (stable, positional) index — the
            array IS the identity model here (no separate id field), and add/remove/edit only ever
            append/splice/replace by index, so index-as-key is safe. Each card is byte-identical to
@@ -817,10 +962,11 @@
           data-testid="approval-node-source-union-hint"
         >已配置 {{ approvalSourceCount(node.key) }} 个来源，取其并集；同一人出现在多个来源时，系统运行时自动去重（此编辑器本身不做去重或排序）</p>
       </div>
+      </template>
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -899,7 +1045,7 @@
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1159,6 +1305,7 @@ import type {
   ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
@@ -1177,6 +1324,10 @@ import {
   CC_TARGET_TYPES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
+  approvalNodeEditOmitsAssigneeSources,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1218,6 +1369,15 @@ const showFieldPermissionsSection = computed(
 
 // ── Lock-0 L0-2 capability registry ──────────────────────────────────────────────────────────
 const registry = computed(() => props.registry ?? DEFAULT_APPROVAL_CAPABILITY_REGISTRY)
+// Lock-1 OD-L1-7(a): the cc target-type select offers the backend-accepted set (CC_TARGET_TYPES),
+// with 用户组 gated on the "`user_group` (cc)" registry row — the cc half's M4 admission, read
+// mechanically from the same registry the approver/handler rosters read, never a hand flag.
+const ccTargetTypeOptions = computed(() =>
+  CC_TARGET_TYPES.filter((targetType) => targetType !== 'group' || isRegisteredAssigneeSourceKind(registry.value, 'cc', 'user_group')),
+)
+// The same admission gates RENDERING a persisted 'group' target (picker + empty hint), not only
+// offering it: outside the registry the value is read-only (unknown line), never re-typed.
+const ccGroupTargetOffered = computed(() => ccTargetTypeOptions.value.includes('group'))
 const assigneeSourceRosterForNode = computed(() => {
   const roster = assigneeSourceRoster(registry.value, props.node.type)
   // Lock-2 §2.4 C-7 form-schema precondition (gate D-6): the two contact-derived kinds are
@@ -1378,6 +1538,41 @@ const setApprovalNodeMode = api.setApprovalNodeMode
 const approvalNodeThreshold = api.approvalNodeThreshold
 const setApprovalNodeThreshold = api.setApprovalNodeThreshold
 const approvalNodeInParallelRegion = api.approvalNodeInParallelRegion
+// ── Lock-4 §1 F4-A — node-level 审批类型. The mutator is OPTIONAL on the api: absent ⇒ no control
+// renders (fail-closed), so harnesses that do not wire F4-A are unaffected. Reads go straight to the
+// edit model (`approvalType` / the omit flag), never to a second copy of the state.
+const setApprovalNodeApprovalTypeApi = api.setApprovalNodeApprovalType
+const approvalTypeControlAvailable = computed(() => Boolean(setApprovalNodeApprovalTypeApi))
+function approvalNodeIsAutoApprove(nodeKey: string): boolean {
+  return approvalNodeEditFor(nodeKey)?.approvalType === 'auto_approve'
+}
+function approvalNodeOmitsSources(nodeKey: string): boolean {
+  const edit = approvalNodeEditFor(nodeKey)
+  return edit ? approvalNodeEditOmitsAssigneeSources(edit) : false
+}
+function chooseApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  if (readOnly.value) return
+  setApprovalNodeApprovalTypeApi?.(nodeKey, type)
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — the live validation errors of this node's hidden blocks
+// (computed by the view against the real save validator; see `approvalNodeEditHiddenBlockLiveErrors`).
+// Absent api method ⇒ {} (nothing revealed; documented on the api).
+const approvalNodeHiddenBlockErrorsApi = api.approvalNodeHiddenBlockErrors
+const hiddenBlockLiveErrors = computed<HiddenBlockLiveErrors>(() =>
+  props.node.type === 'approval' && approvalNodeHiddenBlockErrorsApi
+    ? approvalNodeHiddenBlockErrorsApi(props.node.key)
+    : {},
+)
+const hiddenBlockLiveErrorList = computed(() =>
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((blockId) => hiddenBlockLiveErrors.value[blockId] ?? []),
+)
+function hiddenBlockHasLiveErrors(blockId: AutoApproveHiddenBlockId): boolean {
+  return (hiddenBlockLiveErrors.value[blockId]?.length ?? 0) > 0
+}
+function clearApprovalNodeTimeout(nodeKey: string): void {
+  if (readOnly.value) return
+  setApprovalNodeTimeoutEnabled(nodeKey, false)
+}
 const approvalNodeTimeout = api.approvalNodeTimeout
 const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled
 const setApprovalNodeTimeoutAfterMinutes = api.setApprovalNodeTimeoutAfterMinutes

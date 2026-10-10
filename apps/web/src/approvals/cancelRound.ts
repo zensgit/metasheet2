@@ -20,9 +20,12 @@
  * Contract notes (the backend lane changes two response shapes in parallel with this slice):
  *  - the summary read carries `entryEnabled: boolean`; an ABSENT field is read as `false`;
  *  - approve / reject / withdraw success bodies are minimal (`{ requestId, roundId, outcome, status }`).
- *    The only field read from any of them is the approver decision's `roundId`, to confirm which round
- *    was decided (see `decideCancelRoundFromApproval`); every caller re-reads the summary (or the
- *    approval detail) after a successful write.
+ *    The only field read from any of them is `roundId`, to confirm which round was decided or withdrawn
+ *    (see `decideCancelRoundOnRequest`, `decideListedCancelRound` and the attendance panel's withdraw);
+ *    every caller re-reads the summary (or the approval detail) after a successful write.
+ *  - every approve / reject / withdraw this client sends names the round on screen (`expectedRoundId`,
+ *    phase D D2): the server refuses it — 409 `INVALID_STATUS_TRANSITION`, nothing written — when that is
+ *    no longer the leave's current round, instead of acting on a round the page never showed.
  */
 import { apiFetch } from '../utils/api'
 import type { StatusDomain } from '../utils/statusDomains'
@@ -547,13 +550,25 @@ export async function launchCancelRound(requestId: string, reason?: string | nul
   await readCancelRoundResponse(response)
 }
 
-/** `POST /api/attendance/requests/:id/cancel-round/withdraw` (attendance:write). */
-export async function withdrawCancelRound(requestId: string, comment?: string | null): Promise<void> {
+/**
+ * `POST /api/attendance/requests/:id/cancel-round/withdraw` (attendance:write). Resolves to the `roundId`
+ * the minimal success body names — the round the server actually withdrew — or `null` when the body does
+ * not name one. `expectedRoundId`: the round on screen; the server refuses (409 `INVALID_STATUS_TRANSITION`,
+ * nothing written) when it is not the leave's current round — the same code, and for the withdraw the
+ * same message, as a round that has already finished, so the caller tells the two apart by re-reading.
+ */
+export async function withdrawCancelRound(
+  requestId: string,
+  comment?: string | null,
+  expectedRoundId?: string | null,
+): Promise<string | null> {
   const response = await apiFetch(cancelRoundPath(requestId, '/withdraw'), {
     method: 'POST',
-    body: JSON.stringify(withOptionalText('comment', comment)),
+    body: JSON.stringify({ ...withOptionalText('comment', comment), ...withOptionalText('expectedRoundId', expectedRoundId) }),
   })
-  await readCancelRoundResponse(response)
+  const payload = await readCancelRoundResponse(response)
+  const data = payload?.data && typeof payload.data === 'object' ? (payload.data as Record<string, unknown>) : null
+  return typeof data?.roundId === 'string' && data.roundId.length > 0 ? data.roundId : null
 }
 
 /**
@@ -674,12 +689,15 @@ export const CANCEL_ROUND_LEAVE_UNRESOLVED_COPY = {
 } as const
 
 /**
- * The attendance decision route acts on the leave's LATEST cancel round; it does not name an
- * instance. So the approval side confirms — before sending anything — that the round on screen IS
- * that round and is still pending, and afterwards that the round the server decided is the one it
- * confirmed. These three refusals are raised by the client (no server code exists for them):
+ * The attendance decision route acts on the leave's LATEST cancel round unless the body names one. So
+ * the approval side confirms — before sending anything — that the round on screen IS that round and is
+ * still pending, sends the confirmed round as `expectedRoundId` (the server then refuses, writing
+ * nothing, if another round replaced it in between), and afterwards checks that the round the server
+ * decided is the one it confirmed. These three refusals are raised by the client:
  *  - `ROUND_UNVERIFIED`: the pre-read failed (for example the viewer may not read the leave); nothing sent.
- *  - `ROUND_NOT_CURRENT`: the round on screen is no longer the leave's pending round; nothing sent.
+ *  - `ROUND_NOT_CURRENT`: the round on screen is no longer the leave's pending round — found by the
+ *    pre-read (nothing sent), or by the server's 409 `INVALID_STATUS_TRANSITION` for the named round
+ *    (nothing written).
  *  - `ACTED_ROUND_UNCONFIRMED`: the decision WAS accepted, but for a round other than the confirmed one
  *    (or the body did not name it) — never announced as a success, never as 「失败，请重试」.
  */
@@ -780,8 +798,12 @@ export async function decideCancelRoundFromApproval(
  * The route decides the leave's latest round, so the round on screen (`expected.engineInstanceId`,
  * and `expected.roundId` when the surface knows it) is first confirmed — by the summary read — to be
  * that round and still pending; a failed or mismatching read sends nothing (fail closed; the same
- * for a delegate who may not read the leave). After the decision, the `roundId` the server names must
- * be the confirmed round, or the caller is told to re-check instead of being told it succeeded.
+ * for a delegate who may not read the leave). The decision then names the confirmed round
+ * (`expectedRoundId`), so a round that replaced it after the read is refused by the server — 409
+ * `INVALID_STATUS_TRANSITION`, nothing written, shown as `ROUND_NOT_CURRENT` (reviewer finding F1,
+ * 2026-10-08: before, that window let the decision land on a round the approver never saw). After the
+ * decision, the `roundId` the server names must be the confirmed round, or the caller is told to
+ * re-check instead of being told it succeeded.
  */
 export async function decideCancelRoundOnRequest(
   requestId: string,
@@ -807,8 +829,13 @@ export async function decideCancelRoundOnRequest(
   }
   let actedRoundId: string | null
   try {
-    actedRoundId = await decideCancelRound(requestId, action, comment)
+    actedRoundId = await decideCancelRound(requestId, action, comment, confirmed.roundId)
   } catch (error) {
+    // The named round is no longer the leave's current round, or it finished after the pre-read: the
+    // server wrote nothing either way. Never the registered withdraw copy (「已有审批人处理过…」).
+    if (errorCodeOf(error) === 'INVALID_STATUS_TRANSITION') {
+      throw cancelRoundClientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT, isZh)
+    }
     const described = describeCancelRoundError(error, isZh, isZh ? '操作失败，请重试' : 'Action failed, please retry')
     const status = error instanceof ApprovalApiError ? error.status : 0
     throw new ApprovalApiError(described.message, status, described.code ?? undefined)
@@ -826,7 +853,8 @@ export async function decideCancelRoundOnRequest(
  * which a seated delegator does not pass. The refusal is shown with the client's 「no longer pending /
  * replaced — nothing was done」 copy (`ROUND_NOT_CURRENT`); after the decision, the `roundId` the server
  * names must be the listed one, or the caller is told to re-check. The approval-side path
- * (`decideCancelRoundOnRequest`) is unchanged.
+ * (`decideCancelRoundOnRequest`) keeps its pre-read and, since reviewer finding F1 (2026-10-08), also
+ * names the confirmed round.
  */
 export async function decideListedCancelRound(
   requestId: string,

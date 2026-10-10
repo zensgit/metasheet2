@@ -272,19 +272,27 @@ const NON_GH_EXACT = new Set([
   'DINGTALK_TODO_MIRROR_STATUSES',
 ])
 
-function grepFlagTokens(pattern) {
-  const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
+// Default: every *.ts under packages/core-backend/src. `{ file }` greps ONE repo-relative file instead (a
+// plugin reads its env flags in its own source, outside that tree).
+function grepFlagTokens(pattern, { file } = {}) {
+  const target = path.join(REPO_ROOT, file ?? 'packages/core-backend/src')
+  const command = file
+    ? `grep -hoE '${pattern}' ${target}`
+    : `grep -rhoE '${pattern}' ${target} --include='*.ts'`
   let out = ''
   try {
-    out = execSync(`grep -rhoE '${pattern}' ${srcDir} --include='*.ts'`, {
+    out = execSync(command, {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch (err) {
-    throw new Error(`could not grep ${pattern} under ${srcDir}: ${err.message}`)
+    throw new Error(`could not grep ${pattern} under ${target}: ${err.message}`)
   }
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
+
+// The attendance plugin file whose leave cancel-round launch flag is registered here (see below).
+const ATTENDANCE_PLUGIN_SOURCE = 'plugins/plugin-attendance/index.cjs'
 
 function globalHistoryFlagsInSource() {
   const tokens = grepFlagTokens('MULTITABLE_[A-Z_0-9]+')
@@ -321,7 +329,12 @@ function globalHistoryFlagsInSource() {
     ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
     ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage])].sort()
+  // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
+  // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
+  // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
+  const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
+    .filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
@@ -338,7 +351,29 @@ function grepPluginFlagTokens(pattern) {
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
 
-test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
+test('leave cancel-round launch flag: registered against the plugin reader, exact literal true only', () => {
+  const key = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.source, `${ATTENDANCE_PLUGIN_SOURCE}#isAttendanceCancelRoundEntryEnabled`)
+  // The activation value is the reader's own comparison, read from source: a reader that goes back to the
+  // plugin's lenient parseBoolean (trim + lowercase; 'true' / '1' / 'yes') fails here as well.
+  const plugin = readFileSync(path.join(REPO_ROOT, ATTENDANCE_PLUGIN_SOURCE), 'utf8')
+  const reader = /\nfunction isAttendanceCancelRoundEntryEnabled\(\) \{\n([\s\S]*?)\n\}\n/.exec(plugin)
+  assert.ok(reader, 'the plugin reader isAttendanceCancelRoundEntryEnabled must be found')
+  assert.equal(reader[1].trim(), `return process.env.${key} === 'true'`)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+})
+
+test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
   const sourceGH = globalHistoryFlagsInSource()
   assert.ok(
     sourceGH.length >= 20,
@@ -358,7 +393,7 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
   assert.deepEqual(
     phantom,
     [],
-    `manifest lists flags NOT read anywhere in packages/core-backend/src (stale or typo'd key): ${phantom.join(', ')}`,
+    `manifest lists flags NOT read anywhere in the scanned sources (packages/core-backend/src, and ${ATTENDANCE_PLUGIN_SOURCE} for the ATTENDANCE_CANCEL_ROUND_ family) (stale or typo'd key): ${phantom.join(', ')}`,
   )
   // every spec carries a non-empty source citation — a rule with no citation is not verified
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {

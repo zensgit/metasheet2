@@ -9,9 +9,12 @@
  *     without a case reds this file; so does a sendDirectoryFailure call the table does not know.
  *   - Untyped failure at every clause: the awaited service rejects with `Error('MARKER_x7q_<n>')`. A 5xx answer
  *     carries the route's own code and its FIXED sentence; neither the body nor any header contains the marker;
- *     where the route logs, the marker reached logger.warn (the text moved to the log, it did not vanish). The
- *     five literal-400 echo sites (provider, transport or database-driver text) are 4xx, outside that rule: they are pinned as they are (400,
- *     the route's code, the caught text), so changing them is a visible decision.
+ *     where the route logs, the marker reached logger.warn (the text moved to the log, it did not vanish).
+ *   - R-41: the five literal-400 sites that used to echo the caught text (provider, transport or database-driver
+ *     text) no longer do, although they are 4xx: an untyped failure answers 400, the route's code and its FIXED
+ *     sentence; a typed DingTalk failure answers the fixed sentence plus DingTalk's numeric errcode / HTTP status
+ *     and never its errmsg; a developer-authored sentence thrown TYPED (DingTalkConfigValidationError, the
+ *     directory errors on the test route) still shows as it is; the same sentence thrown untyped does not.
  *   - The three typed directory-sync errors through every sendDirectoryFailure site: 400 / 404 / 409 with the
  *     typed sentence and the route's code; the specific branches in front of the helper still win; a batch
  *     that commits nothing answers by the TYPE of its first failure.
@@ -125,7 +128,18 @@ import {
 } from '../../src/db/recovery-conflict'
 import { RECOVERY_AUTHORITY_BUSY_MARKER } from '../../src/multitable/recovery-authorization-stability'
 import { DingTalkCorpNotAllowedError } from '../../src/integrations/dingtalk/runtime-policy'
+// NOT mocked: the R-41 typed validation sentence lives in its own module, so the route's `instanceof` sees the
+// real class even though work-notification-settings / approval-card-config are replaced by factories above.
+import { DingTalkConfigValidationError } from '../../src/integrations/dingtalk/config-validation-error'
+import {
+  DingTalkBusinessError,
+  DingTalkIncompleteResponseError,
+  DingTalkMalformedResponseError,
+  DingTalkRequestError,
+  DingTalkTimeoutError,
+} from '../../src/integrations/dingtalk/transport'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+import { EncryptionMaterialError } from '../../src/security/encrypted-secrets'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROUTE_SOURCE = fs.readFileSync(path.resolve(HERE, '../../src/routes/admin-directory.ts'), 'utf8')
@@ -148,8 +162,11 @@ type Outcome =
   | { kind: 'helper'; code: string; fallback: string }
   /** A fixed 5xx sentence written in the handler itself. */
   | { kind: 'fixed'; status: number; code: string; message: string; logged: boolean }
-  /** A literal-400 echo site (provider, transport or database-driver text) left as it is: it still echoes (4xx, outside the 5xx rule). */
-  | { kind: 'echo400'; code: string }
+  /**
+   * R-41: a literal-400 site that used to echo the caught text. It answers 400 with `fallback` (untyped), the
+   * fallback plus DingTalk's numeric code (typed DingTalk failure), or a typed sentence as it is (`typed`).
+   */
+  | { kind: 'config400'; code: string; fallback: string; typed: Array<{ make: () => Error; message: string }> }
 interface Site {
   /** `VERB /path` of the router registration, or `fn:<name>` of the request helper, enclosing the clause. */
   owner: string
@@ -170,6 +187,13 @@ const rejectWith = (fn: ReturnType<typeof vi.fn>) => (error: unknown) => {
   fn.mockRejectedValue(error)
 }
 const helper = (code: string, fallback: string): Outcome => ({ kind: 'helper', code, fallback })
+const configTyped = (message: string) => ({ make: () => new DingTalkConfigValidationError(message), message })
+/** R-41 follow-up: production refusing to encrypt / decrypt for want of material — values-free, shown as it is. */
+const ENCRYPTION_MATERIAL_ISSUES = ['ENCRYPTION_KEY not configured / not set', 'ENCRYPTION_SALT uses the built-in default placeholder value']
+const encryptionMaterialTyped = {
+  make: () => new EncryptionMaterialError([...ENCRYPTION_MATERIAL_ISSUES]),
+  message: `Invalid encryption material for production: ${ENCRYPTION_MATERIAL_ISSUES.join('; ')}`,
+}
 const fixed500 = (code: string, message: string): Outcome => ({ kind: 'fixed', status: 500, code, message, logged: false })
 
 const INTEGRATION = { integrationId: 'd1000000-0000-4000-8000-000000000001' }
@@ -187,13 +211,23 @@ const CATCH_SITES: Site[] = [
     owner: 'POST /dingtalk/work-notification/test',
     calls: [{ method: 'post', path: '/dingtalk/work-notification/test', body: {} }],
     fail: rejectWith(workNotificationMocks.testDingTalkWorkNotificationAgentId),
-    outcome: { kind: 'echo400', code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED' },
+    outcome: {
+      kind: 'config400',
+      code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
+      fallback: 'Failed to test DingTalk work notification Agent ID',
+      typed: [configTyped('DingTalk Agent ID must be 1-32 numeric characters'), configTyped('DingTalk directory integration not found'), encryptionMaterialTyped],
+    },
   },
   {
     owner: 'PUT /dingtalk/work-notification',
     calls: [{ method: 'put', path: '/dingtalk/work-notification', body: {} }],
     fail: rejectWith(workNotificationMocks.saveDingTalkWorkNotificationAgentId),
-    outcome: { kind: 'echo400', code: 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED' },
+    outcome: {
+      kind: 'config400',
+      code: 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED',
+      fallback: 'Failed to save DingTalk work notification Agent ID',
+      typed: [configTyped('integrationId is required'), configTyped('DingTalk appSecret is required'), encryptionMaterialTyped],
+    },
   },
   {
     owner: 'GET /integrations',
@@ -238,19 +272,43 @@ const CATCH_SITES: Site[] = [
     owner: 'POST /integrations/:integrationId/approval-card-config/secret/generate',
     calls: [{ method: 'post', path: '/integrations/:integrationId/approval-card-config/secret/generate', params: INTEGRATION }],
     fail: rejectWith(approvalCardMocks.generateApprovalCardLinkSecret),
-    outcome: { kind: 'echo400', code: 'APPROVAL_CARD_SECRET_GENERATE_FAILED' },
+    outcome: {
+      kind: 'config400',
+      code: 'APPROVAL_CARD_SECRET_GENERATE_FAILED',
+      fallback: 'Failed to generate approval card link secret',
+      typed: [configTyped('DingTalk directory integration not found'), encryptionMaterialTyped],
+    },
   },
   {
     owner: 'PUT /integrations/:integrationId/approval-card-config',
     calls: [{ method: 'put', path: '/integrations/:integrationId/approval-card-config', params: INTEGRATION, body: { publicAppUrl: '' } }],
     fail: rejectWith(approvalCardMocks.saveApprovalCardPublicAppUrl),
-    outcome: { kind: 'echo400', code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED' },
+    outcome: {
+      kind: 'config400',
+      code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED',
+      fallback: 'Failed to save approval card config',
+      typed: [configTyped('publicAppUrl must be an absolute http(s) URL'), configTyped('publicAppUrl must use http or https'), encryptionMaterialTyped],
+    },
   },
   {
     owner: 'POST /integrations/test',
     calls: [{ method: 'post', path: '/integrations/test', body: {} }],
     fail: rejectWith(syncMocks.testDirectoryIntegration),
-    outcome: { kind: 'echo400', code: 'DIRECTORY_TEST_FAILED' },
+    outcome: {
+      kind: 'config400',
+      code: 'DIRECTORY_TEST_FAILED',
+      fallback: 'Failed to test directory integration',
+      typed: [
+        { make: () => new DirectoryValidationError('appSecret is required'), message: 'appSecret is required' },
+        { make: () => new DirectoryNotFoundError('Directory integration not found'), message: 'Directory integration not found' },
+        { make: () => new DirectoryConflictError('Directory account binding changed; retry the operation'), message: 'Directory account binding changed; retry the operation' },
+        {
+          make: () => new DingTalkCorpNotAllowedError('Directory integration corpId is required when DINGTALK_ALLOWED_CORP_IDS is configured', null),
+          message: 'Directory integration corpId is required when DINGTALK_ALLOWED_CORP_IDS is configured',
+        },
+        encryptionMaterialTyped,
+      ],
+    },
   },
   {
     owner: 'POST /integrations/:integrationId/sync',
@@ -431,7 +489,7 @@ const BARE_CATCH_SITES: Array<Site | NoResponseCatch> = [
 const isSite = (entry: Site | NoResponseCatch): entry is Site => 'calls' in entry
 const RESPONDING_SITES: Site[] = [...CATCH_SITES, ...BARE_CATCH_SITES.filter(isSite)]
 const HELPER_SITES = CATCH_SITES.filter((site) => site.outcome.kind === 'helper')
-const ECHO_400_SITES = CATCH_SITES.filter((site) => site.outcome.kind === 'echo400')
+const CONFIG_400_SITES = CATCH_SITES.filter((site) => site.outcome.kind === 'config400')
 const siteName = (site: Site): string => (site.clause ? `${site.owner} (${site.clause})` : site.owner)
 
 /** A batch route whose service resolved with every item failed (nothing committed). */
@@ -645,14 +703,23 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
     expect(calls).toEqual(listed)
   })
 
-  it('the five literal-400 echo sites (provider, transport or database-driver text) are the only echo sites left', () => {
-    expect(ECHO_400_SITES.map((s) => s.outcome.kind === 'echo400' && s.outcome.code)).toEqual([
+  it('R-41: the five literal-400 sites that used to echo are the config sites, and no body reads a caught text any more', () => {
+    expect(CONFIG_400_SITES.map((s) => s.outcome.kind === 'config400' && s.outcome.code)).toEqual([
       'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
       'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED',
       'APPROVAL_CARD_SECRET_GENERATE_FAILED',
       'APPROVAL_CARD_CONFIG_SAVE_FAILED',
       'DIRECTORY_TEST_FAILED',
     ])
+    // Every one answers through the R-41 responder with its literal code and fallback.
+    const calls = [...ROUTE_SOURCE.matchAll(/sendDirectoryConfigFailure\(res, error, '([A-Z_]+)', '([^']+)', [A-Z_]+\)/g)]
+      .map((m) => `${m[1]} | ${m[2]}`)
+    expect(ROUTE_SOURCE.split('sendDirectoryConfigFailure(').length - 1).toBe(calls.length + 1) // + the declaration
+    expect(calls).toEqual(CONFIG_400_SITES.map((s) => (s.outcome.kind === 'config400' ? `${s.outcome.code} | ${s.outcome.fallback}` : '')))
+    // readErrorMessage (the generic "caught text, else fallback" reader) is only ever a LOG argument now.
+    const readers = ROUTE_SOURCE.split(/\r?\n/).filter((line) => /readErrorMessage\(/.test(line) && !/^function readErrorMessage\(/.test(line))
+    expect(readers.length).toBeGreaterThan(0)
+    for (const line of readers) expect(line).toMatch(/logger\.warn\(|^\s*error: readErrorMessage\(error, 'unknown error'\),$/)
   })
 })
 
@@ -660,14 +727,15 @@ describe('routes/admin-directory.ts — every catch clause is enumerated (#6163 
 
 let markerProbesRun = 0
 const EXPECTED_MARKER_PROBES =
-  RESPONDING_SITES.filter((s) => s.outcome.kind !== 'echo400').reduce((n, s) => n + s.calls.length, 0)
+  RESPONDING_SITES.filter((s) => s.outcome.kind !== 'config400').reduce((n, s) => n + s.calls.length, 0)
   + NOTHING_COMMITTED.length
   + 1 // the test-send outcome-unknown 502
+  + CONFIG_400_SITES.length * 7 // R-41: untyped, five typed DingTalk shapes and a raw network error at every config site
 
 describe('an untyped failure at every catch clause answers a fixed 5xx sentence — never the caught text', () => {
   RESPONDING_SITES.forEach((site, index) => {
     const outcome = site.outcome
-    if (outcome.kind === 'echo400') return
+    if (outcome.kind === 'config400') return
     const status = outcome.kind === 'helper' ? 500 : outcome.status
     const message = outcome.kind === 'helper' ? outcome.fallback : outcome.message
     const logged = outcome.kind === 'helper' ? true : outcome.logged
@@ -719,18 +787,116 @@ describe('an untyped failure at every catch clause answers a fixed 5xx sentence 
   }
 })
 
-describe('the five literal-400 echo sites (provider, transport or database-driver text) still echo (4xx, outside the 5xx rule) — pinned so a change is visible', () => {
-  for (const site of ECHO_400_SITES) {
+describe('R-41: the five literal-400 sites that used to echo answer a fixed sentence (plus DingTalk\'s code) — never the caught text', () => {
+  // Documentation-range address + port + request id: the shape of text a provider or a socket error carries.
+  const PROVIDER_TEXT = `${MARKER}_r41 egress 203.0.113.7:443 request-id 0f0f-marker`
+  /** Every typed DingTalk failure shape, each carrying the marker wherever that shape can carry provider text. */
+  const DINGTALK_FAILURES: Array<{ label: string; make: () => Error; suffix: string }> = [
+    {
+      label: 'DingTalkBusinessError (errcode + errmsg)',
+      make: () => new DingTalkBusinessError(PROVIDER_TEXT, { errcode: 40089, errmsg: PROVIDER_TEXT, request_id: PROVIDER_TEXT }),
+      suffix: ': DingTalk rejected the request (errcode 40089)',
+    },
+    {
+      label: 'DingTalkRequestError (HTTP status + body)',
+      make: () => new DingTalkRequestError(PROVIDER_TEXT, 403, { message: PROVIDER_TEXT, code: PROVIDER_TEXT }),
+      suffix: ': DingTalk answered with an error status (HTTP 403)',
+    },
+    {
+      label: 'DingTalkIncompleteResponseError (2xx without the expected field)',
+      make: () => new DingTalkIncompleteResponseError(PROVIDER_TEXT, { errcode: 0, errmsg: PROVIDER_TEXT, message: PROVIDER_TEXT }),
+      suffix: ': DingTalk returned a response without the expected data (errcode 0)',
+    },
+    {
+      label: 'DingTalkMalformedResponseError',
+      make: () => new DingTalkMalformedResponseError('unparseable_body', 200, PROVIDER_TEXT),
+      suffix: ': DingTalk returned an unusable response (HTTP 200)',
+    },
+    {
+      label: 'DingTalkTimeoutError',
+      make: () => Object.assign(new DingTalkTimeoutError(10_000), { detail: PROVIDER_TEXT }),
+      suffix: ': DingTalk did not answer in time',
+    },
+  ]
+
+  for (const site of CONFIG_400_SITES) {
     const outcome = site.outcome
-    if (outcome.kind !== 'echo400') continue
-    it(`${siteName(site)}: an untyped failure answers a literal 400 ${outcome.code} carrying the caught text`, async () => {
-      const text = `${MARKER}_echo provider diagnostic`
-      site.fail(new Error(text))
-      const res = await invoke(site.calls[0])
+    if (outcome.kind !== 'config400') continue
+    const call = site.calls[0]
+
+    it(`${siteName(site)}: an untyped failure → 400 ${outcome.code} with the fixed sentence, the caught text logged`, async () => {
+      const marker = `${MARKER}_config relation "directory_integrations" does not exist at 203.0.113.9:5432`
+      site.fail(Object.assign(new Error(marker), { detail: marker, hint: marker }))
+      const res = await invoke(call)
       expect(res.statusCode).toBe(400)
-      expect(res.body).toEqual({ ok: false, error: { code: outcome.code, message: text, details: undefined } })
+      expect(res.body).toEqual({ ok: false, error: { code: outcome.code, message: outcome.fallback, details: undefined } })
+      expect(bodyAndHeaders(res)).not.toContain(MARKER)
+      expect(bodyAndHeaders(res)).not.toContain('203.0.113')
+      expect(loggedTexts()).toContain(marker)
+      markerProbesRun += 1
+    })
+
+    it(`${siteName(site)}: a raw network error (no DingTalk type) → 400 ${outcome.code} with the fixed sentence`, async () => {
+      const marker = `${MARKER}_config fetch failed`
+      site.fail(Object.assign(new TypeError(marker), { cause: Object.assign(new Error('connect ECONNREFUSED 203.0.113.5:443'), { code: 'ECONNREFUSED' }) }))
+      const res = await invoke(call)
+      expect(res.statusCode).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: outcome.code, message: outcome.fallback, details: undefined } })
+      expect(bodyAndHeaders(res)).not.toContain(MARKER)
+      expect(bodyAndHeaders(res)).not.toContain('203.0.113')
+      markerProbesRun += 1
+    })
+
+    for (const failure of DINGTALK_FAILURES) {
+      it(`${siteName(site)}: ${failure.label} → 400 ${outcome.code}, fixed sentence + DingTalk's code only`, async () => {
+        site.fail(failure.make())
+        const res = await invoke(call)
+        expect(res.statusCode).toBe(400)
+        expect(res.body).toEqual({
+          ok: false,
+          error: { code: outcome.code, message: `${outcome.fallback}${failure.suffix}`, details: undefined },
+        })
+        expect(bodyAndHeaders(res)).not.toContain(MARKER)
+        expect(bodyAndHeaders(res)).not.toContain('203.0.113')
+        // The provider text went to the log, not into the body.
+        expect(loggedTexts()).toContain(outcome.fallback)
+        markerProbesRun += 1
+      })
+    }
+
+    for (const typed of outcome.typed) {
+      it(`${siteName(site)}: a typed sentence (${typed.make().name}) still shows as it is — 400 ${outcome.code}`, async () => {
+        site.fail(typed.make())
+        const res = await invoke(call)
+        expect(res.statusCode).toBe(400)
+        expect(res.body).toEqual({ ok: false, error: { code: outcome.code, message: typed.message, details: undefined } })
+        // An answer, not an incident: the fallback log line is not written.
+        expect(warnSpy).not.toHaveBeenCalledWith(outcome.fallback, expect.anything())
+      })
+    }
+
+    it(`${siteName(site)}: the type decides, not the prose — the same sentence thrown untyped is the fixed sentence`, async () => {
+      site.fail(new Error(outcome.typed[0].message))
+      const res = await invoke(call)
+      expect(res.statusCode).toBe(400)
+      expect(res.body).toEqual({ ok: false, error: { code: outcome.code, message: outcome.fallback, details: undefined } })
     })
   }
+
+  it('PUT /integrations/:integrationId: the tenant-change 409 shows the typed sentence, and an untyped failure on the same call is the fixed 500', async () => {
+    syncMocks.updateDirectoryIntegration.mockRejectedValue(new DirectoryTenantChangeBlockedError('corp_id is immutable on directory integration d1000000-0000-4000-8000-000000000001'))
+    const blocked = await invoke({ method: 'put', path: '/integrations/:integrationId', params: INTEGRATION, body: {} })
+    expect(blocked.statusCode).toBe(409)
+    expect(blocked.body).toEqual({
+      ok: false,
+      error: { code: 'DIRECTORY_TENANT_CHANGE_BLOCKED', message: 'corp_id is immutable on directory integration d1000000-0000-4000-8000-000000000001', details: undefined },
+    })
+
+    syncMocks.updateDirectoryIntegration.mockRejectedValue(new Error(`${MARKER}_tenant 203.0.113.11`))
+    const untyped = await invoke({ method: 'put', path: '/integrations/:integrationId', params: INTEGRATION, body: {} })
+    expect(untyped.statusCode).toBe(500)
+    expect(bodyAndHeaders(untyped)).not.toContain(MARKER)
+  })
 })
 
 // ── typed failures: the status comes from the type ──────────────────────────────────────────────────

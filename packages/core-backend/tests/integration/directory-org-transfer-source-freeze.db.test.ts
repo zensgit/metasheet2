@@ -569,8 +569,10 @@ describeIfDatabase('Transfer MVP T2 — §12.2 source freeze during an active or
     const runs = await runRows(source.integrationId)
     expect(runs).toHaveLength(1)
     expect(runs[0].status).toBe('failed')
-    expect(runs[0].error_message).toContain('b1 provider pull exploded')
-    expect(await integrationLastError(source.integrationId)).toContain('b1 provider pull exploded')
+    // R-41: the persisted text is the classified one — an untyped error's own text goes to the log, never
+    // to error_message / last_error / the alert (which is also delivered outbound).
+    expect(runs[0].error_message).toBe('Directory sync failed')
+    expect(await integrationLastError(source.integrationId)).toBe('Directory sync failed')
     expect(await syncFailedAlertCount(source.integrationId)).toBe(1)
     // …and THIS one does drive escalation.
     expect(await countConsecutiveFailedRuns(source.integrationId)).toBe(1)
