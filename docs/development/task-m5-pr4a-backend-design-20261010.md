@@ -17,7 +17,7 @@
 3. **接口**：PR-4a 新增 16 条路由（重复 1、里程碑 1、依赖 5、字段定义 4、字段绑定 4、字段值 1），改动 4 条既有路由的形状（complete 的请求体、详情、列表项、删除），全部挂在 `TASKS_ENABLED` 的同一个 `tasksRouter()` 上，**不新增任何 `TASKS_*` 读点、不新增开关**（§3）。
 4. **锁**：所有写走 `withOrgStructure`；S09 已裁的锁序包装器 `withTaskLockOrder` 在 PR-4a 落地并首次武装 `M5|7|锁序控件`，不新增第四处取锁字面量（§4.2）。
 5. **门**：PR-4a 承载既有 `M5|7|锁序控件` 与 `M5|10|P2子集` 中属于它的格，以及候选门 27（重复）、29（依赖）、30（字段）和 G1 的候选子集行；候选行要等锁修订写进 `arm-set` 才计分（§6）。
-6. **仍待 owner 的**：本文自选 29 项（§7.1）；任务 E 的三个问题与四项偏离里影响 PR-4a 的部分（§7.2）；候选门行入锁的那次修订（§7.3）。
+6. **仍待 owner 的**：本文自选 30 项（§7.1）；任务 E 的三个问题与四项偏离里影响 PR-4a 的部分（§7.2）；候选门行入锁的那次修订（§7.3）。
 
 ---
 
@@ -241,6 +241,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 - org 只取 `req.authenticatedTenantId`：写路由缺 org ⇒ 422 `ORG_MISSING`；集合型读 ⇒ 200 `{ items: [], degraded: true, reason: 'org_missing' }`；单对象读 ⇒ 404。判定都在 `rbacGuard` 之后的 handler 里。
 - 行级失败统一回 404 `{ error: { code: 'NOT_FOUND' } }`，响应与目标不存在时完全一样，不区分不存在、他 org、已软删、看不见、看得见但没有这项能力；行级从不返回 403。
 - 请求体与路径参数的校验排在行级能力判定之后：看不到的对象不论请求体如何都是 404。
+- 本文写 `can(roles, …)` 的地方，`roles` 都是 `resolveTaskRoles` 给出的完整角色集，含清单身份（S11、S13、S35 与 S26 的取值写法）。只看直接角色的判定有两处，都写明了：G1 的 `canCompleteForAll`（只比较创建人），以及沿用 PR-3a `[own-53]` 的增删负责人与关注人（本 PR 不改）。
 - 错误码：纯函数的 `reason` 转大写即 HTTP 码；`not_found` / `forbidden` / `cross_org` ⇒ 404；`has_children` 沿用 M3 的 409 `HAS_CHILDREN`；`VERSION_CONFLICT` 409 不变；其余 422。错误体只有 `{ error: { code } }`（`[a-14]`）。
 - 空操作 200，不写行、不写事件。
 - 路径里不可打印的 id ⇒ 发 SQL 之前 404；请求体里的任务域 id 必须过 `isValidTaskDomainId`（四合取），不过 ⇒ 422（门 10 的 id 两格）。
@@ -280,6 +281,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 **派生**（S15、S16、D3）：在三个把任务从 open 翻成 done 的调用点上——`completeTask`（`services/task-records.ts:637`，含 §3.1 的 G1 路径）、`removeAssignee`（`services/task-structure.ts:347`，翻转在 `:364`）、`switchCompletionMode`（同文件 `:406`，翻转在 `:424`）——同一事务、同一把结构锁里，在写入翻转之后调用同一个服务函数 `spawnNextOccurrenceIfDue(db, …)`：`shouldSpawnOnFlip` 为真才调用 `planSpawn`，再用独立的插入函数写入新一期的任务行，以及它的负责人（`completed_at` 为空）、关注人、所属清单、字段取值和两条事件，不经 `createTask`（它自开事务并再次取锁）。`addAssignee`（`:313`，翻转在 `:341`）是 done → open 方向，不派生。
 
 - 一次性守卫：锁内查本任务是否已有 `recurrence_spawned` 事件（D3）；库里再有 §2.2 的唯一索引兜底。reopen 之后再完成不派生第二次。
+- 新一期的日期与提醒（E05、S16）：新的 `due_date` 由 `nextOccurrenceDueDate` 算出，`start_date` 与它顺延相同的民用天数，`due_time`、`start_time`、`time_zone` 照抄，`due_at` 用 `computeDueAt` 重算。`remind_at`：上一期有提醒 ⇒ 新一期保持相对新 `due_at` 的同一提前量；上一期没有 ⇒ 按系列创建人的 `default_remind_policy` 经 `computeDefaultRemindAt` 计算（任务 E `planSpawn` 返回的两种指示）。新一期的 `created` 事件就是它的提醒下界，PR-3b 的扫描据此判断是否该提醒。
 - 派生的负责人：只带上仍是本 org 在职成员的那些（经 `services/task-org-members.ts` 的 `findActiveOrgMembers`），离开 org 的人不进新一期，也不让完成失败（`[a-15]`）。
 - 派生的清单项与字段值照抄，不写 `list_added` / `item_added` 事件（任务 E `planSpawn` 只给两条事件；`[a-30]`）。
 - 派生不发通知（S33）：新任务的 `created` 不在可通知闭集里。
@@ -294,10 +296,10 @@ write；`can(roles, 'edit')`（S13）；请求体 `{ isMilestone: boolean }`，�
 | 方法 路径 | 码 | 行级 | 请求 | 成功 200 | 错误 |
 |---|---|---|---|---|---|
 | `GET /api/tasks/:id/dependencies` | read | 本任务 `view` | — | `{ predecessors: DepItem[], successors: DepItem[] }` | 404 |
-| `POST /api/tasks/:id/dependencies` | write | 两端都 `can(roles,'edit')` 且同 org 且都未软删（S11） | 恰一个键：`{ predecessorId }`（加 `predecessorId → :id`）或 `{ successorId }`（加 `:id → successorId`） | `{ predecessorId, successorId }` | 404；422 `ORG_MISSING`、`INVALID_DEPENDENCY`、`SELF`、`CYCLE`、`LIMIT` |
+| `POST /api/tasks/:id/dependencies` | write | 两端都 `can(roles,'edit')` 且同 org 且都未软删（S11；`roles` 是含清单身份的完整角色集） | 恰一个键：`{ predecessorId }`（加 `predecessorId → :id`）或 `{ successorId }`（加 `:id → successorId`） | `{ predecessorId, successorId }` | 404；422 `ORG_MISSING`、`INVALID_DEPENDENCY`、`SELF`、`CYCLE`、`LIMIT` |
 | `DELETE /api/tasks/:id/dependencies/predecessors/:otherId` | write | 同上（两端 `edit`） | — | `{ predecessorId, successorId }` | 404；422 `ORG_MISSING` |
 | `DELETE /api/tasks/:id/dependencies/successors/:otherId` | write | 同上 | — | 同上 | 同上 |
-| `GET /api/tasks/:id/dependency-candidates` | read | 本任务 `edit` | query `direction=predecessor\|successor`（必填）、`q`（可选，按标题包含匹配） | `{ items: [{ id, title, status }], total }` | 404；422 `INVALID_DIRECTION`、分页 |
+| `GET /api/tasks/:id/dependency-candidates` | read | 本任务 `edit` | query `direction=predecessor\|successor`（必填）、`q`（可选，按标题包含匹配，不区分大小写，`[a-32]`） | `{ items: [{ id, title, status }], total }` | 404；422 `INVALID_DIRECTION`、分页 |
 
 - `DepItem` = `{ id, title, status, dueAt, isMilestone }`，只列调用者能 `view` 的对端；看不见的对端不列出、也不计数（与 M3 详情里的子任务同一规则，`[a-28]`）。
 - 判定顺序（锁后）：本任务取行与 `edit`（404）→ 请求体恰一个键且 id 过四合取（422 `INVALID_DEPENDENCY`）→ 对端取行（同 org、未软删）与 `edit`（404）→ `validateAddDependency`：`cross_org` ⇒ 404，`self` ⇒ 422 `SELF`，**`duplicate` ⇒ 200 空操作**（`[a-11]`：PR-3a 的约定是重复加入为空操作；任务 E 的 reason 名不变，只是路由把它当空操作），`limit` ⇒ 422 `LIMIT`，`cycle` ⇒ 422 `CYCLE`。
@@ -518,6 +520,7 @@ M5-b（附件）、M5-e（夹钳）、M5-f（导出）归 PR-4b / 4c。
 | a-28 | 依赖列表里看不见的对端 | 不列、不计数 | 列出 id 不列标题：泄露存在性 |
 | a-30 | 派生照抄清单项时不写清单事件 | 不写 | 写 `list_added` / `item_added`：清单动态里出现每一期的加入 |
 | a-31 | 成员型字段不在候选集的码 | `NOT_A_CANDIDATE` | `INACTIVE_ORG_MEMBER`（与负责人校验同码） |
+| a-32 | 没有纯函数 reason 对应、由本文命名的码与规则：`INVALID_DEPENDENCY`、`INVALID_DIRECTION`、`INVALID_FIELD`、`INVALID_BINDING`、`INVALID_SCOPE`；候选的 `q` 按标题包含匹配（不区分大小写） | 如左 | 改名或合并为一个 `INVALID_BODY`：前端少几个分支，但定位不到哪个参数错了 |
 
 （编号 a-26、a-29 预留未用：起草时归入已裁的 S05 与 S09，不再是自选。）
 
@@ -532,7 +535,7 @@ M5-b（附件）、M5-e（夹钳）、M5-f（导出）归 PR-4b / 4c。
 ### 7.3 锁与合并
 
 - 候选门 27、29、30 与 G1 的子集行写进锁 §12 `arm-set` 的那次修订：由哪张 PR 承载、何时提交，请 owner 点名（S31 已定内容，未定载体）。
-- 合并顺序：#6249 → PR-4a → {PR-4b, PR-4c}；每张都需要 owner 单独的合并点名（锁 §14-5）。PR-4a 的合并也受 M4 列车影响：它的迁移名必须排在 PR-3b、PR-3c 带来的迁移之后。
+- 合并顺序：#6249 → PR-4a → {PR-4b, PR-4c}；每张都需要 owner 单独的合并点名（锁 §14-5）。PR-4a 的迁移名必须排在合并那一刻 main 上最晚的迁移之后，届时重核（`[a-23]`）。
 
 ---
 
