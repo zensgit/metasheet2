@@ -4,6 +4,7 @@ import type {
   ApprovalMode,
   ApprovalNode,
   ApprovalNodeConfig,
+  ApprovalType,
   AutoApprovalPolicy,
   EmptyAssigneePolicy,
   HandlerMode,
@@ -14,6 +15,7 @@ import type {
 } from '../types/approval'
 import {
   APPROVAL_ROLE_CONFIGURE_SENTINEL,
+  APPROVAL_TYPE_VALUES,
   HANDLER_ASSIGNEE_SOURCE_KINDS,
   NODE_FIELD_ACCESS_VALUES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
@@ -24,6 +26,8 @@ import { runtimeSuccessorTargets } from './parallelEdit'
 const NODE_TIMEOUT_SUPPORTED_EFFECT_SET = new Set<string>(NODE_TIMEOUT_SUPPORTED_EFFECTS)
 
 const HANDLER_ASSIGNEE_SOURCE_KIND_SET = new Set<string>(HANDLER_ASSIGNEE_SOURCE_KINDS)
+
+const APPROVAL_TYPE_SET = new Set<string>(APPROVAL_TYPE_VALUES)
 
 // Approval-node editing inside a preserved graph. The editor owns the fields already available in
 // the linear authoring surface: approver source, approval/empty-assignee modes, requester-merge,
@@ -59,6 +63,22 @@ export interface ApprovalNodeSourceEdit {
   // mode away can never leave an orphaned threshold on the saved graph. approval-node-only (never on a
   // handler edit — §1.2 forbids the key there).
   approvalThreshold?: number
+  /**
+   * Lock-4 §1 F4-A — 审批类型, approval-node-only (a handler carries no approval-decision concept;
+   * the backend rejects the key there). Same absent/`null` grammar as `autoApprovalPolicy`:
+   * `undefined` = untouched (the persisted value, if any, survives — seeding copies an explicit
+   * `'manual'` verbatim); `null` = the author chose 人工审批, so the key is REMOVED (absent ≡ manual).
+   */
+  approvalType?: ApprovalType | null
+  /**
+   * Lock-4 §1 F4-A — true ⇒ the rebuilt node carries NO `assigneeSources` key (an `auto_approve`
+   * node carries none; the backend 400s an empty array). Meaningful ONLY while the effective
+   * `approvalType` is `'auto_approve'` (`approvalNodeEditOmitsAssigneeSources`). Seeded for a
+   * persisted sourceless auto_approve node and set by the 自动通过 setter (an AUTHOR action — save
+   * never clears sources on its own). `assigneeSources` stays on the edit as hidden scratch while
+   * it is set, so an accidental radio traversal back to 人工审批 restores the cards.
+   */
+  omitAssigneeSources?: boolean
   emptyAssigneePolicy?: EmptyAssigneePolicy
   autoApprovalPolicy?: AutoApprovalPolicy | null
   fieldPermissions?: NodeFieldPermission[]
@@ -101,6 +121,34 @@ function hasAssigneeSources(config: ApprovalNode['config']): config is ApprovalN
 }
 
 /**
+ * Lock-4 §1 F4-A — an `approval` node in the ONE shape that may legally carry no assignee carrier at
+ * all: `approvalType: 'auto_approve'` with neither `assigneeSources` nor the legacy
+ * `assigneeType`/`assigneeIds` pair ("an empty source list is legal here and only here"). Such a node
+ * IS seeded (with an empty card list + the omit flag) so its 审批类型 stays editable on the canvas;
+ * a legacy-keyed node is still never seeded (preserved verbatim, as before).
+ */
+export function isSourcelessAutoApproveNode(node: ApprovalNode): boolean {
+  if (node.type !== 'approval') return false
+  const config = (node.config ?? {}) as ApprovalNodeConfig
+  return config.approvalType === 'auto_approve'
+    && config.assigneeSources === undefined
+    && config.assigneeType === undefined
+    && config.assigneeIds === undefined
+}
+
+/**
+ * Lock-4 §1 F4-A — the ONE predicate for "this edit rebuilds with NO `assigneeSources` key": an
+ * approval edit whose 审批类型 is `auto_approve` AND whose sources were omitted (seeded sourceless, or
+ * switched to 自动通过 by the author). Validation, the rebuild, and the publish placeholder checklist
+ * all ask THIS, so a hidden scratch card can never be validated, saved, or flagged on its own.
+ */
+export function approvalNodeEditOmitsAssigneeSources(
+  edit: Pick<ApprovalNodeSourceEdit, 'nodeType' | 'approvalType' | 'omitAssigneeSources'>,
+): boolean {
+  return edit.nodeType !== 'handler' && edit.approvalType === 'auto_approve' && edit.omitAssigneeSources === true
+}
+
+/**
  * Seed the editable model from a (preserved) graph — one entry per `approval` node THAT HAS an
  * `assigneeSources` array, carrying a clone of it. Non-approval and legacy (no-`assigneeSources`)
  * nodes are skipped (preserved verbatim). Seeding is identity: an untouched edit reproduces the
@@ -110,24 +158,32 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
   const edits: ApprovalNodeEdits = {}
   if (!graph) return edits
   for (const node of graph.nodes) {
-    if (!hasAssigneeSources(node.config)) continue
+    // Lock-4 §1 F4-A: a sourceless auto_approve node is seeded too (empty card list + omit flag) —
+    // before this slice it was skipped here and therefore never editable on the canvas.
+    const sourcelessAutoApprove = isSourcelessAutoApproveNode(node)
+    if (!sourcelessAutoApprove && !hasAssigneeSources(node.config)) continue
     if (node.type === 'approval') {
+      const config = node.config as ApprovalNodeConfig
       // `nodeType` is deliberately OMITTED for approval edits — absent ≡ 'approval', keeping the
       // approval seed byte-identical to before this slice (no round-trip churn). Only handler edits
       // carry the discriminator (validate() reads it; the rebuild keys on the graph node's own type).
       edits[node.key] = {
         nodeKey: node.key,
-        assigneeSources: cloneJson(node.config.assigneeSources),
-        ...(node.config.approvalMode !== undefined ? { approvalMode: node.config.approvalMode } : {}),
-        ...(node.config.approvalThreshold !== undefined ? { approvalThreshold: node.config.approvalThreshold } : {}),
-        ...(node.config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: node.config.emptyAssigneePolicy } : {}),
-        ...(node.config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(node.config.autoApprovalPolicy) } : {}),
-        ...(node.config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(node.config.fieldPermissions) } : {}),
-        ...(node.config.timeout !== undefined ? { timeout: cloneJson(node.config.timeout) } : {}),
+        assigneeSources: sourcelessAutoApprove ? [] : cloneJson(config.assigneeSources ?? []),
+        ...(config.approvalMode !== undefined ? { approvalMode: config.approvalMode } : {}),
+        ...(config.approvalThreshold !== undefined ? { approvalThreshold: config.approvalThreshold } : {}),
+        // Lock-4 §1 F4-A: seeding is IDENTITY — an explicit persisted 'manual' is copied verbatim
+        // (and so re-emitted verbatim); absent stays absent.
+        ...(config.approvalType !== undefined ? { approvalType: config.approvalType } : {}),
+        ...(sourcelessAutoApprove ? { omitAssigneeSources: true } : {}),
+        ...(config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: config.emptyAssigneePolicy } : {}),
+        ...(config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(config.autoApprovalPolicy) } : {}),
+        ...(config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(config.fieldPermissions) } : {}),
+        ...(config.timeout !== undefined ? { timeout: cloneJson(config.timeout) } : {}),
         // Lock-5 §1.1: seeding is IDENTITY — an untouched edit reproduces the persisted object
         // byte-for-byte (including a mixed add/reduce pair the tab renders read-only, A-7).
-        ...(node.config.nodeOperationPolicy !== undefined
-          ? { nodeOperationPolicy: cloneJson(node.config.nodeOperationPolicy) }
+        ...(config.nodeOperationPolicy !== undefined
+          ? { nodeOperationPolicy: cloneJson(config.nodeOperationPolicy) }
           : {}),
       }
     } else if (node.type === 'handler') {
@@ -196,7 +252,9 @@ export function removeAssigneeSourceCard(
  */
 export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: ApprovalNodeEdits): ApprovalGraph {
   const nodes: ApprovalNode[] = graph.nodes.map((node) => {
-    if (!hasAssigneeSources(node.config)) return cloneJson(node)
+    // Lock-4 §1 F4-A: admits EXACTLY the set `approvalNodeEditsFromGraph` seeds — a sourceless
+    // auto_approve node's edits (e.g. switching it to 人工审批) must land, not be cloned past.
+    if (!hasAssigneeSources(node.config) && !isSourcelessAutoApproveNode(node)) return cloneJson(node)
     const edit = edits[node.key]
     if (!edit) return cloneJson(node)
     if (node.type === 'handler') {
@@ -220,6 +278,15 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
     if (node.type !== 'approval') return cloneJson(node)
     const originalConfig = cloneJson(node.config)
     const config: ApprovalNodeConfig = { ...originalConfig, assigneeSources: cloneJson(edit.assigneeSources) }
+    // Lock-4 §1 F4-A — `null` removes the key (人工审批: absent ≡ manual), a value sets it, absent
+    // leaves the persisted value untouched (the `autoApprovalPolicy` grammar below).
+    if (edit.approvalType === null) delete config.approvalType
+    else if (edit.approvalType !== undefined) config.approvalType = edit.approvalType
+    // Lock-4 §1 F4-A — an auto_approve node whose sources were omitted carries NO `assigneeSources`
+    // key, and no node is ever rebuilt with an EMPTY array (the backend 400s `[]`; a manual node left
+    // with zero cards is caught first by `validateApprovalNodeEdits`). For a seeded sourceless node
+    // the spread above appended the key, so deleting it restores the original key order exactly.
+    if (approvalNodeEditOmitsAssigneeSources(edit) || edit.assigneeSources.length === 0) delete config.assigneeSources
     if (edit.approvalMode !== undefined) config.approvalMode = edit.approvalMode
     // P1-C: `approvalThreshold` rides ONLY with an effective mode of 'threshold' — mirrors the
     // backend's own conditional emission. An author switching mode away (or a stale edit carrying a
@@ -361,11 +428,16 @@ export function validateApprovalNodeEdits(
     const isHandler = edit.nodeType === 'handler'
     const nodeLabel = isHandler ? '办理节点' : '审批节点'
     const sourceLabel = isHandler ? '办理人来源' : '审批人来源'
-    if (edit.assigneeSources.length === 0) {
+    // Lock-4 §1 F4-A — "an empty source list is legal here and only here": an auto_approve edit
+    // whose sources were omitted rebuilds with NO source, so neither the ≥1 rule nor the per-source
+    // checks apply to its hidden scratch cards. Every other edit (manual, absent, an auto_approve node
+    // that still CARRIES sources, every handler) keeps the rules unchanged.
+    const omitsAssigneeSources = approvalNodeEditOmitsAssigneeSources(edit)
+    if (!omitsAssigneeSources && edit.assigneeSources.length === 0) {
       errors.push(`${nodeLabel} ${edit.nodeKey} 至少需要一个${sourceLabel}`)
       continue
     }
-    for (const source of edit.assigneeSources) {
+    for (const source of omitsAssigneeSources ? [] : edit.assigneeSources) {
       // Lock-3 §1.5 / G-13: a handler admits ONLY the seven-member registry kinds (backend
       // APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED). Mirror it in the FE preview.
       if (isHandler && !HANDLER_ASSIGNEE_SOURCE_KIND_SET.has(source.kind)) {
@@ -399,6 +471,11 @@ export function validateApprovalNodeEdits(
       if (edit.approvalThreshold !== undefined) {
         errors.push(`办理节点 ${edit.nodeKey} 不支持门槛会签人数`)
       }
+      // Lock-4 §1 F4-A — mirrors the backend authoring choke: `approvalType` on a non-approval node
+      // (handler included) is a 400 on every read. Same belt-on-the-door posture as the two above.
+      if (edit.approvalType !== undefined && edit.approvalType !== null) {
+        errors.push(`办理节点 ${edit.nodeKey} 不支持审批类型`)
+      }
     } else {
       if (edit.approvalMode !== undefined && !(['single', 'all', 'any', 'threshold', 'sequential'] as const).includes(edit.approvalMode)) {
         errors.push(`审批节点 ${edit.nodeKey} 的审批模式无效`)
@@ -413,6 +490,17 @@ export function validateApprovalNodeEdits(
         errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略无效`)
       }
       const inParallelRegion = parallelRegionNodeKeys?.has(edit.nodeKey) ?? false
+      // Lock-4 §1 F4-A — the value door (a seeded off-union value, `'auto_reject'` included, is never
+      // saved from here) and the v1 placement rule, mirroring backend
+      // `APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED` ("A non-`manual` node inside a parallel region
+      // is rejected in v1"). The 自动通过 radio is disabled inside a parallel region and its setter
+      // refuses there too; THIS is the save-blocking floor (e.g. a topology edit that later moves an
+      // auto_approve node into a branch).
+      if (edit.approvalType !== undefined && edit.approvalType !== null && !APPROVAL_TYPE_SET.has(edit.approvalType)) {
+        errors.push(`审批节点 ${edit.nodeKey} 的审批类型无效`)
+      } else if (edit.approvalType === 'auto_approve' && inParallelRegion) {
+        errors.push(`审批节点 ${edit.nodeKey} 位于并行分支内，不支持自动通过（v1 仅支持线性路径）`)
+      }
       // P1-C (T2-4): linear-only fail-closed — mirrors `APPROVAL_THRESHOLD_IN_PARALLEL`. The mode
       // picker must not OFFER 'threshold' inside a parallel region (rendering layer); this is the
       // defense-in-depth floor for a caller that bypassed that (e.g. a programmatic edit).
@@ -557,6 +645,8 @@ export function isPlaceholderRoleSource(source: ApprovalAssigneeSource): boolean
  */
 export function placeholderRoleNodeKeys(edits: ApprovalNodeEdits): string[] {
   return Object.values(edits)
-    .filter((edit) => edit.assigneeSources.some(isPlaceholderRoleSource))
+    // Lock-4 §1 F4-A: an auto_approve edit whose sources are omitted saves NO source — a hidden
+    // scratch placeholder card on it is not something publish will ever see, so it is not flagged.
+    .filter((edit) => !approvalNodeEditOmitsAssigneeSources(edit) && edit.assigneeSources.some(isPlaceholderRoleSource))
     .map((edit) => edit.nodeKey)
 }

@@ -6,6 +6,7 @@ import type {
   ApprovalNodeConfig,
   ApprovalTemplateDetailDTO,
   ApprovalTemplateVisibilityScope,
+  ApprovalType,
   AutoApprovalPolicy,
   EmptyAssigneeFallback,
   EmptyAssigneePolicy,
@@ -25,7 +26,7 @@ import type {
   UpdateApprovalTemplateRequest,
   RuntimePolicy,
 } from '../types/approval'
-import { NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
+import { APPROVAL_TYPE_VALUES, NODE_FIELD_ACCESS_VALUES, NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export { NODE_TIMEOUT_MAX_AFTER_MINUTES, NODE_TIMEOUT_SUPPORTED_EFFECTS } from '../types/approval'
 export type { NodeTimeoutConfig, NodeTimeoutEffect, SupportedNodeTimeoutEffect } from '../types/approval'
 import {
@@ -82,7 +83,7 @@ export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './paralle
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
-export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -238,6 +239,22 @@ export interface ApprovalStepDraft {
   // dispatch (`APPROVAL_THRESHOLD_UNREACHABLE`), never at save/publish. See
   // `validateTemplateApprovalFlow` for the (integer-only) client-side preview.
   approvalThreshold: number
+  /**
+   * Lock-4 §1 F4-A — 审批类型. Absent ≡ `'manual'` (today's behavior, byte-stable). Hydrated
+   * VERBATIM (an explicit persisted `'manual'` stays explicit) and re-emitted by `buildStepConfig`
+   * only when defined. Authored through `setStepApprovalType`, never assigned ad hoc.
+   */
+  approvalType?: ApprovalType
+  /**
+   * Lock-4 §1 F4-A — true ⇒ this step emits NO `assigneeSources` ("an empty source list is legal
+   * here and only here"). Meaningful ONLY while `approvalType === 'auto_approve'` (see
+   * `stepOmitsAssigneeSources`). Set by hydrate for a persisted auto_approve node that carries no
+   * sources, and by `setStepApprovalType(step, 'auto_approve')` (an AUTHOR action — save never
+   * clears sources on its own). The step's source fields (`sourceKind`/`idsText`/…) are kept as
+   * hidden scratch while it is set, so switching back to 人工审批 restores the previous source
+   * instead of silently discarding it (the P1-1 radio-traversal loss class).
+   */
+  omitAssigneeSources?: boolean
   emptyAssigneePolicy: EmptyAssigneePolicy
   /**
    * Fix-round P1-1 (gate P3A-F4B-20260819) — PRESERVE-VERBATIM carrier for `'designated'`'s target
@@ -789,6 +806,14 @@ function stepDraftFromApprovalNode(
     Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1
       ? (config.approvalThreshold as number)
       : 1
+  // Lock-4 §1 F4-A: an `auto_approve` node persisted with NO assignee carrier at all (the one shape
+  // only it may take) hydrates with the omit flag, so `buildStepConfig` re-emits it sourceless instead
+  // of inventing the `requester` default above as a phantom source. An auto_approve node that DOES
+  // carry sources keeps them (preserved verbatim; hidden in the UI while 自动通过).
+  const omitAssigneeSources = config.approvalType === 'auto_approve'
+    && config.assigneeSources === undefined
+    && config.assigneeType === undefined
+    && config.assigneeIds === undefined
 
   // P1-C: hydrate node-level timeout. Shape is already gated by `unsupportedTemplateAuthoringReason`
   // (`timeoutConfigHasBackendDrop`), so every field read here is well-typed.
@@ -822,6 +847,11 @@ function stepDraftFromApprovalNode(
     groupIds,
     approvalMode,
     approvalThreshold,
+    // Lock-4 §1 F4-A: verbatim (absent stays absent). An out-of-union value never reaches an
+    // editable draft — `unsupportedTemplateAuthoringReason`'s approvalType value door forces the
+    // whole template read-only first, so this line never re-decides that question.
+    ...(config.approvalType !== undefined ? { approvalType: config.approvalType as ApprovalType } : {}),
+    ...(omitAssigneeSources ? { omitAssigneeSources: true } : {}),
     // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4): the out-of-union coercion to
     // `'error'` is DELETED — this used to map `'designated'` (and any future value) to `'error'`,
     // exactly the silent downgrade M4's no-flatten clause exists to make impossible (the same
@@ -955,6 +985,13 @@ const BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS = [
   'assigneeSources',
   'approvalMode',
   'approvalThreshold',
+  // Lock-4 §1 F4-A / §2.3 — allowlist 2 of 4 for 审批类型. The backend approval-node rebuild already
+  // re-emits `approvalType` ("allowlist 1", ApprovalProductService.ts `case 'approval'` spread), so a
+  // template carrying it must stay EDITABLE rather than being forced read-only by the drop-check
+  // below. It is a SCALAR, so its "nested" counterpart is the value door in
+  // `approvalTypeConfigHasBackendDrop` (an off-union value — `'auto_reject'` included — still fails
+  // closed). Gate A-3's `signaturePolicy` positive control still goes read-only here.
+  'approvalType',
   'emptyAssigneePolicy',
   // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 2 of 4. The backend
   // approval-node rebuild re-emits `emptyAssigneeFallback` (ApprovalProductService.ts, the
@@ -1149,6 +1186,22 @@ function thresholdConfigHasBackendDrop(config: Record<string, unknown>): boolean
   return config.approvalThreshold !== undefined && config.approvalMode !== 'threshold'
 }
 
+/** Lock-4 §1 F4-A — true for a value outside the FE `ApprovalType` union. */
+export function isKnownApprovalType(value: unknown): value is ApprovalType {
+  return typeof value === 'string' && (APPROVAL_TYPE_VALUES as readonly string[]).includes(value)
+}
+
+/**
+ * Lock-4 §1 F4-A — the value door for the `approvalType` SCALAR on BOTH paths (allowlist "4 of 4"
+ * for a key with no nested shape). A persisted value outside `APPROVAL_TYPE_VALUES` — `'auto_reject'`
+ * included (OD-L4-2(a): no inert third option) — can never come from a real save (backend
+ * `normalizeApprovalType` rejects it on every read), and no 审批类型 radio can represent it, so it
+ * fails closed to read-only instead of rendering as a silently-unchecked control.
+ */
+function approvalTypeConfigHasBackendDrop(config: Record<string, unknown>): boolean {
+  return config.approvalType !== undefined && !isKnownApprovalType(config.approvalType)
+}
+
 /**
  * True when a COMPLEX approval node's config carries a key — TOP-LEVEL or NESTED in assigneeSources[]
  * / autoApprovalPolicy / fieldPermissions[] / timeout — that the backend `normalizeApprovalGraph` does
@@ -1158,6 +1211,7 @@ function thresholdConfigHasBackendDrop(config: Record<string, unknown>): boolean
 function complexApprovalConfigHasBackendDrop(config: Record<string, unknown>): boolean {
   if (hasKeyOutside(config, BACKEND_PRESERVED_COMPLEX_APPROVAL_CONFIG_KEYS)) return true
   if (thresholdConfigHasBackendDrop(config)) return true
+  if (approvalTypeConfigHasBackendDrop(config)) return true
   if (config.timeout !== undefined && timeoutConfigHasBackendDrop(config.timeout)) return true
   // Fix-round P1-1 (gate P3A-F4B-20260819) — allowlist 4 of 4, the nested shape check for the key
   // added to allowlist 2 above.
@@ -1308,6 +1362,11 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
       // (buildStepConfig / stepDraftFromApprovalNode), so they are no longer unknown config keys
       // that would force the whole template read-only (master §P1-C I12/I13 no-flatten).
       'approvalThreshold',
+      // Lock-4 §1 F4-A / §2.3 — allowlist 3 of 4 for 审批类型. AUTHORED here (the 审批类型 radio on
+      // each step) and carried end to end: `stepDraftFromApprovalNode` hydrates it verbatim and
+      // `buildStepConfig` re-emits it — before this slice it was absent from this list, so any
+      // template carrying it opened read-only with save disabled (never silently stripped).
+      'approvalType',
       'emptyAssigneePolicy',
       // Fix-round P1-1 (gate P3A-F4B-20260819, Lock-4 §3 F4-B / §2.3) — allowlist 3 of 4. The
       // linear editor does NOT author `emptyAssigneeFallback` (no typed userIds/roleIds picker
@@ -1343,6 +1402,8 @@ export function unsupportedTemplateAuthoringReason(template: ApprovalTemplateDet
     ) return true
     if (thresholdConfigHasBackendDrop(config)) return true
     if (config.approvalMode === 'threshold' && !(Number.isInteger(config.approvalThreshold) && (config.approvalThreshold as number) >= 1)) return true
+    // Lock-4 §1 F4-A — the same value door as the complex path (`approvalTypeConfigHasBackendDrop`).
+    if (approvalTypeConfigHasBackendDrop(config)) return true
     // Fix-round P1-1 / P3-2 (gate P3A-F4B-20260819, master M4 "no silent flatten of an unknown
     // persisted value") — mirrors the `approvalMode` check immediately above. `'designated'` is now
     // a KNOWN value (`stepDraftFromApprovalNode` preserves it verbatim, never coercing it to
@@ -1771,6 +1832,38 @@ export function sourceFromStep(step: ApprovalStepDraft, allSteps?: ApprovalStepD
 }
 
 /**
+ * Lock-4 §1 F4-A — the ONE predicate for "this linear step saves with NO assignee sources": an
+ * `auto_approve` step whose sources were omitted (hydrated sourceless, or switched to 自动通过 by the
+ * author). Every consumer of the step's hidden source scratch — `buildStepConfig`, the save/publish
+ * preview in `validateTemplateApprovalFlow`, the spine (`linearStepSpine.ts`) and the view's
+ * routing-driver hint — asks THIS, so they cannot disagree about whether a source is real.
+ */
+export function stepOmitsAssigneeSources(step: Pick<ApprovalStepDraft, 'approvalType' | 'omitAssigneeSources'>): boolean {
+  return step.approvalType === 'auto_approve' && step.omitAssigneeSources === true
+}
+
+/**
+ * Lock-4 §1 F4-A — the linear 审批类型 radio's mutator (implementer defaults, owner-visible):
+ *  - `'auto_approve'`: the step carries NO assignee sources from now on (L4: "an empty source list
+ *    is legal here and only here"). The source fields stay on the draft as hidden scratch, so an
+ *    accidental arrow-key traversal 自动通过 → 人工审批 restores them (never a silent discard).
+ *  - `'manual'`: the KEY is removed (absent ≡ manual — byte-identical to every pre-F4-A step) and
+ *    the step's source becomes live again (for a step hydrated sourceless that is the `requester`
+ *    default — the same zero-config default a brand-new step starts from).
+ * No other field is touched: mode / empty-assignee / self-approval / timeout values are preserved
+ * verbatim while hidden (no flatten) and reappear on switching back.
+ */
+export function setStepApprovalType(step: ApprovalStepDraft, type: ApprovalType): void {
+  if (type === 'auto_approve') {
+    step.approvalType = 'auto_approve'
+    step.omitAssigneeSources = true
+    return
+  }
+  delete step.approvalType
+  delete step.omitAssigneeSources
+}
+
+/**
  * Build the approval-node config for a step. The `mergeWithRequester` toggle is the
  * only authored sub-field of `autoApprovalPolicy`; the three non-merge sub-fields are
  * preserved verbatim from `originalAutoApprovalPolicy` (no silent flatten). The
@@ -1869,12 +1962,18 @@ function buildStepConfig(
     ? (JSON.parse(JSON.stringify(step.emptyAssigneeFallback)) as EmptyAssigneeFallback)
     : undefined
   return {
-    assigneeSources: [sourceFromStep(step, allSteps)],
+    // Lock-4 §1 F4-A: a sourceless auto_approve step OMITS the key entirely — never `[]` (the backend
+    // 400s an empty array) and never the hidden `requester` scratch default (a phantom source).
+    ...(stepOmitsAssigneeSources(step) ? {} : { assigneeSources: [sourceFromStep(step, allSteps)] }),
     approvalMode: step.approvalMode,
     // P1-C: `approvalThreshold` is emitted ONLY under `approvalMode === 'threshold'` — mirrors the
     // backend's own conditional emission (`thresholdConfigHasBackendDrop`'s invariant) so switching
     // mode away never leaves an orphaned threshold key behind.
     ...(step.approvalMode === 'threshold' ? { approvalThreshold: step.approvalThreshold } : {}),
+    // Lock-4 §1 F4-A / §2.3 — allowlist 3's emitter (without it the linear save DROPS the key). Placed
+    // where the backend rebuild places it (after `approvalThreshold`, before `emptyAssigneePolicy`),
+    // so a backend-normalized node round-trips byte-for-byte, key order included. Absent stays absent.
+    ...(step.approvalType !== undefined ? { approvalType: step.approvalType } : {}),
     emptyAssigneePolicy: step.emptyAssigneePolicy,
     // Fix-round advisor catch (post-P1-1): emitted ONLY under `emptyAssigneePolicy === 'designated'`
     // — mirrors `approvalThreshold`'s own conditional emission immediately above. The 空审批人策略
@@ -2346,13 +2445,21 @@ export function validateTemplateApprovalFlow(
   )
   draft.steps.forEach((step, index) => {
     const label = step.name.trim() || `审批步骤 ${index + 1}`
-    if ((step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
+    // Lock-4 §1 F4-A: a sourceless auto_approve step saves NO assignee source (`buildStepConfig`
+    // omits it), so its hidden source scratch is not validated — a preview error about a source the
+    // save will not send would block save on nothing. An auto_approve step that still CARRIES sources
+    // keeps every check below (those sources are sent, and the backend validates them).
+    const sourceIsLive = !stepOmitsAssigneeSources(step)
+    if (sourceIsLive && (step.sourceKind === 'static_user' || step.sourceKind === 'static_role') && parseIdsText(step.idsText).length === 0) {
       errors.push(`${label} 需要填写用户/角色 id`)
     }
     if (
-      step.sourceKind === 'form_field_user'
-      || step.sourceKind === 'form_field_user_manager'
-      || step.sourceKind === 'form_field_user_dept_head'
+      sourceIsLive
+      && (
+        step.sourceKind === 'form_field_user'
+        || step.sourceKind === 'form_field_user_manager'
+        || step.sourceKind === 'form_field_user_dept_head'
+      )
     ) {
       const userField = userFieldsById.get(step.fieldId.trim())
       if (!userField) {
@@ -2375,7 +2482,8 @@ export function validateTemplateApprovalFlow(
     // Lock-1 §K2 PREVIEW (backend normalize is the final arbiter): a members/role scope needs
     // at least one configured id — the backend rejects an empty scope list the same way.
     if (
-      step.sourceKind === 'requester_choice'
+      sourceIsLive
+      && step.sourceKind === 'requester_choice'
       && (step.requesterChoiceScopeType === 'members' || step.requesterChoiceScopeType === 'role')
       && parseIdsText(step.idsText).length === 0
     ) {
@@ -2385,7 +2493,7 @@ export function validateTemplateApprovalFlow(
     // referenced step must exist and be STRICTLY EARLIER than this one — a missing choice, a
     // deleted referenced step, a self-reference, or a reference that ended up at/after this step
     // via reorder all fail here (matching what `sourceFromStep` would emit as an empty nodeKey).
-    if (step.sourceKind === 'prior_node_approver') {
+    if (sourceIsLive && step.sourceKind === 'prior_node_approver') {
       const referencedIndex = draft.steps.findIndex((candidate) => candidate.localId === step.priorStepLocalId)
       if (referencedIndex < 0 || referencedIndex >= index) {
         errors.push(`${label} 需要引用一个位于其之前的审批步骤作为节点审批人`)
@@ -2394,7 +2502,7 @@ export function validateTemplateApprovalFlow(
     // Lock-1 §K1 PREVIEW (backend normalize's non-empty-array check is the final arbiter): a
     // user_group source needs at least one bound group selected — mirrors the static_user/
     // static_role empty check above.
-    if (step.sourceKind === 'user_group' && step.groupIds.length === 0) {
+    if (sourceIsLive && step.sourceKind === 'user_group' && step.groupIds.length === 0) {
       errors.push(`${label} 需要选择至少一个用户组`)
     }
     // P1-C (T2-4) threshold PREVIEW: integer-only shape check, matching the ONE bound the backend
