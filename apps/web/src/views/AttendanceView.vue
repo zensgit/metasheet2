@@ -33321,6 +33321,7 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
 .attendance__form-sheet .attendance__override-filters {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: center;
   gap: var(--ms-space-3) var(--ms-space-4);
 }
 
@@ -33395,6 +33396,7 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__field--checkbox),
 .attendance__form-sheet .attendance__field--inline,
 .attendance__form-sheet :deep(.attendance__field--inline) {
+  box-sizing: border-box;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
@@ -33579,6 +33581,7 @@ defineExpose({
 #attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview-controls),
 #attendance-admin-settings.attendance__form-sheet :deep(.attendance__admin-grid),
 #attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview-controls) {
+  align-items: center;
   gap: var(--ms-space-3) var(--ms-space-4);
 }
 
@@ -33597,6 +33600,7 @@ defineExpose({
 
 #attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox),
 #attendance-admin-settings.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  box-sizing: border-box;
   gap: var(--ms-space-3);
   min-height: var(--ms-control-height);
   padding: var(--ms-space-1) var(--ms-space-3);
