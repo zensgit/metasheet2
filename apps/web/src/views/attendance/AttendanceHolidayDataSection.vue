@@ -305,45 +305,48 @@ void syncMonthRange(calendarMonth.value)
 </script>
 
 <style scoped>
-.attendance__admin-section { display: flex; flex-direction: column; gap: 12px; margin-top: 16px; }
-.attendance__admin-section-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
-.attendance__admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.attendance__admin-section { display: flex; flex-direction: column; gap: 16px; }
+.attendance__admin-section-header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.attendance__admin-section-header h4 { margin: 0; color: var(--ms-text-1); font-size: var(--ms-font-size-section-title); font-weight: var(--ms-font-weight-title); }
+.attendance__admin-grid { display: grid; grid-template-columns: 1fr; gap: 16px; }
 .attendance__admin-actions, .attendance__table-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-.attendance__field { display: flex; flex-direction: column; gap: 6px; }
+.attendance__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--ms-text-2); font-size: 12px; font-weight: 600; }
+.attendance__field input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 36px; padding: 8px 12px; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-md); background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 14px; font-weight: 400; }
 .attendance__field--full { grid-column: 1 / -1; }
-.attendance__field--checkbox { justify-content: flex-end; }
-.attendance__field-hint { color: #666; font-size: 12px; }
-.attendance__section-meta { color: #555; font-size: 12px; align-self: center; }
-.attendance__btn { padding: 8px 14px; border-radius: 6px; border: 1px solid #d0d0d0; background: #fff; cursor: pointer; }
-.attendance__btn--primary { background: #1976d2; border-color: #1976d2; color: #fff; }
-.attendance__btn--danger { color: #c62828; }
+.attendance__field--checkbox { flex-direction: row; align-items: center; justify-content: space-between; min-height: 40px; padding: 8px 12px; border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-md); background: var(--ms-bg-page); }
+.attendance__field--checkbox input { width: 16px; min-width: 16px; min-height: 16px; height: 16px; accent-color: var(--ms-color-primary); }
+.attendance__field-hint { color: var(--ms-text-3); font-size: 12px; line-height: 1.5; }
+.attendance__section-meta { color: var(--ms-text-2); font-size: 13px; align-self: center; }
+.attendance__btn { padding: 8px 14px; min-height: 36px; border-radius: var(--ms-radius-md); border: 1px solid var(--ms-border); background: var(--ms-bg-card); color: var(--ms-text-1); cursor: pointer; }
+.attendance__btn--primary { background: var(--ms-color-primary); border-color: var(--ms-color-primary); color: var(--ms-bg-card); }
+.attendance__btn--danger { color: var(--ms-color-danger); border-color: var(--ms-color-danger); }
 .attendance__btn:disabled { opacity: 0.6; cursor: not-allowed; }
-.attendance__holiday-layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr); gap: 16px; align-items: start; }
-.attendance__holiday-calendar { border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; background: #fff; }
-.attendance__holiday-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-bottom: 8px; color: #666; font-size: 12px; }
+.attendance__holiday-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr); gap: 16px; align-items: start; }
+.attendance__holiday-calendar { border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-lg); padding: 16px; background: var(--ms-bg-card); box-shadow: var(--ms-shadow-card); }
+.attendance__holiday-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); gap: 8px; margin-bottom: 8px; color: var(--ms-text-3); font-size: 12px; }
 .attendance__holiday-weekdays span { text-align: center; }
 .attendance__holiday-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
-.attendance__holiday-cell { min-height: 92px; padding: 8px; border-radius: 10px; border: 1px solid #e6e6e6; background: #fafafa; text-align: left; display: flex; flex-direction: column; gap: 6px; cursor: pointer; }
+.attendance__holiday-cell { min-height: 92px; padding: 8px; border-radius: var(--ms-radius-md); border: 1px solid var(--ms-border-light); background: var(--ms-bg-page); text-align: left; display: flex; flex-direction: column; gap: 6px; cursor: pointer; color: var(--ms-text-1); }
 .attendance__holiday-cell--muted { opacity: 0.45; }
-.attendance__holiday-cell--today { border-color: #1976d2; }
-.attendance__holiday-cell--selected { box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.18); background: #f3f8ff; }
-.attendance__holiday-cell--holiday { background: #fffaf1; }
+.attendance__holiday-cell--today { border-color: var(--ms-color-primary); }
+.attendance__holiday-cell--selected { box-shadow: 0 0 0 2px var(--el-color-primary-light-8); background: var(--el-color-primary-light-9); }
+.attendance__holiday-cell--holiday { background: var(--el-color-warning-light-9); }
 .attendance__holiday-cell-day { font-weight: 600; }
-.attendance__holiday-cell-lunar { color: #8a5c2e; font-size: 11px; line-height: 1.3; }
+.attendance__holiday-cell-lunar { color: var(--ms-text-3); font-size: 11px; line-height: 1.3; }
 .attendance__holiday-chip { display: inline-flex; align-items: center; max-width: 100%; padding: 2px 6px; border-radius: 999px; font-size: 11px; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.attendance__holiday-chip--holiday { background: #ffe8e8; color: #9a1a1a; }
-.attendance__holiday-chip--working { background: #e5f7ec; color: #15693a; }
+.attendance__holiday-chip--holiday { background: var(--el-color-danger-light-9); color: var(--ms-color-danger); }
+.attendance__holiday-chip--working { background: var(--el-color-success-light-9); color: var(--ms-color-success); }
 /* PR2: tiny origin badge inside the chip (N = national/sync, M = manual/admin).
  * The chip also receives a `calendar-source--{national|manual}` class from
  * the shared palette, painting a 4px border-left accent in the source color. */
 .attendance__holiday-chip-origin { margin-left: 4px; font-size: 9px; opacity: 0.65; letter-spacing: 0.5px; }
-.attendance__holiday-more { color: #666; font-size: 11px; }
-.attendance__holiday-side { display: flex; flex-direction: column; gap: 12px; }
-.attendance__holiday-panel { border: 1px solid #e0e0e0; border-radius: 10px; padding: 12px; background: #fff; display: flex; flex-direction: column; gap: 10px; }
-.attendance__holiday-panel-title { font-size: 13px; color: #444; }
+.attendance__holiday-more { color: var(--ms-text-3); font-size: 11px; }
+.attendance__holiday-side { display: flex; flex-direction: column; gap: 12px; padding: 16px; border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-lg); background: var(--ms-bg-card); box-shadow: var(--ms-shadow-card); }
+.attendance__holiday-panel { display: flex; flex-direction: column; gap: 10px; padding-bottom: 4px; }
+.attendance__holiday-panel-title { font-size: 13px; color: var(--ms-text-2); }
 .attendance__holiday-day-list { display: flex; flex-direction: column; gap: 10px; }
-.attendance__holiday-day-item { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid #ededed; border-radius: 8px; padding: 10px; background: #fafafa; }
-.attendance__empty { color: #888; font-size: 13px; }
+.attendance__holiday-day-item { display: flex; justify-content: space-between; gap: 12px; align-items: center; border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-md); padding: 10px; background: var(--ms-bg-page); }
+.attendance__empty { color: var(--ms-text-3); font-size: 13px; }
 
 @media (max-width: 960px) {
   .attendance__holiday-layout { grid-template-columns: 1fr; }
