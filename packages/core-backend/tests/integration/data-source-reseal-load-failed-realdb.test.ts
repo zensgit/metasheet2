@@ -121,6 +121,9 @@ const OWNER = { userId: OWNER_ID, platformAdmin: false }
 const OTHER = { userId: OTHER_ID, platformAdmin: false }
 const CONNECTION = { host: 'db.reseal-realdb.test', port: 5432, database: 'plm', encrypt: true }
 const SCHEMA = `reseal_realdb_${process.pid}_${Date.now()}`
+// The encrypted-store probe case's own schema (#6164 step 1); afterAll drops it too, so a timed-out case
+// cannot leave it behind.
+const PROBE_SCHEMA = `${SCHEMA}_probe`
 // application_name of each simulated server process's pool (lets a case see WHICH one waits).
 const PROCESS_A = `reseal-realdb-a-${process.pid}`
 const PROCESS_B = `reseal-realdb-b-${process.pid}`
@@ -248,6 +251,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
   afterAll(async () => {
     await db?.destroy()
     await admin?.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`)
+    await admin?.query(`DROP SCHEMA IF EXISTS ${PROBE_SCHEMA} CASCADE`).catch(() => {}) // best-effort
     await admin?.end()
     if (savedMaterial.key === undefined) delete process.env.ENCRYPTION_KEY
     else process.env.ENCRYPTION_KEY = savedMaterial.key
@@ -518,9 +522,10 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
   // #6164 step 1: the encrypted-store probe's own SQL against REAL columns of every catalog store. Own
   // schema (so the rows of the cases above do not count), a session forced READ ONLY for the probe (any
   // write would fail with 25006 and show up as read_failed), one value sealed under the CURRENT material
-  // and one under the PREVIOUS material per field, then real SQLSTATEs for a missing column / table.
-  it('encrypted-store probe: every catalog field read from real columns — one current-sealed and one previous-sealed value each; missing column / table by real SQLSTATE; nothing written', async () => {
-    const probeSchema = `${SCHEMA}_probe`
+  // and one under the PREVIOUS material per field; then a dropped column / table must be reported by the
+  // existence precheck WITHOUT any statement being rejected (no server-side ERROR, no 42703 / 42P01).
+  it('encrypted-store probe: every catalog field read from real columns — one current-sealed and one previous-sealed value each; a dropped column / table reported by the precheck with no rejected statement; nothing written', async () => {
+    const probeSchema = PROBE_SCHEMA
     await admin.query(`CREATE SCHEMA IF NOT EXISTS ${probeSchema}`)
     const setupPool = new Pool({ connectionString: process.env.DATABASE_URL, options: `-c search_path=${probeSchema}`, max: 2 })
     const readOnlyPool = new Pool({
@@ -632,10 +637,16 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       }
       const before = await fingerprint()
       const statements: string[] = []
+      const rejected: string[] = [] // every statement the server refused — each one is an ERROR in its log
       const runProbe = () => probeEncryptedStores({
-        query: (sql, params) => {
+        query: async (sql, params) => {
           statements.push(sql)
-          return readOnlyPool.query(sql, params)
+          try {
+            return await readOnlyPool.query(sql, params)
+          } catch (error) {
+            rejected.push(sql)
+            throw error
+          }
         },
         env,
       })
@@ -657,18 +668,24 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       ])
       expect(report.material.status).toBe('ok')
       expect(report.totals).toMatchObject({ encrypted: 22, undecryptable: 11, plaintext: 1, legacyNotChecked: 1, unreadable: 0, missing: 0 })
-      expect(statements).toHaveLength(report.stores.length)
+      // one existence precheck per table + one SELECT per field, every one a SELECT, none rejected
+      expect(statements).toHaveLength(TABLES.length + report.stores.length)
       expect(statements.every((sql) => /^SELECT\s/.test(sql))).toBe(true)
+      expect(rejected).toEqual([])
       expect(await fingerprint()).toBe(before)
 
-      // Real SQLSTATEs (fixture writes through the setup pool, not the probe): a dropped column -> 42703,
-      // a dropped table -> 42P01; every other store still reads.
+      // A dropped column and a dropped table (fixture writes through the setup pool, not the probe): the
+      // precheck reports them and their SELECTs are never issued — no 42703 / 42P01 is raised at all.
       await setupPool.query(`ALTER TABLE dingtalk_group_destinations DROP COLUMN secret`)
       await setupPool.query(`DROP TABLE system_configs`)
+      statements.length = 0
       const degraded = await runProbe()
       const by = Object.fromEntries(degraded.stores.map((s) => [`${s.store}.${s.field}`, s]))
-      expect(by['dingtalk_group_destinations.secret']).toMatchObject({ status: 'column_missing', sqlState: '42703', rows: 0 })
-      expect(by['system_configs.value (is_encrypted)']).toMatchObject({ status: 'table_missing', sqlState: '42P01', rows: 0 })
+      expect(by['dingtalk_group_destinations.secret']).toMatchObject({ status: 'column_missing', rows: 0 })
+      expect(by['system_configs.value (is_encrypted)']).toMatchObject({ status: 'table_missing', rows: 0 })
+      expect([by['dingtalk_group_destinations.secret'].sqlState, by['system_configs.value (is_encrypted)'].sqlState]).toEqual([undefined, undefined])
+      expect(rejected).toEqual([])
+      expect(statements).toHaveLength(TABLES.length + report.stores.length - 2)
       expect(by['dingtalk_group_destinations.webhook_url']).toMatchObject({ status: 'ok', encrypted: 2, undecryptable: 1 })
       expect(degraded.totals).toMatchObject({ encrypted: 18, undecryptable: 9, missing: 2, unreadable: 0 })
 

@@ -24,8 +24,10 @@ import ts from 'typescript'
 import { SENSITIVE_CREDENTIAL_KEYS } from '../../src/data-adapters/DataSourceManager'
 import {
   ENCRYPTED_STORE_CATALOG,
+  ENCRYPTED_STORE_COLUMNS_SQL,
   ENCRYPTED_STORE_REENTER_HINT,
   probeEncryptedStores,
+  probeEncryptedStoresShared,
   runEncryptedStoreProbeAtStartup,
   type EncryptedStoreCatalogEntry,
   type EncryptedStoreProbeReport,
@@ -75,19 +77,46 @@ const sealIntegrationHost = (m: Material, plaintext: string) =>
 const sealIntegrationV1 = (plaintext: string) => credentialStoreModule.__internals.encrypt(plaintext, V1_FIXTURE_KEY) as string
 
 /** A memory-level database keyed by the catalog's SQL. Records every statement. */
-function fakeDatabase(rowsByField: FixtureRows) {
+/**
+ * The live schema the fake database reports through the existence precheck: every catalog table with
+ * every column its entries reference (plus an unrelated `id`), unless a test overrides a table —
+ * `null` = the table does not exist, an array = exactly those columns.
+ */
+function fixtureSchema(overrides: Record<string, string[] | null> = {}): Map<string, string[] | null> {
+  const schema = new Map<string, string[] | null>()
+  for (const entry of ENCRYPTED_STORE_CATALOG) {
+    schema.set(entry.store, [...new Set([...(schema.get(entry.store) ?? ['id']), ...entry.columns])])
+  }
+  for (const [table, columns] of Object.entries(overrides)) schema.set(table, columns)
+  return schema
+}
+
+/** A memory-level database: answers the existence precheck from a schema, the catalog SQL from rows. */
+function fakeDatabase(rowsByField: FixtureRows, schema: Map<string, string[] | null> = fixtureSchema()) {
   const statements: Array<{ sql: string; params: unknown[] | undefined }> = []
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     statements.push({ sql, params })
+    if (sql === ENCRYPTED_STORE_COLUMNS_SQL) {
+      const columns = schema.get(String(params?.[0])) ?? null
+      return { rows: (columns ?? []).map((attname) => ({ attname })) }
+    }
     const entry = ENCRYPTED_STORE_CATALOG.find((candidate) => candidate.sql === sql)
     if (!entry) throw new Error('fixture database: unexpected statement')
+    // Like PostgreSQL: a SELECT on an absent relation / column is REJECTED (a server-side ERROR).
+    const live = schema.get(entry.store) ?? null
+    if (live === null) throw sqlError('42P01', 'fixture database: relation does not exist')
+    if (entry.columns.some((column) => !live.includes(column))) throw sqlError('42703', 'fixture database: column does not exist')
     const rows = rowsByField[`${entry.store}.${entry.field}`] ?? []
     if (rows instanceof Error) throw rows
     const limit = Number(params?.[0])
     return { rows: rows.slice(0, Number.isFinite(limit) ? limit : rows.length).map((value) => ({ value })) }
   })
-  return { query, statements }
+  const catalogStatements = () => statements.filter((s) => s.sql !== ENCRYPTED_STORE_COLUMNS_SQL)
+  const prechecks = () => statements.filter((s) => s.sql === ENCRYPTED_STORE_COLUMNS_SQL)
+  return { query, statements, catalogStatements, prechecks }
 }
+
+const CATALOG_TABLES = [...new Set(ENCRYPTED_STORE_CATALOG.map((e) => e.store))]
 
 function sqlError(code: string | undefined, message: string): Error {
   const error = new Error(message)
@@ -304,35 +333,175 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
     expect(report.stores.map((s) => `${s.store}.${s.field}`)).toEqual(EXPECTED_STORE_FIELDS)
     expect(ENCRYPTED_STORE_CATALOG.map((e) => `${e.store}.${e.field}`)).toEqual(EXPECTED_STORE_FIELDS)
-    expect(db.statements).toHaveLength(EXPECTED_STORE_FIELDS.length)
+    expect(db.catalogStatements().map((s) => s.sql)).toEqual(ENCRYPTED_STORE_CATALOG.map((e) => e.sql))
+    // ...after ONE existence precheck per distinct table, all issued before the first catalog SELECT
+    expect(db.prechecks().map((s) => s.params)).toEqual(CATALOG_TABLES.map((t) => [t]))
+    expect(db.statements.slice(0, CATALOG_TABLES.length).every((s) => s.sql === ENCRYPTED_STORE_COLUMNS_SQL)).toBe(true)
   })
 
-  it('every statement it issues is ONE SELECT, bounded by LIMIT $1 = rowLimit + 1 — nothing that writes or locks', async () => {
+  it('every statement it issues is ONE SELECT — the per-table precheck and the bounded catalog reads — nothing that writes or locks', async () => {
     const db = fakeDatabase(fixture.rows)
     await probeEncryptedStores({ query: db.query, env: ENV_A })
     const forbidden = /\b(INSERT|UPDATE|DELETE|MERGE|UPSERT|ALTER|CREATE|DROP|TRUNCATE|GRANT|REVOKE|LOCK|COPY|CALL|DO|VACUUM|REINDEX|CLUSTER|COMMENT|SET|RESET|BEGIN|COMMIT|NOTIFY|INTO|FOR\s+(NO\s+KEY\s+)?(UPDATE|SHARE)|nextval|setval|pg_advisory\w*)\b/i
-    const shapes = [...db.statements.map((s) => s.sql), ...ENCRYPTED_STORE_CATALOG.map((e) => e.sql)]
+    const shapes = [...db.statements.map((s) => s.sql), ...ENCRYPTED_STORE_CATALOG.map((e) => e.sql), ENCRYPTED_STORE_COLUMNS_SQL]
     for (const sql of shapes) {
       expect({ sql, select: /^SELECT\s/.test(sql) }).toEqual({ sql, select: true })
       expect({ sql, forbidden: forbidden.exec(sql)?.[0] ?? null }).toEqual({ sql, forbidden: null })
       expect({ sql, statements: sql.includes(';') }).toEqual({ sql, statements: false })
-      expect({ sql, bounded: /\sLIMIT \$1$/.test(sql) }).toEqual({ sql, bounded: true })
     }
-    expect(db.statements.every((s) => JSON.stringify(s.params) === JSON.stringify([10_001]))).toBe(true)
+    // Catalog reads are bounded by LIMIT $1 = rowLimit + 1; the precheck reads one table's columns,
+    // through to_regclass (NULL, not an ERROR, for a missing relation).
+    for (const s of db.catalogStatements()) {
+      expect({ sql: s.sql, bounded: /\sLIMIT \$1$/.test(s.sql), params: s.params }).toEqual({ sql: s.sql, bounded: true, params: [10_001] })
+    }
+    expect(ENCRYPTED_STORE_COLUMNS_SQL).toBe('SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped')
+    expect(db.prechecks().every((s) => s.params?.length === 1 && CATALOG_TABLES.includes(String(s.params[0])))).toBe(true)
+  })
+
+  it('every catalog entry lists exactly the top-level columns its SELECT references (what the precheck checks)', () => {
+    const KEYWORDS = new Set(['select', 'as', 'from', 'where', 'and', 'is', 'null', 'true', 'limit', 'coalesce'])
+    for (const entry of ENCRYPTED_STORE_CATALOG) {
+      const tokens = entry.sql.replace(/'[^']*'/g, ' ').replace(/\$\d+/g, ' ').toLowerCase().match(/[a-z_]+/g) ?? []
+      const referenced = new Set<string>()
+      tokens.forEach((token, i) => {
+        if (KEYWORDS.has(token) || token === entry.store || tokens[i - 1] === 'as') return
+        referenced.add(token)
+      })
+      expect({ field: `${entry.store}.${entry.field}`, columns: [...entry.columns].sort() })
+        .toEqual({ field: `${entry.store}.${entry.field}`, columns: [...referenced].sort() })
+    }
   })
 
   it('bounded read: past rowLimit it counts the first rowLimit rows and says `truncated`', async () => {
     const rows = fixture.rows['data_sources.config.credentials.password'] as string[]
     const db = fakeDatabase({ 'data_sources.config.credentials.password': rows })
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A, rowLimit: 2 })
-    expect(db.statements[0].params).toEqual([3])
+    expect(db.catalogStatements()[0].params).toEqual([3])
     expect(report.stores[0]).toMatchObject({ rows: 2, encrypted: 2, plaintext: 0, truncated: true })
     expect(report.stores[1].truncated).toBeUndefined()
   })
 })
 
+describe('probeEncryptedStores: an absent table / column is decided by the precheck — no statement that would ERROR', () => {
+  /** A database that records every statement it REJECTS (each one is a server-side ERROR in real life). */
+  function recordingRejections(db: ReturnType<typeof fakeDatabase>) {
+    const rejected: string[] = []
+    const query = async (sql: string, params?: unknown[]) => {
+      try {
+        return await db.query(sql, params)
+      } catch (error) {
+        rejected.push(sql)
+        throw error
+      }
+    }
+    return { query, rejected }
+  }
+
+  it('missing table: table_missing for all its fields, NO catalog SELECT issued for it, nothing rejected', async () => {
+    const db = fakeDatabase(fixture.rows, fixtureSchema({ directory_integrations: null, system_configs: null }))
+    const spy = recordingRejections(db)
+    const report = await probeEncryptedStores({ query: spy.query, env: ENV_A })
+    const missing = report.stores.filter((s) => s.status === 'table_missing').map((s) => `${s.store}.${s.field}`)
+    expect(missing).toEqual([
+      'directory_integrations.config.appSecret',
+      'directory_integrations.config.workNotificationAgentId|agentId',
+      'directory_integrations.config.approvalCardLinkSecret',
+      'system_configs.value (is_encrypted)',
+    ])
+    for (const s of report.stores.filter((r) => r.status === 'table_missing')) {
+      expect(s).toMatchObject({ rows: 0, encrypted: 0, undecryptable: 0, plaintext: 0 })
+      expect(s.sqlState).toBeUndefined() // nothing was raised
+    }
+    const issued = db.catalogStatements().map((s) => s.sql)
+    for (const entry of ENCRYPTED_STORE_CATALOG.filter((e) => e.store === 'directory_integrations' || e.store === 'system_configs')) {
+      expect(issued).not.toContain(entry.sql)
+    }
+    expect(issued).toHaveLength(EXPECTED_STORE_FIELDS.length - 4)
+    expect(spy.rejected).toEqual([])
+    expect(report.totals).toMatchObject({ missing: 4, unreadable: 0 })
+  })
+
+  it('missing column: column_missing for the entry that needs it, its SELECT never issued; a sibling field of the same table is still read', async () => {
+    const db = fakeDatabase(fixture.rows, fixtureSchema({ dingtalk_group_destinations: ['id', 'webhook_url'] }))
+    const spy = recordingRejections(db)
+    const report = await probeEncryptedStores({ query: spy.query, env: ENV_A })
+    const secret = report.stores.find((s) => s.store === 'dingtalk_group_destinations' && s.field === 'secret')
+    const webhook = report.stores.find((s) => s.store === 'dingtalk_group_destinations' && s.field === 'webhook_url')
+    expect(secret).toMatchObject({ status: 'column_missing', rows: 0 })
+    expect(secret?.sqlState).toBeUndefined()
+    expect(webhook).toMatchObject({ status: 'ok', rows: 1, encrypted: 1 })
+    const issued = db.catalogStatements().map((s) => s.sql)
+    expect(issued).not.toContain(ENCRYPTED_STORE_CATALOG.find((e) => e.field === 'secret')?.sql)
+    expect(issued).toContain(ENCRYPTED_STORE_CATALOG.find((e) => e.field === 'webhook_url')?.sql)
+    // data_sources needs is_active / deleted_at too, not only config
+    const noDeletedAt = fakeDatabase(fixture.rows, fixtureSchema({ data_sources: ['id', 'config', 'is_active'] }))
+    const r2 = await probeEncryptedStores({ query: noDeletedAt.query, env: ENV_A })
+    expect(r2.stores.slice(0, 3).map((s) => s.status)).toEqual(['column_missing', 'column_missing', 'column_missing'])
+    expect(noDeletedAt.catalogStatements().some((s) => s.sql.includes('FROM data_sources'))).toBe(false)
+    expect(spy.rejected).toEqual([])
+  })
+
+  it('present table and columns: the SELECT is issued and read', async () => {
+    const db = fakeDatabase(fixture.rows)
+    const spy = recordingRejections(db)
+    const report = await probeEncryptedStores({ query: spy.query, env: ENV_A })
+    expect(db.catalogStatements().map((s) => s.sql)).toEqual(ENCRYPTED_STORE_CATALOG.map((e) => e.sql))
+    expect(report.stores.every((s) => s.status === 'ok')).toBe(true)
+    expect(spy.rejected).toEqual([])
+  })
+
+  it('a failing precheck makes that table read_failed (its SQLSTATE, no text) without issuing its SELECTs; other tables are still probed', async () => {
+    const db = fakeDatabase(fixture.rows)
+    const query = async (sql: string, params?: unknown[]) => {
+      if (sql === ENCRYPTED_STORE_COLUMNS_SQL && params?.[0] === 'integration_external_systems') {
+        throw Object.assign(new Error('MARKER-permission-text'), { code: '42501' })
+      }
+      return db.query(sql, params)
+    }
+    const report = await probeEncryptedStores({ query, env: ENV_A })
+    expect(report.stores[8]).toMatchObject({ store: 'integration_external_systems', status: 'read_failed', sqlState: '42501', rows: 0 })
+    expect(db.catalogStatements().map((s) => s.sql)).not.toContain(ENCRYPTED_STORE_CATALOG[8].sql)
+    expect(table(report).filter((_, i) => i !== 8)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 8))
+    expect(JSON.stringify(report)).not.toContain('MARKER')
+  })
+})
+
+describe('probeEncryptedStoresShared: concurrent on-demand callers share ONE run; nothing is cached', () => {
+  it('two concurrent calls run the probe once and get the same report; a later call runs again', async () => {
+    const db = fakeDatabase(fixture.rows)
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const query = async (sql: string, params?: unknown[]) => {
+      await gate
+      return db.query(sql, params)
+    }
+    const makeDeps = vi.fn(() => ({ query, env: ENV_A }))
+    const first = probeEncryptedStoresShared(makeDeps)
+    const second = probeEncryptedStoresShared(makeDeps)
+    expect(second).toBe(first)
+    expect(makeDeps).toHaveBeenCalledTimes(1)
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect(b).toBe(a)
+    const oneRun = db.statements.length
+    expect(oneRun).toBe(CATALOG_TABLES.length + EXPECTED_STORE_FIELDS.length)
+
+    const later = await probeEncryptedStoresShared(makeDeps)
+    expect(makeDeps).toHaveBeenCalledTimes(2)
+    expect(later).not.toBe(a)
+    expect(db.statements.length).toBe(2 * oneRun)
+  })
+
+  it('a makeDeps that throws shares nothing: the throw reaches the caller and the next call starts a run', async () => {
+    expect(() => probeEncryptedStoresShared(() => { throw new Error('no pool') })).toThrow('no pool')
+    const db = fakeDatabase(fixture.rows)
+    const report = await probeEncryptedStoresShared(() => ({ query: db.query, env: ENV_A }))
+    expect(report.stores).toHaveLength(EXPECTED_STORE_FIELDS.length)
+  })
+})
+
 describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, and never stop the probe', () => {
-  it('42P01 -> table_missing and 42703 -> column_missing, whatever the (localized) message says', async () => {
+  it('race fallback: a catalog SELECT that still fails with 42P01 / 42703 after the precheck is table_missing / column_missing, whatever the (localized) message says', async () => {
     const db = fakeDatabase({
       ...fixture.rows,
       'dingtalk_group_destinations.webhook_url': sqlError('42P01', 'MARKER-localized-message-a'),
@@ -383,13 +552,15 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     expect(report.stores[3]).toMatchObject({ store: 'directory_integrations', status: 'read_failed', rows: 0, encrypted: 0 })
     expect(report.stores[3].sqlState).toBeUndefined()
     expect(table(report).filter((_, i) => i !== 3)).toEqual(EXPECTED_UNDER_A.filter((_, i) => i !== 3))
-    expect(db.statements).toHaveLength(EXPECTED_STORE_FIELDS.length)
+    expect(db.catalogStatements()).toHaveLength(EXPECTED_STORE_FIELDS.length)
     expect(report.totals.unreadable).toBe(1)
     expect(JSON.stringify(report)).not.toContain('MARKER-socket-text')
   })
 
   it('never throws: a query returning garbage, a throwing clock, a non-object row', async () => {
-    const query = vi.fn(async (sql: string) => {
+    const schema = fakeDatabase({})
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql === ENCRYPTED_STORE_COLUMNS_SQL) return schema.query(sql, params)
       if (sql.includes('data_sources')) return undefined as never
       if (sql.includes('directory_integrations')) return { rows: 'not-an-array' } as never
       return { rows: [7, null, 'x'] }
@@ -398,7 +569,20 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     expect(report.stores.filter((s) => s.status === 'read_failed').map((s) => s.store)).toEqual([
       'data_sources', 'data_sources', 'data_sources', 'directory_integrations', 'directory_integrations', 'directory_integrations',
     ])
+    expect(report.stores.filter((s) => s.status === 'ok')).toHaveLength(5)
     expect(typeof report.checkedAt).toBe('string')
+
+    // ...and garbage from the precheck itself: no rows array -> read_failed; rows without a column
+    // name -> the required columns are not there -> column_missing.
+    const garbagePrecheck = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql !== ENCRYPTED_STORE_COLUMNS_SQL) return { rows: [] }
+      return params?.[0] === 'data_sources' ? (undefined as never) : { rows: [7, null, { attname: 42 }] }
+    })
+    const r2 = await probeEncryptedStores({ query: garbagePrecheck, env: ENV_A })
+    expect(r2.stores.map((s) => s.status)).toEqual([
+      'read_failed', 'read_failed', 'read_failed',
+      ...Array(EXPECTED_STORE_FIELDS.length - 3).fill('column_missing'),
+    ])
   })
 })
 
@@ -649,7 +833,7 @@ describe('startup wiring in src/index.ts', () => {
       Object.assign(process.env, ENV_A)
       const report = (await runIndexStatement(real, warn, db)) as EncryptedStoreProbeReport
       expect(report.stores).toHaveLength(EXPECTED_STORE_FIELDS.length)
-      expect(db.statements).toHaveLength(EXPECTED_STORE_FIELDS.length)
+      expect(db.catalogStatements()).toHaveLength(EXPECTED_STORE_FIELDS.length)
     } finally {
       for (const key of ['NODE_ENV', 'ENCRYPTION_KEY', 'ENCRYPTION_SALT']) {
         if (env[key] === undefined) delete process.env[key]

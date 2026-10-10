@@ -19,7 +19,12 @@
  *     SQLSTATE 42P01 / 42703 — never by message text, the server may run a non-English locale — or
  *     read_failed), and the other stores are still probed. Production with unusable material
  *     (EncryptionMaterialError) reports `material.status = 'unavailable'` and attempts no decrypt.
+ *   - No server-side ERROR for an absent store: ONE catalog precheck per table (to_regclass +
+ *     pg_attribute, ENCRYPTED_STORE_COLUMNS_SQL) decides table_missing / column_missing before the
+ *     entry's SELECT is issued; the SQLSTATE classification remains only as the fallback for a race.
  *   - Bounded: each read is LIMIT rowLimit + 1 (default 10,000) and reports `truncated` beyond that.
+ *   - `plaintext` is narrow on purpose: non-encrypted values in the catalogued field each reader uses,
+ *     not every plaintext secret in the database (see EncryptedStoreProbeResult.plaintext).
  *   - Classified the way each store's runtime READER sees the value: the `enc:` / `v1:` prefix is tested
  *     on the raw string, or on the trimmed one where that reader trims first (entry.prefixOn); NULL and
  *     whitespace-only values are not stored secrets and count nowhere (rows = encrypted + plaintext +
@@ -70,9 +75,25 @@ export interface EncryptedStoreCatalogEntry {
    * 'trimmed' (the reader trims first, so ` enc:…` is decrypted by the reader and here).
    */
   readonly prefixOn: 'raw' | 'trimmed'
+  /**
+   * Every top-level column `sql` references. The existence precheck (ENCRYPTED_STORE_COLUMNS_SQL) must
+   * find all of them before `sql` is issued; otherwise the entry is table_missing / column_missing
+   * without a statement that would ERROR on the server.
+   */
+  readonly columns: readonly string[]
   /** ONE static SELECT returning a single column `value`, bounded by `LIMIT $1`. */
   readonly sql: string
 }
+
+/**
+ * Existence precheck, ONE per distinct catalog table: the table's live top-level columns.
+ * to_regclass() returns NULL for a missing relation instead of raising, and resolves the unqualified
+ * name through search_path exactly like the catalog SELECTs do — so a table or column that does not
+ * exist in this deployment costs no server-side ERROR, no db_query_errors_total increment and no
+ * slow-query line on every startup / admin read (integration/db/connection-pool.ts query()).
+ */
+export const ENCRYPTED_STORE_COLUMNS_SQL =
+  'SELECT attname FROM pg_attribute WHERE attrelid = to_regclass($1) AND attnum > 0 AND NOT attisdropped'
 
 const LEGACY_INTEGRATION_PREFIX = 'v1:'
 /** iv (16) + authTag (16): the smallest payload SecretManager.encrypt() can produce (empty plaintext). */
@@ -84,7 +105,7 @@ const DEFAULT_ROW_LIMIT = 10_000
  * its classification (an assignment throws in strict mode).
  */
 function catalogEntry(entry: EncryptedStoreCatalogEntry): EncryptedStoreCatalogEntry {
-  return Object.freeze({ ...entry })
+  return Object.freeze({ ...entry, columns: Object.freeze([...entry.columns]) })
 }
 
 /**
@@ -99,6 +120,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.credentials.password',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['config', 'is_active', 'deleted_at'],
     sql: `SELECT config->'credentials'->>'password' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'password' <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -106,6 +128,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.credentials.apiKey',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['config', 'is_active', 'deleted_at'],
     sql: `SELECT config->'credentials'->>'apiKey' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'apiKey' <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -113,6 +136,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.credentials.token',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['config', 'is_active', 'deleted_at'],
     sql: `SELECT config->'credentials'->>'token' AS value FROM data_sources WHERE is_active = true AND deleted_at IS NULL AND config->'credentials'->>'token' <> '' LIMIT $1`,
   }),
   // Readers: directory-sync parseIntegrationConfig, work-notification-settings decryptStoredText,
@@ -123,6 +147,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.appSecret',
     scheme: 'platform-enc',
     prefixOn: 'trimmed',
+    columns: ['config'],
     sql: `SELECT config->>'appSecret' AS value FROM directory_integrations WHERE config->>'appSecret' <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -130,6 +155,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.workNotificationAgentId|agentId',
     scheme: 'platform-enc',
     prefixOn: 'trimmed',
+    columns: ['config'],
     sql: `SELECT COALESCE(config->>'workNotificationAgentId', config->>'agentId') AS value FROM directory_integrations WHERE COALESCE(config->>'workNotificationAgentId', config->>'agentId') <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -137,6 +163,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.approvalCardLinkSecret',
     scheme: 'platform-enc',
     prefixOn: 'trimmed',
+    columns: ['config'],
     sql: `SELECT config->>'approvalCardLinkSecret' AS value FROM directory_integrations WHERE config->>'approvalCardLinkSecret' <> '' LIMIT $1`,
   }),
   // Reader: dingtalk-group-destinations decryptDingTalkDestinationWebhookUrl / …Secret — raw value.
@@ -145,6 +172,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'webhook_url',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['webhook_url'],
     sql: `SELECT webhook_url AS value FROM dingtalk_group_destinations WHERE webhook_url <> '' LIMIT $1`,
   }),
   catalogEntry({
@@ -152,6 +180,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'secret',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['secret'],
     sql: `SELECT secret AS value FROM dingtalk_group_destinations WHERE secret <> '' LIMIT $1`,
   }),
   // Reader: credential-store.cjs decrypt — isLegacyCiphertext / security.decrypt on the raw value.
@@ -160,6 +189,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'credentials_encrypted',
     scheme: 'integration-credential',
     prefixOn: 'raw',
+    columns: ['credentials_encrypted'],
     sql: `SELECT credentials_encrypted AS value FROM integration_external_systems WHERE credentials_encrypted <> '' LIMIT $1`,
   }),
   // Reader: plugin-attendance normalizeIntegrationConfig — trims only to test emptiness, then
@@ -169,6 +199,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'config.appSecret|appsecret|app_secret',
     scheme: 'platform-enc',
     prefixOn: 'raw',
+    columns: ['config'],
     sql: `SELECT COALESCE(config->>'appSecret', config->>'appsecret', config->>'app_secret') AS value FROM attendance_integrations WHERE COALESCE(config->>'appSecret', config->>'appsecret', config->>'app_secret') <> '' LIMIT $1`,
   }),
   // Reader: ConfigService DatabaseConfigSource -> SecretManager.decryptValue — raw `enc:` test.
@@ -177,6 +208,7 @@ export const ENCRYPTED_STORE_CATALOG: readonly EncryptedStoreCatalogEntry[] = Ob
     field: 'value (is_encrypted)',
     scheme: 'system-config',
     prefixOn: 'raw',
+    columns: ['value', 'is_encrypted'],
     // `value` is text (z20251231 migration) or jsonb (038 migration); it is classified in JS, so no
     // text function is applied to it here.
     sql: `SELECT value FROM system_configs WHERE is_encrypted = true LIMIT $1`,
@@ -199,7 +231,14 @@ export interface EncryptedStoreProbeResult {
   encrypted: number
   /** Of `encrypted`: values the current material cannot decrypt. */
   undecryptable: number
-  /** Non-empty values in this secret field that are NOT encrypted. */
+  /**
+   * Non-empty values that are NOT encrypted — ONLY in this catalogued field, i.e. the value this
+   * store's reader actually uses. It does not see plaintext copies the reader ignores (e.g. the
+   * attendance plugin keeps extra `appsecret` / `app_secret` keys next to `appSecret`; the COALESCE
+   * picks `appSecret` first), nor secrets in rows the probe does not read (system_configs rows with
+   * is_encrypted = false, e.g. federation's plm.apiToken / athena.apiToken written through
+   * ConfigService.set). Not a census of all plaintext secrets.
+   */
   plaintext: number
   /** integration-credential only: `v1:` values under the plugin's own key — counted, not decrypted. */
   legacyNotChecked?: number
@@ -323,13 +362,52 @@ function emptyResult(entry: EncryptedStoreCatalogEntry): EncryptedStoreProbeResu
   return result
 }
 
+type TablePresence =
+  | { kind: 'present'; columns: ReadonlySet<string> }
+  | { kind: 'absent' }
+  /** The precheck itself failed (e.g. the database is unreachable): the table's entries are read_failed. */
+  | { kind: 'unreadable'; sqlState?: string }
+
+/** ENCRYPTED_STORE_COLUMNS_SQL for one table. Zero rows = no such relation on the search_path. */
+async function readTablePresence(query: EncryptedStoreProbeQuery, table: string): Promise<TablePresence> {
+  try {
+    const response = await query(ENCRYPTED_STORE_COLUMNS_SQL, [table])
+    if (!response || !Array.isArray(response.rows)) throw new TypeError('query returned no rows array')
+    if (response.rows.length === 0) return { kind: 'absent' }
+    const columns = new Set<string>()
+    for (const row of response.rows) {
+      const name = row !== null && typeof row === 'object' ? (row as { attname?: unknown }).attname : undefined
+      if (typeof name === 'string') columns.add(name)
+    }
+    return { kind: 'present', columns }
+  } catch (error) {
+    const sqlState = sqlStateOf(error)
+    return sqlState ? { kind: 'unreadable', sqlState } : { kind: 'unreadable' }
+  }
+}
+
 async function probeOne(
   entry: EncryptedStoreCatalogEntry,
   query: EncryptedStoreProbeQuery,
   key: Buffer | null,
   rowLimit: number,
+  presence: TablePresence,
 ): Promise<EncryptedStoreProbeResult> {
   const result = emptyResult(entry)
+  // Decided by the precheck — the entry's SELECT is NOT issued, so nothing errors on the server.
+  if (presence.kind === 'absent') {
+    result.status = 'table_missing'
+    return result
+  }
+  if (presence.kind === 'unreadable') {
+    result.status = 'read_failed'
+    if (presence.sqlState) result.sqlState = presence.sqlState
+    return result
+  }
+  if (entry.columns.some((column) => !presence.columns.has(column))) {
+    result.status = 'column_missing'
+    return result
+  }
   try {
     const response = await query(entry.sql, [rowLimit + 1])
     if (!response || !Array.isArray(response.rows)) throw new TypeError('query returned no rows array')
@@ -349,6 +427,8 @@ async function probeOne(
       }
     }
   } catch (error) {
+    // Fallback for a race (the table / column went away between the precheck and this SELECT): the
+    // SQLSTATE, never the message text, still classifies it.
     const sqlState = sqlStateOf(error)
     const reset = emptyResult(entry)
     reset.status = sqlState === '42P01' ? 'table_missing' : sqlState === '42703' ? 'column_missing' : 'read_failed'
@@ -399,9 +479,14 @@ export async function probeEncryptedStores(deps: EncryptedStoreProbeDeps): Promi
     }
   }
 
+  const presence = new Map<string, TablePresence>()
+  for (const entry of ENCRYPTED_STORE_CATALOG) {
+    if (!presence.has(entry.store)) presence.set(entry.store, await readTablePresence(deps.query, entry.store))
+  }
+
   const stores: EncryptedStoreProbeResult[] = []
   for (const entry of ENCRYPTED_STORE_CATALOG) {
-    stores.push(await probeOne(entry, deps.query, key, rowLimit))
+    stores.push(await probeOne(entry, deps.query, key, rowLimit, presence.get(entry.store) as TablePresence))
   }
 
   return {
@@ -411,6 +496,25 @@ export async function probeEncryptedStores(deps: EncryptedStoreProbeDeps): Promi
     stores,
     totals: totalsOf(stores),
   }
+}
+
+// ── on demand (admin read) ───────────────────────────────────────────────────────────────────────
+
+let sharedRun: Promise<EncryptedStoreProbeReport> | null = null
+
+/**
+ * Single-flight for on-demand callers (GET /api/admin/security/encrypted-stores): while one probe run
+ * is in flight every caller gets THAT run's promise, so concurrent admin reads cost one run, not one
+ * each. Nothing is cached: once the run settles the next call starts a fresh one. `makeDeps` is only
+ * called when a new run starts; if it throws, nothing is shared and the throw reaches the caller.
+ */
+export function probeEncryptedStoresShared(makeDeps: () => EncryptedStoreProbeDeps): Promise<EncryptedStoreProbeReport> {
+  if (sharedRun) return sharedRun
+  const run: Promise<EncryptedStoreProbeReport> = probeEncryptedStores(makeDeps()).finally(() => {
+    if (sharedRun === run) sharedRun = null
+  })
+  sharedRun = run
+  return run
 }
 
 // ── startup ──────────────────────────────────────────────────────────────────────────────────────

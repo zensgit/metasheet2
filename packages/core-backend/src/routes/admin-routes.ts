@@ -41,7 +41,7 @@ import {
   isLiveConnectionFkViolation
 } from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
-import { probeEncryptedStores } from '../security/encrypted-store-probe';
+import { probeEncryptedStoresShared } from '../security/encrypted-store-probe';
 import { createAdminFailureResponders } from './admin-failure-envelope';
 
 const logger = new Logger('AdminRoutes');
@@ -2286,11 +2286,16 @@ router.post('/health/check', async (req: Request, res: Response) => {
  * non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin
  * returns false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20). Which stores
  * are broken after a key change is deployment-level state, not tenant state.
+ *
+ * Concurrent requests share ONE in-flight run (probeEncryptedStoresShared); nothing is cached after
+ * it settles, so every later request gets a fresh report.
  */
 router.get('/security/encrypted-stores', requireAdminRole(), async (_req: Request, res: Response) => {
   try {
-    const pool = poolManager.get();
-    const report = await probeEncryptedStores({ query: (sql, params) => pool.query(sql, params) });
+    const report = await probeEncryptedStoresShared(() => {
+      const pool = poolManager.get();
+      return { query: (sql, params) => pool.query(sql, params) };
+    });
     res.json({ success: true, report });
   } catch (error) {
     sendAdminReadFailure(res, 'Failed to probe encrypted stores', error);

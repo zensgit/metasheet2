@@ -29,7 +29,7 @@ vi.mock('../../src/services/SnapshotService', () => ({}))
 vi.mock('../../src/audit/audit', () => ({}))
 
 import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
-import { ENCRYPTED_STORE_CATALOG } from '../../src/security/encrypted-store-probe'
+import { ENCRYPTED_STORE_CATALOG, ENCRYPTED_STORE_COLUMNS_SQL } from '../../src/security/encrypted-store-probe'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { Logger } from '../../src/core/logger'
 import {
@@ -72,12 +72,17 @@ beforeEach(() => {
   vi.mocked(isAdmin).mockResolvedValue(true)
   // Whatever material the process runs with, this value is sealed under it — so the probe opens it.
   sealed = encryptStoredSecretValue(MARKER)
-  query.mockImplementation(async (sql: string) => {
+  query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    // Existence precheck: every catalog table exists with the columns its entries read, except
+    // system_configs, which this deployment does not have (zero rows = to_regclass NULL).
+    if (sql === ENCRYPTED_STORE_COLUMNS_SQL) {
+      if (params?.[0] === 'system_configs') return { rows: [] }
+      return { rows: [...new Set(ENCRYPTED_STORE_CATALOG.filter((e) => e.store === params?.[0]).flatMap((e) => e.columns))].map((attname) => ({ attname })) }
+    }
     const entry = ENCRYPTED_STORE_CATALOG.find((candidate) => candidate.sql === sql)
     if (entry?.store === 'data_sources' && entry.field === 'config.credentials.password') {
       return { rows: [{ value: sealed }, { value: 'enc:AAAA' }, { value: `${MARKER}-plain` }] }
     }
-    if (entry?.store === 'system_configs') throw Object.assign(new Error('relation missing'), { code: '42P01' })
     return { rows: [] }
   })
   vi.spyOn(poolManager, 'get').mockReturnValue(fakePool() as never)
@@ -121,9 +126,11 @@ describe('GET /api/admin/security/encrypted-stores — platform-admin gate', () 
     expect(report.stores[0]).toMatchObject({
       store: 'data_sources', field: 'config.credentials.password', status: 'ok', rows: 3, encrypted: 2, undecryptable: 1, plaintext: 1,
     })
-    expect(report.stores.find((s: { store: string }) => s.store === 'system_configs')).toMatchObject({ status: 'table_missing', sqlState: '42P01' })
+    expect(report.stores.find((s: { store: string }) => s.store === 'system_configs')).toMatchObject({ status: 'table_missing' })
     expect(report.totals).toMatchObject({ encrypted: 2, undecryptable: 1, plaintext: 1, missing: 1 })
-    expect(query).toHaveBeenCalledTimes(ENCRYPTED_STORE_CATALOG.length)
+    // 6 per-table prechecks + every catalog SELECT except system_configs' (absent: never issued)
+    expect(query).toHaveBeenCalledTimes(6 + ENCRYPTED_STORE_CATALOG.length - 1)
+    expect(query.mock.calls.map((c) => c[0])).not.toContain(ENCRYPTED_STORE_CATALOG.find((e) => e.store === 'system_configs')?.sql)
     const serialized = JSON.stringify(res.body)
     expect(serialized).not.toContain('MARKER')
     expect(serialized).not.toContain(sealed)
@@ -170,5 +177,37 @@ describe('GET /api/admin/security/encrypted-stores — failure envelope', () => 
     expect(res.body.report.stores.every((s: { status: string; sqlState?: string }) => s.status === 'read_failed' && s.sqlState === '28P01')).toBe(true)
     const serialized = JSON.stringify(res.body)
     for (const fragment of LEAKY_FRAGMENTS) expect(serialized).not.toContain(fragment)
+  })
+})
+
+describe('GET /api/admin/security/encrypted-stores — single-flight', () => {
+  it('two concurrent admin reads share ONE probe run and get the same report; a later read runs again', async () => {
+    pinned.setApp(buildApp({ id: 'u-admin-fixture' }))
+    const ONE_RUN = 6 + ENCRYPTED_STORE_CATALOG.length - 1 // prechecks + every SELECT but system_configs'
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const answer = query.getMockImplementation() as (sql: string, params?: unknown[]) => Promise<unknown>
+    query.mockImplementation(async (sql: string, params?: unknown[]) => {
+      await gate
+      return answer(sql, params)
+    })
+    const poolGet = vi.mocked(poolManager.get)
+
+    const first = request(pinned.url()).get(ROUTE).then((r) => r)
+    const second = request(pinned.url()).get(ROUTE).then((r) => r)
+    // Both requests are past the gate and inside the handler before the (blocked) run is released.
+    await vi.waitFor(() => expect(vi.mocked(isAdmin)).toHaveBeenCalledTimes(2))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    release()
+    const [a, b] = await Promise.all([first, second])
+    expect([a.status, b.status]).toEqual([200, 200])
+    expect(b.body.report).toEqual(a.body.report)
+    expect(poolGet).toHaveBeenCalledTimes(1)
+    expect(query).toHaveBeenCalledTimes(ONE_RUN)
+
+    // Nothing is cached once the run settled: the next read is a fresh run.
+    await request(pinned.url()).get(ROUTE).expect(200)
+    expect(poolGet).toHaveBeenCalledTimes(2)
+    expect(query).toHaveBeenCalledTimes(2 * ONE_RUN)
   })
 })
