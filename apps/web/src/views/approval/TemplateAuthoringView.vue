@@ -919,8 +919,14 @@
                  ONE key `emptyAssigneeFallback`, filled through the SAME typed directory pickers the
                  static_user/static_role sources use (D0 §10.2 — never a raw-id input). 转审批管理员 is
                  expressed by designating the approval-admin ROLE (OD-L4-3(a)), not a separate option. -->
+            <!-- Gate r2 P2-1 (C7): re-sync on EVERY policy change, mirroring the source-kind select's
+                 @change above. The fallback targets stay on the draft while the policy is switched away
+                 (default (g)) but are re-ensured into the shared directory options only while it is
+                 'designated'; a user search made in between replaces that list, so without this the
+                 re-mounted picker would have no option for a retained target and Element Plus would
+                 label its chip with the raw id. -->
             <el-form-item label="空审批人策略">
-              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-empty-policy">
+              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-empty-policy" @change="syncStepOptions(step)">
                 <el-option label="报错" value="error" />
                 <el-option label="自动通过" value="auto-approve" />
                 <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
@@ -2487,9 +2493,15 @@ function approvalNodeInParallelRegion(nodeKey: string): boolean {
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
 }
+// Gate r2 P2-1 (C7): every policy change re-syncs the node's chips — the canvas twin of the linear
+// select's @change. A retained 'designated' target (kept while the policy is switched away) is
+// re-ensured only while the policy is 'designated', so a user search made in between would otherwise
+// leave the re-mounted fallback picker without an option for it.
 function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy): void {
   const edit = approvalNodeEditFor(nodeKey)
-  if (edit) edit.emptyAssigneePolicy = policy
+  if (!edit) return
+  edit.emptyAssigneePolicy = policy
+  syncApprovalNodeOptions(nodeKey)
 }
 // W1-1a (Lock-4 §2 F4-C) — the canvas half of the four-value 审批人与发起人为同一人时 control. It
 // REPLACES the shipped 自审合并 checkbox setter (`setApprovalNodeMergeWithRequester`) and goes through

@@ -291,7 +291,7 @@ export interface AutoApprovalPolicy {
    * `'auto_skip'` is normalized). NOTE (code, not lock): an EXPLICIT `'self_approve'` still creates
    * a node-level policy object, which overrides any template-level `policy.autoApproval` at that
    * node (the shipped whole-object precedence) — so explicit and absent are NOT interchangeable in
-   * the editor; see `samePersonChoiceFromPolicy` (approvalNodeEdit.ts).
+   * the editor; see `samePersonControlState` (approvalNodeEdit.ts).
    */
   samePersonPolicy?: SamePersonPolicy
 }

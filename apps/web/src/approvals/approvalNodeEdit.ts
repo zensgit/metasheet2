@@ -300,11 +300,13 @@ export function samePersonOverrideHint(policy: AutoApprovalPolicy | null | undef
   return autoApprovalPolicyHasNonSamePersonKeys(policy) ? SAME_PERSON_OVERRIDE_ACTIVE_HINT : SAME_PERSON_OVERRIDE_HINT
 }
 /**
- * - transfer: OD-L4-5(a) — an absent transfer target means the seat is not produced and
- *   `emptyAssigneePolicy` governs; it must NEVER fall back to self_approve (gate C-3).
+ * - transfer: OD-L4-5(a) — an absent transfer target means the seat is simply not produced, and only
+ *   if the node then has no assignee at all does `emptyAssigneePolicy` govern (L4:130-132 — a
+ *   requester who is one member of a multi-member role just loses that seat; the others remain). It
+ *   must NEVER fall back to self_approve (gate C-3).
  */
 export const SAME_PERSON_TRANSFER_HINT =
-  '若发起人没有直属上级/部门负责人（或该负责人就是发起人本人），本节点不会生成这位审批人，改按「空审批人策略」处理，不会退回由发起人本人审批。'
+  '若发起人没有直属上级/部门负责人（或该负责人就是发起人本人），本节点不会生成这位审批人；若本节点因此没有任何审批人，按「空审批人策略」处理，不会退回由发起人本人审批。'
 
 // ── W1-1a (Lock-4 §3 F4-B) — 'designated' fallback targets, shared by BOTH editors ──────────────
 

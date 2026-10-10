@@ -462,6 +462,63 @@ function setInput(testId: string, value: string) {
   input.dispatchEvent(new Event('input'))
 }
 
+// W1-1a gate r2 (P2-1 / P2-2) — the directory seam for the typed fallback pickers.
+// `useApprovalDirectory` is NOT mocked in this file, so its loaders reach the real `apiFetch` and
+// then the global `fetch`. `searchUsers` REPLACES the shared user list only on a successful
+// response; a failed fetch leaves the list untouched, so a "a search dropped the chip" pin would
+// pass against nothing. These helpers stub `fetch` and route by URL: the users page is served
+// verbatim, the roles list only when a test asks for it, and every other directory loader gets a
+// non-ok response, so a late mount-time load cannot replace a list under the test. The response is
+// the minimal ok/status/json shape (as in approvalTemplateCenterCategory.spec.ts). The shared
+// afterEach of the view suite undoes the stub.
+// W1-1a gate r2 P3-1 — the transfer hint, restated verbatim (Lock-4 L4:130-132: 空审批人策略 applies
+// only if the node then has no assignee at all).
+const W11A_SAME_PERSON_TRANSFER_HINT_TEXT =
+  '若发起人没有直属上级/部门负责人（或该负责人就是发起人本人），本节点不会生成这位审批人；若本节点因此没有任何审批人，按「空审批人策略」处理，不会退回由发起人本人审批。'
+
+const DIRECTORY_USERS_PATH = '/api/approval-templates/directory/users'
+function stubDirectoryFetch(options: {
+  users: Array<{ id: string; name: string; email: string }>
+  roles?: Array<{ id: string; name: string }>
+}) {
+  const fetchSpy = vi.fn(async (input: unknown) => {
+    const url = String(input)
+    if (url.includes(DIRECTORY_USERS_PATH)) {
+      return { ok: true, status: 200, json: async () => ({ users: options.users }) }
+    }
+    if (options.roles && /\/api\/approval-templates\/directory\/roles(?:\?|$)/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ roles: options.roles }) }
+    }
+    return { ok: false, status: 503, json: async () => null }
+  })
+  vi.stubGlobal('fetch', fetchSpy)
+  return fetchSpy
+}
+
+function directoryUserSearchCount(fetchSpy: ReturnType<typeof stubDirectoryFetch>): number {
+  return fetchSpy.mock.calls.filter(([input]) => String(input).includes(DIRECTORY_USERS_PATH)).length
+}
+
+// Opening a real el-select dropdown emits `visible-change(true)`, which the view's pickers answer with
+// `onUserSearch('')`. The ElSelect stub above does not declare that event, so the view's listener falls
+// through to the native <select> as a DOM listener of the same name; dispatching it runs the view's own
+// handler (the Event object is truthy). The fetch spy's call count is the positive control that it did.
+function openUserPicker(select: HTMLSelectElement): void {
+  select.dispatchEvent(new Event('visible-change'))
+}
+
+/** Text of the picker's `<option value=…>`, or null when the picker has no option for that value. */
+function optionText(select: HTMLSelectElement, value: string): string | null {
+  const option = Array.from(select.options).find((candidate) => candidate.value === value)
+  return option ? option.textContent : null
+}
+
+/** Pick exactly `values` in a `multiple` stub select (the stub emits the selected values as an array). */
+function pickOptions(select: HTMLSelectElement, values: string[]): void {
+  for (const option of Array.from(select.options)) option.selected = values.includes(option.value)
+  select.dispatchEvent(new Event('change'))
+}
+
 // P1-A0 — typed basic-info issue model (master §4 UI-0; Lock-0 L0-3 typed-issue-record delta,
 // basic-info-step scope only). `validateTemplateBasicInfo` is a NEW typed extraction of the SAME
 // five checks `validateTemplateFormFields` has always run first; these pin (a) the typed shape and
@@ -1433,6 +1490,8 @@ describe('TemplateAuthoringView', () => {
     container?.remove()
     app = null
     container = null
+    // W1-1a gate r2: undo `stubDirectoryFetch` (a no-op for every test that did not stub).
+    vi.unstubAllGlobals()
     if (originalScrollIntoView) {
       Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
     } else {
@@ -2856,7 +2915,8 @@ describe('TemplateAuthoringView', () => {
     samePerson.value = 'transfer_direct_manager'
     samePerson.dispatchEvent(new Event('change'))
     await flushUi()
-    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')!.textContent)
+      .toBe(W11A_SAME_PERSON_TRANSFER_HINT_TEXT)
 
     // Drop the user target, keep the role (one side at a time).
     for (const option of Array.from(userPicker.options)) option.selected = false
@@ -2946,7 +3006,10 @@ describe('TemplateAuthoringView', () => {
     expect(samePerson.value).toBe('transfer_dept_head')
     expect(Array.from(samePerson.options).map((option) => option.value))
       .toEqual(['default', 'self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'])
-    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')).not.toBeNull()
+    // Gate r2 P3-1 (Lock-4 L4:130-132): the empty-assignee fallback is CONDITIONAL on the node having no
+    // assignee left. Restated here, not imported, so reverting the copy reddens this pin.
+    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')!.textContent)
+      .toBe(W11A_SAME_PERSON_TRANSFER_HINT_TEXT)
 
     samePerson.value = 'default'
     samePerson.dispatchEvent(new Event('change'))
@@ -2962,7 +3025,16 @@ describe('TemplateAuthoringView', () => {
     expect(config.emptyAssigneeFallback).toEqual({ userIds: ['u-fallback'], roleIds: ['approval-admin'] })
   })
 
+  // Gate r2 P2-2: the blocked half alone was an absence assertion without a positive control (Lock-4
+  // §3, L4:285-286), and it stayed green with the linear picker write-through removed (mutation E1e).
+  // The test now also CHOOSES a role and a user through the typed pickers and asserts the save goes
+  // through carrying exactly those targets. The directory is served through the fetch seam: roles by
+  // the mount-time load, users by the picker's own search.
   it("W1-1a linear: choosing 转交指定人员 renders the typed pickers and blocks save until a target is chosen", async () => {
+    const fetchSpy = stubDirectoryFetch({
+      users: [{ id: 'u-pick', name: '目录用户', email: '' }],
+      roles: [{ id: 'role-pick', name: '审批管理员' }],
+    })
     await mountView()
     setInput('approval-template-name', '报销审批')
     const emptyPolicy = container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
@@ -2974,10 +3046,176 @@ describe('TemplateAuthoringView', () => {
     expect(container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]')).not.toBeNull()
     expect(container!.querySelector('[data-testid="approval-step-empty-fallback-hint"]')).not.toBeNull()
 
-    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    const saveButton = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    saveButton.click()
     await flushUi()
     expect(createTemplateSpy).toHaveBeenCalledTimes(0)
     expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')!.textContent).toContain('转交指定人员')
+
+    // Positive control: choose a role and a user through the typed pickers, then save again.
+    const rolePicker = container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]') as HTMLSelectElement
+    await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+    pickOptions(rolePicker, ['role-pick'])
+    await flushUi()
+    const userPicker = container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    openUserPicker(userPicker)
+    await vi.waitFor(() => expect(optionText(userPicker, 'u-pick')).toBe('目录用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    pickOptions(userPicker, ['u-pick'])
+    await flushUi()
+
+    saveButton.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph.nodes
+      .find((node: any) => node.key === 'approval_1').config
+    expect({ emptyAssigneePolicy: config.emptyAssigneePolicy, emptyAssigneeFallback: config.emptyAssigneeFallback })
+      .toStrictEqual({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { userIds: ['u-pick'], roleIds: ['role-pick'] } })
+  })
+
+  // ── W1-1a gate r2 P2-1 (C7: a fallback chip never shows a raw id). `searchUsers` REPLACES the shared
+  // user list with the new page, and Element Plus labels a selected value that has no option with the
+  // raw value (`useSelect.getOption`). The fallback ids are re-ensured into the list only while the
+  // policy is 'designated': after a search (`onUserSearch`), on hydrate / pick (`syncStepOptions`,
+  // `syncApprovalNodeOptions`), and, since this round, on every empty-assignee-policy change. The stub
+  // renders NOTHING for an option-less value, so these pins assert that the `<option value=id>` is
+  // present and reads 未知用户 — never the mere absence of the id from the picker text.
+  function buildW11aLinearTemplate(config: Record<string, unknown>) {
+    return buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '审批人 1', config: config as ApprovalNodeConfig },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    })
+  }
+
+  // Pins the `onUserSearch` designated loop (mutation X7c): the picker stays mounted, so only that loop
+  // can put the hydrated target back after the page replaced the list.
+  it('W1-1a linear (gate r2 P2-1): a user search while 转交指定人员 stays selected keeps the hydrated fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_linear_search' })
+    getTemplateSpy.mockResolvedValue(buildW11aLinearTemplate({
+      assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['u-fallback'] },
+    }))
+    await mountView()
+    await flushUi()
+    const userPicker = () => container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+
+    openUserPicker(userPicker())
+    // Positive control: the search ran and its page replaced the list (the page user is labelled).
+    await vi.waitFor(() => expect(optionText(userPicker(), 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+  })
+
+  // Pins the policy-change re-sync (the linear select's @change): switching away unmounts the pickers
+  // while the draft keeps the target (default (g)); a search in between drops its placeholder option;
+  // only a re-sync on the switch back restores it.
+  it('W1-1a linear (gate r2 P2-1): switching 空审批人策略 away, searching, and back re-syncs the retained fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_linear_switch' })
+    getTemplateSpy.mockResolvedValue(buildW11aLinearTemplate({
+      assigneeSources: [{ kind: 'static_user', userIds: ['u-page'] }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['u-fallback'] },
+    }))
+    await mountView()
+    await flushUi()
+    const fallbackPicker = () => container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement | null
+    const emptyPolicy = () => container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+
+    emptyPolicy().value = 'error'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).toBeNull()
+
+    // A search through the step's own source picker; the page omits the retained target.
+    const sourcePicker = container!.querySelector('[data-testid="approval-step-user-picker"]') as HTMLSelectElement
+    openUserPicker(sourcePicker)
+    await vi.waitFor(() => expect(optionText(sourcePicker, 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    // Precondition that makes the last assertion discriminating: the search really dropped the
+    // retained target's option (it is re-ensured only while the policy is 'designated').
+    expect(optionText(sourcePicker, 'u-fallback')).toBeNull()
+
+    emptyPolicy().value = 'designated'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).not.toBeNull()
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+  })
+
+  // Canvas twin of the search pin: `onUserSearch` re-syncs every approval node through
+  // `syncApprovalNodeOptions`, whose designated branch puts the hydrated target back.
+  it('W1-1a canvas (gate r2 P2-1): a user search while 转交指定人员 stays selected keeps the hydrated fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_canvas_search' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+    const userPicker = () => container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+
+    openUserPicker(userPicker())
+    await vi.waitFor(() => expect(optionText(userPicker(), 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+  })
+
+  // Pins the canvas policy-change re-sync (`setApprovalNodeEmptyPolicy` → `syncApprovalNodeOptions`).
+  it('W1-1a canvas (gate r2 P2-1): switching 空审批人策略 away, searching, and back re-syncs the retained fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_canvas_switch' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'static_user', userIds: ['u-page'] }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+    const fallbackPicker = () => container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement | null
+    const emptyPolicy = () => container!.querySelector('[data-testid="approval-node-empty-policy"]') as HTMLSelectElement
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+
+    emptyPolicy().value = 'error'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).toBeNull()
+
+    const sourcePicker = container!.querySelector('[data-testid="approval-node-source-user-picker"]') as HTMLSelectElement
+    openUserPicker(sourcePicker)
+    await vi.waitFor(() => expect(optionText(sourcePicker, 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(sourcePicker, 'u-fallback')).toBeNull()
+
+    emptyPolicy().value = 'designated'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).not.toBeNull()
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
   })
 
   it('W1-1a linear (gate X-3): an off-enum persisted samePersonPolicy opens read-only, the control shows an honest label — never the raw value', async () => {
