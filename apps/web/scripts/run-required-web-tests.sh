@@ -751,6 +751,31 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 # and in this batch before wiring.
 npx vitest run approval-detail-can-decide-current-node --reporter=dot
 
+# 退回候选 (return candidates), 2026-10-09: ONE token added — `approval-detail-return-candidates`, a
+# NEW spec (apps/web/tests/approval-detail-return-candidates.spec.ts) over the mounted
+# ApprovalDetailView. It pins the 退回 target list against the three checks the server's return
+# dispatch applies (handler cursor, parallel region, target off the executor's visited approval
+# trail). It covers both DTO shapes — the detail read carries `currentNodeType`, an action response
+# carries `currentNodeKeys` — and the owner-visible choices: no graph ⇒ today's unfiltered list,
+# only the instance's own template / pinned version may judge it, and the pinned version wins over a
+# drifted live template.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file, using the counting rule of scripts/ops/required-web-lane-exec-block.mjs `allVitestTokens`
+# (drop comment lines, join backslash continuations, keep every logical line containing
+# `vitest run`, strip a trailing `|| exit $?`, take every non-flag positional): 553 tokens on 19
+# gating lines before this change, 554 on 20 after, no duplicates, identical to the committed
+# apps/web/scripts/run-required-web-tests.tokens manifest. No existing token contains the new one,
+# and the new one contains no existing token. In particular the five pre-existing
+# `approval-detail-*` tokens (approval-detail-can-decide-current-node,
+# approval-detail-column-row-key, approval-detail-field, approval-detail-instance-consistency,
+# approval-detail-record-table) are unrelated to it in both directions. It matches exactly ONE file
+# under apps/web (none under apps/web/verification, which vitest's default include also collects).
+# Verified green in isolation at the wiring commit (`npx vitest run approval-detail-return-candidates
+# --reporter=dot` → "Test Files 1 passed"), and before wiring in one batch with its three
+# neighbouring detail-view specs.
+npx vitest run approval-detail-return-candidates --reporter=dot
+
 # 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
 # packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
 # these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
