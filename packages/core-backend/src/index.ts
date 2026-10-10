@@ -290,6 +290,7 @@ import {
   startAttendanceScheduler,
   stopAttendanceScheduler,
 } from './services/AttendanceScheduler'
+import { startTaskScheduler, stopTaskScheduler } from './services/task-scheduler'
 import {
   resolveWebhookRetrySchedulerIntervalMs,
   resolveWebhookRetrySchedulerLeaderOptions,
@@ -3933,6 +3934,16 @@ export class MetaSheetServer {
       }
     })())
 
+    // Task scheduler: waits for its tick in flight at most 8 s, inside the 10 s barrier below, so
+    // the pool is still open while that tick finishes.
+    shutdownTasks.push((async () => {
+      try {
+        await stopTaskScheduler()
+      } catch (err) {
+        this.logger.warn(`Task scheduler shutdown failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })())
+
     // BPMN workflow engine's `node-cron` minute poller (see `routes/workflow.ts` /
     // `BPMNWorkflowEngine.shutdown()`; env-gated OFF by default via
     // `ENABLE_BPMN_TIMER_POLLER`, see `bpmnTimerPollerConfig.ts`): previously only stopped
@@ -4300,6 +4311,17 @@ export class MetaSheetServer {
       this.logger.error('DataSourceManager initialization failed; continuing in degraded mode', e as Error)
     }
 
+    // #6164 step 1: read-only trial decrypt of every encrypted store (counts only). Not awaited; never throws.
+    void import('./security/encrypted-store-probe')
+      .then(({ runEncryptedStoreProbeAtStartup }) => runEncryptedStoreProbeAtStartup({ resolvePool: () => poolManager.get() }))
+      .catch(() => {
+        try {
+          this.logger.warn('Encrypted store probe could not be loaded; startup continues without it')
+        } catch {
+          // a throwing logger must not turn into an unhandled rejection
+        }
+      })
+
     try {
       await startDirectorySyncScheduler()
       this.logger.info('Directory sync scheduler initialized')
@@ -4366,6 +4388,17 @@ export class MetaSheetServer {
       this.logger.info(scheduler ? 'Attendance scheduler initialized' : 'Attendance scheduler disabled (ATTENDANCE_SCHEDULER_ENABLED!=true)')
     } catch (e) {
       this.logger.error('Attendance scheduler initialization failed; continuing in degraded mode', e as Error)
+    }
+
+    // Task scheduler (M4 PR-3b design §6.6): the reminder and daily digest scans under a per-tick
+    // leader lock, then the delivery loop. Default OFF: it starts only when TASKS_ENABLED and
+    // TASKS_SCHEDULER_ENABLED are both the exact string true and the database pool exists;
+    // otherwise startTaskScheduler returns null and nothing runs.
+    try {
+      const taskScheduler = startTaskScheduler()
+      this.logger.info(taskScheduler ? 'Task scheduler initialized' : 'Task scheduler not started')
+    } catch (e) {
+      this.logger.error('Task scheduler initialization failed; continuing in degraded mode', e as Error)
     }
 
     // Webhook outbound pipeline. Two independent halves wired here:

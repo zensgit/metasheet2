@@ -110,10 +110,58 @@ test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+function hasVerifiedViteFlagSource(spec) {
+  if (!/^VITE_[A-Z0-9_]+$/.test(spec.key)) return false
+  const match = /^apps\/web\/src\/[A-Za-z0-9_./-]+\.ts#([A-Za-z_$][\w$]*)$/.exec(spec.source)
+  if (!match) return false
+
+  const webSourceRoot = path.join(REPO_ROOT, 'apps/web/src')
+  const sourcePath = path.resolve(REPO_ROOT, spec.source.split('#')[0])
+  const relativeSourcePath = path.relative(webSourceRoot, sourcePath)
+  if (
+    relativeSourcePath === '..'
+    || relativeSourcePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativeSourcePath)
+  ) return false
+  let source
+  try {
+    source = readFileSync(sourcePath, 'utf8')
+  } catch {
+    return false
+  }
+  return source.includes(`export function ${match[1]}(`)
+    && source.includes(`import.meta.env.${spec.key}`)
+}
+
+test('VITE manifest entries require an exact frontend source binding', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.VITE_MULTITABLE_RANGE_FILL_ENABLED
+  assert.ok(spec)
+  assert.equal(hasVerifiedViteFlagSource(spec), true)
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, key: 'VITE_UNREGISTERED_EXAMPLE' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, source: 'packages/core-backend/src/example.ts#isEnabled' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({
+      ...spec,
+      source: 'apps/web/src/../../packages/core-backend/src/example.ts#isEnabled',
+    }),
+    false,
+  )
+})
+
 // Non-boolean e-learning env reads that belong in the manifest, by exact name. A suffix rule such
 // as *_MS would also catch source constants (ELEARNING_MEDIA_FFPROBE_TIMEOUT_MS and friends are
 // not env reads). #6175: the audience catalog scan timeout.
 const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'])
+
+// Non-boolean task-line env reads that belong in the manifest, by exact name (same reason as
+// above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
+const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
 
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
@@ -135,6 +183,57 @@ test('audience scan timeout (#6175): numeric, default 5000, sourced from the res
   assert.match(resolver, /export function resolveElearningAudienceScanTimeoutMs\(/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS = 5_000/)
+})
+
+// M4 PR-3b: the three pipeline switches name the M4 migration they depend on as it is on disk, and
+// no other M4 migration name, so a rename of that migration is followed in their purposes too.
+test('task notification pipeline switches (M4 PR-3b): each purpose names the M4 migration on disk', () => {
+  const migrationsDir = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'packages/core-backend/src/db/migrations')
+  const m4 = readdirSync(migrationsDir).filter((name) => /^zzzz\d{14}_create_task_m4_tables\.ts$/.test(name))
+  assert.equal(m4.length, 1)
+  const onDisk = m4[0].replace(/\.ts$/, '')
+  for (const key of [
+    'TASKS_SCHEDULER_ENABLED',
+    'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+  ]) {
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    assert.ok(spec, key)
+    const named = [...spec.purpose.matchAll(/zzzz\d{14}_create_task_m4_tables/g)].map((match) => match[0])
+    assert.deepEqual(named, [onDisk], `${key} purpose names the M4 migration on disk`)
+  }
+})
+
+// M4 PR-3b S5: TASKS_ENABLED is also the prerequisite of the scheduler and the delivery worker
+// (ASSUMPTION(task-m4): [own-3b-06]); its purpose names both switches it gates.
+test('TASKS_ENABLED purpose (M4 PR-3b): names the scheduler and the delivery worker switches it gates', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_ENABLED
+  assert.ok(spec)
+  for (const key of ['TASKS_SCHEDULER_ENABLED', 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED']) {
+    assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key], key)
+    assert.ok(spec.purpose.includes(key), `TASKS_ENABLED purpose names ${key}`)
+  }
+  assert.match(spec.purpose, /prerequisite of the task scheduler and its notification delivery worker/)
+})
+
+test('task scheduler interval (M4 PR-3b): numeric, default 60000, clamped to half the scan window, sourced from the flags parser', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_SCHEDULER_INTERVAL_MS
+  assert.ok(spec)
+  assert.equal(spec.type, 'numeric')
+  assert.equal(spec.source, 'packages/core-backend/src/services/task-notification-flags.ts#resolveTaskSchedulerIntervalMs')
+  assert.match(spec.activationValue, /default 60000/)
+  assert.match(spec.activationValue, /\[5000, 3600000\]/)
+  assert.match(spec.purpose, /\[5000, 3600000\]/)
+  assert.deepEqual(spec.dependsOn, ['TASKS_SCHEDULER_ENABLED'])
+  assert.equal(spec.rules, undefined)
+  assert.equal(isActivated(spec, '60000'), false)
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  const flags = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/task-notification-flags.ts'), 'utf8')
+  assert.match(flags, /export function resolveTaskSchedulerIntervalMs\(/)
+  assert.match(flags, /env\.TASKS_SCHEDULER_INTERVAL_MS/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_DEFAULT_MS = 60_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MIN_MS = 5_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MAX_MS = TASK_REMINDER_SCAN_WINDOW_MS \/ 2/)
 })
 
 // MAINTAINER NOTE: these are PREFIX families — a future flag that shares one of these prefixes is
@@ -228,19 +327,27 @@ const NON_GH_EXACT = new Set([
   'DINGTALK_TODO_MIRROR_STATUSES',
 ])
 
-function grepFlagTokens(pattern) {
-  const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
+// Default: every *.ts under packages/core-backend/src. `{ file }` greps ONE repo-relative file instead (a
+// plugin reads its env flags in its own source, outside that tree).
+function grepFlagTokens(pattern, { file } = {}) {
+  const target = path.join(REPO_ROOT, file ?? 'packages/core-backend/src')
+  const command = file
+    ? `grep -hoE '${pattern}' ${target}`
+    : `grep -rhoE '${pattern}' ${target} --include='*.ts'`
   let out = ''
   try {
-    out = execSync(`grep -rhoE '${pattern}' ${srcDir} --include='*.ts'`, {
+    out = execSync(command, {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch (err) {
-    throw new Error(`could not grep ${pattern} under ${srcDir}: ${err.message}`)
+    throw new Error(`could not grep ${pattern} under ${target}: ${err.message}`)
   }
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
+
+// The attendance plugin file whose leave cancel-round launch flag is registered here (see below).
+const ATTENDANCE_PLUGIN_SOURCE = 'plugins/plugin-attendance/index.cjs'
 
 function globalHistoryFlagsInSource() {
   const tokens = grepFlagTokens('MULTITABLE_[A-Z_0-9]+')
@@ -260,7 +367,9 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !t.endsWith('_'))
     .filter((t) => !NON_GH_EXACT.has(t))
   // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
-  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // The *_ENABLED rule keeps constant names out; the one non-boolean task knob is named exactly, the
+  // same shape as ELEARNING_NON_BOOLEAN_FLAGS above.
+  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || TASKS_NON_BOOLEAN_FLAGS.has(t))
   // Approval center read-state badges (test report 2026-10-08): default-OFF exact-'true' switches,
   // one family by name shape so a new badge switch joins the population as soon as source reads it.
   const approvalBadges = grepFlagTokens('APPROVAL_[A-Z_0-9]+_BADGE_ENABLED')
@@ -279,7 +388,12 @@ function globalHistoryFlagsInSource() {
   ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
   // Derive the reviewed owner-send switch from actual core reads, including phantom detection.
   const yidaOwner = grepFlagTokens('INTEGRATION_YIDA_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner])].sort()
+  // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
+  // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
+  // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
+  const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
+    .filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...yidaOwner, ...attendanceCancelRound])].sort()
 }
 
 function grepPluginFlagTokens(pattern) {
@@ -296,7 +410,29 @@ function grepPluginFlagTokens(pattern) {
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
 
-test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
+test('leave cancel-round launch flag: registered against the plugin reader, exact literal true only', () => {
+  const key = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.source, `${ATTENDANCE_PLUGIN_SOURCE}#isAttendanceCancelRoundEntryEnabled`)
+  // The activation value is the reader's own comparison, read from source: a reader that goes back to the
+  // plugin's lenient parseBoolean (trim + lowercase; 'true' / '1' / 'yes') fails here as well.
+  const plugin = readFileSync(path.join(REPO_ROOT, ATTENDANCE_PLUGIN_SOURCE), 'utf8')
+  const reader = /\nfunction isAttendanceCancelRoundEntryEnabled\(\) \{\n([\s\S]*?)\n\}\n/.exec(plugin)
+  assert.ok(reader, 'the plugin reader isAttendanceCancelRoundEntryEnabled must be found')
+  assert.equal(reader[1].trim(), `return process.env.${key} === 'true'`)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+})
+
+test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
   const sourceGH = globalHistoryFlagsInSource()
   assert.ok(
     sourceGH.length >= 20,
@@ -310,11 +446,13 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
     `source reads Global-History flags MISSING from the manifest — add each to global-history-flag-manifest.mjs (or, if genuinely out of scope, to NON_GH_PREFIXES/NON_GH_EXACT with a reason): ${missing.join(', ')}`,
   )
   const sourceSet = new Set(sourceGH)
-  const phantom = GLOBAL_HISTORY_FLAG_KEYS.filter((k) => !sourceSet.has(k))
+  const phantom = GLOBAL_HISTORY_FLAG_MANIFEST
+    .filter((spec) => !sourceSet.has(spec.key) && !hasVerifiedViteFlagSource(spec))
+    .map((spec) => spec.key)
   assert.deepEqual(
     phantom,
     [],
-    `manifest lists flags NOT read anywhere in packages/core-backend/src (stale or typo'd key): ${phantom.join(', ')}`,
+    `manifest lists flags NOT read anywhere in the scanned sources (packages/core-backend/src, and ${ATTENDANCE_PLUGIN_SOURCE} for the ATTENDANCE_CANCEL_ROUND_ family) (stale or typo'd key): ${phantom.join(', ')}`,
   )
   // every spec carries a non-empty source citation — a rule with no citation is not verified
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {

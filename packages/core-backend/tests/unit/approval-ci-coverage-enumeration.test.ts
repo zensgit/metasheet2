@@ -18,7 +18,8 @@ import { APPROVAL_CI_COVERAGE_ALLOWLIST } from './approval-ci-coverage-allowlist
  * (a) collected by a named, un-skippable CI lane, or (b) present in the explicit, commented
  * allowlist (`approval-ci-coverage-allowlist.ts`) of deliberate exclusions. A newly-added, unwired
  * approval spec turns the matching `it(...)` below RED by construction — the enumeration is a live
- * `fs.readdirSync` glob, not a snapshot list.
+ * `fs.readdirSync` glob, not a snapshot list. (T1 also enumerates the leave cancel-round entry's
+ * `cancelRound*` web specs, which approval surfaces mount but which are not named `approval*`.)
  *
  * WHERE THIS LIVES, AND WHY: `packages/core-backend/tests/unit/*.test.ts` is collected by Vitest's
  * DEFAULT include glob (no `include:` override in vitest.config.ts — see the self-exemption test
@@ -524,14 +525,29 @@ function assertCoverage(repoPath: string, verdict: Verdict): void {
 }
 
 // =================================================================================================
-// §2 T1 — apps/web/tests/approval*.{test,spec}.ts (FE unit/spec)
+// §2 T1 — apps/web/tests/{approval,cancelRound}*.{test,spec}.ts (FE unit/spec)
+//
+// `cancelRound*`: the leave cancel-round entry's approval-side specs (`cancelRoundEntry*`, #6176) are
+// named after the feature, not `approval*`, so the original glob never saw them — dropping one from both
+// run-required-web-tests.sh and its .tokens manifest stayed green (reviewer finding F4, 2026-10-08).
 // =================================================================================================
 
-describe('T1 — apps/web/tests/approval*.{test,spec}.ts (FE unit/spec)', () => {
-  const files = readdirSync(join(repoRoot, 'apps/web/tests')).filter((name) => /^approval.*\.(test|spec)\.ts$/.test(name))
+describe('T1 — apps/web/tests/{approval,cancelRound}*.{test,spec}.ts (FE unit/spec)', () => {
+  const files = readdirSync(join(repoRoot, 'apps/web/tests')).filter((name) => /^(approval|cancelRound).*\.(test|spec)\.ts$/.test(name))
 
   it('tier glob returns a non-zero file count (scan negative control)', () => {
     expect(files.length).toBeGreaterThan(0)
+  })
+
+  // Per-arm negative control: the union count above is satisfied by `approval*` alone, so reverting the
+  // glob to `^approval` would silently drop the eight `cancelRoundEntry*` specs and stay green (gate
+  // mutation X13, 2026-10-09). Count the arm on its own.
+  it('tier glob keeps the cancelRound arm (per-arm negative control)', () => {
+    expect(
+      files.filter((name) => name.startsWith('cancelRound')).length,
+      'the cancelRound arm of the T1 glob must still see the eight cancelRoundEntry* specs (reviewer F4, 2026-10-08); if one was deleted on purpose, lower this floor in the same commit',
+    ).toBeGreaterThanOrEqual(8)
+    expect(files.filter((name) => name.startsWith('approval')).length).toBeGreaterThan(0)
   })
 
   for (const file of files) {

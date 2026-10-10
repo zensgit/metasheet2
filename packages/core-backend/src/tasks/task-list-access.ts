@@ -58,6 +58,24 @@ export function buildTaskListByIdCondition(input: { listIdParam: string; orgPara
   }
 }
 
+// M4 PR-3b S2 (design task-m4-pr3b-backend-design-20261001.md §5.3): the notification producer's
+// list-member fan-out. RULED(2026-10-07): [R05] [D13] a task's list members are the members of every
+// list that holds it, archived lists included, so there is no `archived_at` filter here.
+/**
+ * Every list of one org that holds one task as an item, archived or not. `$1` = task id, `$2` = org.
+ * The org clause is the list org clause of every builder in this module, so a list of another org
+ * never contributes members, whatever its item rows say.
+ */
+export function buildTaskListsOfTaskCondition(input: { taskIdParam: string; orgParam: string }): TaskListCondition {
+  return {
+    sql: taskListOrgClause(
+      `EXISTS (SELECT 1 FROM task_list_items tli_task WHERE tli_task.list_id = task_lists.id ` +
+        `AND tli_task.task_id = ${FIRST_PLACEHOLDER})`,
+    ),
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
 // ASSUMPTION(task-m4): [D9] [own-35] ORDER BY bodies of the list endpoints. Each ends with the
 // primary key, so the order is total. Lists: most recently updated first. List events: newest
 // first; the events of one transaction share `occurred_at` and are ordered by id.

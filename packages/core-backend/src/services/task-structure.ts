@@ -48,6 +48,7 @@ import {
 } from '../tasks/task-tree'
 import { isPrintableId, isStorableText, isValidMemberId } from './task-create'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
+import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
 import {
   assertRowAbility,
@@ -125,16 +126,23 @@ interface MembershipEventLike {
  * Membership events carry `targetUserId` (the assignee/follower the change is
  * about) that the tree/deletion events do not — written into `task_events
  * .payload` (PR #6126 second-round review, P2 item 6). Tree/deletion events
- * have no `targetUserId` and keep the column's `{}` default.
+ * have no `targetUserId` and keep the column's `{}` default. Returns the
+ * events as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: each id
+ * is generated before its INSERT, for the notification producer).
  */
-async function writeMembershipEvents(db: Db, taskId: string, events: MembershipEventLike[], fallbackAt: Date): Promise<void> {
+async function writeMembershipEvents(db: Db, taskId: string, events: MembershipEventLike[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
+  const written: WrittenTaskEvent[] = []
   for (const event of events) {
+    const id = newTaskEventId()
+    const occurredAt = event.occurredAt ?? fallbackAt
     const payload = event.targetUserId !== undefined ? JSON.stringify({ targetUserId: event.targetUserId }) : '{}'
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, payload, occurred_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-      [newTaskEventId(), taskId, event.userId, event.type, payload, event.occurredAt ?? fallbackAt],
+      [id, taskId, event.userId, event.type, payload, occurredAt],
     )
+    written.push({ id, type: event.type, actorId: event.userId, occurredAt })
   }
+  return written
 }
 
 interface MembershipResponse {
@@ -339,7 +347,9 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
       )
     }
     if (result.status !== task.status) await writeTaskDoneState(db, input.taskId, result.status === 'done', now)
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
     return membershipResponse(input.taskId, result.status, task.mode, result.rows)
   })
 }
@@ -362,7 +372,9 @@ export async function removeAssignee(input: { orgId: string; actorId: string; ta
       await db.query(`DELETE FROM task_assignees WHERE task_id = $1 AND user_id = $2`, [input.taskId, userId])
     }
     if (result.status !== task.status) await writeTaskDoneState(db, input.taskId, result.status === 'done', now)
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
     return membershipResponse(input.taskId, result.status, task.mode, result.rows)
   })
 }
@@ -423,7 +435,9 @@ export async function switchCompletionMode(input: { orgId: string; actorId: stri
       const statusChanged = result.status !== task.status
       await writeCompletionModeState(db, input.taskId, { mode: to, statusChanged, done: result.status === 'done', now })
     }
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
     return membershipResponse(input.taskId, result.status, to, result.rows)
   })
 }
@@ -655,10 +669,18 @@ export async function addComment(input: { orgId: string; actorId: string; taskId
     )
     const createdAtRaw = insertResult.rows[0]?.created_at
     const createdAt = createdAtRaw instanceof Date ? createdAtRaw : new Date(String(createdAtRaw))
+    const eventId = newTaskEventId()
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, 'commented')`,
-      [newTaskEventId(), input.taskId, input.actorId],
+      [eventId, input.taskId, input.actorId],
     )
+    // M4 PR-3b: outbox rows for the comment, on this transaction's client.
+    await enqueueTaskEventNotifications(db, {
+      orgId: input.orgId,
+      taskId: input.taskId,
+      createdBy: task.createdBy,
+      events: [{ id: eventId, type: 'commented', actorId: input.actorId, occurredAt: null }],
+    })
     return commentJson(toCommentView({
       id, taskId: input.taskId, authorId: input.actorId, body, deleted: false, createdAt,
     }))
@@ -824,11 +846,20 @@ export async function deleteTaskById(input: { orgId: string; actorId: string; ta
        WHERE t.id = $1`,
       [input.taskId],
     )
+    const eventId = newTaskEventId()
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at)
        SELECT $1, $2, $3, 'deleted', deleted_at FROM tasks WHERE id = $2`,
-      [newTaskEventId(), input.taskId, input.actorId],
+      [eventId, input.taskId, input.actorId],
     )
+    // M4 PR-3b: outbox rows for the deletion, in this transaction. The producer does not read the
+    // task row again, so the soft-deleted task is still notified.
+    await enqueueTaskEventNotifications(db, {
+      orgId: input.orgId,
+      taskId: input.taskId,
+      createdBy: task.createdBy,
+      events: [{ id: eventId, type: 'deleted', actorId: input.actorId, occurredAt: null }],
+    })
     return { id: input.taskId, deleted: true }
   })
 }

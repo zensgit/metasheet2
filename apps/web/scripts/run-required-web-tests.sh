@@ -1486,6 +1486,14 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # targeted run line. It matches exactly one spec file, and a bidirectional substring scan against
 # every token in this file finds no token that contains it or is contained by it (the
 # `approval-center*` and `approval-comments-*` tokens are the closest neighbours).
+# #5597 refresh (2026-10-09): FOUR tokens inserted at their case-insensitive alphabetical position —
+# `IntegrationK3WiseSetupView`, `IntegrationPipelineRunSection`, `IntegrationWorkbenchView`,
+# `integrationErrorCodeLabels`. They are the four specs that PR introduced on 2026-09-10 for the
+# 数据工厂 K3 write-back copy change (the K3 setup view, the pipeline run section, the workbench view,
+# and the human-readable error-code labels); none of them had been registered, so the lane never ran
+# them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
+# and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
+# The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1516,6 +1524,7 @@ exec npx vitest run \
   approval-graph-topology-edit \
   approval-handler-node-authoring \
   approval-handler-node-config \
+  approval-leave-preset-boundary-note \
   approval-member-action-dialog-grammar \
   approval-member-identity-coverage-enumeration \
   approval-node-threshold-timeout-config \
@@ -1578,6 +1587,10 @@ exec npx vitest run \
   approvalTemplateVersionHistory \
   approvalUserPicker \
   asyncStateBlock \
+  attendance-approval-option-hint \
+  attendance-approval-option-wiring \
+  attendance-scheduled-feature-status-wiring \
+  attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
   attendanceAdminEndpointCompatibility \
   attendanceCapabilityUnavailable \
@@ -1589,6 +1602,7 @@ exec npx vitest run \
   attendanceFeatureOverride \
   attendanceOverviewRequestReveal \
   attendanceRequestReviewEntitlement \
+  AttendanceScheduledFeatureStatus \
   attendanceUserPickerEndpoint \
   automation-action-summary \
   automation-condition-legacy-person-picker \
@@ -1624,8 +1638,12 @@ exec npx vitest run \
   directoryManagementView \
   featureFlagsApprovalMobile \
   formViewValidation \
+  integrationErrorCodeLabels \
+  IntegrationK3WiseSetupView \
+  IntegrationPipelineRunSection \
   IntegrationRunDetail \
   IntegrationStockPrepPanel \
+  IntegrationWorkbenchView \
   lineDerivation \
   meta-ai-bulk-labels \
   meta-api-error-labels \
@@ -1787,6 +1805,10 @@ exec npx vitest run \
   multitable-phase8 \
   multitable-phase9 \
   multitable-qrcode-field \
+  multitable-range-fill-flag \
+  multitable-range-fill-interaction \
+  multitable-range-fill-planner \
+  multitable-range-fill-writer \
   multitable-record-approval-panel \
   multitable-record-approval-progress \
   multitable-record-approval-submit \

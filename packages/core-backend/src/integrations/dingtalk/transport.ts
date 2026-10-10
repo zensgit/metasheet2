@@ -87,6 +87,37 @@ export class DingTalkMalformedResponseError extends Error {
 }
 
 /**
+ * R-41: a 2xx response that passed the envelope checks above (for `'oapi'` endpoints: `errcode` 0) but lacks
+ * the one field the call exists to obtain — gettoken without `access_token`, the v1.0 userAccessToken
+ * exchange without `accessToken`, `contact/users/me` without `openId`. Thrown by client.ts AFTER the transport
+ * returned, so it is never retried and never carries the outcome-unknown marker.
+ *
+ * Deliberately NOT a DingTalkBusinessError: that type means "DingTalk rejected the request", and callers key
+ * retry / ledger / status decisions on it (AttendanceNotificationDeliveryWorker, dingtalk-todo-mirror-worker,
+ * elearning-notification-dingtalk, the container-login route's 401). These sites threw a plain Error before,
+ * and every such caller keeps treating this one exactly as it treated that. The message is the text the plain
+ * Error carried (it may be provider text — it is for the logs); the body rides along in `responseBody` so the
+ * provider's code survives for admin surfaces, which show only that code (directory/directory-failure-text.ts).
+ *
+ * `responseBody` is NON-enumerable (readable as `error.responseBody`, never written by JSON.stringify or by a
+ * logger serialising `{ error }` meta): the body of `contact/users/me` can carry the user's profile fields.
+ */
+export class DingTalkIncompleteResponseError extends Error {
+  declare readonly responseBody: Record<string, unknown>
+
+  constructor(message: string, responseBody: Record<string, unknown>) {
+    super(message)
+    this.name = 'DingTalkIncompleteResponseError'
+    Object.defineProperty(this, 'responseBody', {
+      value: responseBody,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    })
+  }
+}
+
+/**
  * DT-HARDEN-06: every DingTalk call that is not the group-robot webhook goes through
  * here — gettoken, directory sync, work notifications, approval cards, container
  * login. They used a naked `fetch` with no timeout, so a hung connection blocked an
@@ -294,6 +325,12 @@ export interface DingTalkTransportRequest {
   timeoutMs?: number
   /** Caller's OVERALL signal: aborts the whole retry loop (incl. mid-backoff) immediately. */
   signal?: AbortSignal
+  /**
+   * `false`: the warn line for a rejected (non-2xx) response carries the HTTP status and a fixed
+   * note; the upstream message is left out (the caller keeps a redacted form of it). Default:
+   * the message is logged.
+   */
+  logUpstreamMessage?: boolean
 }
 
 export function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
@@ -501,7 +538,11 @@ async function performDingTalkAttempt(
 
     if (!response.ok) {
       const message = normalizeErrorMessage(payload, request.fallbackError)
-      logger.warn(`DingTalk request failed (${response.status}): ${message}`)
+      if (request.logUpstreamMessage === false) {
+        logger.warn(`DingTalk request failed (${response.status}); the upstream message is not logged for this call`)
+      } else {
+        logger.warn(`DingTalk request failed (${response.status}): ${message}`)
+      }
       const requestError = new DingTalkRequestError(message, response.status, payload)
       const retryAfterMs = parseRetryAfterMs(readResponseHeader(response, 'retry-after'))
       if (retryAfterMs !== null) retryAfterHints.set(requestError, retryAfterMs)

@@ -1,6 +1,7 @@
 import { assertDingTalkCorpAllowed } from './runtime-policy'
 import {
   DingTalkBusinessError,
+  DingTalkIncompleteResponseError,
   normalizeErrorMessage,
   readNumericField,
   requestDingTalkTransportJson,
@@ -14,6 +15,7 @@ import {
 export {
   DINGTALK_REQUEST_TIMEOUT_MS,
   DingTalkBusinessError,
+  DingTalkIncompleteResponseError,
   DingTalkMalformedResponseError,
   DingTalkRequestError,
   DingTalkTimeoutError,
@@ -94,6 +96,12 @@ interface DingTalkRequestOptions {
   timeoutMs?: number
   /** Overall abort signal: cancels the in-flight attempt AND any retry backoff immediately. */
   signal?: AbortSignal
+  /**
+   * `false`: the transport's log line for a rejected (non-2xx) response carries the status and a
+   * fixed note instead of the upstream message (callers that store a redacted form themselves).
+   * Default: the message is logged, as before.
+   */
+  logUpstreamMessage?: boolean
 }
 
 export interface DingTalkDepartment {
@@ -198,6 +206,7 @@ async function requestDingTalkJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
@@ -223,6 +232,7 @@ async function requestDingTalkDirectoryJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
@@ -335,7 +345,7 @@ export async function exchangeCodeForUserAccessToken(
       : ''
 
   if (!accessToken) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to obtain access token from DingTalk'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to obtain access token from DingTalk'), payload)
   }
 
   return {
@@ -385,7 +395,7 @@ export async function fetchDingTalkCurrentUser(accessToken: string): Promise<Din
       : ''
 
   if (!openId) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to resolve DingTalk openId'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to resolve DingTalk openId'), payload)
   }
 
   return {
@@ -456,7 +466,7 @@ async function fetchDingTalkAppAccessTokenUncached(
       : ''
 
   if (!token) {
-    throw new Error(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'))
+    throw new DingTalkIncompleteResponseError(normalizeErrorMessage(payload, 'Failed to obtain DingTalk app access token'), payload)
   }
 
   const expiresRaw = Number(payload.expires_in ?? payload.expiresIn)
