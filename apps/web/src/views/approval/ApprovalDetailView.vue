@@ -2149,8 +2149,23 @@ const reducibleAssignees = computed<Array<{ assigneeId: string; label: string; d
   return result
 })
 
+// ---------------------------------------------------------------------------
+// 退回 candidates
+// ---------------------------------------------------------------------------
+// The server's `returnableNodeKeys` is the only source of truth: the targets its return gate would
+// accept right now, walked on the instance's frozen runtime graph (see the field's doc on
+// `UnifiedApprovalDTO`). An array is offered verbatim, in the gate's trail order; `[]` offers nothing
+// and the button's `v-if` hides 退回. `Array.isArray`, not truthiness: absent / `null` means not
+// computed — an older server, or an instance without a walkable frozen graph (bridged / legacy) —
+// and then the list is the legacy one, as before any filtering: every visited node key but the
+// cursor, `start` and `end`, first occurrence in `store.history` order. The return gate still
+// refuses an illegal target with its own typed 409.
 const returnableNodes = computed(() => {
   if (!approval.value || approval.value.status !== 'pending') return []
+  const serverKeys = approval.value.returnableNodeKeys
+  if (Array.isArray(serverKeys)) {
+    return serverKeys.map((key) => ({ key, label: nodeLabel(key) }))
+  }
   const currentNodeKey = approval.value.currentNodeKey
   const visited = new Set<string>()
   for (const h of store.history) {

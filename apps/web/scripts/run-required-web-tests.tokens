@@ -35,6 +35,7 @@ approval-detail-column-row-key
 approval-detail-field
 approval-detail-instance-consistency
 approval-detail-record-table
+approval-detail-return-candidates
 approval-e2e-lifecycle
 approval-e2e-permissions
 approval-explanation-field
@@ -464,6 +465,7 @@ StockPreparationLargeBomPull.spec.ts
 StockPreparationLargeBomPullPanel.spec.ts
 StockPreparationManagedTableRelabelPanel
 StockPreparationMappingConfirmView
+StockPreparationMembers
 StockPreparationMissingComponents
 StockPreparationOnboardingReadiness
 StockPreparationOperatorHome
@@ -471,7 +473,9 @@ StockPreparationOperatorProjectDirectory
 StockPreparationOpsPanel
 StockPreparationPosturePlainLanguage
 StockPreparationPrepLineView
+StockPreparationProjectArchive
 StockPreparationProjectBoard
+StockPreparationProjectOverview
 StockPreparationProjectQuery
 StockPreparationProjectSync.spec.ts
 StockPreparationProjectSyncPanel.spec.ts

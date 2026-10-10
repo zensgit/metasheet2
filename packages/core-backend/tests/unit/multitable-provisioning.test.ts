@@ -324,6 +324,8 @@ describe('multitable provisioning helper', () => {
         baseId: DEFAULT_BASE_ID,
         name: 'Vendor Intake',
         description: 'Main vendor list',
+        // S3: the loaded sheet now carries the server-owned kind; an unstamped sheet reads null.
+        systemKind: null,
       },
     })
     expect(second).toEqual({

@@ -332,18 +332,37 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
 - **开关关着**：§3 列的内容逐字节不变；新路由一律回 DISABLED（v1 的 register-bound 例外已删除）。
 - **拉取门不跟开关走（S0）**：升级即生效，一线马上失去拉取。这和「开关关着时逐字节不变」不一致，是有意的：owner 2026-10-08 裁决推翻了 `workbench-access.cjs:227` 的旧裁决，记入 R-33。
 - **从开切回关**（附录 D.3）：所有路由回到 env 旧表。旧表混着多个项目，#5860 守卫会对其余项目回 409（`table-actions.cjs:1090-1100`）。所以**关开关 = 停用拉取**，不是回到旧行为。项目表和数据都在，但首页看不到它们；重新打开就恢复原样。
-- **迁移**：S0 播种 `stock-prep:pull` 和四个内置角色模板（零成员）；087 建登记表、088 扩审计动作。S3 的宿主改动不需要迁移（`system_kind` 列已经有了）；S4 没有宿主改动。
+- **迁移**：S0 播种 `stock-prep:pull`；四个内置角色模板（零成员）**实际由 S5a 播种**（`zzzz20261010124500_seed_stock_prep_role_templates`，R-39；S0 落地时只播种了码，本行原写「S0 播种 … 和四个内置角色模板」，2026-10-10 订正）；087 建登记表、088 扩审计动作。S3 的宿主改动不需要迁移（`system_kind` 列已经有了）；S4 没有宿主改动。
 - **版本安排**
   - R63：S0 + S1，开关关闭，迁移随包执行。S0 一升级就生效。
   - R64：S2 + S4（S4 也可以并入 S1 或 S2），是否开开关由 owner 决定。
   - S3：R64 或 R65。S5（§11 第一步）：R63 或 R64。
+  - owner 2026-10-10：R64 = S3 + S5a（内置角色播种迁移 + 旧一线角色搬迁脚本），S5b（「成员与权限」页与写口）就绪则一并进 R64。
 - **演示机操作员的步骤**
-  1. **升级前先建「备料拉取人员」/「备料主管理员」角色**。角色和 `stock-prep:pull` 码随 S0 迁移出现，迁移前在角色管理里加这个码会被 400 拒（`roles.ts:381-393`）。所以落实为：升级前定好名单；迁移跑完、对一线放开之前完成任命和「开通插件使用」，并给主管理员配好委托范围（§11.1）。
+  1. **角色不能在升级前建，升级前只定名单**（2026-10-10 订正：原写「升级前先建「备料拉取人员」/「备料主管理员」角色」，做不到）。`stock-prep:pull` 码随 S0 迁移才进目录，迁移前在角色管理里加这个码会被 400 拒（`roles.ts:381-393`）；内置角色随 S5a 迁移出现。所以落实为：
+     - **R63**（S0 已在包里）：迁移跑完后，在「角色管理」手工建 id 为 `stock-prep_puller` 的角色（`stock-prep:read` + `operate` + `pull`），任命拉取人员并「开通插件使用」。R63 上机清单（私有记录）就是这么写的：角色在迁移之后建，id **恰为** `stock-prep_puller`（不是别的写法），所以 R64 的 S5a 迁移会采纳它，而不是另建一个。
+     - **R64**（S5a）：迁移播种四个内置角色（零成员）。`stock-prep_puller` 已存在则**原样采纳**（不改名、不改码、不动成员；迁移日志只记 id，以及它的码集是否与模板一致——是 / 否，缺几个、多几个，不列码名）；其余三个新建；某个内置显示名已被别的角色占用时，新建的那个显示名带「（内置）」后缀。某个内置 id 在 `roles` 里不存在、却残留着该 id 的 `user_roles` 或 `role_permissions` 行（被删角色留下的；Kysely 建的库这两列对 `roles` 没有外键）时，**跳过这个模板**（不建、不绑码），日志只记 id 和两个计数，残留行原样保留——上机后看迁移日志里有没有 `NOT created`，有就由现场先处理残留行，再在角色管理里按同一 id 手工建。迁移跑完、对一线放开之前完成主管理员任命和「开通插件使用」，并给主管理员配好委托范围（§11.1）。
   2. 备份，升级，迁移，开关保持关闭。
-  3. 按第 1 步的名单任命；旧一线角色 `stock-prep-operator` 迁到 `stock-prep_frontline`（§11.2）。
+  3. 按第 1 步的名单任命；旧一线角色 `stock-prep-operator` 迁到 `stock-prep_frontline`（§11.2）。用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`，**必须在 S5a 迁移之后**（`stock-prep_frontline` 不存在时脚本拒绝，退出码 2），**并且必须在第 6 步把 `stock-prep_frontline` 写进 G1 角色清单 `MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS` 之前**（G1 会给清单里的角色写项目表授权行，目标角色一旦有了旧角色没有的表级授权，脚本的「凭空多得」检查就会拒绝）；**在任何服务器上运行都是 owner 动作**：
+     - **`--apply` 之前先手工核对**：① S5a 迁移日志里有没有 `NOT created`（某个内置 id 残留成员行或码行而被跳过）、`code set equals the template: no`（被采纳的同 id 角色码集与模板不同），有就先由现场处理（处理残留行后按同一 id 手工建 / 在角色管理里核对码），迁移不替现场决定；② 在审批设计器里查有没有审批模板按 id（或显示名）把旧角色写成审批人或抄送对象——脚本不读也不改审批模板，搬完后从这些模板发起的新审批仍会指派 / 抄送给已没有成员的旧角色，要先在设计器里改指向；
+     - 先不带参数跑一次 dry-run：只读事务，只打印计数和 `--apply` 会得出的判定，不写任何东西；
+     - 再 `--apply`：成员（`user_roles`）和以该角色为主体的表级授权行（`spreadsheet_permissions` 中 `subject_type = 'role'` 的行）在一个事务里搬到 `stock-prep_frontline`，可重跑（第二次什么都不写）；
+     - 旧角色已空后，可另加 `--delete-empty-old-role` 删除旧角色（只删它自己的码和角色行）。搬完后在同一事务里重读，只有旧角色已没有成员、没有任何 role 主体授权行（`spreadsheet_permissions` 及视图 / 字段 / 记录权限、历史审计授权）、没有在途或任何状态的角色审批席位、没有角色抄送记录、也没有指名它的待接受邀请（`user_invites` 的 pending 行）时才删；仍有待接受邀请或审批席位 / 抄送记录时，在任何写入之前就拒绝删除，dry-run 打印这些数；
+     - 脚本会拒绝（退出码 2，不写）的情形，就是下面这几条，没有别的（比较的是两个角色，不是每个成员经其它角色得到的有效权限，所以可能拒绝一个其实无害的搬迁）：
+       - `stock-prep_frontline` 不存在；
+       - 旧角色持有新角色没有的码且仍有成员（成员会**失去**它们）；
+       - 旧角色仍有成员，且有按角色指派给旧角色的审批席位（**任何状态**，`approval_assignments` 中 `assignment_type = 'role'`）或抄送给旧角色的记录（`approval_records` 中 `action = 'cc'`、`metadata->>'targetType' = 'role'`），按角色 id 或去空白后的显示名匹配：审批实例的可读性对席位不看 `is_active`、也认角色抄送（`approval-instance-readability.ts` 的 `canReadApprovalInstance`，列表侧 `ApprovalBridgeService.ts` 同口径），成员搬走就**失去**这些历史审批的读权限，而脚本不搬席位也不搬抄送（修复轮 2 新增，dry-run 打印两个计数）；
+       - 新角色持有旧角色没有的码、role 主体授权行（表级按「同表且同级别」比较；视图 / 字段 / 记录权限、历史审计授权）、指派给新角色的在途审批、任何状态的角色审批席位或角色抄送记录（经新角色 id / 显示名可达、经旧角色不可达），而旧角色里有还不在新角色的成员要搬（他们会**凭空多得**这些；刚播种的 `stock-prep_frontline` 全为 0，dry-run 一律打印这几项计数）；
+       - 旧角色是视图 / 字段 / 记录权限或历史审计授权的主体（按角色 id）；
+       - 有指派给旧角色的在途审批（按角色 id）；
+       - `stock-prep_frontline` 已有旧角色以外的成员而又有表级授权要搬；
+       - 带 `--delete-empty-old-role` 时：仍有指名旧角色的待接受邀请，或仍有指名旧角色的审批席位 / 抄送记录（它们搬不走；以后有人按同一 id 或显示名重建角色，就会读到这些审批）；
+     - **脚本不检查、也不改**：审批模板里对旧角色的引用（见上面 `--apply` 之前的核对）；指名旧角色的待接受邀请（不改指向；成员关系本身是建用户时写的 `user_roles` 行，照常搬走；邀请只挡 `--delete-empty-old-role`）；上面没列到的任何按角色 id 或名字引用角色的表或配置（脚本只读上面列出的表）；
+     - **R64 上机的 owner 决策点：旧角色上的平台码只有方案 ① 一条路**。演示机旧角色 `stock-prep-operator` 预计持有三个手工加的平台码 `approvals:read`、`approvals:write`、`multitable:submit-approval`（frontline plan 记录），所以 dry-run 会报「会失去」、`--apply` 会拒绝。**① 唯一受支持的做法**：在角色管理里新建一个单独的平台角色持有这三个码，授给同一批成员，再从旧角色去掉这三个码，然后再跑脚本——内置角色里保持没有平台码。**② 给 `stock-prep_frontline` 补上这三个码：不可接受。** 委托任命只校验角色 id 的前缀（`admin-users.ts:3160-3168` 的 `roleIdMatchesNamespaces`，写入口 `role-assignment.ts:168-171` 同口径，都不看角色带了哪些码），而 `approvals`、`multitable` 两个资源不受命名空间准入控制（`namespace-admission.ts:11-25` 的 `NON_NAMESPACED_PERMISSION_RESOURCES`）；`stock-prep_frontline` 一旦带上这三个码，`stock-prep_admin` 的委托管理员就能经任命它把审批写权限发给任何人，违反 §11.3「主管理员不能做：平台码」。脚本的拒绝提示也只指向 ①。只从旧角色去掉三个码（不建单独角色）则一线失去记录送审，须 owner 明确接受；
+     - 检查与搬迁之间，别的会话并发任命 / 改角色 / 加授权有一个很小的时间窗（任命不锁角色行），所以 `--apply` 在维护窗口里跑、期间不动角色和审批。
   4. **定时试拉换账号**：脚本只调 dry-run 和 apply（`scheduled-pull.mjs:368-374`），用的如果是一线账号，升级后会 403；换成拉取人员账号。走 legacy `integration:read` / `integration:write` 的账号不受影响（`workbench-access.cjs:272,278`）。
   5. **撤销一线在旧表上的授权**，或降为只读（`univer-meta.ts:9797`），免得一线继续往一张没人读的表里填；暂停挂在旧表上的自动化（0924 §1）。
-  6. 在 `app.env` 写入开关和 G1 角色清单，重启。
+  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。
   7. 拉取人员把每个项目建一次表；建表前定时试拉会把它们当 ABSENT 跳过。
   8. 只读核对：GET target 的行数要和表格 All Records 一致。
   9. 通知客户：自动化、提醒、自建视图都是按表配置的，新项目表不会自动带过去；旧表里已填的人工列不会带进新表，新表第一次拉取后人工列是空的。
@@ -365,12 +384,12 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
 
 | 切片 | 改动文件 | 测试 | 模型 / 验证 | 登记册 |
 |---|---|---|---|---|
-| **S0** 拉取人员码 + 内置角色模板 | `workbench-access.cjs`：新增 `STOCK_PREP_PULL`，加入 CODES（`:75`）和 DESCRIPTORS（`:78-86`）；`satisfiesStockPrepAccess`（`:399-408`）加 PULL 分支（pull+operate+read 同时持有，`:402-403` 的短路不变）；`operatorMayRunStockPrepPull` 的 `:440` 改 PULL。`http-routes.cjs:1150` 是唯一调用点，11 个子路由一起移过去，legacy 门不变。web 镜像 `workbenchAccess.ts`（`canRunStockPrepProjectSync` `:476-479`、看板空状态）。迁移：照 `zzzz20260830100000_add_stock_prep_permissions.ts` 播种码，照 e-learning 角色模板迁移播种四个内置角色（字面 id，§11.2） | operator-pull-gate 套件（`workbench-access.cjs:257`）、两侧权限矩阵（F-01 字节一致 `:489-491`，F-09/F-10 `:603-604`）；迁移测试：四个 id 都匹配 `stock-prep_` 前缀、只有主管理员以 `_admin` 结尾、零成员、有成员时 down 拒绝；变异：去掉 PULL 分支里任一码，一线重新能拉，测试必须红 | 保障类：opus 实现，Fable/opus 对抗验证 | **R-33**：新增 `stock-prep:pull` 与四个内置角色模板；一线失去拉取，推翻 `workbench-access.cjs:227` 的旧裁决；不跟开关走，可随 R63 独立发布；内置角色由迁移播种（零成员，R-11「零持有者」仍成立），推翻附录 A.5「不用迁移写角色」 |
+| **S0** 拉取人员码 + 内置角色模板 | `workbench-access.cjs`：新增 `STOCK_PREP_PULL`，加入 CODES（`:75`）和 DESCRIPTORS（`:78-86`）；`satisfiesStockPrepAccess`（`:399-408`）加 PULL 分支（pull+operate+read 同时持有，`:402-403` 的短路不变）；`operatorMayRunStockPrepPull` 的 `:440` 改 PULL。`http-routes.cjs:1150` 是唯一调用点，11 个子路由一起移过去，legacy 门不变。web 镜像 `workbenchAccess.ts`（`canRunStockPrepProjectSync` `:476-479`、看板空状态）。迁移：照 `zzzz20260830100000_add_stock_prep_permissions.ts` 播种码，照 e-learning 角色模板迁移播种四个内置角色（字面 id，§11.2）。**落地订正（2026-10-10）**：S0 只播种了码；四个内置角色移到 S5a（见 S5 行），因为 R63 先在现场手建 `stock-prep_puller`，播种迁移必须能与之共存 | operator-pull-gate 套件（`workbench-access.cjs:257`）、两侧权限矩阵（F-01 字节一致 `:489-491`，F-09/F-10 `:603-604`）；迁移测试（随 S5a）：四个 id 都匹配 `stock-prep_` 前缀、只有主管理员以 `_admin` 结尾、零成员、有成员时 down 拒绝；变异：去掉 PULL 分支里任一码，一线重新能拉，测试必须红 | 保障类：opus 实现，Fable/opus 对抗验证 | **R-33**：新增 `stock-prep:pull` 与四个内置角色模板；一线失去拉取，推翻 `workbench-access.cjs:227` 的旧裁决；不跟开关走，可随 R63 独立发布；内置角色由迁移播种（零成员，R-11「零持有者」仍成立），推翻附录 A.5「不用迁移写角色」（角色模板部分实际随 S5a 落地，记入 R-39） |
 | **S1** 登记 + 建表 + 路由解析 + 开关 + G1 | migrations 087/088；新增 `stock-preparation-project-target-store.cjs`、`stock-preparation-project-targets.cjs`；改 `table-actions.cjs`（叠加解析、写入门）、`target-provisioning.cjs`（待填写视图）、`own-base.cjs`、`http-routes.cjs`、`preflight.cjs`、`index.cjs`、scheduled-pull 脚本、flag manifest、`scripts/test-chain.txt`；宿主 `plugin-scope.ts` 加 G1 授权 port；admin 码描述去掉 no provisioning（照 `zzzz20260927120000` 的 compare-and-set，`workbench-access.cjs:81-85`） | 单测用内存假库（`stock-preparation-handoff.test.cjs:164` 的 `makeMemoryDb`）：23505 并发、开关关时逐字节快照、写入门四个条件逐个缺失、各路由的墙与 409、`getTableAction` 源码守卫（含 `targetPurpose:'source'`）、conflict-policies 缺 `projectNo` 回 400；同步改 `tenant-scoped-write-guard` 的固定清单（`:330,444`）、`operator-pull-gate` 的固定清单、`audit-migration`（最高号迁移生效）。真库：放进已接线的 `stock-prep-w2-scoped-repair-realdb.test.ts`（`plugin-tests.yml:1419`）——两个项目两张表、都已认领；G1 只写 role 主体、非 `stock-prep_` 角色被拒、重复调用不新增行、一线能打开新表 | 保障类：opus 实现，Fable/opus 对抗验证 | **R-35**：一项目一表登记 + 开关 + 拉取人员建表作为 R-11 的具名例外 + G1 授权 port（Q1 / Q6 / Q7） |
 | **S2** 一线交互 | `OperatorHome.vue`、`ProjectBoardView.vue`、`ProjectSyncPanel.vue`、`ProjectQueryView.vue`；新增 `projectTarget.ts`；改 `plainLanguage.ts`、`operatorHomeCards.ts`、`projectSync.ts`、`projectQuery.ts`（「平台登记」改名） | web spec。注意：`StockPreparationOperatorHome`、`ProjectBoard`、`ProjectSync` 三个 spec **目前不在**必跑清单里（`integration-guard-run-web-specs.sh:152-167`），要按「过滤词唯一」的规则加进去 | sonnet 实现，opus 复核 | **R-36**：先建后预览、无「撤销新建」、覆盖拉取 = 幂等重拉、行数提示、「平台登记」改名（Q4 / Q8） |
 | **S3** 总览表 | 总览模板、新增 `stock-preparation-project-overview.cjs`、refresh 路由、项目级列路由与表单及各处挂点；宿主：`system-sheet-predicate.ts`、provisioning 盖章选项、能力钳制 | 单测：投影（含两列未完成数和「截至」）、姿态对照、项目级列白名单与审计不含值；web 对照 spec；真库：非管理员写被拒、插件写成功 | 保障类：opus，Fable 验证 | **R-37**：总览宿主级只读 + O1 + O2(a)，不做 O3（Q5） |
 | **S4** 归档与恢复 | 插件内：archive / restore 路由、登记行状态、各路由的 409；**不改宿主** | 单测：各层级（一线 403；拉取人员、admin、平台管理员通过）、`confirmProjectNo` 不符被拒、§6 路由表逐行、200 上限含已归档；真库：归档后网格仍可读写、恢复后拉取可用 | 保障类：opus，Fable 验证 | **R-38**：归档代替删除、永不删除、归档 / 恢复归拉取人员（Q2）；归档表侧栏可见（默认 (ii)） |
-| **S5** 应用内角色与委托管理（§11 第一步） | 工作台「成员与权限」页与导航项（`workbench-access.cjs:531-537` 的 deploy 组）及前端镜像；宿主：自定义角色的窄写口；任命 / 准入复用 `admin-users.ts` 的委托路由 | 三条不变式各有一条「去掉就红」的测试；平台码出现在请求体里一律 400；生成的 id 不会以 `_admin` 结尾；每次变更都有审计 | 保障类：opus，Fable 对抗验证 | **R-39**：§11 模型（主管理员委托管理、自定义角色 = 码子集 × 项目表范围、三条不变式、分两步） |
+| **S5** 应用内角色与委托管理（§11 第一步），分 S5a / S5b | **S5a**（R64）：迁移 `zzzz20261010124500_seed_stock_prep_role_templates`（四个内置角色，字面 id，零成员；同 id 已存在则原样采纳、不改名不改码不动成员；同 id 不存在却残留无主的 `user_roles` / `role_permissions` 行则跳过该模板、不绑码（修复轮 1）；显示名已被别的角色占用则新建的那个带「（内置）」；新建的 id 记入 `stock_prep_role_template_seeds`，down 只动这些）+ 运维脚本 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`（§11.2-1、§8 第 3 步）。**S5b**：工作台「成员与权限」页与导航项（`workbench-access.cjs:531-537` 的 deploy 组）及前端镜像；宿主：自定义角色的窄写口；任命 / 准入复用 `admin-users.ts` 的委托路由 | **S5a**：迁移单测（假库）、运维脚本 node:test（假 pg 客户端，计入 `EXPECTED_OPS_TESTS_COUNT`）、真库用例接在已接线的 `elearning-role-templates.db.test.ts`。**S5b**：三条不变式各有一条「去掉就红」的测试；平台码出现在请求体里一律 400；生成的 id 不会以 `_admin` 结尾；每次变更都有审计 | 保障类：opus，Fable 对抗验证 | **R-39**：S5a 先立本行，S5b 修订同一行；§11 模型（主管理员委托管理、自定义角色 = 码子集 × 项目表范围、三条不变式、分两步） |
 
 **另外一处**：导出租户墙的真库文件 `stock-preparation-prep-line-export-tenant-wall-realdb.test.ts` 存在，但没有接进任何 workflow（`.github` 里 0 处引用）。建议 S1 把它一起接上，因为墙现在作用在项目表上了。
 
@@ -388,17 +407,17 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 | 委托开准入 | `PATCH /api/admin/role-delegation/users/:userId/namespaces/:namespace/admission`（`admin-users.ts:3065-3141`，审计 `:3112-3126`）；界面上的「开通插件使用」（`UserManagementView.vue:568`、`RoleDelegationView.vue:132`） | 应用页复用，不另造 |
 | 委托任命角色 | `POST /api/admin/role-delegation/users/:userId/roles/assign`（及 `unassign`，`admin-users.ts:3143-3221`，审计 `:3207-3221`） | 同上 |
 | 委托管理员必须先有部门或成员组范围 | 否则 403 `ROLE_DELEGATION_SCOPE_REQUIRED`（`admin-users.ts:3093-3095`、`:3170-3172`）；目标用户还要在范围内（`:3096-3101`、`:3173-3179`） | 平台管理员要先给主管理员配一次范围 |
-| 角色模板迁移先例（e-learning） | `zzzz20260826140000_add_elearning_role_templates.ts:36-40`（三档模板）、`:71-104`（id / 名冲突即失败）、`:130-147`（有成员时拒绝 down） | 照它的形制播种四个内置角色 |
+| 角色模板迁移先例（e-learning） | `zzzz20260826140000_add_elearning_role_templates.ts:36-40`（三档模板）、`:71-104`（id / 名冲突即失败）、`:130-147`（有成员时拒绝 down） | 照它的形制播种四个内置角色；**一处不照搬**（S5a）：id 冲突时它让升级失败，S5a 改为原样采纳已存在的同 id 角色，并用 `stock_prep_role_template_seeds` 记下自己新建的 id，供 down 区分 |
 | 窄宿主 port 先例 | `services/stock-preparation-field-permissions.ts:1-42`：只写列写权，结构上不能产生读限制 | G1 和 11.4 的写口照这个口径收窄 |
 | 建角色、改角色权限今天要平台级 `roles:write` | `routes/roles.ts:496`、`:588`；目录外的码回 400（`:381-393`） | 委托管理员今天建不了角色，自定义角色要一条新写口（11.4） |
 
-### 11.2 命名陷阱（S0 落实）
+### 11.2 命名陷阱（S0 / S5a 落实）
 
-1. 演示机现有的一线角色 id 是 `stock-prep-operator`（连字符，frontline plan `:16`）。它不匹配 `stock-prep_` 前缀，委托管理员在可选清单里看不到它、任命路由也会拒（`admin-users.ts:1009`、`:3160`）。**任务**：迁成 `stock-prep_frontline`——新角色由 S0 播种，演示机上把成员和表级授权行搬过去，旧角色清空后删除；备选是在应用页里给旧 id 一个只读别名。默认走迁移，写进 §8 第 3 步。
+1. 演示机现有的一线角色 id 是 `stock-prep-operator`（连字符，frontline plan `:16`）。它不匹配 `stock-prep_` 前缀，委托管理员在可选清单里看不到它、任命路由也会拒（`admin-users.ts:1009`、`:3160`）。**任务**：迁成 `stock-prep_frontline`——新角色由 S5a 播种（原写 S0，2026-10-10 订正），演示机上用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 把成员和表级授权行搬过去，旧角色清空后经单独的 `--delete-empty-old-role` 删除；备选是在应用页里给旧 id 一个只读别名。默认走迁移，写进 §8 第 3 步。
 2. **不能直接用 e-learning 的 `buildPluginRoleId`**：它把非字母数字一律换成 `_`（`rbac/plugin-role-template.ts:21-37`），`stock-prep` 会变成 `stock_prep_<kind>`，同样不匹配。四个内置角色的 id 写成字面量。（e-learning 自己的角色前缀 `plugin-elearning` 和码的命名空间 `elearning` 也不一致：`…add_elearning_role_templates.ts:17-18`。）
 3. **只有主管理员的 id 能以 `_admin` 结尾**。`deriveDelegatedAdminNamespace` 只看后缀（`namespace-admission.ts:105-106`）：如果数据管理员叫 `stock-prep_data_admin`，持有者会被当成命名空间 `stock-prep_data` 的委托管理员（这个名字对 `isNamespaceAdmissionControlledResource` 为真，`:133-137`），能进委托页；只要有人给这个命名空间配了范围，就能把 `stock-prep_data_*` 角色授给别人。自定义角色的 id 由服务端生成，同样禁止 `_admin` 结尾。
 
-### 11.3 四个内置角色（S0 迁移播种为模板，零成员）
+### 11.3 四个内置角色（S5a 迁移播种为模板，零成员；原写 S0）
 
 | 角色（id） | 权限码 | 能做 | 不能做 |
 |---|---|---|---|
@@ -408,7 +427,7 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 | 一线填写 `stock-prep_frontline` | `read` + `operate` + 项目表的表级 `spreadsheet:write`（G1） | 填写、确认「等您拿主意」、导出、交接推进、看板、项目查询（默认 (i)） | 拉取、建表、归档 |
 
 - 开发成员**不发**全局 `multitable:manage-schema`：表上没有任何授权行时，全局码不受表级收窄（`permission-service.ts:1478-1485`），而多维表没有租户边界（frontline plan `:86-93`），等于给了整个实例里所有无授权行的表的结构权。这是把裁决里的「manage-schema 一族」落到表级授权上，只收紧不放宽。
-- 模板播种零成员，所以 R-11「新 scope 零持有者、按角色显式授予」仍成立；推翻的是附录 A.5「不要用迁移写角色」，记入 R-33。
+- 模板播种零成员，所以 R-11「新 scope 零持有者、按角色显式授予」仍成立；推翻的是附录 A.5「不要用迁移写角色」，记入 R-33；播种实际随 S5a 落地，记入 R-39。
 
 ### 11.4 自定义角色
 
@@ -445,5 +464,5 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 
 | 步 | 版本 | 内容 |
 |---|---|---|
-| 第一步 | R63 / R64 | 四个内置角色（S0）+ 主管理员委托管理 + 「成员与权限」页 + 自定义角色（码子集 + 项目表范围）（S5） |
+| 第一步 | R63 / R64 | 四个内置角色（S5a）+ 主管理员委托管理 + 「成员与权限」页 + 自定义角色（码子集 + 项目表范围）（S5） |
 | 第二步 | 之后 | 视图 / 字段范围；行级范围跟归属稿走 |

@@ -98,6 +98,7 @@ import {
   canOpenStockPrepHome,
   canOpenStockPrepInstallView,
   canOpenStockPrepOpsPanel,
+  canOpenStockPrepMembersPage,
   canOpenStockPrepProjectQuery,
   canOpenStockPrepRailItem,
   canUseLegacyMvpTabs,
@@ -292,6 +293,29 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-project-target-status',
   'stock-prep-project-target-create',
   'stock-prep-project-target-list',
+  // S4 (R-38): archive / restore live on 项目备料页's sheet-state line, PULL tier, rendered only on the
+  // state the server says the action fits. Their alignment, both directions, per actor, is asserted
+  // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
+  'stock-prep-project-target-archive',
+  'stock-prep-project-target-restore',
+  // S3 (R-37): the project-level fields form and its 「保存」 live on 项目备料页's sheet-state line, the
+  // 「刷新项目总览」 button on 今天要处理's project-sheets line — OPERATE, each rendered only once the
+  // server answered with the switch on. Their alignment, both directions, per actor, is asserted on
+  // those surfaces in apps/web/tests/StockPreparationProjectOverview.spec.ts (PO-ALIGN).
+  'stock-prep-project-fields',
+  'stock-prep-project-fields-save',
+  'stock-prep-project-overview-refresh',
+  // S3 fix round 1 (R6): 「建立项目总览」 (PULL) lives on the same home line, rendered only while the server says
+  // the overview is absent; PO-ALIGN asserts it renders for exactly the actors the server grants.
+  'stock-prep-project-overview-ensure',
+  // S5b (R-39) 「成员与权限」: the four members controls live on StockPreparationMembersView.vue — its own
+  // rail item, rendered only after the server's members read answered — never on this view. Their
+  // alignment against the SERVER's grant is asserted there, in apps/web/tests/StockPreparationMembers.spec.ts
+  // (SMW-ALIGN), together with the shell's switch-off and below-tier invisibility (SMW-SHELL).
+  'stock-prep-members-page',
+  'stock-prep-members-custom-role-create',
+  'stock-prep-members-custom-role-save',
+  'stock-prep-members-custom-role-add-tables',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */
@@ -639,10 +663,11 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
       for (const item of group.items) keys.push(item.key)
       for (const key of group.advanced ?? []) keys.push(key)
     }
-    // 15 today: 4 【工作】 + 3 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
+    // 16 today: 4 【工作】 + 4 【部署与接入】 + 7 深度工具 + 1 【帮助】. Stated as a number so that
     // adding a rail item without a view — or a view without a rail item — has to be deliberate.
     // 14 -> 15 是 P2-1 的 项目查询(设计稿 §6.3 第一行),【工作】里排在 项目备料 之后。
-    expect(keys.length).toBe(15)
+    // 15 -> 16 是 S5b(R-39)的 成员与权限,【部署与接入】的最后一项;它另外受服务端开关约束(见 SMW-SHELL)。
+    expect(keys.length).toBe(16)
     expect(new Set(keys).size).toBe(keys.length)
     for (const key of keys) {
       expect(workspace, `${key} must be a view key in the shell`).toContain(`key: '${key}',`)
@@ -694,6 +719,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
         .toBe(canOpenStockPrepInstallView(principal()))
       expect(canOpenStockPrepOpsPanel(principal()), `${actor.name} ops`)
         .toBe(canOpenStockPrepInstallView(principal()))
+      // S5b (R-39): 成员与权限's permission half is the same workbench ceiling (the switch is the other half).
+      expect(canOpenStockPrepMembersPage(principal()), `${actor.name} members`)
+        .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'workbench-admin'))
       expect(canOpenStockPrepHelp(principal()), `${actor.name} help`)
         .toBe(backendAccess.satisfiesStockPrepRailGate(flattened(), 'route'))
       expect(canUseLegacyMvpTabs(principal()), `${actor.name} 深度工具`)

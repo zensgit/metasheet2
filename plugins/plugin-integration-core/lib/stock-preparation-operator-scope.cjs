@@ -123,6 +123,15 @@
 //           源就绪预检 (「检查这个源」): up to two observed project numbers as liveness evidence. The
 //           proven tenant is the one value its table-action lookup, binding peek and load run under.
 //
+//   E. 备料「成员与权限」(S5b, register R-39; behind the default-OFF STOCK_PREP_MEMBERS_PAGE_ENABLED and
+//      MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, 404 before any IO without them). Listed apart from D
+//      so the two slices' numbering cannot collide; it is the same rule.
+//      E1. POST …/members/custom-roles/:roleId/project-targets  `stockPreparationMembersCustomRoleProjectTargets`
+//           A WRITE (one G1 grant per named project sheet, WORKBENCH_ADMIN + the host members port). The
+//           proven tenant keys the registry rows the request may name and the staging project the grant
+//           is addressed to; a header-fillable tenant here would grant a role on another tenant's sheet.
+//           The scope is resolved only after the host port admitted the caller.
+//
 //   D. 一个项目一张备料表 (S1, ADR adr-stock-prep-project-sheets-20261008; all three behind the
 //      default-OFF switch MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, 404 before any IO without it).
 //      The registry they read (migration 087) is keyed by the tenant this scope proves, so what a
@@ -136,6 +145,26 @@
 //           tenant here would plant a sheet in another tenant's staging project.
 //       13. GET  …/stock-preparation/project-targets   `stockPreparationProjectTargetList`
 //           The tenant's registry rows (handles and enums only; OPERATE).
+//       14. POST …/projects/:projectNo/target/archive  `stockPreparationProjectTargetArchive`
+//       15. POST …/projects/:projectNo/target/restore  `stockPreparationProjectTargetRestore`
+//           S4 (R-38): WRITES to the registry row of the proven tenant — 归档 / 恢复, PULL tier. The
+//           tenant keys the row they flip; a header-fillable tenant here would archive another
+//           tenant's project. Neither touches a sheet, so neither derives a staging project.
+//       16. GET  …/projects/:projectNo/target/project-fields  `stockPreparationProjectFieldsGet`
+//       17. PATCH …/projects/:projectNo/target/project-fields `stockPreparationProjectFieldsUpdate`
+//           S3 (R-37, ADR §5 O2(a)): the ONLY surfaces that carry the three free-text project-level
+//           columns (负责人 / 备注 / 计划完成), OPERATE. The proven tenant keys the registry row they
+//           read or write; a header-fillable tenant here would read or overwrite another tenant's
+//           texts. Neither touches a sheet, so neither derives a staging project.
+//       18. POST …/stock-preparation/project-overview/refresh  `stockPreparationProjectOverviewRefresh`
+//           S3 (R-37, ADR §5 Q5): rebuilds the read-only overview sheet of the proven tenant's staging
+//           project from its registry rows and project sheets (OPERATE). The staging project whose
+//           overview it projects into, and every project sheet it counts through, is derived from this
+//           scope with no request projectId. Fix round 1: it never creates the overview.
+//       19. POST …/stock-preparation/project-overview/ensure  `stockPreparationProjectOverviewEnsure`
+//           S3 fix round 1 (R-37, R6): the PULL tier creates the proven tenant's read-only overview in
+//           the staging project derived from this scope with no request projectId, and grants the
+//           configured roles READ on it (the host's overview read port).
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

@@ -3046,8 +3046,17 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // and the header list stayed in step through the deletion above.
   // 一个项目一张备料表 (S1) added THREE — the project-target GET, CREATE and LIST (the scope header's
   // section D, items 11–13): the registry they read is keyed by the tenant this scope proves.
-  assert.equal(callSites, 13, 'G9: thirteen call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
+  // S4 (R-38) added TWO — ARCHIVE and RESTORE (section D, items 14–15): the row they flip is keyed by
+  // the same proven tenant.
+  // S3 (R-37) added THREE — the project-fields GET and PATCH (the only surfaces that carry the O2(a)
+  // free texts, keyed by the proven tenant's registry row) and the overview REFRESH (the staging
+  // project it creates the overview in and counts every project sheet through) — section D, items
+  // 16–18. S3 fix round 1 (R6) added ONE — the overview ENSURE (PULL), section D item 19: the proven
+  // tenant's staging project is where it creates the read-only overview.
+  // S5b (R-39) added ONE — the members project-sheet add (section E, item E1): the registry rows it may
+  // name and the staging project its G1 grants address are the proven tenant's.
+  assert.equal(callSites, 20, 'G9: twenty call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name
