@@ -4,6 +4,7 @@ import type {
   ApprovalAssigneeType,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
@@ -105,6 +106,14 @@ export interface ApprovalNodeConfigEditorApi {
   // `APPROVAL_THRESHOLD_IN_PARALLEL` / `APPROVAL_NODE_TIMEOUT_PARALLEL_UNSUPPORTED` region). The mode
   // picker must not OFFER 'threshold', and the timeout section must not be enterable, when true.
   approvalNodeInParallelRegion: (nodeKey: string) => boolean
+  /**
+   * Lock-4 §1 F4-A — the node-level 审批类型 (人工审批 / 自动通过) mutator for an `approval` node; L0-1
+   * places the control in the 审批人设置 tab. The current value is read straight off
+   * `approvalNodeEditFor(nodeKey).approvalType`. OPTIONAL (absent ⇒ the control does not render at
+   * all, fail-closed — the same posture as `removeConditionBranch` above), so component harnesses
+   * that do not exercise F4-A can omit it; always present on the shipped app's api.
+   */
+  setApprovalNodeApprovalType?: (nodeKey: string, type: ApprovalType) => void
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
   approvalNodeMergeWithRequester: (nodeKey: string) => boolean

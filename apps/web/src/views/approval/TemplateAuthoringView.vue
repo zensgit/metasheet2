@@ -1500,6 +1500,10 @@ import {
   addAssigneeSourceCard,
   removeAssigneeSourceCard,
   legalPriorApproverNodeKeys,
+  approvalNodeEditOmitsAssigneeSources,
+  applyApprovalTypeChoice,
+  setStepApprovalType,
+  stepOmitsAssigneeSources,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1581,6 +1585,7 @@ import type {
   ApprovalGraph,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   CcNodeConfig,
   ConditionNodeConfig,
   EmptyAssigneePolicy,
@@ -2117,6 +2122,13 @@ function nodeConfigSummary(node: ApprovalNode): string[] {
       const effectLabel = nodeTimeoutEffectLabel(approvalConfig.timeout.effect)
       if (effectLabel) lines.push(`节点超时：${approvalConfig.timeout.afterMinutes} 分钟后${effectLabel}`)
     }
+    // Lock-4 §1 F4-A: an auto_approve node decides without a person. With no source saved, the
+    // person-only lines (mode / timeout) are inert and hidden in the editor, so the summary says
+    // only that — and the card no longer falls back to 「点击配置」 for a node that needs nothing.
+    // A node that still carries sources (API-saved) keeps its lines after the type line.
+    if ((config as { approvalType?: unknown }).approvalType === 'auto_approve') {
+      return sources.length > 0 ? ['审批类型：自动通过', ...lines] : ['审批类型：自动通过（不分配审批人）']
+    }
     return lines
   }
   return []
@@ -2400,6 +2412,17 @@ function setApprovalNodeThreshold(nodeKey: string, value: number): void {
 const parallelRegionNodeKeysInDraft = computed(() => collectParallelRegionNodeKeys(canvasEffectiveGraph.value))
 function approvalNodeInParallelRegion(nodeKey: string): boolean {
   return parallelRegionNodeKeysInDraft.value.has(nodeKey)
+}
+// ── Lock-4 §1 F4-A — node-level 审批类型 (人工审批 / 自动通过) on the canvas edit model ──────────────
+// The whole mutation (and its owner-visible implementer defaults) lives in the pure
+// `applyApprovalTypeChoice` (approvalNodeEdit.ts); this setter only resolves the edit and the
+// parallel-region flag. Refusing 自动通过 inside a parallel region here is the defense-in-depth floor
+// mirroring `setApprovalNodeMode`; the SAVE-blocking floor is `validateApprovalNodeEdits` (backend
+// `APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED`).
+function setApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  applyApprovalTypeChoice(edit, type, approvalNodeInParallelRegion(nodeKey))
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
@@ -3416,9 +3439,12 @@ const routingDriverFieldIds = computed(() => {
   const ids = new Set<string>()
   const driverKinds = new Set(['form_field_user', 'form_field_user_manager', 'form_field_user_dept_head'])
   for (const step of draft.value.steps) {
+    // Lock-4 §1 F4-A: a sourceless auto_approve step's hidden source scratch routes nobody.
+    if (stepOmitsAssigneeSources(step)) continue
     if (driverKinds.has(step.sourceKind) && step.fieldId.trim()) ids.add(step.fieldId.trim())
   }
   for (const edit of Object.values(draft.value.approvalNodeEdits ?? {})) {
+    if (approvalNodeEditOmitsAssigneeSources(edit)) continue
     for (const source of edit.assigneeSources) {
       // Lock-2 §L2-C: the contact-extension kinds reference a driver field too — same hint.
       if ((source.kind === 'form_field_user' || source.kind === 'form_field_user_manager' || source.kind === 'form_field_user_dept_head') && source.fieldId.trim()) ids.add(source.fieldId.trim())
@@ -3628,6 +3654,8 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalNodeThreshold,
   setApprovalNodeThreshold,
   approvalNodeInParallelRegion,
+  // Lock-4 §1 F4-A — 审批类型 (OPTIONAL on the api; always present on the shipped app's object).
+  setApprovalNodeApprovalType,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,

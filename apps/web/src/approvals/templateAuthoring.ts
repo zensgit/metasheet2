@@ -83,7 +83,7 @@ export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './paralle
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
 export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
-export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources } from './approvalNodeEdit'
+export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources, applyApprovalTypeChoice } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
 export type ApprovalStepSourceKind = ApprovalAssigneeSource['kind']
@@ -809,7 +809,8 @@ function stepDraftFromApprovalNode(
   // Lock-4 §1 F4-A: an `auto_approve` node persisted with NO assignee carrier at all (the one shape
   // only it may take) hydrates with the omit flag, so `buildStepConfig` re-emits it sourceless instead
   // of inventing the `requester` default above as a phantom source. An auto_approve node that DOES
-  // carry sources keeps them (preserved verbatim; hidden in the UI while 自动通过).
+  // carry a source (only an API save can produce one) keeps it: it is re-emitted verbatim, validated,
+  // and stays VISIBLE in the step card with a notice — the UI hides exactly what the save omits.
   const omitAssigneeSources = config.approvalType === 'auto_approve'
     && config.assigneeSources === undefined
     && config.assigneeType === undefined

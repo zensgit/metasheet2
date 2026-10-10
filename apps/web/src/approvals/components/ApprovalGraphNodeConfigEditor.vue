@@ -435,6 +435,78 @@
       class="template-authoring__approval-node-section"
       data-testid="approval-node-section-assignee"
     >
+      <!-- Lock-4 §1 F4-A — node-level 审批类型, placed in this 审批人设置 tab by L0-1. OD-L4-2(a): exactly
+           TWO options (人工审批 / 自动通过) — auto_reject is deferred and no inert third option renders.
+           A native radiogroup like the roster below (arrow keys move AND commit), which is why 自动通过
+           keeps the cards as hidden scratch instead of discarding them (`applyApprovalTypeChoice`).
+           Rendered only when the api provides the mutator (fail-closed for harnesses that omit it). -->
+      <el-form-item v-if="node.type === 'approval' && approvalTypeControlAvailable" label="审批类型">
+        <div
+          class="approval-node-source-roster"
+          role="radiogroup"
+          aria-label="审批类型"
+          data-testid="approval-node-approval-type"
+        >
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="manual"
+              :checked="!approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly"
+              data-testid="approval-node-approval-type-manual"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'manual')"
+            />
+            <span>人工审批</span>
+          </label>
+          <label class="approval-node-source-roster-option">
+            <input
+              type="radio"
+              :name="`approval-node-approval-type-${node.key}`"
+              value="auto_approve"
+              :checked="approvalNodeIsAutoApprove(node.key)"
+              :disabled="readOnly || approvalNodeInParallelRegion(node.key)"
+              data-testid="approval-node-approval-type-auto-approve"
+              @change="() => chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+            />
+            <span>自动通过</span>
+          </label>
+        </div>
+        <!-- Backend APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED ("a non-manual node inside a parallel
+             region is rejected in v1"): disabled + this hint, same posture as the threshold hint below. -->
+        <p
+          v-if="approvalNodeInParallelRegion(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-parallel-hint"
+        >位于并行分支内，暂不支持自动通过（v1 仅支持线性路径）</p>
+        <p
+          v-else-if="approvalNodeIsAutoApprove(node.key)"
+          class="template-authoring__hint"
+          data-testid="approval-node-approval-type-auto-hint"
+        >流程到达此节点时由系统自动通过，不分配审批人</p>
+        <!-- An auto_approve node that still CARRIES sources (only reachable from a template saved
+             through the API) keeps them visible: they are saved and validated, so hiding them would
+             let an error block save with no visible cause. The action drops them (sets the omit flag). -->
+        <p
+          v-if="approvalNodeIsAutoApprove(node.key) && !approvalNodeOmitsSources(node.key)"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-live-sources-hint"
+        >
+          该节点仍保存有下方的审批人来源：自动通过时不会生效，保存时原样保留。
+          <el-button
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-drop-sources"
+            @click="chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
+          >移除审批人来源</el-button>
+        </p>
+      </el-form-item>
+      <!-- Lock-4 §1 F4-A: an auto_approve node whose sources are omitted saves NONE, so the cards (hidden
+           scratch, restored on 人工审批) and every control below that only matters when a person
+           approves are not rendered; their values are preserved verbatim. Same predicate as the save
+           and the validator (`approvalNodeEditOmitsAssigneeSources`), so nothing hidden is ever sent. -->
+      <template v-if="!approvalNodeOmitsSources(node.key)">
       <!-- P1-B: one card per assigneeSources[] entry, keyed by its (stable, positional) index — the
            array IS the identity model here (no separate id field), and add/remove/edit only ever
            append/splice/replace by index, so index-as-key is safe. Each card is byte-identical to
@@ -817,10 +889,11 @@
           data-testid="approval-node-source-union-hint"
         >已配置 {{ approvalSourceCount(node.key) }} 个来源，取其并集；同一人出现在多个来源时，系统运行时自动去重（此编辑器本身不做去重或排序）</p>
       </div>
+      </template>
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && !approvalNodeOmitsSources(node.key)" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -899,7 +972,7 @@
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval'" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && !approvalNodeOmitsSources(node.key)" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1159,6 +1232,7 @@ import type {
   ApprovalAssigneeSourceKind,
   ApprovalMode,
   ApprovalNode,
+  ApprovalType,
   EmptyAssigneePolicy,
   HandlerMode,
   NodeFieldAccess,
@@ -1177,6 +1251,7 @@ import {
   CC_TARGET_TYPES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
+  approvalNodeEditOmitsAssigneeSources,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1378,6 +1453,22 @@ const setApprovalNodeMode = api.setApprovalNodeMode
 const approvalNodeThreshold = api.approvalNodeThreshold
 const setApprovalNodeThreshold = api.setApprovalNodeThreshold
 const approvalNodeInParallelRegion = api.approvalNodeInParallelRegion
+// ── Lock-4 §1 F4-A — node-level 审批类型. The mutator is OPTIONAL on the api: absent ⇒ no control
+// renders (fail-closed), so harnesses that do not wire F4-A are unaffected. Reads go straight to the
+// edit model (`approvalType` / the omit flag), never to a second copy of the state.
+const setApprovalNodeApprovalTypeApi = api.setApprovalNodeApprovalType
+const approvalTypeControlAvailable = computed(() => Boolean(setApprovalNodeApprovalTypeApi))
+function approvalNodeIsAutoApprove(nodeKey: string): boolean {
+  return approvalNodeEditFor(nodeKey)?.approvalType === 'auto_approve'
+}
+function approvalNodeOmitsSources(nodeKey: string): boolean {
+  const edit = approvalNodeEditFor(nodeKey)
+  return edit ? approvalNodeEditOmitsAssigneeSources(edit) : false
+}
+function chooseApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
+  if (readOnly.value) return
+  setApprovalNodeApprovalTypeApi?.(nodeKey, type)
+}
 const approvalNodeTimeout = api.approvalNodeTimeout
 const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled
 const setApprovalNodeTimeoutAfterMinutes = api.setApprovalNodeTimeoutAfterMinutes

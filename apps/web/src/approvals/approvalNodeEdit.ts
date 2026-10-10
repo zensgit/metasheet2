@@ -149,6 +149,45 @@ export function approvalNodeEditOmitsAssigneeSources(
 }
 
 /**
+ * Lock-4 §1 F4-A — the canvas 审批类型 radio's WHOLE mutation on one approval-node edit, kept pure so
+ * it is testable without mounting (the view's `setApprovalNodeApprovalType` only resolves the edit
+ * and the parallel-region flag, then delegates here). Returns false when the choice was refused.
+ * Implementer defaults (owner-visible, recorded in the slice note):
+ *  - `'auto_approve'`: refused for a handler edit (the backend 400s the key there) and inside a
+ *    parallel region (backend `APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED`; the save-blocking floor
+ *    is `validateApprovalNodeEdits`). Otherwise sets the type AND omits the node's sources, keeping
+ *    the cards on the edit as hidden scratch: canvas history does not record config edits (A-8), so
+ *    discarding them would turn an accidental arrow-key traversal of the native radiogroup into an
+ *    unrecoverable loss (the P1-1 radio-traversal class). Calling it on a node that is already
+ *    auto_approve but still carries live sources is how the author drops those sources.
+ *  - `'manual'`: a persisted value other than `'manual'` becomes `null` (the key is REMOVED on
+ *    rebuild — absent ≡ manual); an absent or explicit `'manual'` is left as it is. The omit flag is
+ *    cleared so the scratch cards are live again; a node that had NO card (seeded sourceless) gets
+ *    the one zero-config default card, `requester` — the same default a new linear step
+ *    (`createEmptyStepDraft`) and a canvas-inserted approval node (`graphTopologyEdit.ts`) start
+ *    from — so the author lands on an editable manual node rather than a ≥1-source error.
+ */
+export function applyApprovalTypeChoice(
+  edit: ApprovalNodeSourceEdit,
+  type: ApprovalType,
+  inParallelRegion: boolean,
+): boolean {
+  if (edit.nodeType === 'handler') return false
+  if (type === 'auto_approve') {
+    if (inParallelRegion) return false
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    return true
+  }
+  if (edit.approvalType !== undefined && edit.approvalType !== null && edit.approvalType !== 'manual') {
+    edit.approvalType = null
+  }
+  delete edit.omitAssigneeSources
+  if (edit.assigneeSources.length === 0) edit.assigneeSources = [{ kind: 'requester' }]
+  return true
+}
+
+/**
  * Seed the editable model from a (preserved) graph — one entry per `approval` node THAT HAS an
  * `assigneeSources` array, carrying a clone of it. Non-approval and legacy (no-`assigneeSources`)
  * nodes are skipped (preserved verbatim). Seeding is identity: an untouched edit reproduces the
