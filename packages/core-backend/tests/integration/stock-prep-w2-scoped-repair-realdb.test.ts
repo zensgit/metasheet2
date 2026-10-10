@@ -347,6 +347,9 @@ import {
   STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
   StockPreparationOverviewSystemKindError,
   SheetSystemKindConflictError,
+  // S3 fix round 2 (F3): the stamp lookup index.ts wires as the wrapper's hook, and the generic-write refusal.
+  StockPreparationOverviewRecordsWriteError,
+  loadStockPreparationOverviewSheetIds,
 } from '../../src/multitable/stock-preparation-overview-contract'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -970,5 +973,98 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       getObjectSheetId(projectId, otherObject),
     ]])
     expect(leaked.rowCount).toBe(0)
+  })
+
+  // S3 fix round 2 (F3 / F4), against real PostgreSQL — runs after the S3 case above (it needs the stamped overview):
+  //   * F4: the overview lock is `pg_try_advisory_xact_lock` through the plugin's REAL db helper and the REAL store —
+  //     while one transaction holds it, a second answers `{ acquired: false }` AT ONCE (it does not wait for the
+  //     holder), and once the holder commits the lock is free again;
+  //   * F3: through the REAL plugin-scope wrapper with index.ts's stamp hook (the contract's lookup on this database),
+  //     a GENERIC plugin createRecord to the stamped overview is refused (StockPreparationOverviewRecordsWriteError,
+  //     no row), while the overview PORT — given only the project id — writes it; an ordinary plugin-owned sheet of
+  //     the same id shape still takes a generic write.
+  it('S3 fix round 2 (real DB): the overview lock never waits; generic plugin record writes refuse the stamped overview while its port writes it', async () => {
+    expect(overviewSheet, 'the S3 case above provisioned the overview').not.toBe('')
+    type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) }) as {
+      tryWithOverviewLock: <T>(input: { tenantId: string }, fn: () => Promise<T>) => Promise<{ acquired: boolean; value?: T }>
+    }
+    // F4 — THE TRY-LOCK.
+    let signalHeld!: () => void
+    const held = new Promise<void>((resolve) => { signalHeld = resolve })
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const holder = store.tryWithOverviewLock({ tenantId }, async () => { signalHeld(); await gate; return 'held' })
+    await held
+    const started = Date.now()
+    let secondRan = false
+    await expect(store.tryWithOverviewLock({ tenantId }, async () => { secondRan = true; return 'second' })).resolves.toEqual({ acquired: false })
+    expect(secondRan).toBe(false)
+    expect(Date.now() - started, 'the busy try answered without waiting for the holder').toBeLessThan(3000)
+    // Another tenant's overview lock is independent.
+    await expect(store.tryWithOverviewLock({ tenantId: `${tenantId}_other` }, async () => 'other')).resolves.toEqual({ acquired: true, value: 'other' })
+    release()
+    await expect(holder).resolves.toEqual({ acquired: true, value: 'held' })
+    await expect(store.tryWithOverviewLock({ tenantId }, async () => 'again')).resolves.toEqual({ acquired: true, value: 'again' })
+
+    // F3 — THE WRAPPER, index.ts-shaped hooks over this database.
+    const inTx = async <T>(fn: (cq: Q) => Promise<T>): Promise<T> => database.transaction((trx) => fn(trx.query))
+    const raw = {
+      provisioning: { getObjectSheetId },
+      records: {
+        createRecord: (input: { sheetId: string; data: Record<string, unknown> }) => inTx((cq) => createMultitableRecord({ query: cq as never, sheetId: input.sheetId, data: input.data })),
+      },
+    }
+    const wrapper = createPluginScopedMultitableApi(raw as never, PLUGIN, {
+      assertSheetScope: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+        return { registered: true }
+      },
+      assertSheetOwnedByPlugin: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+      },
+      isStockPreparationOverviewSheet: async ({ sheetId }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId),
+    })
+    const overviewRowCount = async () => Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_records WHERE sheet_id = $1', [overviewSheet])).rows[0].n)
+    const before = await overviewRowCount()
+    const generic = await wrapper.records.createRecord({ sheetId: overviewSheet, data: {} }).then(() => null, (e: unknown) => e)
+    expect(generic).toBeInstanceOf(StockPreparationOverviewRecordsWriteError)
+    expect(generic).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'generic_write' } })
+    expect(await overviewRowCount(), 'the generic write left no row').toBe(before)
+    const viaPort = await wrapper.records.stockPreparationOverview!.createRecord({ projectId, data: {} })
+    expect(viaPort.sheetId).toBe(overviewSheet)
+    expect(await overviewRowCount(), 'the port wrote exactly one row').toBe(before + 1)
+    // Control: an ordinary sheet of the same id shape, registered to the plugin, still takes a generic write.
+    const ordinary = await wrapper.records.createRecord({ sheetId: sheetA, data: {} })
+    expect(ordinary.sheetId).toBe(sheetA)
   })
 })
