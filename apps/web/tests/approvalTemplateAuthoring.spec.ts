@@ -4959,7 +4959,7 @@ describe('TemplateAuthoringView', () => {
     const hiddenErrors = (testId: string) =>
       Array.from(container!.querySelectorAll(`[data-testid="${testId}"]`)).map((item) => item.textContent?.trim())
 
-    it('HIDDEN-BLOCK GUARD (LINEAR): an enabled-but-empty timeout switched to 自动通过 stays VISIBLE with a notice naming the errors and blocks save; filling it hides the section and the save proceeds', async () => {
+    it('HIDDEN-BLOCK GUARD (LINEAR): an enabled-but-empty timeout switched to 自动通过 stays VISIBLE with a notice naming the errors and blocks save; filling it clears the notice, the section stays until the save completes', async () => {
       await loadEditable('tpl_f4a_linear_hidden_timeout', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
       const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
       enable.checked = true
@@ -4991,14 +4991,18 @@ describe('TemplateAuthoringView', () => {
       expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([expect.stringContaining('超时后的处理方式')])
       select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
       await flushUi()
-      // Valid ⇒ hidden again (an auto_approve step never waits); the value is preserved verbatim.
-      expect(q('approval-step-timeout-section')).toBeNull()
+      // Valid ⇒ the notice goes, but the revealed section STAYS (sticky reveal, gate r2 P3-1) so the
+      // author is never unmounted mid-edit; the value is preserved verbatim.
       expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
       const payload = await saveAndTakePayload(0)
       const config = payload.approvalGraph.nodes[1].config
       expect(config.approvalType).toBe('auto_approve')
       expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
       expect(config.timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+      // Save completed ⇒ re-baselined ⇒ the valid hidden timeout (inert: an auto_approve step never
+      // waits) is hidden again.
+      expect(q('approval-step-timeout-section')).toBeNull()
     })
 
     it('HIDDEN-BLOCK GUARD (LINEAR): 关闭超时 on the notice is the one-click author action — the section hides and the save carries no timeout', async () => {
@@ -5017,7 +5021,7 @@ describe('TemplateAuthoringView', () => {
       expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
     })
 
-    it('HIDDEN-BLOCK GUARD (LINEAR policy rows): a failing hidden threshold reveals ONLY the policy rows (the source rows stay hidden — they are really omitted), and a valid N hides them again', async () => {
+    it('HIDDEN-BLOCK GUARD (LINEAR policy rows): a failing hidden threshold reveals ONLY the policy rows (the source rows stay hidden — they are really omitted); a valid N clears the notice and the rows stay until the save completes', async () => {
       // Reached here through the input stub (Element Plus clamps to min=1 in a real browser); this pins
       // the policy block's wiring and the source/policy split, which a later policy rule (e.g. a
       // designated empty-assignee fallback) will rely on.
@@ -5040,12 +5044,103 @@ describe('TemplateAuthoringView', () => {
       fixed.value = '2'
       fixed.dispatchEvent(new Event('input'))
       await flushUi()
-      expect(q('approval-step-threshold')).toBeNull()
+      // Sticky reveal (gate r2 P3-1): notice gone, rows still mounted, source rows still hidden.
       expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      expect(q('approval-step-source-kind')).toBeNull()
       const payload = await saveAndTakePayload(0)
       expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
         JSON.stringify({ approvalMode: 'threshold', approvalThreshold: 2, approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
       )
+      expect(q('approval-step-threshold')).toBeNull()
+    })
+
+    // Shared setup for the sticky / read-only / duplicate pins below: tick 启用超时处理 (left empty) on
+    // every linear step, then switch every step to 自动通过 ⇒ each step's hidden timeout is failing.
+    async function brokenTimeoutAutoSteps(): Promise<void> {
+      for (const enable of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-timeout-enabled"]'))) {
+        enable.checked = true
+        enable.dispatchEvent(new Event('change'))
+      }
+      await flushUi()
+      for (const radio of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-approval-type-auto-approve"]'))) radio.click()
+      await flushUi()
+    }
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL (gate r2 P3-1): typing into the revealed minutes field never unmounts it — the keystroke that makes the step valid keeps the field, the save carries the full value', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_typing', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      // 提醒 first (the order that used to unmount), then type 6 … 60 into the SAME input element.
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '6'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      // The step is valid now (notice gone) — the field the author is typing in is still mounted.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      minutes.value = '60'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      const payload = await saveAndTakePayload(0)
+      expect(payload.approvalGraph.nodes[1].config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+      expect(q('approval-step-timeout-section')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL releases on a 审批类型 change: 人工审批 then back to 自动通过 with valid values hides the timeout section again', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_release', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-section')).not.toBeNull() // sticky
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      // While the radio says 人工审批 the step keeps its sources ⇒ the section renders anyway.
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      // Back on 自动通过 with a VALID timeout ⇒ released, not re-revealed.
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) two SAME-NAMED sourceless auto steps with broken timeouts are BOTH revealed (call-site multiset, gate r2 P2-1)', async () => {
+      const node = (key: string) => ({ key, type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      await loadEditable('tpl_f4a_dup_names', {
+        nodes: [{ key: 'start', type: 'start', name: '发起', config: {} }, node('approval_1'), node('approval_2'), { key: 'end', type: 'end', name: '结束', config: {} }],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+          { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+        ],
+      })
+      await brokenTimeoutAutoSteps()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-errors-hint"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-error"]')).toHaveLength(4)
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) 关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the draft untouched', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout_readonly', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      canManageTemplates.value = false
+      await flushUi()
+      const clear = q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!
+      expect(clear.disabled).toBe(true)
+      // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+      clear.removeAttribute('disabled')
+      clear.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-timeout-enabled')!.checked).toBe(true)
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toHaveLength(2)
     })
 
     it('HIDDEN-BLOCK GUARD (CANVAS edit model): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {

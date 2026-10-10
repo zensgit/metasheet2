@@ -1107,6 +1107,45 @@ describe('Lock-4 §1 F4-A — hidden-block guard: attributing live errors to hid
     expect(stepHiddenBlockLiveErrors(draft, step)).toEqual({})
   })
 
+  it('LINEAR call-site multiset (gate r2 P2-1): two SAME-NAMED sourceless auto_approve steps with broken timeouts each get BOTH of their own timeout errors', () => {
+    // Same-named steps label their errors identically (`step.name || 审批步骤 N`), so neutralizing one
+    // step's timeout leaves the OTHER step's identical messages in the "after" list. A set difference
+    // at the hiddenBlockLiveErrors call site would let each copy mask the other ⇒ neither step is
+    // revealed ⇒ the original trap. Only one-for-one (multiset) subtraction attributes them.
+    const graph: ApprovalGraph = {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ],
+    }
+    const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(graph))
+    expect(draft.steps).toHaveLength(2)
+    for (const step of draft.steps) {
+      step.timeoutEnabled = true
+      setStepApprovalType(step, 'auto_approve')
+    }
+    // Precondition — the collision is real (otherwise this passes vacuously under a set difference).
+    expect(draft.steps[0]!.name).toBe(draft.steps[1]!.name)
+    const flowErrors = validateTemplateApprovalFlow(draft)
+    expect(flowErrors).toHaveLength(4)
+    const counts = new Map<string, number>()
+    for (const message of flowErrors) counts.set(message, (counts.get(message) ?? 0) + 1)
+    expect([...counts.values()]).toEqual([2, 2])
+    for (const step of draft.steps) {
+      const live = stepHiddenBlockLiveErrors(draft, step)
+      expect(Object.keys(live)).toEqual(['timeout'])
+      expect(live.timeout).toHaveLength(2)
+      expect([...new Set(live.timeout)].sort()).toEqual([...counts.keys()].sort())
+    }
+  })
+
   it('LINEAR: an invalid threshold on a sourceless auto_approve step is attributed to the policy block', () => {
     const draft: TemplateAuthoringDraft = draftFromTemplate(buildTemplate(F4A_LINEAR_GRAPH))
     const step = draft.steps[0]!

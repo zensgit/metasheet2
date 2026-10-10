@@ -357,4 +357,45 @@ describe('F4-A hidden-block guard: a hidden block is revealed exactly while it h
     expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
     expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
   })
+
+  // The notice lives in the 审批类型 item, which renders only when the api can set the type — the
+  // stub above has no `setApprovalNodeApprovalType`, so these provide one (a no-op: never clicked).
+  function autoApproveApiWithTypeControl(liveErrors: Record<string, string[]>, opts: { readOnly?: boolean } = {}) {
+    const api = autoApproveApi(liveErrors) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    api.setApprovalNodeApprovalType = () => {}
+    if (opts.readOnly) api.readOnly = true
+    return api
+  }
+  const noticeItems = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll('[data-testid="approval-node-approval-type-hidden-error"]')).map((item) => item.textContent?.trim())
+  const POLICY_ERROR = '审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'
+  const TIMEOUT_ERROR = '审批节点 approval_1 的超时转交需要选择接收人'
+
+  it('the notice LISTS the policy-block messages, not only the timeout ones (gate r2 P3-3) — policy first, in block order', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR], timeout: [TIMEOUT_ERROR] }))
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).not.toBeNull()
+    expect(noticeItems(c)).toEqual([POLICY_ERROR, TIMEOUT_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+  })
+
+  it('a policy-only live error: the notice lists it and offers NO 关闭超时 (the timeout block is not failing)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR] }))
+    expect(noticeItems(c)).toEqual([POLICY_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).toBeNull()
+  })
+
+  it('关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the timeout untouched', async () => {
+    const api = autoApproveApiWithTypeControl({ timeout: [TIMEOUT_ERROR] }, { readOnly: true })
+    const before = api.approvalNodeTimeout('approval_1')
+    expect(before).toEqual({ afterMinutes: 60, effect: 'remind' })
+    const c = mountEditorFlat(approvalNode(), api)
+    const clear = c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]') as HTMLButtonElement
+    expect(clear).not.toBeNull()
+    expect(clear.disabled).toBe(true)
+    // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+    clear.removeAttribute('disabled')
+    clear.click()
+    await nextTick()
+    expect(api.approvalNodeTimeout('approval_1')).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
 })
