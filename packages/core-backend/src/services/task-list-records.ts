@@ -51,6 +51,7 @@ import { TASK_DEFAULT_GROUP_NAME } from '../tasks/task-groups'
 import { TASK_PAGE_SORT_KEY, type TaskPageParams } from '../tasks/task-pagination'
 import { isPrintableId, isValidMemberId } from './task-create'
 import { newTaskEventId, newTaskGroupId, newTaskListEventId, newTaskListId } from './task-ids-runtime'
+import { enqueueTaskListEventNotifications } from './task-notification-producer'
 import { assertActiveOrgMembers, findActiveOrgMembers } from './task-org-members'
 import {
   fail,
@@ -352,7 +353,15 @@ export async function setTaskListArchived(input: {
       [input.listId],
     )
     for (const event of plan.events) {
-      await writeListEvent(db, { listId: input.listId, actorId: event.userId, type: event.type, payload: {}, at: { from: 'list' } })
+      const eventId = await writeListEvent(db, { listId: input.listId, actorId: event.userId, type: event.type, payload: {}, at: { from: 'list' } })
+      // M4 PR-3b: outbox rows for the list event, in this transaction (only `archived` notifies).
+      await enqueueTaskListEventNotifications(db, {
+        orgId: input.orgId,
+        listId: input.listId,
+        listCreatorId: list.createdBy,
+        actorId: event.userId,
+        event: { id: eventId, type: event.type },
+      })
     }
     return reloadList(db, input)
   })

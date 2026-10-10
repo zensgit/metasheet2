@@ -159,6 +159,10 @@ test('VITE manifest entries require an exact frontend source binding', () => {
 // not env reads). #6175: the audience catalog scan timeout.
 const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'])
 
+// Non-boolean task-line env reads that belong in the manifest, by exact name (same reason as
+// above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
+const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
+
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
   assert.ok(spec)
@@ -179,6 +183,57 @@ test('audience scan timeout (#6175): numeric, default 5000, sourced from the res
   assert.match(resolver, /export function resolveElearningAudienceScanTimeoutMs\(/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS = 5_000/)
+})
+
+// M4 PR-3b: the three pipeline switches name the M4 migration they depend on as it is on disk, and
+// no other M4 migration name, so a rename of that migration is followed in their purposes too.
+test('task notification pipeline switches (M4 PR-3b): each purpose names the M4 migration on disk', () => {
+  const migrationsDir = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'packages/core-backend/src/db/migrations')
+  const m4 = readdirSync(migrationsDir).filter((name) => /^zzzz\d{14}_create_task_m4_tables\.ts$/.test(name))
+  assert.equal(m4.length, 1)
+  const onDisk = m4[0].replace(/\.ts$/, '')
+  for (const key of [
+    'TASKS_SCHEDULER_ENABLED',
+    'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+  ]) {
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    assert.ok(spec, key)
+    const named = [...spec.purpose.matchAll(/zzzz\d{14}_create_task_m4_tables/g)].map((match) => match[0])
+    assert.deepEqual(named, [onDisk], `${key} purpose names the M4 migration on disk`)
+  }
+})
+
+// M4 PR-3b S5: TASKS_ENABLED is also the prerequisite of the scheduler and the delivery worker
+// (ASSUMPTION(task-m4): [own-3b-06]); its purpose names both switches it gates.
+test('TASKS_ENABLED purpose (M4 PR-3b): names the scheduler and the delivery worker switches it gates', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_ENABLED
+  assert.ok(spec)
+  for (const key of ['TASKS_SCHEDULER_ENABLED', 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED']) {
+    assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key], key)
+    assert.ok(spec.purpose.includes(key), `TASKS_ENABLED purpose names ${key}`)
+  }
+  assert.match(spec.purpose, /prerequisite of the task scheduler and its notification delivery worker/)
+})
+
+test('task scheduler interval (M4 PR-3b): numeric, default 60000, clamped to half the scan window, sourced from the flags parser', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_SCHEDULER_INTERVAL_MS
+  assert.ok(spec)
+  assert.equal(spec.type, 'numeric')
+  assert.equal(spec.source, 'packages/core-backend/src/services/task-notification-flags.ts#resolveTaskSchedulerIntervalMs')
+  assert.match(spec.activationValue, /default 60000/)
+  assert.match(spec.activationValue, /\[5000, 3600000\]/)
+  assert.match(spec.purpose, /\[5000, 3600000\]/)
+  assert.deepEqual(spec.dependsOn, ['TASKS_SCHEDULER_ENABLED'])
+  assert.equal(spec.rules, undefined)
+  assert.equal(isActivated(spec, '60000'), false)
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  const flags = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/task-notification-flags.ts'), 'utf8')
+  assert.match(flags, /export function resolveTaskSchedulerIntervalMs\(/)
+  assert.match(flags, /env\.TASKS_SCHEDULER_INTERVAL_MS/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_DEFAULT_MS = 60_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MIN_MS = 5_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MAX_MS = TASK_REMINDER_SCAN_WINDOW_MS \/ 2/)
 })
 
 // MAINTAINER NOTE: these are PREFIX families — a future flag that shares one of these prefixes is
@@ -304,7 +359,9 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !t.endsWith('_'))
     .filter((t) => !NON_GH_EXACT.has(t))
   // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
-  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
+  // The *_ENABLED rule keeps constant names out; the one non-boolean task knob is named exactly, the
+  // same shape as ELEARNING_NON_BOOLEAN_FLAGS above.
+  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || TASKS_NON_BOOLEAN_FLAGS.has(t))
   // Approval center read-state badges (test report 2026-10-08): default-OFF exact-'true' switches,
   // one family by name shape so a new badge switch joins the population as soon as source reads it.
   const approvalBadges = grepFlagTokens('APPROVAL_[A-Z_0-9]+_BADGE_ENABLED')

@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   TASK_ABILITIES,
   TASK_ROLES,
   TASK_ROLE_ABILITY,
   TASK_VIEWS,
+  buildTaskByIdAnyStateCondition,
   buildTaskByIdCondition,
   buildTaskInListCondition,
   buildTaskPendingCondition,
@@ -523,6 +525,54 @@ describe('buildTaskByIdCondition / buildTaskInListCondition (M4 R04)', () => {
     }
     expect(buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }).sql.endsWith(clause)).toBe(true)
     expect(buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }).sql.endsWith(clause)).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// M4 PR-3b S4 (design task-m4-pr3b-backend-design-20261001.md §3.4, §7.4, §10 item 1).
+// ASSUMPTION(task-m4): [own-3b-17] the by-id builder that also admits a soft-deleted row (owner
+// question §13-Q14); its org clause is the module's single emission.
+// ---------------------------------------------------------------------------------------------
+
+describe('buildTaskByIdAnyStateCondition (M4 PR-3b)', () => {
+  const ACCESS_SOURCE = new URL('../../src/tasks/task-access.ts', import.meta.url)
+
+  it('pinned text and params: the by-id text with TRUE in place of the liveness condition', () => {
+    const cond = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.id = $1 AND (tasks.org_id = $2) AND TRUE')
+    expect(cond.params).toEqual(['tsk_a', 'org1'])
+  })
+
+  it('the org clause appears exactly once, the liveness condition not at all, and only $1/$2 are bound', () => {
+    const cond = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
+    expect(cond.sql.includes('deleted_at')).toBe(false)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+    expect(cond.params).toHaveLength(2)
+  })
+
+  it('differs from the live by-id builder only in the row-state condition', () => {
+    const live = buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    const anyState = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(live.sql.replace(/tasks\.deleted_at IS NULL$/, 'TRUE')).toBe(anyState.sql)
+    expect(anyState.params).toEqual(live.params)
+  })
+
+  it('the source writes the org clause text once, in the generator\'s template literal, and every builder output carries it once', () => {
+    const source = readFileSync(ACCESS_SOURCE, 'utf8')
+    const needle = '(tasks.org_id = ${ORG_PLACEHOLDER}) AND '
+    expect(source.split(needle).length - 1).toBe(1)
+    const lines = source.split('\n').filter((line) => line.includes('tasks.org_id'))
+    expect(lines).toHaveLength(1)
+    expect(lines[0].trim().startsWith('return `')).toBe(true)
+    const outputs = [
+      ...TASK_VIEWS.map((view) => buildTaskScopeCondition({ view, actorParam: 'u1', orgParam: 'org1' })),
+      buildTaskPendingCondition({ actorParam: 'u1', orgParam: 'org1', scope: 'overdue_or_today', viewerTzParam: 'UTC' }),
+      buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }),
+      buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+    ]
+    for (const cond of outputs) expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
   })
 })
 

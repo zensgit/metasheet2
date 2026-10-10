@@ -17,7 +17,7 @@ import {
   transferTaskListOwner,
 } from '../../src/services/task-list-records'
 import { completeTask, countPending, createTask, parseTaskPage, reopenTask, toTaskPendingItem } from '../../src/services/task-records'
-import { addAssignee, addFollower, leaveTask, removeAssignee, removeFollower } from '../../src/services/task-structure'
+import { addAssignee, addComment, addFollower, deleteTaskById, leaveTask, removeAssignee, removeFollower, switchCompletionMode } from '../../src/services/task-structure'
 import {
   createTaskListGroup,
   createUserTaskGroup,
@@ -1379,5 +1379,173 @@ describe('task org membership (M4 PR-3a S9)', () => {
     await expect(add({ ...memberBase, body: { userId: 'usr-2' } })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(lookups()).toEqual([])
     expect(written()).toEqual([])
+  })
+})
+
+// M4 PR-3b S2 (design task-m4-pr3b-backend-design-20261001.md §4.2, §4.3, §5.1): the producer runs
+// on the touchpoint's own transaction client, after the event it reads, and sends nothing while
+// the pipeline is off. ASSUMPTION(task-m4): [own-3b-01] [own-3b-12]. S3 adds the two assignee
+// writes, whose status flips now record events that notify.
+describe('notification producer wiring (M4 PR-3b S2)', () => {
+  const SWITCHES = [
+    'TASKS_SCHEDULER_ENABLED',
+    'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+  ] as const
+  let saved: Record<string, string | undefined> = {}
+
+  function setPipeline(on: boolean): void {
+    for (const key of SWITCHES) {
+      if (on) process.env[key] = 'true'
+      else delete process.env[key]
+    }
+  }
+
+  /** The task's assignee rows and status for the next write (the mode switch needs one completed
+   * row; an assignee change notifies only when it flips the status, S3). */
+  let assigneeRows: Array<{ user_id: string; completed_at: Date | null }> = []
+  let taskStatus = 'open'
+
+  /** One answer for both the pool (`query`, the reads before a comment's transaction) and the
+   * transaction client: a live `all` task created by usr-0 with `taskStatus` and `assigneeRows`, one
+   * follower, no children; an active integration; one follower as the member read. */
+  function answer(sql: string): { rows: Record<string, unknown>[] } | undefined {
+    if (sql.includes('INSERT INTO task_comments')) return { rows: [{ created_at: new Date(0) }] }
+    if (sql.includes('INSERT INTO task_notification_deliveries')) return { rows: [{ id: 'row-0' }, { id: 'row-1' }] }
+    if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
+    if (sql.includes("current_setting('statement_timeout')")) return { rows: [{ value: '0' }] }
+    if (sql.includes('parent_id = $1')) return { rows: [] }
+    if (sql.includes('FROM task_lists WHERE')) {
+      return { rows: [{ id: 'tlst_1', name: 'n', created_by: 'usr-0', archived_at: null, created_at: new Date(0), updated_at: new Date(0), owner_id: 'usr-1', my_role: 'owner' }] }
+    }
+    if (sql.includes('FROM directory_integrations')) return { rows: [{ dingtalk_active: true }] }
+    if (sql.includes('UNION ALL')) return { rows: [{ member_kind: 'follower', user_id: 'usr-9' }] }
+    if (sql.includes('FROM tasks WHERE') || sql.includes('FROM tasks t WHERE')) {
+      return { rows: [{ created_by: 'usr-0', completion_mode: 'all', status: taskStatus, parent_id: null, depth: 0, version: 1 }] }
+    }
+    if (sql.includes('FROM task_assignees')) return { rows: assigneeRows }
+    if (sql.includes('FROM task_followers')) return { rows: [{ user_id: 'usr-9' }] }
+    return undefined
+  }
+
+  function txSqls(): string[] {
+    return state.calls.map((call) => call.sql.replace(/\s+/g, ' ').trim())
+  }
+
+  function poolSqls(): string[] {
+    return vi.mocked(query).mock.calls.map((call) => String(call[0]).replace(/\s+/g, ' ').trim())
+  }
+
+  const touchesOutbox = (sql: string): boolean => sql.includes('directory_integrations') || sql.includes('task_notification_deliveries')
+
+  beforeEach(() => {
+    saved = Object.fromEntries(SWITCHES.map((key) => [key, process.env[key]]))
+    state.calls.length = 0
+    state.transactions = 0
+    state.respond = (sql) => answer(sql)
+    vi.mocked(query).mockReset()
+    vi.mocked(query).mockImplementation(async (sql: string) => (answer(sql) ?? { rows: [] }) as never)
+  })
+
+  afterEach(() => {
+    for (const key of SWITCHES) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+    state.respond = undefined
+  })
+
+  const open = (userId: string) => ({ user_id: userId, completed_at: null })
+  const done = (userId: string) => ({ user_id: userId, completed_at: new Date(0) })
+  const write = (rows: typeof assigneeRows, run: () => Promise<unknown>, status = 'open') => () => {
+    assigneeRows = rows
+    taskStatus = status
+    return run()
+  }
+  const writes: Array<[string, () => Promise<unknown>]> = [
+    ['completeTask', write([open('usr-1')], () => completeTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1' }))],
+    ['reopenTask', write([done('usr-1')], () => reopenTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1', scope: 'all' }))],
+    // S3, RULED(2026-10-07): [N1]: the creator adding themselves to a done task reopens it (no org
+    // lookup for the operator); removing the only open row of an open task completes it.
+    ['addAssignee', write([done('usr-1')], () => addAssignee({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', body: { userId: 'usr-0' } }), 'done')],
+    ['removeAssignee', write([done('usr-1'), open('usr-2')], () => removeAssignee({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', userId: 'usr-2' }))],
+    ['switchCompletionMode', write([done('usr-1'), open('usr-2')], () => switchCompletionMode({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', body: { completionMode: 'any' } }))],
+    ['addComment', write([open('usr-1')], () => addComment({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1', body: { body: '已核对' } }))],
+    ['deleteTaskById', write([open('usr-1')], () => deleteTaskById({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1' }))],
+    ['setTaskListArchived', write([], () => setTaskListArchived({ orgId: 'org-1', actorId: 'usr-1', listId: 'tlst_1', archived: true }))],
+  ]
+
+  it('with the pipeline off, no touchpoint sends a statement to the integration or outbox table, on either client', async () => {
+    setPipeline(false)
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      vi.mocked(query).mockClear()
+      await expect(write(), name).resolves.toBeDefined()
+      expect(txSqls().filter(touchesOutbox), name).toEqual([])
+      expect(poolSqls().filter(touchesOutbox), name).toEqual([])
+      expect(txSqls().some((sql) => sql.startsWith('INSERT INTO task_events') || sql.startsWith('INSERT INTO task_list_events')), name).toBe(true)
+    }
+  })
+
+  it('with the pipeline on, each touchpoint runs the check, the member read and the outbox INSERT on its transaction client, after its event, never on the pool', async () => {
+    setPipeline(true)
+    const eventTable: Record<string, string> = {
+      completeTask: 'INSERT INTO task_events',
+      reopenTask: 'INSERT INTO task_events',
+      addAssignee: 'INSERT INTO task_events',
+      removeAssignee: 'INSERT INTO task_events',
+      switchCompletionMode: 'INSERT INTO task_events',
+      addComment: 'INSERT INTO task_events',
+      deleteTaskById: 'INSERT INTO task_events',
+      setTaskListArchived: 'INSERT INTO task_list_events',
+    }
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      vi.mocked(query).mockClear()
+      await expect(write(), name).resolves.toBeDefined()
+      expect(poolSqls().filter(touchesOutbox), name).toEqual([])
+      const sqls = txSqls()
+      const lastEvent = sqls.map((sql, i) => (sql.startsWith(eventTable[name]) ? i : -1)).filter((i) => i >= 0).pop() ?? -1
+      const check = sqls.findIndex((sql) => sql.includes('FROM directory_integrations'))
+      const insert = sqls.findIndex((sql) => sql.startsWith('INSERT INTO task_notification_deliveries'))
+      expect(lastEvent, name).toBeGreaterThanOrEqual(0)
+      expect(check, name).toBeGreaterThan(lastEvent)
+      expect(insert, name).toBeGreaterThan(check)
+      // Nothing after the event reads the task row again (a deleted task is still notified).
+      expect(sqls.slice(lastEvent + 1).some((sql) => /FROM tasks\b/.test(sql)), name).toBe(false)
+    }
+  })
+
+  it('each touchpoint writes each of its events exactly once, and the outbox rows carry the id the event was written with', async () => {
+    setPipeline(true)
+    // The event INSERTs of each write, in order and by type: one INSERT per event the write records
+    // (an assignee change or a mode switch that flips the status records two). A second event write
+    // in the same callback, placed before or after the write whose ids the producer reads, repeats
+    // the list and fails here in either order.
+    const eventsWritten: Record<string, string[]> = {
+      completeTask: ['completed'],
+      reopenTask: ['reopened'],
+      addAssignee: ['assignee_added', 'reopened'],
+      removeAssignee: ['assignee_removed', 'completed'],
+      switchCompletionMode: ['completion_mode_changed', 'completed_by_any'],
+      addComment: ['commented'],
+      deleteTaskById: ['deleted'],
+      setTaskListArchived: ['archived'],
+    }
+    // The bound fourth parameter, or the type literal of an INSERT that binds three.
+    const eventType = (call: { sql: string; params?: unknown[] }): unknown =>
+      typeof call.params?.[3] === 'string' ? call.params[3] : /'([a-z_]+)'/.exec(call.sql)?.[1]
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      await write()
+      const eventInserts = state.calls.filter((call) => /^\s*INSERT INTO task_(list_)?events/.test(call.sql))
+      expect(eventInserts.map(eventType), name).toEqual(eventsWritten[name])
+      // With the list exact, the notifying event of each fixture is its last one.
+      const eventId = eventInserts[eventInserts.length - 1]?.params?.[0]
+      const outbox = state.calls.find((call) => call.sql.includes('INSERT INTO task_notification_deliveries'))
+      const payloads = ((outbox?.params?.[7] ?? []) as string[]).map((text) => JSON.parse(text) as { eventId: string })
+      expect(payloads.length, name).toBeGreaterThan(0)
+      for (const payload of payloads) expect(payload.eventId, name).toBe(eventId)
+    }
   })
 })
