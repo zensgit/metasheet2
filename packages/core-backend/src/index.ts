@@ -63,6 +63,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 // column). See the service file header for the load-bearing property and the removal path.
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
+import { createStockPrepMembersHostPort } from './services/stock-preparation-members-host'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -3387,6 +3388,15 @@ export class MetaSheetServer {
         // output. Absent for every other plugin.
         stockPreparationFieldPermissions: manifest.name === 'plugin-integration-core'
           ? new StockPreparationFieldPermissionsService()
+          : undefined,
+        // 备料「成员与权限」(S5b, register R-39): the narrow members port for plugin-integration-core
+        // ONLY — create / update server-generated `stock-prep_c_…` roles (never `_admin`, never a
+        // built-in, never outside the namespace), `stock-prep:*` codes only and within the grantor's own,
+        // project-sheet scope through the plugin's G1 call and within what the grantor can read, every
+        // change audited. Platform admin or the `stock-prep` delegated admin only; behind the default-OFF
+        // STOCK_PREP_MEMBERS_PAGE_ENABLED. Absent for every other plugin.
+        stockPreparationMembers: manifest.name === 'plugin-integration-core'
+          ? createStockPrepMembersHostPort()
           : undefined,
         // 通知下一步: the DingTalk notification seam for plugin-integration-core ONLY. The plugin's
         // handoff advance route calls `stockPreparationHandoffNotifier.sendToDestinations({ destinationIds,
