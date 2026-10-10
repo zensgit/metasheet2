@@ -909,8 +909,9 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 // S5b fix round 1 — the members port's new guards through the REAL host wiring on real PostgreSQL:
 //   * RF-01 (S2) the project-sheet bound is WRITE: a delegated admin holding only `spreadsheet:read`
 //     (or `spreadsheet:write-own`) on a sheet is refused with no row written; `spreadsheet:write' lands;
-//   * RF-02 (S3) the sheet decision reads FRESH codes: a global write code revoked in the database
-//     while still in the 60 s permission memo is not honoured;
+//   * RF-02 (S2, S3) a global record-write code without `multitable:manage-schema` is not enough to
+//     hand out `spreadsheet:write`; the sheet decision reads FRESH codes: a code revoked in the
+//     database while still in the 60 s permission memo is not honoured;
 //   * RF-03 (S4) the caller tier is exactly `stock-prep_admin`: another admitted, scoped `_admin`
 //     role of the namespace is 403;
 //   * RF-04 (S4) the platform-admin decision is the DB `admin` role only: legacy `users.is_admin` /
@@ -1126,17 +1127,24 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
     expect(await roleRowsOn(SHEET, roleId)).toBe(1)
   })
 
-  it('RF-02 (S3) a global write code revoked in the database is not honoured from the permission memo', async () => {
+  it('RF-02 (S2, S3) record write without schema management is not enough; a global write code revoked in the database is not honoured from the permission memo', async () => {
     const roleId = createdRoleIds[createdRoleIds.length - 1]
     await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:write')", [MTW_ROLE])
     await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MTW_ROLE])
-    // Positive control: the global code makes the assignment-free sheet writable.
+    // S2: the global record-write code alone — no `multitable:manage-schema` — may not hand out
+    // `spreadsheet:write`, which carries field / view management on the sheet.
+    const recordOnly: string[] = []
+    const refusedRecordOnly = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, recordOnly) }] }))
+    expect([refusedRecordOnly.status, refusedRecordOnly.code]).toEqual([403, 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE'])
+    expect(recordOnly).toEqual([])
+    await pool.query("INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'multitable:manage-schema')", [MTW_ROLE])
+    // Positive control: write + schema management make the assignment-free sheet writable.
     const ok: string[] = []
     await expect(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, ok) }] }))
       .resolves.toMatchObject({ sheets: [{ sheetId: SHEET_GLOBAL, granted: true }] })
     // Prime the memo WITH the code, then revoke it in the database only.
     expect(await rbacListUserPermissions(DELEGATED)).toContain('multitable:write')
-    await pool.query("DELETE FROM role_permissions WHERE role_id = $1 AND permission_code = 'multitable:write'", [MTW_ROLE])
+    await pool.query('DELETE FROM role_permissions WHERE role_id = $1', [MTW_ROLE])
     expect(await rbacListUserPermissions(DELEGATED), 'the memo still holds the revoked code').toContain('multitable:write')
     const calls: string[] = []
     const error = await refusal(port().grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId, resolveTargets: async () => [{ sheetId: SHEET_GLOBAL, grant: g1(roleId, SHEET_GLOBAL, calls) }] }))

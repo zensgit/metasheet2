@@ -16,9 +16,11 @@
  *                                   dropping the actor's memo (fix round 1, S3)
  *   resolveWritableSheetIds       → multitable/permission-service.ts resolveSheetCapabilitiesForAccess
  *                                   per sheet (the grid's own capability resolver): a live sheet on
- *                                   which the actor may create, edit and delete ANY record (not
- *                                   write-own only) — the bound for handing out `spreadsheet:write`
- *                                   (fix round 1, S2); same fresh access snapshot (S3)
+ *                                   which the actor holds everything a `spreadsheet:write` grant
+ *                                   confers — create, edit and delete ANY record (not write-own
+ *                                   only), manage fields and views, notify — the bound for handing
+ *                                   out `spreadsheet:write` (fix round 1, S2); same fresh access
+ *                                   snapshot (S3)
  *   auditLog                      → audit/audit.ts auditLog (the admin-users.ts writer)
  */
 
@@ -76,12 +78,20 @@ export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
       for (const sheetId of Array.from(new Set(sheetIds))) {
         const resolved = await resolveSheetCapabilitiesForAccess(query, sheetId, access)
         const { capabilities } = resolved
+        // Everything a `spreadsheet:write` sheet grant confers (permission-service.ts
+        // applyContextSheetSchemaWriteGrant): read, create / edit / delete ANY record (not write-own
+        // only), manage fields and views, send notifications. The grantor must hold all of it on this
+        // sheet — GRANTED ⊆ GRANTOR — so e.g. a global `multitable:write` without
+        // `multitable:manage-schema` cannot hand out schema management.
         if (
           resolved.sheetLiveness === 'live'
           && capabilities.canRead
           && capabilities.canCreateRecord
           && capabilities.canEditRecord
           && capabilities.canDeleteRecord
+          && capabilities.canManageFields
+          && capabilities.canManageViews
+          && capabilities.canSendNotification
           && !requiresOwnWriteRowPolicy(resolved.sheetScope, access.isAdminRole)
         ) {
           writable.add(sheetId)

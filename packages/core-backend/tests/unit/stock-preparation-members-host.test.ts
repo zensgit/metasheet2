@@ -14,8 +14,8 @@
  *   SW-06 auditLog is audit/audit.ts `auditLog`.
  *   SW-07 the switch is read from process.env on every call.
  *   SW-08 resolveWritableSheetIds (S2, S3) drops the memo, then asks the grid's capability resolver
- *         per sheet and admits only a LIVE sheet with full record write (create + edit + delete, not
- *         write-own only).
+ *         per sheet and admits only a LIVE sheet on which the actor holds everything `spreadsheet:write`
+ *         confers (create + edit + delete any record — not write-own only — fields, views, notify).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -54,7 +54,8 @@ vi.mock('../../src/audit/audit', () => ({ auditLog: mocks.auditLog }))
 import { createStockPrepMembersHostDeps, createStockPrepMembersHostPort } from '../../src/services/stock-preparation-members-host'
 
 const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
-const FULL = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true }
+/** Everything a `spreadsheet:write` sheet grant confers (applyContextSheetSchemaWriteGrant). */
+const FULL = { canRead: true, canCreateRecord: true, canEditRecord: true, canDeleteRecord: true, canManageFields: true, canManageViews: true, canSendNotification: true }
 
 describe('stock-prep members port — host wiring (S5b, R-39)', () => {
   afterEach(() => {
@@ -140,6 +141,11 @@ describe('stock-prep members port — host wiring (S5b, R-39)', () => {
       sheet_read_only: { capabilities: { ...FULL, canCreateRecord: false, canEditRecord: false, canDeleteRecord: false }, sheetLiveness: 'live', sheetScope: { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: false, canAdmin: false } },
       sheet_write_own: { capabilities: { ...FULL }, sheetLiveness: 'live', sheetScope: { hasAssignments: true, canRead: true, canWrite: false, canWriteOwn: true, canAdmin: false } },
       sheet_no_delete: { capabilities: { ...FULL, canDeleteRecord: false }, sheetLiveness: 'live' },
+      // A global record-write code without schema management (no `multitable:manage-schema`): the
+      // grant would hand out field / view management the grantor does not hold.
+      sheet_no_schema: { capabilities: { ...FULL, canManageFields: false }, sheetLiveness: 'live' },
+      sheet_no_views: { capabilities: { ...FULL, canManageViews: false }, sheetLiveness: 'live' },
+      sheet_no_notify: { capabilities: { ...FULL, canSendNotification: false }, sheetLiveness: 'live' },
       sheet_unreadable: { capabilities: { ...FULL, canRead: false }, sheetLiveness: 'live' },
       sheet_deleted: { capabilities: { ...FULL }, sheetLiveness: 'deleted' },
       sheet_absent: { capabilities: { ...FULL }, sheetLiveness: 'absent' },
