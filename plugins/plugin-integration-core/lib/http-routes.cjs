@@ -541,6 +541,7 @@ const { StockPreparationProjectTargetStoreError } = require('./stock-preparation
 const {
   STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS,
   STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS,
+  STOCK_PREP_MEMBERS_INTERNAL_CODE,
   STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE,
   STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
   STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS,
@@ -4173,6 +4174,34 @@ function requireStockPreparationAudit() {
   function requireMembersPageEnabled() {
     if (!stockPrepMembersPageEnabled(process.env)) {
       throw new HttpRouteError(404, STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE, `the stock-prep members page is disabled on this deployment (${STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV} is not 'true')`)
+    }
+  }
+  /**
+   * VALUES-FREE FAILURES on the four members routes (fix round 1, S9). `sendError` answers with
+   * `error.message` verbatim, so an untyped error (a driver's "duplicate key … (id)=(…)", a
+   * dependency's text) would reach the body. Here a TYPED REFUSAL — an integer 4xx status and an
+   * UPPER_SNAKE code, the plugin's own and the host port's — passes as it is; anything else, and any
+   * 5xx, answers a fixed message (and, when untyped, the fixed code STOCK_PREP_MEMBERS_INTERNAL) with
+   * no details. The original stays on `cause` for the route-failure log, which logs codes only.
+   */
+  function membersRouteFailure(error) {
+    const status = error && Number.isInteger(error.status) ? error.status : 0
+    const code = error && typeof error.code === 'string' ? error.code : ''
+    const typed = status >= 400 && status <= 599 && /^[A-Z][A-Z0-9_]{2,80}$/.test(code)
+    if (typed && status < 500) return error
+    const failure = new Error('the stock-prep members request could not be completed')
+    failure.name = 'StockPrepMembersRouteFailure'
+    failure.status = typed ? status : 500
+    failure.code = typed ? code : STOCK_PREP_MEMBERS_INTERNAL_CODE
+    failure.cause = error
+    return failure
+  }
+  /** Runs a members route's body past the gate and the switch, through membersRouteFailure. */
+  async function withMembersFailures(body) {
+    try {
+      return await body()
+    } catch (error) {
+      throw membersRouteFailure(error)
     }
   }
 
@@ -9590,33 +9619,39 @@ function requireStockPreparationAudit() {
     async stockPreparationMembersRead(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireMembersPageEnabled()
-      normalizeStockPreparationConfirmBody(requestQuery(req), VALID_EMPTY_REQUEST_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
-      const members = requireStockPreparationMembers()
-      return sendOk(res, await members.describe({ actorId: user.id }))
+      return withMembersFailures(async () => {
+        normalizeStockPreparationConfirmBody(requestQuery(req), VALID_EMPTY_REQUEST_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const members = requireStockPreparationMembers()
+        return sendOk(res, await members.describe({ actorId: user.id }))
+      })
     },
 
     async stockPreparationMembersCustomRoleCreate(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireMembersPageEnabled()
-      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
-      const members = requireStockPreparationMembers()
-      const created = await members.createCustomRole({ actorId: user.id, name: body.name, permissionCodes: body.permissionCodes })
-      return sendOk(res, created, 201)
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const members = requireStockPreparationMembers()
+        const created = await members.createCustomRole({ actorId: user.id, name: body.name, permissionCodes: body.permissionCodes })
+        return sendOk(res, created, 201)
+      })
     },
 
     async stockPreparationMembersCustomRoleUpdate(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireMembersPageEnabled()
-      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
-      const roleId = firstString(requestParams(req).roleId)
-      const members = requireStockPreparationMembers()
-      const updated = await members.updateCustomRole({
-        actorId: user.id,
-        roleId,
-        ...(Object.prototype.hasOwnProperty.call(body, 'name') ? { name: body.name } : {}),
-        ...(Object.prototype.hasOwnProperty.call(body, 'permissionCodes') ? { permissionCodes: body.permissionCodes } : {}),
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        const roleId = firstString(requestParams(req).roleId)
+        const members = requireStockPreparationMembers()
+        const updated = await members.updateCustomRole({
+          actorId: user.id,
+          roleId,
+          ...(Object.prototype.hasOwnProperty.call(body, 'name') ? { name: body.name } : {}),
+          ...(Object.prototype.hasOwnProperty.call(body, 'permissionCodes') ? { permissionCodes: body.permissionCodes } : {}),
+        })
+        return sendOk(res, updated)
       })
-      return sendOk(res, updated)
     },
 
     // ADD project sheets to a custom role's scope (§11.5). Add-only: there is no remove route (ADR
@@ -9624,85 +9659,98 @@ function requireStockPreparationAudit() {
     // switches must be on: this page's, and the project-sheets switch whose registry names the sheets.
     // The port runs the caller tier and the role checks BEFORE it asks for the targets, so the
     // registry is read only for an admitted caller and an existing custom role; it then requires every
-    // sheet to be readable by the grantor, and runs each target's G1 call — the SAME host port the
+    // sheet to be WRITABLE by the grantor, and runs each target's G1 call — the SAME host port the
     // create route uses (`grantSheetRoleWrite` through plugin-scope: plugin-owned project sheets only,
     // role subjects only, `spreadsheet:write`, ON CONFLICT DO NOTHING). Each landed call also appends
-    // the plugin audit row `project_target_grant` (mode custom_role_granted / _already_granted).
+    // the plugin audit row `project_target_grant` (mode custom_role_granted / _already_granted) —
+    // BEST-EFFORT (fix round 1, S9): the G1 grant has committed by then, and the host port writes its
+    // own audit row once this call returns, so a failed plugin append is logged (code only) and never
+    // turns a landed grant into a 500 that skips the host's row.
     async stockPreparationMembersCustomRoleProjectTargets(req, res) {
       const user = requireAccess(req, STOCK_PREP_ADMIN)
       requireMembersPageEnabled()
       requireProjectSheetsEnabled()
-      const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
-      let projectNos
-      try {
-        projectNos = normalizeStockPrepMembersProjectNos(body.projectNos)
-      } catch (error) {
-        if (error instanceof StockPrepMembersRequestError) throw new HttpRouteError(400, error.code, error.message, error.details)
-        throw error
-      }
-      const roleId = firstString(requestParams(req).roleId)
-      const members = requireStockPreparationMembers()
-      const actor = user.id
-      const result = await members.grantCustomRoleProjectSheets({
-        actorId: actor,
-        roleId,
-        resolveTargets: async () => {
-          const scope = await resolveOperatorValueScope({
-            user,
-            authenticatedTenantId: req.authenticatedTenantId,
-            explicitTenantIds: collectExplicitTenantIds(req, {}),
-            tenantPrincipalDirectory,
-          })
-          const tenantId = scope.tenantId
-          const store = requireStockPreparationProjectTargets()
-          const audit = requireStockPreparationAudit()
-          await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION, '088', tenantId)
-          const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
-          // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
-          const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
-          const rows = []
-          // Only the CALLER's tenant's registry rows can be named (`store.get` is keyed by the
-          // host-vouched tenant), and only active ones — a write to an archived project's table is a
-          // §6 write-purpose action and refuses like the others.
-          for (const projectNo of projectNos) {
-            const row = await store.get({ tenantId, projectNo })
-            if (!row) {
-              throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'a named project has no registered stock-preparation sheet in your tenant', { field: 'projectNos' })
-            }
-            if (row.status !== 'active') {
-              throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'a named project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNos' })
-            }
-            rows.push({ projectNo, row })
-          }
-          return rows.map(({ projectNo, row }) => ({
-            sheetId: row.sheetId,
-            grant: async () => {
-              const outcome = await grantProjectSheetRoles({
-                provisioning,
-                projectId: targetProjectId,
-                sheetId: row.sheetId,
-                objectId: row.objectId,
-                roleIds: [roleId],
-                actorId: actor,
-              })
-              if (!outcome.attempted) {
-                throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_GRANT_PORT_UNAVAILABLE', 'the host does not expose the project-sheet grant port here')
+      return withMembersFailures(async () => {
+        const body = normalizeStockPreparationConfirmBody(requestBody(req), VALID_STOCK_PREP_MEMBERS_PROJECT_TARGETS_KEYS, STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE)
+        let projectNos
+        try {
+          projectNos = normalizeStockPrepMembersProjectNos(body.projectNos)
+        } catch (error) {
+          if (error instanceof StockPrepMembersRequestError) throw new HttpRouteError(400, error.code, error.message, error.details)
+          throw error
+        }
+        const roleId = firstString(requestParams(req).roleId)
+        const members = requireStockPreparationMembers()
+        const actor = user.id
+        const result = await members.grantCustomRoleProjectSheets({
+          actorId: actor,
+          roleId,
+          resolveTargets: async () => {
+            const scope = await resolveOperatorValueScope({
+              user,
+              authenticatedTenantId: req.authenticatedTenantId,
+              explicitTenantIds: collectExplicitTenantIds(req, {}),
+              tenantPrincipalDirectory,
+            })
+            const tenantId = scope.tenantId
+            const store = requireStockPreparationProjectTargets()
+            const audit = requireStockPreparationAudit()
+            await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION, '088', tenantId)
+            const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+            // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
+            const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
+            const rows = []
+            // Only the CALLER's tenant's registry rows can be named (`store.get` is keyed by the
+            // host-vouched tenant), and only active ones — a write to an archived project's table is a
+            // §6 write-purpose action and refuses like the others.
+            for (const projectNo of projectNos) {
+              const row = await store.get({ tenantId, projectNo })
+              if (!row) {
+                throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'a named project has no registered stock-preparation sheet in your tenant', { field: 'projectNos' })
               }
-              await audit.append({
-                tenantId,
-                projectId: projectNo,
-                action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
-                subjectId: row.sheetId,
-                mode: outcome.granted > 0 ? 'custom_role_granted' : 'custom_role_already_granted',
-                actor,
-                detail: { roleId, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
-              })
-              return { granted: outcome.granted > 0 }
-            },
-          }))
-        },
+              if (row.status !== 'active') {
+                throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'a named project\'s stock-preparation sheet is archived; restore it first', { field: 'projectNos' })
+              }
+              rows.push({ projectNo, row })
+            }
+            return rows.map(({ projectNo, row }) => ({
+              sheetId: row.sheetId,
+              grant: async () => {
+                const outcome = await grantProjectSheetRoles({
+                  provisioning,
+                  projectId: targetProjectId,
+                  sheetId: row.sheetId,
+                  objectId: row.objectId,
+                  roleIds: [roleId],
+                  actorId: actor,
+                })
+                if (!outcome.attempted) {
+                  throw new HttpRouteError(501, 'STOCK_PREP_MEMBERS_GRANT_PORT_UNAVAILABLE', 'the host does not expose the project-sheet grant port here')
+                }
+                try {
+                  await audit.append({
+                    tenantId,
+                    projectId: projectNo,
+                    action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+                    subjectId: row.sheetId,
+                    mode: outcome.granted > 0 ? 'custom_role_granted' : 'custom_role_already_granted',
+                    actor,
+                    detail: { roleId, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
+                  })
+                } catch (auditError) {
+                  if (routeLogger && typeof routeLogger.warn === 'function') {
+                    routeLogger.warn('[plugin-integration-core] stock-prep members grant: plugin audit append failed after the grant landed', {
+                      code: loggableRouteFailureCode(auditError),
+                    })
+                  }
+                }
+                return { granted: outcome.granted > 0 }
+              },
+            }))
+          },
+        })
+        return sendOk(res, result)
       })
-      return sendOk(res, result)
     },
 
     // B-stage confirmation-decision LEDGER surfaces (first cut) — all admin-gated; the staging

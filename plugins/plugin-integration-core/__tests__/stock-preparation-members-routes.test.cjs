@@ -24,6 +24,14 @@
 //         `project_target_grant` per landed call.
 //   MR-07 PORT ABSENT: 501 STOCK_PREP_MEMBERS_PORT_UNAVAILABLE, never a fallback.
 //   MR-08 SOURCE ORDER: in each handler the gate precedes the switch, which precedes the first await.
+//   Fix round 1:
+//   MR-06g (S10) a header-shaped tenant (no verified claim) whose membership the host directory DENIES
+//         is 403 with ZERO registry reads, grants and audit rows.
+//   MR-09 (S9) the plugin's audit row is best-effort: a failing append after a landed G1 grant neither
+//         fails the call nor stops the host port from auditing the grant.
+//   MR-10 (S9) values-free failures: an untyped error (or any 5xx) from the port or from inside the
+//         target resolution answers a fixed message — untyped ones the fixed code
+//         STOCK_PREP_MEMBERS_INTERNAL — on all four routes; typed 4xx refusals pass unchanged.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -97,9 +105,10 @@ function makeProvisioning({ grantResult = () => ({ granted: [ROLE], alreadyGrant
  * The host port, faked in the REAL port's order: the caller is decided first (a configured refusal
  * throws before anything else), then the targets are resolved, then each target's grant runs.
  */
-function makeMembersPort({ refuse = null } = {}) {
+function makeMembersPort({ refuse = null, throwError = null } = {}) {
   const calls = []
   const refuseNow = () => {
+    if (throwError) throw throwError
     if (!refuse) return
     throw Object.assign(new Error(refuse.code), { status: refuse.status, code: refuse.code, details: {} })
   }
@@ -115,6 +124,8 @@ function makeMembersPort({ refuse = null } = {}) {
       const sheets = []
       for (const target of targets) {
         const outcome = await target.grant()
+        // The real port audits each landed grant right after `grant()` returns (host audit).
+        calls.push(['hostAudit', target.sheetId])
         sheets.push({ sheetId: target.sheetId, granted: outcome.granted })
       }
       return { roleId: input.roleId, sheets }
@@ -162,10 +173,11 @@ function withEnv(values, fn) {
 
 const ON = { [STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV]: 'true', [PROJECT_SHEETS_ENABLED_ENV]: 'true' }
 
-function mount({ port = makeMembersPort(), provisioning = makeProvisioning(), withPort = true, directory = { async verifyTenantMembership() { return { member: true } } } } = {}) {
+function mount({ port = makeMembersPort(), provisioning = makeProvisioning(), withPort = true, directory = { async verifyTenantMembership() { return { member: true } } }, auditAppendThrows = null, storeThrows = null } = {}) {
   const routes = new Map()
   const auditAppends = []
   const auditProbes = []
+  const warnings = []
   const db = makeMemoryDb()
   const context = {
     api: {
@@ -180,6 +192,7 @@ function mount({ port = makeMembersPort(), provisioning = makeProvisioning(), wi
     async append(entry) {
       auditInternals.assertValuesFreeDetail(entry.detail)
       assert.ok(STOCK_PREP_AUDIT_ACTIONS.includes(entry.action), `audit action ${entry.action} is in the closed vocabulary`)
+      if (auditAppendThrows) throw auditAppendThrows
       auditAppends.push(entry)
       return { ok: true }
     },
@@ -188,9 +201,10 @@ function mount({ port = makeMembersPort(), provisioning = makeProvisioning(), wi
   }
   let n = 0
   services.stockPreparationProjectTargetStore = createStockPreparationProjectTargetStore({ db, idGenerator: () => `pt-${(n += 1)}` })
+  if (storeThrows) services.stockPreparationProjectTargetStore.get = async () => { throw storeThrows }
   services.tenantPrincipalDirectory = directory
   if (withPort) services.stockPreparationMembers = port
-  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn() {}, error() {} } })
+  httpRoutes.registerIntegrationRoutes({ context, services, logger: { info() {}, warn(message, meta) { warnings.push([message, meta]) }, error() {} } })
   const seed = (tenantId, projectNo, status = 'active') => {
     const objectId = deriveProjectSheetObjectId(tenantId, projectNo)
     const sheetId = provisioning.getObjectSheetId(`${tenantId}:integration-core`, objectId)
@@ -198,7 +212,7 @@ function mount({ port = makeMembersPort(), provisioning = makeProvisioning(), wi
     return { sheetId, objectId }
   }
   return {
-    routes, port, provisioning, db, auditAppends, auditProbes, seed,
+    routes, port, provisioning, db, auditAppends, auditProbes, seed, warnings,
     ioCount: () => port.calls.length + provisioning.calls.length + db.calls.length + auditAppends.length + auditProbes.length,
   }
 }
@@ -431,6 +445,28 @@ async function main() {
     }
   })
 
+  // MR-06g (S10) a header-shaped tenant the host directory does NOT vouch for ──────────────────────
+  // No verified token claim (no `authenticatedTenantId`): the principal's tenantId is the shape a
+  // header-fed tenant takes. The port admits the caller (the fake follows the real order), then the
+  // target resolution asks the host directory, which DENIES membership: 403, nothing read or granted.
+  await withEnv(ON, async () => {
+    for (const user of ADMITTED_BY_GATE) {
+      const directoryCalls = []
+      const h = mount({ directory: { async verifyTenantMembership(input) { directoryCalls.push(input); return { member: false } } } })
+      h.seed(TENANT, PROJECT)
+      h.db.calls.length = 0
+      const res = await call(h.routes, 'POST', TARGETS_PATH, { user, params: { roleId: ROLE }, body: { projectNos: [PROJECT] } })
+      assert.equal(res.statusCode, 403, `MR-06g: ${user.id} ${JSON.stringify(res.body)}`)
+      assert.equal(errorCode(res), 'OPERATOR_SCOPE_TENANT_MEMBERSHIP_DENIED')
+      assert.deepEqual(directoryCalls, [{ userId: user.id, tenantId: TENANT }], 'MR-06g: the host directory was asked for exactly this principal and tenant')
+      assert.deepEqual(h.db.calls, [], 'MR-06g: zero registry reads')
+      assert.deepEqual(h.provisioning.calls, [], 'MR-06g: zero grants')
+      assert.deepEqual(h.auditAppends, [], 'MR-06g: zero audit rows')
+      assert.deepEqual(h.auditProbes, [], 'MR-06g: not even the audit vocabulary probe')
+      assert.ok(!h.port.calls.some(([name]) => name === 'hostAudit'), 'MR-06g: the port audited no grant')
+    }
+  })
+
   // MR-07 PORT ABSENT ──────────────────────────────────────────────────────────────────────────────
   await withEnv(ON, async () => {
     const h = mount({ withPort: false })
@@ -440,6 +476,55 @@ async function main() {
       assert.equal(errorCode(res), 'STOCK_PREP_MEMBERS_PORT_UNAVAILABLE')
     }
     assert.equal(h.ioCount(), 0)
+  })
+
+  // MR-09 (S9) the plugin audit row is best-effort; the host port still audits the landed grant ────
+  await withEnv(ON, async () => {
+    const h = mount({ auditAppendThrows: Object.assign(new Error('audit store unavailable: s5bf-secret-host'), { code: 'ECONNRESET' }) })
+    const a = h.seed(TENANT, PROJECT)
+    const b = h.seed(TENANT, PROJECT_2)
+    const res = await call(h.routes, 'POST', TARGETS_PATH, { user: WORKBENCH_ADMIN, params: { roleId: ROLE }, body: { projectNos: [PROJECT, PROJECT_2] } })
+    assert.equal(res.statusCode, 200, `MR-09: a failed plugin audit append does not fail a landed grant, got ${JSON.stringify(res.body)}`)
+    assert.deepEqual(res.body.data, { roleId: ROLE, sheets: [{ sheetId: a.sheetId, granted: true }, { sheetId: b.sheetId, granted: true }] })
+    assert.equal(h.provisioning.calls.length, 2, 'MR-09: both G1 grants ran')
+    assert.deepEqual(h.port.calls.filter(([name]) => name === 'hostAudit'), [['hostAudit', a.sheetId], ['hostAudit', b.sheetId]], 'MR-09: the host port audited BOTH landed grants')
+    assert.deepEqual(h.warnings.filter(([message]) => /plugin audit append failed/.test(message)).map(([, meta]) => meta), [{ code: 'UNLISTED' }, { code: 'UNLISTED' }], 'MR-09: logged, code only')
+    assert.ok(!JSON.stringify(h.warnings).includes('s5bf-secret-host'), 'MR-09: the log line is values-free')
+  })
+
+  // MR-10 (S9) values-free failures on all four routes ────────────────────────────────────────────
+  await withEnv(ON, async () => {
+    const SECRET = 's5bf-secret-value'
+    const untyped = () => Object.assign(new Error(`duplicate key value violates unique constraint "roles_pkey" Key (id)=(${SECRET})`), { code: '23505', detail: SECRET })
+    const typed5xx = () => Object.assign(new Error(`id space exhausted near ${SECRET}`), { status: 503, code: 'STOCK_PREP_CUSTOM_ROLE_ID_EXHAUSTED', details: { hint: SECRET } })
+    const typed4xx = () => Object.assign(new Error('a custom role may not carry a code the grantor does not currently hold'), { status: 403, code: 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', details: { exceedingCount: 1 } })
+    for (const [kind, make, status, code] of [
+      ['untyped', untyped, 500, 'STOCK_PREP_MEMBERS_INTERNAL'],
+      ['typed 5xx', typed5xx, 503, 'STOCK_PREP_CUSTOM_ROLE_ID_EXHAUSTED'],
+      ['typed 4xx', typed4xx, 403, 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR'],
+    ]) {
+      for (const [method, routePath, build] of REQUESTS) {
+        const h = mount({ port: makeMembersPort({ throwError: make() }) })
+        h.seed(TENANT, PROJECT)
+        const res = await call(h.routes, method, routePath, { ...build(), user: WORKBENCH_ADMIN })
+        assert.equal(res.statusCode, status, `MR-10 ${kind}: ${method} ${routePath}`)
+        assert.equal(errorCode(res), code, `MR-10 ${kind}: ${method} ${routePath} code`)
+        assert.ok(!JSON.stringify(res.body).includes(SECRET), `MR-10 ${kind}: ${method} ${routePath} body is values-free: ${JSON.stringify(res.body)}`)
+        if (status >= 500) {
+          assert.equal(res.body.error.message, 'the stock-prep members request could not be completed', `MR-10 ${kind}: fixed message`)
+          assert.equal(res.body.error.details, undefined, `MR-10 ${kind}: no details`)
+        } else {
+          assert.equal(res.body.error.message, 'a custom role may not carry a code the grantor does not currently hold', 'MR-10: a typed 4xx refusal passes unchanged')
+        }
+      }
+    }
+    // …and an untyped failure INSIDE the target resolution (a registry read) is wrapped the same way.
+    const h = mount({ storeThrows: Object.assign(new Error(`relation lookup failed for ${SECRET}`), { code: 'XX000' }) })
+    const res = await call(h.routes, 'POST', TARGETS_PATH, { user: WORKBENCH_ADMIN, params: { roleId: ROLE }, body: { projectNos: [PROJECT] } })
+    assert.equal(res.statusCode, 500)
+    assert.equal(errorCode(res), 'STOCK_PREP_MEMBERS_INTERNAL')
+    assert.ok(!JSON.stringify(res.body).includes(SECRET), 'MR-10: a registry failure is values-free too')
+    assert.deepEqual(h.provisioning.calls, [])
   })
 
   // MR-08 SOURCE ORDER ─────────────────────────────────────────────────────────────────────────────

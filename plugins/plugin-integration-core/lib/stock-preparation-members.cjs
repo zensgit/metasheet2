@@ -23,6 +23,8 @@ const { isValidStockPrepProjectNo } = require('./stock-preparation-common.cjs')
 const STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
 const STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE = 'STOCK_PREP_MEMBERS_PAGE_DISABLED'
 const STOCK_PREP_MEMBERS_REQUEST_INVALID_CODE = 'STOCK_PREP_MEMBERS_REQUEST_INVALID'
+/** The one code an untyped / 5xx failure on a members route answers with (values-free; fix round 1, S9). */
+const STOCK_PREP_MEMBERS_INTERNAL_CODE = 'STOCK_PREP_MEMBERS_INTERNAL'
 
 /** Project sheets per add call. The host port enforces the same bound on what it is handed. */
 const STOCK_PREP_MEMBERS_MAX_PROJECTS_PER_CALL = 50
@@ -68,6 +70,7 @@ function normalizeStockPrepMembersProjectNos(raw) {
 module.exports = {
   STOCK_PREP_MEMBERS_CUSTOM_ROLE_CREATE_KEYS,
   STOCK_PREP_MEMBERS_CUSTOM_ROLE_UPDATE_KEYS,
+  STOCK_PREP_MEMBERS_INTERNAL_CODE,
   STOCK_PREP_MEMBERS_MAX_PROJECTS_PER_CALL,
   STOCK_PREP_MEMBERS_PAGE_DISABLED_CODE,
   STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV,
