@@ -42,16 +42,16 @@
     "reason": "Exact install callback invokes copyInsideTransaction on the transaction query; callback handoff and public execute caller are separate sites."
   },
   {
-    "key": "multitable/plugin-scope.ts#ensureObjectDefaultView#caller#multitable/provisioning.ts#ensureObjectDefaultView#4dfa1ec4d877057087af5031fa018066874b1a6bea8d3ef31cbbe46dca68fb05",
+    "key": "multitable/plugin-scope.ts#ensureObjectDefaultView#caller#multitable/provisioning.ts#ensureObjectDefaultView#ac397143cac7a7123978aac22f18f285e79680e15e305e9c39e75ef38fc8fb19",
     "count": 1,
     "disposition": "ambiguous",
-    "reason": "Property-call candidate to multitable.provisioning.ensureObjectDefaultView after project/object scope checks. Same-name receiver identity is syntactic; host implementation is separately inventoried, not inferred as runtime proof."
+    "reason": "Property-call candidate forwards the captured projectId/objectId with copied remaining values after namespace, overview-structure and object-scope checks. Same-name receiver identity is syntactic; host implementation is separately inventoried, not inferred as runtime proof."
   },
   {
-    "key": "multitable/plugin-scope.ts#ensureView#caller#multitable/provisioning.ts#ensureView#c3fc0b85b2b8ad20fa359a9b59177e70819aa01393347600e8ee40496f4d1df4",
+    "key": "multitable/plugin-scope.ts#ensureView#caller#multitable/provisioning.ts#ensureView#1b3d1f5be0b67f85109bcb5ddbd746bbccbac0a5e5ecabbe755bfdf592caa526",
     "count": 1,
     "disposition": "ambiguous",
-    "reason": "Property-call candidate to multitable.provisioning.ensureView after project/sheet scope checks. Receiver identity is not type-proven; host implementation is separately inventoried."
+    "reason": "Property-call candidate forwards captured projectId/sheetId/descriptor after namespace, overview-marker, sheet-scope and unmarked-overview checks; systemKind is not forwarded. Receiver identity is not type-proven; host implementation is separately inventoried."
   },
   {
     "key": "multitable/provisioning.ts#createView#mutation#INSERT INTO#4db6b3ec3224c4edc4ae5f09442055f034f5d40587c5d272326e89da19328cbf",
