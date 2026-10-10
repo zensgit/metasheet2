@@ -893,6 +893,18 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
 # `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
 # substring of any of them; it matches exactly one file on disk.
+# 一个项目一张备料表 S3 (ADR adr-stock-prep-project-sheets-20261008 §5, register R-37, 2026-10-09): ONE
+# token added, `StockPreparationProjectOverview` — the NEW spec (apps/web/tests/
+# StockPreparationProjectOverview.spec.ts) for the project overview and the O2(a) project-level
+# columns: the client (GET / PATCH project-fields — the PATCH body carries ONLY the changed keys — and
+# POST project-overview/refresh), the cross-language posture mirror against the plugin's
+# `projectOverviewPosture` (the `*-vocab-mirror` precedent; 「已归档」 first), 今天要处理's 「已归档（N）」
+# section and 刷新 / 打开项目总览, 项目备料页's fields form (read / save / archived / 422), 项目查询's
+# 含已归档 toggle and 已归档 tag, and the PO-ALIGN block the permission-matrix suite defers to for the
+# three new manifest controls. Substring collision checked in BOTH directions: no existing token is a
+# substring of `StockPreparationProjectOverview` (its neighbours `StockPreparationProjectBoard` /
+# `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
+# of any token, and it matches exactly one file on disk.
 # 一个项目一张备料表 S4 (ADR adr-stock-prep-project-sheets-20261008 §6, register R-38, 2026-10-09): ONE
 # token added, `StockPreparationProjectArchive` — the NEW spec (apps/web/tests/
 # StockPreparationProjectArchive.spec.ts) for archive / restore: the client (POST, body exactly
@@ -1873,6 +1885,7 @@ exec npx vitest run \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
   StockPreparationProjectBoard \
+  StockPreparationProjectOverview \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
   StockPreparationProjectSyncPanel.spec.ts \

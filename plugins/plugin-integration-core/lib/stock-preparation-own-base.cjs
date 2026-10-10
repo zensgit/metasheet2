@@ -88,6 +88,7 @@ const crypto = require('node:crypto')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   pickOwnBaseName,
 } = require('./stock-preparation-templates.cjs')
 
@@ -199,7 +200,9 @@ function deriveStockPreparationBaseId(tenantId) {
 function stockPreparationOwnBasePairPartners(objectId) {
   const self = optionalString(objectId)
   if (!self) return []
-  if (isStockPreparationProjectSheetObjectId(self)) {
+  // S3 (ADR §5): the PROJECT OVERVIEW is a one-way anchor partner too, exactly like a project sheet —
+  // it follows the ledger / main table into their base and nothing ever follows it.
+  if (isStockPreparationProjectSheetObjectId(self) || self === STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE.objectId) {
     return [
       STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId,
       STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,

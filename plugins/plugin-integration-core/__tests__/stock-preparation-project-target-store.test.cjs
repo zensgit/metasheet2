@@ -213,7 +213,8 @@ test('S-03 the public projection carries handles, enums, counts and clocks — n
   const row = await store.get({ tenantId: TENANT, projectNo: 'PRJ-S1-A' })
   assert.deepEqual(Object.keys(row).sort(), [
     'activeRowCount', 'archivedAt', 'countsAt', 'countsBounded', 'createdAt', 'createdBy', 'lastPullAt', 'lastPullCode',
-    'lastPullOutcome', 'objectId', 'projectNo', 'restoredAt', 'rowCount', 'sheetId', 'status', 'tenantId', 'updatedAt',
+    'lastPullOutcome', 'missingComponentsCount', 'objectId', 'procurementOpenCount', 'projectNo', 'restoredAt', 'rowCount',
+    'sheetId', 'status', 'tenantId', 'updatedAt', 'warehouseOpenCount',
   ])
   const serialized = JSON.stringify(row)
   for (const forbidden of ['某负责人', '自由文本备注', '2026-12-31', 'responsible', 'note', 'planned']) {

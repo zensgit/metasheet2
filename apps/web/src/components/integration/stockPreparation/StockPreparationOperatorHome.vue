@@ -69,15 +69,83 @@
     <!-- 一个项目一张备料表 (S2, R-36) — the projectTarget.list control of the workbench manifest
          (OPERATE). Rendered only when GET …/project-targets answered, i.e. the server's switch is on;
          with it off the page says exactly what it said before. -->
-    <p
+    <div
       v-if="projectTargets"
       class="sp-home__project-sheets"
       data-testid="stock-prep-project-target-list"
       :data-registered-count="projectTargets.count"
     >
-      {{ bi(oneSheetPerProject.zh, oneSheetPerProject.en) }}
-      {{ bi(`已经有 ${projectTargets.count} 个项目建了表。`, `${projectTargets.count} project(s) have a sheet so far.`) }}
-    </p>
+      <p class="sp-home__project-sheets-line">
+        {{ bi(oneSheetPerProject.zh, oneSheetPerProject.en) }}
+        {{ bi(`已经有 ${projectTargets.count} 个项目建了表。`, `${projectTargets.count} project(s) have a sheet so far.`) }}
+      </p>
+      <!-- 项目总览表 (S3, ADR §5, register R-37), only inside this block — i.e. once the list answered
+           (switch on). Fix round 1:
+             「建立项目总览」 — the projectOverview.ensure control (PULL): only while the server says the
+               overview is ABSENT and only for a holder of that capability (R6);
+             「刷新项目总览」 — the projectOverview.refresh control (OPERATE): only once a STAMPED overview
+               exists (the server never creates one on a refresh);
+             「打开项目总览」 — a deep link to the 「进行中」 view, rendered only when the HOST answered that this
+               caller can read the sheet (R1: probed, never assumed — the sheet is host-level read-only, so
+               opening it grants nothing, but a link the caller cannot open is not offered). -->
+      <p
+        v-if="showEnsureOverview || showRefreshOverview || overviewOpenTarget"
+        class="sp-home__overview"
+        data-testid="stock-prep-project-overview"
+      >
+        <button
+          v-if="showEnsureOverview"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-ensure"
+          :disabled="overviewBusy"
+          @click="onEnsureOverview"
+        >
+          {{ overviewBusy
+            ? bi(overviewPlain('overview_ensuring').zh, overviewPlain('overview_ensuring').en)
+            : bi(overviewPlain('overview_ensure_action').zh, overviewPlain('overview_ensure_action').en) }}
+        </button>
+        <button
+          v-if="showRefreshOverview"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-refresh"
+          :disabled="overviewBusy"
+          @click="onRefreshOverview"
+        >
+          {{ overviewBusy
+            ? bi(overviewPlain('overview_refreshing').zh, overviewPlain('overview_refreshing').en)
+            : bi(overviewPlain('overview_refresh_action').zh, overviewPlain('overview_refresh_action').en) }}
+        </button>
+        <button
+          v-if="overviewOpenTarget"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-open"
+          @click="emit('open-multitable', overviewOpenTarget)"
+        >
+          {{ bi(overviewPlain('overview_open_action').zh, overviewPlain('overview_open_action').en) }}
+        </button>
+      </p>
+      <p
+        v-if="showOverviewAbsentHint"
+        class="sp-home__overview-result"
+        data-testid="stock-prep-project-overview-absent"
+      >
+        {{ bi(overviewPlain('overview_absent_hint').zh, overviewPlain('overview_absent_hint').en) }}
+      </p>
+      <p
+        v-if="overviewNotice"
+        class="sp-home__overview-result"
+        data-testid="stock-prep-project-overview-result"
+        :data-result="overviewNotice.kind"
+        role="status"
+      >
+        {{ bi(overviewNoticeText.zh, overviewNoticeText.en) }}
+        <span v-if="overviewNoticeText.zhNext">{{ bi(overviewNoticeText.zhNext, overviewNoticeText.enNext ?? '') }}</span>
+        <code v-if="overviewNotice.kind === 'refused' && overviewNotice.code" class="sp-home__token">{{ overviewNotice.code }}</code>
+      </p>
+    </div>
 
     <EmptyState
       v-if="emptyState"
@@ -248,6 +316,44 @@
       </article>
     </div>
 
+    <!-- 「已归档（N）」 (S3, ADR §5 「首页」): archived projects leave the main list above and wait here,
+         collapsed, each with the 「已归档」 tag. Archiving changes no grant, so 「打开」 stays — the
+         project's page says what an archived sheet can and cannot do. Absent when N = 0. -->
+    <details
+      v-if="archivedCards.length > 0"
+      class="sp-home__archived"
+      data-testid="stock-prep-operator-home-archived"
+      :data-archived-count="archivedCards.length"
+    >
+      <summary class="sp-home__archived-summary" data-testid="stock-prep-operator-home-archived-summary">
+        {{ bi(archivedHeading.zh, archivedHeading.en) }}
+      </summary>
+      <ul class="sp-home__archived-list">
+        <li
+          v-for="card in archivedCards"
+          :key="card.projectNo"
+          class="sp-home__archived-item"
+          data-testid="stock-prep-operator-home-archived-card"
+          :data-project-no="card.projectNo"
+        >
+          <span class="sp-home__card-no">{{ card.projectNo }}</span>
+          <span v-if="card.projectName" class="sp-home__card-name">{{ card.projectName }}</span>
+          <span
+            class="sp-home__badge sp-home__badge--neutral"
+            data-testid="stock-prep-operator-home-archived-tag"
+          >{{ bi(overviewPlain('archived_tag').zh, overviewPlain('archived_tag').en) }}</span>
+          <button
+            type="button"
+            class="sp-home__card-open"
+            data-testid="stock-prep-operator-home-archived-open"
+            @click="emit('open-project', card.projectNo)"
+          >
+            {{ bi('打开', 'Open') }}
+          </button>
+        </li>
+      </ul>
+    </details>
+
     <!-- 兜底入口 (§3 wireframe A ⑦) — the HEADING AND THE HONEST SENTENCE only. The input itself is
          the workspace's own existing search box, which the parent renders immediately below this
          block instead of this component owning a second one: two boxes with byte-identical labels,
@@ -295,7 +401,7 @@
 // main action, and not a `--ms-color-primary` fill. The criterion then holds literally on this screen
 // too (zero filled primaries), and the one filled primary in the whole tab stays where §3 wireframe C
 // ③ puts it: the workspace's 「下一步」 bar.
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import EmptyState from '../../status/EmptyState.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -313,6 +419,7 @@ import {
   countActionableOperatorHomeCards,
   countOperatorHomeCardsByFilter,
   filterOperatorHomeCards,
+  partitionOperatorHomeCards,
   resolveOperatorHomeEmptyState,
   sortOperatorHomeCards,
   stockPrepHomeStatusLabel,
@@ -322,13 +429,29 @@ import {
 } from '../../../services/integration/stockPreparation/operatorHomeCards'
 import {
   resolveStockPrepPullBanner,
+  stockPrepErrorPlain,
   stockPrepExportTenantWallPlain,
+  stockPrepHomeArchivedHeading,
+  stockPrepProjectOverviewPlain,
+  stockPrepProjectOverviewRefreshText,
   stockPrepProjectTargetPlain,
   stockPrepProjectTargetRowCountText,
   STOCK_PREP_TOOLTIP_READY_TO_EXPORT,
   type StockPrepPlainEntry,
 } from '../../../services/integration/stockPreparation/plainLanguage'
-import type { StockPrepProjectTargetList } from '../../../services/integration/stockPreparation/projectTarget'
+import {
+  createStockPreparationProjectTargetApi,
+  ensureStockPreparationProjectOverview,
+  probeStockPreparationProjectOverviewReadable,
+  refreshStockPreparationProjectOverview,
+  stockPrepProjectOverviewOpenTarget,
+  type StockPrepProjectOverviewEnsureOutcome,
+  type StockPrepProjectOverviewEnsureResult,
+  type StockPrepProjectOverviewRefreshOutcome,
+  type StockPrepProjectOverviewRefreshResult,
+  type StockPrepProjectTargetList,
+  type StockPreparationProjectTargetApi,
+} from '../../../services/integration/stockPreparation/projectTarget'
 
 const props = withDefaults(
   defineProps<{
@@ -354,8 +477,31 @@ const props = withDefaults(
      * says exactly what it said before S2.
      */
     projectTargets?: StockPrepProjectTargetList | null
+    /**
+     * S3 (R-37): whether THIS viewer holds `projectOverview.refresh` — the parent resolves it from the
+     * workbench manifest mirror (`grantedStockPrepCapabilities`), the same way it resolves the
+     * archive / restore controls. Defaults to `false`: no principal, no button.
+     */
+    canRefreshOverview?: boolean
+    /**
+     * S3 fix round 1 (R6): whether THIS viewer holds `projectOverview.ensure` (PULL) — resolved by the
+     * parent from the same manifest mirror. Defaults to `false`.
+     */
+    canEnsureOverview?: boolean
+    /** Test seam ONLY (S3) — the project-target client for the refresh. Null in production: built from `scope`. */
+    targetApi?: StockPreparationProjectTargetApi | null
   }>(),
-  { scope: () => ({}), directory: null, directoryLoaded: false, memory: () => [], canPull: true, projectTargets: null },
+  {
+    scope: () => ({}),
+    directory: null,
+    directoryLoaded: false,
+    memory: () => [],
+    canPull: true,
+    projectTargets: null,
+    canRefreshOverview: false,
+    canEnsureOverview: false,
+    targetApi: null,
+  },
 )
 
 const emit = defineEmits<{
@@ -369,8 +515,16 @@ const emit = defineEmits<{
    * 打开备料多维表. NO PAYLOAD, deliberately: the parent already holds the directory this page is
    * rendered from and resolves the handle in ONE place (`openFillTarget`), shared with the board's
    * own button. Sending the target back up would be a second copy of that decision.
+   *
+   * S3: 「打开项目总览」 is the one caller that DOES send a target — the overview sheet is not the
+   * fill sheet, and only this page holds its handles (from the registry list or the refresh it just
+   * ran). The parent routes a target as-is and falls back to `openFillTarget` without one.
    */
-  (e: 'open-multitable'): void
+  (e: 'open-multitable', target?: { sheetId: string; viewId: string }): void
+  /** S3: the overview was refreshed — the parent re-reads the registry list (counts, handles). */
+  (e: 'overview-refreshed', result: StockPrepProjectOverviewRefreshResult): void
+  /** S3 fix round 1 (R6): the overview was created (or found) by a puller — the parent re-reads the list. */
+  (e: 'overview-ensured', result: StockPrepProjectOverviewEnsureResult): void
   /**
    * 从列表移除 (客户反馈 2026-09-24 #1a / A8) — informational only. Every OTHER mutation on this page
    * follows the contract at the top of `props`: this component reads nothing from storage and asks the
@@ -422,9 +576,19 @@ const hiddenProjectNos = ref<Set<string>>(new Set(readStockPrepHiddenProjects(pr
 /** [S2] How many projects this browser is currently choosing not to show — see `resolveOperatorHomeEmptyState`'s own doc for why the empty-state logic needs this, and the persistent banner below for why the UI does too. */
 const hiddenCount = computed(() => hiddenProjectNos.value.size)
 
-const cards = computed<StockPrepHomeCard[]>(() => sortOperatorHomeCards(
+/**
+ * S3 (ADR §5 「首页」): the MAIN list excludes archived projects; they go to the collapsed
+ * 「已归档（N）」 section below it. Every count on this page — the five chips, the guidance line, the
+ * explainer — is over the main list; only the empty-state decision also counts the archived half, so
+ * a tenant whose every project is archived is never told 「这里还没有您的项目」.
+ */
+const partitionedCards = computed(() => partitionOperatorHomeCards(sortOperatorHomeCards(
   buildOperatorHomeCards(directoryProjects.value, props.memory ?? [], hiddenProjectNos.value),
-))
+)))
+
+const cards = computed<StockPrepHomeCard[]>(() => partitionedCards.value.active)
+const archivedCards = computed<StockPrepHomeCard[]>(() => partitionedCards.value.archived)
+const archivedHeading = computed(() => stockPrepHomeArchivedHeading(archivedCards.value.length))
 
 const actionable = computed(() => countActionableOperatorHomeCards(cards.value))
 
@@ -434,7 +598,7 @@ const directoryAvailable = computed(() => props.directory !== null)
 const emptyState = computed(() => resolveOperatorHomeEmptyState({
   directorySettled: directorySettled.value,
   directoryAvailable: directoryAvailable.value,
-  cardCount: cards.value.length,
+  cardCount: cards.value.length + archivedCards.value.length,
   actionableCount: actionable.value.any,
   hiddenCount: hiddenCount.value,
 }))
@@ -529,6 +693,103 @@ function cardRowsText(card: StockPrepHomeCard): string {
   })
   return text ? bi(text.zh, text.en) : ''
 }
+
+// ── 项目总览表 (S3, ADR §5, register R-37) ──────────────────────────────────────────────────────────
+
+function overviewPlain(id: string): StockPrepPlainEntry {
+  return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
+}
+
+/** The last refresh / ensure answer on THIS page — it carries the handles before the parent's list re-read lands. */
+const refreshedOverview = ref<{ sheetId: string; activeViewId: string | null } | null>(null)
+
+function targetApiOf() {
+  return props.targetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+/** The overview's handles as known now: this page's last answer, else the server's list (only a STAMPED one). */
+const overviewHandles = computed(() => stockPrepProjectOverviewOpenTarget(refreshedOverview.value)
+  ?? (props.projectTargets?.overview?.status === 'ready' ? stockPrepProjectOverviewOpenTarget(props.projectTargets.overview) : null))
+
+/**
+ * S3 fix round 1 (R1): may THIS caller open the overview? The HOST answers (the multitable context's
+ * `canRead` for the overview sheet) — a floor operator without the G1 READ grant is not offered a link
+ * the host would refuse. Re-asked whenever the handles change; a stale answer is dropped.
+ */
+const overviewReadable = ref(false)
+let overviewProbeGeneration = 0
+watch(overviewHandles, async (handles) => {
+  overviewProbeGeneration += 1
+  const generation = overviewProbeGeneration
+  overviewReadable.value = false
+  if (!handles) return
+  const readable = await probeStockPreparationProjectOverviewReadable(targetApiOf(), handles)
+  if (generation === overviewProbeGeneration) overviewReadable.value = readable
+}, { immediate: true })
+
+/** 「打开项目总览」's target: handles the host said this caller can read — never a half link, never a guess. */
+const overviewOpenTarget = computed(() => (overviewReadable.value ? overviewHandles.value : null))
+
+/** The overview exists (the server reported it stamped, or this page just ensured / refreshed it). */
+const overviewExists = computed(() => overviewHandles.value !== null)
+const overviewAbsent = computed(() => !overviewExists.value && props.projectTargets?.overview?.status === 'absent')
+const showRefreshOverview = computed(() => props.canRefreshOverview && overviewExists.value)
+const showEnsureOverview = computed(() => props.canEnsureOverview && overviewAbsent.value)
+const showOverviewAbsentHint = computed(() => overviewAbsent.value && !props.canEnsureOverview && props.canRefreshOverview)
+
+const overviewBusy = ref(false)
+const overviewNotice = ref<StockPrepProjectOverviewRefreshOutcome | StockPrepProjectOverviewEnsureOutcome | null>(null)
+
+/**
+ * 刷新项目总览 — a write-shaped click, so its answer is VISIBLE either way (G3): the one result line,
+ * or the refusal's plain sentence and code. The server re-checks the gate (OPERATE) and answers 404
+ * DISABLED while the switch is off; this page only renders the button for a holder of the capability.
+ */
+async function onRefreshOverview(): Promise<void> {
+  if (overviewBusy.value || !props.canRefreshOverview) return
+  overviewBusy.value = true
+  overviewNotice.value = null
+  try {
+    const outcome = await refreshStockPreparationProjectOverview(targetApiOf())
+    overviewNotice.value = outcome
+    if (outcome.kind === 'done') {
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
+      emit('overview-refreshed', outcome.result)
+    }
+  } finally {
+    overviewBusy.value = false
+  }
+}
+
+/**
+ * 建立项目总览 (S3 fix round 1, R6) — a puller's write-shaped click: the answer is visible either way. The
+ * server re-checks the PULL gate and the switch; on success the parent re-reads the list (handles + status).
+ */
+async function onEnsureOverview(): Promise<void> {
+  if (overviewBusy.value || !props.canEnsureOverview) return
+  overviewBusy.value = true
+  overviewNotice.value = null
+  try {
+    const outcome = await ensureStockPreparationProjectOverview(targetApiOf())
+    overviewNotice.value = outcome
+    if (outcome.kind === 'done') {
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
+      emit('overview-ensured', outcome.result)
+    }
+  } finally {
+    overviewBusy.value = false
+  }
+}
+
+const overviewNoticeText = computed<StockPrepPlainEntry>(() => {
+  const notice = overviewNotice.value
+  if (!notice) return { zh: '', en: '' }
+  if (notice.kind === 'done') {
+    return 'fresh' in notice.result ? stockPrepProjectOverviewRefreshText(notice.result) : overviewPlain('overview_ensured')
+  }
+  if (notice.kind === 'cooled') return overviewPlain('overview_cooled')
+  return stockPrepErrorPlain(notice.code ?? '')
+})
 
 /**
  * U2 契约 (P0 补项 5)'s three-sentence priority chain — shared with 项目查询 (hardening wave, see
@@ -815,6 +1076,63 @@ async function exportCard(projectNo: string): Promise<void> {
 .sp-home__fill-hint {
   color: var(--ms-color-text-secondary, #6b7280);
   font-size: 12px;
+}
+
+/* S3: the overview line sits inside the project-sheets block — links, not buttons, like 打开备料多维表. */
+.sp-home__project-sheets-line,
+.sp-home__overview,
+.sp-home__overview-result {
+  margin: 0;
+}
+
+.sp-home__overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ms-space-3);
+  margin-top: var(--ms-space-2);
+}
+
+.sp-home__overview-result {
+  margin-top: var(--ms-space-2);
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sp-home__token {
+  margin: 0 4px;
+  font-size: 11px;
+  color: var(--ms-text-3);
+}
+
+/* S3: 「已归档（N）」 — collapsed, muted, below the main list. */
+.sp-home__archived {
+  padding: var(--ms-space-2) var(--ms-space-3);
+  border: 1px solid var(--ms-border-light);
+  border-radius: 8px;
+  background: var(--ms-bg-page);
+}
+
+.sp-home__archived-summary {
+  cursor: pointer;
+  color: var(--ms-text-2);
+  font-size: 13px;
+}
+
+.sp-home__archived-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ms-space-2);
+  margin: var(--ms-space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sp-home__archived-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--ms-space-2);
 }
 .sp-home__link {
   border: none;
