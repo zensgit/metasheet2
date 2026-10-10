@@ -344,6 +344,26 @@ describe('attendance web guard workflow contract', () => {
     }
   })
 
+  // Reviewer finding F4 (2026-10-08) and gate r3 P3-1 (2026-10-09): the eight cancel-round entry specs were
+  // wired into this guard at both registration points (push `paths` + the changed-file classifier) and
+  // the targeted run list; before this test nothing pinned them, so dropping them again stayed green.
+  it('keeps the cancel-round entry specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'cancelRoundEntryApproverList',
+      'cancelRoundEntryAttendancePanel',
+      'cancelRoundEntryCenterRoute',
+      'cancelRoundEntryContract',
+      'cancelRoundEntryCore',
+      'cancelRoundEntryDetailView',
+      'cancelRoundEntrySurfaces',
+      'cancelRoundEntryTodoCenter',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
   it('keeps employee 常用 icon specs in the classifier and targeted run list', () => {
     const targetedRun = targetedRunCommand(workflow)
     for (const spec of [
