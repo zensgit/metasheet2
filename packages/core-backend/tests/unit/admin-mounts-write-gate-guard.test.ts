@@ -2,6 +2,9 @@
  * `/api/admin` 挂载点下、**不经 `admin-routes.ts`** 的 7 个 router（外加 `permissions.ts` 的
  * `/api/admin/**` 切片）的写路由守卫 —— #5680 的扩面。
  *
+ * Refreshed 2026-10-10 against main 1b843faee: registry unchanged (67 entries); line refs replaced
+ * by self-verifying anchors.（登记表不变，仍是 67 条；文件里不再有任何源码行号，改为能对源码自证的锚点。）
+ *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
  *   其余 63 条的门在**处理器体内的第一条语句**（`ensurePlatformAdmin` / `ensureRoleDelegationAdmin` /
@@ -14,8 +17,12 @@
  *   只有 (A) 的话，新增写路由不会让任何测试变红；只有 (B) 的话，登记表里的门可以被掏空而不被发现。
  *
  * 盘点来源：`docs/development/admin-mounts-write-gate-inventory-20260912.md`（W4-I，基线
- * `origin/main` @ `9fb29831c`）。本文件的登记表逐条实读核对过注册行与门所在行（见每行的 `reg`/`gate`）。
- * 设计说明与盲区：`docs/development/admin-mounts-write-gate-guard-design-20260912.md`。
+ * `origin/main` @ `9fb29831c`）。设计说明与盲区：`docs/development/admin-mounts-write-gate-guard-design-20260912.md`。
+ *
+ * 锚点不写行号（行号随每次改 `admin-users.ts` / `index.ts` 漂移，写了就会过期）：挂载点记 `index.ts`
+ * 里挂载语句的原文（`MOUNTS[*].source`），登记表记注册文件（`reg`）与门函数名链（`gate`）。「fixture 自检」
+ * 逐条对源码核对：挂载语句在 `index.ts` 里恰好一处、其字面路径 = `mountPath`；`(method, path)` 在注册文件里
+ * 恰好注册一处；门函数在该注册的处理器区间里被调用（经 helper 的，helper 的第一条语句就是门）。
  *
  * 三个必须显式说明的构造：
  *
@@ -23,13 +30,15 @@
  *    在没有 Bearer token 时直接 401 `UNAUTHORIZED`（"Missing Bearer token"）——那样每条
  *    `admin-users` / `permissions` 路由都会在**到达 admin 门之前**就被拦下，测试全绿却一寸也没量到
  *    admin 门（实测过：不 mock 时这 28 条全部返回 401 "Missing Bearer token"）。生产上 `req.user`
- *    由全局 JWT 闸填充（`index.ts:1669`–`:1682`，`/api/admin` 不在豁免表内），这里用一个 app 级中间件
+ *    由全局 JWT 闸填充（`index.ts` 里「全局 JWT 保护 `/api/**`」那段 `this.app.use`：不在 `isWhitelisted`
+ *    豁免表里的 API 路径走 `jwtAuthMiddleware`，`/api/admin` 不在豁免表内），这里用一个 app 级中间件
  *    直接注入 `req.user` 来还原那一步。
  *
  * 2) 注入的非管理员 `req.user` 必须同时不满足 `hasLegacyAdminClaim` 的**四种形态**，否则假绿：
  *    `role === 'admin'` / `roles` 含 `'admin'` / `perms` 含 `'*:*'`（或 `'admin:all'`）/
- *    `permissions` 含 `'*:*'`。两份副本（`admin-directory.ts:207`–`:215` 与
- *    `admin-users.ts:440`–`:447`）认的形态并不完全一致，取并集才安全。下面的
+ *    `permissions` 含 `'*:*'`。两份副本（`routes/admin-directory.ts` 的私有 `hasLegacyAdminClaim`，与
+ *    `admin-users.ts` import 的 `rbac/platform-admin.ts` `hasLegacyAdminClaim`——后者是 `admin-users.ts`
+ *    原私有副本原样迁出的）认的形态并不完全一致，取并集才安全。下面的
  *    `LEGACY_CLAIM_PREDICATES` 把四种形态写成谓词并对 fixture 自检——fixture 若被改成带 claim，
  *    自检先红，而不是让 67 条 403 断言悄悄变成「门根本没跑」。
  *
@@ -37,6 +46,9 @@
  *    桩（类导出与常量原样保留），再断言记录为空。DB（`db/pg` 的 `query`/`transaction`/`pool.query`）
  *    与审计（`audit/audit`）另算一份预算，按门的族别逐族声明（见 `EFFECT_BUDGET`）。
  */
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import express, { type Express, type NextFunction, type Request, type Response, type Router } from 'express'
 import request from 'supertest'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -58,7 +70,8 @@ const probe = vi.hoisted(() => {
     /**
      * 把模块的**函数**导出换成记录调用名的桩；类导出（错误类等，`instanceof` 依赖构造函数身份）、
      * 常量、对象导出原样保留。`keep` 用于放过在模块加载期就会被调用的导出
-     * （例如 `access-presets.listAccessPresets`，`admin-users.ts:369` 在模块作用域就调用它）。
+     * （例如 `access-presets.listAccessPresets`：`admin-users.ts` 在模块作用域初始化 `ATTENDANCE_ROLE_IDS`
+     * 时就调用它）。
      */
     wrap(actual: Record<string, unknown>, label: string, keep: string[] = []): Record<string, unknown> {
       const out: Record<string, unknown> = { ...actual }
@@ -84,7 +97,8 @@ const rbac = vi.hoisted(() => ({
   isAdmin: vi.fn(),
 }))
 
-// `pool` 必须是**真值**：`permissions.ts:349` 在身份/权限判定之前有 `if (!pool) return 503`，
+// `pool` 必须是**真值**：`permissions.ts` 的 `/api/admin/permission-templates/apply` 处理器在身份/权限判定
+// 之前有 `if (!pool) return 503`，
 // pool=null 会让这条路由在无 DB 环境里答 503 而不是 403——那样这条断言就不是在量门了。
 vi.mock('../../src/db/pg', () => ({
   pool: { query: pg.poolQuery },
@@ -99,7 +113,7 @@ vi.mock('../../src/middleware/auth', () => {
   return { authenticate: passThrough, authMiddleware: passThrough, default: passThrough }
 })
 
-// `isAdmin` 是三套判据共同的兜底（`rbac/service.ts:19` -> `user_roles`），由本文件驱动；
+// `isAdmin` 是三套判据共同的兜底（`rbac/service.ts` 的 `isAdmin` -> `user_roles`），由本文件驱动；
 // 同模块的其它导出照样上绊线。
 vi.mock('../../src/rbac/service', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>()
@@ -146,11 +160,12 @@ vi.mock('../../src/auth/invite-tokens', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'invite-tokens'))
 vi.mock('../../src/rbac/role-assignment', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'role-assignment'))
-// `deriveDelegatedAdminNamespace` 保持真身：委派管理员口径（`admin-users.ts:1740`–`:1745`）要用它把
+// `deriveDelegatedAdminNamespace` 保持真身：委派管理员口径（`admin-users.ts` 的 `ensureRoleDelegationAdmin`
+// -> `deriveDelegableNamespaces`）要用它把
 // `user_roles` 行推成命名空间，桩掉它会让「有委派命名空间」的正向控制组永远推不出命名空间。
 vi.mock('../../src/rbac/namespace-admission', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'namespace-admission', ['deriveDelegatedAdminNamespace']))
-// `listAccessPresets` 在 `admin-users.ts:369` 的模块作用域被调用，桩掉会让模块加载就炸。
+// `listAccessPresets` 在 `admin-users.ts` 的模块作用域（`ATTENDANCE_ROLE_IDS` 初始化）被调用，桩掉会让模块加载就炸。
 vi.mock('../../src/auth/access-presets', async (importOriginal) =>
   probe.wrap(await importOriginal<Record<string, unknown>>(), 'access-presets', ['listAccessPresets']))
 
@@ -173,20 +188,36 @@ const WRITE_METHODS: WriteMethod[] = ['post', 'put', 'patch', 'delete']
 
 /** 门的族别。拒绝码/拒绝形态按族走，不是一刀切 403。 */
 type GateFamily =
-  /** `ensurePlatformAdmin`（两份副本：`admin-directory.ts:222` / `admin-users.ts:455`） */
+  /** `ensurePlatformAdmin`（两份副本：`routes/admin-directory.ts` 导出的一份 / `routes/admin-users.ts` 导出的一份） */
   | 'platform'
-  /** `ensureRoleDelegationAdmin`（`admin-users.ts:1721`）——有意的委派管理员口径，例外 */
+  /** `ensureRoleDelegationAdmin`（`routes/admin-users.ts`）——有意的委派管理员口径，例外 */
   | 'delegation'
-  /** `requireAdminRole()`（`guards/audit-integration.ts:113`），中间件首位 */
+  /** `requireAdminRole()`（`guards/audit-integration.ts`），中间件首位 */
   | 'middleware'
-  /** `permissions.ts:358` 处理器内 `isAdmin` 直调 */
+  /** `routes/permissions.ts` 处理器内 `isAdmin` 直调 */
   | 'inline'
+
+/** 每个门族的门函数名：`REGISTRY[*].gate` 里每条分支链的**最后一环**必须是它（自检）。 */
+const FAMILY_GATE: Readonly<Record<GateFamily, string>> = {
+  platform: 'ensurePlatformAdmin',
+  delegation: 'ensureRoleDelegationAdmin',
+  middleware: 'requireAdminRole',
+  inline: 'isAdmin',
+}
 
 interface MountSpec {
   /** `index.ts` 里的挂载路径 */
   readonly mountPath: string
-  /** 挂载点来源 file:line */
+  /**
+   * `src/index.ts` 里挂载这个 router 的语句原文（去掉缩进）。自检：`index.ts` 里恰好有一行（trim 后）
+   * 与它逐字节相同；语句里的字面路径 = `mountPath`（不带字面路径的根挂载 ↔ `'/'`）；语句里调用的工厂名
+   * = `factory.name`。挂载顺序（谁先接管前缀重叠的 URL）也由这些语句在 `index.ts` 里的先后算出。
+   */
   readonly source: string
+  /** router 工厂（本文件 import 的那个导出）；自检按函数名与 `index.ts` 挂载语句调用的工厂比对 */
+  readonly factory: (...args: never[]) => unknown
+  /** 注册这个 router 写路由的源文件（相对 `src/`）；`REGISTRY[*].reg` 必须等于它 */
+  readonly routeFile: string
   readonly build: () => Router
 }
 
@@ -219,40 +250,172 @@ function buildCanaryRouter(): Router {
 
 const MOUNTS: Record<MountKey, MountSpec> = {
   // 根挂载，路由自带 `/api/admin/**` 绝对路径
-  'admin-users': { mountPath: '/', source: 'src/index.ts:1898', build: () => adminUsersRouter() },
+  'admin-users': {
+    mountPath: '/',
+    source: 'this.app.use(adminUsersRouter())',
+    factory: adminUsersRouter,
+    routeFile: 'routes/admin-users.ts',
+    build: () => adminUsersRouter(),
+  },
   'admin-directory-org-transfers': {
     mountPath: '/api/admin/directory/org-transfers',
-    source: 'src/index.ts:1901',
+    source: "this.app.use('/api/admin/directory/org-transfers', adminDirectoryOrgTransfersRouter())",
+    factory: adminDirectoryOrgTransfersRouter,
+    routeFile: 'routes/admin-directory-org-transfers.ts',
     build: () => adminDirectoryOrgTransfersRouter(),
   },
   'admin-directory': {
     mountPath: '/api/admin/directory',
-    source: 'src/index.ts:1902',
+    source: "this.app.use('/api/admin/directory', adminDirectoryRouter())",
+    factory: adminDirectoryRouter,
+    routeFile: 'routes/admin-directory.ts',
     build: () => adminDirectoryRouter(),
   },
   'admin-directory-local': {
     mountPath: '/api/admin/directory/local',
-    source: 'src/index.ts:1905',
+    source: "this.app.use('/api/admin/directory/local', adminDirectoryLocalRouter())",
+    factory: adminDirectoryLocalRouter,
+    routeFile: 'routes/admin-directory-local.ts',
     build: () => adminDirectoryLocalRouter(),
   },
   'admin-directory-department-bindings': {
     mountPath: '/api/admin/directory/department-bindings',
-    source: 'src/index.ts:1906',
+    source: "this.app.use('/api/admin/directory/department-bindings', adminDirectoryDepartmentBindingsRouter())",
+    factory: adminDirectoryDepartmentBindingsRouter,
+    routeFile: 'routes/admin-directory-department-bindings.ts',
     build: () => adminDirectoryDepartmentBindingsRouter(),
   },
   'admin-directory-routing-policy': {
     mountPath: '/api/admin/directory/routing-policy',
-    source: 'src/index.ts:1907',
+    source: "this.app.use('/api/admin/directory/routing-policy', adminDirectoryRoutingPolicyRouter())",
+    factory: adminDirectoryRoutingPolicyRouter,
+    routeFile: 'routes/admin-directory-routing-policy.ts',
     build: () => adminDirectoryRoutingPolicyRouter(),
   },
-  canary: { mountPath: '/api/admin/canary', source: 'src/index.ts:1912', build: buildCanaryRouter },
+  canary: {
+    mountPath: '/api/admin/canary',
+    source: "this.app.use('/api/admin/canary', canaryRoutes(canaryRouter))",
+    factory: canaryRoutes,
+    routeFile: 'routes/canary-routes.ts',
+    build: buildCanaryRouter,
+  },
   // 根挂载；只有 `/api/admin/permission-templates*` 两条属于本文件的范围（其余 `/api/permissions/**`
   // 不在 `/api/admin` 前缀下，见 W4-I §7「邻接管理面」，不在此判定）。
-  permissions: { mountPath: '/', source: 'src/index.ts:1753', build: () => permissionsRouter() },
+  permissions: {
+    mountPath: '/',
+    source: 'this.app.use(permissionsRouter())',
+    factory: permissionsRouter,
+    routeFile: 'routes/permissions.ts',
+    build: () => permissionsRouter(),
+  },
 }
 
 // ---------------------------------------------------------------------------
-// 登记表（67 条）——来源逐条实读核对，`reg` = 注册行，`gate` = 门所在行
+// 源码锚点：读真实源码，给「fixture 自检」核对 MOUNTS.source 与 REGISTRY 的 reg/gate
+// ---------------------------------------------------------------------------
+
+const SRC_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../src')
+const sourceCache = new Map<string, string>()
+
+/** 读 `src/` 下的源文件（统一成 LF，结果缓存）。 */
+function readSource(relative: string): string {
+  let text = sourceCache.get(relative)
+  if (text === undefined) {
+    text = fs.readFileSync(path.join(SRC_ROOT, relative), 'utf8').replace(/\r\n/g, '\n')
+    sourceCache.set(relative, text)
+  }
+  return text
+}
+
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+const IDENTIFIER = /^[A-Za-z_$][\w$]*$/
+
+/** `this.app.use(<'字面路径', >?<工厂>(<实参>?))` —— 只认这一种形状，别的形状一律让自检红。 */
+const MOUNT_STATEMENT = /^this\.app\.use\((?:'([^']*)', )?([A-Za-z_$][\w$]*)\((?:[A-Za-z_$][\w$]*)?\)\)$/
+
+/** `index.ts` 里 trim 后与 `statement` 逐字节相同的行号（0 起）。 */
+function indexStatementLines(statement: string): number[] {
+  const lines = readSource('index.ts').split('\n')
+  const hits: number[] = []
+  lines.forEach((line, index) => {
+    if (line.trim() === statement) hits.push(index)
+  })
+  return hits
+}
+
+/** 按挂载语句在 `index.ts` 里的先后排出的 MountKey（语句缺失时抛错——那时自检也已经红了）。 */
+function indexMountOrder(): MountKey[] {
+  const position = (mount: MountKey): number => {
+    const hits = indexStatementLines(MOUNTS[mount].source)
+    if (hits.length !== 1) throw new Error(`mount statement not found exactly once in index.ts: ${mount}`)
+    return hits[0]
+  }
+  return (Object.keys(MOUNTS) as MountKey[]).sort((left, right) => position(left) - position(right))
+}
+
+/** 注册文件里 `const <name> = Router()` 的变量名——只有这些变量上的 `.post(...)` 等才算注册。 */
+function routerVariables(text: string): string[] {
+  return [...text.matchAll(/\bconst ([A-Za-z_$][\w$]*) = (?:express\.)?Router\(\)/g)].map((match) => match[1])
+}
+
+/**
+ * `(method, path)` 在注册文件里的注册位置（字符偏移）。单行 `router.post('/x', ...)` 与多行
+ * `router.post(\n    '/x',` 两种写法都认；路径字面量必须逐字节相同（带收尾引号，前缀不会误中）。
+ */
+function registrationOffsets(text: string, method: WriteMethod, routePath: string): number[] {
+  const receivers = routerVariables(text).map(escapeRegExp).join('|')
+  if (!receivers) return []
+  const pattern = new RegExp(`\\b(?:${receivers})\\.${method}\\(\\s*(['"\`])${escapeRegExp(routePath)}\\1`, 'g')
+  return [...text.matchAll(pattern)].map((match) => match.index ?? -1)
+}
+
+/**
+ * 一处注册的处理器区间：从注册所在行起，到其后第一条缩进不深于注册行的非空行为止（是 `})` / `)` 收尾行
+ * 就把它算进来）。prettier 风格下这正好是这次 `router.<method>(...)` 调用本身——不会延伸到相邻路由，
+ * 也不会延伸到同文件里同样调用门函数的 helper，所以「区间里调用了门函数」量的是这条路由自己。
+ */
+function registrationRegion(text: string, offset: number): string {
+  const lines = text.slice(text.lastIndexOf('\n', offset) + 1).split('\n')
+  const indentOf = (line: string): number => line.length - line.trimStart().length
+  const indent = indentOf(lines[0])
+  for (let index = 1; index < lines.length; index += 1) {
+    const trimmed = lines[index].trim()
+    if (trimmed.length === 0 || indentOf(lines[index]) > indent) continue
+    return lines.slice(0, /^[})]/.test(trimmed) ? index + 1 : index).join('\n')
+  }
+  return lines.join('\n')
+}
+
+/** helper 函数体的第一条语句（`function <name>(...) {` 之后第一行非空源码）。 */
+function helperFirstStatement(text: string, helper: string): string | null {
+  const definition = new RegExp(`\\bfunction ${escapeRegExp(helper)}\\(`).exec(text)
+  if (!definition) return null
+  const bodyStart = text.indexOf('{', definition.index)
+  if (bodyStart < 0) return null
+  const first = text.slice(bodyStart + 1).split('\n').map((line) => line.trim()).find((line) => line.length > 0)
+  return first ?? null
+}
+
+/**
+ * 解析 `gate`：`routes/<file>.ts <分支>[ / <分支>]`，分支 = `门函数` 或 `helper -> 门函数`；
+ * 全角括号 `（…）` 里是说明文字，不参与解析。
+ */
+function parseGate(gate: string): { file: string; branches: string[][] } | null {
+  const match = /^(routes\/[a-z-]+\.ts) (.+)$/.exec(gate)
+  if (!match) return null
+  const branches = match[2]
+    .replace(/（[^）]*）/g, '')
+    .split(/\s*\/\s*/)
+    .map((branch) => branch.trim().split(/\s*->\s*/))
+  if (branches.some((branch) => branch.some((link) => !IDENTIFIER.test(link)))) return null
+  return { file: match[1], branches }
+}
+
+// ---------------------------------------------------------------------------
+// 登记表（67 条）——`reg` = 注册文件，`gate` = 注册文件 + 门函数名链；均由「fixture 自检」对源码自证
 // ---------------------------------------------------------------------------
 
 interface WriteRouteEntry {
@@ -260,7 +423,13 @@ interface WriteRouteEntry {
   readonly method: WriteMethod
   /** 与 `router.stack` 里 `layer.route.path` **逐字节相同**的注册路径 */
   readonly path: string
+  /** 注册文件（相对 `src/`，= `MOUNTS[mount].routeFile`）；自检：该文件里 `(method, path)` 恰好注册一处 */
   readonly reg: string
+  /**
+   * `routes/<file>.ts <分支>[ / <分支>]`，分支 = `门函数` 或 `helper -> 门函数`，全角括号里是说明。
+   * 自检：每条分支的第一环在这条注册的处理器区间里被调用；`helper -> 门函数` 的门函数是 helper 的第一条
+   * 语句；最后一环 = `FAMILY_GATE[family]`。
+   */
   readonly gate: string
   readonly family: GateFamily
 }
@@ -270,98 +439,99 @@ const D = 'delegation' as const
 
 const REGISTRY: readonly WriteRouteEntry[] = [
   // --- routes/admin-users.ts（27 条；门为处理器第一条语句） ---
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts:2202', gate: 'routes/admin-users.ts:2203 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts:2281', gate: 'routes/admin-users.ts:2282 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', reg: 'routes/admin-users.ts:2343', gate: 'routes/admin-users.ts:2344 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts:2421', gate: 'routes/admin-users.ts:2422 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', reg: 'routes/admin-users.ts:2527', gate: 'routes/admin-users.ts:2528 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts:2613', gate: 'routes/admin-users.ts:2614 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts:2691', gate: 'routes/admin-users.ts:2692 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-templates/apply', reg: 'routes/admin-users.ts:2756', gate: 'routes/admin-users.ts:2757 ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/member-groups', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/departments/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/scope-templates/:templateId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scopes/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/member-groups/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/scope-templates/apply', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
   // 例外 1/2：委派管理员口径（见 EXCEPTIONS）
-  { mount: 'admin-users', method: 'patch', path: '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts:2982', gate: 'routes/admin-users.ts:2983 ensureRoleDelegationAdmin', family: D },
+  { mount: 'admin-users', method: 'patch', path: '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensureRoleDelegationAdmin', family: D },
   // 例外 2/2
-  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', reg: 'routes/admin-users.ts:3060', gate: 'routes/admin-users.ts:3061 ensureRoleDelegationAdmin', family: D },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/revoke', reg: 'routes/admin-users.ts:3367', gate: 'routes/admin-users.ts:3368 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/resend', reg: 'routes/admin-users.ts:3421', gate: 'routes/admin-users.ts:3422 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users', reg: 'routes/admin-users.ts:3534', gate: 'routes/admin-users.ts:3535 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/profile', reg: 'routes/admin-users.ts:4002', gate: 'routes/admin-users.ts:4003 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts:4314', gate: 'routes/admin-users.ts:4315 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/namespaces/:namespace/admission/bulk', reg: 'routes/admin-users.ts:4365', gate: 'routes/admin-users.ts:4366 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/dingtalk-grant', reg: 'routes/admin-users.ts:4430', gate: 'routes/admin-users.ts:4431 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/dingtalk-grants/bulk', reg: 'routes/admin-users.ts:4477', gate: 'routes/admin-users.ts:4478 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/roles/assign', reg: 'routes/admin-users.ts:4530', gate: 'routes/admin-users.ts:4531 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/roles/unassign', reg: 'routes/admin-users.ts:4580', gate: 'routes/admin-users.ts:4581 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/status', reg: 'routes/admin-users.ts:4631', gate: 'routes/admin-users.ts:4632 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/reset-password', reg: 'routes/admin-users.ts:4719', gate: 'routes/admin-users.ts:4720 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/revoke-sessions', reg: 'routes/admin-users.ts:4775', gate: 'routes/admin-users.ts:4776 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/sessions/:sessionId/revoke', reg: 'routes/admin-users.ts:5045', gate: 'routes/admin-users.ts:5046 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/activate/bulk', reg: 'routes/admin-users.ts:5189', gate: 'routes/admin-users.ts:5190 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:id/activate', reg: 'routes/admin-users.ts:5272', gate: 'routes/admin-users.ts:5273 ensurePlatformAdmin', family: P },
-  { mount: 'admin-users', method: 'post', path: '/api/admin/login-aliases/backfill', reg: 'routes/admin-users.ts:5298', gate: 'routes/admin-users.ts:5299 ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensureRoleDelegationAdmin', family: D },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/revoke', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/invites/:inviteId/resend', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/profile', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/namespaces/:namespace/admission', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/namespaces/:namespace/admission/bulk', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/dingtalk-grant', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/dingtalk-grants/bulk', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/roles/assign', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/roles/unassign', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'patch', path: '/api/admin/users/:userId/status', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/reset-password', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/revoke-sessions', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:userId/sessions/:sessionId/revoke', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/activate/bulk', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/users/:id/activate', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-users', method: 'post', path: '/api/admin/login-aliases/backfill', reg: 'routes/admin-users.ts', gate: 'routes/admin-users.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory.ts（20 条） ---
-  { mount: 'admin-directory', method: 'post', path: '/dingtalk/work-notification/test', reg: 'routes/admin-directory.ts:253', gate: 'routes/admin-directory.ts:254 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'put', path: '/dingtalk/work-notification', reg: 'routes/admin-directory.ts:281', gate: 'routes/admin-directory.ts:282 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/integrations', reg: 'routes/admin-directory.ts:320', gate: 'routes/admin-directory.ts:321 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId', reg: 'routes/admin-directory.ts:353', gate: 'routes/admin-directory.ts:354 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/approval-card-config/secret/generate', reg: 'routes/admin-directory.ts:453', gate: 'routes/admin-directory.ts:454 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId/approval-card-config', reg: 'routes/admin-directory.ts:482', gate: 'routes/admin-directory.ts:483 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/integrations/test', reg: 'routes/admin-directory.ts:517', gate: 'routes/admin-directory.ts:518 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/sync', reg: 'routes/admin-directory.ts:529', gate: 'routes/admin-directory.ts:530 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/sync/preview', reg: 'routes/admin-directory.ts:621', gate: 'routes/admin-directory.ts:622 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/bind', reg: 'routes/admin-directory.ts:869', gate: 'routes/admin-directory.ts:870 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/admit-user', reg: 'routes/admin-directory.ts:919', gate: 'routes/admin-directory.ts:920 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-bind', reg: 'routes/admin-directory.ts:1007', gate: 'routes/admin-directory.ts:1008 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-admit-users', reg: 'routes/admin-directory.ts:1073', gate: 'routes/admin-directory.ts:1074 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/unbind', reg: 'routes/admin-directory.ts:1181', gate: 'routes/admin-directory.ts:1182 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-unbind', reg: 'routes/admin-directory.ts:1222', gate: 'routes/admin-directory.ts:1223 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/alerts/:alertId/ack', reg: 'routes/admin-directory.ts:1279', gate: 'routes/admin-directory.ts:1280 ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/dingtalk/work-notification/test', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'put', path: '/dingtalk/work-notification', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/approval-card-config/secret/generate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'put', path: '/integrations/:integrationId/approval-card-config', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations/test', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/sync', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/integrations/:integrationId/sync/preview', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/bind', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/admit-user', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-bind', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-admit-users', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/:accountId/unbind', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/accounts/batch-unbind', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/alerts/:alertId/ack', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin', family: P },
   // 本批唯一一条「门不在处理器第一条语句」的写路由：先跑纯解析 `readCompatibilityRestoreMode`
-  // （`:1340`，无 IO 无副作用），mode 非法走 `:1690` 的门后 400，mode 合法走 helper（门在 `:1456`）。
-  // 两条分支都在任何副作用之前过门——下面的 `deprovision restore` 用例把两条分支都打一遍。
-  { mount: 'admin-directory', method: 'post', path: '/deprovision/events/:eventId/restore', reg: 'routes/admin-directory.ts:1687', gate: 'routes/admin-directory.ts:1690 ensurePlatformAdmin（非法 mode 分支）/ :1456（helper 分支）', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/reactivate', reg: 'routes/admin-directory.ts:1703', gate: 'routes/admin-directory.ts:1456 ensurePlatformAdmin（helper restoreDeprovisionEventForRequest 第一条语句）', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/force-reactivate', reg: 'routes/admin-directory.ts:1710', gate: 'routes/admin-directory.ts:1456 ensurePlatformAdmin（同上）', family: P },
-  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/compensate-orphan-deny', reg: 'routes/admin-directory.ts:1717', gate: 'routes/admin-directory.ts:1556 ensurePlatformAdmin（helper compensateSupersededDenyGrantForRequest 第一条语句）', family: P },
+  // （无 IO 无副作用），mode 非法时处理器内 `ensurePlatformAdmin` 过门后才 400，mode 合法走 helper
+  // `restoreDeprovisionEventForRequest`（门是它的第一条语句）。两条分支都在任何副作用之前过门——
+  // 下面的 `deprovision restore` 用例把两条分支都打一遍。
+  { mount: 'admin-directory', method: 'post', path: '/deprovision/events/:eventId/restore', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts ensurePlatformAdmin（非法 mode 分支，400 之前） / restoreDeprovisionEventForRequest -> ensurePlatformAdmin（合法 mode 分支）', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/reactivate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts restoreDeprovisionEventForRequest -> ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/force-reactivate', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts restoreDeprovisionEventForRequest -> ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory', method: 'post', path: '/deprovision-events/:eventId/compensate-orphan-deny', reg: 'routes/admin-directory.ts', gate: 'routes/admin-directory.ts compensateSupersededDenyGrantForRequest -> ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-local.ts（8 条；门从 ./admin-directory import） ---
-  { mount: 'admin-directory-local', method: 'post', path: '/departments', reg: 'routes/admin-directory-local.ts:152', gate: 'routes/admin-directory-local.ts:153 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'patch', path: '/departments/:departmentId', reg: 'routes/admin-directory-local.ts:188', gate: 'routes/admin-directory-local.ts:189 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'post', path: '/departments/:departmentId/archive', reg: 'routes/admin-directory-local.ts:234', gate: 'routes/admin-directory-local.ts:235 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'post', path: '/accounts', reg: 'routes/admin-directory-local.ts:263', gate: 'routes/admin-directory-local.ts:264 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'patch', path: '/accounts/:accountId', reg: 'routes/admin-directory-local.ts:301', gate: 'routes/admin-directory-local.ts:302 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'post', path: '/accounts/:accountId/archive', reg: 'routes/admin-directory-local.ts:342', gate: 'routes/admin-directory-local.ts:343 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'post', path: '/memberships', reg: 'routes/admin-directory-local.ts:371', gate: 'routes/admin-directory-local.ts:372 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-local', method: 'patch', path: '/memberships/:membershipId', reg: 'routes/admin-directory-local.ts:405', gate: 'routes/admin-directory-local.ts:406 ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/departments', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'patch', path: '/departments/:departmentId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/departments/:departmentId/archive', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/accounts', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'patch', path: '/accounts/:accountId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/accounts/:accountId/archive', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'post', path: '/memberships', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-local', method: 'patch', path: '/memberships/:membershipId', reg: 'routes/admin-directory-local.ts', gate: 'routes/admin-directory-local.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-department-bindings.ts（1 条） ---
-  { mount: 'admin-directory-department-bindings', method: 'post', path: '/sweep', reg: 'routes/admin-directory-department-bindings.ts:85', gate: 'routes/admin-directory-department-bindings.ts:86 ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-department-bindings', method: 'post', path: '/sweep', reg: 'routes/admin-directory-department-bindings.ts', gate: 'routes/admin-directory-department-bindings.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-routing-policy.ts（1 条） ---
-  { mount: 'admin-directory-routing-policy', method: 'patch', path: '/:purpose', reg: 'routes/admin-directory-routing-policy.ts:130', gate: 'routes/admin-directory-routing-policy.ts:131 ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-routing-policy', method: 'patch', path: '/:purpose', reg: 'routes/admin-directory-routing-policy.ts', gate: 'routes/admin-directory-routing-policy.ts ensurePlatformAdmin', family: P },
 
   // --- routes/admin-directory-org-transfers.ts（5 条） ---
-  { mount: 'admin-directory-org-transfers', method: 'post', path: '/', reg: 'routes/admin-directory-org-transfers.ts:141', gate: 'routes/admin-directory-org-transfers.ts:142 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/scan', reg: 'routes/admin-directory-org-transfers.ts:195', gate: 'routes/admin-directory-org-transfers.ts:196 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/apply', reg: 'routes/admin-directory-org-transfers.ts:218', gate: 'routes/admin-directory-org-transfers.ts:219 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/cancel', reg: 'routes/admin-directory-org-transfers.ts:256', gate: 'routes/admin-directory-org-transfers.ts:257 ensurePlatformAdmin', family: P },
-  { mount: 'admin-directory-org-transfers', method: 'patch', path: '/:transferId/source-sync-freeze', reg: 'routes/admin-directory-org-transfers.ts:279', gate: 'routes/admin-directory-org-transfers.ts:280 ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-org-transfers', method: 'post', path: '/', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/scan', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/apply', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-org-transfers', method: 'post', path: '/:transferId/cancel', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
+  { mount: 'admin-directory-org-transfers', method: 'patch', path: '/:transferId/source-sync-freeze', reg: 'routes/admin-directory-org-transfers.ts', gate: 'routes/admin-directory-org-transfers.ts ensurePlatformAdmin', family: P },
 
   // --- routes/canary-routes.ts（4 条；本批唯一把门放在中间件首位的） ---
-  { mount: 'canary', method: 'put', path: '/rules/:topic', reg: 'routes/canary-routes.ts:39', gate: 'routes/canary-routes.ts:39 requireAdminRole()（中间件首位）', family: 'middleware' },
-  { mount: 'canary', method: 'delete', path: '/rules/:topic', reg: 'routes/canary-routes.ts:70', gate: 'routes/canary-routes.ts:70 requireAdminRole()（中间件首位）', family: 'middleware' },
-  { mount: 'canary', method: 'post', path: '/promote/:topic', reg: 'routes/canary-routes.ts:114', gate: 'routes/canary-routes.ts:114 requireAdminRole()（中间件首位）', family: 'middleware' },
-  { mount: 'canary', method: 'post', path: '/rollback/:topic', reg: 'routes/canary-routes.ts:136', gate: 'routes/canary-routes.ts:136 requireAdminRole()（中间件首位）', family: 'middleware' },
+  { mount: 'canary', method: 'put', path: '/rules/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
+  { mount: 'canary', method: 'delete', path: '/rules/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
+  { mount: 'canary', method: 'post', path: '/promote/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
+  { mount: 'canary', method: 'post', path: '/rollback/:topic', reg: 'routes/canary-routes.ts', gate: 'routes/canary-routes.ts requireAdminRole（中间件首位）', family: 'middleware' },
 
   // --- routes/permissions.ts 的 /api/admin 切片（1 条） ---
-  // W4-I §3.8 把门记成 `:358`（身份）+ `:359`（isAdmin）→ `:361`（403）；实读为
-  // `:353`（身份）/ `:355`（401）/ `:358`（isAdmin）/ `:360`（403），本表以实读为准。
-  { mount: 'permissions', method: 'post', path: '/api/admin/permission-templates/apply', reg: 'routes/permissions.ts:347', gate: 'routes/permissions.ts:358 isAdmin 直调 → :360 403', family: 'inline' },
+  // 门在处理器体内，顺序是：`if (!pool)` 503 -> 身份（`req.user` 的 id/sub/userId）缺失 401 ->
+  // `isAdmin(adminUserId)` 为假 403。W4-I §3.8 记的是行号（已漂移），本表只记函数名。
+  { mount: 'permissions', method: 'post', path: '/api/admin/permission-templates/apply', reg: 'routes/permissions.ts', gate: 'routes/permissions.ts isAdmin（处理器内直调：缺身份 401，非管理员 403）', family: 'inline' },
 ]
 
 /**
- * 例外登记：`ensureRoleDelegationAdmin` 是**有意的**委派管理员口径（`admin-users.ts:1721`），
+ * 例外登记：`ensureRoleDelegationAdmin`（`routes/admin-users.ts`）是**有意的**委派管理员口径，
  * 不是漏门。对它们的断言口径是「既不是平台管理员、也没有任何委派命名空间的调用者被拒」，
  * 而不是「非平台管理员被拒」——后者会把设计当 bug 钉死。
  */
@@ -373,10 +543,10 @@ const EXCEPTIONS = REGISTRY.filter((entry) => entry.family === 'delegation')
 
 /**
  * `hasLegacyAdminClaim` 的四种形态（两份副本的并集）：
- *   - `admin-directory.ts:210`–`:213`：`role==='admin'` / `roles` 含 `'admin'` /
+ *   - `routes/admin-directory.ts` 的私有 `hasLegacyAdminClaim`：`role==='admin'` / `roles` 含 `'admin'` /
  *     `permissions` 含 `'*:*'` / `perms` 含 `'*:*'`
- *   - `admin-users.ts:443`–`:445`：`role==='admin'` / `roles` 含 `'admin'` /
- *     `perms` 含 `'*:*'` 或 `'admin:all'`（**不看** `permissions`）
+ *   - `rbac/platform-admin.ts` 的 `hasLegacyAdminClaim`（`admin-users.ts` 用的那份）：`role==='admin'` /
+ *     `roles` 含 `'admin'` / `perms` 含 `'*:*'` 或 `'admin:all'`（**不看** `permissions`）
  * 注入的非管理员身份必须四条全不满足，否则 403 断言会在门根本没执行到 RBAC 的情况下假绿。
  */
 const LEGACY_CLAIM_PREDICATES: ReadonlyArray<{ form: string; holds: (user: Record<string, unknown>) => boolean }> = [
@@ -404,6 +574,12 @@ const NON_ADMIN_USER: Record<string, unknown> = Object.freeze({
   permissions: ['multitable:read'],
 })
 
+/**
+ * 路径参数 fixture。`admin-directory` 的四个 id 形参用 uuid 形状：门之后的处理器会（或将会）对畸形 id
+ * 答 400，非管理员用例不受影响（门在前），但只有 uuid 形状的值才能让管理员侧的控制组量到 400 之后的逻辑。
+ */
+const UUID_SHAPED_PARAMS = ['eventId', 'integrationId', 'accountId', 'alertId'] as const
+
 const PARAM_VALUES: Readonly<Record<string, string>> = {
   templateId: 'tpl-1',
   action: 'assign',
@@ -412,9 +588,9 @@ const PARAM_VALUES: Readonly<Record<string, string>> = {
   inviteId: 'inv-1',
   id: 'u-target',
   sessionId: 'sess-1',
-  integrationId: 'int-1',
-  accountId: 'acct-1',
-  alertId: 'alert-1',
+  integrationId: '22222222-2222-4222-8222-222222222222',
+  accountId: '33333333-3333-4333-8333-333333333333',
+  alertId: '44444444-4444-4444-8444-444444444444',
   eventId: '11111111-1111-4111-8111-111111111111',
   departmentId: 'dept-1',
   membershipId: 'mem-1',
@@ -475,10 +651,11 @@ function effectReport(): EffectReport {
 /**
  * 每个门族在「被拒绝」时允许留下的痕迹。除此之外的任何下游调用都算越过门。
  *  - platform / inline：什么都不许碰。
- *  - delegation：允许 `fetchUserRoleIds`（`admin-users.ts:481`）那一条**只读** `user_roles` 查询
+ *  - delegation：允许 `fetchUserRoleIds`（`routes/admin-users.ts`）那一条**只读** `user_roles` 查询
  *    ——委派口径本来就要先读角色才知道有没有委派命名空间；写与审计仍然零。
  *  - middleware：`requireAdminRole` 拒绝时会 best-effort 写一条 `operation_audit_logs`
- *    （`guards/audit-integration.ts:131`/`:161` -> `logSafetyOperation` 用 `pool.query`）。
+ *    （`guards/audit-integration.ts` 里 `requireAdminRole` 的「无 user」与「非 admin」两条拒绝分支
+ *    -> `logSafetyOperation` 用 `pool.query`）。
  *    这条 INSERT 本身就是门开火的证据，不是越权写。
  */
 function expectDeniedEffects(family: GateFamily, report: EffectReport): void {
@@ -610,17 +787,83 @@ describe('/api/admin 挂载点写路由守卫 — fixture 自检', () => {
     )
   })
 
+  it('admin-directory 的 id 形参 fixture 是 uuid 形状（见 UUID_SHAPED_PARAMS）', () => {
+    for (const name of UUID_SHAPED_PARAMS) {
+      expect(PARAM_VALUES[name], name).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+    }
+  })
+
   it('登记表条数与分族口径固定：67 条 / 2 条委派例外 / 4 条中间件门 / 1 条 inline', () => {
     expect(REGISTRY).toHaveLength(67)
     expect(REGISTRY.filter((e) => e.family === 'delegation')).toHaveLength(2)
     expect(REGISTRY.filter((e) => e.family === 'middleware')).toHaveLength(4)
     expect(REGISTRY.filter((e) => e.family === 'inline')).toHaveLength(1)
     expect(REGISTRY.filter((e) => e.family === 'platform')).toHaveLength(60)
-    // 每条都必须带来源
+    // 每条都必须带来源：reg = 该挂载点的注册文件；gate 可解析，且每条分支链的最后一环是本族的门函数
     for (const entry of REGISTRY) {
-      expect(entry.reg, label(entry)).toMatch(/^routes\/[a-z-]+\.ts:\d+$/)
-      expect(entry.gate, label(entry)).toMatch(/^routes\/[a-z-]+\.ts:\d+/)
+      expect(entry.reg, label(entry)).toBe(MOUNTS[entry.mount].routeFile)
+      const gate = parseGate(entry.gate)
+      expect(gate, `${label(entry)} gate 形状不认识：${entry.gate}`).not.toBeNull()
+      for (const branch of gate!.branches) {
+        expect(branch[branch.length - 1], label(entry)).toBe(FAMILY_GATE[entry.family])
+      }
     }
+  })
+
+  it('挂载点锚点对 index.ts 自证：挂载语句恰好一处、字面路径 = mountPath、调用的工厂 = factory', () => {
+    const problems: string[] = []
+    for (const [mount, spec] of Object.entries(MOUNTS) as Array<[MountKey, MountSpec]>) {
+      const hits = indexStatementLines(spec.source)
+      if (hits.length !== 1) {
+        problems.push(`${mount}: index.ts 里与挂载语句逐字节相同的行有 ${hits.length} 处（应恰好 1 处）：${spec.source}`)
+      }
+      const parsed = MOUNT_STATEMENT.exec(spec.source)
+      if (!parsed) {
+        problems.push(`${mount}: 挂载语句形状不认识：${spec.source}`)
+        continue
+      }
+      const literalPath = parsed[1] ?? '/'
+      if (literalPath !== spec.mountPath) {
+        problems.push(`${mount}: 挂载语句的字面路径 ${literalPath} 与 mountPath ${spec.mountPath} 不一致`)
+      }
+      if (parsed[2] !== spec.factory.name) {
+        problems.push(`${mount}: 挂载语句调用的是 ${parsed[2]}，factory 却是 ${spec.factory.name}`)
+      }
+    }
+    expect(problems).toEqual([])
+  })
+
+  it('登记表锚点对源码自证：(method, path) 恰好注册一处；门函数在该注册的处理器区间里被调用；helper 的第一条语句是门', () => {
+    const problems: string[] = []
+    for (const entry of REGISTRY) {
+      const text = readSource(entry.reg)
+      const offsets = registrationOffsets(text, entry.method, entry.path)
+      if (offsets.length !== 1) {
+        problems.push(`${label(entry)}: ${entry.reg} 里 .${entry.method}('${entry.path}') 注册了 ${offsets.length} 处（应恰好 1 处）`)
+        continue
+      }
+      const gate = parseGate(entry.gate)
+      if (!gate) {
+        problems.push(`${label(entry)}: gate 形状不认识：${entry.gate}`)
+        continue
+      }
+      const region = registrationRegion(text, offsets[0])
+      const gateText = readSource(gate.file)
+      for (const branch of gate.branches) {
+        if (!new RegExp(`\\b${escapeRegExp(branch[0])}\\(`).test(region)) {
+          problems.push(`${label(entry)}: 处理器区间里没有调用 ${branch[0]}(...)`)
+        }
+        for (let index = 1; index < branch.length; index += 1) {
+          const first = helperFirstStatement(gateText, branch[index - 1])
+          if (first === null || !new RegExp(`\\b${escapeRegExp(branch[index])}\\(`).test(first)) {
+            problems.push(
+              `${label(entry)}: ${gate.file} 里 ${branch[index - 1]} 的第一条语句不是 ${branch[index]}(...)：${first ?? '找不到定义'}`,
+            )
+          }
+        }
+      }
+    }
+    expect(problems).toEqual([])
   })
 })
 
@@ -653,7 +896,7 @@ describe('(A) 非管理员（无任何 legacy admin claim，isAdmin 恒 false）
   it.each(EXCEPTIONS.map((entry) => [label(entry), entry] as const))(
     '%s（委派例外）-> 无委派命名空间的非管理员被拒',
     async (_name, entry) => {
-      // `fetchUserRoleIds`（admin-users.ts:481）读不到任何角色 -> `deriveDelegableNamespaces` 为空 -> 403
+      // `fetchUserRoleIds`（routes/admin-users.ts）读不到任何角色 -> `deriveDelegableNamespaces` 为空 -> 403
       pg.query.mockResolvedValue({ rows: [] })
       const response = await send(entry, NON_ADMIN_USER)
       expect(response.status).toBe(403)
@@ -666,7 +909,7 @@ describe('(A) 非管理员（无任何 legacy admin claim，isAdmin 恒 false）
   )
 
   it('委派例外不是平台管理员口径：持有委派命名空间的非平台管理员**不**被这道门拒（口径是设计，不是 bug）', async () => {
-    // `attendance_admin` -> `deriveDelegatedAdminNamespace` -> 'attendance'（rbac/namespace-admission.ts:102）
+    // `attendance_admin` -> `deriveDelegatedAdminNamespace`（rbac/namespace-admission.ts）-> 'attendance'
     pg.query.mockResolvedValue({ rows: [{ role_id: 'attendance_admin' }] })
     for (const entry of EXCEPTIONS) {
       const response = await send(entry, NON_ADMIN_USER)
@@ -677,12 +920,12 @@ describe('(A) 非管理员（无任何 legacy admin claim，isAdmin 恒 false）
   it('POST /api/admin/directory/deprovision/events/:eventId/restore 的两条分支都先过门', async () => {
     const entry = REGISTRY.find((candidate) => candidate.path === '/deprovision/events/:eventId/restore')
     expect(entry).toBeDefined()
-    // 非法 mode -> :1690 的门（400 分支之前）
+    // 非法 mode -> 处理器内 `ensurePlatformAdmin`（400 分支之前）
     const invalidMode = await send(entry!, NON_ADMIN_USER, { mode: 'not-a-mode' })
     expect(invalidMode.status).toBe(403)
     expect(invalidMode.body.error.code).toBe('FORBIDDEN')
     expectDeniedEffects('platform', effectReport())
-    // 合法 mode -> helper `restoreDeprovisionEventForRequest` 的门（:1456）
+    // 合法 mode -> helper `restoreDeprovisionEventForRequest` 的门（它的第一条语句）
     const validMode = await send(entry!, NON_ADMIN_USER, { mode: 'rehire' })
     expect(validMode.status).toBe(403)
     expect(validMode.body.error.code).toBe('FORBIDDEN')
@@ -694,7 +937,7 @@ describe('(A) 无身份（req.user 缺失）逐条写路由 fail-closed', () => 
   it.each(REGISTRY.map((entry) => [label(entry), entry] as const))('%s -> 401/403，无副作用', async (_name, entry) => {
     const response = await send(entry, null)
     if (entry.family === 'middleware') {
-      // requireAdminRole 对「没有 req.user」也答 403 ADMIN_REQUIRED（guards/audit-integration.ts:131）
+      // requireAdminRole 对「没有 req.user」也答 403 ADMIN_REQUIRED（guards/audit-integration.ts 的 `!user?.id` 分支）
       expect(response.status).toBe(403)
       expect(response.body.code).toBe('ADMIN_REQUIRED')
     } else if (entry.family === 'inline') {
@@ -897,22 +1140,18 @@ describe('(B) 清单双向反查：router.stack 枚举出的写路由集合必�
   })
 
   it('按 index.ts 真实顺序挂在同一个 app 上时，前缀重叠的挂载点仍各自被自己的门拒', async () => {
-    // org-transfers 挂在 admin-directory 之前（index.ts:1901 vs :1902），local/department-bindings/
-    // routing-policy 挂在其后——同一个 app 里谁接管这些 URL 是顺序决定的，逐 router 建 app 看不到。
+    // 同一个 app 里谁接管前缀重叠的 URL 是挂载顺序决定的，逐 router 建 app 看不到。顺序不手写：按
+    // `MOUNTS[*].source` 那几条挂载语句在 `index.ts` 里的先后排（目前 org-transfers 在 admin-directory
+    // 之前，local/department-bindings/routing-policy 在其后）。
     const app = express()
     app.use(express.json())
     app.use((req: Request, _res: Response, next: NextFunction) => {
       ;(req as Request & { user?: unknown }).user = NON_ADMIN_USER
       next()
     })
-    app.use(MOUNTS['admin-users'].mountPath, MOUNTS['admin-users'].build())
-    app.use(MOUNTS['admin-directory-org-transfers'].mountPath, MOUNTS['admin-directory-org-transfers'].build())
-    app.use(MOUNTS['admin-directory'].mountPath, MOUNTS['admin-directory'].build())
-    app.use(MOUNTS['admin-directory-local'].mountPath, MOUNTS['admin-directory-local'].build())
-    app.use(MOUNTS['admin-directory-department-bindings'].mountPath, MOUNTS['admin-directory-department-bindings'].build())
-    app.use(MOUNTS['admin-directory-routing-policy'].mountPath, MOUNTS['admin-directory-routing-policy'].build())
-    app.use(MOUNTS.canary.mountPath, MOUNTS.canary.build())
-    app.use(MOUNTS.permissions.mountPath, MOUNTS.permissions.build())
+    for (const mount of indexMountOrder()) {
+      app.use(MOUNTS[mount].mountPath, MOUNTS[mount].build())
+    }
     pinned.setApp(app)
     armProbes()
 
