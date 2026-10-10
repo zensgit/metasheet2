@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type {
   ApprovalGraph,
   ApprovalTemplateDetailDTO,
+  AutoApprovalPolicy,
   EmptyAssigneeFallback,
   NodeOperationPolicy,
 } from '../src/types/approval'
@@ -11,9 +12,19 @@ import {
   unsupportedTemplateAuthoringReason,
 } from '../src/approvals/templateAuthoring'
 import {
+  SAME_PERSON_EXPLICIT_CHOICE_LABELS,
+  SAME_PERSON_UNKNOWN_LABEL,
+  SAME_PERSON_UNKNOWN_SELECT_VALUE,
   applyApprovalNodeEditsToGraph,
+  applySamePersonChoice,
   approvalNodeEditsFromGraph,
+  emptyAssigneeFallbackHasTarget,
+  samePersonChoiceFromSelectValue,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonSelectValue,
   validateApprovalNodeEdits,
+  withEmptyAssigneeFallbackIds,
 } from '../src/approvals/approvalNodeEdit'
 import {
   OPERATION_POLICY_MIXED_HINT,
@@ -490,9 +501,11 @@ describe('Lock-4 §3 F4-B / gate P3-2 — the LINEAR path re-emits designated + 
 })
 
 describe('Lock-4 §3 F4-B / gate P3-2 — the CANVAS path preserves the key across an edit it does not own', () => {
-  it('an untouched seed + rebuild reproduces the persisted designated + emptyAssigneeFallback byte-for-byte (spread-preserve, no edit-model entry needed)', () => {
+  it('an untouched seed + rebuild reproduces the persisted designated + emptyAssigneeFallback byte-for-byte (W1-1a: identity seed — the edit model now carries the key)', () => {
     const graph = complexGraphWithF4B({ userIds: ['admin-1'] })
-    const rebuilt = applyApprovalNodeEditsToGraph(graph, approvalNodeEditsFromGraph(graph))
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.approval_1?.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
+    const rebuilt = applyApprovalNodeEditsToGraph(graph, edits)
     expect(rebuilt.nodes.find((n) => n.key === 'approval_1')!.config).toEqual(
       graph.nodes.find((n) => n.key === 'approval_1')!.config,
     )
@@ -568,5 +581,191 @@ describe('Lock-4 §3 F4-B / gate P3-2 — the CANVAS path preserves the key acro
     const config = rebuilt.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
     expect(config.emptyAssigneePolicy).toBe('designated')
     expect(config.emptyAssigneeFallback).toEqual({ userIds: ['admin-1'] })
+  })
+})
+
+// ── W1-1a (Lock-4 §3 F4-B, RATIFIED; backend on main) — the 'designated' fallback becomes AUTHORABLE
+// in BOTH editors through typed user/role pickers. The lock: "`emptyAssigneeFallback?: { userIds?:
+// string[]; roleIds?: string[] }`, filled through typed pickers only (D0 §10.2). `'error'` stays the
+// absent default." Backend enforcement evidence (Lock-4 §2.1 / X-5): tests/unit/
+// approval-p3a-f4b-designated-fallback.test.ts (B-1/B-2/B-3) + approval-realdb-f4b-designated lane.
+describe('W1-1a — Lock-4 F4-B authoring: the shared fallback helpers', () => {
+  it('withEmptyAssigneeFallbackIds replaces ONE side, keeps the other, and prunes blanks / duplicates / an empty side', () => {
+    expect(withEmptyAssigneeFallbackIds(undefined, 'user', ['u1', ' u1 ', '', 'u2'])).toEqual({ userIds: ['u1', 'u2'] })
+    expect(withEmptyAssigneeFallbackIds({ userIds: ['u1'] }, 'role', ['r1'])).toEqual({ userIds: ['u1'], roleIds: ['r1'] })
+    expect(withEmptyAssigneeFallbackIds({ userIds: ['u1'], roleIds: ['r1'] }, 'user', [])).toEqual({ roleIds: ['r1'] })
+  })
+
+  it('clearing BOTH sides yields undefined (the key is dropped — the backend normalizes an all-empty fallback to absent the same way)', () => {
+    expect(withEmptyAssigneeFallbackIds({ roleIds: ['r1'] }, 'role', [])).toBeUndefined()
+    expect(withEmptyAssigneeFallbackIds(undefined, 'user', ['  '])).toBeUndefined()
+  })
+
+  it('returns a FRESH object (never aliases the input)', () => {
+    const input: EmptyAssigneeFallback = { userIds: ['u1'], roleIds: ['r1'] }
+    const out = withEmptyAssigneeFallbackIds(input, 'user', ['u2'])!
+    expect(out).not.toBe(input)
+    expect(input).toEqual({ userIds: ['u1'], roleIds: ['r1'] })
+  })
+
+  it('emptyAssigneeFallbackHasTarget mirrors the backend B-s10 emptiness check (empty arrays ≡ absent)', () => {
+    expect(emptyAssigneeFallbackHasTarget(undefined)).toBe(false)
+    expect(emptyAssigneeFallbackHasTarget(null)).toBe(false)
+    expect(emptyAssigneeFallbackHasTarget({})).toBe(false)
+    expect(emptyAssigneeFallbackHasTarget({ userIds: [], roleIds: [] })).toBe(false)
+    expect(emptyAssigneeFallbackHasTarget({ userIds: ['  '] })).toBe(false)
+    // POSITIVE CONTROLS — either side alone counts.
+    expect(emptyAssigneeFallbackHasTarget({ userIds: ['u1'] })).toBe(true)
+    expect(emptyAssigneeFallbackHasTarget({ roleIds: ['r1'] })).toBe(true)
+  })
+})
+
+describe('W1-1a — Lock-4 F4-B authoring: CANVAS editor carries the fallback in the edit model', () => {
+  it('the seed is IDENTITY: present when persisted, absent (not even an undefined key) when not', () => {
+    const withKey = approvalNodeEditsFromGraph(complexGraphWithF4B({ roleIds: ['approval-admin'] }))
+    expect(withKey.approval_1?.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+    const without = approvalNodeEditsFromGraph(complexGraph({ assigneeSources: [{ kind: 'requester' }] }))
+    expect(Object.prototype.hasOwnProperty.call(without.approval_1, 'emptyAssigneeFallback')).toBe(false)
+  })
+
+  it('an authored fallback is written under designated; null removes it; switching away removes it', () => {
+    const graph = complexGraph({ assigneeSources: [{ kind: 'requester' }], emptyAssigneePolicy: 'error' })
+    const edits = approvalNodeEditsFromGraph(graph)
+    edits.approval_1!.emptyAssigneePolicy = 'designated'
+    edits.approval_1!.emptyAssigneeFallback = withEmptyAssigneeFallbackIds(undefined, 'user', ['u1'])
+    let config = applyApprovalNodeEditsToGraph(graph, edits).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ userIds: ['u1'] })
+
+    edits.approval_1!.emptyAssigneeFallback = null
+    config = applyApprovalNodeEditsToGraph(graph, edits).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+
+    edits.approval_1!.emptyAssigneeFallback = { userIds: ['u1'] }
+    edits.approval_1!.emptyAssigneePolicy = 'auto-approve'
+    config = applyApprovalNodeEditsToGraph(graph, edits).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'emptyAssigneeFallback')).toBe(false)
+  })
+
+  it('B-s10 FE mirror on the CANVAS path: designated without a target is flagged; with one it is not (positive control)', () => {
+    const graph = complexGraph({ assigneeSources: [{ kind: 'requester' }], emptyAssigneePolicy: 'error' })
+    const edits = approvalNodeEditsFromGraph(graph)
+    edits.approval_1!.emptyAssigneePolicy = 'designated'
+    expect(validateApprovalNodeEdits(edits).some((e) => e.includes('转交指定人员'))).toBe(true)
+    edits.approval_1!.emptyAssigneeFallback = { userIds: [], roleIds: [] }
+    expect(validateApprovalNodeEdits(edits).some((e) => e.includes('转交指定人员'))).toBe(true)
+    edits.approval_1!.emptyAssigneeFallback = { roleIds: ['approval-admin'] }
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+})
+
+// ── W1-1a (Lock-4 §2 F4-C, RATIFIED; backend on main) — the four-value 审批人与发起人为同一人时
+// control. Lock text: "Enum `samePersonPolicy?: 'self_approve' | 'auto_skip' |
+// 'transfer_direct_manager' | 'transfer_dept_head'`, absent ≡ `'self_approve'` ≡ today's behavior when
+// `mergeWithRequester` is off." / "`mergeWithRequester:true` … IS the 自动跳过 family … stays the
+// persisted carrier for that value, so no existing graph changes shape." Backend enforcement evidence
+// (§2.1 / X-5): tests/unit/approval-lock4-f4c-same-person.test.ts (exact set, auto_skip synthesis,
+// X-1, C-1/C-3) + tests/integration/approval-lock4-f4c-same-person.db.test.ts (C-1/C-2/C-3).
+describe('W1-1a — Lock-4 F4-C: samePersonControlState projects what the backend RUNS', () => {
+  const cases: Array<[string, AutoApprovalPolicy | undefined, string]> = [
+    ['absent policy', undefined, 'default'],
+    ['empty object', {}, 'default'],
+    ['explicit mergeWithRequester:false', { mergeWithRequester: false }, 'default'],
+    ['bare legacy carrier', { mergeWithRequester: true }, 'auto_skip'],
+    ['auto_skip as the backend persists it', { mergeWithRequester: true, samePersonPolicy: 'auto_skip' }, 'auto_skip'],
+    ['explicit self_approve', { samePersonPolicy: 'self_approve' }, 'self_approve'],
+    ['transfer_direct_manager', { samePersonPolicy: 'transfer_direct_manager' }, 'transfer_direct_manager'],
+    ['transfer_dept_head', { samePersonPolicy: 'transfer_dept_head' }, 'transfer_dept_head'],
+    // API-only combinations: the resolver substitutes BEFORE the merge cascade, so a transfer wins…
+    ['transfer + a co-present merge flag', { samePersonPolicy: 'transfer_dept_head', mergeWithRequester: true }, 'transfer_dept_head'],
+    // …but an explicit self_approve does NOT stop the merge cascade — runtime auto-skips, so the UI says so.
+    ['self_approve + a co-present merge flag', { samePersonPolicy: 'self_approve', mergeWithRequester: true }, 'auto_skip'],
+    ['siblings only', { mergeAdjacentApprover: true, actorMode: 'system' }, 'default'],
+  ]
+  for (const [label, policy, expected] of cases) {
+    it(`${label} → ${expected}`, () => {
+      expect(samePersonControlState(policy)).toEqual({ kind: 'editable', choice: expected })
+      expect(samePersonSelectValue(policy)).toBe(expected)
+    })
+  }
+
+  it('gate X-3: an OFF-ENUM persisted value is `unknown` — never projected onto a known choice', () => {
+    const policy = { samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy
+    expect(samePersonControlState(policy)).toEqual({ kind: 'unknown' })
+    expect(samePersonSelectValue(policy)).toBe(SAME_PERSON_UNKNOWN_SELECT_VALUE)
+  })
+})
+
+describe('W1-1a — Lock-4 F4-C: applySamePersonChoice owns BOTH carriers and keeps every sibling', () => {
+  const siblings: AutoApprovalPolicy = { mergeAdjacentApprover: true, dedupeHistoricalApprover: false, actorMode: 'system' }
+
+  it("implementer default (a): 'auto_skip' writes samePersonPolicy:'auto_skip' AND mergeWithRequester:true (the shape the backend persists)", () => {
+    expect(applySamePersonChoice(undefined, 'auto_skip')).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
+  })
+
+  it('INVARIANT — leaving auto_skip for self_approve / a transfer DELETES mergeWithRequester (else the merge cascade would still auto-skip while the UI says otherwise)', () => {
+    for (const from of [{ mergeWithRequester: true }, { mergeWithRequester: true, samePersonPolicy: 'auto_skip' }] as AutoApprovalPolicy[]) {
+      expect(applySamePersonChoice(from, 'self_approve')).toEqual({ samePersonPolicy: 'self_approve' })
+      expect(applySamePersonChoice(from, 'transfer_direct_manager')).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+      expect(applySamePersonChoice(from, 'transfer_dept_head')).toEqual({ samePersonPolicy: 'transfer_dept_head' })
+    }
+  })
+
+  it("implementer default (b): 'default' OMITS both keys — null when nothing else is left (the canvas 'remove the key' grammar)", () => {
+    expect(applySamePersonChoice({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' }, 'default')).toBeNull()
+    expect(applySamePersonChoice({ samePersonPolicy: 'transfer_dept_head' }, 'default')).toBeNull()
+    expect(applySamePersonChoice({ samePersonPolicy: 'self_approve' }, 'default')).toBeNull()
+  })
+
+  it('delete-key-keep-siblings (Lock-4 OD-L4-6): mergeAdjacentApprover / dedupeHistoricalApprover / actorMode survive every pick', () => {
+    expect(applySamePersonChoice({ ...siblings, mergeWithRequester: true }, 'default')).toEqual(siblings)
+    expect(applySamePersonChoice(siblings, 'transfer_direct_manager')).toEqual({ ...siblings, samePersonPolicy: 'transfer_direct_manager' })
+    expect(applySamePersonChoice(siblings, 'auto_skip')).toEqual({ ...siblings, mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
+  })
+
+  it('implementer default (c): re-picking the CURRENT projection is a no-op — a bare legacy { mergeWithRequester:true } keeps its exact shape', () => {
+    const legacy: AutoApprovalPolicy = { mergeWithRequester: true }
+    expect(applySamePersonChoice(legacy, 'auto_skip')).toBe(legacy)
+    expect(applySamePersonChoice(undefined, 'default')).toBeUndefined()
+  })
+
+  it('gate X-3: an unknown persisted value is never overwritten by the control (fail-closed no-op)', () => {
+    const unknown = { samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy
+    expect(applySamePersonChoice(unknown, 'auto_skip')).toBe(unknown)
+    expect(applySamePersonChoice(unknown, 'default')).toBe(unknown)
+  })
+
+  it('the raw select value is narrowed before any write: only default + the four ratified values pass', () => {
+    expect(samePersonChoiceFromSelectValue('default')).toBe('default')
+    expect(samePersonChoiceFromSelectValue('transfer_dept_head')).toBe('transfer_dept_head')
+    expect(samePersonChoiceFromSelectValue(SAME_PERSON_UNKNOWN_SELECT_VALUE)).toBeNull()
+    expect(samePersonChoiceFromSelectValue('')).toBeNull()
+    expect(samePersonChoiceFromSelectValue(undefined)).toBeNull()
+  })
+})
+
+describe('W1-1a — Lock-4 F4-C: option rendering (M8 honesty — business labels, never the raw enum)', () => {
+  it('offers 默认 + exactly the four ratified values, in lock order', () => {
+    expect(samePersonChoiceOptions(undefined).map((o) => o.value))
+      .toEqual(['default', 'self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'])
+    for (const option of samePersonChoiceOptions(undefined)) {
+      expect(option.label).not.toMatch(/self_approve|auto_skip|transfer_/)
+    }
+    expect(samePersonChoiceOptions(undefined)[1]!.label).toBe(SAME_PERSON_EXPLICIT_CHOICE_LABELS.self_approve)
+  })
+
+  it("default (b) honesty: 默认 says 跟随模板 only when the node has NO other node-level auto-approval key", () => {
+    expect(samePersonChoiceOptions(undefined)[0]!.label).toBe('默认（跟随模板设置）')
+    expect(samePersonChoiceOptions({ mergeWithRequester: true })[0]!.label).toBe('默认（跟随模板设置）')
+    // A sibling key means the node ALREADY overrides the template-level policy (Lock-4 §0 precedence).
+    expect(samePersonChoiceOptions({ mergeAdjacentApprover: true })[0]!.label).toBe('默认（本节点不单独设置）')
+  })
+
+  it('gate X-3: an unknown persisted value gets ONE leading read-only option with an honest label (never the raw string)', () => {
+    const options = samePersonChoiceOptions({ samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy)
+    expect(options[0]).toEqual({ value: SAME_PERSON_UNKNOWN_SELECT_VALUE, label: SAME_PERSON_UNKNOWN_LABEL })
+    expect(options.map((o) => o.label).join('|')).not.toContain('transfer_to_ceo')
+    // POSITIVE CONTROL — a known value adds no such option (the branch is value-selected).
+    expect(samePersonChoiceOptions({ samePersonPolicy: 'transfer_dept_head' }).some((o) => o.value === SAME_PERSON_UNKNOWN_SELECT_VALUE)).toBe(false)
   })
 })
