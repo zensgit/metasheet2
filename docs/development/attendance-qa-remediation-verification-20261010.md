@@ -2,13 +2,21 @@
 
 ## 当前结论
 
-冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支已先后正常合并 `main` `548c1d5834`、`0f17cf6085` 、`20c705add7` 与当前冻结快照 `e0205875d7`，均无冲突；测试链两边合并后无丢项，本地 merge/CI 守卫与 provenance 检查均有结果，详见下文。
+冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支当前正常对齐固定 main 快照 `00caf5f639`；历次 main 合并均无冲突，测试链并集无丢项，本地检查结果及各批冻结身份见下文。
 
 本轮独立审阅发现并修复一个 P2：跨午夜的旧刷新，以及审批后迟到的历史请求，均可能覆盖新一天的本人签到状态。两个入口已补齐开始时刻/最终规则时区保护；反例在修复前失败、修复后通过，完整前端回归与 Astra 最终复核通过。原 QA 环境、真实历史、性能与远端 CI 尚未验证，不能声称附件 20 项全部解决。
 
 首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，早期正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。该批合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，对应回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。各批证据保留自己的冻结代码身份；当前代码见下一节。
 
-## #6285 对齐后的当前代码
+## #6296 对齐后的当前代码
+
+正常合并固定 main `00caf5f639050700cb4590448d9261f0fef2b101`（#6296），合并提交 `703c3c233e54a0100222581c1e0d07c2d1bf04fe`，树 `70addd34eaaf28a21f7ee10e4ecc776f9dc3da31`；无冲突、无手工源码解冲突、未 rebase 或强推。考勤 View/dashboard/today/prefill、attendance-web-guard、web-tests、plugin-tests、token manifest、backend Vitest 和 integration test chain 保持原哈希；required-web 脚本仅注释变化，运行 token 仍为 559，三项新增前端 spec 的双点接线保留。
+
+在上述树上 Node 20 / pnpm 10.33 新跑两个受影响审批 spec **20 通过、0 失败/跳过**（return candidates 11、can-decide 9），完整 Web 类型脚本、provenance 与 **3 项审批 CI 接线契约**通过。守卫首次调用因 PATH 先匹配 Corepack pnpm 而报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`；改为优先现有 pnpm 10.33 后通过，未改 package/lockfile。Playwright `--list` 收集 **9 文件、60 项**，其中 return-candidates 6 项；这是收集证明，未执行浏览器用例。未改动的考勤、backend/数据库及此前浏览器结果保留原冻结身份，未重复执行。
+
+证据：[`approval-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/approval-main-alignment.json)。日志为 `approval-main-affected-frontend.log`、`approval-main-web-typecheck.log`、`approval-main-ci-contract.log`、`approval-main-browser-list.log` 和 `approval-main-provenance.log`；首次环境失败留在 `approval-main-ci-contract-initial.log`。公开 Draft PR 与最终 head 远端 CI 尚待批准；PR 合并、部署、真实历史操作及原 QA/性能验收保持各自授权边界。
+
+## #6285 考勤代码对齐
 
 本地正常合并固定 main 快照 `e0205875d7e523466f68f2ecb0ecd19c25b9cbbf`，合并提交 `895acd06b7678d7d2add1eac4f183318eee28591`，树 `177793708e5b8fbdf724b767db97f36cb4f46da0`；无冲突、无手工源码解冲突、未 rebase 或强推。
 
