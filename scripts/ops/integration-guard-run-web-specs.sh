@@ -163,7 +163,12 @@ pnpm --filter @metasheet/web exec vitest run \
   IntegrationFieldOptionSyncPanel \
   IntegrationHelpView \
   IntegrationHubOverviewSection \
+  IntegrationK3B4RunPanel \
+  IntegrationK3B4WorkbenchAccess \
+  IntegrationK3Bl2RunPanel \
+  IntegrationK3Bl2Services \
   IntegrationK3WiseSetupView \
+  IntegrationK3WorkbenchStartup \
   IntegrationMappingRulesSection \
   IntegrationMonitoringSection \
   IntegrationObjectTemplateSection \

@@ -96,12 +96,12 @@
           <div class="integration-workbench__panel-head">
             <div>
               <h2>读取源配置(顾问自助)</h2>
-          <p>标准化第三方 API 只读读取源:S1 结构校验 → 定位容器探测 → 内容寻址保存版本 → 审批。运行时只消费已审批版本;本面板不含写入 / 删除。</p>
+          <p>标准化第三方 API 读取源：校验 → 探测 → 保存版本 → 审批 → 手动运行。外部系统只读；已批准的 K3 B4 可单页试读，管理员同步可能写 MetaSheet 内部物料缓存。</p>
         </div>
       </div>
         </template>
 
-      <IntegrationReadSourceConfigPanel :scope="currentScope()" :systems="systems" />
+      <IntegrationReadSourceConfigPanel :scope="currentScope()" :systems="systems" :has-integration-admin="readSourceAdminHint" />
       </el-card>
     </section>
 
@@ -458,6 +458,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useAuth } from '../composables/useAuth'
+import { onAuthSessionSwitch } from '../composables/authPrincipal'
+import { holdsPlatformAdmin } from '../services/integration/stockPreparation/workbenchAccess'
 import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
 import PageHeader from '../components/layout/PageHeader.vue'
@@ -674,6 +676,28 @@ const flowSteps = [
   { title: '4. Dry-run / 交付', description: '预览 payload 后导出，或写入多维表；K3 目标只读不写回' },
 ]
 const auth = useAuth()
+// UI hint only: the source-run route still authorizes every request. Do not use
+// hasPermission here: its broad isAdmin shortcut is not this route's admin gate.
+const readSourceAdminHint = ref(holdsPlatformAdmin(auth.getAccessSnapshot()))
+function refreshReadSourceAdminHint() {
+  readSourceAdminHint.value = holdsPlatformAdmin(auth.getAccessSnapshot())
+}
+function onReadSourceAccessStorage(event: StorageEvent) {
+  if (event.key === null || ['user_permissions', 'user_roles', 'auth_token', 'jwt', 'devToken'].includes(event.key)) {
+    refreshReadSourceAdminHint()
+  }
+}
+const unsubscribeReadSourceSession = onAuthSessionSwitch(refreshReadSourceAdminHint)
+onMounted(() => {
+  refreshReadSourceAdminHint()
+  window.addEventListener('storage', onReadSourceAccessStorage)
+  window.addEventListener('focus', refreshReadSourceAdminHint)
+})
+onBeforeUnmount(() => {
+  unsubscribeReadSourceSession()
+  window.removeEventListener('storage', onReadSourceAccessStorage)
+  window.removeEventListener('focus', refreshReadSourceAdminHint)
+})
 const { locale } = useLocale()
 
 // IU-6a: bilingual guidance copy helper — same locale pattern as the IU-1 error labels elsewhere in
