@@ -29,8 +29,38 @@ const preload = path.join(lib, 'stock-preparation-yida-browser-ci-preload.cjs')
 const backend = path.join(root, 'packages/core-backend')
 const requireBackend = createRequire(path.join(backend, 'package.json'))
 const native = createRequire(import.meta.url)(nativePath)
-const fail = code => new Error('YIDA_BROWSER_CI_' + code)
+// Only errors created here carry a public reason. Never inspect thrown values:
+// even message/code getters or a forged Error can contain customer values.
+const failureReasons = new WeakMap()
+const failureStages = new WeakMap()
+const startupReasons = new Set(['ARGUMENTS_INVALID', 'ENVIRONMENT_FILE_PRESENT', 'PATH_INVALID',
+  'PLATFORM_UNSUPPORTED', 'NODE_VERSION_UNSUPPORTED', 'IDENTITY_INVALID', 'INIT_UNAVAILABLE', 'INTERRUPTED'])
+const startupStages = new Set(['RUNTIME', 'ARGUMENTS', 'ENVIRONMENT_FILES', 'PATHS', 'TOOLS',
+  'SOURCE_INTEGRITY', 'OWNER', 'NAMESPACE', 'WORKER'])
+const fail = code => {
+  const reason = startupReasons.has(code) ? code : 'INTERNAL'
+  const error = new Error('YIDA_BROWSER_CI_' + reason)
+  failureReasons.set(error, reason)
+  return error
+}
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+
+export function startupFailureDiagnostic(error, stage) {
+  return Object.freeze({ stage: startupStages.has(stage) ? stage : 'RUNTIME',
+    reason: failureReasons.get(error) ?? 'INTERNAL' })
+}
+
+export function reportStartupFailure(error, stage = failureStages.get(error), write = console.error) {
+  process.exitCode = 1
+  write('YIDA_BROWSER_CI_FAILED')
+  write('YIDA_BROWSER_CI_STARTUP_FAILED ' + JSON.stringify(startupFailureDiagnostic(error, stage)))
+}
+
+function assertRuntime() {
+  if (process.platform !== 'linux') throw fail('PLATFORM_UNSUPPORTED')
+  if (Number(process.versions.node.split('.')[0]) !== 20) throw fail('NODE_VERSION_UNSUPPORTED')
+  if (!(process.getuid() > 0 && process.getgid() > 0)) throw fail('IDENTITY_INVALID')
+}
 
 export function cleanEnvironment(input = {}) {
   // HOME/cache location is OS plumbing for the preinstalled Chromium. Node,
@@ -281,16 +311,21 @@ async function worker(owner, ownerPath, ownerSha) {
   }
 }
 
-async function outer(args) {
+async function outer(args, setStage) {
+  setStage('ARGUMENTS')
   const { pgBin } = parsePublicArguments(args)
-  assert.equal(process.platform, 'linux'); assert.equal(Number(process.versions.node.split('.')[0]), 20)
-  assert(process.getuid() > 0 && process.getgid() > 0)
+  setStage('RUNTIME')
+  assertRuntime()
+  setStage('ENVIRONMENT_FILES')
   assertNoEnvironmentFiles([root, backend, path.join(root, 'apps/web')])
+  setStage('PATHS')
   plain(root, true); plain(pgBin, true)
+  setStage('TOOLS')
   for (const tool of ['/usr/bin/unshare', '/usr/bin/setpriv', '/usr/bin/python3', '/usr/sbin/ip']) {
     // System tools may legitimately be symlinks; they are fixed paths, never caller executables.
     fs.accessSync(tool, fs.constants.X_OK)
   }
+  setStage('PATHS')
   const node = fs.realpathSync(process.execPath), cli = requireBackend.resolve('vitest/vitest.mjs')
   assert.equal(process.execPath, node)
   const tmp = path.join(root, 'tmp')
@@ -300,15 +335,18 @@ async function outer(args) {
   fs.mkdirSync(evidence, { mode: 0o700 })
   const collector = path.join(evidence, 'collector.mjs')
   privateWrite(collector, COLLECTOR)
+  setStage('SOURCE_INTEGRITY')
   const owner = { protocol: 'YIDA_BROWSER_CI_NATIVE_V1', root, runner, helper, preload, native: nativePath,
     node, cli, collector, pgBin, uid: process.getuid(), gid: process.getgid(),
     parentNetworkNamespace: fs.readlinkSync('/proc/self/ns/net'),
     hashes: Object.fromEntries([...sourcePaths(node, cli), collector].map(file => [file, fileHash(file)])) }
   verifyHashes(owner)
+  setStage('OWNER')
   const ownerPath = path.join(evidence, 'owner.json'), raw = JSON.stringify(owner), ownerSha = hash(raw)
   privateWrite(ownerPath, raw)
   const argv = ['--user', '--map-current-user', '--keep-caps', '--net', '--pid', '--fork', '--mount-proc',
     '--propagation', 'private', '--kill-child=SIGKILL', '/usr/bin/python3', helper, ownerPath, ownerSha]
+  setStage('NAMESPACE')
   const terminal = await capture('/usr/bin/unshare', argv, root, cleanEnvironment(process.env), evidence,
     'namespace', DEADLINE_MS, { ...owner, ownerPath, ownerSha })
   let passed = false
@@ -328,16 +366,30 @@ async function outer(args) {
 }
 
 export async function main(args = process.argv.slice(2)) {
-  process.umask(0o077)
-  assert.equal(process.platform, 'linux'); assert.equal(Number(process.versions.node.split('.')[0]), 20)
-  assert(process.getuid() > 0 && process.getgid() > 0)
-  if (args[0] === '--namespace-init' || args[0] === '--worker') {
-    assert.equal(args.length, 3)
-    const owner = readOwner(args[1], args[2])
-    if (args[0] === '--namespace-init') await namespaceInit(owner, args[1], args[2])
-    else await worker(owner, args[1], args[2])
-  } else await outer(args)
+  let stage = 'RUNTIME'
+  try {
+    process.umask(0o077)
+    assertRuntime()
+    if (args[0] === '--namespace-init' || args[0] === '--worker') {
+      stage = 'OWNER'
+      assert.equal(args.length, 3)
+      const owner = readOwner(args[1], args[2])
+      if (args[0] === '--namespace-init') {
+        stage = 'NAMESPACE'
+        await namespaceInit(owner, args[1], args[2])
+      } else {
+        stage = 'WORKER'
+        await worker(owner, args[1], args[2])
+      }
+    } else await outer(args, next => { stage = next })
+  } catch (error) {
+    // Preserve programmatic rejection; the CLI alone publishes the diagnostic.
+    const failure = error !== null && (typeof error === 'object' || typeof error === 'function')
+      ? error : fail('INTERNAL')
+    failureStages.set(failure, stage)
+    throw failure
+  }
 }
 if (process.argv[1] && path.resolve(process.argv[1]) === runner) {
-  main().catch(() => { console.error('YIDA_BROWSER_CI_FAILED'); process.exitCode = 1 })
+  main().catch(error => { reportStartupFailure(error) })
 }

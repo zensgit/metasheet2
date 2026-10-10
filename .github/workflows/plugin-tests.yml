@@ -145,6 +145,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4

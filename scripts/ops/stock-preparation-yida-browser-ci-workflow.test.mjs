@@ -2,9 +2,11 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { writeFile as writeFixtureFile } from 'node:fs/promises'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { assertNoEnvironmentFiles } from './run-stock-preparation-yida-browser-ci.mjs'
 
 // Caller contracts only. The executable adapter records argv/environment; it never
 // runs the launcher, Vitest, PG or Chromium and does not produce a whole-70 receipt.
@@ -41,6 +43,101 @@ function extractStep(source) {
 }
 
 const step = extractStep(workflow)
+
+function extractCheckoutPatterns(source) {
+  const lines = source.split('\n')
+  const jobs = lines.flatMap((line, index) => line === '  test:' ? [index] : [])
+  assert.equal(jobs.length, 1, 'required integration job must occur exactly once')
+  let end = jobs[0] + 1
+  while (end < lines.length && !/^  \S/u.test(lines[end])) end++
+  const job = lines.slice(jobs[0], end)
+  const checkout = job.indexOf('      - name: Checkout repository')
+  assert.ok(checkout >= 0)
+  let next = checkout + 1
+  while (next < job.length && !job[next].startsWith('      - name: ')) next++
+  const block = job.slice(checkout, next)
+  assert.ok(block.includes('        uses: actions/checkout@v4'))
+  assert.equal(block.filter(line => line === '          sparse-checkout-cone-mode: false').length, 1,
+    'exact file exclusion requires non-cone checkout')
+  const index = block.indexOf('          sparse-checkout: |')
+  assert.ok(index >= 0, 'checkout must select all source except the exact legacy env')
+  const patterns = []
+  for (const line of block.slice(index + 1)) {
+    if (!line.startsWith('            ')) break
+    patterns.push(line.slice(12))
+  }
+  assert.deepEqual(patterns, ['/*', '!/packages/core-backend/.env'],
+    'checkout cannot omit tests, sources, other env names or arbitrary trees')
+  return patterns
+}
+
+const checkoutPatterns = extractCheckoutPatterns(workflow)
+
+test('required job excludes only the exact tracked runtime env in its fresh checkout', () => {
+  assert.deepEqual(checkoutPatterns, ['/*', '!/packages/core-backend/.env'])
+  for (const mutation of [
+    workflow.replace('sparse-checkout-cone-mode: false', 'sparse-checkout-cone-mode: true'),
+    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/.env*'),
+    workflow.replace('!/packages/core-backend/.env', '!/packages/core-backend/tests'),
+    workflow.replace('            /*\n', '            /scripts/\n'),
+  ]) {
+    assert.notEqual(mutation, workflow)
+    assert.throws(() => extractCheckoutPatterns(mutation))
+  }
+})
+
+test('actual Git sparse checkout preserves all fixture sources and still rejects another env', linuxShell, async () => {
+  const fixture = path.join(root, 'tmp', 'yida-workflow-checkout-' + randomUUID())
+  const seed = path.join(fixture, 'seed'), checkout = path.join(fixture, 'checkout')
+  const ownership = JSON.stringify({ owner: 'yida-workflow-checkout-contract', pid: process.pid, fixture })
+  const files = ['package.json', '.env.example', '.github/workflows/plugin-tests.yml',
+    'packages/core-backend/.env', 'packages/core-backend/.env.example', 'packages/core-backend/package.json',
+    'packages/core-backend/tests/synthetic.test.ts', 'packages/core-backend/src/synthetic.ts',
+    'apps/web/src/synthetic.ts', 'plugins/synthetic/index.cjs', 'scripts/ops/synthetic.mjs']
+  mkdirSync(seed, { recursive: true, mode: 0o700 })
+  writeFileSync(path.join(fixture, 'owner.json'), ownership, { mode: 0o600 })
+  const git = (cwd, args, input) => {
+    const result = spawnSync('/usr/bin/git', ['--no-optional-locks', '-c', 'core.autocrlf=false', ...args], {
+      cwd, input, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024,
+      env: { PATH: '/usr/bin:/bin', HOME: fixture, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8',
+        GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0' },
+    })
+    assert.ifError(result.error)
+    assert.equal(result.status, 0, 'SYNTHETIC_CHECKOUT_GIT_FAILED')
+    return result.stdout
+  }
+  try {
+    for (const file of files) {
+      mkdirSync(path.dirname(path.join(seed, file)), { recursive: true, mode: 0o700 })
+      // Like the launcher filename contract, create only our owned synthetic fixtures;
+      // never open an env file for content verification or import it into a process.
+      await writeFixtureFile(path.join(seed, file), 'synthetic fixture only\n', { mode: 0o600 })
+    }
+    git(seed, ['init', '--quiet'])
+    git(seed, ['add', '--force', '--', ...files])
+    git(seed, ['-c', 'user.name=Synthetic Fixture', '-c', 'user.email=fixture@example.invalid',
+      'commit', '--quiet', '-m', 'synthetic sparse checkout fixture'])
+    git(fixture, ['clone', '--quiet', '--local', '--no-hardlinks', '--no-checkout', '--', seed, checkout])
+    git(checkout, ['sparse-checkout', 'init', '--no-cone'])
+    git(checkout, ['sparse-checkout', 'set', '--no-cone', '--stdin'], checkoutPatterns.join('\n') + '\n')
+    git(checkout, ['checkout', '--quiet', 'HEAD'])
+    assert.equal(existsSync(path.join(checkout, 'packages/core-backend/.env')), false)
+    assert.equal(existsSync(path.join(seed, 'packages/core-backend/.env')), true, 'original env is untouched')
+    for (const file of files.filter(file => file !== 'packages/core-backend/.env')) {
+      if (path.basename(file).startsWith('.env')) assert.equal(existsSync(path.join(checkout, file)), true)
+      else assert.equal(readFileSync(path.join(checkout, file), 'utf8'), 'synthetic fixture only\n')
+    }
+    assertNoEnvironmentFiles([checkout, path.join(checkout, 'packages/core-backend'), path.join(checkout, 'apps/web')])
+    await writeFixtureFile(path.join(checkout, 'packages/core-backend/.env.local'), 'synthetic-unused\n', { mode: 0o600 })
+    assert.throws(() => assertNoEnvironmentFiles([path.join(checkout, 'packages/core-backend')]),
+      /YIDA_BROWSER_CI_ENVIRONMENT_FILE_PRESENT/u)
+  } finally {
+    assert.equal(path.dirname(fixture), path.join(root, 'tmp'))
+    assert.match(path.basename(fixture), /^yida-workflow-checkout-[a-f0-9-]{36}$/u)
+    assert.equal(readFileSync(path.join(fixture, 'owner.json'), 'utf8'), ownership)
+    rmSync(fixture, { recursive: true, force: false })
+  }
+})
 
 function withProbe(callback, pgConfigMode = 'wrong-directory') {
   const temporaryRoot = path.join(root, 'tmp')
