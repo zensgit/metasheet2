@@ -16,6 +16,11 @@
  *   SW-08 resolveWritableSheetIds (S2, S3) drops the memo, then asks the grid's capability resolver
  *         per sheet and admits only a LIVE sheet on which the actor holds everything `spreadsheet:write`
  *         confers (create + edit + delete any record — not write-own only — fields, views, notify).
+ *   SW-09 (lock redesign) handed the transaction's query, every decision dependency runs on THAT
+ *         connection: `isAdmin` with an executor over it, `listUserPermissions` and
+ *         `userHasEffectiveNamespaceAccess` with it, the capability resolver with it — the pool is not
+ *         touched; through the port, a write's in-lock decision is made that way.
+ *   SW-10 boundGrantLockWaits is the G1 service's lock bound: inside it the bound is in force.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -52,6 +57,7 @@ vi.mock('../../src/multitable/permission-service', () => ({
 vi.mock('../../src/audit/audit', () => ({ auditLog: mocks.auditLog }))
 
 import { createStockPrepMembersHostDeps, createStockPrepMembersHostPort } from '../../src/services/stock-preparation-members-host'
+import { currentStockPreparationProjectSheetGrantLockTimeoutMs } from '../../src/services/stock-preparation-project-sheet-grants'
 
 const ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'
 /** Everything a `spreadsheet:write` sheet grant confers (applyContextSheetSchemaWriteGrant). */
@@ -88,7 +94,11 @@ describe('stock-prep members port — host wiring (S5b, R-39)', () => {
     mocks.transaction.mockImplementation(async (handler: (client: { query: typeof mocks.poolQuery }) => Promise<unknown>) => handler({
       query: vi.fn(async (sql: string) => {
         const text = sql.replace(/\s+/g, ' ')
+        mocks.order.push(`tx:${text.slice(0, 30)}`)
         if (text.startsWith('SELECT code FROM permissions')) return { rows: [{ code: 'stock-prep:read' }], rowCount: 1 }
+        if (text.includes('AS held FROM user_roles')) return { rows: [{ held: 1 }], rowCount: 1 }
+        if (text.includes('AS configured')) return { rows: [{ configured: true }], rowCount: 1 }
+        if (text.startsWith('SELECT id FROM roles WHERE id = $1 FOR UPDATE')) return { rows: [{ id: 'stock-prep_c_0a1b2c3d' }], rowCount: 1 }
         if (text.startsWith('INSERT INTO roles')) return { rows: [{ id: 'x' }], rowCount: 1 }
         if (text.includes('AS permissions FROM roles r')) return { rows: [{ id: 'stock-prep_c_0a1b2c3d', name: 'x', permissions: ['stock-prep:read'] }], rowCount: 1 }
         if (text.includes('COUNT(*)')) return { rows: [{ c: 0 }], rowCount: 1 }
@@ -174,6 +184,67 @@ describe('stock-prep members port — host wiring (S5b, R-39)', () => {
     // Once as the fast check, once again under the locks.
     expect(mocks.resolveSheetCapabilitiesForAccess).toHaveBeenCalledTimes(2)
     expect(granted).toEqual(['sheet_a'])
+  })
+
+  it('SW-09: handed the transaction query, every decision dependency runs on that connection, and the port hands it in-lock', async () => {
+    const deps = createStockPrepMembersHostDeps()
+    const txStatements: string[] = []
+    const txQuery = vi.fn(async (sql: string) => {
+      txStatements.push(sql.replace(/\s+/g, ' ').trim().slice(0, 40))
+      return { rows: [{ ok: 1 }], rowCount: 1 }
+    })
+    // isAdmin gets an executor that IS the transaction query (same statement, same parameters).
+    await deps.isPlatformAdmin('u_x', txQuery)
+    const executor = mocks.isAdmin.mock.calls.at(-1)?.[1] as (sql: string, params?: unknown[]) => Promise<unknown>
+    expect(typeof executor).toBe('function')
+    await executor('SELECT 1 AS probe', ['p'])
+    expect(txQuery).toHaveBeenLastCalledWith('SELECT 1 AS probe', ['p'])
+    // listUserPermissions / userHasEffectiveNamespaceAccess are handed the transaction query itself,
+    // and the memo is NOT dropped on that path (the read bypasses it).
+    mocks.order.length = 0
+    await deps.listEffectivePermissions('u_x', txQuery)
+    expect(mocks.listUserPermissions).toHaveBeenLastCalledWith('u_x', txQuery)
+    expect(mocks.order).toEqual(['list:u_x'])
+    await deps.hasEffectiveNamespaceAdmission('u_x', 'stock-prep', txQuery)
+    expect(mocks.userHasEffectiveNamespaceAccess).toHaveBeenLastCalledWith('u_x', 'stock-prep', txQuery)
+    // The capability resolver runs on the transaction query, with a snapshot read on it.
+    await deps.resolveWritableSheetIds('u_x', ['sheet_a'], txQuery)
+    expect(mocks.resolveSheetCapabilitiesForAccess.mock.calls.at(-1)?.[0]).toBe(txQuery)
+    expect(mocks.listUserPermissions).toHaveBeenLastCalledWith('u_x', txQuery)
+    expect(mocks.poolQuery).not.toHaveBeenCalled()
+
+    // Through the port: the in-lock decision is handed the transaction client's query.
+    vi.clearAllMocks()
+    mocks.isAdmin.mockResolvedValue(false)
+    mocks.userHasEffectiveNamespaceAccess.mockResolvedValue(true)
+    mocks.listUserPermissions.mockResolvedValue(['stock-prep:admin'])
+    mocks.resolveSheetCapabilitiesForAccess.mockResolvedValue({ capabilities: { ...FULL }, sheetLiveness: 'live' })
+    mocks.auditLog.mockResolvedValue(undefined)
+    const port = createStockPrepMembersHostPort()
+    await port.grantCustomRoleProjectSheets({
+      actorId: 'u_delegated',
+      roleId: 'stock-prep_c_0a1b2c3d',
+      resolveTargets: async () => [{ sheetId: 'sheet_a', grant: async () => ({ granted: true }) }],
+    })
+    const inLockAdmission = mocks.userHasEffectiveNamespaceAccess.mock.calls.filter((call) => typeof call[2] === 'function')
+    expect(inLockAdmission, 'the in-lock admission check got the transaction query').toHaveLength(1)
+    expect(mocks.isAdmin.mock.calls.filter((call) => typeof call[1] === 'function'), 'the in-lock admin check and the in-lock snapshot').toHaveLength(2)
+    // Which connection each capability read was handed: probe each executor once.
+    const targetsOf: string[] = []
+    for (const call of mocks.resolveSheetCapabilitiesForAccess.mock.calls) {
+      const poolBefore = mocks.poolQuery.mock.calls.length
+      const txBefore = mocks.order.filter((entry) => entry.startsWith('tx:SELECT 2 AS probe')).length
+      await (call[0] as (sql: string) => Promise<unknown>)('SELECT 2 AS probe')
+      targetsOf.push(mocks.poolQuery.mock.calls.length > poolBefore ? 'pool' : mocks.order.filter((entry) => entry.startsWith('tx:SELECT 2 AS probe')).length > txBefore ? 'tx' : '?')
+    }
+    expect(targetsOf, 'the fast check on the pool, the in-lock check on the transaction').toEqual(['pool', 'tx'])
+  })
+
+  it('SW-10: boundGrantLockWaits is the G1 service\'s lock bound — in force inside, gone after', async () => {
+    const deps = createStockPrepMembersHostDeps()
+    expect(currentStockPreparationProjectSheetGrantLockTimeoutMs()).toBeNull()
+    await expect(deps.boundGrantLockWaits(5000, async () => currentStockPreparationProjectSheetGrantLockTimeoutMs())).resolves.toBe(5000)
+    expect(currentStockPreparationProjectSheetGrantLockTimeoutMs()).toBeNull()
   })
 
   it('SW-07: the switch is read from process.env per call', async () => {

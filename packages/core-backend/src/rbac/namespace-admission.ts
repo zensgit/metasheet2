@@ -176,19 +176,33 @@ export function deriveGrantNamespaces(grant: {
   return uniqueSorted(namespaces)
 }
 
-async function fetchUserNamespaceRoleContext(userId: string): Promise<UserNamespaceRoleContext> {
-  try {
-    const result = await query<UserRolePermissionRow>(
-      `SELECT ur.role_id, rp.permission_code
+/**
+ * A caller-supplied executor — the caller's TRANSACTION client — for the two admission reads below.
+ * Absent, they run on the pool, as before. Present, they run on that one connection, so a caller
+ * deciding inside a transaction under row locks decides on what its locks protect. Each read names
+ * its SQL literal at BOTH seams (no forwarding adapter), so a static sweep of a call path through
+ * here (tests/helpers/attendance-w6-call-path-closure.ts) classifies both as resolved literals.
+ */
+export type NamespaceAdmissionQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+
+const USER_NAMESPACE_ROLE_CONTEXT_SQL = `SELECT ur.role_id, rp.permission_code
        FROM user_roles ur
        LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
-       WHERE ur.user_id = $1`,
-      [userId],
-    )
+       WHERE ur.user_id = $1`
+
+const USER_NAMESPACE_ADMISSIONS_SQL = `SELECT namespace, enabled, source, granted_by, updated_by, created_at, updated_at
+       FROM user_namespace_admissions
+       WHERE user_id = $1`
+
+async function fetchUserNamespaceRoleContext(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<UserNamespaceRoleContext> {
+  try {
+    const result = typeof runQuery === 'function'
+      ? await runQuery(USER_NAMESPACE_ROLE_CONTEXT_SQL, [userId])
+      : await query<UserRolePermissionRow>(USER_NAMESPACE_ROLE_CONTEXT_SQL, [userId])
 
     const roleIds = new Set<string>()
     const namespaces = new Set<string>()
-    for (const row of result.rows) {
+    for (const row of result.rows as UserRolePermissionRow[]) {
       const roleId = normalizeString(row.role_id)
       if (!roleId) continue
       roleIds.add(roleId)
@@ -221,17 +235,14 @@ async function fetchUserNamespaceRoleContext(userId: string): Promise<UserNamesp
   }
 }
 
-async function fetchNamespaceAdmissions(userId: string): Promise<Map<string, NamespaceAdmissionRow>> {
+async function fetchNamespaceAdmissions(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<Map<string, NamespaceAdmissionRow>> {
   try {
-    const result = await query<NamespaceAdmissionRow>(
-      `SELECT namespace, enabled, source, granted_by, updated_by, created_at, updated_at
-       FROM user_namespace_admissions
-       WHERE user_id = $1`,
-      [userId],
-    )
+    const result = typeof runQuery === 'function'
+      ? await runQuery(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
+      : await query<NamespaceAdmissionRow>(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
     admissionsTableUnavailable = false
     return new Map(
-      result.rows
+      (result.rows as NamespaceAdmissionRow[])
         .map((row) => [normalizeNamespace(row.namespace), row] as const)
         .filter(([namespace]) => Boolean(namespace)),
     )
@@ -332,14 +343,27 @@ export async function listUserNamespaceAdmissionSnapshots(userId: string): Promi
   })
 }
 
-export async function userHasEffectiveNamespaceAccess(userId: string, namespace: string): Promise<boolean> {
+/**
+ * The two admission reads. On the pool they run concurrently, as they always have; on a caller's
+ * transaction client (`runQuery`) they run one after the other on that connection.
+ */
+async function fetchAdmissionInputs(
+  userId: string,
+  runQuery?: NamespaceAdmissionQueryFn,
+): Promise<[UserNamespaceRoleContext, Map<string, NamespaceAdmissionRow>]> {
+  if (typeof runQuery !== 'function') {
+    return Promise.all([fetchUserNamespaceRoleContext(userId), fetchNamespaceAdmissions(userId)])
+  }
+  const roleContext = await fetchUserNamespaceRoleContext(userId, runQuery)
+  const admissions = await fetchNamespaceAdmissions(userId, runQuery)
+  return [roleContext, admissions]
+}
+
+export async function userHasEffectiveNamespaceAccess(userId: string, namespace: string, runQuery?: NamespaceAdmissionQueryFn): Promise<boolean> {
   const normalizedNamespace = normalizeNamespace(namespace)
   if (!normalizedNamespace) return false
 
-  const [roleContext, admissions] = await Promise.all([
-    fetchUserNamespaceRoleContext(userId),
-    fetchNamespaceAdmissions(userId),
-  ])
+  const [roleContext, admissions] = await fetchAdmissionInputs(userId, runQuery)
 
   if (roleContext.isAdmin) return true
   if (!roleContext.controlledNamespaces.includes(normalizedNamespace)) return false
@@ -353,7 +377,7 @@ export async function isPermissionAllowedByNamespaceAdmission(userId: string, pe
   return userHasEffectiveNamespaceAccess(userId, namespace)
 }
 
-export async function filterPermissionCodesByNamespaceAdmission(userId: string, permissionCodes: string[]): Promise<string[]> {
+export async function filterPermissionCodesByNamespaceAdmission(userId: string, permissionCodes: string[], runQuery?: NamespaceAdmissionQueryFn): Promise<string[]> {
   const normalizedCodes = Array.from(new Set(
     permissionCodes
       .map((code) => normalizeString(code))
@@ -361,10 +385,7 @@ export async function filterPermissionCodesByNamespaceAdmission(userId: string, 
   ))
   if (normalizedCodes.length === 0) return []
 
-  const [roleContext, admissions] = await Promise.all([
-    fetchUserNamespaceRoleContext(userId),
-    fetchNamespaceAdmissions(userId),
-  ])
+  const [roleContext, admissions] = await fetchAdmissionInputs(userId, runQuery)
 
   if (roleContext.isAdmin) return normalizedCodes
   if (admissionsTableUnavailable) return normalizedCodes
