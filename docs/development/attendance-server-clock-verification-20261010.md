@@ -1,13 +1,13 @@
 # Attendance server clock — local verification snapshot
 
 **Date:** 2026-10-10
-**State:** Pre-push local verification snapshot. This records completed local evidence and remaining gates; it is not a merge, deployment, or customer-acceptance claim.
+**State:** Local verification snapshot, including follow-up work after the first CI failure. This records completed local evidence and remaining gates; it is not a merge, deployment, or customer-acceptance claim.
 
 ## Source identity and scope
 
 The implementation worktree is based on merged prerequisite #6300: base commit `9bbbdb29e352527b93164490d17f759d321ddb68`, tree `fe89dc3a13b01d82ade8c6ebe093991cac058e93`. The merge receipt is `artifacts/attendance-server-clock-20261010/pr6300-actual-merge-receipt.json`. These identify the predecessor base, not the final tested implementation.
 
-The final implementation sources are identified by SHA-256 in `artifacts/attendance-server-clock-20261010/backend/source-final-hashes.json`; that manifest also records the base and harness hash and confirms all deliberate backend mutations were restored. It covers the attendance plugin entry point, server clock module, online request module, operation registry, live scheduled boundary, and backend index. Frontend source identity is in `artifacts/attendance-server-clock-20261010/frontend-completion-receipt.json`. The linked successor PR head and live remote CI result will be recorded separately after push; neither is inferred from this local snapshot.
+The final implementation sources are identified by SHA-256 in `artifacts/attendance-server-clock-20261010/backend/source-final-hashes.json`; that manifest also records the base and harness hash and confirms all deliberate backend mutations were restored. It covers the attendance plugin entry point, server clock module, online request module, operation registry, live scheduled boundary, and backend index. Frontend source identity is in `artifacts/attendance-server-clock-20261010/frontend-completion-receipt.json`. The qualified successor PR head and final remote CI result are recorded separately; neither is inferred from this local snapshot.
 
 All checks below used synthetic/isolated test data. No customer data or production environment was used. No deployment, production history repair, external write, or business acceptance occurred.
 
@@ -39,6 +39,14 @@ OpenAPI build and guard exited 0. Post-recovery OpenAPI, retired-tool and requir
 
 The exact frontend source hashes are in `frontend-completion-receipt.json`. The 12-file whole-file lane passed 323/323 with no failures, skips, or todo; `vue-tsc --noEmit -p tsconfig.app.json` exited 0. Synthetic Chromium completed 10/10 expected tests with no skip, unexpected, or flaky result. Four synthetic captures covered available/unavailable clock × desktop/mobile and were independently reviewed in `root-visual-review.json`. The earlier mounted-view baseline had 17 assertion failures; five focused frontend mutations went red and were restored. Detailed receipts are `frontend-final-wholefiles.json`, `frontend-chromium-final.json`, `frontend-negative-restoration.json`, and `frontend-mutation-*-red.json`.
 
+## First-CI source census follow-up
+
+Draft PR #6321 first ran at head `b3dd4ec1de0ac8290891f3a0ed3539fbc04ffe2c`. The core step failed with seven assertions in two files: the W7 preservation classification omitted the two new modules, and the multitable fence-holder ledger omitted the two new shared-transaction callers. Downstream database, drain and checkpoint steps were skipped and are NOT_RUN for that head. The failure is preserved in `ci/sol61-core-failure.json` and its raw/API logs; the independently reviewed cause is `ci/independent-core-failure-review-astra.json`.
+
+The follow-up adds both modules to `CALCULATION_PATH` (keeping the carve-out list empty), and records `executeOnlinePunch` and `probeOnlinePunchReplay` as row-32 attendance-only `NONWRITER` holders, each with count 1. This registers the actual source without changing production code, scan roots, guard functions or assertions. The two guard whole files and the adjacent W6 enum-parity whole file passed 124/124 after restoration: W7 13, fence census 49, enum parity 62; zero failures/skips/todo. Deleting each of the four new entries caused its matching guard to fail, and each file was restored to its exact hash before the final whole-file run. The name-filtered mutation exclusions are not counted as passing whole-file qualification. All 1409 tracked production/runtime file hashes remained unchanged.
+
+Receipts: `ci-guard-fix/final-receipt.json`, `ci-guard-fix/final-green.json`, and the independent `ci-guard-fix/independent-guard-fix-review-astra.json`. Final qualification still requires a fresh CI run on the follow-up head; the original failed head is not retroactively marked green.
+
 ## Product boundary and remaining gates
 
 Calendar `today` and punch `workDate` remain distinct: the former follows calibrated server time and the aligned attendance timezone; backend shift and overnight rules determine the latter. Existing resolution remains rotation shift, assignment shift, then default rule. No device-time fallback is claimed.
@@ -51,6 +59,7 @@ The owner stated that old attendance data can be discarded for future enablement
 |---|---|
 | Local frontend, backend unit/integration, fresh-database migration/replay/regression, strict fixture and real-PG teardown | Complete for the source hashes and receipts listed above |
 | Local `validate:all`, feature-flag manifest, OpenAPI, retired-tool and source CI-wiring checks | Complete; no remote CI implication |
+| First-CI static registration repair, whole-file guard/neighbor checks and deletion controls | Local PASS: 3 files / 124; four deletion controls detected and exactly restored; independent review PASS |
 | Final independent Astra review | PASS for frontend/root and backend local source/evidence; remote CI remains separate |
 | Linked Draft PR head and remote exact-head CI | Pending; will be recorded separately |
 | Original 20-item QA and business acceptance | NOT_RUN |

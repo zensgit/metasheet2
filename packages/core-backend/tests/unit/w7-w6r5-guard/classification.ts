@@ -69,6 +69,9 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
   'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
+  // Online punch identity and receipt framing feed the live calculation boundary;
+  // both W6 aggregate bans apply, with no carve-out.
+  'packages/core-backend/src/attendance/online-punch-request.ts',
   'packages/core-backend/src/attendance/w4c0-authorization.ts',
   'packages/core-backend/src/attendance/w4c0-fingerprints.ts',
   'packages/core-backend/src/attendance/w4c0-identity.ts',
@@ -161,6 +164,8 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
   'plugins/plugin-attendance/lib/attendance-live-punch-order.cjs',
+  // The punch route uses this server instant for persisted events and calculations.
+  'plugins/plugin-attendance/lib/attendance-online-punch-clock.cjs',
   // Shadow audit of the punch route's org resolution (env
   // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow). Classified `calculation_path` — the
   // HONEST bucket, not a carve-out: it is `require`d directly from
