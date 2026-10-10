@@ -61,10 +61,15 @@ import {
 import { collectParallelRegionNodeKeys } from './graphTopologyEdit'
 export { collectParallelRegionNodeKeys } from './graphTopologyEdit'
 import {
+  APPROVAL_NODE_EDIT_HIDDEN_BLOCK_NEUTRALIZERS,
   applyApprovalNodeEditsToGraph,
+  approvalNodeEditOmitsAssigneeSources,
   approvalNodeEditsFromGraph,
+  hiddenBlockLiveErrors,
   validateApprovalNodeEdits,
   type ApprovalNodeEdits,
+  type HiddenBlockLiveErrors,
+  type HiddenBlockNeutralizers,
 } from './approvalNodeEdit'
 
 export type { DetailColumnDraft } from './detailField'
@@ -82,7 +87,8 @@ export type { ParallelEdits, ParallelNodeEdit } from './parallelEdit'
 export { PARALLEL_JOIN_MODES, parallelDynamicAssigneeConflicts } from './parallelEdit'
 export type { CcEdits, CcNodeEdit } from './ccEdit'
 export { CC_TARGET_TYPES } from './ccEdit'
-export type { ApprovalNodeEdits, ApprovalNodeSourceEdit } from './approvalNodeEdit'
+export type { ApprovalNodeEdits, ApprovalNodeSourceEdit, AutoApproveHiddenBlockId, HiddenBlockLiveErrors } from './approvalNodeEdit'
+export { AUTO_APPROVE_HIDDEN_BLOCK_IDS } from './approvalNodeEdit'
 export { placeholderRoleNodeKeys, isPlaceholderRoleSource, addAssigneeSourceCard, removeAssigneeSourceCard, legalPriorApproverNodeKeys, approvalNodeEditOmitsAssigneeSources, applyApprovalTypeChoice } from './approvalNodeEdit'
 
 export type AuthorableFieldType = Exclude<FormFieldType, 'attachment'>
@@ -2542,6 +2548,54 @@ export function validateTemplateApprovalFlow(
     }
   })
   return errors
+}
+
+/**
+ * Lock-4 §1 F4-A — the linear step cards' hidden blocks for the HIDDEN-BLOCK GUARD
+ * (`hiddenBlockLiveErrors`, approvalNodeEdit.ts — the one mechanism both editors use). `policy` =
+ * the 审批模式 / 门槛 / 空审批人策略 / 自审策略 rows, `timeout` = the 节点超时 section. The source rows
+ * are NOT a block: a sourceless step really saves no source, so `validateTemplateApprovalFlow`
+ * already exempts them (`sourceIsLive`). Neutralized copies are for attribution only.
+ */
+export const APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS: HiddenBlockNeutralizers<ApprovalStepDraft> = {
+  policy: (step) => ({
+    ...step,
+    approvalMode: 'single',
+    approvalThreshold: 1,
+    emptyAssigneePolicy: 'error',
+    mergeWithRequester: false,
+  }),
+  timeout: (step) => ({ ...step, timeoutEnabled: false }),
+}
+
+/**
+ * The live errors of `step`'s hidden blocks, judged by the SAME validator the save/publish runs
+ * (`validateTemplateApprovalFlow`, full mode) on the draft with only this step substituted. Empty for
+ * every step whose blocks are not hidden (`stepOmitsAssigneeSources` false): those render anyway.
+ */
+export function stepHiddenBlockLiveErrors(draft: TemplateAuthoringDraft, step: ApprovalStepDraft): HiddenBlockLiveErrors {
+  if (!stepOmitsAssigneeSources(step)) return {}
+  return hiddenBlockLiveErrors(step, APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS, (candidate) =>
+    validateTemplateApprovalFlow({
+      ...draft,
+      steps: draft.steps.map((existing) => (existing.localId === step.localId ? candidate : existing)),
+    }))
+}
+
+/**
+ * Canvas twin of `stepHiddenBlockLiveErrors`: the live errors of the hidden blocks on approval node
+ * `nodeKey`, judged by `validateTemplateApprovalFlow` (which derives the parallel-region / approval-
+ * node context exactly as the save does) on the draft with only this edit substituted. Empty unless
+ * the edit omits its sources.
+ */
+export function approvalNodeEditHiddenBlockLiveErrors(draft: TemplateAuthoringDraft, nodeKey: string): HiddenBlockLiveErrors {
+  const edit = draft.approvalNodeEdits?.[nodeKey]
+  if (!edit || !approvalNodeEditOmitsAssigneeSources(edit)) return {}
+  return hiddenBlockLiveErrors(edit, APPROVAL_NODE_EDIT_HIDDEN_BLOCK_NEUTRALIZERS, (candidate) =>
+    validateTemplateApprovalFlow({
+      ...draft,
+      approvalNodeEdits: { ...draft.approvalNodeEdits, [nodeKey]: candidate },
+    }))
 }
 
 export function validateTemplateDraft(

@@ -188,6 +188,74 @@ export function applyApprovalTypeChoice(
 }
 
 /**
+ * Lock-4 §1 F4-A — HIDDEN-BLOCK GUARD, the ONE mechanism behind both editors (this canvas edit model
+ * and the linear step cards, `stepHiddenBlockLiveErrors` in templateAuthoring.ts). A sourceless
+ * auto_approve node/step does not render its person-only config blocks, but the save still emits
+ * their values verbatim (no flatten) and the validators still check them. The rule is the one the
+ * 活来源 notice already follows: anything that is saved AND validated must not stay hidden while it
+ * fails — otherwise an error naming an invisible control blocks save with no visible way out. So a
+ * block whose OWN values carry a live validation error is rendered again, with a notice naming the
+ * error, until the author fixes or clears it (an author action; nothing is rewritten at save time).
+ *
+ * "Live error of a block" is derived WITHOUT a second copy of any rule: run the editor's own save
+ * validator on the subject as-is and on a copy with ONLY that block neutralized (its fields at the
+ * inert default — attribution only, never written back), and take the multiset difference (two
+ * unnamed steps produce identical labelled messages, so a plain set would lose one). A rule added to
+ * a validator later on a field a block's neutralizer resets is attributed to that block with no
+ * change here; a NEW hidden field needs only a neutralizer entry.
+ */
+export type AutoApproveHiddenBlockId = 'policy' | 'timeout'
+export const AUTO_APPROVE_HIDDEN_BLOCK_IDS: readonly AutoApproveHiddenBlockId[] = ['policy', 'timeout']
+/** Per hidden block, the validator messages its own values cause; a block with none has no key. */
+export type HiddenBlockLiveErrors = Partial<Record<AutoApproveHiddenBlockId, string[]>>
+export type HiddenBlockNeutralizers<T> = Record<AutoApproveHiddenBlockId, (subject: T) => T>
+
+/** Multiset difference: every entry of `minuend` not matched one-for-one by an equal `subtrahend` entry. */
+export function multisetDifference(minuend: readonly string[], subtrahend: readonly string[]): string[] {
+  const remaining = new Map<string, number>()
+  for (const entry of subtrahend) remaining.set(entry, (remaining.get(entry) ?? 0) + 1)
+  const out: string[] = []
+  for (const entry of minuend) {
+    const count = remaining.get(entry) ?? 0
+    if (count > 0) remaining.set(entry, count - 1)
+    else out.push(entry)
+  }
+  return out
+}
+
+export function hiddenBlockLiveErrors<T>(
+  subject: T,
+  neutralizers: HiddenBlockNeutralizers<T>,
+  validate: (subject: T) => string[],
+): HiddenBlockLiveErrors {
+  const baseline = validate(subject)
+  const result: HiddenBlockLiveErrors = {}
+  if (baseline.length === 0) return result
+  for (const blockId of AUTO_APPROVE_HIDDEN_BLOCK_IDS) {
+    const owned = multisetDifference(baseline, validate(neutralizers[blockId](subject)))
+    if (owned.length > 0) result[blockId] = owned
+  }
+  return result
+}
+
+/**
+ * The canvas inspector's hidden blocks on an approval-node edit: `policy` = the 审批模式 / 门槛 /
+ * 空审批人策略 / 自审策略 grid, `timeout` = the 节点超时 section (`undefined` = untouched ⇒ nothing
+ * to validate). The cards are NOT a block here: their omission is real (the save sends no source),
+ * so they are exempt from validation by `approvalNodeEditOmitsAssigneeSources`, not hidden-while-sent.
+ */
+export const APPROVAL_NODE_EDIT_HIDDEN_BLOCK_NEUTRALIZERS: HiddenBlockNeutralizers<ApprovalNodeSourceEdit> = {
+  policy: (edit) => ({
+    ...edit,
+    approvalMode: undefined,
+    approvalThreshold: undefined,
+    emptyAssigneePolicy: undefined,
+    autoApprovalPolicy: undefined,
+  }),
+  timeout: (edit) => ({ ...edit, timeout: undefined }),
+}
+
+/**
  * Seed the editable model from a (preserved) graph — one entry per `approval` node THAT HAS an
  * `assigneeSources` array, carrying a clone of it. Non-approval and legacy (no-`assigneeSources`)
  * nodes are skipped (preserved verbatim). Seeding is identity: an untouched edit reproduces the

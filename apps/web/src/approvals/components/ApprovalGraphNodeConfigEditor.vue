@@ -501,6 +501,32 @@
             @click="chooseApprovalNodeApprovalType(node.key, 'auto_approve')"
           >移除审批人来源</el-button>
         </p>
+        <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD: a hidden block (policy grid / timeout section below) is
+             still saved and validated, so while its own values fail validation it is rendered again
+             and this notice names the failure — never an error about an invisible control. Clearing
+             the timeout is an explicit author action; nothing is rewritten at save time. -->
+        <div
+          v-if="approvalNodeOmitsSources(node.key) && hiddenBlockLiveErrorList.length > 0"
+          class="template-authoring__hint template-authoring__hint--warn"
+          data-testid="approval-node-approval-type-hidden-errors-hint"
+        >
+          <p>该节点有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+          <ul>
+            <li
+              v-for="(message, messageIndex) in hiddenBlockLiveErrorList"
+              :key="messageIndex"
+              data-testid="approval-node-approval-type-hidden-error"
+            >{{ message }}</li>
+          </ul>
+          <el-button
+            v-if="hiddenBlockHasLiveErrors('timeout')"
+            size="small"
+            link
+            :disabled="readOnly"
+            data-testid="approval-node-approval-type-clear-timeout"
+            @click="clearApprovalNodeTimeout(node.key)"
+          >关闭超时</el-button>
+        </div>
       </el-form-item>
       <!-- Lock-4 §1 F4-A: an auto_approve node whose sources are omitted saves NONE, so the cards (hidden
            scratch, restored on 人工审批) and every control below that only matters when a person
@@ -893,7 +919,7 @@
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval' && !approvalNodeOmitsSources(node.key)" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -972,7 +998,7 @@
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval' && !approvalNodeOmitsSources(node.key)" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1252,6 +1278,9 @@ import {
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
   approvalNodeEditOmitsAssigneeSources,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1468,6 +1497,25 @@ function approvalNodeOmitsSources(nodeKey: string): boolean {
 function chooseApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void {
   if (readOnly.value) return
   setApprovalNodeApprovalTypeApi?.(nodeKey, type)
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — the live validation errors of this node's hidden blocks
+// (computed by the view against the real save validator; see `approvalNodeEditHiddenBlockLiveErrors`).
+// Absent api method ⇒ {} (nothing revealed; documented on the api).
+const approvalNodeHiddenBlockErrorsApi = api.approvalNodeHiddenBlockErrors
+const hiddenBlockLiveErrors = computed<HiddenBlockLiveErrors>(() =>
+  props.node.type === 'approval' && approvalNodeHiddenBlockErrorsApi
+    ? approvalNodeHiddenBlockErrorsApi(props.node.key)
+    : {},
+)
+const hiddenBlockLiveErrorList = computed(() =>
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((blockId) => hiddenBlockLiveErrors.value[blockId] ?? []),
+)
+function hiddenBlockHasLiveErrors(blockId: AutoApproveHiddenBlockId): boolean {
+  return (hiddenBlockLiveErrors.value[blockId]?.length ?? 0) > 0
+}
+function clearApprovalNodeTimeout(nodeKey: string): void {
+  if (readOnly.value) return
+  setApprovalNodeTimeoutEnabled(nodeKey, false)
 }
 const approvalNodeTimeout = api.approvalNodeTimeout
 const setApprovalNodeTimeoutEnabled = api.setApprovalNodeTimeoutEnabled

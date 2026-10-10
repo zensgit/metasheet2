@@ -666,11 +666,38 @@
                   @click="onStepApprovalTypeChange(step, 'auto_approve')"
                 >移除审批人来源</el-button>
               </p>
+              <!-- Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (same mechanism as the canvas inspector): a hidden
+                   block (policy rows / timeout section below) is still saved and validated, so while its
+                   own values fail validation it is rendered again and this notice names the failure.
+                   关闭超时 is an explicit author action; nothing is rewritten at save time. -->
+              <div
+                v-if="stepOmitsAssigneeSources(step) && stepHiddenBlockErrors(step).length > 0"
+                class="template-authoring__hint template-authoring__hint--warn"
+                data-testid="approval-step-approval-type-hidden-errors-hint"
+              >
+                <p>该步骤有已隐藏的设置未通过校验（自动通过时这些设置不会生效，但保存时原样保留并校验），已在下方显示，请修正或关闭：</p>
+                <ul>
+                  <li
+                    v-for="(message, messageIndex) in stepHiddenBlockErrors(step)"
+                    :key="messageIndex"
+                    data-testid="approval-step-approval-type-hidden-error"
+                  >{{ message }}</li>
+                </ul>
+                <el-button
+                  v-if="stepHiddenBlockErrors(step, 'timeout').length > 0"
+                  size="small"
+                  link
+                  :disabled="readOnly"
+                  data-testid="approval-step-approval-type-clear-timeout"
+                  @click="clearStepTimeout(step)"
+                >关闭超时</el-button>
+              </div>
             </el-form-item>
             <!-- Lock-4 §1 F4-A: a step whose sources are omitted saves NONE, so the source controls
-                 (hidden scratch, restored on 人工审批) and every control that only matters when a person
-                 approves are not rendered; their values are preserved verbatim. Same predicate as
-                 `buildStepConfig` and `validateTemplateApprovalFlow` (`stepOmitsAssigneeSources`). -->
+                 (hidden scratch, restored on 人工审批) are not rendered. Same predicate as
+                 `buildStepConfig` and `validateTemplateApprovalFlow` (`stepOmitsAssigneeSources`). The
+                 person-only policy rows below are a SEPARATE block: hidden too, values preserved
+                 verbatim, but rendered again while they carry a live error (HIDDEN-BLOCK GUARD). -->
             <template v-if="!stepOmitsAssigneeSources(step)">
             <el-form-item label="审批人来源">
               <el-select v-model="step.sourceKind" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-source-kind" @change="syncStepOptions(step)">
@@ -946,6 +973,8 @@
                 />
               </el-select>
             </el-form-item>
+            </template>
+            <template v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockErrors(step, 'policy').length > 0">
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
@@ -998,8 +1027,9 @@
           <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
                (see the mode-picker comment above), so this section needs no parallel gating. Lock-4
                §1 F4-A: not rendered for a step whose sources are omitted (an auto_approve step never
-               waits, so a timeout there is inert); the persisted value is preserved verbatim. -->
-          <div v-if="!stepOmitsAssigneeSources(step)" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+               waits, so a timeout there is inert); the persisted value is preserved verbatim — and
+               rendered again while it carries a live error (HIDDEN-BLOCK GUARD). -->
+          <div v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockErrors(step, 'timeout').length > 0" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
             <el-form-item label="节点超时">
               <el-checkbox
                 v-model="step.timeoutEnabled"
@@ -1569,6 +1599,9 @@ import {
   applyApprovalTypeChoice,
   setStepApprovalType,
   stepOmitsAssigneeSources,
+  stepHiddenBlockLiveErrors,
+  approvalNodeEditHiddenBlockLiveErrors,
+  AUTO_APPROVE_HIDDEN_BLOCK_IDS,
   approvalFormulaInsertOptions,
   parallelDynamicAssigneeConflicts,
   CONDITION_RULE_OPERATORS,
@@ -1584,6 +1617,8 @@ import {
   type CcNodeEdit,
   type ApprovalNodeSourceEdit,
   type TemplateAuthoringDraft,
+  type AutoApproveHiddenBlockId,
+  type HiddenBlockLiveErrors,
   moveItemToIndex,
   isTemplateDedupTierLocked,
 } from '../../approvals/templateAuthoring'
@@ -2488,6 +2523,10 @@ function setApprovalNodeApprovalType(nodeKey: string, type: ApprovalType): void 
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
   applyApprovalTypeChoice(edit, type, approvalNodeInParallelRegion(nodeKey))
+}
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (canvas) — judged against the whole draft by the save validator.
+function approvalNodeHiddenBlockErrors(nodeKey: string): HiddenBlockLiveErrors {
+  return approvalNodeEditHiddenBlockLiveErrors(draft.value, nodeKey)
 }
 function approvalNodeEmptyPolicy(nodeKey: string): EmptyAssigneePolicy {
   return approvalNodeEditFor(nodeKey)?.emptyAssigneePolicy ?? 'error'
@@ -3526,6 +3565,26 @@ function onStepApprovalTypeChange(step: ApprovalStepDraft, type: ApprovalType): 
   if (readOnly.value) return
   setStepApprovalType(step, type)
 }
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (linear) — per sourceless auto_approve step, the live errors of
+// its hidden blocks, judged by the save validator itself (`stepHiddenBlockLiveErrors`). Computed once
+// per draft change and read many times by the template.
+const stepHiddenBlockErrorsByLocalId = computed(() => {
+  const byLocalId = new Map<string, HiddenBlockLiveErrors>()
+  for (const step of draft.value.steps) {
+    if (stepOmitsAssigneeSources(step)) byLocalId.set(step.localId, stepHiddenBlockLiveErrors(draft.value, step))
+  }
+  return byLocalId
+})
+function stepHiddenBlockErrors(step: ApprovalStepDraft, blockId?: AutoApproveHiddenBlockId): string[] {
+  const errors = stepHiddenBlockErrorsByLocalId.value.get(step.localId)
+  if (!errors) return []
+  if (blockId) return errors[blockId] ?? []
+  return AUTO_APPROVE_HIDDEN_BLOCK_IDS.flatMap((id) => errors[id] ?? [])
+}
+function clearStepTimeout(step: ApprovalStepDraft): void {
+  if (readOnly.value) return
+  step.timeoutEnabled = false
+}
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely
 // additive: it reads/writes the SAME step.idsText carrier (parseIdsText in, ', ' join out, the
@@ -3727,6 +3786,7 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalNodeInParallelRegion,
   // Lock-4 §1 F4-A — 审批类型 (OPTIONAL on the api; always present on the shipped app's object).
   setApprovalNodeApprovalType,
+  approvalNodeHiddenBlockErrors,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
   approvalNodeMergeWithRequester,
