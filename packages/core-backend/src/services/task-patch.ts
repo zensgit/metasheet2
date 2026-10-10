@@ -14,8 +14,10 @@ import {
   type TaskEditableState,
   type TaskPatchInput,
 } from '../tasks/task-edit'
+import { patchChangesPendingInputs } from '../tasks/task-realtime'
+import { taskCountsSignal } from './task-counts-realtime'
 import { isPrintableId } from './task-create'
-import { fail, isoOrNull, loadRowRoles, withOrgStructure, type Db, type Row } from './task-records'
+import { assigneeIds, fail, isoOrNull, loadRowRoles, withOrgStructure, type Db, type Row } from './task-records'
 
 export interface VersionConflictError extends Error {
   status: 409
@@ -105,9 +107,10 @@ export async function patchTask(input: {
   // RULED(2026-10-07): [R03] a body that is not a plain object is read as `{}` (so it lands on
   // INVALID_VERSION once the task is visible and editable); unknown keys are ignored.
   const body: Record<string, unknown> = isPlainObject(input.body) ? input.body : {}
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const result = await withOrgStructure(input.orgId, async (db) => {
     const row = await loadEditableRow(db, input.taskId, input.orgId)
-    const { roles } = await loadRowRoles(db, {
+    const { roles, assignees } = await loadRowRoles(db, {
       taskId: input.taskId,
       actorId: input.actorId,
       createdBy: String(row.created_by),
@@ -128,7 +131,8 @@ export async function patchTask(input: {
       timeZone: body.timeZone,
       remindAt: body.remindAt,
     }
-    const plan = planTaskPatch(toEditableState(row), patch)
+    const current = toEditableState(row)
+    const plan = planTaskPatch(current, patch)
     if (plan.ok === false) fail(422, plan.reason.toUpperCase())
     if (!plan.changed) return { id: input.taskId, version: currentVersion }
     const next = plan.next
@@ -163,6 +167,14 @@ export async function patchTask(input: {
         [newTaskEventId(), input.taskId, input.actorId, eventType],
       )
     }
+    // RULED(2026-10-07): [R16] ASSUMPTION(task-m4): [own-3c-03] a stored due field or the time
+    // zone changed: every assignee.
+    if (patchChangesPendingInputs(current, next)) {
+      counts.note({ before: assigneeIds(assignees), after: assigneeIds(assignees) })
+    }
     return { id: input.taskId, version: Number(updated.rows[0].version) }
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return result
 }
