@@ -15,7 +15,8 @@ import type {
   PersonalViewConfigOverlay,
 } from '../types'
 import { MultitableApiClient, multitableClient } from '../api/client'
-import { isPropertyHiddenField } from '../utils/field-permissions'
+import { isFieldAlwaysReadOnly, isPropertyHiddenField } from '../utils/field-permissions'
+import { cloneRangeValue, isRangeWritableFieldType, type RangeChange } from '../utils/grid-range-fill'
 import { writePersonalConfigMerged } from '../utils/personal-config-write'
 import { metaCoreLabel } from '../utils/meta-core-labels'
 import { resolveRollupFieldProperty, rollupResultType } from '../utils/field-config'
@@ -573,6 +574,12 @@ export function useMultitableGrid(opts: {
   // rows onto the freshly-reset set. This is the single guard that keeps the masked/filtered/sorted
   // per-fetch contract intact under interleaving (scroll-append racing a filter/sort/search/view change).
   let latestLoadRequestId = 0
+  let rangePending = false
+  let activeGridWrites = 0
+  let rangeContextId = 0
+  let loadedRangeContextId = -1
+  // Invalidate immediately, including an away/back roundtrip hidden by Vue's batched watcher.
+  watch([opts.sheetId, opts.viewId], () => { rangeContextId++ }, { flush: 'sync' })
 
   // Pagination
   const page = ref<MetaPage>({ offset: 0, limit: pageSize, total: 0, hasMore: false })
@@ -706,6 +713,7 @@ export function useMultitableGrid(opts: {
     const vid = opts.viewId.value
     if (!sid) return
     const requestId = ++latestLoadRequestId
+    const contextId = rangeContextId
     loading.value = true
     error.value = null
     try {
@@ -771,6 +779,7 @@ export function useMultitableGrid(opts: {
       // compare against, nothing may be persisted.
       if (data.view) syncFromView(data.view, vid || undefined)
       else resetViewState()
+      if (contextId === rangeContextId) loadedRangeContextId = contextId
     } catch (e: any) {
       if (requestId !== latestLoadRequestId) return
       error.value = e.message ?? fallback('grid.errorLoadViewData')
@@ -1306,6 +1315,10 @@ export function useMultitableGrid(opts: {
       nextLinkSummaries?: LinkedRecordSummary[]
     },
   ): Promise<GridPatchFailure | null> {
+    if (rangePending) return {
+      recordId, fieldId, attemptedValue: value, status: 409, code: 'RANGE_BUSY',
+      message: fallback('grid.errorPatchCell'),
+    }
     error.value = null
     conflict.value = null
     // PR-B2 (§1.3): the LOCAL row-action refusal never reaches the server and yields no structured
@@ -1318,6 +1331,7 @@ export function useMultitableGrid(opts: {
     const oldValue = row?.data[fieldId]
     const oldLinkSummaries = options?.previousLinkSummaries ?? linkSummaries.value[recordId]?.[fieldId]
     let nextLinkSummaries: LinkedRecordSummary[] | undefined
+    activeGridWrites++
 
     // Optimistic update
     if (row) row.data[fieldId] = value
@@ -1368,6 +1382,8 @@ export function useMultitableGrid(opts: {
         message: e?.message ?? fallback('grid.errorPatchCell'),
         fieldErrors: e?.fieldErrors && typeof e.fieldErrors === 'object' ? { ...(e.fieldErrors as Record<string, string>) } : undefined,
       }
+    } finally {
+      activeGridWrites--
     }
     return null
   }
@@ -1375,9 +1391,10 @@ export function useMultitableGrid(opts: {
   // --- Undo / Redo ---
 
   async function undo() {
-    if (!canUndo.value) return
+    if (rangePending || !canUndo.value) return
     const edit = editHistory.value[historyIndex.value]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    activeGridWrites++
     historyIndex.value--
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.oldValue
@@ -1390,14 +1407,17 @@ export function useMultitableGrid(opts: {
       applyPatchResult(result)
     } catch {
       // silent
+    } finally {
+      activeGridWrites--
     }
   }
 
   async function redo() {
-    if (!canRedo.value) return
+    if (rangePending || !canRedo.value) return
     const nextHistoryIndex = historyIndex.value + 1
     const edit = editHistory.value[nextHistoryIndex]
     if (resolveRowActions(edit.recordId)?.canEdit === false) return void rejectRowEdit()
+    activeGridWrites++
     historyIndex.value = nextHistoryIndex
     const row = rows.value.find((r) => r.id === edit.recordId)
     if (row) row.data[edit.fieldId] = edit.newValue
@@ -1410,6 +1430,8 @@ export function useMultitableGrid(opts: {
       applyPatchResult(result)
     } catch {
       // silent
+    } finally {
+      activeGridWrites--
     }
   }
 
@@ -1418,6 +1440,7 @@ export function useMultitableGrid(opts: {
     value: unknown
     recordIds: string[]
   }): Promise<{ updated: string[]; failed: Array<{ recordId: string; reason: string }> }> {
+    if (rangePending) throw new Error('RANGE_BUSY')
     const changes = args.recordIds
       .map((recordId) => {
         const row = rows.value.find((r) => r.id === recordId)
@@ -1433,20 +1456,170 @@ export function useMultitableGrid(opts: {
 
     if (changes.length === 0) return { updated: [], failed: [] }
 
-    const result = await client.patchRecords({
-      sheetId: opts.sheetId.value || undefined,
-      viewId: opts.viewId.value || undefined,
-      partialSuccess: true,
-      changes,
-    })
-    applyPatchResult(result)
-    lastBatchId.value = result.batchId ?? null
-    const updated = (result.updated ?? []).map((u) => u.recordId)
-    const failed = (result.failed ?? []).map((failure) => ({
-      recordId: failure.recordId,
-      reason: failure.message || failure.code || fallback('grid.errorPatchFailed'),
-    }))
-    return { updated, failed }
+    activeGridWrites++
+    try {
+      const result = await client.patchRecords({
+        sheetId: opts.sheetId.value || undefined,
+        viewId: opts.viewId.value || undefined,
+        partialSuccess: true,
+        changes,
+      })
+      applyPatchResult(result)
+      lastBatchId.value = result.batchId ?? null
+      const updated = (result.updated ?? []).map((u) => u.recordId)
+      const failed = (result.failed ?? []).map((failure) => ({
+        recordId: failure.recordId,
+        reason: failure.message || failure.code || fallback('grid.errorPatchFailed'),
+      }))
+      return { updated, failed }
+    } finally {
+      activeGridWrites--
+    }
+  }
+
+  async function patchRange(changes: RangeChange[]): Promise<PatchResult> {
+    if (rangePending || activeGridWrites) throw new Error('RANGE_BUSY')
+    rangePending = true
+    try {
+      const sheetId = opts.sheetId.value
+      const viewId = opts.viewId.value
+      const loadRequestId = latestLoadRequestId
+      const contextId = rangeContextId
+      if (!sheetId || !viewId || !changes.length || changes.length > 1000) {
+        throw new Error('RANGE_INVALID')
+      }
+      if (loading.value || loadedRangeContextId !== contextId) throw new Error('RANGE_STALE')
+      const rowsById = new Map(rows.value.map((row) => [row.id, row]))
+      const fieldsById = new Map(fields.value.map((field) => [field.id, field]))
+      const visibleIds = new Set(visibleFields.value.map((field) => field.id))
+      const seen = new Set<string>()
+      const capturedChanges = changes.map(({ recordId, fieldId, value, expectedVersion }) => {
+        const row = rowsById.get(recordId)
+        const field = fieldsById.get(fieldId)
+        const cell = JSON.stringify([recordId, fieldId])
+        if (!row || !field || seen.has(cell)) throw new Error('RANGE_INVALID')
+        seen.add(cell)
+        if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || row.version !== expectedVersion) {
+          throw new Error('RANGE_STALE')
+        }
+        if (row.locked === true || resolveRowActions(recordId)?.canEdit === false
+          || viewPermission.value?.canAccess === false || !visibleIds.has(fieldId)
+          || fieldPermissions.value[fieldId]?.readOnly === true || isFieldAlwaysReadOnly(field)
+          || !isRangeWritableFieldType(field.type)) {
+          throw new Error('RANGE_READ_ONLY')
+        }
+        return { recordId, fieldId, value: cloneRangeValue(value), expectedVersion }
+      })
+      const result = await client.patchRecords({
+        sheetId,
+        viewId,
+        partialSuccess: false,
+        changes: capturedChanges,
+      })
+      const isMap = (value: unknown): value is Record<string, unknown> =>
+        value !== null && typeof value === 'object' && !Array.isArray(value)
+      const expectedVersions = new Map(capturedChanges.map(change => [change.recordId, change.expectedVersion]))
+      const updatedIds = new Set<string>()
+      const echoIds = new Set<string>()
+      if (!isMap(result) || !Array.isArray(result.updated)
+        || result.updated.length !== expectedVersions.size
+        || (result.failed !== undefined && (!Array.isArray(result.failed) || result.failed.length > 0))
+        || (result.batchId !== undefined && typeof result.batchId !== 'string')
+        || result.updated.some(update => {
+          if (!isMap(update) || !expectedVersions.has(update.recordId) || updatedIds.has(update.recordId)
+            || !Number.isSafeInteger(update.version) || update.version <= expectedVersions.get(update.recordId)!) return true
+          updatedIds.add(update.recordId)
+          return false
+        })
+        || (result.records !== undefined && (!Array.isArray(result.records) || result.records.some(record => {
+          if (!isMap(record) || typeof record.recordId !== 'string' || !isMap(record.data) || echoIds.has(record.recordId)) return true
+          echoIds.add(record.recordId)
+          return false
+        })))
+        || [result.linkSummaries, result.attachmentSummaries].some(summaries => summaries !== undefined
+          && (!isMap(summaries) || Object.values(summaries).some(fieldMap => !isMap(fieldMap)
+            || Object.values(fieldMap).some(value => !Array.isArray(value)))))) {
+        throw new Error('RANGE_INVALID')
+      }
+      // A navigation or reload can replace rows while the atomic server write is pending.
+      if (opts.sheetId.value === sheetId && opts.viewId.value === viewId
+        && latestLoadRequestId === loadRequestId && rangeContextId === contextId) {
+        // Realtime may already have installed a newer revision for part of this batch.
+        const liveVersions = new Map(rows.value.map(row => [row.id, row.version]))
+        const superseded = new Set((result.updated ?? [])
+          .filter(update => !liveVersions.has(update.recordId) || liveVersions.get(update.recordId)! > update.version)
+          .map(update => update.recordId))
+        // The API acknowledges primitive writes by version; optional echoes contain computed/canonical data.
+        const committedData = new Map<string, Record<string, unknown>>()
+        for (const change of capturedChanges) {
+          let value = change.value
+          // Range dateTime inputs are epoch milliseconds or explicitly zoned text; storage is UTC ISO.
+          if (fieldsById.get(change.fieldId)?.type === 'dateTime'
+            && (typeof value === 'number' || (typeof value === 'string' && /(?:Z|[+-]\d{2}:\d{2})$/.test(value)))) {
+            value = new Date(value).toISOString()
+          }
+          committedData.set(change.recordId, { ...committedData.get(change.recordId), [change.fieldId]: value })
+        }
+        for (const record of result.records ?? []) {
+          if (updatedIds.has(record.recordId)) {
+            committedData.set(record.recordId, { ...committedData.get(record.recordId), ...record.data })
+          }
+        }
+        applyPatchResult({
+          ...result,
+          updated: (result.updated ?? []).filter(update => !superseded.has(update.recordId)),
+          records: [...committedData].filter(([recordId]) => !superseded.has(recordId))
+            .map(([recordId, data]) => ({ recordId, data })),
+          linkSummaries: result.linkSummaries && Object.fromEntries(
+            Object.entries(result.linkSummaries).filter(([recordId]) => updatedIds.has(recordId) && !superseded.has(recordId)),
+          ),
+          attachmentSummaries: result.attachmentSummaries && Object.fromEntries(
+            Object.entries(result.attachmentSummaries).filter(([recordId]) => updatedIds.has(recordId) && !superseded.has(recordId)),
+          ),
+        })
+        lastBatchId.value = result.batchId ?? null
+        clearEditHistory()
+        // Extended types can be normalized server-side and people need directory-backed display names.
+        // Read only affected records, with bounded concurrency; never reload or replace another view.
+        const scalarTypes = new Set(['string', 'number', 'boolean', 'date', 'dateTime', 'select'])
+        const refreshIds = [...new Set(capturedChanges.filter(change =>
+          !superseded.has(change.recordId) && !scalarTypes.has(fieldsById.get(change.fieldId)!.type),
+        ).map(change => change.recordId))]
+        const sameContext = () => opts.sheetId.value === sheetId && opts.viewId.value === viewId
+          && latestLoadRequestId === loadRequestId && rangeContextId === contextId
+        let next = 0
+        let refreshFailed = false
+        await Promise.all(Array.from({ length: Math.min(4, refreshIds.length) }, async () => {
+          while (next < refreshIds.length && sameContext()) {
+            const recordId = refreshIds[next++]
+            try {
+              const context = await client.getRecord(recordId, { sheetId, viewId })
+              if (!sameContext()) return
+              const record = context.record
+              const acknowledged = result.updated.find(update => update.recordId === recordId)!
+              if (!record || record.id !== recordId || !Number.isSafeInteger(record.version)
+                || record.version < acknowledged.version || !isMap(record.data)) {
+                throw new Error('RANGE_REFRESH_REQUIRED')
+              }
+              const live = rows.value.find(row => row.id === recordId)
+              if (live && live.version <= record.version) {
+                // This is a complete server record, including lock/unlock metadata, not a data-only patch.
+                rows.value = rows.value.map(row => row.id === recordId ? { ...record, data: { ...record.data } } : row)
+                replaceRecordLinkSummaries(recordId, context.linkSummaries)
+                replaceRecordPersonSummaries(recordId, context.personSummaries)
+                replaceRecordAttachmentSummaries(recordId, context.attachmentSummaries)
+              }
+            } catch {
+              refreshFailed = true
+            }
+          }
+        }))
+        if (refreshFailed && sameContext()) throw new Error('RANGE_REFRESH_REQUIRED')
+      }
+      return result
+    } finally {
+      rangePending = false
+    }
   }
 
   function applyPatchResult(result?: PatchResult) {
@@ -1681,7 +1854,7 @@ export function useMultitableGrid(opts: {
     addFilterRule, updateFilterRule, removeFilterRule, clearFilters,
     addFilterGroup, updateFilterGroup, removeFilterGroup,
     applySortFilter,
-    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch,
+    createRecord, duplicateRecord, deleteRecord, patchCell, bulkPatch, patchRange,
     // A3: exposed as the single echo-application seam for the AI shortcut
     // run adapter (useAiShortcut synthesizes a PatchResult and feeds it here).
     applyPatchResult,
