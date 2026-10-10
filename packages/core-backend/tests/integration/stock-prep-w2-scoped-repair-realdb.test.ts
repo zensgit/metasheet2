@@ -349,6 +349,8 @@ import {
   SheetSystemKindConflictError,
   // S3 fix round 2 (F3): the stamp lookup index.ts wires as the wrapper's hook, and the generic-write refusal.
   StockPreparationOverviewRecordsWriteError,
+  // S3 follow-up E: the plugin-scope refusal of a structural write to the overview.
+  StockPreparationOverviewStructureWriteError,
   loadStockPreparationOverviewSheetIds,
 } from '../../src/multitable/stock-preparation-overview-contract'
 
@@ -1066,6 +1068,27 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     // Control: an ordinary sheet of the same id shape, registered to the plugin, still takes a generic write.
     const ordinary = await wrapper.records.createRecord({ sheetId: sheetA, data: {} })
     expect(ordinary.sheetId).toBe(sheetA)
+    // S3 follow-up E — the REAL stamp lookup (index.ts's hook over this database) decides an unmarked ensureView:
+    // refused on the stamped overview, admitted on an ordinary derived-shape sheet; the overview module's own marked
+    // call reaches the host without the marker.
+    const viewDescriptor = { id: 'overview-active', objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, name: 'Active', type: 'grid' }
+    const hostEnsureView = vi.fn(async (input: { sheetId: string }) => ({ id: 'view_e', sheetId: input.sheetId }))
+    const structural = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, PLUGIN, {
+      assertSheetScope: async ({ pluginName, sheetId }) => {
+        const owns = await assertPluginOwnsSheet(q as never, { pluginName, sheetId })
+        if (!owns) throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
+        return { registered: true }
+      },
+      isStockPreparationOverviewSheet: async ({ sheetId }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId),
+    })
+    const unmarked = await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+    expect(unmarked).toBeInstanceOf(StockPreparationOverviewStructureWriteError)
+    expect(unmarked).toMatchObject({ status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'structure_write' } })
+    expect(hostEnsureView).not.toHaveBeenCalled()
+    await structural.provisioning.ensureView({ projectId, sheetId: sheetA, descriptor: viewDescriptor } as never)
+    await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND } as never)
+    expect(hostEnsureView.mock.calls.map((call) => (call[0] as { sheetId: string }).sheetId)).toEqual([sheetA, overviewSheet])
+    expect(hostEnsureView.mock.calls[1][0]).not.toHaveProperty('systemKind')
   })
 })
 
