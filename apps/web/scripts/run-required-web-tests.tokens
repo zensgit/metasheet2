@@ -464,6 +464,7 @@ StockPreparationLargeBomPull.spec.ts
 StockPreparationLargeBomPullPanel.spec.ts
 StockPreparationManagedTableRelabelPanel
 StockPreparationMappingConfirmView
+StockPreparationMembers
 StockPreparationMissingComponents
 StockPreparationOnboardingReadiness
 StockPreparationOperatorHome
