@@ -234,8 +234,8 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     createPrimitives = (await importNative(pathToFileURL(path.join(lib, 'yida-send-authority-primitives.mjs')).href)).createYidaSendAuthorityPrimitives
     compile = (await importNative(pathToFileURL(path.join(lib, 'yida-draft-plan.mjs')).href)).compileYidaDraft
     const integration = path.join(root, 'packages/core-backend/src/integration')
-    createService = (await importNative(pathToFileURL(path.join(integration, 'yida-send-approval-service.ts')).href)).createYidaSendApprovalService
-    assertActor = (await importNative(pathToFileURL(path.join(integration, 'automation-live-authority.ts')).href)).assertAutomationIntegrationActor
+    createService = (await import(pathToFileURL(path.join(integration, 'yida-send-approval-service.ts')).href)).createYidaSendApprovalService
+    assertActor = (await import(pathToFileURL(path.join(integration, 'automation-live-authority.ts')).href)).assertAutomationIntegrationActor
     const migrations = path.join(root, 'packages/core-backend/migrations')
     approvalDdl = readFileSync(path.join(migrations, '095_create_integration_yida_send_approvals.sql'), 'utf8')
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
@@ -245,7 +245,7 @@ databaseSuite('SA05 internal single-attempt approvals — real PG, ACL and priva
     process.env.NODE_ENV = 'production'
     process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex')
     process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
-    const { PluginRuntimeSecurityService } = await importNative(pathToFileURL(path.join(root,
+    const { PluginRuntimeSecurityService } = await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/security/plugin-runtime-security-service.ts')).href) as { PluginRuntimeSecurityService: new () => HostSecurity }
     security = new PluginRuntimeSecurityService()
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 9, connectionTimeoutMillis: 5000 })

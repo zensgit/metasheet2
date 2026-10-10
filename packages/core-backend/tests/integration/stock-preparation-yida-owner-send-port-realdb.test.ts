@@ -276,7 +276,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
     createPrimitives = (await importNative(pathToFileURL(path.join(lib, 'yida-send-authority-primitives.mjs')).href)).createYidaSendAuthorityPrimitives
     createPort = (await importNative(pathToFileURL(path.join(lib, 'yida-owner-send-port.mjs')).href)).createYidaOwnerSendPort
     compile = (await importNative(pathToFileURL(path.join(lib, 'yida-draft-plan.mjs')).href)).compileYidaDraft
-    createAuthority = (await importNative(pathToFileURL(path.join(root,
+    createAuthority = (await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/integration/yida-send-approval-service.ts')).href)).createInternalYidaSendExecutionAuthority
     ddl = ['090_create_integration_yida_delivery_ledger.sql', '091_create_integration_yida_create_fence.sql',
       '092_create_integration_yida_credential_materials.sql', '093_create_integration_yida_draft_plans.sql',
@@ -284,7 +284,7 @@ databaseSuite('SA05 internal owner send port — actual authority and synthetic-
       .map(name => readFileSync(path.join(root, 'packages/core-backend/migrations', name), 'utf8')).join('\n')
     savedEnv = envKeys.map(key => [key, process.env[key]])
     process.env.NODE_ENV = 'production'; process.env.ENCRYPTION_KEY = randomBytes(32).toString('hex'); process.env.ENCRYPTION_SALT = randomBytes(32).toString('hex')
-    const { PluginRuntimeSecurityService } = await importNative(pathToFileURL(path.join(root,
+    const { PluginRuntimeSecurityService } = await import(pathToFileURL(path.join(root,
       'packages/core-backend/src/security/plugin-runtime-security-service.ts')).href) as { PluginRuntimeSecurityService: new () => HostSecurity }
     security = new PluginRuntimeSecurityService()
     pool = new Pool({ connectionString: process.env.DATABASE_URL, max: 9, connectionTimeoutMillis: 5000 })
