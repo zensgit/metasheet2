@@ -120,6 +120,8 @@ function makeMemoryDb() {
       return [s]
     },
     async countRows(_t, where) { calls.push('countRows'); return rows.filter((r) => matches(r, where || {})).length },
+    // S4 fix round 1: the create REPLAY re-reads its row FOR UPDATE under the tenant lock.
+    async selectOneForUpdate(_t, where) { calls.push('selectOneForUpdate'); return rows.find((r) => matches(r, where)) || null },
   }
   return api
 }
