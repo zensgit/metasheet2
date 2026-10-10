@@ -255,9 +255,19 @@ export function assertRoleAssignable(roleId: string, scope: RoleAssignmentScope)
  *                   rbac/platform-admin.ts).
  * Every other action (`manage`, `approve`, `all`, ...) is a domain action: no access matcher
  * treats it as a wildcard (`<r>:all` is one only in the demo metrics middleware).
+ *
+ * NORMALISATION — a SUPERSET of every path a code takes, never a narrower one. On write the role
+ * editor (`routes/roles.ts#normalizePermissionCodes`) trims and keeps case; on match `rbacGuard`
+ * (`normalizeStringArray`) and `permission-match.ts#normalizePermissionCodes` trim and compare
+ * case-sensitively, so a stored ` stock-prep:admin ` IS `stock-prep:admin` to the guard: hence the
+ * trims. Case is FOLDED here although no matcher folds it today: a mixed-case variant
+ * (`Attendance:Admin`) grants nothing now, so classifying it admin-level costs nothing, and it keeps
+ * this predicate a superset of the role editor's previous case-folded elevation check — the editor
+ * now gates on this function, and must not admit a shape it used to refuse. Inner whitespace
+ * (`attendance : admin`) is likewise read as admin-level: an over-refusal, never an admission.
  */
 export function isAdminLevelPermissionCode(code: unknown): boolean {
-  const normalized = typeof code === 'string' ? code.trim() : ''
+  const normalized = typeof code === 'string' ? code.trim().toLowerCase() : ''
   const separatorIndex = normalized.indexOf(':')
   if (separatorIndex <= 0) return false
   const resource = normalized.slice(0, separatorIndex).trim()
@@ -478,7 +488,7 @@ async function clearDelegatedAdminScopesWhereNamespaceLost(
 export async function auditDelegatedAdminScopeCleanup(options: {
   actorId: string | null | undefined
   roleId: string
-  trigger: 'role_unassigned' | 'role_appointed'
+  trigger: 'role_unassigned' | 'role_appointed' | 'role_deleted'
   cleanup: readonly DelegatedAdminScopeCleanup[] | null | undefined
 }): Promise<void> {
   const entries = (options.cleanup ?? []).filter((entry) => entry.scopeRows + entry.groupScopeRows > 0)

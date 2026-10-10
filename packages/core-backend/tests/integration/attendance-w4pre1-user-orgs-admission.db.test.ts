@@ -1019,3 +1019,276 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     expect(admission.json?.error?.code).toBe('ENABLED_REQUIRED')
   })
 })
+
+describeIfDatabase('role editor — admin-level codes and namespace-admin role deletes are platform-admin only (real DB)', () => {
+  const RUN_ID = crypto.randomBytes(4).toString('hex')
+  const P = `rolef${TS}${RUN_ID}`
+  const X_NS = `rfx${RUN_ID}`
+  const ids = {
+    platformAdmin: `${P}-pa`,
+    editor: `${P}-ed`,
+    plainMember: `${P}-m1`,
+    xAdminBoth: `${P}-m2`,
+    xAdminOnly: `${P}-m3`,
+    leadMember: `${P}-m4`,
+  }
+  const allUserIds = Object.values(ids)
+  const roles = {
+    editor: `${P}_roleeditor`,
+    plain: `attendance_rolef${RUN_ID}_plain`,
+    lead: `attendance_rolef${RUN_ID}_lead`,
+    xAdmin: `${X_NS}_admin`,
+    ordinary: `${P}_ordinary`,
+  }
+  const createdRoleIds: string[] = []
+  const createdPermissionCodes: string[] = []
+  const tokens: Record<string, string> = {}
+  let httpServer: http.Server
+  let baseUrl = ''
+  let groupId = ''
+  let integrationId = ''
+  let departmentId = ''
+
+  async function api(method: string, path: string, token: string, body?: Record<string, unknown>) {
+    const res = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+    return { status: res.status, json: await res.json().catch(() => null) as any }
+  }
+  async function ensureCode(code: string): Promise<void> {
+    const created = await query<{ code: string }>(
+      'INSERT INTO permissions (code, name, description) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING RETURNING code',
+      [code, code, code],
+    )
+    if (created.rows.length) createdPermissionCodes.push(code)
+  }
+  async function ensureRole(roleId: string, codes: string[]): Promise<void> {
+    const inserted = await query<{ id: string }>(
+      'INSERT INTO roles (id, name) VALUES ($1, $1) ON CONFLICT (id) DO NOTHING RETURNING id',
+      [roleId],
+    )
+    if (inserted.rows.length === 0) throw new Error('role id collision in the real-DB fixture')
+    createdRoleIds.push(roleId)
+    for (const code of codes) {
+      await ensureCode(code)
+      await query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [roleId, code])
+    }
+  }
+  async function codesOf(roleId: string): Promise<string[]> {
+    const r = await query<{ permission_code: string }>('SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY 1', [roleId])
+    return r.rows.map((row) => row.permission_code)
+  }
+  async function membersOf(roleId: string): Promise<string[]> {
+    const r = await query<{ user_id: string }>('SELECT user_id FROM user_roles WHERE role_id = $1 ORDER BY 1', [roleId])
+    return r.rows.map((row) => row.user_id)
+  }
+  async function audience(userId: string, namespace: string): Promise<{ departments: number; groups: number }> {
+    const [d, g] = await Promise.all([
+      query<{ n: number }>('SELECT count(*)::int AS n FROM delegated_role_admin_scopes WHERE admin_user_id = $1 AND namespace = $2', [userId, namespace]),
+      query<{ n: number }>('SELECT count(*)::int AS n FROM delegated_role_admin_member_groups WHERE admin_user_id = $1 AND namespace = $2', [userId, namespace]),
+    ])
+    return { departments: d.rows[0]?.n ?? 0, groups: g.rows[0]?.n ?? 0 }
+  }
+  async function giveAudience(userId: string, namespace: string): Promise<void> {
+    await query(
+      'INSERT INTO delegated_role_admin_scopes (admin_user_id, namespace, directory_department_id, created_by) VALUES ($1, $2, $3, $4)',
+      [userId, namespace, departmentId, ids.platformAdmin],
+    )
+    await query(
+      'INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id, created_by) VALUES ($1, $2, $3, $4)',
+      [userId, namespace, groupId, ids.platformAdmin],
+    )
+  }
+  async function cleanupAuditRows(userId: string, namespace: string): Promise<Array<Record<string, unknown>>> {
+    const r = await query<{ action_details: Record<string, unknown> }>(
+      `SELECT action_details FROM audit_logs WHERE resource_type = 'delegated-admin-scope' AND resource_id = $1 AND action = 'revoke'`,
+      [`${userId}:${namespace}`],
+    )
+    return r.rows.map((row) => row.action_details ?? {})
+  }
+
+  beforeAll(async () => {
+    for (const userId of allUserIds) {
+      await query(
+        `INSERT INTO users (id, email, name, password_hash, role, is_active, is_admin)
+         VALUES ($1, $2, $1, 'x', 'user', true, false)`,
+        [userId, `${userId}@example.test`],
+      )
+    }
+    await ensureRole(roles.editor, ['roles:read', 'roles:write'])
+    await ensureRole(roles.plain, ['attendance:read'])
+    await ensureRole(roles.lead, ['attendance:read', 'attendance:admin'])
+    await ensureRole(roles.xAdmin, [])
+    await ensureRole(roles.ordinary, ['attendance:read'])
+    // A catalogued mixed-case variant, so the catalog probe cannot be what refuses it.
+    await ensureCode('Attendance:Admin')
+
+    await query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES
+         ($1, $2), ($3, $4), ($5, $6), ($5, 'attendance_admin'), ($7, $6), ($8, $9), ($3, $10)`,
+      [
+        ids.editor, roles.editor,
+        ids.plainMember, roles.plain,
+        ids.xAdminBoth, roles.xAdmin,
+        ids.xAdminOnly,
+        ids.leadMember, roles.lead,
+        roles.ordinary,
+      ],
+    )
+    groupId = (await query<{ id: string }>('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', [`${P}-group`])).rows[0].id
+    integrationId = (await query<{ id: string }>(
+      `INSERT INTO directory_integrations (org_id, provider, name, status, corp_id, config)
+       VALUES ($1, 'dingtalk', $2, 'active', $3, '{}'::jsonb) RETURNING id`,
+      [`${P}-org`, `${P}-int`, `corp-${P}`],
+    )).rows[0].id
+    departmentId = (await query<{ id: string }>(
+      `INSERT INTO directory_departments (integration_id, provider, external_department_id, name, is_active, raw)
+       VALUES ($1, 'dingtalk', $2, $3, true, '{}'::jsonb) RETURNING id`,
+      [integrationId, `${P}-dept`, `${P}-dept`],
+    )).rows[0].id
+    await giveAudience(ids.xAdminBoth, X_NS)
+    await giveAudience(ids.xAdminBoth, 'attendance')
+    await giveAudience(ids.xAdminOnly, X_NS)
+
+    const { rolesRouter } = await import('../../src/routes/roles')
+    const app = express()
+    app.use(express.json())
+    app.use('/api/auth', authRouter)
+    app.use(adminUsersRouter())
+    app.use('/api/roles', authenticate)
+    app.use(rolesRouter())
+    httpServer = http.createServer(app)
+    const port = await new Promise<number>((resolve, reject) => {
+      httpServer.once('error', reject)
+      httpServer.listen(0, '127.0.0.1', () => {
+        const address = httpServer.address()
+        if (address && typeof address === 'object') resolve(address.port)
+        else reject(new Error('failed to bind ephemeral port for the role-editor test server'))
+      })
+    })
+    baseUrl = `http://127.0.0.1:${port}`
+    const devToken = async (userId: string, platform: boolean) => {
+      const qs = platform
+        ? `userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent('*:*')}`
+        : `userId=${encodeURIComponent(userId)}&roles=user&perms=${encodeURIComponent('roles:write')}`
+      const json = await (await fetch(`${baseUrl}/api/auth/dev-token?${qs}`)).json()
+      if (!json?.token) throw new Error('dev-token issuance failed')
+      return json.token as string
+    }
+    tokens.platformAdmin = await devToken(ids.platformAdmin, true)
+    tokens.editor = await devToken(ids.editor, false)
+    tokens.xAdminOnly = await devToken(ids.xAdminOnly, false)
+  })
+
+  afterAll(async () => {
+    if (httpServer) await new Promise<void>((resolve) => httpServer.close(() => resolve()))
+    await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [allUserIds])
+    await query('DELETE FROM delegated_role_admin_scopes WHERE admin_user_id = ANY($1::text[])', [allUserIds])
+    await query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = ANY($1::text[])', [allUserIds])
+    await query('DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])', [allUserIds])
+    if (groupId) await query('DELETE FROM platform_member_groups WHERE id = $1', [groupId])
+    if (departmentId) await query('DELETE FROM directory_departments WHERE id = $1', [departmentId])
+    if (integrationId) await query('DELETE FROM directory_integrations WHERE id = $1', [integrationId])
+    if (createdRoleIds.length) {
+      await query('DELETE FROM user_roles WHERE role_id = ANY($1::text[])', [createdRoleIds])
+      await query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds])
+      await query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds])
+    }
+    if (createdPermissionCodes.length) {
+      await query('DELETE FROM role_permissions WHERE permission_code = ANY($1::text[])', [createdPermissionCodes])
+      await query('DELETE FROM permissions WHERE code = ANY($1::text[])', [createdPermissionCodes])
+    }
+    await query('DELETE FROM users WHERE id = ANY($1::text[])', [allUserIds])
+  })
+
+  it('EDITOR: a roles:write holder cannot add `attendance:admin` (nor its whitespace / case variants) to an assigned role; a platform admin can', async () => {
+    // PUT, the exact code.
+    const put = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.editor, {
+      permissions: ['attendance:read', 'attendance:admin'],
+    })
+    expect({ status: put.status, code: put.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    // POST on the existing id (the additive bypass shape).
+    const post = await api('POST', '/api/roles', tokens.editor, { id: roles.plain, name: roles.plain, permissions: ['attendance:admin'] })
+    expect({ status: post.status, code: post.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    // Variants: trimmed on write, folded by the predicate.
+    for (const variant of [' attendance:admin ', 'Attendance:Admin']) {
+      const res = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.editor, {
+        permissions: ['attendance:read', variant],
+      })
+      expect({ variant, status: res.status, code: res.json?.error?.code }).toEqual({ variant, status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    }
+    expect(await codesOf(roles.plain)).toEqual(['attendance:read'])
+    // The member gained nothing.
+    const memberCodes = await query<{ permission_code: string }>(
+      'SELECT rp.permission_code FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id WHERE ur.user_id = $1',
+      [ids.plainMember],
+    )
+    expect(memberCodes.rows.map((row) => row.permission_code)).not.toContain('attendance:admin')
+
+    // POSITIVE CONTROL — the editor's ordinary edit lands; the platform admin's admin-level edit lands.
+    const ordinary = await api('PUT', `/api/roles/${encodeURIComponent(roles.ordinary)}`, tokens.editor, { permissions: ['attendance:read', 'roles:read'] })
+    expect(ordinary.status).toBe(200)
+    const platform = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.platformAdmin, {
+      permissions: ['attendance:read', 'attendance:admin'],
+    })
+    expect(platform.status).toBe(200)
+    expect(await codesOf(roles.plain)).toEqual(['attendance:admin', 'attendance:read'])
+    // …and only the platform admin removes it again (symmetric gate).
+    const editorRemove = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.editor, { permissions: ['attendance:read'] })
+    expect(editorRemove.status).toBe(403)
+    const platformRemove = await api('PUT', `/api/roles/${encodeURIComponent(roles.plain)}`, tokens.platformAdmin, { permissions: ['attendance:read'] })
+    expect(platformRemove.status).toBe(200)
+    expect(await codesOf(roles.plain)).toEqual(['attendance:read'])
+  })
+
+  it('DELETE `<ns>_admin`: refused to a roles:write holder; a platform admin\'s delete removes the memberships, that namespace\'s audience and the delegated identity (another namespace\'s audience stays)', async () => {
+    // The identity exists before: the x-only member is a delegated admin of X_NS.
+    const before = await api('GET', '/api/admin/role-delegation/summary', tokens.xAdminOnly)
+    expect(before.status).toBe(200)
+    expect(before.json?.data?.delegableNamespaces).toEqual([X_NS])
+
+    const refused = await api('DELETE', `/api/roles/${encodeURIComponent(roles.xAdmin)}`, tokens.editor)
+    expect({ status: refused.status, code: refused.json?.error?.code }).toEqual({ status: 403, code: 'PROTECTED_ROLE_FORBIDDEN' })
+    expect(await membersOf(roles.xAdmin)).toEqual([ids.xAdminBoth, ids.xAdminOnly].sort())
+    expect(await audience(ids.xAdminOnly, X_NS)).toEqual({ departments: 1, groups: 1 })
+
+    const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.xAdmin)}`, tokens.platformAdmin)
+    expect(deleted.status).toBe(200)
+    const roleRow = await query('SELECT 1 FROM roles WHERE id = $1', [roles.xAdmin])
+    expect(roleRow.rows).toHaveLength(0)
+    // The migrated schema has no user_roles → roles FK: only the route can have removed these.
+    expect(await membersOf(roles.xAdmin)).toEqual([])
+    expect(await audience(ids.xAdminOnly, X_NS)).toEqual({ departments: 0, groups: 0 })
+    expect(await audience(ids.xAdminBoth, X_NS)).toEqual({ departments: 0, groups: 0 })
+    expect(await audience(ids.xAdminBoth, 'attendance')).toEqual({ departments: 1, groups: 1 })
+    expect(await membersOf('attendance_admin')).toContain(ids.xAdminBoth)
+
+    // The delegated identity is gone with the memberships.
+    const after = await api('GET', '/api/admin/role-delegation/summary', tokens.xAdminOnly)
+    expect(after.status).toBe(403)
+    // Audited post-commit, counts only, with the delete as the trigger.
+    const audits = await cleanupAuditRows(ids.xAdminOnly, X_NS)
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toMatchObject({ trigger: 'role_deleted', scopeRows: 1, groupScopeRows: 1, roleId: roles.xAdmin })
+  })
+
+  it('DELETE of an admin-equivalent role (carries `attendance:admin`): refused to a roles:write holder; a platform admin\'s delete removes its memberships', async () => {
+    const refused = await api('DELETE', `/api/roles/${encodeURIComponent(roles.lead)}`, tokens.editor)
+    expect({ status: refused.status, code: refused.json?.error?.code }).toEqual({ status: 403, code: 'PROTECTED_ROLE_FORBIDDEN' })
+    expect(refused.json?.error?.details).toEqual({ roleId: roles.lead, escalatingCount: 1 })
+    expect(await membersOf(roles.lead)).toEqual([ids.leadMember])
+
+    const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.lead)}`, tokens.platformAdmin)
+    expect(deleted.status).toBe(200)
+    expect(await membersOf(roles.lead)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — an ordinary role is still deleted by a roles:write holder', async () => {
+    const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.ordinary)}`, tokens.editor)
+    expect(deleted.status).toBe(200)
+    const roleRow = await query('SELECT 1 FROM roles WHERE id = $1', [roles.ordinary])
+    expect(roleRow.rows).toHaveLength(0)
+  })
+})

@@ -7,7 +7,8 @@
  * routers that had no catch before this slice).
  *
  * Surfaces covered here:
- *   - routes/roles.ts                  (POST /api/roles, DELETE /api/roles/:id)
+ *   - routes/roles.ts                  (POST /api/roles, DELETE /api/roles/:id — ordinary and
+ *                                       namespace-admin / admin-equivalent role)
  *   - routes/spreadsheet-permissions.ts (grant / revoke)
  *   - routes/permissions.ts            (POST /api/permissions/grant)
  *   - routes/attendance-admin.ts       (POST .../users/:userId/roles/assign,
@@ -179,6 +180,32 @@ beforeEach(() => {
   })
 })
 
+/**
+ * One scripted DELETE /api/roles/:id transaction: the role row exists with `codes` and `members`,
+ * every statement is recorded, and `failOn` may throw at a chosen statement (statements are
+ * matched on their whitespace-collapsed text).
+ */
+function scriptRoleDeleteTransaction(options: {
+  codes: string[]
+  members: string[]
+  failOn: (sql: string) => Error | null
+}): string[] {
+  const seen: string[] = []
+  const run = async (rawSql: string, params: unknown[] = []) => {
+    const sql = rawSql.replace(/\s+/g, ' ').trim()
+    seen.push(sql)
+    const injected = options.failOn(sql)
+    if (injected) throw injected
+    if (/^SELECT id, name FROM roles WHERE id=/.test(sql)) return { rows: [{ id: params[0], name: 'Role' }] }
+    if (/^SELECT permission_code FROM role_permissions/.test(sql)) return { rows: options.codes.map((permission_code) => ({ permission_code })) }
+    if (/^SELECT user_id FROM user_roles WHERE role_id=/.test(sql)) return { rows: options.members.map((user_id) => ({ user_id })) }
+    if (/^DELETE FROM user_roles/.test(sql)) return { rows: options.members.map((user_id) => ({ user_id })), rowCount: options.members.length }
+    return { rows: [], rowCount: 0 }
+  }
+  pgMocks.transaction.mockImplementationOnce(async (handler: (client: { query: typeof run }) => unknown) => handler({ query: run }))
+  return seen
+}
+
 describe('routes/roles.ts', () => {
   it('[recovery-census:roles:create] POST /api/roles: marker 40001 on the write → exact uniform retryable 409', async () => {
     // The role row and its grants now share ONE transaction (so a refused or failed grant
@@ -208,15 +235,21 @@ describe('routes/roles.ts', () => {
   })
 
   it('[recovery-census:roles:delete] DELETE /api/roles/:id: marker 40001 (FK cascade into role_permissions/user_roles) → 409', async () => {
-    pgMocks.poolQuery
-      .mockResolvedValueOnce({ rows: [{ id: 'role-1', name: 'Role' }] })
-      .mockRejectedValueOnce(markerError())
+    // The delete now runs in ONE transaction (lock, classification, member snapshot, delete).
+    // An ORDINARY role's write set is the `roles` DELETE alone; where the cascading FK exists the
+    // marker surfaces from that statement.
+    const seen = scriptRoleDeleteTransaction({
+      codes: ['p:read'],
+      members: ['user-a'],
+      failOn: (sql) => (/^DELETE FROM roles WHERE id=/.test(sql) ? markerError() : null),
+    })
     const res = mockResponse()
     await invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
       params: { id: 'role-1' },
     }, res)
     expect(res.statusCode).toBe(409)
     expect(res.body).toEqual(UNIFORM_409_BODY)
+    expect(seen.filter((sql) => /user_roles/.test(sql) && /^DELETE/.test(sql))).toEqual([])
     census.record('roles:delete')
   })
 
@@ -245,6 +278,43 @@ describe('routes/roles.ts', () => {
     await invokeHandler(rolesRouter(), 'put', '/api/roles/:id', {
       params: { id: 'role-1' },
       body: { name: 'Renamed' },
+    }, res)
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
+  })
+
+  it('[recovery-census:roles:delete-admin-role] DELETE of a namespace main-admin role: marker 40001 on the membership removal (user_roles) → exact uniform retryable 409', async () => {
+    // A platform admin deleting `<ns>_admin` also removes the role's user_roles rows through the
+    // role-assignment boundary, in the same transaction. user_roles carries
+    // trg_user_roles_recovery_authority_lock, so a held user lease surfaces the marker there.
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const seen = scriptRoleDeleteTransaction({
+      codes: [],
+      members: ['user-a'],
+      failOn: (sql) => (/^DELETE FROM user_roles/.test(sql) ? markerError() : null),
+    })
+    const res = mockResponse()
+    await invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
+      params: { id: 'crm_admin' },
+    }, res)
+    expect(res.statusCode).toBe(409)
+    expect(res.body).toEqual(UNIFORM_409_BODY)
+    // The marker came from the membership removal, before the role row was touched.
+    expect(seen.some((sql) => /^DELETE FROM user_roles/.test(sql))).toBe(true)
+    expect(seen.some((sql) => /^DELETE FROM roles/.test(sql))).toBe(false)
+    census.record('roles:delete-admin-role')
+  })
+
+  it('DELETE of a namespace main-admin role: non-40001 error on the membership removal → values-free 500, not a hang', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    scriptRoleDeleteTransaction({
+      codes: [],
+      members: ['user-a'],
+      failOn: (sql) => (/^DELETE FROM user_roles/.test(sql) ? otherDbError() : null),
+    })
+    const res = mockResponse()
+    await invokeHandler(rolesRouter(), 'delete', '/api/roles/:id', {
+      params: { id: 'crm_admin' },
     }, res)
     expect(res.statusCode).toBe(500)
     expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })

@@ -5,6 +5,13 @@ import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import { auditLog } from '../audit/audit'
 import { pool, transaction } from '../db/pg'
 import { invalidateUserPerms, isAdmin, userHasPermission } from '../rbac/service'
+import { deriveDelegatedAdminNamespace } from '../rbac/namespace-admission'
+import {
+  auditDelegatedAdminScopeCleanup,
+  isAdminLevelPermissionCode,
+  unassignUserRoles,
+  type RoleAssignmentResult,
+} from '../rbac/role-assignment'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { parsePagination } from '../util/response'
 import { Logger } from '../core/logger'
@@ -281,8 +288,18 @@ function toEpochMillis(value: unknown): number | null {
  * the catalog unfiltered, so the role editor already renders it as a checkbox.
  * rbacGuard expands both the global wildcard and a per-resource one (rbac/rbac.ts
  * hasPermissionCode), so all of those shapes count as elevation.
+ *
+ * FIRST the SAME predicate the delegated-role boundary uses (`isAdminLevelPermissionCode`,
+ * rbac/role-assignment.ts). Before, `<ns>:admin` was not elevated here: a non-platform holder of
+ * `roles:write` could add `attendance:admin` to a role that was ALREADY ASSIGNED, and every member
+ * became an attendance administrator without any membership change — the very appointment the
+ * owner ruling 「只有平台管理员能任命 *_admin」 reserves for a platform administrator, reached
+ * through the role instead of through the member. Sharing the function means the editor and the
+ * delegation route cannot disagree on what "admin-level" is. The local shapes below are kept on
+ * top of it (never instead of it), so nothing this gate refused before is admitted now.
  */
 function isElevatedPermissionCode(code: string): boolean {
+  if (isAdminLevelPermissionCode(code)) return true
   const normalized = code.trim().toLowerCase()
   if (!normalized) return false
   if (normalized === '*' || normalized === '*:*') return true
@@ -393,14 +410,76 @@ async function assertCodesInCatalog(client: SqlClient, codes: readonly string[])
 }
 
 /**
+ * Why a role may only be DELETED by a platform administrator, or null for an ordinary role.
+ *
+ * ONE ADMIT SET WITH PUT. A delete removes every code the role carries from every member at once,
+ * so it is refused to exactly the callers PUT would refuse for the same removal — plus the
+ * namespace main-admin identity, which lives in the role ID rather than in its codes:
+ *  - `platform_admin_role`  the seeded `admin` role (as before);
+ *  - `main_admin_role`      the id derives a delegated-admin namespace (`deriveDelegatedAdminNamespace`,
+ *                           the predicate that MAKES its holders delegated admins — owner ruling
+ *                           「只有平台管理员能任命 *_admin」); judged by id, so it holds even when the
+ *                           `roles` row is already gone and only memberships remain;
+ *  - `admin_equivalent_role` it carries a code `isElevatedPermissionCode` classifies (the editor's
+ *                           own gate, i.e. `isAdminLevelPermissionCode` and the wildcard shapes).
+ *
+ * The codes are read on the caller's transaction client, after the role row is locked FOR UPDATE,
+ * so a concurrent PUT/POST adding an admin code (which takes the same lock first) is ordered
+ * entirely before or after this classification. Counts only: the codes never leave this function.
+ */
+type RoleDeleteProtection =
+  | { kind: 'platform_admin_role' }
+  | { kind: 'main_admin_role' }
+  | { kind: 'admin_equivalent_role'; elevatedCount: number }
+
+async function readRoleDeleteProtection(client: SqlClient, roleId: string): Promise<RoleDeleteProtection | null> {
+  if (roleId === PLATFORM_ADMIN_ROLE_ID) return { kind: 'platform_admin_role' }
+  if (deriveDelegatedAdminNamespace(roleId) !== null) return { kind: 'main_admin_role' }
+  const current = await client.query('SELECT permission_code FROM role_permissions WHERE role_id=$1', [roleId])
+  const elevatedCount = (current.rows as Array<{ permission_code?: unknown }>)
+    .filter((row) => typeof row?.permission_code === 'string' && isElevatedPermissionCode(row.permission_code))
+    .length
+  return elevatedCount > 0 ? { kind: 'admin_equivalent_role', elevatedCount } : null
+}
+
+/** The fixed refusal per protection kind; the body names the role id the caller sent, never its codes. */
+function protectedRoleDeleteRefusal(roleId: string, protection: RoleDeleteProtection): RolePermissionRequestError {
+  switch (protection.kind) {
+    case 'platform_admin_role':
+      return new RolePermissionRequestError(
+        403,
+        'PROTECTED_ROLE_FORBIDDEN',
+        'Only a platform administrator may delete the platform administrator role',
+        { roleId },
+      )
+    case 'main_admin_role':
+      return new RolePermissionRequestError(
+        403,
+        'PROTECTED_ROLE_FORBIDDEN',
+        'Only a platform administrator may delete a namespace admin role',
+        { roleId },
+      )
+    default:
+      return new RolePermissionRequestError(
+        403,
+        'PROTECTED_ROLE_FORBIDDEN',
+        'Only a platform administrator may delete a role that carries wildcard or admin permission codes',
+        { roleId, escalatingCount: protection.elevatedCount },
+      )
+  }
+}
+
+/**
  * The role's current members. Split out of `invalidateRoleMembers` because DELETE must take
  * this snapshot BEFORE the role row goes: `user_roles.role_id REFERENCES roles(id) ON DELETE
  * CASCADE` (migrations/033_create_rbac_core.sql:36), so after the DELETE the lookup returns
- * nobody and the fan-out would silently invalidate no one.
+ * nobody and the fan-out would silently invalidate no one. DELETE passes its transaction client,
+ * so the snapshot is read under the role-row lock it also classifies the role under.
  */
-async function readRoleMemberIds(roleId: string): Promise<string[]> {
-  if (!pool) return []
-  const members = await pool.query('SELECT user_id FROM user_roles WHERE role_id=$1', [roleId])
+async function readRoleMemberIds(roleId: string, client?: SqlClient): Promise<string[]> {
+  const executor: SqlClient | null = client ?? (pool ? pool : null)
+  if (!executor) return []
+  const members = await executor.query('SELECT user_id FROM user_roles WHERE role_id=$1', [roleId])
   const memberIds: string[] = []
   for (const row of members.rows as Array<{ user_id: string }>) {
     const memberId = String(row.user_id ?? '')
@@ -740,44 +819,78 @@ export function rolesRouter(): Router {
     return res.json({ ok: true, data: next })
   })
 
+  /**
+   * DELETE — the widest revocation this router offers: every code the role carries, for every
+   * member, at once. Hence the same admit set as PUT (`readRoleDeleteProtection`): the platform-admin
+   * role, a namespace main-admin role and an admin-equivalent role are platform-administrator only.
+   *
+   * MEMBERSHIPS GO WITH A MAIN-ADMIN OR ADMIN-EQUIVALENT ROLE. The migrated schema has no foreign
+   * key from `user_roles` (nor `role_permissions`) to `roles` (the Kysely chain creates both without
+   * one; see the SCHEMA CAVEAT on `sendRoleWriteFailure`), so deleting the `roles` row alone left
+   * every membership standing — and delegated-admin identity is DERIVED from the held role id, so
+   * the members of a deleted `<ns>_admin` stayed delegated admins with their whole audience. Such a
+   * delete now removes the role's `user_roles` rows through the role-assignment boundary
+   * (`unassignUserRoles`, scope `platform-admin` — the caller was just proven one) on THIS
+   * transaction's client, which also drops each member's delegated audience for the namespace once
+   * no other held role derives it. Membership, audience and the role row commit or roll back
+   * together. Deliberately NOT for the seeded `admin` role: removing every platform administrator's
+   * membership is a lock-out, not a cleanup, and stays a separate, explicit decision.
+   */
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
     const actorId = req.user?.id?.toString()
     if (pool) {
       let before: unknown = null
       let memberIds: string[] = []
+      let membershipRemoval: RoleAssignmentResult | undefined
+      // Set immediately before the first membership statement: a failure after it belongs to the
+      // `roles:delete-admin-role` recovery-census site (that write set reaches `user_roles`).
+      let removesMemberships = false
       try {
-        const { rows } = await pool.query('SELECT id, name FROM roles WHERE id=$1', [id])
-        before = rows[0] ?? null
-        // Deleting the seeded platform-admin role removes the only row `isAdmin` looks for,
-        // i.e. it de-administrates the platform — the same blast radius as emptying its
-        // permission set, which the PUT gate reserves for a platform administrator. A
-        // surgical revoke and a delete must not have different admit sets, or the gate is
-        // just a detour.
-        if (before && id === PLATFORM_ADMIN_ROLE_ID && !await actorIsPlatformAdmin(req, actorId)) {
-          throw new RolePermissionRequestError(
-            403,
-            'PROTECTED_ROLE_FORBIDDEN',
-            'Only a platform administrator may delete the platform administrator role',
-            { roleId: id },
-          )
-        }
-        // The member snapshot, taken BEFORE the row goes and INSIDE this try. Before,
-        // because `user_roles.role_id → roles(id)` is ON DELETE CASCADE
-        // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
-        // because a read that failed out here would escape unanswered exactly like the tail
-        // used to — and unlike the tail this one is PRE-commit, so its honest answer is the
-        // 500 below, with nothing deleted.
-        memberIds = await readRoleMemberIds(id)
-        // The FK cascade from roles → role_permissions deletes recovery-authority rows,
-        // so this DELETE can also surface the marker 40001.
-        await pool.query('DELETE FROM roles WHERE id=$1', [id])
+        await transaction(async (client) => {
+          // FOR UPDATE, as the FIRST statement: PUT/POST take the same row lock before touching
+          // role_permissions, so the classification below cannot miss an admin code they add.
+          const { rows } = await client.query('SELECT id, name FROM roles WHERE id=$1 FOR UPDATE', [id])
+          before = rows[0] ?? null
+          // Deleting the seeded platform-admin role removes the only row `isAdmin` looks for,
+          // i.e. it de-administrates the platform — the same blast radius as emptying its
+          // permission set, which the PUT gate reserves for a platform administrator. A
+          // surgical revoke and a delete must not have different admit sets, or the gate is
+          // just a detour. The same holds for a main-admin or admin-equivalent role.
+          const protection = await readRoleDeleteProtection(client, id)
+          if (protection && !await actorIsPlatformAdmin(req, actorId)) {
+            throw protectedRoleDeleteRefusal(id, protection)
+          }
+          // The member snapshot, taken BEFORE the row goes and INSIDE this transaction. Before,
+          // because `user_roles.role_id → roles(id)` is ON DELETE CASCADE where that FK exists
+          // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
+          // because it is PRE-commit: a failed read answers the 500 below with nothing deleted.
+          memberIds = await readRoleMemberIds(id, client)
+          if (protection && protection.kind !== 'platform_admin_role' && memberIds.length > 0) {
+            removesMemberships = true
+            membershipRemoval = await unassignUserRoles({
+              userIds: memberIds,
+              roleId: id,
+              scope: { kind: 'platform-admin' },
+              executor: client,
+            })
+          }
+          await client.query('DELETE FROM roles WHERE id=$1', [id])
+        })
       } catch (error) {
         if (error instanceof RolePermissionRequestError) {
           await recordRoleWriteRefusal({ action: 'delete', actorId, roleId: id, error })
           return sendRolePermissionRequestError(res, error)
         }
-        // O2-S2: marker 40001 → retryable 409.
+        if (removesMemberships) {
+          // O2-S2, census site `roles:delete-admin-role`: the membership removal DELETEs from
+          // `user_roles`, which carries trg_user_roles_recovery_authority_lock, so a marker 40001
+          // under a held user lease is constructible here → retryable 409.
+          if (sendIfRecoveryConflict(res, error)) return
+          return sendRoleWriteFailure(res, error, 'delete', id)
+        }
+        // O2-S2, census site `roles:delete`: marker 40001 → retryable 409. This write set reaches
+        // `roles` only (see the L1 battery's NOT-DRIVEN ledger for why that holds on this schema).
         if (sendIfRecoveryConflict(res, error)) return
         return sendRoleWriteFailure(res, error, 'delete', id)
       }
@@ -791,9 +904,18 @@ export function rolesRouter(): Router {
         async () => invalidateMembers(memberIds),
         null,
       )
+      // Post-commit and best-effort by contract (it never throws): one entry per member whose
+      // delegated audience the membership removal dropped. Counts only.
+      await auditDelegatedAdminScopeCleanup({
+        actorId,
+        roleId: id,
+        trigger: 'role_deleted',
+        cleanup: membershipRemoval?.delegatedAdminScopeCleanup,
+      })
+      const membershipsRemoved = membershipRemoval?.affectedUserIds.length ?? 0
       await settlePostCommitEffect<void>(
         { label: 'audit', action: 'delete', roleId: id },
-        () => auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before, membersInvalidated } }),
+        () => auditLog({ actorId, actorType: 'user', action: 'delete', resourceType: 'role', resourceId: id, meta: { before, membersInvalidated, membershipsRemoved } }),
         undefined,
       )
       return res.json({ ok: true, data: { id } })

@@ -320,6 +320,82 @@ describe('RoleDelegationView', () => {
     expect(container?.textContent).not.toContain('alpha@example.com')
   })
 
+  it('revokes from the server\'s revocable list (delegableRoles), not from the assignable catalog', async () => {
+    // A delegate may REVOKE a role it may not ASSIGN (a role carrying ordinary codes outside its
+    // namespace — e.g. `plugin_elearning_viewer` for an e-learning delegate). The server answers the
+    // two sets separately; the revoke control must offer the revocable one.
+    const catalog = [{ id: 'attendance_employee', name: '考勤员工', permissions: ['attendance:read'] }]
+    const delegateAccess = (delegableRoles: string[]) => ({
+      actorId: 'delegate-1',
+      isPlatformAdmin: false,
+      delegableNamespaces: ['attendance'],
+      roleCatalog: catalog,
+      scopeAssignments: [],
+      groupAssignments: [],
+      user: { id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true },
+      roles: delegableRoles,
+      memberGroups: [],
+      delegableRoles,
+      namespaceAdmissions: [],
+    })
+    let access = delegateAccess(['attendance_employee', 'plugin_elearning_viewer'])
+    const posts: Array<{ path: string; body: unknown }> = []
+    apiFetchMock.mockReset()
+    apiFetchMock.mockImplementation(async (input: unknown, init?: { method?: string; body?: string }) => {
+      const rawUrl = String(input)
+      callLog.push(rawUrl)
+      const { pathname } = new URL(rawUrl, 'http://localhost')
+      if (pathname === '/api/admin/role-delegation/summary') {
+        return createJsonResponse({
+          ok: true,
+          data: { actorId: 'delegate-1', isPlatformAdmin: false, delegableNamespaces: ['attendance'], roleCatalog: catalog, scopeAssignments: [], groupAssignments: [] },
+        })
+      }
+      if (pathname === '/api/admin/role-delegation/users') {
+        return createJsonResponse({ ok: true, data: { items: [{ id: 'user-1', email: 'alpha@example.com', name: 'Alpha', role: 'user', is_active: true }] } })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/access') {
+        return createJsonResponse({ ok: true, data: access })
+      }
+      if (pathname === '/api/admin/role-delegation/users/user-1/roles/unassign' && init?.method === 'POST') {
+        posts.push({ path: pathname, body: JSON.parse(String(init.body)) })
+        access = delegateAccess(['attendance_employee'])
+        return createJsonResponse({ ok: true, data: access })
+      }
+      throw new Error(`Unhandled apiFetch call: ${rawUrl}`)
+    })
+
+    app = createApp(RoleDelegationView)
+    app.component('RouterLink', { props: ['to'], template: '<a><slot /></a>' })
+    app.mount(container!)
+    await waitForCondition(() => Boolean(container?.querySelector('select[data-testid="delegation-revoke-role"] option[value="plugin_elearning_viewer"]')))
+
+    const optionValues = (testId: string) => Array.from(
+      container!.querySelectorAll(`select[data-testid="${testId}"] option`),
+    ).map((option) => (option as HTMLOptionElement).value)
+    expect(optionValues('delegation-assign-role')).toEqual(['', 'attendance_employee'])
+    expect(optionValues('delegation-revoke-role')).toEqual(['', 'attendance_employee', 'plugin_elearning_viewer'])
+
+    const revokeButton = findButtonByText(container!, '撤销角色')
+    const assignButton = findButtonByText(container!, '分配角色')
+    expect(revokeButton.disabled).toBe(true)
+
+    const revokeSelect = container!.querySelector('select[data-testid="delegation-revoke-role"]') as HTMLSelectElement
+    revokeSelect.value = 'plugin_elearning_viewer'
+    revokeSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(revokeButton.disabled).toBe(false)
+    // Picking a role to revoke does not arm the assign button with it.
+    expect(assignButton.disabled).toBe(true)
+
+    revokeButton.click()
+    await waitForCondition(() => posts.length === 1)
+    expect(posts[0]).toEqual({ path: '/api/admin/role-delegation/users/user-1/roles/unassign', body: { roleId: 'plugin_elearning_viewer' } })
+    await waitForCondition(() => !optionValues('delegation-revoke-role').includes('plugin_elearning_viewer'))
+    expect(revokeSelect.value).toBe('')
+    expect(container?.textContent).toContain('角色已撤销')
+  })
+
   it('shows namespace admission controls for delegated members and can toggle plugin usage', async () => {
     await mountView()
 
