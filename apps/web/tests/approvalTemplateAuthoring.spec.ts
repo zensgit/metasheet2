@@ -4764,6 +4764,206 @@ describe('TemplateAuthoringView', () => {
       })
     })
   })
+
+  // ── Lock-4 §1 F4-A — 审批类型 (approvalType) through the REAL mounted view ───────────────────────
+  // docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A / §2.3 / OD-L4-2(a). The
+  // template is LOADED THROUGH THE API SEAM (getTemplate) and SAVED through the real button, so
+  // these also exercise the read-only door and the save gating the pure helpers cannot see. Before
+  // this slice every one of these templates opened read-only with save disabled. `JSON.stringify`
+  // equality pins key order (`toEqual` would not); fixtures are in the backend-normalized shape.
+  describe('Lock-4 §1 F4-A — 审批类型 authoring and the via-API round-trip (mounted)', () => {
+    const f4aLinear = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    })
+    // The cc node forces the preserved-graph path (the canvas edit model; flag OFF renders it in the
+    // structured list with the SAME ApprovalGraphNodeConfigEditor the canvas inspector hosts).
+    const f4aComplex = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管', config },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'cc_1' },
+        { key: 'e3', source: 'cc_1', target: 'end' },
+      ],
+    })
+    const SOURCELESS_AUTO = { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const AUTO_WITH_SOURCE = { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const EXPLICIT_MANUAL = { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'manual', emptyAssigneePolicy: 'error' }
+    const CASES: Array<[string, string, Record<string, unknown>]> = [
+      ['sourceless', 'a sourceless auto_approve node', SOURCELESS_AUTO],
+      ['withsource', 'an auto_approve node that still carries a source', AUTO_WITH_SOURCE],
+      ['manual', "an explicit 'manual' node", EXPLICIT_MANUAL],
+    ]
+    const q = <T extends Element = HTMLElement>(testId: string) => container!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function loadEditable(id: string, graph: unknown): Promise<void> {
+      setRouteParams({ id })
+      getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).toBeNull()
+      expect(q<HTMLButtonElement>('approval-template-save-button')!.disabled).toBe(false)
+    }
+
+    async function saveAndTakePayload(callIndex: number): Promise<any> {
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(callIndex + 1)
+      return updateTemplateSpy.mock.calls[callIndex]?.[1]
+    }
+
+    for (const [slug, label, config] of CASES) {
+      it(`LINEAR editor: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aLinear(config)
+        await loadEditable(`tpl_f4a_linear_${slug}`, graph)
+        expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(1)
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+
+      it(`CANVAS edit model: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aComplex(config)
+        await loadEditable(`tpl_f4a_complex_${slug}`, graph)
+        expect(container!.querySelector('[data-approval-node="approval_1"]')).not.toBeNull()
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+    }
+
+    it('LINEAR: each step gets a two-option 审批类型 radiogroup (人工审批 / 自动通过, no 自动拒绝 — OD-L4-2(a)) with a per-step radio name', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
+      graph.nodes.splice(2, 0, { key: 'approval_2', type: 'approval', name: '审批人 2', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      graph.edges = [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ]
+      await loadEditable('tpl_f4a_linear_two_steps', graph)
+      const groups = Array.from(container!.querySelectorAll('[data-testid="approval-step-approval-type"]'))
+      expect(groups).toHaveLength(2)
+      const names = groups.map((group) => {
+        const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+        expect(radios.map((radio) => radio.value)).toEqual(['manual', 'auto_approve'])
+        expect(Array.from(group.querySelectorAll('label')).map((labelEl) => labelEl.textContent?.trim())).toEqual(['人工审批', '自动通过'])
+        expect(radios[0]!.checked).toBe(true)
+        expect(new Set(radios.map((radio) => radio.name)).size).toBe(1)
+        return radios[0]!.name
+      })
+      expect(new Set(names).size).toBe(2)
+      expect(container!.textContent).not.toContain('自动拒绝')
+    })
+
+    it('LINEAR: 自动通过 hides the person-only controls and saves approvalType with NO assigneeSources', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_toggle', graph)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-merge-with-requester')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-auto-hint')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      expect(Array.from(container!.querySelectorAll('[data-testid="approval-spine-chip-step"]')).map((chip) => chip.textContent)).toEqual([
+        expect.stringContaining('自动通过'),
+      ])
+      let payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ approvalMode: 'all', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
+      )
+
+      // The save re-hydrates the draft from the server response, which carries NO source: the scratch
+      // lived only in the unsaved session, so 人工审批 now starts from the zero-config requester
+      // default (owner-visible consequence, recorded in the slice note).
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      payload = await saveAndTakePayload(1)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
+      )
+    })
+
+    it('LINEAR: 自动通过 then 人工审批 BEFORE saving restores the configured source — the traversal is lossless and the save is byte-for-byte the original', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_traversal', graph)
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+    })
+
+    it('LINEAR: an auto_approve step that still carries a source keeps it VISIBLE with a notice (it is saved); the notice action drops it', async () => {
+      await loadEditable('tpl_f4a_linear_live_source', f4aLinear(AUTO_WITH_SOURCE))
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).not.toBeNull()
+
+      q<HTMLButtonElement>('approval-step-approval-type-drop-sources')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
+    })
+
+    it('CANVAS edit model: a sourceless auto_approve node renders an editor (seeded) with 自动通过 checked and no cards / policy / timeout; 人工审批 lands on one requester card and saves it', async () => {
+      await loadEditable('tpl_f4a_complex_seeded', f4aComplex(SOURCELESS_AUTO))
+      const editor = container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      expect(editor).not.toBeNull()
+      expect((editor.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(editor.querySelector('[data-testid="approval-node-source-add"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).not.toBeNull()
+
+      ;(editor.querySelector('[data-testid="approval-node-approval-type-manual"]') as HTMLInputElement).click()
+      await flushUi()
+      const cards = editor.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((cards[0]!.querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config).toEqual({ approvalMode: 'single', emptyAssigneePolicy: 'error', assigneeSources: [{ kind: 'requester' }] })
+    })
+
+    it("an approvalType outside the FE union ('auto_reject') opens READ-ONLY with save disabled — never silently dropped (gate X-3 analog)", async () => {
+      setRouteParams({ id: 'tpl_f4a_auto_reject' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'auto_reject', emptyAssigneePolicy: 'error' }) as any,
+      }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).not.toBeNull()
+      const save = q<HTMLButtonElement>('approval-template-save-button')!
+      expect(save.disabled).toBe(true)
+      save.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+    })
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {
