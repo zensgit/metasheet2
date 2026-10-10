@@ -705,8 +705,23 @@ function emptySummary(projectCount = 0) {
 // ACROSS PROCESSES the database try-lock is the only coordination: a writer that loses it to another process
 // leaves its projects dirty here — reconciled by this process's next overview writer — and the next refresh
 // rebuilds everything (register R-37 states this limit).
+//
+// S3 follow-ups, fix round 1 — A FAILED PROJECT IS RETRIED BOUNDED, NOT BY EVERY EVENT. A project whose write
+// failed is put back into the dirty set as a RETRY mark (`retry: true` + the in-process `Date.now()` of the
+// failure). A PER-EVENT writer runs inside a request handler (create / dry-run / apply / confirm / archive /
+// restore / project fields), so it drains every FRESH mark (its own project, and the projects of in-process
+// events deferred into it — the F4 contract above) but at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS retry marks per
+// call, and none whose failure is younger than OVERVIEW_EVENT_RETRY_BACKOFF_MS; the rest stay dirty, in order,
+// for a later writer. Without this a persistent failure (up to the registry's 200 projects, each a multi-page
+// recount + a registry write + the failing write) would be re-run inline by EVERY event of the tenant. A fresh
+// mark for a project (an event on it) clears its retry mark — the event's own project is always attempted. The
+// REFRESH is the full pass: it drains every dirty project, retry marks included, with no bound and no backoff.
 
 const BUSY_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY'
+// S3 follow-ups, fix round 1: the per-event writer's retry bound and per-project backoff (in-process, per tenant).
+const OVERVIEW_EVENT_RETRY_MAX_PROJECTS = 5
+const OVERVIEW_EVENT_RETRY_BACKOFF_MS = 30 * 1000
+const OVERVIEW_EVENT_RETRY_POLICY = Object.freeze({ maxProjects: OVERVIEW_EVENT_RETRY_MAX_PROJECTS, backoffMs: OVERVIEW_EVENT_RETRY_BACKOFF_MS })
 
 function overviewBusyError() {
   return new StockPreparationProjectOverviewError(409, BUSY_CODE, 'another update of this tenant\'s project overview is running; nothing was done — try again in a moment', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
@@ -758,33 +773,86 @@ function overviewWriterState(store, tenant) {
   return state
 }
 
+/** A FRESH mark (an event, or the refresh's past-the-bound re-projection): never a retry — it clears one. */
 function markOverviewProjectDirty(state, projectNo, { recount = false } = {}) {
   const previous = state.dirty.get(projectNo)
   state.dirty.set(projectNo, { recount: recount === true || Boolean(previous && previous.recount === true) })
 }
 
 /**
+ * S3 follow-ups, fix round 1: a RETRY mark — the project's write failed at `failedAtMs` (in-process clock). A fresh
+ * mark already pending for it (an event after the failure) stays fresh: the event's project is always attempted.
+ */
+function markOverviewProjectRetry(state, projectNo, { recount = false } = {}, failedAtMs) {
+  const previous = state.dirty.get(projectNo)
+  const mergedRecount = recount === true || Boolean(previous && previous.recount === true)
+  if (previous && previous.retry !== true) {
+    state.dirty.set(projectNo, { recount: mergedRecount })
+    return
+  }
+  state.dirty.set(projectNo, { recount: mergedRecount, retry: true, failedAtMs })
+}
+
+/**
+ * Whether a writer under `budget` may drain the mark now. `budget === null` is the refresh: everything. Otherwise a
+ * fresh mark always; a retry mark only while the run's retry budget lasts and once its backoff has passed (a clock
+ * that moved backwards, or a missing stamp, counts as passed — never a project stranded until the clock catches up).
+ */
+function overviewMarkDrainable(flags, budget, nowMs) {
+  if (budget === null || !flags || flags.retry !== true) return true
+  if (budget.remaining <= 0) return false
+  const age = nowMs - flags.failedAtMs
+  return !(Number.isFinite(age) && age >= 0 && age < budget.backoffMs)
+}
+
+/** Take (remove from the dirty set) the marks this writer drains now, in mark order; retry marks spend the budget. */
+function takeDrainableOverviewMarks(state, budget) {
+  const nowMs = Date.now()
+  const batch = []
+  for (const [projectNo, flags] of state.dirty) {
+    if (!overviewMarkDrainable(flags, budget, nowMs)) continue
+    if (budget !== null && flags && flags.retry === true) budget.remaining -= 1
+    batch.push([projectNo, flags])
+  }
+  for (const [projectNo] of batch) state.dirty.delete(projectNo)
+  return batch
+}
+
+function hasDrainableOverviewMarks(state, budget) {
+  const nowMs = Date.now()
+  for (const flags of state.dirty.values()) {
+    if (overviewMarkDrainable(flags, budget, nowMs)) return true
+  }
+  return false
+}
+
+/**
  * Run ONE writer for the tenant: take the try-lock, run `firstPass` (the refresh's rebuild; none for an event),
- * drain the dirty set inside the lock, release, and go round again while the set is not empty. Returns
+ * drain the dirty set inside the lock, release, and go round again while something drainable is left. Returns
  * `{ busy: true }` when the FIRST try-lock is busy (another process); a later busy try stops the loop and leaves
  * what is still dirty for the next writer here. The caller set nothing on `state.running`; this does.
  *
  * S3 follow-up C: `failed` (the drain's projectNo → flags of every project whose LAST attempt in this run failed)
  * is put BACK into the dirty set when the run stops — not while it runs (the drain loop would retry a persistent
- * failure forever) and not dropped (the `dirty.clear()` above already took it out): the next overview writer of
- * this tenant in this process retries it. Done in `finally`, before `running` flips, in the same turn.
+ * failure forever) and not dropped (taking a batch already removed it): the next overview writer of this tenant in
+ * this process retries it. Done in `finally`, before `running` flips, in the same turn.
+ *
+ * Fix round 1: `retryPolicy` (the per-event writer's `OVERVIEW_EVENT_RETRY_POLICY`; null for the refresh) bounds the
+ * RETRY marks this run drains — at most `maxProjects`, none within `backoffMs` of its failure. Fresh marks are never
+ * bounded. The marks left are not drainable by this run, so they never keep its loop going.
  */
-async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne, failed = null }) {
+async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne, failed = null, retryPolicy = null }) {
+  const budget = retryPolicy ? { remaining: retryPolicy.maxProjects, backoffMs: retryPolicy.backoffMs } : null
   state.running = true
   try {
     let value
     for (let pass = 0; ; pass += 1) {
-      if (pass > 0 && state.dirty.size === 0) break
+      if (pass > 0 && !hasDrainableOverviewMarks(state, budget)) break
       const attempt = await registry.tryWithOverviewLock({ tenantId: tenant }, async () => {
         const out = pass === 0 && typeof firstPass === 'function' ? await firstPass() : undefined
-        while (state.dirty.size > 0) {
-          const batch = [...state.dirty.entries()]
-          state.dirty.clear()
+        for (;;) {
+          const batch = takeDrainableOverviewMarks(state, budget)
+          if (batch.length === 0) break
           for (const [projectNo, flags] of batch) await drainOne(projectNo, flags)
         }
         return out
@@ -797,8 +865,9 @@ async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne,
     }
     return { busy: false, value }
   } finally {
-    if (failed) {
-      for (const [projectNo, flags] of failed) markOverviewProjectDirty(state, projectNo, flags)
+    if (failed && failed.size > 0) {
+      const failedAtMs = Date.now()
+      for (const [projectNo, flags] of failed) markOverviewProjectRetry(state, projectNo, flags, failedAtMs)
     }
     state.running = false
   }
@@ -901,7 +970,8 @@ function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant,
  *   4. per registry row: count the project sheet (bounded), stamp the registry only when the counts
  *      changed, create or patch the overview row only when its projection (minus 「截至」) changed;
  *   5. (F4) the projects events marked dirty while the refresh ran are re-projected before the lock is
- *      released — from the registry as it stands after those events.
+ *      released — from the registry as it stands after those events; so is every project an earlier writer
+ *      left failed (fix round 1: the refresh is the full pass — no retry bound, no backoff).
  * Every overview write goes through the host's overview port (F3). Returns a values-free summary. The caller
  * audits it (`project_overview_refresh`).
  * S3 follow-ups: (D) step 3 reads EVERY page before it deletes anything; (C) a project whose write fails in
@@ -1049,7 +1119,8 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
  * if this tenant's overview writer is already running in this process the call returns `deferred` at once (that
  * writer re-projects it before it stops, no connection taken here); otherwise this call becomes the writer:
  * try-lock (another process holds it → `busy`, the project stays dirty for this process's next writer), drain
- * every dirty project, release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
+ * every FRESH dirty project and at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS earlier failures past their backoff (fix
+ * round 1), release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
  * rows; the others do not). BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's
  * outcome. The first failure of the drain is rethrown for that log.
  */
@@ -1068,7 +1139,9 @@ async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenan
   const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
   // S3 follow-up C: a project whose write failed is put back into the dirty set when the writer stops (it was taken
   // out by the drain) — the next overview writer of this tenant here retries it instead of it being dropped.
-  const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne, failed: drain.failed })
+  // Fix round 1: this writer runs inside a request handler, so it retries at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS
+  // earlier failures, none within OVERVIEW_EVENT_RETRY_BACKOFF_MS of its failure; its own project is a fresh mark.
+  const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne, failed: drain.failed, retryPolicy: OVERVIEW_EVENT_RETRY_POLICY })
   if (run.busy) return { outcome: 'busy', sheetId: sheet.sheetId }
   if (drainFailedCount(drain) > 0) throw drain.firstError
   return { outcome: drain.outcome || 'updated', sheetId: sheet.sheetId, ...drain.summary }
@@ -1116,5 +1189,8 @@ module.exports = {
     REFRESH_INCOMPLETE_CODE,
     OVERVIEW_READ_PAGE_LIMIT,
     OVERVIEW_READ_MAX_PAGES,
+    // S3 follow-ups, fix round 1: the per-event writer's retry bound + backoff.
+    OVERVIEW_EVENT_RETRY_MAX_PROJECTS,
+    OVERVIEW_EVENT_RETRY_BACKOFF_MS,
   },
 }

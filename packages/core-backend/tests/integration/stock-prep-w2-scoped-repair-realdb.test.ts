@@ -1089,6 +1089,23 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     await structural.provisioning.ensureView({ projectId, sheetId: overviewSheet, descriptor: viewDescriptor, systemKind: STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND } as never)
     expect(hostEnsureView.mock.calls.map((call) => (call[0] as { sheetId: string }).sheetId)).toEqual([sheetA, overviewSheet])
     expect(hostEnsureView.mock.calls[1][0]).not.toHaveProperty('systemKind')
+    // S3 follow-ups, fix round 1 (no ordering oracle) — a FOREIGN plugin's unmarked ensureView meets the REAL owner
+    // check (the registry rows of this database) before anything else: the overview and an ordinary integration-core
+    // sheet answer the same scope refusal, and the stamp lookup is never asked.
+    const foreignLookup = vi.fn(async ({ sheetId }: { sheetId: string }) => (await loadStockPreparationOverviewSheetIds(q as never, [sheetId])).has(sheetId))
+    const foreign = createPluginScopedMultitableApi({ provisioning: { getObjectSheetId, ensureView: hostEnsureView }, records: {} } as never, 'plugin-after-sales', {
+      assertSheetScope: async ({ pluginName, sheetId }) => ({ registered: await assertPluginOwnsSheet(q as never, { pluginName, sheetId }) }),
+      isStockPreparationOverviewSheet: foreignLookup,
+    })
+    const probeForeign = async (sheetId: string) => {
+      const error = await foreign.provisioning.ensureView({ projectId: `${tenantId}:after-sales`, sheetId, descriptor: viewDescriptor } as never).then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(MultitableSheetScopeError)
+      const e = error as MultitableSheetScopeError
+      return { name: e.name, code: e.code, message: e.message.split(sheetId).join('<sheet>') }
+    }
+    expect(await probeForeign(overviewSheet)).toStrictEqual(await probeForeign(sheetA))
+    expect(foreignLookup).not.toHaveBeenCalled()
+    expect(hostEnsureView).toHaveBeenCalledTimes(2)
   })
 })
 

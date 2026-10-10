@@ -38,7 +38,12 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { deriveRecordPermissions } from '../../src/multitable/permission-derivation'
 import { resolveSheetCapabilitiesForAccess, type QueryFn } from '../../src/multitable/permission-service'
-import { MultitableProjectNamespaceError, createPluginScopedMultitableApi } from '../../src/multitable/plugin-scope'
+import {
+  MultitableProjectNamespaceError,
+  MultitableSheetScopeError,
+  assertPluginOwnsSheet,
+  createPluginScopedMultitableApi,
+} from '../../src/multitable/plugin-scope'
 import {
   createSheet,
   ensureObject,
@@ -951,7 +956,9 @@ describe('S3 follow-up E — structural writes to the overview are refused at th
         await refusedWith(s.api.provisioning.ensureView({ projectId: s.projectId, sheetId, descriptor: viewDescriptor } as never), 'structure_write')
       }
       expect(s.host.ensureView).not.toHaveBeenCalled()
-      expect(s.hooks.assertSheetScope).not.toHaveBeenCalled()
+      // Fix round 1 (no oracle): the refusal runs AFTER the sheet-scope check (here a scope hook that admits every
+      // sheet — the observe-mode tolerance — so the refusal is what stops the write; E-05 is the foreign-plugin case).
+      expect(s.hooks.assertSheetScope).toHaveBeenCalledTimes(2)
     }
     const blind = build('plugin-integration-core', { withStampHook: false })
     await refusedWith(blind.api.provisioning.ensureView({ projectId: PROJECT, sheetId: DERIVED_PLAIN_SHEET, descriptor: viewDescriptor } as never), 'unverifiable')
@@ -983,6 +990,92 @@ describe('S3 follow-up E — structural writes to the overview are refused at th
     // Another tenant's overview, and an ordinary sheet, under this project with the marker.
     await misuse('plugin-integration-core', { sheetId: OTHER_TENANT_OVERVIEW, systemKind: KIND }, 'object')
     await misuse('plugin-integration-core', { sheetId: DERIVED_PLAIN_SHEET, systemKind: KIND }, 'object')
+  })
+
+  // ── S3 follow-ups, fix round 1 ─────────────────────────────────────────────────────────────────────────────────
+  //   E-05 (no ordering oracle): a FOREIGN plugin's ensureView on the overview id meets the scope refusal it meets on
+  //        any other sheet integration-core owns — the REAL owner check (`assertPluginOwnsSheet`) over a registry
+  //        fake — and the stamp lookup is never asked, so the probe cannot tell the overview from an ordinary sheet.
+  //   E-06 (read-once): a getter-bearing input that answers a harmless object first and the overview afterwards
+  //        reaches the scope hook AND the host with the harmless value it was checked with, read exactly once.
+  it('E-05 a foreign plugin probing the overview id gets the same scope refusal as for any foreign sheet; the stamp lookup is never asked', async () => {
+    const registry = new Map<string, string>([
+      [OV_SHEET, 'plugin-integration-core'],
+      [DERIVED_PLAIN_SHEET, 'plugin-integration-core'],
+    ])
+    const registryQuery = vi.fn(async (_sql: string, params?: unknown[]) => {
+      const owner = registry.get(String((params ?? [])[0]))
+      return { rows: owner ? [{ plugin_name: owner }] : [] }
+    })
+    const isStockPreparationOverviewSheet = vi.fn(async ({ sheetId }: { sheetId: string }) => sheetId === OV_SHEET)
+    const host = { getObjectSheetId, ensureView: vi.fn(async () => ({ id: 'view_x' })) }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-after-sales', {
+      assertSheetScope: async ({ pluginName, sheetId }: { pluginName: string; sheetId: string }) => {
+        const registered = await assertPluginOwnsSheet(registryQuery as never, { pluginName, sheetId })
+        return { registered }
+      },
+      isStockPreparationOverviewSheet,
+    } as never)
+    const probe = async (sheetId: string) => {
+      const error = await api.provisioning.ensureView({ projectId: 'tenant_1:after-sales', sheetId, descriptor: viewDescriptor } as never)
+        .then(() => null, (e: unknown) => e)
+      expect(error).toBeInstanceOf(MultitableSheetScopeError)
+      const e = error as MultitableSheetScopeError
+      // The message names the probed id; with the id masked, the two refusals are the same refusal.
+      return { name: e.name, code: e.code, message: e.message.split(sheetId).join('<sheet>'), keys: Object.keys(e).sort() }
+    }
+    const onOverview = await probe(OV_SHEET)
+    const onOrdinary = await probe(DERIVED_PLAIN_SHEET)
+    expect(onOverview).toStrictEqual(onOrdinary)
+    expect(onOverview.code).toBe('MULTITABLE_SHEET_SCOPE_FORBIDDEN')
+    expect(isStockPreparationOverviewSheet).not.toHaveBeenCalled()
+    expect(host.ensureView).not.toHaveBeenCalled()
+  })
+
+  it('E-06 read-once: a getter-bearing input is checked and forwarded with ONE read — the hook and the host see the value that was checked, never the overview', async () => {
+    const OV = STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID
+    const HARMLESS = 'plm_stock_preparation_main'
+    const flipping = <T extends Record<string, unknown>>(base: T, key: string, first: unknown, later: unknown) => {
+      let reads = 0
+      const input: Record<string, unknown> = { ...base }
+      Object.defineProperty(input, key, { enumerable: true, get() { reads += 1; return reads === 1 ? first : later } })
+      return { input, reads: () => reads }
+    }
+    const s = build('plugin-integration-core')
+    const objectIdSeen = (fn: { mock: { calls: unknown[][] } }) => (fn.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId
+    // The four object-keyed writes: the getter answers the harmless object first, the overview afterwards.
+    const cases: Array<[string, () => Promise<unknown>, () => unknown, () => number]> = []
+    {
+      const f = flipping({ projectId: PROJECT, fields: [] }, 'objectId', HARMLESS, OV)
+      cases.push(['ensureMissingObjectFields', () => s.api.provisioning.ensureMissingObjectFields(f.input as never), () => objectIdSeen(s.host.ensureMissingObjectFields), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, name: 'n' }, 'objectId', HARMLESS, OV)
+      cases.push(['ensureObjectDefaultView', () => s.api.provisioning.ensureObjectDefaultView!(f.input as never), () => objectIdSeen(s.host.ensureObjectDefaultView), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, fieldId: 'status', propertyPatch: {} }, 'objectId', HARMLESS, OV)
+      cases.push(['patchObjectFieldProperty', () => s.api.provisioning.patchObjectFieldProperty(f.input as never), () => objectIdSeen(s.host.patchObjectFieldProperty), f.reads])
+    }
+    {
+      const f = flipping({ projectId: PROJECT, fields: [] }, 'objectId', HARMLESS, OV)
+      cases.push(['repair-tx ensureMissingObjectFields', () => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.ensureMissingObjectFields(f.input as never)), () => objectIdSeen(s.txEnsureMissing), f.reads])
+    }
+    for (const [name, run, hostSaw, reads] of cases) {
+      await run()
+      expect(hostSaw(), `${name}: the host gets the checked value`).toBe(HARMLESS)
+      expect(reads(), `${name}: objectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId, `${name}: the scope hook gets the checked value`).toBe(HARMLESS)
+    }
+    // ensureObject without a kind: the descriptor's id getter answers the harmless object first.
+    let idReads = 0
+    const descriptor: Record<string, unknown> = { name: 'x', fields: [] }
+    Object.defineProperty(descriptor, 'id', { enumerable: true, get() { idReads += 1; return idReads === 1 ? HARMLESS : OV } })
+    await s.api.provisioning.ensureObject({ projectId: PROJECT, descriptor } as never)
+    const ensured = s.host.ensureObject.mock.calls.at(-1)?.[0] as unknown as { descriptor: { id: unknown } }
+    expect(ensured.descriptor.id, 'ensureObject: the host gets the checked descriptor id').toBe(HARMLESS)
+    expect(idReads, 'ensureObject: the descriptor id is read once').toBe(1)
+    expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId).toBe(HARMLESS)
   })
 })
 

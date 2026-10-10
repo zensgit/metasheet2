@@ -1107,6 +1107,30 @@ const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
 ])
 const ROUTE_FAILURE_LOGGABLE_CODE_SET = new Set(ROUTE_FAILURE_LOGGABLE_CODES)
 const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
+// S3 follow-ups, fix round 1: a failure the handler ALREADY logged with its own typed, values-free line (today only
+// the overview refresh's REFRESH_INCOMPLETE) is not logged a second time by the wrapper's generic `route failed …`
+// line. The mark is a MODULE-PRIVATE symbol on the thrown object itself (never a code a caller could set, never
+// enumerable, so never serialized): only the handler that logged it sets it, right after its own warn. Both sides
+// are synchronous and never throw — a frozen error just keeps the generic line; an exotic thrown value is unmarked.
+const ROUTE_FAILURE_LOGGED_BY_HANDLER = Symbol('routeFailureLoggedByHandler')
+
+function markRouteFailureLoggedByHandler(error) {
+  try {
+    Object.defineProperty(error, ROUTE_FAILURE_LOGGED_BY_HANDLER, { value: true, enumerable: false })
+  } catch {
+    // Not markable: the wrapper logs its generic line as before.
+  }
+}
+
+function routeFailureLoggedByHandler(error) {
+  try {
+    if (error === null || typeof error !== 'object') return false
+    const own = Object.getOwnPropertyDescriptor(error, ROUTE_FAILURE_LOGGED_BY_HANDLER)
+    return Boolean(own && own.value === true)
+  } catch {
+    return false
+  }
+}
 
 // The code a route-failure log line carries: the response's own code when it is in the closed list
 // above, the fixed placeholder otherwise. Synchronous, no I/O, never throws — a thrown `null` or a
@@ -9829,6 +9853,8 @@ function requireStockPreparationAudit() {
               code: loggableOverviewUpdateCode(error.cause),
               failedProjectCount,
             })
+            // Fix round 1: this typed line IS the log of this answer — the wrapper adds no generic UNLISTED line.
+            markRouteFailureLoggedByHandler(error)
           }
         }
         throw error
@@ -12174,7 +12200,8 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
       try {
         return await handler(req, res)
       } catch (error) {
-        if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
+        // Fix round 1: a failure its handler already logged with a typed line is not logged twice.
+        if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError) && !routeFailureLoggedByHandler(error)) {
           // R2: method + route TEMPLATE + one closed-list code (loggableRouteFailureCode). No request
           // value — no param, no query, no id — is interpolated. Same single synchronous call as
           // before, on the same branches, right before the unchanged `sendError`.
