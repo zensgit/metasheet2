@@ -1,6 +1,8 @@
 // View-layer-only helpers for the employee overview chrome.
 // Do not use these to change punch, policy, approval, or API contracts.
 
+import { formatTimezoneLabel } from '../../utils/timezones'
+import { normalizeAttendanceTimeZone } from './attendanceDateTimePresentation'
 import type { AttendanceOverviewAttentionKey } from './attendanceOverviewPriority'
 import type { WorkspaceDisplayIconId } from './attendanceEmployeeWorkspaceCommonIcons'
 
@@ -89,6 +91,29 @@ export function formatLateEarlyPair(label: string | null | undefined, tr: Worksp
   const match = label.trim().match(/^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/)
   if (!match) return label
   return `${formatMinuteCount(Number(match[1]), tr)} / ${formatMinuteCount(Number(match[2]), tr)}`
+}
+
+export interface SelfServiceWorkWindowInput {
+  workStartTime?: string | null
+  workEndTime?: string | null
+  timezone?: string | null
+  defaultRuleLabel: string
+}
+
+/**
+ * Employee overview 「工作时间」 line.
+ * A recognized IANA zone uses formatTimezoneLabel (`UTC±offset · IANA`), the same
+ * helper summary/calendar/anomaly hints use via displayTimezone.
+ * The clock range stays before the first " · " so workWindowShortLabel can parse it.
+ * Empty or unrecognized zones omit the suffix instead of printing a raw IANA id.
+ */
+export function formatSelfServiceWorkWindowSummary(input: SelfServiceWorkWindowInput): string {
+  const start = String(input.workStartTime || '').trim()
+  const end = String(input.workEndTime || '').trim()
+  const windowLabel = start && end ? `${start}-${end}` : input.defaultRuleLabel
+  const timezone = normalizeAttendanceTimeZone(input.timezone)
+  if (!timezone) return windowLabel
+  return `${windowLabel} · ${formatTimezoneLabel(timezone)}`
 }
 
 export function workWindowShortLabel(summary: string | null | undefined): string | null {
