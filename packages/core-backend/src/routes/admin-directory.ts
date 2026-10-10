@@ -34,7 +34,9 @@ import {
   updateDirectoryIntegration,
 } from '../directory/directory-sync'
 import { getDirectoryInactiveLinkedMetric, getDirectoryManagerBindingCoverage } from '../directory/directory-sync-alert-delivery'
+import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from '../directory/directory-failure-text'
 import { isDingTalkOutcomeUnknown } from '../integrations/dingtalk/client'
+import { DingTalkConfigValidationError } from '../integrations/dingtalk/config-validation-error'
 import { DingTalkCorpNotAllowedError } from '../integrations/dingtalk/runtime-policy'
 import {
   getDingTalkWorkNotificationRuntimeStatusFromStore,
@@ -61,6 +63,8 @@ import { PasswordPolicyError } from '../auth/password-policy-error'
 // NOT a directory error: thrown by the alias claim inside admission (directory-sync.ts) with a fixed sentence.
 import { LoginAliasClaimError } from '../auth/login-alias-service'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
+// R-41: values-free by design (names the env vars, never their values) — shown as it is on the config routes.
+import { EncryptionMaterialError } from '../security/encrypted-secrets'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
 // than the multitable automation scheduler's own cron parser.
@@ -147,6 +151,54 @@ function sendDirectoryFailure(res: Response, error: unknown, code: string, fallb
   logger.warn(fallbackMessage, { error: readErrorMessage(error, 'unknown error') })
   jsonError(res, 500, code, fallbackMessage)
 }
+
+/**
+ * R-41: the literal-400 failure responder of the DingTalk work-notification, approval-card config and
+ * directory-test routes. These used to answer 400 with the caught text — DingTalk's errmsg, a socket error
+ * naming the peer, a driver sentence. Now the body never carries caught text, whatever the status:
+ *   - an instance of one of the classes the call site lists (developer-authored sentences thrown typed) shows
+ *     its own sentence, so input feedback ("DingTalk Agent ID must be 1-32 numeric characters") survives;
+ *   - a typed DingTalk failure shows the route's fixed sentence plus DingTalk's numeric errcode or HTTP status;
+ *   - anything else shows the route's literal `fallbackMessage`.
+ * The caught text of the last two goes to the log. Status and code stay the route's own (a literal 400).
+ */
+function sendDirectoryConfigFailure(
+  res: Response,
+  error: unknown,
+  code: string,
+  fallbackMessage: string,
+  fixedSentenceClasses: readonly FixedSentenceErrorClass[],
+): void {
+  const failure = classifyDirectoryFailureText(error, { fallback: fallbackMessage, fixedSentenceClasses })
+  if (failure.kind !== 'fixed_sentence') {
+    logger.warn(fallbackMessage, {
+      error: readErrorMessage(error, 'unknown error'),
+      ...(failure.providerCode !== undefined
+        ? { providerCode: failure.providerCode, providerCodeKind: failure.providerCodeKind }
+        : {}),
+    })
+  }
+  jsonError(res, 400, code, failure.text)
+}
+
+/**
+ * R-41: the developer-authored sentences the DingTalk work-notification and approval-card config routes show.
+ * EncryptionMaterialError: production refusing to encrypt / decrypt the stored Agent ID or link secret because
+ * ENCRYPTION_KEY / ENCRYPTION_SALT are unset or the built-in defaults — the operator's next step, named without
+ * any value.
+ */
+const DINGTALK_CONFIG_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [DingTalkConfigValidationError, EncryptionMaterialError]
+/**
+ * R-41: the developer-authored sentences the directory-test route shows (input, missing integration, corp
+ * allowlist, and the stored appSecret it cannot decrypt for want of encryption material).
+ */
+const DIRECTORY_TEST_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
+  DirectoryValidationError,
+  DirectoryNotFoundError,
+  DirectoryConflictError,
+  DingTalkCorpNotAllowedError,
+  EncryptionMaterialError,
+]
 
 // Mirrors `directory-sync.ts`'s private `normalizeText` so the save-time gate below sees exactly the same
 // "is this actually empty" verdict the persistence layer will compute from the same field (empty/null/
@@ -345,7 +397,7 @@ export function adminDirectoryRouter(): Router {
         )
         return
       }
-      jsonError(res, 400, 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED', readErrorMessage(error, 'Failed to test DingTalk work notification Agent ID'))
+      sendDirectoryConfigFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED', 'Failed to test DingTalk work notification Agent ID', DINGTALK_CONFIG_FIXED_SENTENCES)
     }
   })
 
@@ -372,7 +424,7 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { result })
     } catch (error) {
-      jsonError(res, 400, 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', readErrorMessage(error, 'Failed to save DingTalk work notification Agent ID'))
+      sendDirectoryConfigFailure(res, error, 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', 'Failed to save DingTalk work notification Agent ID', DINGTALK_CONFIG_FIXED_SENTENCES)
     }
   })
 
@@ -504,8 +556,15 @@ export function adminDirectoryRouter(): Router {
       await refreshDirectoryIntegrationSchedule(integration.id)
       jsonOk(res, { integration })
     } catch (error) {
+      // R-41: the class's own developer-authored sentence (its one thrower interpolates only the path's
+      // integration id), never a caught text read generically.
       if (error instanceof DirectoryTenantChangeBlockedError) {
-        jsonError(res, 409, 'DIRECTORY_TENANT_CHANGE_BLOCKED', readErrorMessage(error, 'Tenant change blocked'))
+        jsonError(
+          res,
+          409,
+          'DIRECTORY_TENANT_CHANGE_BLOCKED',
+          classifyDirectoryFailureText(error, { fallback: 'Tenant change blocked', fixedSentenceClasses: [DirectoryTenantChangeBlockedError] }).text,
+        )
         return
       }
       // Same corp-allowlist verdict as on create: the caller's input, typed by its own class — 400 as before.
@@ -562,7 +621,7 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { status })
     } catch (error) {
-      jsonError(res, 400, 'APPROVAL_CARD_SECRET_GENERATE_FAILED', readErrorMessage(error, 'Failed to generate approval card link secret'))
+      sendDirectoryConfigFailure(res, error, 'APPROVAL_CARD_SECRET_GENERATE_FAILED', 'Failed to generate approval card link secret', DINGTALK_CONFIG_FIXED_SENTENCES)
     }
   })
 
@@ -598,7 +657,7 @@ export function adminDirectoryRouter(): Router {
       })
       jsonOk(res, { status })
     } catch (error) {
-      jsonError(res, 400, 'APPROVAL_CARD_CONFIG_SAVE_FAILED', readErrorMessage(error, 'Failed to save approval card config'))
+      sendDirectoryConfigFailure(res, error, 'APPROVAL_CARD_CONFIG_SAVE_FAILED', 'Failed to save approval card config', DINGTALK_CONFIG_FIXED_SENTENCES)
     }
   })
 
@@ -610,7 +669,7 @@ export function adminDirectoryRouter(): Router {
       const result = await testDirectoryIntegration(req.body as Record<string, unknown> as never)
       jsonOk(res, result)
     } catch (error) {
-      jsonError(res, 400, 'DIRECTORY_TEST_FAILED', readErrorMessage(error, 'Failed to test directory integration'))
+      sendDirectoryConfigFailure(res, error, 'DIRECTORY_TEST_FAILED', 'Failed to test directory integration', DIRECTORY_TEST_FIXED_SENTENCES)
     }
   })
 

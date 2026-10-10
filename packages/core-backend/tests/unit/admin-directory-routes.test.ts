@@ -19,6 +19,10 @@ import { LOGIN_NAME_RULE_MESSAGE, LoginNameRuleError } from '../../src/auth/logi
 import { PasswordPolicyError } from '../../src/auth/password-policy-error'
 // NOT mocked below — the admission routes discriminate this REAL class with `instanceof`.
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
+// NOT mocked below — R-41: the DingTalk config routes show this REAL class's sentence (its own module, so the
+// work-notification-settings / approval-card-config factories below cannot hide it).
+import { DingTalkConfigValidationError } from '../../src/integrations/dingtalk/config-validation-error'
+import { DingTalkBusinessError } from '../../src/integrations/dingtalk/transport'
 
 const COMPENSATION_EVENT_ID = '11111111-1111-4111-8111-111111111111'
 const DEPROVISION_EVENT_ID = '22222222-2222-4222-8222-222222222222'
@@ -900,13 +904,15 @@ describe('adminDirectoryRouter', () => {
       expect(ok.statusCode).toBe(200)
       expect(approvalCardConfigMocks.saveApprovalCardPublicAppUrl).toHaveBeenCalledWith('d1000000-0000-4000-8000-000000000001', 'https://app.example.com')
 
-      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockRejectedValue(new Error('publicAppUrl must use http or https'))
+      approvalCardConfigMocks.saveApprovalCardPublicAppUrl.mockRejectedValue(new DingTalkConfigValidationError('publicAppUrl must use http or https'))
       const bad = await invokeRoute('put', '/integrations/:integrationId/approval-card-config', {
         params: { integrationId: 'd1000000-0000-4000-8000-000000000001' },
         body: { publicAppUrl: 'javascript:alert(1)' },
         user: { id: 'admin-1', role: 'admin' },
       })
       expect(bad.statusCode).toBe(400)
+      // R-41: the typed validation sentence is the admin's feedback, shown as it is.
+      expect(bad.body).toMatchObject({ ok: false, error: { code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED', message: 'publicAppUrl must use http or https' } })
     })
 
     it('rejects a PUT missing publicAppUrl instead of silently clearing', async () => {
@@ -1040,9 +1046,9 @@ describe('adminDirectoryRouter', () => {
     expect(message.toLowerCase()).toContain('check the test message on the device')
   })
 
-  it('keeps the generic failure shape for a plain (non-outcome-unknown) test-send error', async () => {
+  it('keeps the generic failure shape for a typed validation sentence (non-outcome-unknown) on the test send', async () => {
     workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(
-      new Error('DingTalk appSecret is required'),
+      new DingTalkConfigValidationError('DingTalk appSecret is required'),
     )
 
     const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789' }
@@ -1059,6 +1065,38 @@ describe('adminDirectoryRouter', () => {
         message: 'DingTalk appSecret is required',
       },
     })
+  })
+
+  // R-41: an untyped failure no longer reaches the body (it used to be echoed at 400), and a DingTalk rejection
+  // shows only its errcode next to the route's fixed sentence — never DingTalk's errmsg.
+  it('answers the fixed sentence for an untyped test-send failure and only the errcode for a DingTalk rejection', async () => {
+    const payload = { integrationId: 'd1000000-0000-4000-8000-000000000001', agentId: '123456789' }
+
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(
+      new Error('MARKER_r41_routes connect ECONNREFUSED 192.0.2.10:443'),
+    )
+    const untyped = await invokeRoute('post', '/dingtalk/work-notification/test', { body: payload, user: { id: 'admin-1', role: 'admin' } })
+    expect(untyped.statusCode).toBe(400)
+    expect(untyped.body).toMatchObject({
+      ok: false,
+      error: { code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED', message: 'Failed to test DingTalk work notification Agent ID' },
+    })
+    expect(JSON.stringify(untyped.body)).not.toContain('MARKER_r41')
+
+    workNotificationMocks.testDingTalkWorkNotificationAgentId.mockRejectedValue(
+      new DingTalkBusinessError('MARKER_r41_routes invalid agentid from 192.0.2.11', { errcode: 40056, errmsg: 'MARKER_r41_routes invalid agentid from 192.0.2.11' }),
+    )
+    const rejected = await invokeRoute('post', '/dingtalk/work-notification/test', { body: payload, user: { id: 'admin-1', role: 'admin' } })
+    expect(rejected.statusCode).toBe(400)
+    expect(rejected.body).toMatchObject({
+      ok: false,
+      error: {
+        code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
+        message: 'Failed to test DingTalk work notification Agent ID: DingTalk rejected the request (errcode 40056)',
+      },
+    })
+    expect(JSON.stringify(rejected.body)).not.toContain('MARKER_r41')
+    expect(JSON.stringify(rejected.body)).not.toContain('192.0.2')
   })
 
   it('saves DingTalk work notification Agent ID and writes a redacted audit entry', async () => {
