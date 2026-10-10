@@ -522,24 +522,34 @@ export function createPluginScopedMultitableApi(
         return multitable.provisioning.resolveFieldIds(input)
       },
       // W2: DB-backed existence read, scoped to the plugin's own object.
+      // S3 follow-ups 2 (item 3, read-once): like the writes below, projectId / objectId are read ONCE and THAT
+      // snapshot is what the namespace check, the scope hook and the host see — a getter cannot pass the checks with
+      // the plugin's own object and have the host read another one.
       resolveExistingObjectFieldIds: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.resolveExistingObjectFieldIds(input)
+        return multitable.provisioning.resolveExistingObjectFieldIds({ ...rest, projectId, objectId } as typeof input)
       },
       // W2: DB-backed field CONTENT read, scoped to the plugin's own object.
+      // Follow-ups 2 (item 3, read-once): the checked values are the forwarded values.
       readObjectFieldsContent: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.readObjectFieldsContent(input)
+        return multitable.provisioning.readObjectFieldsContent({ ...rest, projectId, objectId } as typeof input)
       },
       // W2: additive-only field write — a WRITE capability, so it must pass the same
       // object-scope check as ensureObject/patchObjectFieldProperty (never bare-forward).
@@ -593,15 +603,22 @@ export function createPluginScopedMultitableApi(
               assertProjectIdAllowedForPlugin(pluginName, input.projectId)
               return surface.findObjectSheet(input)
             },
+            // Follow-ups 2 (item 3, read-once): the checked values are the forwarded values, inside the tx too.
             resolveExistingObjectFieldIds: async (input) => {
-              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
-              return surface.resolveExistingObjectFieldIds(input)
+              const projectId = input.projectId
+              const objectId = input.objectId
+              const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return surface.resolveExistingObjectFieldIds({ ...rest, projectId, objectId } as typeof input)
             },
             readObjectFieldsContent: async (input) => {
-              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
-              return surface.readObjectFieldsContent(input)
+              const projectId = input.projectId
+              const objectId = input.objectId
+              const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return surface.readObjectFieldsContent({ ...rest, projectId, objectId } as typeof input)
             },
             ensureMissingObjectFields: async (input) => {
               // Fix round 1 (read-once): the checked values are the forwarded values.
@@ -873,15 +890,19 @@ export function createPluginScopedMultitableApi(
       // write above — same derived id, no mutation — so it widens no plugin's reach. A host
       // that does not implement it answers null rather than throwing, which is the degrade the
       // optional declaration on the API promises.
+      // Follow-ups 2 (item 3, read-once): the checked values are the forwarded values.
       findObjectView: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
         if (typeof multitable.provisioning.findObjectView !== 'function') return null
-        return multitable.provisioning.findObjectView(input)
+        return multitable.provisioning.findObjectView({ ...rest, projectId, objectId } as typeof input)
       },
       patchObjectFieldProperty: async (input) => {
         // Fix round 1 (read-once): the checked values are the forwarded values (see ensureMissingObjectFields).
@@ -899,14 +920,18 @@ export function createPluginScopedMultitableApi(
         return multitable.provisioning.patchObjectFieldProperty({ ...rest, projectId, objectId } as typeof input)
       },
       getObjectField: async (input) => {
-        // Read-only, but same project/object scope enforcement as the patch path.
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        // Read-only, but same project/object scope enforcement as the patch path — and (follow-ups 2, item 3) the
+        // same read-once: the checked values are the forwarded values.
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.getObjectField(input)
+        return multitable.provisioning.getObjectField({ ...rest, projectId, objectId } as typeof input)
       },
     },
     records: {
