@@ -69,6 +69,7 @@ const { normalizeCarryPolicy } = require('./stock-preparation-carry-policy.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -1228,7 +1229,11 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
   // rather than removed: membership grants TRANSLATION only, never authorization,
   // and each module's own guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's
   // pinned OBJECT_ID, the carry executor's bound target) stays the wall.
-  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
+  //
+  // S3 (R-37): the PROJECT OVERVIEW template rides it for the same reason the ledger does — its
+  // refresh writes rows by logical key through the one scoped records API. Translation only; the
+  // overview module's pinned OBJECT_ID is its wall, and the host's capability clamp is the people's.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )
 

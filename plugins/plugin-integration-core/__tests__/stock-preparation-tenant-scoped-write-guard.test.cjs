@@ -363,6 +363,22 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   // sheet), so neither is in the inline-staging set below.
   'stockPreparationProjectTargetArchive',
   'stockPreparationProjectTargetRestore',
+  // S3 (ADR §5, register R-37). The project-fields GET / PATCH are the ONLY surfaces that carry the
+  // three free-text project-level columns (负责人 / 备注 / 计划完成), so WHOSE registry row they read
+  // or write must come from the host-vouched scope — a header-fillable tenant here would read or
+  // overwrite another tenant's texts. Neither derives a staging project (they touch no sheet). The
+  // overview REFRESH derives the staging project whose overview it projects into and every project
+  // sheet is counted through, so it IS in the inline-staging set below — and so is the fix-round-1
+  // overview ENSURE (PULL), which creates the overview in that staging project.
+  'stockPreparationProjectFieldsGet',
+  'stockPreparationProjectFieldsUpdate',
+  'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
+  // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and
+  // the sheets it may name are the caller's OWN tenant's registry rows — keyed by the tenant this scope
+  // proves, so a header-fillable tenant here would grant a role on another tenant's project sheet. The
+  // other three members handlers resolve no tenant at all (roles are platform-global) and are not here.
+  'stockPreparationMembersCustomRoleProjectTargets',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
@@ -432,6 +448,11 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   'stockPreparationConfirmationDecisionsConfirm',
   'stockPreparationOperatorProjectDirectory',
   'stockPreparationOperatorProjectBoard',
+  // S3 (R-37): the overview refresh projects into the overview of, and counts every project sheet
+  // through, the staging project it derives — from the resolved scope with no request projectId. The
+  // fix-round-1 ENSURE creates the overview in that same staging project, derived the same way.
+  'stockPreparationProjectOverviewRefresh',
+  'stockPreparationProjectOverviewEnsure',
   // 通知下一步 (#6121). The advance probes the deploy-global bound sheet for "does this project have
   // rows" before it writes, so it now runs the shared target tenant wall first — and the staging
   // project that wall compares against must come from the resolved scope with no request projectId,
@@ -443,6 +464,9 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   // tenant's staging project. (The list route derives none: it reads registry rows by tenant only.)
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetGet',
+  // S5b (R-39): the project-sheet add derives the staging project the G1 grant names (the plugin-scope
+  // wrapper then requires the sheet to be the one derived for it) — from the scope, never the request.
+  'stockPreparationMembersCustomRoleProjectTargets',
 ])
 
 /**

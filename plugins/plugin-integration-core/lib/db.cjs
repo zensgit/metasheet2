@@ -470,9 +470,29 @@ function createDb({ database, logger } = {}) {
         }
         await trx.query('SELECT pg_advisory_xact_lock(hashtext($1))', [key])
       }
+      /**
+       * The NON-BLOCKING sibling of `advisoryXactLock`: `SELECT pg_try_advisory_xact_lock(hashtext($1)) AS
+       * locked` on THIS transaction. `true` = the lock is now held until COMMIT / ROLLBACK; `false` = another
+       * transaction holds it, answered AT ONCE — this never queues. For a caller that must not hold a pooled
+       * connection while it waits: the stock-preparation project overview writers (S3 fix round 2, F4), whose
+       * lock holder needs MORE pool connections for its host calls, so N blocked waiters each holding one could
+       * starve the very holder they wait on. Same key rules as `advisoryXactLock` (the key is the ONE parameter
+       * of a fixed literal); only an explicit boolean `true` from PostgreSQL counts as acquired.
+       */
+      async function tryAdvisoryXactLock(key) {
+        if (typeof key !== 'string' || key.trim().length === 0) {
+          throw new ScopeViolationError('plugin-integration-core: advisory lock key must be a non-empty string', {})
+        }
+        const result = await trx.query('SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', [key])
+        const rows = Array.isArray(result)
+          ? result
+          : (result && Array.isArray(result.rows) ? result.rows : [])
+        return Boolean(rows[0] && rows[0].locked === true)
+      }
       return callback({
         setTransactionIsolationLevel,
         advisoryXactLock,
+        tryAdvisoryXactLock,
         select: scoped.select,
         selectOne: scoped.selectOne,
         selectOneForUpdate: scoped.selectOneForUpdate,

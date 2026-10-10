@@ -199,7 +199,8 @@ function isParallelNodeConfig(config: unknown): config is ParallelNodeConfig {
 
 // Lock-3 §1.1 — a normalized handler config always carries an `assigneeSources` array (empty arrays
 // are rejected at authoring, so a runtime handler node always has ≥1 source). Structural only: the
-// normalize choke (ApprovalProductService) owns the seven-member registry + prohibition gates.
+// normalize choke (ApprovalProductService) owns the handler registry (HANDLER_ASSIGNEE_SOURCE_KINDS)
+// + prohibition gates.
 function isHandlerNodeConfig(config: unknown): config is HandlerNodeConfig {
   return isRecord(config) && Array.isArray(config.assigneeSources)
 }

@@ -753,12 +753,12 @@ npx vitest run approval-detail-can-decide-current-node --reporter=dot
 
 # 退回候选 (return candidates), 2026-10-09: ONE token added — `approval-detail-return-candidates`, a
 # NEW spec (apps/web/tests/approval-detail-return-candidates.spec.ts) over the mounted
-# ApprovalDetailView. It pins the 退回 target list against the three checks the server's return
-# dispatch applies (handler cursor, parallel region, target off the executor's visited approval
-# trail). It covers both DTO shapes — the detail read carries `currentNodeType`, an action response
-# carries `currentNodeKeys` — and the owner-visible choices: no graph ⇒ today's unfiltered list,
-# only the instance's own template / pinned version may judge it, and the pinned version wins over a
-# drifted live template.
+# ApprovalDetailView. It pins the 退回 target list: the DTO's `returnableNodeKeys` is offered
+# verbatim, in the server's order (`[]` hides 退回, whatever the history holds), and when the field
+# is absent or null the view shows the legacy unfiltered history list (every visited node key but
+# the cursor, `start` and `end`). There is no client-side filter any more: the server slice #6293
+# computes the legal targets. It covers both DTO shapes, the detail read and an action response,
+# which carry the field alike.
 #
 # SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
 # file, using the counting rule of scripts/ops/required-web-lane-exec-block.mjs `allVitestTokens`
@@ -893,6 +893,27 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
 # `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
 # substring of any of them; it matches exactly one file on disk.
+# 备料「成员与权限」S5b (ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, register R-39, 2026-10-10):
+# ONE token added, `StockPreparationMembers` — the NEW spec (apps/web/tests/StockPreparationMembers.spec.ts)
+# for members.ts (the four S5b routes' client and the reused delegation routes), the members page, the
+# shell's switch-gated 「成员与权限」 rail item and the SMW-ALIGN block the permission-matrix suite defers
+# to for the four new manifest controls. Substring collision checked in BOTH directions: no existing
+# token is a substring of `StockPreparationMembers` (its neighbours `StockPreparationManagedTableRelabelPanel`
+# / `StockPreparationMappingConfirmView` / `StockPreparationMissingComponents` diverge right after
+# `StockPreparationM`), it is not a substring of any token, and it matches exactly one file on disk.
+#
+# 一个项目一张备料表 S3 (ADR adr-stock-prep-project-sheets-20261008 §5, register R-37, 2026-10-09): ONE
+# token added, `StockPreparationProjectOverview` — the NEW spec (apps/web/tests/
+# StockPreparationProjectOverview.spec.ts) for the project overview and the O2(a) project-level
+# columns: the client (GET / PATCH project-fields — the PATCH body carries ONLY the changed keys — and
+# POST project-overview/refresh), the cross-language posture mirror against the plugin's
+# `projectOverviewPosture` (the `*-vocab-mirror` precedent; 「已归档」 first), 今天要处理's 「已归档（N）」
+# section and 刷新 / 打开项目总览, 项目备料页's fields form (read / save / archived / 422), 项目查询's
+# 含已归档 toggle and 已归档 tag, and the PO-ALIGN block the permission-matrix suite defers to for the
+# three new manifest controls. Substring collision checked in BOTH directions: no existing token is a
+# substring of `StockPreparationProjectOverview` (its neighbours `StockPreparationProjectBoard` /
+# `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
+# of any token, and it matches exactly one file on disk.
 # 一个项目一张备料表 S4 (ADR adr-stock-prep-project-sheets-20261008 §6, register R-38, 2026-10-09): ONE
 # token added, `StockPreparationProjectArchive` — the NEW spec (apps/web/tests/
 # StockPreparationProjectArchive.spec.ts) for archive / restore: the client (POST, body exactly
@@ -1861,6 +1882,7 @@ exec npx vitest run \
   StockPreparationLargeBomPullPanel.spec.ts \
   StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
+  StockPreparationMembers \
   StockPreparationMissingComponents \
   StockPreparationOnboardingReadiness \
   StockPreparationOperatorHome \
@@ -1870,6 +1892,7 @@ exec npx vitest run \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
   StockPreparationProjectBoard \
+  StockPreparationProjectOverview \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
   StockPreparationProjectSyncPanel.spec.ts \

@@ -5,19 +5,20 @@
  * segment count from `/api/tasks/:id` itself, so route order among them
  * does not matter for correctness (contract §2 / lock §12 门 13).
  */
-import type { Request, Response } from 'express'
 import { Router } from 'express'
-import { Logger } from '../core/logger'
 import { authenticate } from '../middleware/auth'
 import { rbacGuard } from '../rbac/rbac'
 import { validateViewerTimeZoneHeader } from '../tasks/task-dates'
 import {
   completeTask,
   countPending,
+  countPendingList,
+  countTasks,
   createTask,
   getTask,
   listPending,
   listTasks,
+  parseTaskPage,
   reopenTask,
 } from '../services/task-records'
 import {
@@ -35,34 +36,10 @@ import {
   switchCompletionMode,
   updateComment,
 } from '../services/task-structure'
-
-function actorId(req: Request): string {
-  const sub = req.user && typeof req.user === 'object' && 'sub' in req.user ? String(req.user.sub ?? '') : ''
-  return sub || String(req.user?.id ?? '')
-}
-
-function orgId(req: Request): string {
-  return typeof req.authenticatedTenantId === 'string' ? req.authenticatedTenantId : ''
-}
-
-const logger = new Logger('TasksRoutes')
-
-/**
- * Errors raised by the task services through `fail()` carry a numeric 4xx
- * `status` and a contract `code`, and are sent as-is. Anything else (a
- * driver error, a bug) is logged and answered 500 `INTERNAL`: its own `code`
- * (for a pg error, the SQLSTATE) is never echoed to the client (M3R2-AUTHZ-4).
- */
-function sendError(res: Response, err: unknown): void {
-  const status = typeof err === 'object' && err && 'status' in err ? Number((err as { status: unknown }).status) : NaN
-  const code = typeof err === 'object' && err && 'code' in err ? (err as { code: unknown }).code : undefined
-  if (Number.isInteger(status) && status >= 400 && status < 500 && typeof code === 'string') {
-    res.status(status).json({ error: { code } })
-    return
-  }
-  logger.error('tasks route failed', err instanceof Error ? err : undefined)
-  res.status(500).json({ error: { code: 'INTERNAL' } })
-}
+import { isVersionConflict, patchTask } from '../services/task-patch'
+import { actorId, orgId, sendError } from './tasks-http'
+import { registerTaskListRoutes } from './tasks-lists'
+import { registerTaskSettingsRoutes } from './tasks-settings'
 
 export function tasksRouter(): Router | null {
   if (process.env.TASKS_ENABLED !== 'true') return null
@@ -80,9 +57,12 @@ export function tasksRouter(): Router | null {
         res.json({ items: [], degraded: true, reason: 'org_missing' })
         return
       }
+      // RULED(2026-10-07): [R15] paged; an invalid page is 422 before anything is read.
+      const page = parseTaskPage({ limit: req.query.limit, offset: req.query.offset })
       const viewerTz = validateViewerTimeZoneHeader(req.header('x-viewer-time-zone'))
-      const items = await listPending({ orgId: org, actorId: actorId(req), viewerTz })
-      res.json({ items })
+      const items = await listPending({ orgId: org, actorId: actorId(req), viewerTz, page })
+      const total = await countPendingList({ orgId: org, actorId: actorId(req) })
+      res.json({ items, total })
     } catch (err) {
       sendError(res, err)
     }
@@ -97,7 +77,8 @@ export function tasksRouter(): Router | null {
       }
       const viewerTz = validateViewerTimeZoneHeader(req.header('x-viewer-time-zone'))
       const count = await countPending({ orgId: org, actorId: actorId(req), viewerTz })
-      res.json({ count })
+      // ASSUMPTION(task-m4): [D5] [own-11] `null` means badge_scope 'off'; only then the extra key.
+      res.json(count === null ? { count: 0, badgeScope: 'off' } : { count })
     } catch (err) {
       sendError(res, err)
     }
@@ -124,9 +105,14 @@ export function tasksRouter(): Router | null {
         res.json({ items: [], degraded: true, reason: 'org_missing' })
         return
       }
+      // ASSUMPTION(task-m4): [own-10] the page is parsed before the view is checked, so an
+      // invalid page is 422 even when the view is also invalid; a missing org still degrades first
+      // ([own-19]). The service keeps its array return; the total is a separate count.
+      const page = parseTaskPage({ limit: req.query.limit, offset: req.query.offset })
       const view = typeof req.query.view === 'string' ? req.query.view : 'assigned'
-      const items = await listTasks({ orgId: org, actorId: actorId(req), view })
-      res.json({ items })
+      const items = await listTasks({ orgId: org, actorId: actorId(req), view, page })
+      const total = await countTasks({ orgId: org, actorId: actorId(req), view })
+      res.json({ items, total })
     } catch (err) {
       const code = typeof err === 'object' && err && 'code' in err ? String((err as { code: string }).code) : ''
       if (code === 'INVALID_VIEW' || (err instanceof TypeError)) {
@@ -144,16 +130,44 @@ export function tasksRouter(): Router | null {
         res.status(422).json({ error: { code: 'ORG_MISSING' } })
         return
       }
-      const body = req.body && typeof req.body === 'object' ? req.body as { title?: unknown; assignees?: unknown; completionMode?: unknown } : {}
+      const body = req.body && typeof req.body === 'object' ? req.body as Record<string, unknown> : {}
+      // RULED(2026-10-07): [R03] the date keys, `timeZone` and `remindAt` are accepted on create;
+      // `description` is not (it is a PATCH field).
       const created = await createTask({
         orgId: org,
         creatorId: actorId(req),
         title: body.title,
         assignees: body.assignees,
         completionMode: body.completionMode,
+        dueDate: body.dueDate,
+        dueTime: body.dueTime,
+        startDate: body.startDate,
+        startTime: body.startTime,
+        timeZone: body.timeZone,
+        remindAt: body.remindAt,
       })
       res.status(200).json(created)
     } catch (err) {
+      sendError(res, err)
+    }
+  })
+
+  // M4 PR-3a (design §5.3). The only single-segment PATCH under /api/tasks/.
+  router.patch('/api/tasks/:id', authenticate, rbacGuard('tasks', 'write'), async (req, res) => {
+    try {
+      const org = orgId(req)
+      if (!org) {
+        res.status(422).json({ error: { code: 'ORG_MISSING' } })
+        return
+      }
+      const result = await patchTask({ orgId: org, actorId: actorId(req), taskId: req.params.id, body: req.body })
+      res.json(result)
+    } catch (err) {
+      // RULED(2026-10-07): [R03] the one error body with a field beside `error`.
+      if (isVersionConflict(err)) {
+        res.status(409).json({ error: { code: 'VERSION_CONFLICT' }, currentVersion: err.currentVersion })
+        return
+      }
       sendError(res, err)
     }
   })
@@ -382,6 +396,11 @@ export function tasksRouter(): Router | null {
       sendError(res, err)
     }
   })
+
+  // ASSUMPTION(task-m4): [own-17] M4 routes register on this same router (no nested Router, no
+  // new mount, no new flag read). One call per line: gate 13's negative control rewrites it.
+  registerTaskSettingsRoutes(router)
+  registerTaskListRoutes(router)
 
   return router
 }

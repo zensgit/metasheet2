@@ -58,6 +58,8 @@ import {
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
 import { LoginNameRuleError } from '../auth/login-name-rule'
 import { PasswordPolicyError } from '../auth/password-policy-error'
+// NOT a directory error: thrown by the alias claim inside admission (directory-sync.ts) with a fixed sentence.
+import { LoginAliasClaimError } from '../auth/login-alias-service'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
@@ -109,13 +111,25 @@ function readErrorMessage(error: unknown, fallback: string): string {
 }
 
 /**
+ * Admission claims the new user's email / username / mobile as login aliases; one already claimed by another
+ * account is a conflict the admin can resolve, not a server fault. Same status and code as POST
+ * /api/admin/users. The message is the alias service's own fixed sentence (LoginAliasClaimError never carries
+ * driver text). A failed claim WRITE (`ALIAS_WRITE_FAILED`) is not handled here: it stays the route's fixed 500.
+ */
+function sendIfLoginAliasConflict(res: Response, error: unknown): boolean {
+  if (!(error instanceof LoginAliasClaimError) || error.code !== 'ALIAS_CONFLICT') return false
+  jsonError(res, 409, 'LOGIN_ALIAS_CONFLICT', error.message)
+  return true
+}
+
+/**
  * #6163 S6: the failure responder the directory handlers below share. The status comes from the error's
  * TYPE, never from a regex over its text: the three typed directory-sync errors answer 400 / 404 / 409 with
  * their own developer-authored sentence (see their classes in directory-sync.ts). Anything else is
  * unexpected — its text goes to the log only, and the 500 body carries the route's fixed `fallbackMessage`
  * (a literal at every call site), so no driver, provider or transport text reaches a 5xx body. A handler's
- * specific branches (sync lease / freeze, recovery conflict, login-name and password rules, tenant change,
- * corp allowlist) run before it; every call keeps the route's own error code.
+ * specific branches (sync lease / freeze, recovery conflict, login-name and password rules, login-alias conflict,
+ * tenant change, corp allowlist) run before it; every call keeps the route's own error code.
  */
 function sendDirectoryFailure(res: Response, error: unknown, code: string, fallbackMessage: string): void {
   if (error instanceof DirectoryValidationError) {
@@ -269,9 +283,32 @@ export async function ensurePlatformAdmin(req: Request, res: Response): Promise<
 export function adminDirectoryRouter(): Router {
   const router = Router()
 
+  // Every id below is a uuid column (gen_random_uuid()). A malformed one in the path used to reach Postgres as
+  // `$1::uuid`, fail with 22P02 and, since the status is decided by error TYPE (#6163 S6), answer the route's
+  // generic 500. It is the caller's mistake: 400, with the same shape check and wording the runId / eventId
+  // routes below already use, placed AFTER the admin gate so a non-admin still sees 401 / 403 first.
+  const ID_PARAM_INVALID = {
+    integrationId: { code: 'DIRECTORY_INTEGRATION_ID_INVALID', message: 'integrationId must be a UUID' },
+    accountId: { code: 'DIRECTORY_ACCOUNT_ID_INVALID', message: 'accountId must be a UUID' },
+    alertId: { code: 'DIRECTORY_ALERT_ID_INVALID', message: 'alertId must be a UUID' },
+  } as const
+
+  function validateIdParam(req: Request, res: Response, name: keyof typeof ID_PARAM_INVALID): boolean {
+    if (UUID_SHAPE_RE.test(String(req.params[name] ?? ''))) return true
+    jsonError(res, 400, ID_PARAM_INVALID[name].code, ID_PARAM_INVALID[name].message)
+    return false
+  }
+
   router.get('/dingtalk/work-notification', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    // Optional filter: blank means "the preferred integration" (the service trims it); anything else must be a
+    // uuid, like the path ids above, or it reaches `WHERE id = $1` and fails with 22P02.
+    const requestedIntegrationId = typeof req.query.integrationId === 'string' ? req.query.integrationId.trim() : ''
+    if (requestedIntegrationId && !UUID_SHAPE_RE.test(requestedIntegrationId)) {
+      jsonError(res, 400, ID_PARAM_INVALID.integrationId.code, ID_PARAM_INVALID.integrationId.message)
+      return
+    }
 
     try {
       const integrationId = typeof req.query.integrationId === 'string' ? req.query.integrationId : undefined
@@ -393,6 +430,7 @@ export function adminDirectoryRouter(): Router {
   router.put('/integrations/:integrationId', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     // Zone first, then the cron IN the zone it will actually run in.
     //
@@ -484,6 +522,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/approval-card-config', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const status = await getApprovalCardConfigStatus(req.params.integrationId)
@@ -500,6 +539,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/integrations/:integrationId/approval-card-config/secret/generate', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const status = await generateApprovalCardLinkSecret(req.params.integrationId)
@@ -529,6 +569,7 @@ export function adminDirectoryRouter(): Router {
   router.put('/integrations/:integrationId/approval-card-config', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const body = (req.body ?? {}) as Record<string, unknown>
@@ -576,6 +617,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/integrations/:integrationId/sync', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     // DT-OPS-02: async is OPT-IN. The synchronous response carries the auto-admission
     // onboarding packets (one-time temporary passwords), which are never persisted — a
@@ -668,6 +710,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/integrations/:integrationId/sync/preview', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const preview = await previewDirectorySyncIntegration(req.params.integrationId)
@@ -687,6 +730,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/runs', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
@@ -709,6 +753,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/runs/:runId', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
     if (!UUID_SHAPE_RE.test(req.params.runId)) {
       jsonError(res, 400, 'DIRECTORY_SYNC_RUN_ID_INVALID', 'runId must be a UUID')
       return
@@ -729,6 +774,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/schedule', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const snapshot = await getDirectorySyncScheduleSnapshot(req.params.integrationId)
@@ -745,6 +791,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/alerts', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
@@ -775,6 +822,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/review-items', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
@@ -804,6 +852,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/accounts', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const { page, pageSize, offset } = parsePagination(req.query as Record<string, unknown>, {
@@ -828,6 +877,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/departments', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const result = await listDirectoryIntegrationDepartments(req.params.integrationId)
@@ -845,6 +895,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/manager-coverage', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const coverage = await getDirectoryManagerBindingCoverage(req.params.integrationId)
@@ -861,6 +912,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/integrations/:integrationId/inactive-linked', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'integrationId')) return
 
     try {
       const thresholdDays = normalizeInactiveLinkedDays(req.query.days)
@@ -874,6 +926,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/accounts/:accountId', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'accountId')) return
 
     try {
       const account = await getDirectoryAccountSummary(req.params.accountId)
@@ -890,6 +943,7 @@ export function adminDirectoryRouter(): Router {
   router.get('/accounts/:accountId/review-item', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'accountId')) return
 
     try {
       const item = await getDirectoryReviewItem(req.params.accountId)
@@ -906,6 +960,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/accounts/:accountId/bind', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'accountId')) return
 
     try {
       const localUserRef = typeof req.body?.localUserRef === 'string' ? req.body.localUserRef : ''
@@ -948,6 +1003,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/accounts/:accountId/admit-user', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'accountId')) return
 
     try {
       const username = typeof req.body?.username === 'string' && req.body.username.trim().length > 0
@@ -1032,6 +1088,7 @@ export function adminDirectoryRouter(): Router {
         jsonError(res, 400, error.code, error.message, { details: [...error.errors] })
         return
       }
+      if (sendIfLoginAliasConflict(res, error)) return
       sendDirectoryFailure(res, error, 'DIRECTORY_ADMISSION_FAILED', 'Failed to create and bind local user for directory account')
     }
   })
@@ -1192,6 +1249,7 @@ export function adminDirectoryRouter(): Router {
     } catch (error) {
       // O2-S2: named retryable RecoveryConflictError from an admission write → retryable 409.
       if (sendIfRecoveryConflict(res, error)) return
+      if (sendIfLoginAliasConflict(res, error)) return
       sendDirectoryFailure(res, error, 'DIRECTORY_BATCH_ADMISSION_FAILED', 'Failed to batch create and bind local users for directory accounts')
     }
   })
@@ -1199,6 +1257,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/accounts/:accountId/unbind', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'accountId')) return
 
     try {
       const disableDingTalkGrant = req.body?.disableDingTalkGrant === true
@@ -1286,6 +1345,7 @@ export function adminDirectoryRouter(): Router {
   router.post('/alerts/:alertId/ack', async (req: Request, res: Response) => {
     const adminUserId = await ensurePlatformAdmin(req, res)
     if (!adminUserId) return
+    if (!validateIdParam(req, res, 'alertId')) return
 
     try {
       const alert = await acknowledgeDirectorySyncAlert(req.params.alertId, adminUserId)

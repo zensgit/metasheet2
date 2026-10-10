@@ -5,24 +5,14 @@
  * the insert fails as 422, not a raw constraint error. More than
  * `TASK_ASSIGNEE_SOFT_LIMIT` distinct ids is 422 LIMIT.
  */
+import { isStorableText } from '../tasks/task-ids'
 import { TASK_ASSIGNEE_SOFT_LIMIT } from '../tasks/task-membership'
 
 const PRINTABLE_ID = /^[!-~]+$/
 
-/** A lone UTF-16 surrogate: a high surrogate not followed by a low one, or a
- * low surrogate not preceded by a high one. No `u` flag, so the pattern
- * works on code units. */
-const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
-
-/**
- * User text (task title, comment body) that Postgres `text` stores exactly
- * as sent: no U+0000, and well-formed UTF-16 (no lone surrogate, which the
- * UTF-8 encoding on the way to the database would otherwise replace with
- * U+FFFD). Callers reject, never strip, so what is stored is what was sent.
- */
-export function isStorableText(value: string): boolean {
-  return !value.includes('\u0000') && !LONE_SURROGATE.test(value)
-}
+// `isStorableText` lives with the other pure text rules in `src/tasks/task-ids.ts` (the M4 edit
+// rules in `src/tasks/task-edit.ts` use it too); re-exported here for the existing importers.
+export { isStorableText }
 
 /**
  * Upper bound on a member (assignee/follower) id, in UTF-16 code units — the

@@ -4194,11 +4194,12 @@ function normalizeApprovalGraph(
             context,
             `${handlerPath}.assigneeSources`,
           )!
-          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the SEVEN kinds
-          // in HANDLER_ASSIGNEE_SOURCE_KINDS. `continuous_managers` (corpus C-2 approver-only) and every
-          // forward Lock-1 kind (requester_choice, user_group, …) are rejected until their own slice
-          // admits them (§1.5 "each row lands in the same slice as its kind"). Rejecting on the KIND, not
-          // silently dropping it, is the fail-closed gate G-13 tests.
+          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the kinds in
+          // HANDLER_ASSIGNEE_SOURCE_KINDS (base seven + Lock-2's two contact rows + Lock-3 §1.5's three
+          // forward rows `user_group` / `requester_choice` / `dept_head_at_level`, landed by W1-1d).
+          // `continuous_managers` (corpus C-2 approver-only), `prior_node_approver` (K3) and
+          // `continuous_dept_heads` (K4) stay rejected — §1.5 names them "do NOT". Rejecting on the
+          // KIND, not silently dropping it, is the fail-closed gate G-13 tests.
           for (const source of assigneeSources) {
             if (!(HANDLER_ASSIGNEE_SOURCE_KINDS as readonly string[]).includes(source.kind)) {
               throw new ServiceError(
@@ -5478,15 +5479,19 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
  * class R-13 names: a graph using ONLY `dept_head_at_level` would never bake `deptHeadChainIds`,
  * so the resolver's positional read would see `undefined` and resolve empty — indistinguishable
  * from "no head at that level" and liable to silently auto-approve under
- * `emptyAssigneePolicy:'auto-approve'`. Node-type is `approval`-only (§2.3 registry row: neither
- * kind is admitted on a `handler` node in this slice — Lock-3 §1.5's forward ADMIT for K5-b on
- * handler is deliberately NOT landed here; see the `dept_head_at_level` resolver arm comment).
+ * `emptyAssigneePolicy:'auto-approve'`. Node types `approval` AND `handler` (Lock-3 §1.5 forward
+ * row, landed by W1-1d: "`dept_head_at_level` (K5-b) ADMIT" on a handler) — a handler using ONLY
+ * `dept_head_at_level` must bake `deptHeadChainIds` too, else its positional read sees `undefined`,
+ * resolves EMPTY and the handler fails `APPROVAL_ASSIGNEE_EMPTY` at dispatch (the R-13 silent-skip
+ * class; a handler has no empty-assignee policy to fall to). `continuous_dept_heads` is NOT
+ * admitted on a handler (rejected at authoring), so reading it here for a handler is unreachable
+ * and merely keeps the predicate node-type-symmetric like `runtimeGraphUsesManagerChain`.
  * `kind` is read structurally so this works before the kind is added to the typed union (same
  * posture as `runtimeGraphUsesManagerChain`).
  */
 export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
@@ -5629,10 +5634,14 @@ function ccNodeGroupTargetIds(config: unknown): string[] {
  * AFTER (`asRuntimeGraph`'s published/frozen graph) — `RuntimeGraph extends ApprovalGraph`, so one
  * function structurally serves both call sites. Detector scope stays in exact lockstep with what is
  * actually admitted (the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s doc comment names):
- * the approver arm reads `approval` nodes only (§2.3 registry row), and the cc arm — the separate
- * "`user_group` (cc)" registry row, landed by the OD-L1-7 slice — reads `cc` nodes only. The cc arm
- * is what lets a group cc target be FROZEN into `groupMemberIds` at create, which is the only
- * membership source the executor's cc arm reads (never a live read at dispatch).
+ * the approver arm reads `approval` AND `handler` nodes — the §2.3 registry row plus Lock-3 §1.5's
+ * forward row ("`user_group` (K1) … ADMIT" on a handler) landed by W1-1d: a group id referenced
+ * ONLY by a handler node must be frozen too, else the handler's `groupMemberIds` lookup finds
+ * nothing, resolves EMPTY and fails `APPROVAL_ASSIGNEE_EMPTY` at dispatch (R-13 silent-skip class)
+ * — and the cc arm — the separate "`user_group` (cc)" registry row, landed by the OD-L1-7 slice —
+ * reads `cc` nodes only. The cc arm is what lets a group cc target be FROZEN into `groupMemberIds`
+ * at create, which is the only membership source the executor's cc arm reads (never a live read
+ * at dispatch).
  */
 export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
   const groupIds = new Set<string>()
@@ -5641,7 +5650,7 @@ export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph)
       for (const groupId of ccNodeGroupTargetIds(node.config)) groupIds.add(groupId)
       continue
     }
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) continue
@@ -5662,7 +5671,10 @@ export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph)
  * to a DIFFERENT org only) — fails publish, values-free (the group id itself is template-authored,
  * like `prior_node_approver`'s `nodeKey`, and is permitted per §2.6; the rejection never touches
  * group MEMBERSHIP). UNCONDITIONAL like the K3 dominance gate: no policy exemption makes a
- * foreign/dangling group reference resolvable.
+ * foreign/dangling group reference resolvable. Node types `approval` AND `handler` (Lock-3 §1.5
+ * forward row, W1-1d) — the node loop must stay in lockstep with `collectApprovalGraphMemberGroupIds`
+ * above: a handler-carried group id that the collector freezes but this gate never checked would be
+ * the one way a foreign/dangling group reaches an instance.
  *
  * OD-L1-7(a) — a cc node's `targetType:'group'` targets pass through the SAME gate (same curated
  * set, same code, same fail-closed-at-publish-never-at-dispatch posture — §K1 "a group id that does
@@ -5690,7 +5702,7 @@ export function assertUserGroupSourcesBoundToOrg(
       })
       continue
     }
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
     // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
     // before any graph reaches publish), but the two functions read the SAME field and should not
@@ -5721,15 +5733,21 @@ export function assertUserGroupSourcesBoundToOrg(
 
 /**
  * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
- * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
+ * carrying node's key. Drives the create-time choice validation + snapshot freeze —
  * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
+ * Node types `approval` AND `handler` (Lock-3 §1.5 forward row "`requester_choice` (K2) … ADMIT",
+ * W1-1d): a handler carrying the kind is keyed here exactly like an approval node, so a submitted
+ * choice for it is scope-validated and frozen under its node key (instead of 422
+ * `APPROVAL_REQUESTER_CHOICE_UNKNOWN_NODE`), and an OMITTED choice is a create-time 422
+ * `APPROVAL_REQUESTER_CHOICE_REQUIRED` (instead of an EMPTY resolution that fails the handler
+ * `APPROVAL_ASSIGNEE_EMPTY` at dispatch — the R-13 silent-skip class).
  */
 export function collectRuntimeGraphRequesterChoiceSources(
   runtimeGraph: RuntimeGraph,
 ): Map<string, RequesterChoiceAssigneeSource[]> {
   const byNodeKey = new Map<string, RequesterChoiceAssigneeSource[]>()
   for (const node of runtimeGraph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) continue
@@ -7744,6 +7762,7 @@ export class ApprovalProductService {
     requireComplete: boolean,
   ): Promise<Record<string, string[]>> {
     if (!pool) throw new Error('Database not available')
+    // The user-facing messages below are shared by approval AND handler carriers (W1-1d) — keep them node-type-agnostic.
     // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
     // values-free 422 (the offending VALUE is never echoed — only the node key).
     const normalized = new Map<string, string[]>()
@@ -7802,7 +7821,7 @@ export class ApprovalProductService {
           `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
         )
         throw new ServiceError(
-          'Could not verify the chosen approvers for this approval template. Please retry.',
+          'Could not verify the chosen users for this approval template. Please retry.',
           503,
           'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
         )
@@ -7816,7 +7835,7 @@ export class ApprovalProductService {
           // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
           // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
           throw new ServiceError(
-            `A requester choice is required for this approval node`,
+            `A requester choice is required for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_REQUIRED',
             { nodeKey },
@@ -7829,8 +7848,8 @@ export class ApprovalProductService {
         if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
           throw new ServiceError(
             source.mode === 'single'
-              ? `This approval node requires exactly one chosen approver`
-              : `This approval node requires at least one chosen approver`,
+              ? `This node requires exactly one chosen user`
+              : `This node requires at least one chosen user`,
             422,
             'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
             { nodeKey, mode: source.mode },
@@ -7838,7 +7857,7 @@ export class ApprovalProductService {
         }
         const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
           throw new ServiceError(
-            `A chosen approver is outside the scope configured for this approval node`,
+            `A chosen user is outside the scope configured for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
             { nodeKey, scopeType },
@@ -7865,7 +7884,7 @@ export class ApprovalProductService {
               `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
             )
             throw new ServiceError(
-              'Could not verify the chosen approvers for this approval template. Please retry.',
+              'Could not verify the chosen users for this approval template. Please retry.',
               503,
               'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
             )

@@ -92,9 +92,10 @@ export interface TaskRoleRow {
   followerIds: string[]
 }
 
-// ASSUMPTION(task-b): [design §3 item 2] list roles are P1 — `listMemberships` is accepted on
-// `resolveTaskRoles` for forward-compat but defaults to empty, so `list-editor` / `list-reader`
-// never appear this period (the P1 table they'd be read from does not exist yet).
+// RULED(2026-10-07): [R04] list roles come from `task_list_members` rows of the lists that contain
+// the task (`task_list_items`). The service layer loads them for the acting user and passes them
+// here (after `toTaskListMemberships` in task-lists.ts); a caller that passes nothing gets only the
+// direct roles. List identity never enters a list-view arm below, only single-object abilities.
 export interface TaskListMembership {
   listId: string
   role: 'editor' | 'reader'
@@ -179,6 +180,18 @@ export interface TaskScopeCondition {
 const ME_PLACEHOLDER = '$1'
 const ORG_PLACEHOLDER = '$2'
 const VIEWER_TZ_PLACEHOLDER = '$3'
+// ASSUMPTION(task-m4): [own-01] the by-id and by-list builders have no actor arm: `$1` is the object
+// id and `$2` the org. They are never concatenated with a view/pending fragment in one query.
+const TASK_ID_PLACEHOLDER = '$1'
+const LIST_ID_PLACEHOLDER = '$1'
+
+/**
+ * The org + liveness clause shared by every builder in this module. It is the ONLY place the
+ * org clause text is written (lock §4.3 single-point emission); every exported builder calls this.
+ */
+function taskOrgLiveClause(): string {
+  return `(tasks.org_id = ${ORG_PLACEHOLDER}) AND tasks.deleted_at IS NULL`
+}
 
 function scopeArm(view: Exclude<TaskView, 'any_role'>): string {
   switch (view) {
@@ -222,7 +235,7 @@ export function buildTaskScopeCondition(input: {
           .map((v) => `(${scopeArm(v)})`)
           .join(' OR ')
       : scopeArm(view)
-  const sql = `(tasks.org_id = ${ORG_PLACEHOLDER}) AND tasks.deleted_at IS NULL AND (${arm})`
+  const sql = `${taskOrgLiveClause()} AND (${arm})`
   return { sql, params: [actorParam, orgParam] }
 }
 
@@ -284,4 +297,63 @@ export function buildTaskPendingCondition(input: TaskPendingConditionInput): Tas
   }
   const sql = `${base.sql} AND tasks.status = 'open' AND ${notCompletedByMe}${scopeClause}`
   return { sql, params }
+}
+
+// RULED(2026-10-07): [R04] single-object reads (detail, the task load under the structure lock,
+// the comment and delete row locks) select the row by id through this builder, then decide
+// visibility from the resolved role set (`can(roles, 'view')`), which includes list identity.
+/**
+ * `{ sql, params }` TEXT selecting one live task of one org by id. `$1` = task id, `$2` = org
+ * (see the placeholder note above). A caller that appends its own parameters numbers them from
+ * `params.length + 1`.
+ */
+export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgLiveClause()}`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// ASSUMPTION(task-m4): [own-02] tasks of one list (list item listing, "is this task in the list").
+/**
+ * `{ sql, params }` TEXT selecting the live tasks of one org that are items of one list.
+ * `$1` = list id, `$2` = org.
+ */
+export function buildTaskInListCondition(input: { listIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql:
+      `EXISTS (SELECT 1 FROM task_list_items tli WHERE tli.task_id = tasks.id AND tli.list_id = ${LIST_ID_PLACEHOLDER}) ` +
+      `AND ${taskOrgLiveClause()}`,
+    params: [input.listIdParam, input.orgParam],
+  }
+}
+
+/**
+ * Whether `roles` may complete / reopen a task that has `assigneeCount` assignee rows: the ability
+ * from the role table and, lock §6.2, for a task with no assignee rows the `creator` role, since
+ * such a task is completed and reopened by its creator only. Used by the complete / reopen routes
+ * and by the detail's `canComplete` / `canReopen`, so the two cannot disagree.
+ */
+export function canChangeCompletion(roles: TaskRole[], ability: TaskAbility, assigneeCount: number): boolean {
+  if (ability !== 'complete' && ability !== 'reopen') {
+    throw new TypeError(`canChangeCompletion: ability must be complete or reopen, got "${String(ability)}"`)
+  }
+  return can(roles, ability) && (assigneeCount > 0 || roles.includes('creator'))
+}
+
+// RULED(2026-10-07): [own-53]: adding or removing an assignee, and adding or removing a
+// follower, takes `edit` from a direct role on the task (creator or assignee). List identity is not
+// an input: the roles are resolved here from the three direct-role columns alone, and the input
+// has no place for list memberships. A follower leaving (`leave`) is a different ability.
+/**
+ * Whether `me` may add or remove the assignees and the followers of the task whose creator,
+ * assignees and followers are `task`. Used by those four writes and by the detail's
+ * `canManageMembers`, so the two cannot disagree.
+ */
+export function canChangeTaskMembers(input: { task: TaskRoleRow; me: string }): boolean {
+  const direct = resolveTaskRoles(
+    { createdBy: input.task.createdBy, assigneeIds: input.task.assigneeIds, followerIds: input.task.followerIds },
+    input.me,
+  )
+  return can(direct, 'edit')
 }
