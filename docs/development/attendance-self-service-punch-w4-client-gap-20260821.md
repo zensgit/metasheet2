@@ -81,9 +81,16 @@ workaround.
 
 ## Adjacent defect, recorded here because this note is where it was found
 
-`AttendanceW4IdentityError` is absent from `W4_ERROR_NAMES`
-(`plugins/plugin-attendance/index.cjs:25249-25274`), so every typed fail-closed code
-that class carries reaches the caller as a raw `500 INTERNAL_ERROR`. That contradicts
-the doctrine the surrounding code states in its own words (`:25267-25272`), and it is
-worth its own ticket before anyone runs a W4 staging round — a fail-closed guard whose
-reason is swallowed is much harder to operate than one that says why.
+**Status (2026-09-23, #5992):** the mapping gap below is fixed. The paragraph is the
+pre-fix finding, kept so the wasted-cycle story stays readable. The architectural
+fact above is unchanged: the browser still does not send `operationId`.
+
+Before the fix, `AttendanceW4IdentityError` was absent from `W4_ERROR_NAMES`
+(`plugins/plugin-attendance/index.cjs`, then inline beside the live-punch boundary),
+so every typed fail-closed code that class carries reached the caller as a raw
+`500 INTERNAL_ERROR`. That contradicted the doctrine the surrounding code states.
+The mapper now lives in
+`plugins/plugin-attendance/lib/attendance-w4-boundary-error-response.cjs`, includes
+`AttendanceW4IdentityError`, and returns 422 with `error.code` set to the closed
+code when the class supplies no `httpStatus`. This note still does not authorize
+turning the browser into a W4 client.
