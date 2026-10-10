@@ -7568,6 +7568,8 @@ attendanceIntegrationDescribe(
       block: `attendance-v12b-block-${runSuffix}`,
       short: `attendance-v12b-short-${runSuffix}`,
       partial: `attendance-v12b-partial-${runSuffix}`,
+      partialZero: `attendance-v12b-partial-zero-${runSuffix}`,
+      partialEnough: `attendance-v12b-partial-enough-${runSuffix}`,
       nodbl: `attendance-v12b-nodbl-${runSuffix}`,
     }
     let adminToken: string | undefined
@@ -7624,11 +7626,69 @@ attendanceIntegrationDescribe(
       expect((await pool.query('SELECT status FROM attendance_requests WHERE id=$1', [rShort])).rows[0].status).toBe('pending')
       expect(await compRemaining(users.short)).toBe(60)
 
-      // (4) ENABLED partial, insufficient: deduct AVAILABLE, APPROVE (no throw); shortfall = 200−120 = 账3 absence.
-      await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }] } })
+      // (4) #6009 partial_unpaid_absence is not online. PUT of the mode is 422 and does not replace the
+      // block policy from (2). A legacy stored rule (seeded under the settings row, the way a pre-fix
+      // save would still be sitting in system_configs) fail-closes on approve: no deduction, request
+      // stays pending, no attendance_records projection — including when the pool could cover the request.
+      const rejectedPartial = await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }] } })
+      expect(rejectedPartial.status).toBe(422)
+      expect((rejectedPartial.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE')
+      const settingsAfterReject = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: hdr(adminToken!) })
+      expect((settingsAfterReject.body as { data?: { leaveBalanceDeductionPolicy?: { rules?: Array<{ insufficient?: string }> } } } | undefined)?.data?.leaveBalanceDeductionPolicy?.rules?.[0]?.insufficient).toBe('block')
+
+      const settingsRow = await pool.query(`SELECT value::text AS value_text FROM system_configs WHERE key = 'attendance.settings'`)
+      const seededSettings = JSON.parse(String(settingsRow.rows[0]?.value_text ?? '{}')) as Record<string, unknown>
+      seededSettings.leaveBalanceDeductionPolicy = {
+        enabled: true,
+        rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
+      }
+      await pool.query(
+        `INSERT INTO system_configs (key, value, updated_at) VALUES ('attendance.settings', $1, now())
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+        [JSON.stringify(seededSettings)],
+      )
+      getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.()
+      const settingsAfterSeed = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: hdr(adminToken!) })
+      expect((settingsAfterSeed.body as { data?: { leaveBalanceDeductionPolicy?: { rules?: Array<{ insufficient?: string }> } } } | undefined)?.data?.leaveBalanceDeductionPolicy).toEqual({
+        enabled: true,
+        rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }],
+      })
+
+      const assertPartialRefused = async (userKey: 'partial' | 'partialZero' | 'partialEnough', minutes: number, workDate: string) => {
+        const requestId = await createLeave(tokens[userKey], personalLeaveId, workDate, minutes)
+        const decision = await approve(tokens[userKey], requestId)
+        expect(decision.status).toBe(422)
+        expect((decision.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE')
+        expect((await pool.query('SELECT status FROM attendance_requests WHERE id=$1', [requestId])).rows[0].status).toBe('pending')
+        expect((await pool.query(
+          `SELECT id FROM attendance_records WHERE user_id = $1 AND work_date = $2`,
+          [users[userKey], workDate],
+        )).rows).toHaveLength(0)
+        return requestId
+      }
+
       await insertCompLot(users.partial, 120)
-      expect((await approve(tokens.partial, await createLeave(tokens.partial, personalLeaveId, '2026-09-20', 200))).status).toBe(200)
-      expect(await compRemaining(users.partial)).toBe(0)
+      const partialRequestId = await assertPartialRefused('partial', 200, '2026-09-20')
+      expect(await compRemaining(users.partial)).toBe(120)
+
+      const zeroRequestId = await assertPartialRefused('partialZero', 480, '2026-09-21')
+      expect(await compRemaining(users.partialZero)).toBe(0)
+
+      await insertCompLot(users.partialEnough, 200)
+      const enoughRequestId = await assertPartialRefused('partialEnough', 60, '2026-09-22')
+      expect(await compRemaining(users.partialEnough)).toBe(200)
+
+      // Switching the rule to block is the supported contract: a pool that cannot cover the request
+      // still rolls back; a pool that can cover it deducts the full request (not a silent partial).
+      expect((await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'block' }] } })).status).toBe(200)
+      const blockedAgain = await approve(tokens.partial, partialRequestId)
+      expect(blockedAgain.status).toBe(422)
+      expect((blockedAgain.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('LEAVE_OFFSET_BALANCE_INSUFFICIENT')
+      expect((await pool.query('SELECT status FROM attendance_requests WHERE id=$1', [partialRequestId])).rows[0].status).toBe('pending')
+      expect(await compRemaining(users.partial)).toBe(120)
+      expect((await approve(tokens.partialEnough, enoughRequestId)).status).toBe(200)
+      expect(await compRemaining(users.partialEnough)).toBe(140)
+      expect((await pool.query('SELECT status FROM attendance_requests WHERE id=$1', [zeroRequestId])).rows[0].status).toBe('pending')
 
       // (5) NO DOUBLE-DEDUCT (the load-bearing invariant): a comp_time leave with a comp_time rule → only the
       // dedicated C3 block deducts; the rule path SKIPS comp_time. Balance drops by 60 ONCE (not to 0).
@@ -10752,7 +10812,7 @@ attendanceIntegrationDescribe(
       try {
         const rules = [
           { requestLeaveType: 'annual', deductFrom: ['annual'], insufficient: 'block' },
-          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' },
+          { requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'block' },
         ]
         // (1) full PUT → GET returns the full shape (locks DEFAULT_SETTINGS + normalizeSettings + zod + mergeSettings).
         expect((await putSettings({ leaveBalanceDeductionPolicy: { enabled: true, rules } })).status).toBe(200)
@@ -10764,6 +10824,11 @@ attendanceIntegrationDescribe(
         expect((await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'x', deductFrom: ['bogus'] }] } })).status).toBe(400)
         // (4) §P2 single-pool lock: a multi-pool deductFrom is rejected at the API (>1 element). Cross-pool is v2.
         expect((await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time', 'annual'] }] } })).status).toBe(400)
+        // (5) #6009: partial_unpaid_absence parses (so the error is specific) then 422, and does not replace rules.
+        const rejected = await putSettings({ leaveBalanceDeductionPolicy: { rules: [{ requestLeaveType: 'personal_leave', deductFrom: ['comp_time'], insufficient: 'partial_unpaid_absence' }] } })
+        expect(rejected.status).toBe(422)
+        expect((rejected.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE')
+        expect((await loadSettingsForTest(adminToken)).leaveBalanceDeductionPolicy).toEqual({ enabled: false, rules })
       } finally {
         await putSettings({ leaveBalanceDeductionPolicy: originalSettings.leaveBalanceDeductionPolicy }).catch(() => undefined)
       }
