@@ -22,6 +22,9 @@ REQUIRED_PATHS=(
   "apps/web/package.json"
   "packages/core-backend/dist"
   "packages/core-backend/package.json"
+  # core-backend imports this workspace package at process startup. Keep it in
+  # the delivery root so pnpm can recreate the workspace link during install.
+  "packages/mssql-readonly-utils"
   # The packaged migration runner resolves compiled TS migrations from dist,
   # source SQL migrations from src/db/migrations, and legacy SQL bridge
   # migrations from packages/core-backend/migrations.
