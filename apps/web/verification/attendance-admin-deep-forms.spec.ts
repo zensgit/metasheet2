@@ -130,7 +130,10 @@ test.describe('attendance admin deep forms share Holidays and Settings chrome', 
     await openSection(page, 'attendance-admin-payroll-templates')
     const grid = page.locator('#attendance-admin-payroll-templates > .attendance__admin-grid')
     await expect(grid).toBeVisible()
-    await expectTwoColumns(page, '#attendance-admin-payroll-templates > .attendance__admin-grid')
+    const templateColumns = await page.locator('#attendance-admin-payroll-templates > .attendance__admin-grid').evaluate((node) => (
+      getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
+    ))
+    expect(templateColumns, 'payroll templates use three columns at desktop').toBe(3)
     await expectControlHeight(page, '#attendance-payroll-template-name')
     await expectControlHeight(page, 'label[for="attendance-payroll-template-auto"]')
     await scrollBelowSticky(page, '#attendance-payroll-template-name')

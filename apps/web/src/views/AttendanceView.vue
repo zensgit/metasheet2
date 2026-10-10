@@ -33331,6 +33331,12 @@ defineExpose({
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/* Payroll templates pack short fields three across. Other deep forms stay
+   on the two-column rhythm. Full-width rows still span the grid. */
+#attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .attendance__form-sheet .attendance__field,
 .attendance__form-sheet :deep(.attendance__field),
 .attendance__form-sheet .attendance__override-field {
@@ -33940,7 +33946,8 @@ defineExpose({
   #attendance-admin-settings.attendance__form-sheet > .attendance__admin-subsection,
   #attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule],
   #attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__grid),
-  #attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__approvers) {
+  #attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__approvers),
+  #attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid {
     grid-template-columns: 1fr;
   }
 
