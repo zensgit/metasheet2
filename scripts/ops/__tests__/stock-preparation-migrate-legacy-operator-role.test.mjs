@@ -48,6 +48,10 @@ const G = {
   oldSheetGrants: "SELECT count(*)::int AS count FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1",
   sharedSheetGrants: "SELECT count(*)::int AS count FROM spreadsheet_permissions o WHERE o.subject_type = 'role' AND o.subject_id = $1 AND EXISTS ( SELECT 1 FROM spreadsheet_permissions t WHERE t.subject_type = 'role' AND t.subject_id = $2 AND t.sheet_id = o.sheet_id AND t.perm_code = o.perm_code )",
   activeRoleApprovals: "SELECT count(*)::int AS count FROM approval_assignments WHERE assignment_type = 'role' AND assignee_id = $1 AND is_active = TRUE",
+  // Approval READ through a role: no is_active filter (the read arm is is_active-insensitive); keys
+  // are the role id and its trimmed display name, minus what the other role of the pair carries.
+  approvalRoleSeats: "WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text) AS role_key UNION SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name) = k.role_key) ) SELECT count(*)::int AS count FROM approval_assignments a WHERE a.assignment_type = 'role' AND a.assignee_id IN (SELECT role_key FROM role_read_keys)",
+  approvalRoleCcRecords: "WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text) AS role_key UNION SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name) = k.role_key) ) SELECT count(*)::int AS count FROM approval_records rec WHERE rec.action = 'cc' AND rec.metadata->>'targetType' = 'role' AND rec.metadata->>'targetId' IN (SELECT role_key FROM role_read_keys)",
   moveMembers: 'WITH moved AS ( DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id ), inserted AS ( INSERT INTO user_roles (user_id, role_id) SELECT user_id, $2 FROM moved ON CONFLICT DO NOTHING RETURNING 1 ) SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM inserted)::int AS inserted',
   moveSheetGrants: "WITH moved AS ( DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1 RETURNING sheet_id, perm_code, created_at ), inserted AS ( INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code, created_at) SELECT sheet_id, NULL, 'role', $2, perm_code, created_at FROM moved ON CONFLICT (sheet_id, subject_type, subject_id, perm_code) DO NOTHING RETURNING 1 ) SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM inserted)::int AS inserted",
   deleteOldRoleCodes: 'DELETE FROM role_permissions WHERE role_id = $1',
@@ -62,7 +66,7 @@ const WRITE_KEYS = new Set(['moveMembers', 'moveSheetGrants', 'deleteOldRoleCode
 // task), so moving the old role's members gains them nothing; the gains tests widen it.
 function baseState() {
   return {
-    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'user_invites']),
+    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'approval_records', 'user_invites']),
     roles: [
       { id: OLD, name: 'legacy floor' },
       { id: TARGET, name: '一线填写' },
@@ -91,10 +95,19 @@ function baseState() {
       { sheet_id: 'sheet-project', user_id: null, subject_type: 'role', subject_id: OTHER, perm_code: 'spreadsheet:write', created_at: 't4' },
     ],
     unmoved: Object.fromEntries(UNMOVED_TABLES.map((table) => [table, [{ subject_type: 'role', subject_id: OTHER }]])),
+    // None of these gives a member of OLD or TARGET approval read access through the role: another
+    // role's seats, a USER seat and a source_queue seat that merely carry the old id as assignee.
     approvalAssignments: [
-      { assignment_type: 'role', assignee_id: OLD, is_active: false },
+      { assignment_type: 'role', assignee_id: 'unrelated', is_active: false },
       { assignment_type: 'role', assignee_id: OTHER, is_active: true },
       { assignment_type: 'user', assignee_id: OLD, is_active: true },
+      { assignment_type: 'source_queue', assignee_id: OLD, is_active: false },
+    ],
+    // Likewise: a CC to another role, a CC to a USER carrying the old id, a non-CC record.
+    approvalRecords: [
+      { action: 'cc', metadata: { targetType: 'role', targetId: OTHER } },
+      { action: 'cc', metadata: { targetType: 'user', targetId: OLD } },
+      { action: 'approve', metadata: { targetType: 'role', targetId: OLD } },
     ],
     // Only a PENDING invite naming the old role blocks the delete: accepted / revoked ones and other
     // roles' pending ones do not.
@@ -147,6 +160,22 @@ function makeFakeClient(state, { failOn = null, afterWrite = null } = {}) {
     on(unmovedGolden(table), ([old]) => countRows(state.unmoved[table].filter((r) => r.subject_type === 'role' && r.subject_id === old).length))
   }
   on(G.activeRoleApprovals, ([old]) => countRows(state.approvalAssignments.filter((a) => a.assignment_type === 'role' && a.assignee_id === old && a.is_active === true).length))
+  // role_read_keys: the subject role's id and trimmed name, minus the other role's id and name.
+  const readKeys = ([subject, other]) => {
+    const keys = new Set([subject.trim()])
+    const role = state.roles.find((r) => r.id === subject)
+    if (role && role.name != null) keys.add(role.name.trim())
+    const otherRole = state.roles.find((r) => r.id === other)
+    return [...keys].filter((k) => k !== '' && k !== other.trim() && !(otherRole && otherRole.name != null && otherRole.name.trim() === k))
+  }
+  on(G.approvalRoleSeats, (params) => {
+    const keys = readKeys(params)
+    return countRows(state.approvalAssignments.filter((a) => a.assignment_type === 'role' && keys.includes(a.assignee_id)).length)
+  })
+  on(G.approvalRoleCcRecords, (params) => {
+    const keys = readKeys(params)
+    return countRows(state.approvalRecords.filter((r) => r.action === 'cc' && r.metadata?.targetType === 'role' && keys.includes(r.metadata?.targetId)).length)
+  })
   on(G.moveMembers, ([old, target]) => {
     const moved = state.userRoles.filter((r) => r.role_id === old)
     state.userRoles = state.userRoles.filter((r) => r.role_id !== old)
@@ -267,7 +296,12 @@ test('dry run: zero write statements, READ ONLY transaction, rolled back, state 
     `gains — role-subject table grants of ${TARGET} not held by ${OLD}: 0`,
     ...UNMOVED_TABLES.map((table) => `gains — role-subject rows of ${TARGET} in ${table}: 0`),
     `gains — active role-assigned approval tasks of ${TARGET}: 0`,
+    `gains — role-typed approval seats of ${TARGET} in any state, not reachable through ${OLD}: 0`,
+    `gains — role-targeted approval CC records of ${TARGET}, not reachable through ${OLD}: 0`,
     `gains — members who would gain them (in ${OLD}, not yet in ${TARGET}): 1`,
+    // the approval read access the old role carries: none in the base state (only decoys)
+    `approval read through ${OLD} — role-typed seats in any state (by role id or display name): 0`,
+    `approval read through ${OLD} — role-targeted CC records (by role id or display name): 0`,
     `pending invites naming ${OLD}: 0`,
     `dry run: with --apply --delete-empty-old-role, ${OLD} would then be deleted`,
   ]) assert.ok(out.includes(line), `dry-run output must carry: ${line}`)
@@ -339,7 +373,13 @@ test('refuses when the old role holds codes the target lacks while it has member
   assert.equal(code, EXIT_REFUSED)
   assert.deepEqual(writes, [])
   assert.equal(snapshot(state), before)
-  assert.ok(out.some((line) => line.includes('holds 2 code(s)') && line.includes('approvals:read, approvals:write')))
+  const lossLine = out.find((line) => line.includes('holds 2 code(s)') && line.includes('approvals:read, approvals:write'))
+  assert.ok(lossLine)
+  // ADR §8 step 3: option ① (a separate platform role) is the only supported resolution; the
+  // message never suggests widening the built-in target with platform codes.
+  assert.ok(lossLine.includes('option ①') && lossLine.includes('create a separate platform role'))
+  assert.ok(!lossLine.includes('grant them to the target role'))
+  assert.ok(lossLine.includes(`never add them to ${TARGET}`))
   assertValuesFree(out)
   // once the target holds them too, the same move proceeds
   state.rolePermissions.push({ role_id: TARGET, permission_code: 'approvals:write' }, { role_id: TARGET, permission_code: 'approvals:read' })
@@ -362,6 +402,126 @@ test('refuses when the old role is the subject of rows the script does not move,
   const { code, writes } = await runMain(['--apply'], state)
   assert.equal(code, EXIT_REFUSED)
   assert.deepEqual(writes, [])
+})
+
+// ── approval READ access through the old role (fix round 2) ─────────────────────────────────────
+// canReadApprovalInstance admits a viewer through a role-typed seat in ANY state and through a
+// role-targeted CC record; neither is moved, so members who leave the old role lose that read.
+
+const SEAT_LINE = `approval read through ${OLD} — role-typed seats in any state (by role id or display name): `
+const CC_LINE = `approval read through ${OLD} — role-targeted CC records (by role id or display name): `
+
+async function assertApprovalReadLossRefused(state, { seats, cc }) {
+  const before = snapshot(state)
+  const dry = await runMain([], state)
+  assert.equal(dry.code, EXIT_REFUSED, 'the dry run reaches the refusal too')
+  assert.deepEqual(dry.writes, [])
+  assert.ok(dry.out.includes(`${SEAT_LINE}${seats}`), `dry run prints the seat count ${seats}`)
+  assert.ok(dry.out.includes(`${CC_LINE}${cc}`), `dry run prints the CC count ${cc}`)
+  assert.ok(dry.out.some((line) => line.startsWith('--apply would refuse') && line.includes('would lose that read access')))
+  const applied = await runMain(['--apply'], state)
+  assert.equal(applied.code, EXIT_REFUSED)
+  assert.deepEqual(applied.writes, [], 'refused before any move')
+  assert.equal(snapshot(state), before)
+  const refusal = applied.out.find((line) => line.startsWith('REFUSED') && line.includes('would lose that read access'))
+  assert.ok(refusal, 'an approval-read refusal is printed')
+  assert.ok(refusal.includes(`named by ${seats} role-typed approval seat(s)`) && refusal.includes(`and ${cc} role-targeted approval CC record(s)`))
+  assert.ok(refusal.includes(`its 2 member(s)`))
+  assertValuesFree([...dry.out, ...applied.out])
+}
+
+test('refuses while a role-typed approval seat in ANY state names the old role and it has members — an INACTIVE seat too (they would lose read access); the dry run prints the count', async () => {
+  for (const isActive of [false, true]) {
+    const state = baseState()
+    state.approvalAssignments.push({ assignment_type: 'role', assignee_id: OLD, is_active: isActive })
+    await assertApprovalReadLossRefused(state, { seats: 1, cc: 0 })
+  }
+})
+
+test('refuses while a role-targeted approval CC record names the old role and it has members (they would lose read access); the dry run prints the count', async () => {
+  const state = baseState()
+  state.approvalRecords.push({ action: 'cc', metadata: { targetType: 'role', targetId: OLD } })
+  await assertApprovalReadLossRefused(state, { seats: 0, cc: 1 })
+})
+
+test('approval read is matched by the old role\'s display NAME too (viewerRoles carries ids and names); a name the target also carries is kept by the move and does not count', async () => {
+  const byName = baseState()
+  byName.approvalAssignments.push({ assignment_type: 'role', assignee_id: 'legacy floor', is_active: false })
+  byName.approvalRecords.push({ action: 'cc', metadata: { targetType: 'role', targetId: 'legacy floor' } })
+  await assertApprovalReadLossRefused(byName, { seats: 1, cc: 1 })
+
+  // the old role carries the target's display name: members keep that key through the target
+  const shared = baseState()
+  shared.roles.find((r) => r.id === OLD).name = ' 一线填写 '
+  shared.approvalAssignments.push({ assignment_type: 'role', assignee_id: '一线填写', is_active: false })
+  shared.approvalRecords.push({ action: 'cc', metadata: { targetType: 'role', targetId: '一线填写' } })
+  const { code, out, writes } = await runMain(['--apply'], shared)
+  assert.equal(code, EXIT_OK)
+  assert.deepEqual(writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'])
+  assert.ok(out.includes(`${SEAT_LINE}0`) && out.includes(`${CC_LINE}0`))
+  assert.ok(out.includes(`gains — role-typed approval seats of ${TARGET} in any state, not reachable through ${OLD}: 0`))
+})
+
+test('--delete-empty-old-role refuses before any write while approval seats / CC records still name the old role (even with no member left); the post-move re-check catches one committed meanwhile', async () => {
+  for (const [label, add] of [
+    ['inactive seat', (s) => s.approvalAssignments.push({ assignment_type: 'role', assignee_id: OLD, is_active: false })],
+    ['CC record', (s) => s.approvalRecords.push({ action: 'cc', metadata: { targetType: 'role', targetId: OLD } })],
+  ]) {
+    // no member and no grant left to move: the move itself has nothing to refuse
+    const state = baseState()
+    state.userRoles = state.userRoles.filter((r) => r.role_id !== OLD)
+    state.sheetGrants = state.sheetGrants.filter((g) => !(g.subject_type === 'role' && g.subject_id === OLD))
+    add(state)
+    const before = snapshot(state)
+    const plain = await runMain(['--apply'], state)
+    assert.equal(plain.code, EXIT_OK, `${label}: without members nobody loses read access`)
+    assert.deepEqual(plain.writes, [])
+    const refused = await runMain(['--apply', '--delete-empty-old-role'], state)
+    assert.equal(refused.code, EXIT_REFUSED, label)
+    assert.deepEqual(refused.writes, [], `${label}: refused before any statement writes`)
+    assert.equal(snapshot(state), before)
+    assert.ok(refused.out.some((line) => line.startsWith('REFUSED: --delete-empty-old-role') && line.includes('role-targeted approval CC record(s) still name')), label)
+    const dry = await runMain([], state)
+    assert.equal(dry.code, EXIT_OK)
+    const [seats, cc] = label === 'CC record' ? [0, 1] : [1, 0]
+    assert.ok(dry.out.includes(`dry run: --apply --delete-empty-old-role would refuse: ${seats} role-typed approval seat(s) (any state) and ${cc} role-targeted approval CC record(s) still name ${OLD}`), label)
+    assert.ok(!dry.out.some((line) => line.includes('would then be deleted')), label)
+    assert.ok(state.roles.some((r) => r.id === OLD))
+
+    // committed by another session between the pre-check and the delete: the re-read refuses
+    const raced = baseState()
+    const rawBefore = snapshot(raced)
+    const late = (key, current) => {
+      if (key === 'moveSheetGrants') add(current)
+    }
+    const run2 = await runMain(['--apply', '--delete-empty-old-role'], raced, { afterWrite: late })
+    assert.equal(run2.code, EXIT_REFUSED, `${label} (late)`)
+    assert.deepEqual(run2.writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'], `${label}: no delete statement is issued`)
+    assert.equal(run2.client.calls.at(-1).key, 'rollback')
+    assert.equal(snapshot(raced), rawBefore)
+    assert.ok(run2.out.some((line) => line.includes('is not empty after the move')), label)
+  }
+})
+
+test('refuses when role-typed approval seats (any state) or role-targeted CC records reach the target but not the old role (moved members would GAIN read access)', async () => {
+  for (const [label, add] of [
+    ['inactive seat on the target id', (s) => s.approvalAssignments.push({ assignment_type: 'role', assignee_id: TARGET, is_active: false })],
+    ['seat on the target display name', (s) => s.approvalAssignments.push({ assignment_type: 'role', assignee_id: '一线填写', is_active: false })],
+    ['CC to the target id', (s) => s.approvalRecords.push({ action: 'cc', metadata: { targetType: 'role', targetId: TARGET } })],
+  ]) {
+    const state = baseState()
+    add(state)
+    const before = snapshot(state)
+    const { code, out, writes } = await runMain(['--apply'], state)
+    assert.equal(code, EXIT_REFUSED, label)
+    assert.deepEqual(writes, [], label)
+    assert.equal(snapshot(state), before)
+    const isCc = label.startsWith('CC')
+    assert.ok(out.includes(`gains — role-typed approval seats of ${TARGET} in any state, not reachable through ${OLD}: ${isCc ? 0 : 1}`), label)
+    assert.ok(out.includes(`gains — role-targeted approval CC records of ${TARGET}, not reachable through ${OLD}: ${isCc ? 1 : 0}`), label)
+    const refusal = out.find((line) => line.startsWith('REFUSED') && line.includes('would gain'))
+    assert.ok(refusal && refusal.includes(`${isCc ? 0 : 1} role-typed approval seat(s) in any state and ${isCc ? 1 : 0} role-targeted approval CC record(s)`), label)
+  }
 })
 
 test('refuses to move table grants onto a target role that already has members outside the old role', async () => {

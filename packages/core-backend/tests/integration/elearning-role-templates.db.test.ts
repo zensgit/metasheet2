@@ -22,6 +22,7 @@ import {
   down as stockPrepTemplatesDown,
   up as stockPrepTemplatesUp,
 } from '../../src/db/migrations/zzzz20261010124500_seed_stock_prep_role_templates'
+import { canReadApprovalInstance } from '../../src/services/approval-instance-readability'
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -389,6 +390,7 @@ const S5A_EXPECTED = [
 const S5A_SCRIPT_PATH = path.resolve(__dirname, '../../../../scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs')
 
 type S5aScript = {
+  SQL: { moveMembers: string }
   run: (options: { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> }; apply?: boolean; deleteEmptyOldRole?: boolean; manageTransaction?: boolean; write?: (line: string) => void }) => Promise<{ exitCode: number; membersMoved: number; sheetGrantsMoved: number; oldRoleDeleted: boolean; refusals: string[] }>
 }
 
@@ -779,6 +781,214 @@ describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
         expect(await membership()).toEqual(before)
         const moved = await script.run({ client, apply: true, manageTransaction: false })
         expect(moved).toMatchObject({ exitCode: 0, membersMoved: 2, oldRoleDeleted: false })
+        expect(await s5aRoleRows(trx, ['stock-prep-operator'])).toEqual([{ id: 'stock-prep-operator', name: 'S5a legacy floor' }])
+
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+
+  it('move script refuses while members READ approval instances through the old role — an INACTIVE role seat, a role-targeted CC, a seat by display name; canReadApprovalInstance stays true, and the move it guards would flip it — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback S5a approval-read test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const members = [`s5a-read-1-${suffix}`, `s5a-read-2-${suffix}`]
+    const requester = `s5a-requester-${suffix}`
+    const instanceId = `s5a-appr-${suffix}`
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = {
+          query: async (text: string, params: unknown[] = []) => {
+            const result = await trx.executeQuery(CompiledQuery.raw(text, params))
+            return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rows.length }
+          },
+        }
+        await s5aResetTemplates(trx)
+        await sql`DELETE FROM user_roles WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM roles WHERE id = 'stock-prep-operator'`.execute(trx)
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'S5a legacy floor')`.execute(trx)
+        await sql`
+          INSERT INTO role_permissions (role_id, permission_code)
+          VALUES ('stock-prep-operator', 'stock-prep:read'), ('stock-prep-operator', 'stock-prep:operate')
+        `.execute(trx)
+        for (const member of members) {
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep-operator')`.execute(trx)
+        }
+        await sql`
+          INSERT INTO approval_instances (id, status, requester_snapshot)
+          VALUES (${instanceId}, 'pending', ${JSON.stringify({ id: requester })}::jsonb)
+        `.execute(trx)
+        const membership = async () => (await sql<{ user_id: string; role_id: string }>`
+          SELECT user_id, role_id FROM user_roles WHERE user_id IN (${members[0]}, ${members[1]}) ORDER BY user_id, role_id
+        `.execute(trx)).rows
+        const before = await membership()
+
+        const cases = [
+          {
+            label: 'inactive role seat naming the role id',
+            seats: 1,
+            cc: 0,
+            add: sql`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES (${instanceId}, 'role', 'stock-prep-operator', FALSE)`,
+          },
+          {
+            label: 'role-targeted CC record naming the role id',
+            seats: 0,
+            cc: 1,
+            add: sql`
+              INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+              VALUES (${instanceId}, 'cc', ${requester}, 'S5a requester', 'pending', 1, ${JSON.stringify({ targetType: 'role', targetId: 'stock-prep-operator' })}::jsonb)
+            `,
+          },
+          {
+            label: 'inactive role seat naming the display name',
+            seats: 1,
+            cc: 0,
+            add: sql`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES (${instanceId}, 'role', 'S5a legacy floor', FALSE)`,
+          },
+        ]
+        for (const scenario of cases) {
+          await sql`SAVEPOINT s5a_read_case`.execute(trx)
+          await scenario.add.execute(trx)
+          const canBefore = await canReadApprovalInstance(client, members[0], instanceId)
+          const dryLines: string[] = []
+          const dry = await script.run({ client, apply: false, manageTransaction: false, write: (line) => dryLines.push(line) })
+          const applyLines: string[] = []
+          const applied = await script.run({ client, apply: true, manageTransaction: false, write: (line) => applyLines.push(line) })
+          const observed = {
+            canBefore,
+            dryExit: dry.exitCode,
+            seatLine: dryLines.find((line) => line.startsWith('approval read through stock-prep-operator — role-typed seats')),
+            ccLine: dryLines.find((line) => line.startsWith('approval read through stock-prep-operator — role-targeted CC')),
+            applyExit: applied.exitCode,
+            membersMoved: applied.membersMoved,
+            membership: await membership(),
+            canAfter: await canReadApprovalInstance(client, members[0], instanceId),
+          }
+          expect(observed, scenario.label).toEqual({
+            canBefore: true,
+            dryExit: 2,
+            seatLine: `approval read through stock-prep-operator — role-typed seats in any state (by role id or display name): ${scenario.seats}`,
+            ccLine: `approval read through stock-prep-operator — role-targeted CC records (by role id or display name): ${scenario.cc}`,
+            applyExit: 2,
+            membersMoved: 0,
+            membership: before,
+            canAfter: true,
+          })
+          expect(applyLines.some((line) => line.startsWith('REFUSED') && line.includes('would lose that read access')), scenario.label).toBe(true)
+          for (const line of [...dryLines, ...applyLines]) {
+            expect(line).not.toContain(suffix)
+            expect(line).not.toContain('S5a legacy floor')
+          }
+          // The loss the refusal guards is real: the script's own membership move flips the read.
+          await client.query(script.SQL.moveMembers, ['stock-prep-operator', 'stock-prep_frontline'])
+          expect(await canReadApprovalInstance(client, members[0], instanceId), scenario.label).toBe(false)
+          await sql`ROLLBACK TO SAVEPOINT s5a_read_case`.execute(trx)
+        }
+
+        // nothing names the old role any more: the same move proceeds
+        const moved = await script.run({ client, apply: true, manageTransaction: false })
+        expect(moved).toMatchObject({ exitCode: 0, membersMoved: 2 })
+
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+
+  it('move script on real rows: an ACCEPTED invite does not block --delete-empty-old-role but a PENDING one does; a target grant on the SAME sheet at a DIFFERENT level is a gain — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback S5a invite-status / grant-level test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const baseId = `base_s5a_l_${suffix}`
+    const sheet = `sheet_s5a_level_${suffix}`
+    const members = [`s5a-level-1-${suffix}`, `s5a-level-2-${suffix}`]
+    const gainsLine = (n: number) => `gains — role-subject table grants of stock-prep_frontline not held by stock-prep-operator: ${n}`
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = {
+          query: async (text: string, params: unknown[] = []) => {
+            const result = await trx.executeQuery(CompiledQuery.raw(text, params))
+            return { rows: result.rows as Array<Record<string, unknown>> }
+          },
+        }
+        await s5aResetTemplates(trx)
+        await sql`DELETE FROM user_roles WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep-operator'`.execute(trx)
+        await sql`DELETE FROM roles WHERE id = 'stock-prep-operator'`.execute(trx)
+        await sql`UPDATE user_invites SET status = 'revoked' WHERE role_id = 'stock-prep-operator' AND status = 'pending'`.execute(trx)
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'S5a legacy floor')`.execute(trx)
+        await sql`
+          INSERT INTO role_permissions (role_id, permission_code)
+          VALUES ('stock-prep-operator', 'stock-prep:read'), ('stock-prep-operator', 'stock-prep:operate')
+        `.execute(trx)
+        for (const member of members) {
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep-operator')`.execute(trx)
+        }
+        await sql`INSERT INTO meta_bases (id, name, owner_id) VALUES (${baseId}, 'S5a level base', ${members[0]})`.execute(trx)
+        await sql`INSERT INTO meta_sheets (id, base_id, name) VALUES (${sheet}, ${baseId}, 'S5a level')`.execute(trx)
+        await sql`
+          INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+          VALUES (${sheet}, NULL, 'role', 'stock-prep-operator', 'spreadsheet:read')
+        `.execute(trx)
+        const dryRun = async () => {
+          const lines: string[] = []
+          const result = await script.run({ client, apply: false, manageTransaction: false, write: (line) => lines.push(line) })
+          return { exitCode: result.exitCode, lines }
+        }
+
+        // the target holds the SAME sheet at a HIGHER level: compared per sheet AND level, a gain
+        await sql`SAVEPOINT s5a_level_case`.execute(trx)
+        await sql`
+          INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+          VALUES (${sheet}, NULL, 'role', 'stock-prep_frontline', 'spreadsheet:write')
+        `.execute(trx)
+        const higher = await dryRun()
+        expect(higher.exitCode).toBe(2)
+        expect(higher.lines).toContain(gainsLine(1))
+        expect(await script.run({ client, apply: true, manageTransaction: false })).toMatchObject({ exitCode: 2, membersMoved: 0, sheetGrantsMoved: 0 })
+        await sql`ROLLBACK TO SAVEPOINT s5a_level_case`.execute(trx)
+
+        // positive control: the same sheet at the SAME level is not a gain
+        await sql`SAVEPOINT s5a_level_case`.execute(trx)
+        await sql`
+          INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code)
+          VALUES (${sheet}, NULL, 'role', 'stock-prep_frontline', 'spreadsheet:read')
+        `.execute(trx)
+        const same = await dryRun()
+        expect(same.exitCode).toBe(0)
+        expect(same.lines).toContain(gainsLine(0))
+        await sql`ROLLBACK TO SAVEPOINT s5a_level_case`.execute(trx)
+
+        // an ACCEPTED invite naming the old role does not block the delete …
+        await sql`SAVEPOINT s5a_invite_case`.execute(trx)
+        await sql`
+          INSERT INTO user_invites (user_id, email, role_id, invite_token, status, accepted_at)
+          VALUES (${`s5a-accepted-${suffix}`}, ${`s5a-a-${suffix}@example.invalid`}, 'stock-prep-operator', ${`s5a-token-a-${suffix}`}, 'accepted', now())
+        `.execute(trx)
+        const accepted = await dryRun()
+        expect(accepted.lines).toContain('pending invites naming stock-prep-operator: 0')
+        expect(await script.run({ client, apply: true, deleteEmptyOldRole: true, manageTransaction: false }))
+          .toMatchObject({ exitCode: 0, membersMoved: 2, sheetGrantsMoved: 1, oldRoleDeleted: true })
+        expect(await s5aRoleRows(trx, ['stock-prep-operator'])).toEqual([])
+        await sql`ROLLBACK TO SAVEPOINT s5a_invite_case`.execute(trx)
+
+        // … a PENDING one does, before any write
+        await sql`
+          INSERT INTO user_invites (user_id, email, role_id, invite_token)
+          VALUES (${`s5a-pending-${suffix}`}, ${`s5a-p-${suffix}@example.invalid`}, 'stock-prep-operator', ${`s5a-token-p-${suffix}`})
+        `.execute(trx)
+        const pending = await dryRun()
+        expect(pending.lines).toContain('pending invites naming stock-prep-operator: 1')
+        expect(await script.run({ client, apply: true, deleteEmptyOldRole: true, manageTransaction: false }))
+          .toMatchObject({ exitCode: 2, membersMoved: 0, sheetGrantsMoved: 0, oldRoleDeleted: false })
         expect(await s5aRoleRows(trx, ['stock-prep-operator'])).toEqual([{ id: 'stock-prep-operator', name: 'S5a legacy floor' }])
 
         throw rollback
