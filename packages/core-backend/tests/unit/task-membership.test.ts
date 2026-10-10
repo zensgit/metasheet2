@@ -41,15 +41,34 @@ describe('task-membership', () => {
         events: [{ type: 'assignee_added', userId: ACTOR, targetUserId: 'b' }],
       })
     })
-    it('all mode: adding to an already-done task reopens it (§5-4)', () => {
+    it('all mode: adding to an already-done task reopens it (§5-4) and records reopened after assignee_added, by the operator (RULED(2026-10-07): [N1])', () => {
       const rows = [row('a', NOW)]
       const result = applyAddAssignee({ mode: 'all', status: 'done', rows, now: NOW, actorId: ACTOR, userId: 'b' })
       expect(result).toEqual({
         ok: true,
         rows: [row('a', NOW), row('b', null)],
         status: 'open',
-        events: [{ type: 'assignee_added', userId: ACTOR, targetUserId: 'b' }],
+        events: [
+          { type: 'assignee_added', userId: ACTOR, targetUserId: 'b' },
+          { type: 'reopened', userId: ACTOR },
+        ],
       })
+    })
+    it('[N1] the reopened event carries no target and no instant of its own (the writer stamps the batch instant)', () => {
+      const result = applyAddAssignee({ mode: 'all', status: 'done', rows: [row('a', NOW)], now: NOW, actorId: ACTOR, userId: 'b' })
+      if (!result.ok) throw new Error('unreachable')
+      const reopened = result.events.find((event) => event.type === 'reopened')
+      expect(reopened).toEqual({ type: 'reopened', userId: ACTOR })
+      expect(Object.keys(reopened ?? {}).sort()).toEqual(['type', 'userId'])
+    })
+    it('[N1] no flip, no status event: an open all task, a re-add, and a done any task record no reopened', () => {
+      const open = applyAddAssignee({ mode: 'all', status: 'open', rows: [row('a', null)], now: NOW, actorId: ACTOR, userId: 'b' })
+      const again = applyAddAssignee({ mode: 'all', status: 'done', rows: [row('a', NOW)], now: NOW, actorId: ACTOR, userId: 'a' })
+      const anyDone = applyAddAssignee({ mode: 'any', status: 'done', rows: [row('a', NOW)], now: NOW, actorId: ACTOR, userId: 'b' })
+      for (const result of [open, again, anyDone]) {
+        if (!result.ok) throw new Error('unreachable')
+        expect(result.events.some((event) => event.type === 'reopened')).toBe(false)
+      }
     })
     it('A1: any mode: adding to an already-done task leaves it done', () => {
       const rows = [row('a', NOW)]
@@ -93,11 +112,23 @@ describe('task-membership', () => {
       const result = applyRemoveAssignee({ mode: 'all', status: 'open', rows, now: NOW, actorId: ACTOR, userId: 'ghost' })
       expect(result).toEqual({ rows: [row('a', null)], status: 'open', events: [] })
     })
-    it('all mode: removing the last incomplete row PROMOTES to done', () => {
+    it('all mode: removing the last incomplete row PROMOTES to done and records completed after assignee_removed, by the operator, at now (RULED(2026-10-07): [N1])', () => {
       const rows = [row('a', NOW), row('b', null)]
       const result = applyRemoveAssignee({ mode: 'all', status: 'open', rows, now: NOW, actorId: ACTOR, userId: 'b' })
-      expect(result).toEqual({ rows: [row('a', NOW)], status: 'done', events: [{ type: 'assignee_removed', userId: ACTOR, targetUserId: 'b' }] })
+      expect(result).toEqual({
+        rows: [row('a', NOW)],
+        status: 'done',
+        events: [
+          { type: 'assignee_removed', userId: ACTOR, targetUserId: 'b' },
+          { type: 'completed', userId: ACTOR, occurredAt: NOW },
+        ],
+      })
       expectInvariant(result.status, 'all', result.rows)
+    })
+    it('[N1] no flip, no status event: an already-done all task losing a completed row while the rest stay complete records assignee_removed only', () => {
+      const rows = [row('a', NOW), row('b', NOW)]
+      const result = applyRemoveAssignee({ mode: 'all', status: 'done', rows, now: NOW, actorId: ACTOR, userId: 'a' })
+      expect(result).toEqual({ rows: [row('b', NOW)], status: 'done', events: [{ type: 'assignee_removed', userId: ACTOR, targetUserId: 'a' }] })
     })
     it('all mode: removing a row while others remain incomplete keeps status as passed (open)', () => {
       const rows = [row('a', null), row('b', null)]

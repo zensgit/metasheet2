@@ -41,6 +41,7 @@ import { parsePageParams, TASK_PAGE_SORT_KEY, type TaskPageParams } from '../tas
 import { pendingScopeForBadge } from '../tasks/task-settings'
 import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
+import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
 import { loadBadgeScope, loadRemindPolicy } from './task-user-settings'
 
@@ -623,13 +624,22 @@ export async function writeTaskDoneState(db: Db, taskId: string, done: boolean, 
   )
 }
 
-export async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<void> {
+/**
+ * Writes `events` and returns them as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: the
+ * notification producer reads the event ids, so each id is generated before its INSERT).
+ */
+export async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
+  const written: WrittenTaskEvent[] = []
   for (const event of events) {
+    const id = newTaskEventId()
+    const occurredAt = event.occurredAt ?? fallbackAt
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,
-      [newTaskEventId(), taskId, event.userId, event.type, event.occurredAt ?? fallbackAt],
+      [id, taskId, event.userId, event.type, occurredAt],
     )
+    written.push({ id, type: event.type, actorId: event.userId, occurredAt })
   }
+  return written
 }
 
 // RULED(2026-10-07): [R03] complete / reopen answer with `version`: the value read under the
@@ -653,7 +663,9 @@ export async function completeTask(input: { orgId: string; actorId: string; task
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
     const flipped = (task.status === 'done') !== next.done
     if (flipped) await writeTaskDoneState(db, input.taskId, next.done, now)
-    await writeEvents(db, input.taskId, next.events, now)
+    const written = await writeEvents(db, input.taskId, next.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
     return { done: next.done, version: flipped ? task.version + 1 : task.version }
   })
 }
@@ -682,7 +694,9 @@ export async function reopenTask(input: {
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
     const flipped = (task.status === 'done') !== done
     if (flipped) await writeTaskDoneState(db, input.taskId, done, now)
-    await writeEvents(db, input.taskId, next.events, now)
+    const written = await writeEvents(db, input.taskId, next.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
     return { ok: true, version: flipped ? task.version + 1 : task.version }
   })
 }
