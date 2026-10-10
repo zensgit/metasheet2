@@ -443,7 +443,7 @@ if ($resolvedVerifyLogin -eq '1') {
 }
 
 # ---------------------------------------------------------------------------------------------
-# Fresh-install local org bootstrap (W1-6; owner ruling 2026-10-10 「W1-6 按此形状实现」).
+# Fresh-install local org bootstrap (W1-6; owner ruling 2026-10-10: "implement W1-6 in this shape").
 # Twin of the same step in attendance-onprem-bootstrap-admin.sh -- same gate, same read-only SQL,
 # same route, same messages (pinned by scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs).
 #
