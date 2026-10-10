@@ -974,7 +974,7 @@
               </el-select>
             </el-form-item>
             </template>
-            <template v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockErrors(step, 'policy').length > 0">
+            <template v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'policy')">
             <el-form-item label="审批模式">
               <el-select v-model="step.approvalMode" :disabled="readOnly" class="ms-w-100pct">
                 <el-option label="单人通过" value="single" />
@@ -1028,8 +1028,9 @@
                (see the mode-picker comment above), so this section needs no parallel gating. Lock-4
                §1 F4-A: not rendered for a step whose sources are omitted (an auto_approve step never
                waits, so a timeout there is inert); the persisted value is preserved verbatim — and
-               rendered again while it carries a live error (HIDDEN-BLOCK GUARD). -->
-          <div v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockErrors(step, 'timeout').length > 0" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
+               rendered again while it carries a live error (HIDDEN-BLOCK GUARD), and then kept rendered
+               until 审批类型 changes, 关闭超时, reload or save (STICKY REVEAL, `stepHiddenBlockRevealed`). -->
+          <div v-if="!stepOmitsAssigneeSources(step) || stepHiddenBlockRevealed(step, 'timeout')" class="template-authoring__approval-node-timeout" data-testid="approval-step-timeout-section">
             <el-form-item label="节点超时">
               <el-checkbox
                 v-model="step.timeoutEnabled"
@@ -1947,8 +1948,13 @@ const validationSummaryRef = ref<HTMLElement | null>(null)
 // same builders on load/save, so key order is deterministic.
 const draftBaseline = ref(JSON.stringify(draft.value))
 const isDraftDirty = computed(() => JSON.stringify(draft.value) !== draftBaseline.value)
+// Linear STICKY REVEAL state (see `stepHiddenBlockRevealed`): `${step.localId}:${blockId}` keys.
+// Declared here, before `snapshotDraft`, which resets it.
+const stickyStepHiddenBlockReveals = ref(new Set<string>())
 function snapshotDraft() {
   draftBaseline.value = JSON.stringify(draft.value)
+  // A re-baselined draft (load / reload / save completed) starts with no sticky hidden-block reveal.
+  stickyStepHiddenBlockReveals.value = new Set()
 }
 
 function promoteLinearDraftAndBaselineToGraphAuthoring(): void {
@@ -3563,6 +3569,7 @@ function onStepFieldAccessChange(step: ApprovalStepDraft, fieldId: string, acces
 // pure `setStepApprovalType` (templateAuthoring.ts).
 function onStepApprovalTypeChange(step: ApprovalStepDraft, type: ApprovalType): void {
   if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId)
   setStepApprovalType(step, type)
 }
 // Lock-4 §1 F4-A HIDDEN-BLOCK GUARD (linear) — per sourceless auto_approve step, the live errors of
@@ -3583,7 +3590,39 @@ function stepHiddenBlockErrors(step: ApprovalStepDraft, blockId?: AutoApproveHid
 }
 function clearStepTimeout(step: ApprovalStepDraft): void {
   if (readOnly.value) return
+  releaseStepHiddenBlockReveals(step.localId, 'timeout')
   step.timeoutEnabled = false
+}
+// STICKY REVEAL (linear; gate r2 P3-1). Keyed on "failing now" alone, a revealed block unmounted on
+// the keystroke that made it valid (提醒 first, then typing 60: the section vanished after the 6 and
+// the save carried 6). So once a step's hidden block has been revealed by a live error it STAYS
+// rendered until (a) the step's 审批类型 changes, (b) 关闭超时 (timeout block only), or (c) the draft
+// is re-baselined — template (re)load, or save completes (`snapshotDraft`). The notice above stays
+// keyed on live errors only. Display state only: never saved, never read by a validator. Canvas needs
+// none: its timeout controls are discrete selects / a clamped number input, so no keystroke unmount.
+const stickyStepHiddenBlockKey = (localId: string, blockId: AutoApproveHiddenBlockId) => `${localId}:${blockId}`
+watch(
+  stepHiddenBlockErrorsByLocalId,
+  (byLocalId) => {
+    for (const [localId, errors] of byLocalId) {
+      for (const blockId of AUTO_APPROVE_HIDDEN_BLOCK_IDS) {
+        const key = stickyStepHiddenBlockKey(localId, blockId)
+        if ((errors[blockId]?.length ?? 0) > 0 && !stickyStepHiddenBlockReveals.value.has(key)) {
+          stickyStepHiddenBlockReveals.value = new Set(stickyStepHiddenBlockReveals.value).add(key)
+        }
+      }
+    }
+  },
+  { immediate: true },
+)
+function stepHiddenBlockRevealed(step: ApprovalStepDraft, blockId: AutoApproveHiddenBlockId): boolean {
+  return stepHiddenBlockErrors(step, blockId).length > 0
+    || stickyStepHiddenBlockReveals.value.has(stickyStepHiddenBlockKey(step.localId, blockId))
+}
+function releaseStepHiddenBlockReveals(localId: string, blockId?: AutoApproveHiddenBlockId): void {
+  const next = new Set(stickyStepHiddenBlockReveals.value)
+  for (const id of blockId ? [blockId] : AUTO_APPROVE_HIDDEN_BLOCK_IDS) next.delete(stickyStepHiddenBlockKey(localId, id))
+  if (next.size !== stickyStepHiddenBlockReveals.value.size) stickyStepHiddenBlockReveals.value = next
 }
 
 // Directory typeahead for static_user / static_role assignee sources. The picker is purely

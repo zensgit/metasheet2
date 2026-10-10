@@ -2555,7 +2555,9 @@ export function validateTemplateApprovalFlow(
  * (`hiddenBlockLiveErrors`, approvalNodeEdit.ts — the one mechanism both editors use). `policy` =
  * the 审批模式 / 门槛 / 空审批人策略 / 自审策略 rows, `timeout` = the 节点超时 section. The source rows
  * are NOT a block: a sourceless step really saves no source, so `validateTemplateApprovalFlow`
- * already exempts them (`sourceIsLive`). Neutralized copies are for attribution only.
+ * already exempts them (`sourceIsLive`). Neutralized copies are for attribution only. A step-draft
+ * field added to the policy rows later (e.g. a same-person policy) must be reset in `policy` too, or a
+ * rule on it is attributed to no block.
  */
 export const APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS: HiddenBlockNeutralizers<ApprovalStepDraft> = {
   policy: (step) => ({

@@ -200,7 +200,7 @@ export function applyApprovalTypeChoice(
  * "Live error of a block" is derived WITHOUT a second copy of any rule: run the editor's own save
  * validator on the subject as-is and on a copy with ONLY that block neutralized (its fields at the
  * inert default — attribution only, never written back), and take the multiset difference (two
- * unnamed steps produce identical labelled messages, so a plain set would lose one). A rule added to
+ * same-named steps produce identical labelled messages, so a plain set would lose one). A rule added to
  * a validator later on a field a block's neutralizer resets is attributed to that block with no
  * change here; a NEW hidden field needs only a neutralizer entry.
  */
