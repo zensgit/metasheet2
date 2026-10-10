@@ -336,6 +336,43 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     control: 'stock-prep-confirmation-reconcile',
   }),
+  // S5b (ADR §11.4–11.6, register R-39) — 「成员与权限」, the app's own roles and members. All four ride
+  // the WORKBENCH_ADMIN tier (`stock-prep:admin`; platform admins through the ladder) at the plugin gate,
+  // and the host's narrow members port then admits only a platform admin or the ADMITTED `stock-prep`
+  // delegated admin (role `stock-prep_admin`) with a stock-prep scope — so the plugin gate is necessary,
+  // never sufficient. All four answer 404 STOCK_PREP_MEMBERS_PAGE_DISABLED while the default-OFF
+  // STOCK_PREP_MEMBERS_PAGE_ENABLED is off, after the gate and before any IO. Their controls live on the
+  // members page (`StockPreparationMembersView.vue`), which renders only once the read answered;
+  // StockPreparationMembers.spec.ts asserts the alignment there. Appoint / revoke / admission are NOT
+  // here: the page calls the existing `/api/admin/role-delegation/...` routes for those.
+  Object.freeze({
+    capability: 'members.read',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    control: 'stock-prep-members-page',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleCreate',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles',
+    control: 'stock-prep-members-custom-role-create',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleUpdate',
+    code: STOCK_PREP_ADMIN,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId',
+    control: 'stock-prep-members-custom-role-save',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleProjectTargets',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets',
+    control: 'stock-prep-members-custom-role-add-tables',
+  }),
 ])
 
 /** The route meta gate for `/stock-prep`: reachability is exactly the queue READ code. */
@@ -672,6 +709,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
       Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      // 成员与权限 (S5b, R-39). The rail gate is the permission half only; the shell additionally hides
+      // the item until the members read has answered (switch on, caller admitted by the host port), so
+      // with STOCK_PREP_MEMBERS_PAGE_ENABLED off nobody sees it.
+      Object.freeze({ key: 'members', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([

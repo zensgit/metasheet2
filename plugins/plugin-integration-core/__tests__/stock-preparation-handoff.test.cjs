@@ -3053,8 +3053,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // project it creates the overview in and counts every project sheet through) — section D, items
   // 16–18. S3 fix round 1 (R6) added ONE — the overview ENSURE (PULL), section D item 19: the proven
   // tenant's staging project is where it creates the read-only overview.
-  assert.equal(callSites, 19, 'G9: nineteen call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh']) {
+  // S5b (R-39) added ONE — the members project-sheet add (section E, item E1): the registry rows it may
+  // name and the staging project its G1 grants address are the proven tenant's.
+  assert.equal(callSites, 20, 'G9: twenty call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name

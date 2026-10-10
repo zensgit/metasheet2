@@ -118,6 +118,11 @@
 # 过滤词唯一: it is a substring of exactly one spec path, and it neither contains nor is contained by
 # any other token here (`StockPreparationStageOverview` diverges right after `StockPreparation`;
 # `StockPreparationProjectBoard` / `StockPreparationProjectQuery` right after `StockPreparationProject`).
+#
+# 备料「成员与权限」S5b note (ADR §11.4–11.6, register R-39, 2026-10-10): ONE token added,
+# `StockPreparationMembers` — S5b's new spec (the members client, the members page, the switch-gated rail
+# item, SMW-ALIGN), in the same position the required lane gives it. 过滤词唯一: it is a substring of exactly
+# one spec path, and it neither contains nor is contained by any other token here.
 set -euo pipefail
 
 #
@@ -190,6 +195,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationHomeQueryLabels \
   StockPreparationManagedTableRelabelPanel \
   StockPreparationMappingConfirmView \
+  StockPreparationMembers \
   StockPreparationOperatorHome \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
