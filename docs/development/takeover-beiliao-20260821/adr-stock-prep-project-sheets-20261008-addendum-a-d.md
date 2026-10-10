@@ -63,6 +63,7 @@
 - **生效时机**：这个改动不跟开关走，升级后立即生效，一线马上失去拉取。这和 ADR §8「开关关着时逐字节不变」矛盾，需要在 ADR 里写明是有意的，并在决策登记册里记下 owner 推翻了 `:227` 的旧裁决。
 - 定时试拉脚本的 token 如果是一线账号，升级后会 403。脚本只调 dry-run 和 apply（`scripts/ops/stock-preparation-scheduled-pull.mjs:369-373`），legacy 门是 `integration:read` / `integration:write`（`workbench-access.cjs:272,278`）。
 - 因此 runbook 必须先建好「备料拉取人员」角色，再升级。
+- **2026-10-10 订正（R-39，切片 S5a）**：上面三处已不成立。(1)「升级前先建角色」做不到：`stock-prep:pull` 随 S0 迁移才进目录，角色编辑器对目录外的码回 400（`roles.ts:381-393`），所以真实顺序是 R63 迁移跑完后在角色管理里手工建 id 为 `stock-prep_puller` 的角色（read+operate+pull）。(2)「不要用迁移写角色」已被 R-33 推翻：四个内置角色（`stock-prep_admin` / `stock-prep_puller` / `stock-prep_developer` / `stock-prep_frontline`）由 S5a 迁移 `zzzz20261010124500_seed_stock_prep_role_templates` 播种为零成员模板；R63 手建的 `stock-prep_puller` 被原样采纳（不改名、不改码、不动成员）。(3)「一线角色 `stock-prep-operator` 不用改」也随 ADR §11.2-1 改为迁到 `stock-prep_frontline`，用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`（ADR §8 第 3 步；在任何服务器上运行都是 owner 动作）。
 
 **A.6 ADR 没写到的硬缺口：新项目表的表级授权（建议列为 Q7）**
 - 一线没有全局 `multitable:read`，读一张表靠这张表上的授权行（`permission-service.ts:1508-1515` 的兜底分支；frontline plan `:84-99`）。

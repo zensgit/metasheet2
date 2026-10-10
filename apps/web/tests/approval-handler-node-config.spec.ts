@@ -6,7 +6,8 @@
  *  - G-14: an inspector on a HANDLER node renders exactly `办理人设置` + `字段权限` (NO `操作权限`);
  *          positive control — a registry declaring a ratified operation policy renders the third tab,
  *          proving two tabs is the registry's doing.
- *  - the config editor renders the handler roster (seven kinds), the 办理模式 (会签/或签) picker, the
+ *  - the config editor renders the handler roster (exactly HANDLER_ASSIGNEE_SOURCE_KINDS — base seven
+ *    + Lock-2's two contact rows + Lock-3 §1.5's three forward rows), the 办理模式 (会签/或签) picker, the
  *    办理意见 opt-in, and the field-permission honesty copy; and (M7) renders NONE of the approval-only
  *    controls (审批模式 / 空审批人策略 / 自审策略) for a handler.
  */
@@ -233,16 +234,22 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     expect(section.querySelector('[data-testid="approval-node-operation-policy-return"]')).toBeNull()
   })
 
-  it('renders the seven-member handler roster; the mode picker (会签/或签) and 办理意见 opt-in; NO approval-only controls (M7)', () => {
+  it('renders the handler roster (exactly HANDLER_ASSIGNEE_SOURCE_KINDS); the mode picker (会签/或签) and 办理意见 opt-in; NO approval-only controls (M7)', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
     const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
-    // roster: exactly the seven handler kinds, and NOT continuous_managers / requester_choice.
+    // roster: exactly the handler kinds — including the W1-1d forward rows (Lock-3 §1.5: user_group /
+    // requester_choice / dept_head_at_level ADMIT) — and NOT continuous_managers / the §1.5 "do NOT"
+    // kinds (prior_node_approver / continuous_dept_heads).
     const rosterKinds = Array.from(c.querySelectorAll('[data-testid^="approval-node-source-kind-"]'))
       .map((el) => (el.getAttribute('data-testid') || '').replace('approval-node-source-kind-', ''))
       .filter((k) => k !== 'unknown')
     expect(rosterKinds.sort()).toEqual([...HANDLER_ASSIGNEE_SOURCE_KINDS].sort())
     expect(rosterKinds).not.toContain('continuous_managers')
-    expect(rosterKinds).not.toContain('requester_choice')
+    expect(rosterKinds).not.toContain('prior_node_approver')
+    expect(rosterKinds).not.toContain('continuous_dept_heads')
+    expect(rosterKinds).toContain('user_group')
+    expect(rosterKinds).toContain('requester_choice')
+    expect(rosterKinds).toContain('dept_head_at_level')
     // handler-only controls present.
     expect(c.querySelector('[data-testid="handler-node-mode"]')).toBeTruthy()
     expect(c.querySelector('[data-testid="handler-node-opinion-required"]')).toBeTruthy()
@@ -277,10 +284,10 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
   })
 
   // P1-B — master §P1-B: multi-source assignee cards. A handler node's roster is the RATIFIED
-  // seven-member subset (Lock-3 §1.5, G-13) — "＋添加办理人" must default the new card from THAT
-  // roster, never a hand-picked kind or an approval-only kind (continuous_managers /
-  // requester_choice / continuous_dept_heads / dept_head_at_level are all absent from it).
-  it('P1-B: "＋添加办理人" defaults the new card from the SEVEN-member handler roster (never an approval-only kind)', () => {
+  // HANDLER_ASSIGNEE_SOURCE_KINDS subset (Lock-3 §1.5, G-13) — "＋添加办理人" must default the new
+  // card from THAT roster, never a hand-picked kind or an approval-only kind (continuous_managers /
+  // prior_node_approver / continuous_dept_heads are absent from it).
+  it('P1-B: "＋添加办理人" defaults the new card from the handler roster (never an approval-only kind)', () => {
     const api = createStubConfigApi({ handler_h: { nodeType: 'handler', assigneeSources: [{ kind: 'requester' }] } })
     const c = mountEditorFlat(handlerNode(), DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api)
 
@@ -297,7 +304,7 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     // (`static_user`, whose zero-config shape fails validation and would disable Save).
     expect(newKind).toBe('requester')
     expect([...HANDLER_ASSIGNEE_SOURCE_KINDS]).toContain(newKind) // in-roster
-    expect(['continuous_managers', 'requester_choice', 'continuous_dept_heads', 'dept_head_at_level']).not.toContain(newKind)
+    expect(['continuous_managers', 'prior_node_approver', 'continuous_dept_heads']).not.toContain(newKind)
   })
 
   // Lock-7B OD-L7B-7 / G-15 (docs/development/approval-lock7b-required-at-node-20260820.md) — the

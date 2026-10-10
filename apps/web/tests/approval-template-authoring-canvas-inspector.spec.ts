@@ -1998,6 +1998,211 @@ describe('Canvas V2 Slice A — canvas inspector', () => {
     // (and only if) the setter's parallel-region guard actually held.
     expect(container!.querySelector('[data-testid="approval-node-timeout-after-minutes"]')).toBeNull()
   })
+
+  // ── Lock-4 §1 F4-A — node-level 审批类型 in the canvas inspector ─────────────────────────────────
+  // docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A; L0-1 places the control in the
+  // 审批人设置 tab; OD-L4-2(a) ships 人工审批 / 自动通过 only. `app_a` sits inside `fork_1`'s parallel
+  // region in `buildMixedGraph`, where the backend rejects a non-manual node in v1
+  // (APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED); `approval_high` does not.
+  it('F4-A: the 审批类型 control is a two-option native radiogroup INSIDE the 审批人设置 tab section, never the 字段权限 section (L0-1)', async () => {
+    setRouteParams({ id: 'tpl_f4a_tab_placement' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const group = inspector.querySelector('[data-testid="approval-node-approval-type"]') as HTMLElement
+    expect(group).not.toBeNull()
+    expect(group.getAttribute('role')).toBe('radiogroup')
+    const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+    expect(radios.map((radio) => radio.value)).toEqual(['manual', 'auto_approve'])
+    expect(radios.map((radio) => radio.name)).toEqual(['approval-node-approval-type-approval_high', 'approval-node-approval-type-approval_high'])
+    expect(Array.from(group.querySelectorAll('label')).map((label) => label.textContent?.trim())).toEqual(['人工审批', '自动通过'])
+    expect(radios[0]!.checked).toBe(true)
+    expect(inspector.textContent).not.toContain('自动拒绝')
+
+    const assigneeSection = inspector.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const fieldPermSection = inspector.querySelector('[data-testid="approval-node-section-field-permissions"]') as HTMLElement
+    expect(assigneeSection.contains(group)).toBe(true)
+    expect(fieldPermSection.contains(group)).toBe(false)
+    // The tab set itself is unchanged by this slice (A-1).
+    const tabs = Array.from(inspector.querySelectorAll('[data-testid="approval-canvas-inspector-tablist"] [role="tab"]'))
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['审批人设置', '字段权限', '操作权限'])
+  })
+
+  it('F4-A: inside a parallel region 自动通过 is disabled with the hint, and the setter refuses even past the disabled radio; POSITIVE CONTROL: outside the region it is enabled', async () => {
+    setRouteParams({ id: 'tpl_f4a_parallel' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+
+    clickCanvasNode('app_a')
+    await flushUi()
+    const auto = container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement
+    expect(auto.disabled).toBe(true)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-parallel-hint"]')).not.toBeNull()
+    // Forced past the disabled affordance — reaches the REAL view setter (approvalNodeInParallelRegion).
+    auto.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(1)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).toBeNull()
+    expect((container!.querySelector('[data-testid="approval-node-approval-type-manual"]') as HTMLInputElement).checked).toBe(true)
+
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect((container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).disabled).toBe(false)
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-parallel-hint"]')).toBeNull()
+  })
+
+  it('F4-A: choosing 自动通过 hides the cards / policy / timeout, the canvas card reads 自动通过, and the save payload carries approvalType with NO assigneeSources', async () => {
+    setRouteParams({ id: 'tpl_f4a_choose_auto' })
+    const graph = buildMixedGraph()
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(1)
+
+    ;(container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+    expect(container!.querySelector('[data-testid="approval-node-source-add"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-empty-policy"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).not.toBeNull()
+    const card = container!.querySelector('[data-testid="approval-canvas-node"][data-canvas-node="approval_high"]') as HTMLElement
+    expect(card.querySelector('.template-authoring__canvas-node-summary')?.textContent).toContain('自动通过')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const saved = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const config = saved.nodes.find((n: any) => n.key === 'approval_high').config
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(config.approvalMode).toBe('single')
+    // Every OTHER node and every edge are unchanged (the byte-for-byte pin itself lives in the
+    // dedicated via-API round-trip tests, approvalTemplateAuthoring.spec.ts).
+    for (const original of graph.nodes.filter((n) => n.key !== 'approval_high')) {
+      expect(saved.nodes.find((n: any) => n.key === original.key)).toEqual(original)
+    }
+    expect(saved.edges).toEqual(graph.edges)
+  })
+
+  it('F4-A HIDDEN-BLOCK GUARD (Canvas-first inspector): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {
+    setRouteParams({ id: 'tpl_f4a_hidden_timeout' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: buildMixedGraph() as any }))
+    await mountView()
+    await flushUi()
+    clickCanvasNode('approval_high')
+    await flushUi()
+    const inspector = () => container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    const pick = (testId: string, value: string) => {
+      const el = inspector().querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement
+      el.value = value
+      el.dispatchEvent(new Event('change'))
+    }
+    const enable = inspector().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+    enable.checked = true
+    enable.dispatchEvent(new Event('change'))
+    await flushUi()
+    pick('approval-node-timeout-effect', 'transfer')
+    await flushUi()
+    ;(inspector().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+
+    expect(inspector().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-transfer-target"]')).not.toBeNull()
+    const notice = inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]') as HTMLElement
+    expect(notice).not.toBeNull()
+    expect(notice.textContent).toContain('审批节点 approval_high 的超时转交需要选择接收人')
+    expect(notice.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).not.toHaveBeenCalled()
+
+    pick('approval-node-timeout-effect', 'remind')
+    await flushUi()
+    expect(inspector().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(inspector().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_high').config
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+
+  // The canvas flag is the Canvas-first surface: entering 流程 PROMOTES a linear draft onto the
+  // canvas model (`promoteLinearDraftToGraphAuthoring` → `approvalNodeEditsFromGraph`), so a linear
+  // template is authored through THIS inspector, not the step cards. A sourceless auto_approve node
+  // only stays editable here because this slice seeds it into the edit model.
+  const f4aLinearGraph = (config: Record<string, unknown>) => ({
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): a sourceless auto_approve template loaded through the API is promoted onto the canvas on entering 流程, stays editable with 自动通过 checked, and saves byte-for-byte', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear' })
+    const graph = f4aLinearGraph({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+    await mountView()
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(0)
+
+    clickCanvasNode('approval_1')
+    await flushUi()
+    const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]') as HTMLElement
+    expect(inspector.querySelector('[data-testid="approval-node-editor"]')).not.toBeNull()
+    expect((inspector.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+    expect(inspector.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify((updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph)).toBe(JSON.stringify(graph))
+  })
+
+  it('F4-A (Canvas-first, LINEAR template): choosing 自动通过 on a promoted manual node saves approvalType with NO assigneeSources', async () => {
+    setRouteParams({ id: 'tpl_f4a_canvas_first_linear_choose' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: f4aLinearGraph({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }) as any,
+    }))
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
+    await flushUi()
+    clickCanvasNode('approval_1')
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+    await flushUi()
+    expect(container!.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+    // Content, not key order: a key the author ADDS on the canvas is appended by the spread-and-set
+    // rebuild (as every newly authored canvas key is) and the backend re-normalizes the order on save.
+    // The byte-for-byte pin is for an UNTOUCHED loaded template (the test above).
+    expect(config).toEqual({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' })
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+  })
 })
 
 // ── Lock-0 P1-A — registry-driven gates (direct component mount) ──────────────────────────────
@@ -2524,6 +2729,133 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     unmount()
   })
 
+  // Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc half's registry treatment + picker (G-4 FE side;
+  // G-16 unknown-value safety). The "`user_group` (cc) | 用户组 | cc" row is the SEPARATE row the
+  // lock requires ("the approver row does not admit it"); the cc editor offers 用户组 in its
+  // target-type select ONLY while that row is present (M4, read mechanically from the registry).
+  function makeCcNode(key: string, targetType: string, targetIds: string[]): ApprovalNode {
+    return { key, type: 'cc', name: '抄送', config: { targetType, targetIds } as never }
+  }
+  function ccStubApi(
+    edit: { targetType: string; targetIds: string[] },
+    overrides: Partial<ApprovalNodeConfigEditorApi> = {},
+  ): ApprovalNodeConfigEditorApi {
+    const reactiveEdit = reactive({ nodeKey: 'cc_g', ...edit })
+    return {
+      ...createStubConfigApi({}),
+      ccEditFor: () => reactiveEdit as any,
+      ccTargetTypeLabel: (t: string) => (t === 'role' ? '角色' : t === 'group' ? '用户组' : '用户'),
+      ...overrides,
+    }
+  }
+  const REGISTRY_WITHOUT_CC_ROW: ApprovalCapabilityRegistry = {
+    ...DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+    assigneeSourcesByNodeType: {
+      approval: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval'),
+      handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'),
+    },
+  }
+
+  it('OD-L1-7(a) registry row: the cc roster is exactly the single user_group row; the cc editor offers 用户组 AND renders the bound-group picker only while that row is present (without it a persisted group target is read-only, G-16)', () => {
+    expect(assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'cc')).toEqual([{ kind: 'user_group', label: '用户组' }])
+
+    const node = makeCcNode('cc_g', 'group', ['grp-1'])
+    const withRow = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: ['grp-1'] }),
+    })
+    const editor = withRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editor).not.toBeNull()
+    expect(editor.getAttribute('data-cc-target-types')).toBe('user,role,group')
+    // The group branch rendered (typed bound-group multi-select), not the role branch and not the
+    // unknown line; the fixture has two bound options so no empty hint.
+    expect(editor.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-unknown"]')).toBeNull()
+    expect(editor.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    withRow.unmount()
+
+    // Positive control (M4) + G-16 parity (Lock-1 §2.3: a persisted kind OUTSIDE the registry
+    // renders READ-ONLY and round-trips unchanged): without the cc row, 用户组 is NOT offered, the
+    // persisted 'group' value renders the read-only unknown line (count shown, NO picker, no
+    // empty-group hint), and the edit model is untouched — never re-typed, ids preserved.
+    const apiNoRow = ccStubApi({ targetType: 'group', targetIds: ['grp-1'] })
+    const noRow = mountDirectInspector({
+      node,
+      registry: REGISTRY_WITHOUT_CC_ROW,
+      api: apiNoRow,
+    })
+    const editorNoRow = noRow.container.querySelector('[data-testid="approval-cc-editor"]') as HTMLElement
+    expect(editorNoRow.getAttribute('data-cc-target-types')).toBe('user,role')
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
+    expect(editorNoRow.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    const unknownNoRow = editorNoRow.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknownNoRow).not.toBeNull()
+    expect(unknownNoRow.textContent).toContain('group')
+    expect(unknownNoRow.textContent).toContain('1 个对象')
+    expect(apiNoRow.ccEditFor('cc_g')).toMatchObject({ targetType: 'group', targetIds: ['grp-1'] })
+    noRow.unmount()
+  })
+
+  it('OD-L1-7(a) type switch: changing the cc target type clears the previous type\'s ids (setCcTargetIds(key, []) — user ids never land under 用户组)', async () => {
+    const node = makeCcNode('cc_g', 'user', ['u-1'])
+    const setCcTargetIds = vi.fn()
+    const syncCcOptions = vi.fn()
+    const api = ccStubApi({ targetType: 'user', targetIds: ['u-1'] }, { setCcTargetIds, syncCcOptions })
+    const { container: c, unmount } = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api })
+    const select = c.querySelector('[data-testid="approval-cc-target-type"]') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['user', 'role', 'group'])
+    select.value = 'group'
+    select.dispatchEvent(new Event('change'))
+    await nextTick()
+    // v-model wrote the new type; the change handler cleared the ids THROUGH the shared draft API
+    // (the production handler sets `edit.targetIds = []` and re-syncs the picker options).
+    expect(api.ccEditFor('cc_g')?.targetType).toBe('group')
+    expect(setCcTargetIds).toHaveBeenCalledTimes(1)
+    expect(setCcTargetIds).toHaveBeenCalledWith('cc_g', [])
+    // Negative control: a bare options re-sync (the pre-fix wiring, which kept the stale ids) is
+    // NOT what the type change calls.
+    expect(syncCcOptions).not.toHaveBeenCalled()
+    unmount()
+  })
+
+  it('OD-L1-7(a) group picker: an empty bound-group list shows the honest empty hint (proves the group branch rendered, not the role branch)', () => {
+    const node = makeCcNode('cc_g', 'group', [])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'group', targetIds: [] }, { memberGroupOptions: [] }),
+    })
+    expect(c.querySelector('[data-testid="approval-cc-target-group-empty"]')).not.toBeNull()
+    unmount()
+    // Positive control: the role branch has no such hint even with zero roles.
+    const roleNode = makeCcNode('cc_g', 'role', [])
+    const roleMount = mountDirectInspector({
+      node: roleNode,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'role', targetIds: [] }, { memberGroupOptions: [], directoryRoles: [] }),
+    })
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-group-empty"]')).toBeNull()
+    expect(roleMount.container.querySelector('[data-testid="approval-cc-target-ids"]')).not.toBeNull()
+    roleMount.unmount()
+  })
+
+  it('G-16: an off-enum persisted cc targetType renders the read-only unknown line (ids preserved, count shown), never a picker', () => {
+    const node = makeCcNode('cc_g', 'dept', ['d-1', 'd-2'])
+    const { container: c, unmount } = mountDirectInspector({
+      node,
+      registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY,
+      api: ccStubApi({ targetType: 'dept', targetIds: ['d-1', 'd-2'] }),
+    })
+    const unknown = c.querySelector('[data-testid="approval-cc-target-unknown"]') as HTMLElement
+    expect(unknown).not.toBeNull()
+    expect(unknown.textContent).toContain('dept')
+    expect(unknown.textContent).toContain('2 个对象')
+    expect(c.querySelector('[data-testid="approval-cc-target-ids"]')).toBeNull()
+    unmount()
+  })
+
   // Lock-1 §K4 — continuous_dept_heads authoring sub-form (canvas/graph inspector surface,
   // ApprovalGraphNodeConfigEditor.vue — distinct from the linear TemplateAuthoringView.vue steps
   // editor covered in approvalTemplateAuthoring.spec.ts): registry-admitted, renders EDITABLE with
@@ -2994,7 +3326,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       unmount()
     })
 
-    // A `handler` node's own "add defaults from the seven-member handler roster" case is covered in
+    // A `handler` node's own "add defaults from the handler roster" case is covered in
     // approval-handler-node-config.spec.ts's stub, which (unlike this file's createStubConfigApi)
     // already implements handlerNodeMode/handlerNodeOpinionRequired — required for a handler node
     // to render at all through THIS harness's `installStubs`.

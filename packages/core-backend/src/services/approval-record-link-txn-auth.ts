@@ -30,6 +30,10 @@ import {
   applyContextSheetSchemaWriteGrant,
   type MultitableCapabilities,
 } from '../multitable/sheet-capabilities'
+import {
+  loadStockPreparationOverviewSheetIds,
+  restrictStockPreparationOverviewCapabilities,
+} from '../multitable/stock-preparation-overview-contract'
 
 /** Ordered stages for base-authority probes (always all four, even when base is missing). */
 export const RECORD_LINK_BASE_AUTH_STAGES = [
@@ -729,6 +733,14 @@ export async function resolveSheetCapabilitiesForUserOnQuery(
       false,
       isParticipant,
     )
+  }
+
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5): the stock-preparation overview clamp, the same
+  // as the request-bound resolver's. This query-bound path gates the automation FWB record writes, the
+  // FWB activation gates and the record-permission routes, so it must not hand out a write the REST
+  // resolver refuses. Every person, admins included. Rides the `sheet_cap_eval` stage (no new stage).
+  if ((await loadStockPreparationOverviewSheetIds(query, [normalizedSheetId])).has(normalizedSheetId)) {
+    capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
 
   return {

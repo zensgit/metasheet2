@@ -199,6 +199,9 @@ import StatusTag from '../../components/status/StatusTag.vue'
 import { useLocale } from '../../composables/useLocale'
 import { ApprovalApiError } from '../../approvals/api'
 import {
+  CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
+  CANCEL_ROUND_CLIENT_COPY,
+  CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT,
   cancelRoundDeliveryChannelLabel,
   cancelRoundDeliveryStatusLabel,
   cancelRoundStatusKeyFromSummary,
@@ -260,8 +263,17 @@ const showEntry = computed(() =>
 const launchBlocked = computed(() => round.value?.outcome === 'pending')
 
 const statusKey = computed(() => (round.value ? cancelRoundStatusKeyFromSummary(round.value) : 'status_unavailable'))
+/**
+ * 「请假仍然有效」 is said only of a leave that IS still approved (reviewer finding F2, 2026-10-08): the round
+ * did not cancel it (V1 / V3–V6), the row says approved (a leave cancelled some other way — the direct
+ * cancel, which leaves the round alone — never shows it), and the round was not closed BECAUSE the leave
+ * is no longer approved: that block code comes from the fresh summary read and wins over a parent row
+ * that may be stale or diverge from the original document.
+ */
 const leaveStillValid = computed(() =>
-  ['cancellation_pending_approval', 'cancellation_rejected', 'cancellation_withdrawn', 'cancellation_window_closed', 'cancellation_blocked']
+  props.request.status === 'approved'
+  && round.value?.blockCode !== 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED'
+  && ['cancellation_pending_approval', 'cancellation_rejected', 'cancellation_withdrawn', 'cancellation_window_closed', 'cancellation_blocked']
     .includes(statusKey.value),
 )
 const blockCopy = computed(() => describeCancelRoundBlock(round.value?.blockCode, isZh.value))
@@ -349,16 +361,38 @@ async function confirmLaunch(): Promise<void> {
   }
 }
 
+/** One of the client's own refusals (`approvals/cancelRound.ts`), as the progress line shows it. */
+function clientRefusal(code: string): CancelRoundErrorDescription {
+  const copy = CANCEL_ROUND_CLIENT_COPY[code]
+  return { message: isZh.value ? copy.zh : copy.en, cls: 'other', code, presentationKey: null }
+}
+
+/**
+ * The withdraw names the round this panel rendered (reviewer finding F1, 2026-10-08), so a stale tab —
+ * the leave's round withdrawn and a new one launched elsewhere — is refused by the server (409, nothing
+ * written) instead of withdrawing a round this page never showed. The refusal has the same code as a
+ * round that already finished, so the panel re-reads first: another round now ⇒ the stale-round copy
+ * next to the new round; the same round ⇒ the registered withdraw copy (P-8), unchanged.
+ */
 async function withdraw(): Promise<void> {
-  if (busy.value) return
+  const shownRoundId = round.value?.roundId ?? null
+  if (busy.value || !shownRoundId) return
   busy.value = 'withdraw'
   progressError.value = null
   try {
-    await withdrawCancelRound(props.request.id)
+    const withdrawnRoundId = await withdrawCancelRound(props.request.id, null, shownRoundId)
     await load()
+    // Accepted, but not (provably) for the round on screen: never a silent success.
+    if (withdrawnRoundId !== shownRoundId) progressError.value = clientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED)
   } catch (error) {
-    progressError.value = describe(error, 'The cancellation request could not be withdrawn.', '撤销申请未能撤回')
-    void load()
+    await load()
+    const replaced = (error as { code?: unknown } | null)?.code === 'INVALID_STATUS_TRANSITION'
+      && loadState.value === 'ready'
+      && round.value !== null
+      && round.value.roundId !== shownRoundId
+    progressError.value = replaced
+      ? clientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT)
+      : describe(error, 'The cancellation request could not be withdrawn.', '撤销申请未能撤回')
   } finally {
     busy.value = null
   }

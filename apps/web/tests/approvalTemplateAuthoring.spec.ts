@@ -5416,6 +5416,547 @@ describe('TemplateAuthoringView', () => {
       })
     })
   })
+
+  // ── Lock-4 §1 F4-A — 审批类型 (approvalType) through the REAL mounted view ───────────────────────
+  // docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A / §2.3 / OD-L4-2(a). The
+  // template is LOADED THROUGH THE API SEAM (getTemplate) and SAVED through the real button, so
+  // these also exercise the read-only door and the save gating the pure helpers cannot see. Before
+  // this slice every one of these templates opened read-only with save disabled. `JSON.stringify`
+  // equality pins key order (`toEqual` would not); fixtures are in the backend-normalized shape.
+  describe('Lock-4 §1 F4-A — 审批类型 authoring and the via-API round-trip (mounted)', () => {
+    const f4aLinear = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    })
+    // The cc node forces the preserved-graph path (the canvas edit model; flag OFF renders it in the
+    // structured list with the SAME ApprovalGraphNodeConfigEditor the canvas inspector hosts).
+    const f4aComplex = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管', config },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'cc_1' },
+        { key: 'e3', source: 'cc_1', target: 'end' },
+      ],
+    })
+    const SOURCELESS_AUTO = { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const AUTO_WITH_SOURCE = { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const EXPLICIT_MANUAL = { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'manual', emptyAssigneePolicy: 'error' }
+    const CASES: Array<[string, string, Record<string, unknown>]> = [
+      ['sourceless', 'a sourceless auto_approve node', SOURCELESS_AUTO],
+      ['withsource', 'an auto_approve node that still carries a source', AUTO_WITH_SOURCE],
+      ['manual', "an explicit 'manual' node", EXPLICIT_MANUAL],
+    ]
+    const q = <T extends Element = HTMLElement>(testId: string) => container!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function loadEditable(id: string, graph: unknown): Promise<void> {
+      setRouteParams({ id })
+      getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).toBeNull()
+      expect(q<HTMLButtonElement>('approval-template-save-button')!.disabled).toBe(false)
+    }
+
+    async function saveAndTakePayload(callIndex: number): Promise<any> {
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(callIndex + 1)
+      return updateTemplateSpy.mock.calls[callIndex]?.[1]
+    }
+
+    for (const [slug, label, config] of CASES) {
+      it(`LINEAR editor: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aLinear(config)
+        await loadEditable(`tpl_f4a_linear_${slug}`, graph)
+        expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(1)
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+
+      it(`CANVAS edit model: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aComplex(config)
+        await loadEditable(`tpl_f4a_complex_${slug}`, graph)
+        expect(container!.querySelector('[data-approval-node="approval_1"]')).not.toBeNull()
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+    }
+
+    it('LINEAR: each step gets a two-option 审批类型 radiogroup (人工审批 / 自动通过, no 自动拒绝 — OD-L4-2(a)) with a per-step radio name', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
+      graph.nodes.splice(2, 0, { key: 'approval_2', type: 'approval', name: '审批人 2', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      graph.edges = [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ]
+      await loadEditable('tpl_f4a_linear_two_steps', graph)
+      const groups = Array.from(container!.querySelectorAll('[data-testid="approval-step-approval-type"]'))
+      expect(groups).toHaveLength(2)
+      const names = groups.map((group) => {
+        const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+        expect(radios.map((radio) => radio.value)).toEqual(['manual', 'auto_approve'])
+        expect(Array.from(group.querySelectorAll('label')).map((labelEl) => labelEl.textContent?.trim())).toEqual(['人工审批', '自动通过'])
+        expect(radios[0]!.checked).toBe(true)
+        expect(new Set(radios.map((radio) => radio.name)).size).toBe(1)
+        return radios[0]!.name
+      })
+      expect(new Set(names).size).toBe(2)
+      expect(container!.textContent).not.toContain('自动拒绝')
+    })
+
+    it('LINEAR: 自动通过 hides the person-only controls and saves approvalType with NO assigneeSources', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_toggle', graph)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-same-person-policy')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-auto-hint')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      expect(Array.from(container!.querySelectorAll('[data-testid="approval-spine-chip-step"]')).map((chip) => chip.textContent)).toEqual([
+        expect.stringContaining('自动通过'),
+      ])
+      let payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ approvalMode: 'all', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
+      )
+
+      // The save re-hydrates the draft from the server response, which carries NO source: the scratch
+      // lived only in the unsaved session, so 人工审批 now starts from the zero-config requester
+      // default (owner-visible consequence, recorded in the slice note).
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      payload = await saveAndTakePayload(1)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
+      )
+    })
+
+    it('LINEAR: 自动通过 then 人工审批 BEFORE saving restores the configured source — the traversal is lossless and the save is byte-for-byte the original', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_traversal', graph)
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+    })
+
+    it('LINEAR: an auto_approve step that still carries a source keeps it VISIBLE with a notice (it is saved); the notice action drops it', async () => {
+      await loadEditable('tpl_f4a_linear_live_source', f4aLinear(AUTO_WITH_SOURCE))
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).not.toBeNull()
+
+      q<HTMLButtonElement>('approval-step-approval-type-drop-sources')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
+    })
+
+    it('CANVAS edit model: a sourceless auto_approve node renders an editor (seeded) with 自动通过 checked and no cards / policy / timeout; 人工审批 lands on one requester card and saves it', async () => {
+      await loadEditable('tpl_f4a_complex_seeded', f4aComplex(SOURCELESS_AUTO))
+      const editor = container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      expect(editor).not.toBeNull()
+      expect((editor.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(editor.querySelector('[data-testid="approval-node-source-add"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).not.toBeNull()
+
+      ;(editor.querySelector('[data-testid="approval-node-approval-type-manual"]') as HTMLInputElement).click()
+      await flushUi()
+      const cards = editor.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((cards[0]!.querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config).toEqual({ approvalMode: 'single', emptyAssigneePolicy: 'error', assigneeSources: [{ kind: 'requester' }] })
+    })
+
+    // ── Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — a hidden block that is saved AND validated must not stay
+    // hidden while it fails: the block is rendered again with a notice naming the error, the author
+    // can fix or clear it, and then the save proceeds. Both editors, one mechanism.
+    const select = (el: HTMLSelectElement | null, value: string) => {
+      el!.value = value
+      el!.dispatchEvent(new Event('change'))
+    }
+    const hiddenErrors = (testId: string) =>
+      Array.from(container!.querySelectorAll(`[data-testid="${testId}"]`)).map((item) => item.textContent?.trim())
+
+    it('HIDDEN-BLOCK GUARD (LINEAR): an enabled-but-empty timeout switched to 自动通过 stays VISIBLE with a notice naming the errors and blocks save; filling it clears the notice, the section stays until the save completes', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(q('approval-step-timeout-after-minutes')).not.toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([
+        expect.stringContaining('超时时长'),
+        expect.stringContaining('超时后的处理方式'),
+      ])
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      const summary = q('approval-template-validation-summary')!.textContent ?? ''
+      for (const message of hiddenErrors('approval-step-approval-type-hidden-error')) expect(summary).toContain(message)
+
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '30'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      // Still failing (no effect yet) ⇒ still visible.
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([expect.stringContaining('超时后的处理方式')])
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      // Valid ⇒ the notice goes, but the revealed section STAYS (sticky reveal, gate r2 P3-1) so the
+      // author is never unmounted mid-edit; the value is preserved verbatim.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes[1].config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+      // Save completed ⇒ re-baselined ⇒ the valid hidden timeout (inert: an auto_approve step never
+      // waits) is hidden again.
+      expect(q('approval-step-timeout-section')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR): 关闭超时 on the notice is the one-click author action — the section hides and the save carries no timeout', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout_clear', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!.click()
+      await flushUi()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR policy rows): a failing hidden threshold reveals ONLY the policy rows (the source rows stay hidden — they are really omitted); a valid N clears the notice and the rows stay until the save completes', async () => {
+      // Reached here through the input stub (Element Plus clamps to min=1 in a real browser); this pins
+      // the policy block's wiring and the source/policy split, which a later policy rule (e.g. a
+      // designated empty-assignee fallback) will rely on.
+      await loadEditable('tpl_f4a_linear_hidden_policy', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'threshold', approvalThreshold: 3, emptyAssigneePolicy: 'error' }))
+      const threshold = q<HTMLInputElement>('approval-step-threshold')!
+      threshold.value = '0'
+      threshold.dispatchEvent(new Event('input'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-threshold')).not.toBeNull()
+      expect(q('approval-step-same-person-policy')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([expect.stringContaining('门槛会签人数')])
+      expect(q('approval-step-approval-type-clear-timeout')).toBeNull()
+
+      const fixed = q<HTMLInputElement>('approval-step-threshold')!
+      fixed.value = '2'
+      fixed.dispatchEvent(new Event('input'))
+      await flushUi()
+      // Sticky reveal (gate r2 P3-1): notice gone, rows still mounted, source rows still hidden.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      expect(q('approval-step-source-kind')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ approvalMode: 'threshold', approvalThreshold: 2, approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
+      )
+      expect(q('approval-step-threshold')).toBeNull()
+    })
+
+    // Shared setup for the sticky / read-only / duplicate pins below: tick 启用超时处理 (left empty) on
+    // every linear step, then switch every step to 自动通过 ⇒ each step's hidden timeout is failing.
+    async function brokenTimeoutAutoSteps(): Promise<void> {
+      for (const enable of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-timeout-enabled"]'))) {
+        enable.checked = true
+        enable.dispatchEvent(new Event('change'))
+      }
+      await flushUi()
+      for (const radio of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-approval-type-auto-approve"]'))) radio.click()
+      await flushUi()
+    }
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL (gate r2 P3-1): typing into the revealed minutes field never unmounts it — the keystroke that makes the step valid keeps the field, the save carries the full value', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_typing', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      // 提醒 first (the order that used to unmount), then type 6 … 60 into the SAME input element.
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '6'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      // The step is valid now (notice gone) — the field the author is typing in is still mounted.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      minutes.value = '60'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      const payload = await saveAndTakePayload(0)
+      expect(payload.approvalGraph.nodes[1].config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+      expect(q('approval-step-timeout-section')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL releases on a 审批类型 change: 人工审批 then back to 自动通过 with valid values hides the timeout section again', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_release', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-section')).not.toBeNull() // sticky
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      // While the radio says 人工审批 the step keeps its sources ⇒ the section renders anyway.
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      // Back on 自动通过 with a VALID timeout ⇒ released, not re-revealed.
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) two SAME-NAMED sourceless auto steps with broken timeouts are BOTH revealed (call-site multiset, gate r2 P2-1)', async () => {
+      const node = (key: string) => ({ key, type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      await loadEditable('tpl_f4a_dup_names', {
+        nodes: [{ key: 'start', type: 'start', name: '发起', config: {} }, node('approval_1'), node('approval_2'), { key: 'end', type: 'end', name: '结束', config: {} }],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+          { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+        ],
+      })
+      await brokenTimeoutAutoSteps()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-errors-hint"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-error"]')).toHaveLength(4)
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) 关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the draft untouched', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout_readonly', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      canManageTemplates.value = false
+      await flushUi()
+      const clear = q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!
+      expect(clear.disabled).toBe(true)
+      // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+      clear.removeAttribute('disabled')
+      clear.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-timeout-enabled')!.checked).toBe(true)
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toHaveLength(2)
+    })
+
+    it('HIDDEN-BLOCK GUARD (CANVAS edit model): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {
+      await loadEditable('tpl_f4a_complex_hidden_timeout', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const enable = editor().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'transfer')
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+      await flushUi()
+
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(editor().querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-transfer-target"]')).not.toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).not.toBeNull()
+      expect(hiddenErrors('approval-node-approval-type-hidden-error')).toEqual(['审批节点 approval_1 的超时转交需要选择接收人'])
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain('审批节点 approval_1 的超时转交需要选择接收人')
+
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'remind')
+      await flushUi()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+    })
+
+    it('HIDDEN-BLOCK GUARD (CANVAS edit model): 关闭超时 on the notice clears the timeout (author action) and the save carries none', async () => {
+      await loadEditable('tpl_f4a_complex_hidden_timeout_clear', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const enable = editor().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'transfer')
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-clear-timeout"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(Object.prototype.hasOwnProperty.call(config, 'timeout')).toBe(false)
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    })
+
+    it("an approvalType outside the FE union ('auto_reject') opens READ-ONLY with save disabled — never silently dropped (gate X-3 analog)", async () => {
+      setRouteParams({ id: 'tpl_f4a_auto_reject' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'auto_reject', emptyAssigneePolicy: 'error' }) as any,
+      }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).not.toBeNull()
+      const save = q<HTMLButtonElement>('approval-template-save-button')!
+      expect(save.disabled).toBe(true)
+      save.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+    })
+
+    // Gate r3 P3-1: the linear sticky reveal is per step and per block. X1/X2 pin step isolation
+    // (a reveal or a 审批类型 change on one step never touches another); X3 pins that 关闭超时 releases only `timeout`.
+    const gateR3TwoSteps = () => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '审批人 2', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error', timeout: { afterMinutes: 30, effect: 'remind' } } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ],
+    })
+    const gateR3Rows = () => Array.from(container!.querySelectorAll<HTMLElement>('[data-testid="approval-template-step-row"]'))
+    const gateR3In = <T extends Element = HTMLElement>(row: HTMLElement | undefined, testId: string) => row!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function gateR3BreakThenFixStep1(): Promise<HTMLInputElement> {
+      expect(gateR3Rows()).toHaveLength(2)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const enable = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      select(gateR3In<HTMLSelectElement>(gateR3Rows()[0], 'approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      return minutes
+    }
+
+    it('GATE-R3 X1: a sticky reveal on step 1 never reveals step 2 (valid hidden timeout stays hidden)', async () => {
+      await loadEditable('tpl_gate_r3_x1', gateR3TwoSteps())
+      await gateR3BreakThenFixStep1()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(1)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+    })
+
+    it('GATE-R3 X2: a 审批类型 change on step 2 never releases step 1 (the field being edited stays mounted)', async () => {
+      await loadEditable('tpl_gate_r3_x2', gateR3TwoSteps())
+      const minutes = await gateR3BreakThenFixStep1()
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const approvals = payload.approvalGraph.nodes.filter((n: any) => n.type === 'approval')
+      expect(approvals.map((n: any) => n.config.timeout)).toEqual([{ afterMinutes: 45, effect: 'remind' }, { afterMinutes: 30, effect: 'remind' }])
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(0)
+    })
+
+    it('GATE-R3 X3: 关闭超时 releases only the timeout block; a sticky policy block stays mounted', async () => {
+      await loadEditable('tpl_gate_r3_x3', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'threshold', approvalThreshold: 3, emptyAssigneePolicy: 'error' }))
+      const threshold = q<HTMLInputElement>('approval-step-threshold')!
+      threshold.value = '0'
+      threshold.dispatchEvent(new Event('input'))
+      await flushUi()
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-threshold')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const fixed = q<HTMLInputElement>('approval-step-threshold')!
+      fixed.value = '2'
+      fixed.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!.click()
+      await flushUi()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+    })
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {

@@ -3,12 +3,12 @@ import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
 import { recordInvite } from '../auth/invite-ledger'
 import { issueInviteToken } from '../auth/invite-tokens'
-import { assertLoginName } from '../auth/login-name-rule'
+import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
-import { translateRecoveryConflict } from '../db/recovery-conflict'
+import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   fetchDingTalkAppAccessToken,
@@ -30,7 +30,7 @@ import {
   summarizeDirectorySyncApiCalls,
   type DirectorySyncApiCallCounters,
 } from './directory-sync-api-telemetry'
-import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
+import { DingTalkCorpNotAllowedError, assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
   isNamespaceAdmissionControlledResource,
@@ -44,13 +44,14 @@ import {
   buildUnusablePasswordHash,
   isDirectoryPendingActivationEnabled,
 } from '../auth/user-activation'
-import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
+import { LoginAliasClaimError, claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import {
   captureApprovalDepartureManagerContexts,
   type ApprovalDepartureManagerContext,
 } from '../services/ApprovalDirectoryOrg'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
+import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from './directory-failure-text'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
@@ -3160,7 +3161,18 @@ async function readIntegrationNameForAlert(integrationId: string): Promise<strin
   }
 }
 
-async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
+/** R-41: the fixed sentence a failed sync persists when its error carries no showable sentence or DingTalk code. */
+const DIRECTORY_SYNC_FAILED_SENTENCE = 'Directory sync failed'
+
+/**
+ * R-41: takes the caught ERROR, not a message, so no caller can hand it raw text. The one text written to
+ * `directory_sync_runs.error_message`, `directory_integrations.last_error` and `directory_sync_alerts.message`
+ * — and delivered OUTBOUND to the DingTalk alert group — is the classified one (directoryFailureText): a typed
+ * directory sentence, the fixed sentence plus DingTalk's numeric code, or the fixed sentence alone. The
+ * original text is logged once, here.
+ */
+async function markSyncFailure(integrationId: string, runId: string, cause: unknown): Promise<void> {
+  const message = directoryFailureText(cause, DIRECTORY_SYNC_FAILED_SENTENCE, { integrationId, runId })
   // DT-HARDEN-05: one transaction, run-row (lease release) first. As two bare
   // statements, a crash between them left the lease held until it went stale while
   // the integration already recorded the failure. No status guard on the run row on
@@ -3719,6 +3731,44 @@ export class DirectorySyncLeaseLostError extends Error {
     )
     this.name = 'DirectorySyncLeaseLostError'
   }
+}
+
+/**
+ * R-41: the error classes whose message a persisted or admin-returned directory failure may carry as it is —
+ * each one's message is a developer-authored sentence by its class contract (some interpolate the caller's own
+ * input or our own ids, never provider, transport or driver text). Declared here, after the last of the
+ * directory classes, because class declarations are not hoisted.
+ */
+const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
+  DirectoryValidationError,
+  DirectoryNotFoundError,
+  DirectoryConflictError,
+  DirectoryTenantChangeBlockedError,
+  DirectorySyncLeaseLostError,
+  RecoveryConflictError,
+  LoginNameRuleError,
+  PasswordPolicyError,
+  LoginAliasClaimError,
+  DingTalkCorpNotAllowedError,
+]
+
+/**
+ * R-41: the text a directory failure may be persisted or returned with (see directory-failure-text.ts). A
+ * typed sentence is returned as it is; anything else becomes `fallback` (plus DingTalk's numeric code for a
+ * typed DingTalk failure), and its original text goes to the log — the only place it goes.
+ */
+function directoryFailureText(error: unknown, fallback: string, context: Record<string, unknown>): string {
+  const failure = classifyDirectoryFailureText(error, { fallback, fixedSentenceClasses: DIRECTORY_FAILURE_FIXED_SENTENCES })
+  if (failure.kind !== 'fixed_sentence') {
+    logger.warn(fallback, {
+      ...context,
+      error: readErrorMessage(error, 'unknown error'),
+      ...(failure.providerCode !== undefined
+        ? { providerCode: failure.providerCode, providerCodeKind: failure.providerCodeKind }
+        : {}),
+    })
+  }
+  return failure.text
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -4865,8 +4915,7 @@ export async function syncDirectoryIntegration(
       )
       throw error
     }
-    const message = readErrorMessage(error, 'Directory sync failed')
-    await markSyncFailure(integrationId, runId, message)
+    await markSyncFailure(integrationId, runId, error)
     throw error
   } finally {
     clearInterval(heartbeat)
@@ -5602,9 +5651,10 @@ export async function batchUnbindDirectoryAccounts(
     try {
       outcome.succeeded.push(await unbindDirectoryAccount(directoryAccountId, input))
     } catch (error) {
+      // R-41: `failed[].error` is answered at 200 — a typed sentence or the fixed one, never caught text.
       outcome.failed.push({
         accountId: directoryAccountId,
-        error: readErrorMessage(error, 'Failed to unbind directory account'),
+        error: directoryFailureText(error, 'Failed to unbind directory account', { accountId: directoryAccountId }),
       })
       outcome.failedErrors.push(error)
     }
@@ -5636,9 +5686,10 @@ export async function batchBindDirectoryAccounts(
         enableDingTalkGrant: entry.enableDingTalkGrant,
       }))
     } catch (error) {
+      // R-41: see batchUnbindDirectoryAccounts.
       outcome.failed.push({
         accountId: entry.accountId,
-        error: readErrorMessage(error, 'Failed to bind directory account'),
+        error: directoryFailureText(error, 'Failed to bind directory account', { accountId: entry.accountId }),
       })
       outcome.failedErrors.push(error)
     }
@@ -5725,9 +5776,10 @@ export async function batchAdmitDirectoryAccountUsers(
         enableDingTalkGrant: input.enableDingTalkGrant === true,
       }))
     } catch (error) {
+      // R-41: see batchUnbindDirectoryAccounts.
       outcome.failed.push({
         accountId,
-        error: readErrorMessage(error, 'Failed to create and bind local user for directory account'),
+        error: directoryFailureText(error, 'Failed to create and bind local user for directory account', { accountId }),
       })
       outcome.failedErrors.push(error)
     }
