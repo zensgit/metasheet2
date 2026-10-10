@@ -1,7 +1,9 @@
 # Required web runner routing — 2026-10-08
 
-Status: Draft PR #6272; routing and runner-portability verification. No merge,
-repository-variable change, runner registration, or deployment is included.
+Status: routing proposal superseded by the GitHub-hosted runner policy merged in
+PR #6288. The current candidate uses literal GitHub-hosted runner selectors.
+The routing proposal and portability results below are historical evidence;
+the timezone-independent date controls remain valid.
 Base: `c147a2d78029dd3097d973e7512e354242ae4883`.
 
 The required `web-tests` job currently selects `ubuntu-latest`. The backend

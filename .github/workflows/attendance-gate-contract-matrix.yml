@@ -22,7 +22,7 @@ env:
 
 jobs:
   contracts:
-    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false

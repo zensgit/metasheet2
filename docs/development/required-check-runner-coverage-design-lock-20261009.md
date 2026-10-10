@@ -1,6 +1,9 @@
 # Required check runner coverage — 2026-10-09
 
-Status: local proposal, publication and runner configuration HOLD.
+Status: superseded by the GitHub-hosted runner policy merged in PR #6288.
+The current Time Machine candidate uses literal GitHub-hosted runner selectors.
+The routing proposal below is retained as historical evidence and must not be
+used to configure self-hosted routing for this public repository.
 Frozen routing base: `64bf18b5e833b5cf938d83afe420ae0df4370c86`.
 Retain the published runner candidate `fda42afdde099fb0431326adbdbe1e8d3097eea8`
 as an ancestor, including its existing UTC test controls and web routing comment.

@@ -41,7 +41,7 @@ concurrency:
 jobs:
   stock-prep-powershell51:
     name: stock-prep PowerShell 5.1 acceptance
-    runs-on: ${{ vars.MS2_WINDOWS_RUNNER || 'windows-latest' }}
+    runs-on: windows-latest
 
     steps:
       - name: Checkout repository

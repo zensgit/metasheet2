@@ -346,7 +346,7 @@ on:
 
 jobs:
   integration-guard:
-    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
