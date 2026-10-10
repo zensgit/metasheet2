@@ -68,6 +68,26 @@
 //   O-18  (E2) unknown errors on the S3 routes are a fixed values-free 500; a column-less database a 503.
 //   O-19  (R10) the store maps a bad code shape to UNKNOWN and never throws over it.
 //
+// S3 FOLLOW-UPS (the S3 final review's merge note, register R-37):
+//   O-24  (A) the suite runs on support/fail-closed-suite-runner.cjs: a hang with nothing alive exits 1 (exit
+//         sentinel), a hang that keeps the loop alive times out per test — never exit 0 past a hang.
+//   O-25  (B) another PROCESS holding the overview lock: the refresh route is 409 BUSY with nothing written or
+//         audited, and the cooldown is cleared (the first click after the lock frees refreshes for real).
+//   O-26  (C) a project write that fails — in the full pass (O-26), in the drain of an event deferred into the
+//         refresh (O-26b), or on the per-event path (O-26c) — is never swallowed: the refresh is a typed 503
+//         REFRESH_INCOMPLETE audited `incomplete` (counts only), and the project stays dirty until a writer heals it.
+//   O-27  (D) the refresh reads every page of the overview before it deletes an orphan; past the read bound a
+//         project is re-projected by number, never created blind.
+//
+// S3 FOLLOW-UPS, FIX ROUND 1:
+//   O-26  (log noise) an INCOMPLETE answer logs only its typed line — no generic `route failed … UNLISTED` beside it.
+//   O-28  (bounded retry) a persistent failure is retried by per-event writers at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS
+//         per event and never within OVERVIEW_EVENT_RETRY_BACKOFF_MS of its failure, round-robin; the event's own
+//         project is always updated (a fresh mark clears its retry mark); the refresh stays the full pass.
+//   O-29a–d the failure bookkeeping: a project-less failed orphan delete is counted (a); a keyed one is recorded and
+//         healed by number (b); a later success in the same run clears an earlier failure (c); a failure the handler
+//         did not log itself still gets the wrapper's generic line (d).
+//
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -76,6 +96,8 @@ const path = require('node:path')
 
 const LIB = path.join(__dirname, '..', 'lib')
 const projectSheet = require(path.join(__dirname, 'support', 'stock-preparation-project-sheet-harness.cjs'))
+// S3 follow-up A: exit sentinel + per-test timeout (a hung test can no longer end the process with exit 0).
+const { runFailClosedSuite } = require(path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs'))
 const overview = require(path.join(LIB, 'stock-preparation-project-overview.cjs'))
 const {
   STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
@@ -134,6 +156,8 @@ const realDateNow = Date.now
 let clockOffsetMs = 0
 Date.now = () => realDateNow() + clockOffsetMs
 const passCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS + 1000 }
+/** Fix round 1: the per-event writer's per-project retry backoff is on the same in-process `Date.now()`. */
+const passRetryBackoff = () => { clockOffsetMs += overview.__internals.OVERVIEW_EVENT_RETRY_BACKOFF_MS + 1000 }
 
 /** A logger that keeps what the routes warn, to pin that a warn is values-free. */
 function capturingLogger() {
@@ -1477,23 +1501,425 @@ test('O-23 (F4) an event that lands after the writer drained but before it stopp
   } finally { h.restore() }
 })
 
-async function main() {
-  let failed = 0
-  for (const [name, fn] of tests) {
-    try {
-      await fn()
-      console.log(`  ${name} OK`)
-    } catch (error) {
-      failed += 1
-      console.error(`FAIL: ${name}`)
-      console.error(error && error.stack ? error.stack : error)
-    }
-  }
-  if (failed) {
-    console.error(`stock-preparation-project-overview.test.cjs FAILED (${failed})`)
-    process.exit(1)
-  }
-  console.log('stock-preparation-project-overview.test.cjs: all assertions passed')
-}
+// ── O-24 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-up A: this suite (and any that adopts support/fail-closed-suite-runner.cjs) cannot exit 0 past a hang.
+test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with nothing alive exits 1 (sentinel); a hang that keeps the loop alive times out, the run continues, and exits 1', () => {
+  const { spawnSync } = require('node:child_process')
+  const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
+  const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedSuite } = require(${JSON.stringify(runnerPath)});\n${body}`], { encoding: 'utf8', timeout: 20000 })
+  // (1) The S3 review's case: a test printed FAIL, the next awaits a promise nothing can settle and nothing keeps
+  // the event loop alive — Node runs out of work before the runner's own exit(1).
+  const drained = probe(`runFailClosedSuite('probe-drain', [
+    ['fails first', () => { throw new Error('synthetic failure') }],
+    ['hangs with nothing alive', () => new Promise(() => {})],
+    ['never reached', () => {}],
+  ], { testTimeoutMs: 60000 })`)
+  assert.equal(drained.status, 1, `a drained hang must exit 1 (status ${drained.status}, signal ${drained.signal}); stderr: ${drained.stderr}`)
+  assert.match(drained.stderr, /FAIL: fails first/)
+  assert.match(drained.stderr, /probe-drain FAILED: the event loop drained before every test settled/)
+  assert.ok(!drained.stdout.includes('never reached OK'), 'the runner stopped at the hang')
+  // (2) A hang that KEEPS the loop alive (a leaked interval): no drain, so only the per-test timeout can end it.
+  const alive = probe(`runFailClosedSuite('probe-alive', [
+    ['hangs with the loop alive', () => new Promise(() => { setInterval(() => {}, 50) })],
+    ['runs after the timeout', () => {}],
+  ], { testTimeoutMs: 300 })`)
+  assert.equal(alive.status, 1, `a live hang must time out and exit 1 (status ${alive.status}, signal ${alive.signal}); stderr: ${alive.stderr}`)
+  assert.match(alive.stderr, /FAIL: hangs with the loop alive/)
+  assert.match(alive.stderr, /timed out after 300 ms/)
+  assert.match(alive.stdout, / {2}runs after the timeout OK/)
+  assert.match(alive.stderr, /probe-alive FAILED \(1\)/)
+  // (3) Control: a passing run exits 0 and says so.
+  const passing = probe(`runFailClosedSuite('probe-ok', [['passes', async () => {}]])`)
+  assert.equal(passing.status, 0, passing.stderr)
+  assert.match(passing.stdout, /probe-ok: all assertions passed/)
+})
 
-main()
+// ── O-25 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-up B: the OTHER PROCESS case of F4 at the route — the in-process `running` flag cannot see it.
+test('O-25 (follow-up B) another process holds the overview lock: the refresh route answers 409 BUSY, writes and audits nothing, and CLEARS the cooldown — the first click after the lock frees refreshes', async () => {
+  const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // Another process: its OWN registry store (own in-process state) over the same database, holding the lock.
+    const otherProcess = createStockPreparationProjectTargetStore({ db: h.db })
+    let signalHeld
+    const held = new Promise((resolve) => { signalHeld = resolve })
+    let releaseLock
+    const gate = new Promise((resolve) => { releaseLock = resolve })
+    const holder = otherProcess.tryWithOverviewLock({ tenantId: TENANT }, async () => { signalHeld(); await gate; return 'held' })
+    await held
+    const auditsBefore = h.auditAppends.length
+    const busy = await refresh(h, FLOOR)
+    assert.equal(busy.statusCode, 409, JSON.stringify(busy.body))
+    assert.equal(busy.body.ok, false)
+    assert.equal(busy.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
+    assert.equal(overviewRows(h).length, 0, 'nothing was written')
+    assert.equal(h.auditAppends.length, auditsBefore, 'nothing was audited')
+    releaseLock()
+    assert.deepEqual(await holder, { acquired: true, value: 'held' })
+    // The cooldown was CLEARED by the BUSY answer: the very next click (no clock step) refreshes for real.
+    const next = await refresh(h, FLOOR)
+    assert.equal(next.statusCode, 200, JSON.stringify(next.body))
+    assert.equal(next.body.data.fresh, true, 'the BUSY click did not leave a cooldown behind')
+    assert.equal(overviewRows(h).length, 1)
+  } finally { h.restore() }
+})
+
+// ── O-26 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-up C: a refresh never reports `fresh: true` over a project it could not write.
+test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRESH_INCOMPLETE (counts only), audited `incomplete`, cooldown cleared, the project stays DIRTY and the next writer heals it', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        throw Object.assign(new Error(`overview write failed for ${PROJECT_B} with a value`), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.ok, false)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    assert.deepEqual({ ...res.body.error.details }, { objectId: OVERVIEW_OBJECT, failedProjectCount: 1, projectCount: 2 })
+    assert.ok(!JSON.stringify(res.body).includes(PROJECT_B) && !JSON.stringify(res.body).includes('with a value'), 'values-free')
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')), [PROJECT], 'the row that could be written stands')
+    // Audited as `incomplete` — counts + the failed count; never `refreshed`.
+    const audits = h.auditAppends.filter((e) => e.action === 'project_overview_refresh' && e.mode !== 'sheet_created')
+    assert.deepEqual(audits.map((e) => e.mode), ['incomplete'])
+    assert.deepEqual(audits[0].detail, { projectCount: 2, countedCount: 2, unreadableCount: 0, boundedCount: 0, rowsCreated: 1, rowsUpdated: 0, rowsUnchanged: 0, rowsRemovedDuplicate: 0, rowsRemovedOrphan: 0, truncated: false, ledgerReady: false, failedProjectCount: 1 })
+    assert.ok(!JSON.stringify(h.auditAppends).includes(PROJECT_B), 'the audit carries no project number')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_OVERVIEW_DOWN', failedProjectCount: 1 }])
+    // Fix round 1 (log noise): the typed line IS the log of this answer — no generic `route failed … UNLISTED` too.
+    assert.deepEqual(logger.warnings.filter((w) => /route failed/.test(w.message)), [], 'the wrapper adds no generic line to the typed one')
+    assert.equal(logger.warnings.length, 1, 'exactly one warn for the incomplete refresh')
+    // The failed project is still DIRTY (with a recount) — not dropped; fix round 1: as a RETRY mark (stamped).
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    const dirtyEntries = [...state.dirty.entries()]
+    assert.deepEqual(dirtyEntries.map(([no, flags]) => [no, { recount: flags.recount, retry: flags.retry }]), [[PROJECT_B, { recount: true, retry: true }]])
+    assert.ok(Number.isFinite(dirtyEntries[0][1].failedAtMs), 'the retry mark carries the in-process time of the failure')
+    assert.equal(state.running, false)
+    // The host is back. Past the per-event retry backoff (fix round 1), the NEXT overview writer — an event on
+    // ANOTHER project — heals it (drains the dirty set).
+    h.overviewPort.createRecord = realCreate
+    passRetryBackoff()
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE })).statusCode, 200)
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
+    assert.equal(state.dirty.size, 0)
+    // The cooldown was cleared by the incomplete answer: the next click refreshes (no clock step) and is fresh.
+    const again = await refresh(h, FLOOR)
+    assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+    assert.equal(again.body.data.fresh, true)
+    assert.equal(h.auditAppends.at(-1).mode, 'refreshed')
+  } finally { h.restore() }
+})
+
+test('O-26b (follow-up C) the S3 review\'s case: an event deferred INTO a running refresh whose write then fails makes the refresh REFRESH_INCOMPLETE (not fresh), and the project stays dirty', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // Hold the refresh inside its lock at its first row write.
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let gated = false
+    h.overviewPort.createRecord = async (input) => {
+      if (!gated) { gated = true; signalEntered(); await gate }
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    // An in-process event while it runs: deferred to the running writer (marked dirty, no write of its own).
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200)
+    // The drain's re-projection of that project is a PATCH (the full pass created its row) — and it fails.
+    h.overviewPort.patchRecord = async () => { throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 503, `a failed deferred-event write is not a fresh refresh: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    assert.equal(res.body.error.details.failedProjectCount, 1)
+    assert.ok(!h.auditAppends.some((e) => e.action === 'project_overview_refresh' && e.mode === 'refreshed'), 'no success audit')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT], 'the project whose write failed is still dirty')
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'status'), 'active', 'its row is stale — which is why it stays dirty')
+  } finally { h.restore() }
+})
+
+test('O-26c (follow-up C) the PER-EVENT path: a project whose overview write fails stays dirty and is healed by the next writer, even one for another project', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    assert.equal((await refresh(h, FLOOR)).statusCode, 200)
+    const realPatch = h.overviewPort.patchRecord
+    h.overviewPort.patchRecord = async () => { throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'the event stands')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT], 'the failed project was not dropped')
+    assert.equal(logger.warnings.filter((w) => /overview row could not be updated/.test(w.message)).length, 1)
+    h.overviewPort.patchRecord = realPatch
+    // An event on PROJECT_B becomes the writer and — past the retry backoff (fix round 1) — drains PROJECT too.
+    passRetryBackoff()
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE }, PROJECT_B)).statusCode, 200)
+    assert.equal(state.dirty.size, 0)
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'status'), 'archived', 'healed')
+  } finally { h.restore() }
+})
+
+// ── O-27 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-up D: the refresh reads every page BEFORE it deletes anything.
+test('O-27 (follow-up D) more than one page of overview rows: orphans on page one are deleted only after every page was read — no project row is skipped, none is duplicated; past the read bound a project is never created blind', async () => {
+  const { OVERVIEW_READ_PAGE_LIMIT, OVERVIEW_READ_MAX_PAGES } = overview.__internals
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const sheetId = overviewSheetId(h)
+    const pushRow = (id, projectNo) => h.rows.push({ id, sheetId, version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: projectNo } })
+    // Page one is ALL orphans (unregistered projects); the two registered rows sit on page two.
+    const orphanCount = OVERVIEW_READ_PAGE_LIMIT + 20
+    for (let i = 0; i < orphanCount; i += 1) pushRow(`rec_orphan_${i}`, `PRJ-ORPHAN-${i}`)
+    pushRow('rec_keep_a', PROJECT)
+    pushRow('rec_keep_b', PROJECT_B)
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(res.body.data.rowsRemovedOrphan, orphanCount)
+    assert.equal(res.body.data.rowsCreated, 0, 'both projects\' rows were SEEN (page two read before page one was deleted) — nothing created')
+    assert.equal(res.body.data.rowsUpdated, 2)
+    assert.equal(res.body.data.overflow, false)
+    assert.deepEqual(overviewRows(h).map((row) => row.id).sort(), ['rec_keep_a', 'rec_keep_b'], 'exactly one row per project — the kept ones')
+
+    // PAST THE BOUND: more rows than the read bound, the project's row beyond it. The full pass must not create
+    // it blind; the drain (same lock) reads that project's rows by number and patches the one that exists.
+    const beyond = OVERVIEW_READ_PAGE_LIMIT * OVERVIEW_READ_MAX_PAGES
+    h.rows.splice(h.rows.findIndex((row) => row.id === 'rec_keep_a'), 1)
+    h.rows.splice(h.rows.findIndex((row) => row.id === 'rec_keep_b'), 1)
+    for (let i = 0; i < beyond + 1; i += 1) pushRow(`rec_orphan2_${i}`, `PRJ-ORPHAN2-${i}`)
+    pushRow('rec_far_a', PROJECT)
+    pushRow('rec_far_b', PROJECT_B)
+    passCooldown()
+    const far = await refresh(h, FLOOR)
+    assert.equal(far.statusCode, 200, JSON.stringify(far.body))
+    assert.equal(far.body.data.overflow, true)
+    assert.equal(far.body.data.rowsCreated, 0, 'no blind create past the read bound')
+    const projectRows = overviewRows(h).filter((row) => [PROJECT, PROJECT_B].includes(logical(row, 'projectNo')))
+    assert.deepEqual(projectRows.map((row) => row.id).sort(), ['rec_far_a', 'rec_far_b'], 'the rows past the bound were found by number and kept')
+    assert.equal(logical(projectRows.find((row) => row.id === 'rec_far_a'), 'status'), 'active', 'and re-projected')
+    // The next refresh sees the rest of the residue.
+    passCooldown()
+    const rest = await refresh(h, FLOOR)
+    assert.equal(rest.statusCode, 200)
+    assert.equal(rest.body.data.overflow, false)
+    assert.equal(rest.body.data.rowsRemovedOrphan, 1, 'the one orphan past the bound is removed now')
+    assert.deepEqual(overviewRows(h).map((row) => row.id).sort(), ['rec_far_a', 'rec_far_b'])
+  } finally { h.restore() }
+})
+
+// ── O-28 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups, fix round 1 (item 1): a persistent failure is NOT re-run inline by every event of the tenant.
+test('O-28 (fix round 1) failed projects are retried BOUNDED by per-event writers — none within the backoff, at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS per event past it, round-robin; the event\'s own project is always updated (a fresh mark clears its retry mark); the refresh stays the full pass', async () => {
+  const { OVERVIEW_EVENT_RETRY_MAX_PROJECTS: MAX_RETRIES } = overview.__internals
+  assert.equal(MAX_RETRIES, 5, 'the bound stated in the PR body and register R-37')
+  const h = mount()
+  try {
+    const failing = Array.from({ length: 20 }, (_, i) => `PRJ-S3-F${String(i).padStart(2, '0')}`)
+    h.seedRegistryRow(PROJECT)
+    for (const no of failing) h.seedRegistryRow(no)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    const attempts = new Map(failing.map((no) => [no, 0]))
+    let hostDown = true
+    h.overviewPort.createRecord = async (input = {}) => {
+      const no = input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')]
+      if (hostDown && attempts.has(no)) {
+        attempts.set(no, attempts.get(no) + 1)
+        throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const totalAttempts = () => [...attempts.values()].reduce((sum, n) => sum + n, 0)
+    const ownNote = () => logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'note')
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, failing.length)
+    assert.equal(totalAttempts(), failing.length, 'the full pass tried each failing project once')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.equal(state.dirty.size, failing.length)
+    assert.ok([...state.dirty.values()].every((flags) => flags.retry === true && flags.recount === true), 'every failure is a retry mark (with its recount)')
+
+    // (a) WITHIN THE BACKOFF: 10 events on the healthy project retry NOTHING — and each updates its own row.
+    for (let i = 0; i < 10; i += 1) {
+      const before = totalAttempts()
+      assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-a${i}` })).statusCode, 200)
+      assert.equal(totalAttempts() - before, 0, `event a${i}: no retry within the backoff`)
+      assert.equal(ownNote(), `${NOTE}-a${i}`, `event a${i}: its own project's row is updated`)
+    }
+    assert.equal(state.dirty.size, failing.length, 'nothing dropped')
+
+    // (b) PAST THE BACKOFF: each event retries EXACTLY the bound (> 0: retries do happen; ≤ the bound: never all 20),
+    // round-robin over the failed projects, and still updates its own row.
+    const perEvent = []
+    for (let i = 0; i < 10; i += 1) {
+      passRetryBackoff()
+      const before = totalAttempts()
+      assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-b${i}` })).statusCode, 200, 'the event stands')
+      perEvent.push(totalAttempts() - before)
+      assert.equal(ownNote(), `${NOTE}-b${i}`, `event b${i}: its own project's row is updated`)
+      if (i === 3) assert.ok([...attempts.values()].every((n) => n === 2), `four events × ${MAX_RETRIES} = every failed project retried once (round-robin): ${JSON.stringify([...attempts.values()])}`)
+    }
+    assert.deepEqual(perEvent, Array(10).fill(MAX_RETRIES), `≤ ${MAX_RETRIES} retries per event (unbounded would be ${failing.length})`)
+    assert.equal(totalAttempts(), failing.length + 10 * MAX_RETRIES)
+    assert.equal(state.dirty.size, failing.length, 'still nothing dropped')
+    assert.equal(state.running, false)
+
+    // (c) THE EVENT'S OWN PROJECT, carried as a failure: its write fails once (→ a retry mark, just stamped), then the
+    // next event ON IT — within the backoff — is attempted anyway (the fresh mark clears the retry mark) and heals it.
+    const realPatch = h.overviewPort.patchRecord
+    h.overviewPort.patchRecord = async () => { throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
+    assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-c0` })).statusCode, 200)
+    assert.equal(state.dirty.get(PROJECT) && state.dirty.get(PROJECT).retry, true, 'its own failure is a retry mark')
+    h.overviewPort.patchRecord = realPatch
+    assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-c1` })).statusCode, 200)
+    assert.equal(ownNote(), `${NOTE}-c1`, 'the event\'s own project is updated within the backoff')
+    assert.equal(state.dirty.has(PROJECT), false)
+
+    // (d) THE REFRESH IS THE FULL PASS: host back, NO clock step — still inside the backoff of the last retries (and
+    // no cooldown: the 503 above cleared it) — and every retry mark is drained.
+    hostDown = false
+    const ok = await refresh(h, FLOOR)
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.fresh, true)
+    assert.equal(state.dirty.size, 0, 'the refresh drains every retry mark — no bound, no backoff')
+    assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, ...failing].sort())
+  } finally { h.restore() }
+})
+
+// ── O-29 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups, fix round 1 (item 2): the failure bookkeeping paths only the verifier's probes covered.
+test('O-29a (fix round 1) a project-less overview row whose delete fails is COUNTED: 503 REFRESH_INCOMPLETE, nothing to re-mark, the next refresh removes it', async () => {
+  // (a) A project-less overview row whose delete fails: counted → 503 INCOMPLETE; nothing to re-mark.
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    h.rows.push({ id: 'rec_noproj', sheetId: overviewSheetId(h), version: 1, data: {} })
+    const realDelete = h.overviewPort.deleteRecord
+    h.overviewPort.deleteRecord = async (input = {}) => {
+      if (input.recordId === 'rec_noproj') throw Object.assign(new Error('delete failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      return realDelete(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, `a project-less orphan whose delete failed is counted: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    assert.equal(res.body.error.details.failedProjectCount, 1)
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.equal(state.dirty.size, 0, 'no project number → nothing to re-mark')
+    h.overviewPort.deleteRecord = realDelete
+    const ok = await refresh(h, FLOOR)
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.rowsRemovedOrphan, 1, 'the next refresh removes it')
+  } finally { h.restore() }
+})
+
+test('O-29b (fix round 1) a row of an UNREGISTERED project whose delete fails is RECORDED: 503, its number is a retry mark, and a later per-event writer deletes it by number', async () => {
+  // (b) A row of an UNREGISTERED project whose delete fails: recorded → 503, and its project number is a retry mark
+  // that a later per-event writer (past the backoff) heals BY NUMBER.
+  const GONE = 'PRJ-S3-GONE'
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    h.rows.push({ id: 'rec_gone', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: GONE } })
+    const realDelete = h.overviewPort.deleteRecord
+    h.overviewPort.deleteRecord = async (input = {}) => {
+      if (input.recordId === 'rec_gone') throw Object.assign(new Error('delete failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      return realDelete(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, `a keyed orphan whose delete failed is recorded: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.error.details.failedProjectCount, 1)
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [GONE], 'the orphan\'s project stays marked')
+    assert.equal(state.dirty.get(GONE).retry, true)
+    h.overviewPort.deleteRecord = realDelete
+    passRetryBackoff()
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE })).statusCode, 200)
+    assert.equal(state.dirty.size, 0)
+    assert.ok(!overviewRows(h).some((row) => row.id === 'rec_gone'), 'deleted by number by the next writer')
+  } finally { h.restore() }
+})
+
+test('O-29c (fix round 1) a later success in the same run clears an earlier failure: the full pass fails a project, an event deferred into the refresh re-marks it, the drain writes it — fresh, nothing dirty', async () => {
+  // (c) A project fails in the full pass; an event deferred INTO the running refresh re-marks it and the drain (same
+  // run) writes it: the later success clears the earlier failure — the refresh is fresh, nothing stays dirty.
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let projectCreates = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT) {
+        projectCreates += 1
+        if (projectCreates === 1) {
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+        }
+      }
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 200, `the drain's success cleared the full pass's failure: ${JSON.stringify(res.body)}`)
+    assert.equal(res.body.data.fresh, true)
+    assert.equal(projectCreates, 2, 'failed once in the full pass, written once by the drain')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.equal(state.dirty.size, 0)
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'status'), 'archived')
+  } finally { h.restore() }
+})
+
+test('O-29d (fix round 1, log-noise control) a refresh that fails otherwise still logs the wrapper\'s generic line — only a failure its handler logged itself is spared it', async () => {
+  // (d) Control for the log-noise fix: a refresh that fails OTHERWISE (the overview read throws) still logs the
+  // wrapper's generic line — only a failure its handler logged itself is spared it.
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realQuery = h.records.queryRecords
+    h.records.queryRecords = async (input = {}) => {
+      if (input.sheetId === overviewSheetId(h)) throw new Error('read failed')
+      return realQuery(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 500)
+    assert.deepEqual(logger.warnings.filter((w) => /route failed/.test(w.message)).map((w) => w.meta), [{ code: 'UNLISTED' }])
+  } finally { h.restore() }
+})
+
+// S3 follow-up A: the fail-closed runner (support/fail-closed-suite-runner.cjs) — exit sentinel + per-test timeout.
+runFailClosedSuite('stock-preparation-project-overview.test.cjs', tests)
