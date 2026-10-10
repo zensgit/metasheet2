@@ -502,11 +502,30 @@ export const appRoutes: RouteRecordRaw[] = [
     component: () => import('../views/tasks/TasksView.vue'),
     meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
+  // Task settings (M4 frontend design §2.1): the same gate as /tasks. Listed before /tasks/:id. The
+  // order is defensive: vue-router 4 ranks a static segment above a parameter wherever the records
+  // sit, and a task id never reads `settings` (task ids carry the `tsk_` prefix).
+  // RULED(2026-10-07): [R02] — the settings surface; the path is [fe-07].
+  {
+    path: '/tasks/settings',
+    name: 'tasks-settings',
+    component: () => import('../views/tasks/TasksSettingsView.vue'),
+    meta: { title: 'Task Settings', titleZh: '任务设置', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
+  },
   {
     path: '/tasks/:id',
     name: 'task-detail',
     component: () => import('../views/tasks/TasksView.vue'),
     meta: { title: 'Tasks', titleZh: '任务', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
+  },
+  // One task list (M4 frontend design §2.1): the same gate as /tasks. There is no /task-lists index
+  // page — the viewer's lists are the /tasks sidebar, which links here. The path, and the absence of
+  // an index page, are [fe-07] (design §12-Q2).
+  {
+    path: '/task-lists/:id',
+    name: 'task-list-detail',
+    component: () => import('../views/tasks/TaskListView.vue'),
+    meta: { title: 'Task Lists', titleZh: '任务清单', requiresAuth: true, requiredFeature: 'tasks', permissions: ['tasks:read'] }
   },
   {
     path: '/:pathMatch(.*)*',

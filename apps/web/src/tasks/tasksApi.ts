@@ -1,9 +1,11 @@
 /**
- * Task-feature-line M2 frontend API client (design lock §5.2 / §5.2.1, backend PR #6062).
+ * Task-feature-line frontend API client: M2 (design lock §5.2 / §5.2.1, backend #6062), M3
+ * (backend #6229) and the M4 additions further down (the PR-3a branch's routes, not on main yet).
  *
- * Typed wrappers over the (not-yet-merged, `TASKS_ENABLED`-gated) `/api/tasks*` endpoints, using
- * the SAME authenticated `apiFetch` helper every other view uses — no bespoke transport, no
- * mock short-circuit: the real endpoint is always asked, in development and tests too.
+ * Typed wrappers over the `TASKS_ENABLED`-gated `/api/tasks*`, `/api/task-lists*`,
+ * `/api/task-groups*` and `/api/task-settings` endpoints, using the SAME authenticated `apiFetch`
+ * helper every other view uses — no bespoke transport, no mock short-circuit: the real endpoint is
+ * always asked, in development and tests too.
  *
  * Every function below returns a discriminated result and NEVER throws on an HTTP status or a
  * transport failure — the caller switches on `kind` instead of catching. The lock's org-guidance
@@ -87,11 +89,35 @@ export interface TaskDetail {
   canLeave?: boolean
   /** Optional row-level abilities (backend contract §3.2). When present, `false` hides the
    *  matching controls; when absent (an older body) the controls stay visible and the server's
-   *  own check remains the only gate. `canEdit` covers membership, completion mode and parent;
+   *  own check remains the only gate. `canEdit` covers completion mode, parent and the M4 editor
+   *  (and, in a body without `canManageMembers`, the assignee / follower controls too);
    *  `canComment` covers posting, and editing or deleting one's own comment. */
   canEdit?: boolean
   canDelete?: boolean
   canComment?: boolean
+  /** M4 (PR-3a; ruled 2026-10-07): whether the viewer may add or remove assignees and followers —
+   *  true exactly for the task's creator and its assignees (a direct role); a viewer who can edit
+   *  the task only through a list is `canEdit: true, canManageMembers: false`. The PR-3a backend
+   *  always sends it; main's M3 body does not, and there the member controls follow `canEdit`
+   *  (see TasksView). */
+  canManageMembers?: boolean
+  /** The row version `patchTask` sends back as `expectedVersion`; a positive integer when present.
+   *  main's M3 backend (#6229) sends it as well, so its presence does not say the backend has
+   *  `PATCH /api/tasks/:id` — the S4 group below does. */
+  version?: number
+  /** M4 (PR-3a S4). These four are a GROUP like the M3 tree fields: a body with any of them
+   *  carries all four (each `string | null`); a body with none is the pre-S4 shape. They arrive
+   *  with `PATCH /api/tasks/:id`, so the editor renders only for a body that carries them. */
+  description?: string | null
+  /** `'YYYY-MM-DD'`, same wall-clock reading as `dueDate`. */
+  startDate?: string | null
+  /** `'HH:MM:SS'`, same reading as `dueTime`. */
+  startTime?: string | null
+  /** An ISO instant, or `null` for no reminder. */
+  remindAt?: string | null
+  /** M4 (PR-3a S7): ids of the lists holding this task — every such list for the task's creator,
+   *  the viewer's own lists for anyone else. Always sent from S7 on; absent from an older body. */
+  listIds?: string[]
 }
 
 /** `getTask`'s result kinds — deliberately NOT `BaseResultKind`: `GET /api/tasks/:id` has no
@@ -109,7 +135,9 @@ export type GetTaskResult =
 type BaseResultKind = 'org_missing' | 'forbidden' | 'not_found' | 'error'
 
 export type ListTasksResult =
-  | { kind: 'ok'; items: TaskListItem[] }
+  /** `total` (M4, PR-3a S3) is present when the body carries it as a non-negative integer and
+   *  absent otherwise; a body with a malformed `total` is an `error`. */
+  | { kind: 'ok'; items: TaskListItem[]; total?: number }
   | { kind: 'predicate_error' }
   | { kind: BaseResultKind; status?: number }
 
@@ -120,7 +148,30 @@ export interface CreateTaskInput {
    *  that want "no assignees" must pass `[]` explicitly; they are not the same request body. */
   assignees?: string[]
   completionMode?: CompletionMode
+  /** M4 (PR-3a S4) — the date keys `POST /api/tasks` accepts. Each is sent only when given; the
+   *  create form does not set them in this slice (design §12-Q3, `[fe-09]`). */
+  dueDate?: string | null
+  dueTime?: string | null
+  startDate?: string | null
+  startTime?: string | null
+  timeZone?: string | null
+  remindAt?: string | null
 }
+
+/** The 422 codes `createTask` reports as `validation` (design §3.2, an allowlist). Any other 422
+ *  code stays `{ kind: 'error', status: 422 }`, the M2 reading (tasks-api.spec.ts pins
+ *  `VALIDATION_FAILED` that way). */
+export const CREATE_TASK_VALIDATION_CODES = [
+  'INVALID_DATE',
+  'INVALID_TIME_ZONE',
+  'TIME_ZONE_REQUIRED',
+  'INVALID_REMIND_AT',
+  'INVALID_ASSIGNEES',
+  'INVALID_MODE',
+  'INACTIVE_ORG_MEMBER',
+  'LIMIT',
+] as const
+export type CreateTaskValidationCode = (typeof CREATE_TASK_VALIDATION_CODES)[number]
 
 /** The backend's `POST /api/tasks` 200 body is contracted to carry only `{ id: string }` — it does
  *  NOT echo back the full row (no `status`/`completion_mode`/`created_by`/`due_at`). Typing the ok
@@ -129,8 +180,10 @@ export interface CreateTaskInput {
  *  row instead of failing. Every caller only needs the new id (to keep it or ignore it) — the
  *  fresh row itself always comes from the subsequent `loadList()`. */
 export type CreateTaskResult =
-  | { kind: 'ok'; id: string }
+  /** `version` (M4, PR-3a S4) is present when the body carries it as a positive integer. */
+  | { kind: 'ok'; id: string; version?: number }
   | { kind: 'invalid_title' }
+  | { kind: 'validation'; code: CreateTaskValidationCode }
   | { kind: BaseResultKind; status?: number }
 
 export type CompleteTaskResult =
@@ -142,7 +195,9 @@ export type ReopenTaskResult =
   | { kind: BaseResultKind; status?: number }
 
 export type PendingCountResult =
-  | { kind: 'ok'; count: number }
+  /** `badgeScope: 'off'` (M4, PR-3a S3) is present exactly when the body says `'off'` with a zero
+   *  count; see `fetchPendingCount`. */
+  | { kind: 'ok'; count: number; badgeScope?: 'off' }
   | { kind: BaseResultKind; status?: number }
 
 async function safeJson(response: Response): Promise<unknown> {
@@ -168,7 +223,9 @@ function isCountLike(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
-function resolveViewerTimeZone(): string {
+/** The browser's IANA zone name, or `''` when the platform does not report one. Read fresh on
+ *  every call. Exported since M4 for the settings page and the detail editor's default zone. */
+export function resolveViewerTimeZone(): string {
   try {
     const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
     return typeof zone === 'string' ? zone : ''
@@ -177,10 +234,14 @@ function resolveViewerTimeZone(): string {
   }
 }
 
-export async function listTasks(view: TaskView): Promise<ListTasksResult> {
+/** `GET /api/tasks?view=…`. Without `page` the request string is the M2 one; with it, the M4
+ *  page parameters are appended (`limit` fixed at `TASK_PAGE_LIMIT`). The views call it without
+ *  `page`; `total` is parsed but not used (`[fe-10]`). */
+export async function listTasks(view: TaskView, page?: { offset: number }): Promise<ListTasksResult> {
+  const query = page === undefined ? '' : `&limit=${TASK_PAGE_LIMIT}&offset=${page.offset}`
   let response: Response
   try {
-    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}`)
+    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${query}`)
   } catch {
     return { kind: 'error', status: 0 }
   }
@@ -201,12 +262,25 @@ export async function listTasks(view: TaskView): Promise<ListTasksResult> {
     return { kind: 'error', status: response.status }
   }
 
-  if (Array.isArray(record.items)) return { kind: 'ok', items: record.items as TaskListItem[] }
-  return { kind: 'error', status: response.status }
+  if (!Array.isArray(record.items)) return { kind: 'error', status: response.status }
+  const items = record.items as TaskListItem[]
+  if (record.total === undefined) return { kind: 'ok', items }
+  if (!isNonNegativeInteger(record.total)) return { kind: 'error', status: response.status }
+  return { kind: 'ok', items, total: record.total }
 }
 
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
+}
+
+/** A positive safe integer: a row `version`, a 409 body's `currentVersion`. */
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+/** A non-negative safe integer: a collection `total`, a placement `position`. */
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isTaskAssignee(value: unknown): value is TaskAssignee {
@@ -239,9 +313,9 @@ function isTaskChild(value: unknown): value is TaskChild {
  *  malformed assignee row, …), which the caller resolves to `{ kind: 'error' }`.
  *
  *  The three M3 tree fields (`parentId`/`depth`/`children`) are a GROUP: a body with none of them is
- *  the M2 shape (today's backend) and parses as a root task with no visible children; a body with
+ *  the M2 shape (the M2 backend) and parses as a root task with no visible children; a body with
  *  any of them must carry all three, each with the right type. The optional `followers`/`canLeave`/
- *  `canEdit`/`canDelete`/`canComment` are validated only when present. */
+ *  `canEdit`/`canDelete`/`canComment`/`canManageMembers` are validated only when present. */
 function parseTaskDetail(value: unknown): TaskDetail | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
@@ -299,10 +373,31 @@ function parseTaskDetail(value: unknown): TaskDetail | null {
     if (typeof record.canLeave !== 'boolean') return null
     detail.canLeave = record.canLeave
   }
-  for (const flag of ['canEdit', 'canDelete', 'canComment'] as const) {
+  for (const flag of ['canEdit', 'canDelete', 'canComment', 'canManageMembers'] as const) {
     if (record[flag] === undefined) continue
     if (typeof record[flag] !== 'boolean') return null
     detail[flag] = record[flag]
+  }
+  // M4 keys (design §3.2 `getTask`): each optional, each checked when present; the four edit
+  // fields are a group — any one present means all four must be, each `string | null`.
+  if (record.version !== undefined) {
+    if (!isPositiveInteger(record.version)) return null
+    detail.version = record.version
+  }
+  const editFields = ['description', 'startDate', 'startTime', 'remindAt'] as const
+  if (editFields.some((field) => record[field] !== undefined)) {
+    if (!isNullableString(record.description)) return null
+    if (!isNullableString(record.startDate)) return null
+    if (!isNullableString(record.startTime)) return null
+    if (!isNullableString(record.remindAt)) return null
+    detail.description = record.description
+    detail.startDate = record.startDate
+    detail.startTime = record.startTime
+    detail.remindAt = record.remindAt
+  }
+  if (record.listIds !== undefined) {
+    if (!Array.isArray(record.listIds) || !record.listIds.every((id) => typeof id === 'string')) return null
+    detail.listIds = record.listIds
   }
   return detail
 }
@@ -334,6 +429,10 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
   // every caller that simply omits the field (the create form does).
   if (input.assignees !== undefined) body.assignees = input.assignees
   if (input.completionMode !== undefined) body.completionMode = input.completionMode
+  // M4 date keys: the same "absent is not sent" rule.
+  for (const key of ['dueDate', 'dueTime', 'startDate', 'startTime', 'timeZone', 'remindAt'] as const) {
+    if (input[key] !== undefined) body[key] = input[key]
+  }
 
   let response: Response
   try {
@@ -353,13 +452,19 @@ export async function createTask(input: CreateTaskInput): Promise<CreateTaskResu
     if (code === 'ORG_MISSING') return { kind: 'org_missing' }
     // Deterministic: retrying the same title fails the same way, so the caller says so.
     if (code === 'INVALID_TITLE') return { kind: 'invalid_title' }
+    if (code !== null && (CREATE_TASK_VALIDATION_CODES as readonly string[]).includes(code)) {
+      return { kind: 'validation', code: code as CreateTaskValidationCode }
+    }
     return { kind: 'error', status: 422 }
   }
   if (response.status !== 200) return { kind: 'error', status: response.status }
 
   const okBody = await safeJson(response)
   if (okBody && typeof okBody === 'object' && typeof (okBody as Record<string, unknown>).id === 'string') {
-    return { kind: 'ok', id: (okBody as Record<string, unknown>).id as string }
+    const { id, version } = okBody as Record<string, unknown>
+    if (version === undefined) return { kind: 'ok', id: id as string }
+    if (!isPositiveInteger(version)) return { kind: 'error', status: response.status }
+    return { kind: 'ok', id: id as string, version }
   }
   return { kind: 'error', status: response.status }
 }
@@ -446,15 +551,24 @@ export async function fetchPendingCount(): Promise<PendingCountResult> {
     return { kind: 'error', status: response.status }
   }
 
-  if (isCountLike(record.count)) return { kind: 'ok', count: record.count }
-  return { kind: 'error', status: response.status }
+  if (!isCountLike(record.count)) return { kind: 'error', status: response.status }
+  // ASSUMPTION(task-m4-fe): [own-11] (PR-3a) — the key appears only with `'off'`. Read with
+  // tolerance (`[fe-14]`): only the literal `'off'` has a meaning, and it must come with a zero
+  // count; the key absent, another closed-set value, or any other value reads as a plain count.
+  if (record.badgeScope === 'off') {
+    if (record.count !== 0) return { kind: 'error', status: response.status }
+    return { kind: 'ok', count: 0, badgeScope: 'off' }
+  }
+  return { kind: 'ok', count: record.count }
 }
 
 /*
  * ---------------------------------------------------------------------------------------------
  * M3 additions (backend contract `docs/development/task-m3-backend-design-20260928.md`, §3.1,
- * §3.3–§3.7). The backend is NOT implemented yet — every function below is coded only against
- * that contract; tests mock `apiFetch`.
+ * §3.3–§3.7; the backend is on main, #6229). Tests mock `apiFetch`. The PR-3a branch adds a 422
+ * `INACTIVE_ORG_MEMBER` to the assignee / follower adds (an inactive or foreign user, R17) and
+ * answers the four assignee / follower writes 404 for a viewer without a direct role on the task
+ * (the detail's `canManageMembers`); both go through the mapping below unchanged.
  *
  * Every M3 WRITE endpoint shares the SAME non-2xx shape: 403 -> forbidden, 404 -> not_found, a
  * 409 with a parseable `error.code` -> conflict, a 422 with `error.code === 'ORG_MISSING'` ->
@@ -479,17 +593,23 @@ export type WriteFailure =
   | { kind: 'forbidden' }
   | { kind: 'org_missing' }
   | { kind: 'validation'; code: string }
-  | { kind: 'conflict'; code: string }
+  /** `currentVersion` (M4, `PATCH /api/tasks/:id` 409 `VERSION_CONFLICT`) is present when the 409
+   *  body carries it as a positive integer; a caller without it treats the conflict as one whose
+   *  version is unknown and reloads the same way. */
+  | { kind: 'conflict'; code: string; currentVersion?: number }
   | { kind: 'error'; status?: number }
 
-/** Shared non-2xx classifier for every M3 write endpoint — see the module-level note above for
- *  the full mapping. Only called once `response.status` is confirmed not to be a success. */
+/** Shared non-2xx classifier for every M3 / M4 write endpoint — see the module-level note above
+ *  for the full mapping. Only called once `response.status` is confirmed not to be a success. */
 async function classifyWriteFailure(response: Response): Promise<WriteFailure> {
   if (response.status === 403) return { kind: 'forbidden' }
   if (response.status === 404) return { kind: 'not_found' }
   if (response.status === 409) {
-    const code = extractErrorCode(await safeJson(response))
-    return code ? { kind: 'conflict', code } : { kind: 'error', status: 409 }
+    const body = await safeJson(response)
+    const code = extractErrorCode(body)
+    if (!code) return { kind: 'error', status: 409 }
+    const currentVersion = (body as Record<string, unknown>).currentVersion
+    return isPositiveInteger(currentVersion) ? { kind: 'conflict', code, currentVersion } : { kind: 'conflict', code }
   }
   if (response.status === 422) {
     const code = extractErrorCode(await safeJson(response))
@@ -907,4 +1027,755 @@ export async function deleteTask(id: string): Promise<DeleteTaskResult> {
   const body = await safeJson(response)
   if (isDeleteTaskOk(body)) return { kind: 'ok', id: body.id, deleted: true }
   return { kind: 'error', status: response.status }
+}
+
+/*
+ * ---------------------------------------------------------------------------------------------
+ * M4 additions (frontend design `docs/development/task-m4-frontend-design-20261007.md` §3;
+ * backend contract PR-3a `task-m4-pr3a-backend-design-20260930.md` §3 and its verification
+ * record). Every route below is built on the PR-3a branch — settings (S3), `PATCH /api/tasks/:id`
+ * (S4), lists (S5), list members (S6), list items (S7), groups (S8); PR-3a also adds the detail's
+ * `canManageMembers` and (S9) the 422 `INACTIVE_ORG_MEMBER` of the task create and the assignee /
+ * follower adds — and none is on main yet. Tests mock `apiFetch`.
+ *
+ * Rules shared by every function below (design §3.1):
+ *   - every id placed in a request path passes `isPathSafeSegment` before a request is built — a
+ *     task / list / group id that fails is `not_found`, a user id that fails is `validation` with
+ *     that endpoint's own member code;
+ *   - write failures go through `classifyWriteFailure` (409 now carries `currentVersion`);
+ *   - every success body passes a strict parser (every field checked, closed sets compared
+ *     literal by literal, unknown keys ignored, a missing or mistyped field is `error`);
+ *   - collection reads are `{ items, total }` with `limit` fixed at `TASK_PAGE_LIMIT` and the
+ *     offset supplied by the caller; the degraded body (no `total`) is checked first; a 422
+ *     (`INVALID_LIMIT` / `INVALID_OFFSET` / `INVALID_FILTER`) can only be contract drift and is
+ *     `error`; "read every page" functions share `collectPages`.
+ * ---------------------------------------------------------------------------------------------
+ */
+
+// RULED(2026-10-07): [R15] — the page size every M4 collection endpoint is read with (the
+// server's upper bound) and the offset form.
+export const TASK_PAGE_LIMIT = 100
+/** Upper bound on pages one "read every page" call makes; past it the result has
+ *  `items.length < total`. The value follows `COMMENTS_MAX_PAGES` (`[fe-13]`). */
+export const TASK_MAX_PAGES = 20
+
+/** Result of every M4 collection read. `org_missing` is the degraded body; a 404 is
+ *  `not_found` (the list-scoped reads fold a missing org into it as well). */
+export type CollectionResult<T> =
+  | { kind: 'ok'; items: T[]; total: number }
+  | { kind: 'org_missing' }
+  | { kind: 'forbidden' }
+  | { kind: 'not_found' }
+  | { kind: 'error'; status?: number }
+
+/** One page of a collection endpoint. */
+async function readCollection<T>(path: string, isItem: (value: unknown) => value is T): Promise<CollectionResult<T>> {
+  let response: Response
+  try {
+    response = await apiFetch(path)
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+
+  const body = await safeJson(response)
+  if (!body || typeof body !== 'object') return { kind: 'error', status: response.status }
+  const record = body as Record<string, unknown>
+  if (record.degraded === true) {
+    if (record.reason === 'org_missing') return { kind: 'org_missing' }
+    return { kind: 'error', status: response.status }
+  }
+  if (!Array.isArray(record.items) || !record.items.every(isItem)) return { kind: 'error', status: response.status }
+  if (!isNonNegativeInteger(record.total)) return { kind: 'error', status: response.status }
+  return { kind: 'ok', items: record.items, total: record.total }
+}
+
+/** Reads page after page (the `listComments` loop): the offset advances by rows read, a row seen
+ *  twice is kept once by key, an empty page or `rowsRead >= total` ends the read, `isSuperseded`
+ *  ends it early, `TASK_MAX_PAGES` bounds it. Any page failing fails the whole read. */
+async function collectPages<T>(
+  fetchPage: (offset: number) => Promise<CollectionResult<T>>,
+  keyOf: (item: T) => string,
+  options: { isSuperseded?: () => boolean } = {},
+): Promise<CollectionResult<T>> {
+  const items: T[] = []
+  const seen = new Set<string>()
+  let rowsRead = 0
+  let total = 0
+  for (let page = 0; page < TASK_MAX_PAGES; page += 1) {
+    const result = await fetchPage(rowsRead)
+    if (result.kind !== 'ok') return result
+    rowsRead += result.items.length
+    for (const item of result.items) {
+      const key = keyOf(item)
+      if (seen.has(key)) continue
+      seen.add(key)
+      items.push(item)
+    }
+    total = result.total
+    if (result.items.length === 0 || rowsRead >= total) break
+    if (options.isSuperseded?.()) break
+  }
+  return { kind: 'ok', items, total: Math.max(total, rowsRead) }
+}
+
+/** Options of every "read every page" function. */
+export interface ReadAllOptions {
+  isSuperseded?: () => boolean
+}
+
+function pageQuery(offset: number): string {
+  return `limit=${TASK_PAGE_LIMIT}&offset=${offset}`
+}
+
+function listPath(listId: string, suffix = ''): string {
+  return `/api/task-lists/${encodeURIComponent(listId)}${suffix}`
+}
+
+/** A write: `apiFetch` with the method and optional JSON body; a non-200 is classified, a 200
+ *  hands its body (parsed, or `null`) to the caller's parser. */
+async function sendWrite(
+  path: string,
+  method: 'POST' | 'PATCH' | 'PUT' | 'DELETE',
+  body?: unknown,
+): Promise<{ ok: true; body: unknown; status: number } | { ok: false; failure: WriteFailure }> {
+  let response: Response
+  try {
+    response = await apiFetch(path, body === undefined ? { method } : { method, body: JSON.stringify(body) })
+  } catch {
+    return { ok: false, failure: { kind: 'error', status: 0 } }
+  }
+  if (response.status !== 200) return { ok: false, failure: await classifyWriteFailure(response) }
+  return { ok: true, body: await safeJson(response), status: response.status }
+}
+
+// ---- 3.2 tasks: PATCH /api/tasks/:id (S4) ---------------------------------------------------
+
+/** The editable keys of `PATCH /api/tasks/:id`. A key that is `undefined` is not sent; `null`
+ *  clears the field (`description` is cleared with `''`, the server stores it as NULL). */
+export interface TaskPatch {
+  title?: string
+  description?: string
+  dueDate?: string | null
+  /** `'HH:MM'` — the client sends the minutes form; the server stores `'HH:MM:SS'`. */
+  dueTime?: string | null
+  startDate?: string | null
+  startTime?: string | null
+  /** An IANA zone name; `null` clears the zone (only accepted when no date remains). */
+  timeZone?: string | null
+  /** An ISO instant; `null` clears the reminder. Never derived by the server. */
+  remindAt?: string | null
+}
+
+export const TASK_PATCH_KEYS = [
+  'title',
+  'description',
+  'dueDate',
+  'dueTime',
+  'startDate',
+  'startTime',
+  'timeZone',
+  'remindAt',
+] as const
+export type TaskPatchKey = (typeof TASK_PATCH_KEYS)[number]
+
+export interface TaskPatchRequest extends TaskPatch {
+  /** The detail's `version` at the time the draft was taken. */
+  expectedVersion: number
+}
+
+export type PatchTaskResult = { kind: 'ok'; id: string; version: number } | WriteFailure
+
+function isIdVersion(value: unknown): value is { id: string; version: number } {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.id === 'string' && isPositiveInteger(record.version)
+}
+
+// RULED(2026-10-07): [R03] — edits go through `PATCH /api/tasks/:id` under `expectedVersion`;
+// a stale version is a 409 `VERSION_CONFLICT` whose body also carries `currentVersion`.
+/** `PATCH /api/tasks/:id`. Only the keys given in `patch` (plus `expectedVersion`) are
+ *  serialized. Codes: `INVALID_VERSION` `INVALID_TITLE` `INVALID_DESCRIPTION` `INVALID_DATE`
+ *  `INVALID_TIME_ZONE` `TIME_ZONE_REQUIRED` `INVALID_REMIND_AT` (422 `validation`),
+ *  `VERSION_CONFLICT` (409 `conflict` with `currentVersion`). A body equal to the stored values is
+ *  a no-op that still answers 200 with the unchanged version. */
+export async function patchTask(id: string, patch: TaskPatchRequest): Promise<PatchTaskResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  const body: Record<string, unknown> = { expectedVersion: patch.expectedVersion }
+  for (const key of TASK_PATCH_KEYS) {
+    if (patch[key] !== undefined) body[key] = patch[key]
+  }
+  const sent = await sendWrite(`/api/tasks/${encodeURIComponent(id)}`, 'PATCH', body)
+  if (!sent.ok) return sent.failure
+  if (isIdVersion(sent.body)) return { kind: 'ok', id: sent.body.id, version: sent.body.version }
+  return { kind: 'error', status: sent.status }
+}
+
+// ---- 3.2 settings (S3) -----------------------------------------------------------------------
+
+export const TASK_BADGE_SCOPES = ['off', 'overdue', 'overdue_or_today'] as const
+export type TaskBadgeScope = (typeof TASK_BADGE_SCOPES)[number]
+export const TASK_REMIND_MODES = ['default', 'none'] as const
+export type TaskRemindMode = (typeof TASK_REMIND_MODES)[number]
+
+// RULED(2026-10-07): [R02] [R07] — the four settings fields and their shapes.
+export interface TaskSettings {
+  badgeScope: TaskBadgeScope
+  dailyReminderEnabled: boolean
+  defaultRemindPolicy: { mode: TaskRemindMode }
+  /** A canonical IANA name, or `null` for none. */
+  timeZone: string | null
+}
+
+/** The `GET /api/task-settings` 200 body, or `null` for a malformed one. Closed sets are compared
+ *  literal by literal; keys outside the four are ignored. */
+export function parseTaskSettings(value: unknown): TaskSettings | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  if (typeof record.badgeScope !== 'string' || !(TASK_BADGE_SCOPES as readonly string[]).includes(record.badgeScope)) return null
+  if (typeof record.dailyReminderEnabled !== 'boolean') return null
+  const policy = record.defaultRemindPolicy
+  if (!policy || typeof policy !== 'object') return null
+  const mode = (policy as Record<string, unknown>).mode
+  if (typeof mode !== 'string' || !(TASK_REMIND_MODES as readonly string[]).includes(mode)) return null
+  if (!isNullableString(record.timeZone)) return null
+  return {
+    badgeScope: record.badgeScope as TaskBadgeScope,
+    dailyReminderEnabled: record.dailyReminderEnabled,
+    defaultRemindPolicy: { mode: mode as TaskRemindMode },
+    timeZone: record.timeZone,
+  }
+}
+
+export type GetTaskSettingsResult =
+  | { kind: 'ok'; settings: TaskSettings }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status?: number }
+
+/** `GET /api/task-settings`. A 404 covers both a missing route and a missing org (the contract
+ *  does not distinguish them). */
+export async function getTaskSettings(): Promise<GetTaskSettingsResult> {
+  let response: Response
+  try {
+    response = await apiFetch('/api/task-settings')
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const settings = parseTaskSettings(await safeJson(response))
+  return settings ? { kind: 'ok', settings } : { kind: 'error', status: response.status }
+}
+
+/** Any subset of `TaskSettings`; `timeZone: null` clears the zone; an `undefined` key is not
+ *  sent. `badgeScope` and `defaultRemindPolicy` are never sent as `null`. */
+export interface TaskSettingsPatch {
+  badgeScope?: TaskBadgeScope
+  dailyReminderEnabled?: boolean
+  defaultRemindPolicy?: { mode: TaskRemindMode }
+  timeZone?: string | null
+}
+
+export const TASK_SETTINGS_KEYS = ['badgeScope', 'dailyReminderEnabled', 'defaultRemindPolicy', 'timeZone'] as const
+
+export type PatchTaskSettingsResult = { kind: 'ok'; settings: TaskSettings } | WriteFailure
+
+/** `PATCH /api/task-settings`. Codes: `INVALID_SETTINGS` `INVALID_BADGE_SCOPE`
+ *  `INVALID_DAILY_REMINDER_ENABLED` `INVALID_POLICY` `INVALID_TIME_ZONE`
+ *  `DAILY_REMINDER_REQUIRES_TIME_ZONE` (422 `validation`). The 200 body is the merged settings. */
+export async function patchTaskSettings(patch: TaskSettingsPatch): Promise<PatchTaskSettingsResult> {
+  const body: Record<string, unknown> = {}
+  for (const key of TASK_SETTINGS_KEYS) {
+    if (patch[key] !== undefined) body[key] = patch[key]
+  }
+  const sent = await sendWrite('/api/task-settings', 'PATCH', body)
+  if (!sent.ok) return sent.failure
+  const settings = parseTaskSettings(sent.body)
+  return settings ? { kind: 'ok', settings } : { kind: 'error', status: sent.status }
+}
+
+// ---- 3.2 lists (S5) --------------------------------------------------------------------------
+
+export const TASK_LIST_ROLES = ['read', 'edit', 'owner'] as const
+export type TaskListRole = (typeof TASK_LIST_ROLES)[number]
+/** The roles a member can be given directly; `owner` only moves by transfer. */
+export type TaskListAssignableRole = 'read' | 'edit'
+
+function isTaskListRole(value: unknown): value is TaskListRole {
+  return typeof value === 'string' && (TASK_LIST_ROLES as readonly string[]).includes(value)
+}
+
+export interface TaskList {
+  id: string
+  name: string
+  createdBy: string
+  /** The member holding `owner`; `null` only for a row without one. */
+  ownerId: string | null
+  /** ISO instant, or `null` while not archived. */
+  archivedAt: string | null
+  createdAt: string
+  updatedAt: string
+  /** The caller's own role on this list. */
+  myRole: TaskListRole
+}
+
+/** The `List` body of the list routes, or `null` for a malformed one. */
+export function parseTaskList(value: unknown): TaskList | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string') return null
+  if (typeof record.name !== 'string') return null
+  if (typeof record.createdBy !== 'string') return null
+  if (!isNullableString(record.ownerId)) return null
+  if (!isNullableString(record.archivedAt)) return null
+  if (typeof record.createdAt !== 'string') return null
+  if (typeof record.updatedAt !== 'string') return null
+  if (!isTaskListRole(record.myRole)) return null
+  return {
+    id: record.id,
+    name: record.name,
+    createdBy: record.createdBy,
+    ownerId: record.ownerId,
+    archivedAt: record.archivedAt,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    myRole: record.myRole,
+  }
+}
+
+function isTaskList(value: unknown): value is TaskList {
+  return parseTaskList(value) !== null
+}
+
+export type TaskListWriteResult = { kind: 'ok'; list: TaskList } | WriteFailure
+
+export type GetTaskListResult =
+  | { kind: 'ok'; list: TaskList }
+  | { kind: 'not_found' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; status?: number }
+
+function taskListsPath(includeArchived: boolean, offset: number): string {
+  return `/api/task-lists?includeArchived=${includeArchived ? 'true' : 'false'}&${pageQuery(offset)}`
+}
+
+/** `GET /api/task-lists` — one page of the caller's lists (`updatedAt` desc). The caller pages
+ *  with `offset` until `items.length === total`. */
+export async function listTaskLists(options: { includeArchived: boolean; offset: number }): Promise<CollectionResult<TaskList>> {
+  return readCollection(taskListsPath(options.includeArchived, options.offset), isTaskList)
+}
+
+/** Every page of `GET /api/task-lists` (the detail page's "my lists" read, design §4.3). */
+export async function listAllTaskLists(
+  options: { includeArchived: boolean },
+  readOptions: ReadAllOptions = {},
+): Promise<CollectionResult<TaskList>> {
+  return collectPages(
+    (offset) => readCollection(taskListsPath(options.includeArchived, offset), isTaskList),
+    (list) => list.id,
+    readOptions,
+  )
+}
+
+/** `POST /api/task-lists` `{ name }` — the caller becomes `owner`. Codes: `INVALID_NAME`
+ *  `NAME_TOO_LONG` (422 `validation`). */
+export async function createTaskList(name: string): Promise<TaskListWriteResult> {
+  const sent = await sendWrite('/api/task-lists', 'POST', { name })
+  if (!sent.ok) return sent.failure
+  const list = parseTaskList(sent.body)
+  return list ? { kind: 'ok', list } : { kind: 'error', status: sent.status }
+}
+
+/** `GET /api/task-lists/:id`. A missing list, another org's list and a list the caller is not a
+ *  member of are the same 404. */
+export async function getTaskList(id: string): Promise<GetTaskListResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  let response: Response
+  try {
+    response = await apiFetch(listPath(id))
+  } catch {
+    return { kind: 'error', status: 0 }
+  }
+  if (response.status === 403) return { kind: 'forbidden' }
+  if (response.status === 404) return { kind: 'not_found' }
+  if (response.status !== 200) return { kind: 'error', status: response.status }
+  const list = parseTaskList(await safeJson(response))
+  return list ? { kind: 'ok', list } : { kind: 'error', status: response.status }
+}
+
+/** `PATCH /api/task-lists/:id` `{ name }`. The same name is a no-op, still 200. Codes:
+ *  `INVALID_NAME` `NAME_TOO_LONG`. */
+export async function renameTaskList(id: string, name: string): Promise<TaskListWriteResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id), 'PATCH', { name })
+  if (!sent.ok) return sent.failure
+  const list = parseTaskList(sent.body)
+  return list ? { kind: 'ok', list } : { kind: 'error', status: sent.status }
+}
+
+async function setTaskListArchived(id: string, segment: 'archive' | 'unarchive'): Promise<TaskListWriteResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, `/${segment}`), 'POST')
+  if (!sent.ok) return sent.failure
+  const list = parseTaskList(sent.body)
+  return list ? { kind: 'ok', list } : { kind: 'error', status: sent.status }
+}
+
+// RULED(2026-10-07): [R13] — lists are archived, never deleted; there is no delete call.
+/** `POST /api/task-lists/:id/archive` — no body. Already archived is a no-op, still 200. */
+export async function archiveTaskList(id: string): Promise<TaskListWriteResult> {
+  return setTaskListArchived(id, 'archive')
+}
+
+/** `POST /api/task-lists/:id/unarchive` — no body. Not archived is a no-op, still 200. */
+export async function unarchiveTaskList(id: string): Promise<TaskListWriteResult> {
+  return setTaskListArchived(id, 'unarchive')
+}
+
+export interface TaskListEvent {
+  id: string
+  listId: string
+  actorId: string
+  /** A word of the server's closed set; the client checks only that it is a string and shows an
+   *  unknown word as is. */
+  eventType: string
+  payload: unknown
+  occurredAt: string
+}
+
+function isTaskListEvent(value: unknown): value is TaskListEvent {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string') return false
+  if (typeof record.listId !== 'string') return false
+  if (typeof record.actorId !== 'string') return false
+  if (typeof record.eventType !== 'string') return false
+  if (record.payload === undefined) return false
+  if (typeof record.occurredAt !== 'string') return false
+  return true
+}
+
+/** `GET /api/task-lists/:id/events` — one page (`occurredAt` desc). */
+export async function listTaskListEvents(id: string, options: { offset: number }): Promise<CollectionResult<TaskListEvent>> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  return readCollection(`${listPath(id, '/events')}?${pageQuery(options.offset)}`, isTaskListEvent)
+}
+
+// ---- 3.2 list members (S6) -------------------------------------------------------------------
+
+export interface TaskListMember {
+  userId: string
+  role: TaskListRole
+  createdAt: string
+}
+
+function isTaskListMember(value: unknown): value is TaskListMember {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.userId === 'string' && isTaskListRole(record.role) && typeof record.createdAt === 'string'
+}
+
+/** One row of a member write's `members` (no `createdAt`). */
+export interface TaskListMembership {
+  userId: string
+  role: TaskListRole
+}
+
+function isTaskListMembership(value: unknown): value is TaskListMembership {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.userId === 'string' && isTaskListRole(record.role)
+}
+
+/** The shared success shape of the four member writes: the list id and the full member roster. */
+export type TaskListMembersResult = { kind: 'ok'; id: string; members: TaskListMembership[] } | WriteFailure
+
+function membersResult(sent: { ok: true; body: unknown; status: number }): TaskListMembersResult {
+  const body = sent.body
+  if (!body || typeof body !== 'object') return { kind: 'error', status: sent.status }
+  const record = body as Record<string, unknown>
+  if (typeof record.id !== 'string') return { kind: 'error', status: sent.status }
+  if (!Array.isArray(record.members) || !record.members.every(isTaskListMembership)) return { kind: 'error', status: sent.status }
+  return { kind: 'ok', id: record.id, members: record.members }
+}
+
+/** `GET /api/task-lists/:id/members`, every page (the member cap is one page). */
+export async function listTaskListMembers(id: string, options: ReadAllOptions = {}): Promise<CollectionResult<TaskListMember>> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  return collectPages(
+    (offset) => readCollection(`${listPath(id, '/members')}?${pageQuery(offset)}`, isTaskListMember),
+    (member) => member.userId,
+    options,
+  )
+}
+
+// RULED(2026-10-07): [R12] — `owner` is never given directly; the creator cannot be removed;
+// an owner transfers first.
+// ASSUMPTION(task-m4-fe): [own-14] (PR-3a) — a member leaves through the same DELETE.
+/** `POST /api/task-lists/:id/members` `{ userId, role }`. Codes: `INVALID_MEMBER` `INVALID_ROLE`
+ *  `INACTIVE_ORG_MEMBER` `LIMIT`. Already a member is a no-op, still 200. */
+export async function addTaskListMember(id: string, userId: string, role: TaskListAssignableRole): Promise<TaskListMembersResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  if (!isPathSafeSegment(userId)) return { kind: 'validation', code: 'INVALID_MEMBER' }
+  const sent = await sendWrite(listPath(id, '/members'), 'POST', { userId, role })
+  return sent.ok ? membersResult(sent) : sent.failure
+}
+
+/** `PATCH /api/task-lists/:id/members/:userId` `{ role }`. A target that is not a member is a
+ *  plain 404. Codes: `INVALID_MEMBER` `INVALID_ROLE` `OWNER_MUST_TRANSFER`. */
+export async function changeTaskListMemberRole(id: string, userId: string, role: TaskListAssignableRole): Promise<TaskListMembersResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  if (!isPathSafeSegment(userId)) return { kind: 'validation', code: 'INVALID_MEMBER' }
+  const sent = await sendWrite(listPath(id, `/members/${encodeURIComponent(userId)}`), 'PATCH', { role })
+  return sent.ok ? membersResult(sent) : sent.failure
+}
+
+/** `DELETE /api/task-lists/:id/members/:userId` — no body; the caller's own id means leaving.
+ *  Codes: `INVALID_MEMBER` `CREATED_BY_IMMUTABLE` `OWNER_MUST_TRANSFER`. */
+export async function removeTaskListMember(id: string, userId: string): Promise<TaskListMembersResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  if (!isPathSafeSegment(userId)) return { kind: 'validation', code: 'INVALID_MEMBER' }
+  const sent = await sendWrite(listPath(id, `/members/${encodeURIComponent(userId)}`), 'DELETE')
+  return sent.ok ? membersResult(sent) : sent.failure
+}
+
+/** `POST /api/task-lists/:id/transfer-owner` `{ userId }`. Codes: `INVALID_MEMBER`
+ *  `TARGET_NOT_MEMBER` `INACTIVE_ORG_MEMBER`. The current owner as target is a no-op. */
+export async function transferTaskListOwner(id: string, userId: string): Promise<TaskListMembersResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  if (!isPathSafeSegment(userId)) return { kind: 'validation', code: 'INVALID_MEMBER' }
+  const sent = await sendWrite(listPath(id, '/transfer-owner'), 'POST', { userId })
+  return sent.ok ? membersResult(sent) : sent.failure
+}
+
+// ---- 3.2 list items (S7) ---------------------------------------------------------------------
+
+/** The strict form of a `TaskListItem` row (the list endpoints' snake_case six columns). */
+function isTaskListItem(value: unknown): value is TaskListItem {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  if (typeof record.id !== 'string') return false
+  if (typeof record.title !== 'string') return false
+  if (record.status !== 'open' && record.status !== 'done') return false
+  if (record.completion_mode !== 'all' && record.completion_mode !== 'any') return false
+  if (typeof record.created_by !== 'string') return false
+  if (!isNullableString(record.due_at)) return false
+  return true
+}
+
+/** `GET /api/task-lists/:id/items`, every page. Past `TASK_MAX_PAGES` the result has
+ *  `items.length < total`. */
+export async function listTaskListItems(id: string, options: ReadAllOptions = {}): Promise<CollectionResult<TaskListItem>> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  return collectPages(
+    (offset) => readCollection(`${listPath(id, '/items')}?${pageQuery(offset)}`, isTaskListItem),
+    (item) => item.id,
+    options,
+  )
+}
+
+export type TaskListItemResult = { kind: 'ok'; listId: string; taskId: string } | WriteFailure
+
+function listItemResult(sent: { ok: true; body: unknown; status: number }): TaskListItemResult {
+  const body = sent.body
+  if (!body || typeof body !== 'object') return { kind: 'error', status: sent.status }
+  const record = body as Record<string, unknown>
+  if (typeof record.listId !== 'string' || typeof record.taskId !== 'string') return { kind: 'error', status: sent.status }
+  return { kind: 'ok', listId: record.listId, taskId: record.taskId }
+}
+
+// RULED(2026-10-07): [own-25] (PR-3a, R12 (a1)) — adding needs a direct role on the task; the
+// 404 folds the three conditions together.
+/** `POST /api/task-lists/:id/items` `{ taskId }`. Codes: `INVALID_TASK` `LIMIT`. Already in the
+ *  list is a no-op, still 200. */
+export async function addTaskToList(id: string, taskId: string): Promise<TaskListItemResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, '/items'), 'POST', { taskId })
+  return sent.ok ? listItemResult(sent) : sent.failure
+}
+
+/** `DELETE /api/task-lists/:id/items/:taskId` — no body. */
+export async function removeTaskFromList(id: string, taskId: string): Promise<TaskListItemResult> {
+  if (!isPathSafeSegment(id) || !isPathSafeSegment(taskId)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, `/items/${encodeURIComponent(taskId)}`), 'DELETE')
+  return sent.ok ? listItemResult(sent) : sent.failure
+}
+
+// ---- 3.2 groups (S8) -------------------------------------------------------------------------
+
+export const TASK_GROUP_SCOPES = ['list', 'user'] as const
+export type TaskGroupScope = (typeof TASK_GROUP_SCOPES)[number]
+
+export interface TaskGroup {
+  /** `null` only for the personal scope's default group before its row exists. */
+  id: string | null
+  scope: TaskGroupScope
+  name: string
+  position: number
+  isDefault: boolean
+}
+
+/** A task's placement inside a group: `position` is the 0-based dense index in that group's
+ *  visible set, not a stored column. */
+export interface TaskPlacement {
+  groupId: string
+  taskId: string
+  position: number
+}
+
+// RULED(2026-10-07): [R11] — one default group per container.
+// ASSUMPTION(task-m4-fe): [own-24] (PR-3a) — the personal default group has `id: null` before its
+// row exists.
+/** One `Group` body for the given scope, or `null` for a malformed one: `scope` must be the
+ *  expected one; `id` may be `null` only in the personal scope and only for the default group. */
+export function parseTaskGroup(value: unknown, scope: TaskGroupScope): TaskGroup | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  if (record.scope !== scope) return null
+  if (!isNullableString(record.id)) return null
+  if (typeof record.name !== 'string') return null
+  if (!isNonNegativeInteger(record.position)) return null
+  if (typeof record.isDefault !== 'boolean') return null
+  if (record.id === null && (scope !== 'user' || !record.isDefault)) return null
+  return { id: record.id, scope, name: record.name, position: record.position, isDefault: record.isDefault }
+}
+
+function isTaskPlacement(value: unknown): value is TaskPlacement {
+  if (!value || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  return typeof record.groupId === 'string' && typeof record.taskId === 'string' && isNonNegativeInteger(record.position)
+}
+
+export type TaskGroupResult = { kind: 'ok'; group: TaskGroup } | WriteFailure
+export type DeleteTaskGroupResult = { kind: 'ok'; id: string; deleted: true; reassignedTo: string } | WriteFailure
+export type PlaceTaskResult = { kind: 'ok'; taskId: string; groupId: string; position: number } | WriteFailure
+
+function groupResult(sent: { ok: true; body: unknown; status: number }, scope: TaskGroupScope): TaskGroupResult {
+  const group = parseTaskGroup(sent.body, scope)
+  return group ? { kind: 'ok', group } : { kind: 'error', status: sent.status }
+}
+
+function deleteGroupResult(sent: { ok: true; body: unknown; status: number }): DeleteTaskGroupResult {
+  const body = sent.body
+  if (!body || typeof body !== 'object') return { kind: 'error', status: sent.status }
+  const record = body as Record<string, unknown>
+  if (typeof record.id !== 'string' || record.deleted !== true || typeof record.reassignedTo !== 'string') {
+    return { kind: 'error', status: sent.status }
+  }
+  return { kind: 'ok', id: record.id, deleted: true, reassignedTo: record.reassignedTo }
+}
+
+function placeResult(sent: { ok: true; body: unknown; status: number }): PlaceTaskResult {
+  const body = sent.body
+  if (!body || typeof body !== 'object') return { kind: 'error', status: sent.status }
+  const record = body as Record<string, unknown>
+  if (typeof record.taskId !== 'string' || typeof record.groupId !== 'string' || !isNonNegativeInteger(record.position)) {
+    return { kind: 'error', status: sent.status }
+  }
+  return { kind: 'ok', taskId: record.taskId, groupId: record.groupId, position: record.position }
+}
+
+function isListGroup(value: unknown): value is TaskGroup {
+  return parseTaskGroup(value, 'list') !== null
+}
+
+function isUserGroup(value: unknown): value is TaskGroup {
+  return parseTaskGroup(value, 'user') !== null
+}
+
+/** `GET /api/task-lists/:id/groups` — one page (the group cap fits in one). */
+export async function listTaskListGroups(id: string): Promise<CollectionResult<TaskGroup>> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  return readCollection(`${listPath(id, '/groups')}?${pageQuery(0)}`, isListGroup)
+}
+
+/** `POST /api/task-lists/:id/groups` `{ name }`. Codes: `INVALID_NAME` `NAME_TOO_LONG` `LIMIT`. */
+export async function createTaskListGroup(id: string, name: string): Promise<TaskGroupResult> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, '/groups'), 'POST', { name })
+  return sent.ok ? groupResult(sent, 'list') : sent.failure
+}
+
+/** `PATCH /api/task-lists/:id/groups/:groupId` `{ name }`. Codes: `INVALID_NAME` `NAME_TOO_LONG`. */
+export async function renameTaskListGroup(id: string, groupId: string, name: string): Promise<TaskGroupResult> {
+  if (!isPathSafeSegment(id) || !isPathSafeSegment(groupId)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, `/groups/${encodeURIComponent(groupId)}`), 'PATCH', { name })
+  return sent.ok ? groupResult(sent, 'list') : sent.failure
+}
+
+/** `DELETE /api/task-lists/:id/groups/:groupId` — no body; the group's items move to the default
+ *  group (`reassignedTo`). Code: `IS_DEFAULT`. */
+export async function deleteTaskListGroup(id: string, groupId: string): Promise<DeleteTaskGroupResult> {
+  if (!isPathSafeSegment(id) || !isPathSafeSegment(groupId)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, `/groups/${encodeURIComponent(groupId)}`), 'DELETE')
+  return sent.ok ? deleteGroupResult(sent) : sent.failure
+}
+
+/** `GET /api/task-lists/:id/group-items`, every page. */
+export async function listTaskListGroupItems(id: string, options: ReadAllOptions = {}): Promise<CollectionResult<TaskPlacement>> {
+  if (!isPathSafeSegment(id)) return { kind: 'not_found' }
+  return collectPages(
+    (offset) => readCollection(`${listPath(id, '/group-items')}?${pageQuery(offset)}`, isTaskPlacement),
+    (placement) => placement.taskId,
+    options,
+  )
+}
+
+/** `PUT /api/task-lists/:id/group-items/:taskId` `{ groupId, position }` — `groupId: null` names
+ *  the default group; `position` is the index in the target group's visible set. Codes:
+ *  `INVALID_GROUP` `INVALID_POSITION`. The same group and index is a no-op, still 200. */
+export async function placeTaskInListGroup(id: string, taskId: string, groupId: string | null, position: number): Promise<PlaceTaskResult> {
+  if (!isPathSafeSegment(id) || !isPathSafeSegment(taskId)) return { kind: 'not_found' }
+  const sent = await sendWrite(listPath(id, `/group-items/${encodeURIComponent(taskId)}`), 'PUT', { groupId, position })
+  return sent.ok ? placeResult(sent) : sent.failure
+}
+
+/** `GET /api/task-groups` — one page: the caller's personal groups, exactly one of them
+ *  `isDefault` (with `id: null` before its row exists). */
+export async function listUserGroups(): Promise<CollectionResult<TaskGroup>> {
+  return readCollection(`/api/task-groups?${pageQuery(0)}`, isUserGroup)
+}
+
+/** `POST /api/task-groups` `{ name }`. Codes: `INVALID_NAME` `NAME_TOO_LONG` `LIMIT`. */
+export async function createUserGroup(name: string): Promise<TaskGroupResult> {
+  const sent = await sendWrite('/api/task-groups', 'POST', { name })
+  return sent.ok ? groupResult(sent, 'user') : sent.failure
+}
+
+/** `PATCH /api/task-groups/:groupId` `{ name }`. Codes: `INVALID_NAME` `NAME_TOO_LONG`. */
+export async function renameUserGroup(groupId: string, name: string): Promise<TaskGroupResult> {
+  if (!isPathSafeSegment(groupId)) return { kind: 'not_found' }
+  const sent = await sendWrite(`/api/task-groups/${encodeURIComponent(groupId)}`, 'PATCH', { name })
+  return sent.ok ? groupResult(sent, 'user') : sent.failure
+}
+
+/** `DELETE /api/task-groups/:groupId` — no body. Code: `IS_DEFAULT`. */
+export async function deleteUserGroup(groupId: string): Promise<DeleteTaskGroupResult> {
+  if (!isPathSafeSegment(groupId)) return { kind: 'not_found' }
+  const sent = await sendWrite(`/api/task-groups/${encodeURIComponent(groupId)}`, 'DELETE')
+  return sent.ok ? deleteGroupResult(sent) : sent.failure
+}
+
+/** `GET /api/task-groups/items`, every page — placements of the tasks on the caller's assigned
+ *  view only. */
+export async function listUserGroupItems(options: ReadAllOptions = {}): Promise<CollectionResult<TaskPlacement>> {
+  return collectPages(
+    (offset) => readCollection(`/api/task-groups/items?${pageQuery(offset)}`, isTaskPlacement),
+    (placement) => placement.taskId,
+    options,
+  )
+}
+
+/** `PUT /api/task-groups/items/:taskId` `{ groupId, position }` — `groupId: null` names the
+ *  default group; the 200 body's `groupId` is the real id once the default group's row exists. A
+ *  task outside the caller's assigned view is a plain 404. Codes: `INVALID_GROUP`
+ *  `INVALID_POSITION`. */
+export async function placeTaskInUserGroup(taskId: string, groupId: string | null, position: number): Promise<PlaceTaskResult> {
+  if (!isPathSafeSegment(taskId)) return { kind: 'not_found' }
+  const sent = await sendWrite(`/api/task-groups/items/${encodeURIComponent(taskId)}`, 'PUT', { groupId, position })
+  return sent.ok ? placeResult(sent) : sent.failure
 }
