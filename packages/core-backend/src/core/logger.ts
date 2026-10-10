@@ -98,10 +98,24 @@ export class Logger {
   private writePrivateObservation(level: 'debug' | 'info' | 'warn' | 'error'): boolean {
     const requestContext = getRequestContext()
     if (requestContext?.privateObservationSurface !== 'yida-owner-http') return false
-    this.winston[level](`YIDA_OWNER_HTTP_${level.toUpperCase()}`, {
+    const meta = {
       correlation_id: requestContext.correlationId,
       requestId: requestContext.correlationId,
-    })
+    }
+    switch (level) {
+      case 'debug':
+        this.winston.debug('YIDA_OWNER_HTTP_DEBUG', meta)
+        break
+      case 'info':
+        this.winston.info('YIDA_OWNER_HTTP_INFO', meta)
+        break
+      case 'warn':
+        this.winston.warn('YIDA_OWNER_HTTP_WARN', meta)
+        break
+      case 'error':
+        this.winston.error('YIDA_OWNER_HTTP_ERROR', meta)
+        break
+    }
     return true
   }
 

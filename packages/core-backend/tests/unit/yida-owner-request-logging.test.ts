@@ -379,6 +379,33 @@ describe('owner private request logging through production producers and Console
     }
   })
 
+  it.each(['debug', 'info', 'warn', 'error'] as const)(
+    'preserves actual %s without request context or request-id bridge', level => {
+      expect(getRequestContext()).toBeUndefined()
+      runWithLogContext({}, () => {
+        const error = new Error(sentinels.error)
+        error.stack = sentinels.stack
+        if (level === 'error') logger.error(sentinels.message, error)
+        else if (level === 'warn') logger.warn(sentinels.message, error)
+        else logger[level](sentinels.message, { private: sentinels.meta })
+      })
+      expect(entries).toHaveLength(1)
+      const entry = entries[0]
+      expect(entry.message).toBe(sentinels.message)
+      expect(entry[Symbol.for('level')]).toBe(level)
+      expect(entry.correlation_id).toBeUndefined()
+      expect(entry.requestId).toBeUndefined()
+      expect(entry.user_id).toBeUndefined()
+      expect(entry.tenant_id).toBeUndefined()
+      if (level === 'warn' || level === 'error') {
+        expect(entry.error).toBe(sentinels.error)
+        expect(entry.stack).toBe(sentinels.stack)
+      } else {
+        expect(entry.private).toBe(sentinels.meta)
+      }
+    },
+  )
+
   it('redacts actual method-override Logger output without changing its decision', () => {
     const req = syntheticRequest('POST', `${PREFIX}/approvals/${sentinels.path}/revoke`)
     req.headers['x-http-method-override'] = 'DELETE'
