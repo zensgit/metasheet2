@@ -8,7 +8,11 @@ import {
 } from './ensureFieldsOverwriteMode'
 import { assertRichLongTextToggleAllowed, mapFieldType, sanitizeFieldProperty } from './field-codecs'
 import { fenceWriterEntry } from './canonical-sheet-fence'
-import { isSystemSheetKind } from './system-sheet-predicate'
+import { isSystemSheetKind, STOCK_PREP_OVERVIEW_SHEET_KIND } from './system-sheet-predicate'
+import {
+  SheetSystemKindConflictError,
+  isStockPreparationOverviewSheetIdCandidate,
+} from './stock-preparation-overview-contract'
 import type { MultitableRepairTransactionSurface } from '../types/plugin'
 import type {
   MultitableProvisioningFieldDescriptor,
@@ -475,12 +479,31 @@ export async function findObjectView(
  * server-owned kind (`isSystemSheetKind`) or the call throws — an unknown or malformed kind never reaches
  * the table, so it can never mint a system identity the trust predicate would then honour.
  */
-function resolveSheetSystemKindStamp(value: unknown): string | null {
+function resolveSheetSystemKindStamp(value: unknown, sheetId?: unknown): string | null {
   if (value === undefined || value === null) return null
   if (!isSystemSheetKind(value)) {
     throw new Error('unknown system kind')
   }
+  // Fix round 1 (R12 / R8): the stock-preparation overview stamp is admitted ONLY on a host-derived sheet
+  // id (`sheet_` + 24 hex). That is what lets every capability resolver skip the kind lookup for any other
+  // id (stock-preparation-overview-contract.ts, part 3) — so it is enforced here, before any IO, rather
+  // than assumed. `ensureObject` always derives the id, so a legitimate caller never trips it.
+  if (value === STOCK_PREP_OVERVIEW_SHEET_KIND && !isStockPreparationOverviewSheetIdCandidate(sheetId)) {
+    throw new Error('system kind not admitted for this sheet id')
+  }
   return value as string
+}
+
+/**
+ * Fix round 1 (R8c): a STAMPED ensure never adopts a sheet whose stored kind differs. ON CONFLICT DO
+ * NOTHING leaves an existing row's kind untouched (P1-a), so without this an unstamped sheet that already
+ * sat at the derived id would come back from `ensureSheet` and `ensureObject` would go on to write the
+ * template's fields onto it — committed before any caller could look at the kind. Thrown here, inside the
+ * provisioning transaction, BEFORE ensureFields: the whole ensure rolls back and nothing is written.
+ */
+function assertStampedSheetAdoptable(sheet: MultitableProvisioningSheet, systemKind: string | null): void {
+  if (systemKind === null) return
+  if (sheet.systemKind !== systemKind) throw new SheetSystemKindConflictError()
 }
 
 /**
@@ -515,7 +538,7 @@ export async function createSheet(
   input: EnsureSheetInput,
 ): Promise<CreateSheetResult> {
   const query = input.query
-  const systemKind = resolveSheetSystemKindStamp(input.systemKind)
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, input.sheetId)
   const baseId = input.baseId ?? await ensureLegacyBase(query)
   await fenceWriterEntry(query, input.sheetId)
   const insert = await insertSheetRow(query, input, baseId, systemKind)
@@ -535,7 +558,7 @@ export async function ensureSheet(
   input: EnsureSheetInput,
 ): Promise<MultitableProvisioningSheet> {
   const query = input.query
-  const systemKind = resolveSheetSystemKindStamp(input.systemKind)
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, input.sheetId)
   const baseId = input.baseId ?? await ensureLegacyBase(query)
 
   await fenceWriterEntry(query, input.sheetId)
@@ -545,6 +568,7 @@ export async function ensureSheet(
   if (!sheet) {
     throw new Error(`Failed to ensure sheet: ${input.sheetId}`)
   }
+  assertStampedSheetAdoptable(sheet, systemKind)
   return sheet
 }
 
@@ -1043,9 +1067,9 @@ export async function ensureObject(
   fields: MultitableProvisioningField[]
 }> {
   // S3: refuse an unknown stamp before the legacy-base INSERT, and forward the checked value.
-  const systemKind = resolveSheetSystemKindStamp(input.systemKind)
-  const baseId = input.baseId ?? await ensureLegacyBase(input.query)
   const sheetId = getObjectSheetId(input.projectId, input.descriptor.id)
+  const systemKind = resolveSheetSystemKindStamp(input.systemKind, sheetId)
+  const baseId = input.baseId ?? await ensureLegacyBase(input.query)
   const sheet = await ensureSheet({
     query: input.query,
     sheetId,

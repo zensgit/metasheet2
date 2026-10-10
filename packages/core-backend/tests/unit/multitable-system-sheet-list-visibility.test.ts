@@ -308,7 +308,7 @@ describe('#5825 — list visibility uses system_kind OR the People sentinel', ()
   // recognized system kind, but unlike People it must stay LISTED and SELECTABLE — the host makes it
   // read-only by clamping capabilities, never by hiding it. ADMIN_USER is a platform admin, so this also
   // pins that the clamp reaches admins on the real /context route.
-  it('S3: a stock_prep_overview sheet stays listed and selectable, and /context clamps even an admin to read + export', async () => {
+  it('S3: a stock_prep_overview sheet stays listed and selectable, and /context clamps even an admin to read + export (+ access management, fix round 1 R1)', async () => {
     store.sheets.push(sheet('sheet_s3_overview', '2026-01-06T00:00:00.000Z', { name: 'Overview', description: null, system_kind: 'stock_prep_overview' }))
     expect(isHiddenSystemSheet({ system_kind: 'stock_prep_overview', description: null })).toBe(false)
     pinned.setApp(await buildApp(store))
@@ -328,7 +328,9 @@ describe('#5825 — list visibility uses system_kind OR the People sentinel', ()
       canDeleteRecord: false,
       canManageFields: false,
       canManageViews: false,
-      canManageSheetAccess: false,
+      // Fix round 1 (R1): access management is KEPT as resolved (the admin may share the overview for READING;
+      // the grant routes refuse any level above read).
+      canManageSheetAccess: true,
       canManageAutomation: false,
       canComment: false,
       canDeleteSheet: false,

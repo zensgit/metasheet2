@@ -387,6 +387,11 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, projectId)
         return multitable.provisioning.getObjectViewId(projectId, objectId, viewId)
       },
+      // S3 fix round 1 (R8c): the host's declaration that it stamps a requested `systemKind` at INSERT and
+      // reports it back. A boolean about the HOST, not about any object — forwarded as-is (only `true`
+      // counts), so a plugin can fail closed BEFORE any write on a host that would create an ordinary,
+      // writable sheet where a read-only one was meant.
+      ...(multitable.provisioning?.supportsSystemKindStamp === true ? { supportsSystemKindStamp: true } : {}),
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)
@@ -586,6 +591,64 @@ export function createPluginScopedMultitableApi(
                 throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
               }
               return multitable.provisioning.grantSheetRoleWrite!({
+                projectId,
+                sheetId,
+                objectId,
+                roleIds,
+                actorId: typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null,
+              })
+            },
+          }
+        : {}),
+      // S3 fix round 1 (R1): G1 for the PROJECT OVERVIEW — the configured roles get READ on the overview
+      // sheet. The same least-privilege posture and the same order as `grantSheetRoleWrite` above, each
+      // step refusing before the next does any IO; the one difference is WHICH object: only the overview
+      // object id is admitted (a project sheet, the main table or any other object is refused here, and the
+      // host re-checks the sheet's `stock_prep_overview` kind inside its write transaction). The level is
+      // the host's literal `spreadsheet:read`; nothing here can ask for more.
+      ...(typeof multitable.provisioning?.grantOverviewRoleRead === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
+        ? {
+            grantOverviewRoleRead: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+              roleIds: string[]
+              actorId?: string | null
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              const roleIds = normalizeStockPreparationGrantRoleIds(input.roleIds)
+              if (objectId !== STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_OVERVIEW_GRANT_OBJECT_NOT_OVERVIEW',
+                  'an overview read grant may target only the stock-preparation project overview object',
+                  { field: 'objectId' },
+                )
+              }
+              if (typeof sheetId !== 'string' || sheetId.trim().length === 0
+                || multitable.provisioning.getObjectSheetId(projectId, objectId) !== sheetId) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_SHEET_MISMATCH',
+                  'the sheet is not the one derived for this project and objectId',
+                  { objectId },
+                )
+              }
+              if (!hooks.assertSheetOwnedByPlugin) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unverifiable')
+              }
+              await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+              const ownedByProject = hooks.isSheetOwnedByProject
+                ? await hooks.isSheetOwnedByProject({ sheetId, projectId })
+                : await multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
+              if (ownedByProject !== true) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
+              }
+              return multitable.provisioning.grantOverviewRoleRead!({
                 projectId,
                 sheetId,
                 objectId,

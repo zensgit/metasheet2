@@ -360,15 +360,7 @@ describe('D7 flag-off HTTP parity', () => {
   // The pin's PURPOSE is intact: it still proves the flag-off path is byte-identical across every
   // non-exact archive flag value. Only the frozen constant moved, and only by the one added query.
   // Previous value (pre-soft-delete): d44200359ffcbed8462e9655944244dbfd6933e11351e5b687b31b82e83876f6
-  //
-  // REBASELINED DELIBERATELY AGAIN (S3, ADR adr-stock-prep-project-sheets-20261008 §5): every capability
-  // resolution now also asks whether the sheet is the stock-preparation project overview (the host clamps
-  // it to read/export for every person) — ONE added statement per resolution, the column-tolerant kind
-  // lookup below. The test proves that is the ONLY change: the trace with exactly those statements removed
-  // still hashes to the pre-S3 value, responses included.
-  const PRE_S3_FLAG_OFF_SHA256 = '626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455'
-  const S3_OVERVIEW_KIND_LOOKUP_SQL = "SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND (to_jsonb(meta_sheets) ->> 'system_kind') = $2"
-  const HISTORICAL_FLAG_OFF_SHA256 = 'abe3a91847f0df26ae274d706d8a9b01ba141d8fb456cdb1a820ae7e43317263'
+  const HISTORICAL_FLAG_OFF_SHA256 = '626bd3e1d1fbe6010b149ca7fba822462312094a2a67911d26de2577056db455'
 
   it('keeps existing recovery responses and SQL byte-identical for every non-exact archive flag value', async () => {
     const probe = async (archiveFlag: string | undefined) => {
@@ -404,13 +396,6 @@ describe('D7 flag-off HTTP parity', () => {
     const baseline = await probe(undefined)
     expect(createHash('sha256').update(JSON.stringify(baseline)).digest('hex'))
       .toBe(HISTORICAL_FLAG_OFF_SHA256)
-    // S3: the only delta from the pre-S3 pin is the overview kind lookup (at least one, each for this sheet).
-    const overviewLookups = baseline.sql.filter((entry) => entry.sql === S3_OVERVIEW_KIND_LOOKUP_SQL)
-    expect(overviewLookups.length).toBeGreaterThan(0)
-    for (const entry of overviewLookups) expect(entry.params).toEqual([[SHEET], 'stock_prep_overview'])
-    const withoutOverviewLookups = { ...baseline, sql: baseline.sql.filter((entry) => entry.sql !== S3_OVERVIEW_KIND_LOOKUP_SQL) }
-    expect(createHash('sha256').update(JSON.stringify(withoutOverviewLookups)).digest('hex'))
-      .toBe(PRE_S3_FLAG_OFF_SHA256)
     for (const value of ['false', 'TRUE', ' true ', '1']) {
       expect(await probe(value)).toEqual(baseline)
     }

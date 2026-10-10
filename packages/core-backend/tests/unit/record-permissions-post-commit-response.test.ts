@@ -55,8 +55,6 @@ function createSqlHandler(opts: { dbAdmin: boolean }): (sql: string, params?: un
     if (q.includes('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
 
     if (q.includes('FROM meta_sheets') && q.includes('base_id = $2')) return { rows: [] }
-    // S3: the stock-preparation overview kind lookup — this sheet is not the overview.
-    if (q.includes('FROM meta_sheets') && q.includes("'system_kind') = $2")) return { rows: [] }
     if (q.includes('FROM meta_sheets') && q.includes('WHERE id = $1')) {
       return {
         rows: [{

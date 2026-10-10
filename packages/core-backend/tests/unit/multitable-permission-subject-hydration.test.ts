@@ -93,8 +93,6 @@ function sheetScaffold(sql: string, params?: unknown[]): QueryResult | null {
     return { rows: [{ sheet_id: 'sheet_ops', perm_code: 'spreadsheet:admin', subject_type: 'user' }] }
   }
   if (/FROM meta_sheets WHERE id = ANY[\s\S]*base_id/i.test(sql)) return { rows: [] }
-  // S3: the stock-preparation overview kind lookup — sheet_ops is not the overview.
-  if (/FROM meta_sheets WHERE id = ANY[\s\S]*'system_kind'/i.test(sql)) return { rows: [] }
   if (/^\s*INSERT\s+INTO\s+meta_config_revisions\b/i.test(sql)) return { rows: [], rowCount: 0 }
   return null
 }

@@ -3,7 +3,6 @@ import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 import { configRevisionNoop } from './config-revision-mock'
-import { answerNotStockPrepOverview, isStockPrepOverviewKindQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -14,8 +13,6 @@ type QueryHandler = (sql: string, params?: unknown[]) => QueryResult | Promise<Q
 
 function createMockPool(queryHandler: QueryHandler) {
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
-    // S3: no fixture here is the stock-preparation overview — see ./sheet-liveness-mock.ts.
-    if (isStockPrepOverviewKindQuery(sql)) return answerNotStockPrepOverview()
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }

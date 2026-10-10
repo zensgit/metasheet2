@@ -1,7 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { answerNotStockPrepOverview, answerSheetLiveness, isSheetLivenessQuery, isStockPrepOverviewKindQuery } from './sheet-liveness-mock'
+import { answerSheetLiveness, isSheetLivenessQuery } from './sheet-liveness-mock'
 
 type QueryResult = {
   rows: any[]
@@ -15,8 +15,6 @@ function createMockPool(queryHandler: QueryHandler) {
     // SHEET LIVENESS (soft delete) — see ./sheet-liveness-mock.ts for why this translates rather
     // than enumerates. Each test keeps its own notion of which sheets exist.
     if (isSheetLivenessQuery(sql)) return answerSheetLiveness(queryHandler, params)
-    // S3: no fixture here is the stock-preparation overview — see ./sheet-liveness-mock.ts.
-    if (isStockPrepOverviewKindQuery(sql)) return answerNotStockPrepOverview()
     if (sql.includes('FROM spreadsheet_permissions')) {
       return { rows: [], rowCount: 0 }
     }

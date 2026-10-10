@@ -123,7 +123,12 @@ import {
   isHiddenSystemSheet,
   isSystemPeopleSheetDescription,
 } from '../multitable/system-sheet-predicate'
-import { restrictStockPreparationOverviewCapabilities } from '../multitable/stock-preparation-overview-contract'
+import {
+  STOCK_PREP_OVERVIEW_GRANT_REFUSAL,
+  isStockPreparationOverviewGrantableAccessLevel,
+  isStockPreparationOverviewSheetIdCandidate,
+  restrictStockPreparationOverviewCapabilities,
+} from '../multitable/stock-preparation-overview-contract'
 // #5807 — the ONE read-side quantity bound for the People system sheet (window + refusal). It is a
 // bound, never a grant: every call site below sits AFTER the unchanged canRead/liveness gate.
 import {
@@ -4890,6 +4895,26 @@ function sendElearningProjectionIdentityForbidden(res: Response) {
     error: {
       code: 'FORBIDDEN',
       message: ELEARNING_PROJECTION_IDENTITY_FORBIDDEN_MESSAGE,
+    },
+  })
+}
+
+/**
+ * S3 fix round 1 (R8a) — the HOST-DERIVED sheet-id namespace (`sheet_` + 24 hex, provisioning.ts
+ * `stableMetaId`) is minted only by server provisioning. A client that could create a sheet at such an id
+ * could pre-create the stock-preparation project overview's derived id and block it forever (the plugin
+ * refuses an unstamped sheet there) — and squat any other plugin-provisioned sheet the same way. Reserved
+ * the way the e-learning projection ids are: refused before any read or write, values-free (the id is not
+ * echoed). Client-generated ids (`sheet_<uuid>`) never have this shape.
+ */
+const DERIVED_SHEET_ID_RESERVED_MESSAGE = 'This sheet id is reserved for server-provisioned sheets'
+
+function sendDerivedSheetIdReserved(res: Response) {
+  return res.status(403).json({
+    ok: false,
+    error: {
+      code: 'SHEET_ID_RESERVED',
+      message: DERIVED_SHEET_ID_RESERVED_MESSAGE,
     },
   })
 }
@@ -9829,9 +9854,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
     try {
       const pool = poolManager.get()
-      const { capabilities, sheetLiveness } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
+      const { capabilities, sheetLiveness, stockPrepOverview } = await resolveSheetCapabilities(req, pool.query.bind(pool), sheetId)
       if (!capabilities.canManageSheetAccess) return sendForbidden(res)
       if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
+      // S3 fix round 1 (R1): the stock-preparation project overview keeps access management (so it can be
+      // shared for READING — G2) but every grant on it is read-only: a level above read is refused here,
+      // before any subject lookup or write, and a row that exists anyway is ignored by the clamp.
+      if (stockPrepOverview && !isStockPreparationOverviewGrantableAccessLevel(parsed.data.accessLevel)) {
+        return res.status(409).json(STOCK_PREP_OVERVIEW_GRANT_REFUSAL)
+      }
 
       if (subjectType !== 'user' && parsed.data.accessLevel === 'write-own') {
         return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'write-own is only supported for direct user grants' } })
@@ -16442,6 +16473,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     ) {
       return sendElearningProjectionIdentityForbidden(res)
     }
+    // S3 fix round 1 (R8a): a client may not mint a host-derived sheet id (the overview's included).
+    if (parsed.data.id !== undefined && isStockPreparationOverviewSheetIdCandidate(sheetId)) {
+      return sendDerivedSheetIdReserved(res)
+    }
 
     try {
       const pool = poolManager.get()
@@ -17463,6 +17498,10 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // would RESURRECT IT BY GET — a plain read silently undoing a delete, bypassing the restore
       // authority entirely. Absent means "create it"; deleted means "it was deliberately removed".
       const seedMayMaterialize = seed && sheetLiveness === 'absent'
+      // S3 fix round 1 (R8a): the seed path MINTS a caller-chosen id when it is absent — the same
+      // reservation as POST /sheets, so the host-derived namespace (the overview's id included) can only
+      // be created by server provisioning.
+      if (seedMayMaterialize && isStockPreparationOverviewSheetIdCandidate(sheetId)) return sendDerivedSheetIdReserved(res)
       if (!seedMayMaterialize && sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       // #5807 — People system sheet: bound the QUANTITY, never the authority. Resolved AFTER the 401/403/
       // 404 above (it must add no oracle) and BEFORE every record query below, so the SQL itself asks for

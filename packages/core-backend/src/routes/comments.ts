@@ -32,6 +32,7 @@ import {
 import { loadSheetLivenessBatch } from '../multitable/sheet-liveness'
 import { resolveMultitableBusinessTimezone } from '../multitable/business-timezone'
 import { sendSheetNotLive } from '../multitable/sheet-refusals'
+import { STOCK_PREP_OVERVIEW_COMMENT_REFUSAL } from '../multitable/stock-preparation-overview-contract'
 import {
   CommentAccessError,
   CommentConflictError,
@@ -168,6 +169,12 @@ type CommentReadContext = {
    */
   authenticatedUserId: string
   deniedRowIds: Set<string>
+  /**
+   * S3 fix round 1 (R11): the sheet is the stock-preparation project overview — readable, but its
+   * `canComment` is clamped false for every person, admins included. The comment WRITE routes refuse on it
+   * (`refuseCommentWriteOnReadOnlySheet`); reads and the caller's own read-state marks are unaffected.
+   */
+  stockPrepOverview: boolean
 }
 
 /**
@@ -194,7 +201,7 @@ async function resolveCommentReadContext(
 ): Promise<CommentReadContext | null> {
   const pool = poolManager.get()
   const query = pool.query.bind(pool)
-  const { access, capabilities, sheetLiveness } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
+  const { access, capabilities, sheetLiveness, stockPrepOverview } = await resolveSheetReadableCapabilities(req, query, spreadsheetId)
   if (!capabilities.canRead) {
     res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: COMMENT_ACCESS_FORBIDDEN_MESSAGE } })
     return null
@@ -216,7 +223,26 @@ async function resolveCommentReadContext(
       deniedRowIds.add(rowId)
     }
   }
-  return { userId: access.userId || getUserId(req), authenticatedUserId: access.userId || '', deniedRowIds }
+  return {
+    userId: access.userId || getUserId(req),
+    authenticatedUserId: access.userId || '',
+    deniedRowIds,
+    stockPrepOverview: stockPrepOverview === true,
+  }
+}
+
+/**
+ * S3 fix round 1 (R11) — the comment surface's half of the overview clamp. The capability resolvers set
+ * `canComment=false` on the stock-preparation project overview for every person, but these routes gate on
+ * the sheet READ plus the global `comments:write` code, so the clamped bit was never consulted. Every
+ * comment WRITE (create, edit, delete, react, resolve) on the overview is refused here, after the read gate
+ * and liveness (no new oracle: the caller already may read the sheet) and before any write. Values-free.
+ * Returns true when it answered.
+ */
+function refuseCommentWriteOnReadOnlySheet(res: Response, context: CommentReadContext): boolean {
+  if (!context.stockPrepOverview) return false
+  res.status(403).json(STOCK_PREP_OVERVIEW_COMMENT_REFUSAL)
+  return true
 }
 
 type CommentIdContext = CommentReadContext & { address: CommentAddressRecord }
@@ -758,6 +784,7 @@ export function commentsRouter(injector?: Injector): Router {
       }
       const context = await resolveCommentReadContext(req, res, spreadsheetId)
       if (!context) return // G-8 sheet-visibility gate (canComment && canRead)
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       if (isRowDenied(context, rowId)) {
         return res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not permitted to comment on this record' } })
       }
@@ -799,6 +826,7 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       const comment = await commentService.updateComment(commentId, getUserId(req), parsed.data)
       return res.json({ ok: true, data: { comment } })
     } catch (error) {
@@ -816,6 +844,7 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       await commentService.deleteComment(commentId, getUserId(req))
       return res.status(204).end()
     } catch (error) {
@@ -858,6 +887,7 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       await commentService.addReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(201).json({ ok: true, data: {} })
     } catch (error) {
@@ -879,6 +909,7 @@ export function commentsRouter(injector?: Injector): Router {
     try {
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       await commentService.removeReaction(commentId, getUserId(req), parsed.data.emoji)
       return res.status(204).end()
     } catch (error) {
@@ -918,6 +949,7 @@ export function commentsRouter(injector?: Injector): Router {
       // (this gate) plus comments:write (rbacGuard above). A stricter rule is tracked in #5841.
       const context = await resolveCommentIdContext(req, res, commentService, commentId)
       if (!context) return // #5831: the comment's own sheet — read gate, liveness, row deny
+      if (refuseCommentWriteOnReadOnlySheet(res, context)) return // S3 fix round 1 (R11)
       await commentService.resolveComment(commentId)
       return res.status(204).end()
     } catch (error) {

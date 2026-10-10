@@ -301,12 +301,6 @@ export class FakePg {
       const ids = new Set(asStringArray(p(0)))
       return ok(sheets.filter((r) => ids.has(String(r.id)) && r.base_id === s(1)).map((r) => ({ id: r.id })))
     }
-    // S3: the stock-preparation overview clamp's kind lookup (stock-preparation-overview-contract.ts),
-    // answered from the row's own system_kind like PostgreSQL's column-tolerant `to_jsonb` read.
-    if (sql === "SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND (to_jsonb(meta_sheets) ->> 'system_kind') = $2") {
-      const ids = new Set(asStringArray(p(0)))
-      return ok(sheets.filter((r) => ids.has(String(r.id)) && (r.system_kind ?? null) === s(1)).map((r) => ({ id: r.id })))
-    }
     if (sql.startsWith('SELECT id FROM meta_sheets WHERE id = ANY($1::text[]) AND deleted_at IS NULL')) {
       const ids = new Set(asStringArray(p(0)))
       return ok(sheets.filter((r) => ids.has(String(r.id)) && r.deleted_at === null).map((r) => ({ id: r.id })))

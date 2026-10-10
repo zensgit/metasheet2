@@ -87,6 +87,10 @@ import {
   resolveSheetBaseIdForTrash,
 } from './side-door-delete-trash'
 import { resolveCrossBaseWriteAuthority } from './cross-base-write-authority'
+import {
+  STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL,
+  loadStockPreparationOverviewSheetIds,
+} from './stock-preparation-overview-contract'
 import { publishMultitableSheetRealtime } from './realtime-publish'
 import { MemoryRateLimitStore, type RateLimitStore } from '../middleware/rate-limiter'
 import {
@@ -214,6 +218,19 @@ type RuntimeParallelBranch = {
   label?: string
   actions: AutomationAction[]
 }
+
+/**
+ * S3 fix round 1 (R4): the automation actions that WRITE a record (or its lock / form-write-back columns).
+ * Every one of them is refused on the stock-preparation project overview before any write — see
+ * `AutomationExecutor.refuseRecordActionOnStockPrepOverview`.
+ */
+const STOCK_PREP_OVERVIEW_GUARDED_ACTIONS: ReadonlySet<AutomationActionType> = new Set<AutomationActionType>([
+  'update_record',
+  'create_record',
+  'delete_record',
+  'lock_record',
+  'write_approval_form_values',
+])
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -2688,7 +2705,17 @@ export class AutomationExecutor {
     let result: AutomationStepResult
 
     try {
-      switch (action.type) {
+      // S3 fix round 1 (R4; ADR adr-stock-prep-project-sheets-20261008 §5 「对所有人生效，含管理员」): the
+      // stock-preparation project overview is written ONLY by its plugin. The record actions below write
+      // through bare SQL with no person capability in front of them (same-base create has no gate at all;
+      // the cross-base gate checks base write only), so the clamp the capability resolvers apply never sees
+      // them. Refused here, for every sheet the action could address — the trigger sheet, `targetSheetId`
+      // and create's `sheetId` — before any write, read-only lookup excepted. An action whose candidate ids
+      // cannot be an overview (the derived-id prefilter) issues no statement and runs exactly as before.
+      const overviewRefusal = await this.refuseRecordActionOnStockPrepOverview(action, context)
+      if (overviewRefusal) {
+        result = overviewRefusal
+      } else switch (action.type) {
         case 'update_record':
           result = await this.executeUpdateRecord(action.config, context, identity)
           break
@@ -2788,6 +2815,29 @@ export class AutomationExecutor {
     }
 
     return result
+  }
+
+  /**
+   * S3 fix round 1 (R4) — the automation half of the stock-preparation overview's read-only guarantee.
+   * Returns a failed step (values-free: a fixed code + sentence, no id) when a RECORD action could write an
+   * overview sheet, else null. Candidate sheets are every id the action may address: the trigger sheet
+   * (the same-base default target of update / delete / lock / form write-back), `config.targetSheetId`
+   * (cross-base update / delete / lock) and `config.sheetId` (create's target, same- or cross-base). Over-
+   * refusing a rule whose TRIGGER is the overview is deliberate: nobody may author automations there
+   * (`canManageAutomation` is clamped), so such a rule can only predate the stamp.
+   * Not a record action → null with no IO; no candidate in the derived-id namespace → null with no IO.
+   */
+  private async refuseRecordActionOnStockPrepOverview(
+    action: AutomationAction,
+    context: ExecutionContext,
+  ): Promise<AutomationStepResult | null> {
+    if (!STOCK_PREP_OVERVIEW_GUARDED_ACTIONS.has(action.type)) return null
+    const config = isPlainRecord(action.config) ? action.config : {}
+    const candidates = [context.sheetId, config.targetSheetId, config.sheetId]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    const overviews = await loadStockPreparationOverviewSheetIds(this.deps.queryFn, candidates)
+    if (overviews.size === 0) return null
+    return { actionType: action.type, status: 'failed', error: STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL }
   }
 
   private async notifyRuleCreatorOfDingTalkGroupFailure(

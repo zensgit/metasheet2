@@ -63,6 +63,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 // column). See the service file header for the load-bearing property and the removal path.
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
+import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -856,6 +857,10 @@ export class MetaSheetServer {
           // read-only sibling of the two accessors above. 项目备料页 composes its multitable deep
           // link from this, AFTER proving the sheet itself exists through findObjectSheet.
           getObjectViewId: (projectId, objectId, viewId) => getProvisionedObjectViewId(projectId, objectId, viewId),
+          // S3 fix round 1 (R8c): this host stamps a requested `systemKind` at INSERT, refuses to adopt an
+          // existing sheet of another kind (provisioning.ts), and reports `systemKind` on every sheet it
+          // returns. The overview plugin checks this declaration before any write and fails closed without it.
+          supportsSystemKindStamp: true,
           findObjectSheet: async ({ projectId, objectId }) => {
             const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {
               const result = await poolManager.get().query(sql, params)
@@ -1131,6 +1136,26 @@ export class MetaSheetServer {
                 }
               }
               return grantStockPreparationProjectSheetRoleWrite(txQuery, { sheetId, roleIds, actorId })
+            })
+          },
+          // 一个项目一张备料表 S3 fix round 1 (R1): G1 for the PROJECT OVERVIEW — the configured stock-prep
+          // roles get `spreadsheet:read` (a literal) on the overview sheet, so the floor can open the
+          // read-only overview. ONE transaction (row lock + liveness, the overview kind re-read under the
+          // lock, role existence, add-only insert, history row); refusals propagate unwrapped. The scope
+          // wrapper (plugin-scope.ts) already refused everything about WHICH sheet and hands the port to
+          // plugin-integration-core only.
+          grantOverviewRoleRead: async ({ sheetId, roleIds, actorId }) => {
+            return poolManager.get().transaction(async ({ query }) => {
+              const txQuery = async (sql: string, params?: unknown[]) => {
+                const result = await query(sql, params)
+                return {
+                  rows: Array.isArray((result as { rows?: unknown[] }).rows)
+                    ? (result as { rows: unknown[] }).rows
+                    : [],
+                  rowCount: (result as { rowCount?: number | null }).rowCount ?? null,
+                }
+              }
+              return grantStockPreparationOverviewRoleRead(txQuery, { sheetId, roleIds, actorId })
             })
           },
         },

@@ -335,6 +335,8 @@ describeDb('W2 scoped canonical repair (real provisioning surface, real DB)', ()
 import { assertPluginOwnsSheet, claimPluginObjectScope, isSheetOwnedByProject, MultitableSheetScopeError } from '../../src/multitable/plugin-scope'
 import { listSheetPermissionEntries, resolveSheetCapabilitiesForAccess } from '../../src/multitable/permission-service'
 import { grantStockPreparationProjectSheetRoleWrite } from '../../src/services/stock-preparation-project-sheet-grants'
+// S3 fix round 1 (R1): the overview's G1 READ port, against real PostgreSQL.
+import { grantStockPreparationOverviewRoleRead } from '../../src/services/stock-preparation-overview-grants'
 // S3 (ADR §5 「只读（Q5）」): the host half of the project overview — the stamp, the clamp, the delete guard and
 // the plugin records path, all against real PostgreSQL.
 import { assertPluginOwnsObject, type MultitableScopeHooks } from '../../src/multitable/plugin-scope'
@@ -344,6 +346,7 @@ import {
   STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
   STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
   StockPreparationOverviewSystemKindError,
+  SheetSystemKindConflictError,
 } from '../../src/multitable/stock-preparation-overview-contract'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -486,7 +489,8 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
       await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
     }
     await pool.query('DELETE FROM user_roles WHERE user_id = $1', [S3_FLOOR_USER]).catch(() => {})
-    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN, ROLE_S3]]).catch(() => {})
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [`${S3_FLOOR_USER}_read`]).catch(() => {})
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [[ROLE_A, ROLE_B, ROLE_FOREIGN, ROLE_S3, `${ROLE_S3}_read`]]).catch(() => {})
     await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
     await pool.end()
   })
@@ -871,13 +875,22 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     const again = await scoped(PLUGIN).provisioning.ensureObject({ projectId, baseId: null, descriptor, systemKind: KIND })
     expect(again.sheet).toMatchObject({ id: overviewSheet, systemKind: KIND })
 
-    // The ordinary twin (no kind), and NO LAUNDERING: re-ensuring it WITH the kind leaves it NULL.
+    // The ordinary twin (no kind), and NO LAUNDERING: re-ensuring it WITH the kind is REFUSED inside the
+    // provisioning transaction (fix round 1, R8c — SheetSystemKindConflictError, before any field write), and
+    // the row keeps NULL.
     const twin = await inTx((cq) => ensureObject({ query: cq as never, projectId, baseId: null, descriptor: twinDescriptor }))
     overviewTwinSheet = twin.sheet.id
     expect(twin.sheet.systemKind).toBeNull()
-    const relaunder = await inTx((cq) => ensureObject({ query: cq as never, projectId, baseId: null, descriptor: twinDescriptor, systemKind: KIND }))
-    expect(relaunder.sheet).toMatchObject({ id: overviewTwinSheet, systemKind: null })
+    const twinFieldsBefore = Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [overviewTwinSheet])).rows[0].n)
+    await expect(inTx((cq) => ensureObject({
+      query: cq as never,
+      projectId,
+      baseId: null,
+      descriptor: { ...twinDescriptor, fields: [...twinDescriptor.fields, { id: 'extra', name: 'Extra', type: 'string' as const }] },
+      systemKind: KIND,
+    }))).rejects.toBeInstanceOf(SheetSystemKindConflictError)
     expect((await pool.query('SELECT system_kind FROM meta_sheets WHERE id = $1', [overviewTwinSheet])).rows[0]).toEqual({ system_kind: null })
+    expect(Number((await pool.query('SELECT COUNT(*)::int AS n FROM meta_fields WHERE sheet_id = $1', [overviewTwinSheet])).rows[0].n)).toBe(twinFieldsBefore)
 
     // THE CLAMP. One role holds spreadsheet:write on BOTH sheets; a floor user holds that role and no global code.
     await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [ROLE_S3, 'S3 test role'])
@@ -898,13 +911,38 @@ describeDb('S1 G1 project-sheet role grant (real registry + real grant service +
     for (const access of [floor, admin]) {
       expect(await capsOf(overviewTwinSheet, access)).toMatchObject({ canRead: true, canCreateRecord: true, canEditRecord: true })
     }
-    // On the overview: read stays, every write is gone — for the admin too.
-    const WRITE_KEYS = ['canCreateRecord', 'canEditRecord', 'canDeleteRecord', 'canManageFields', 'canManageSheetAccess', 'canManageViews', 'canComment', 'canManageAutomation', 'canSendNotification', 'canSubmitApproval']
+    // On the overview: read stays, every write is gone — for the admin too. Access management is KEPT as
+    // resolved (fix round 1, R1): the admin may share the overview for reading; the write-grant floor never had it.
+    const WRITE_KEYS = ['canCreateRecord', 'canEditRecord', 'canDeleteRecord', 'canManageFields', 'canManageViews', 'canComment', 'canManageAutomation', 'canSendNotification', 'canSubmitApproval']
     for (const access of [floor, admin]) {
       const c = await capsOf(overviewSheet, access)
       expect(c.canRead, `${access.userId} canRead`).toBe(true)
       for (const key of WRITE_KEYS) expect(c[key], `${access.userId} ${key}`).toBe(false)
     }
+    expect((await capsOf(overviewSheet, admin)).canManageSheetAccess).toBe(true)
+    expect((await capsOf(overviewSheet, floor)).canManageSheetAccess).toBe(false)
+
+    // THE G1 READ PORT (fix round 1, R1), real DB: a second role gets `spreadsheet:read` on the overview — one
+    // row, add-only, a history row; a reader holding only that role opens the overview and writes nothing; the
+    // port refuses the unstamped twin with nothing written.
+    const ROLE_S3_READ = `${ROLE_S3}_read`
+    const S3_READER = `${S3_FLOOR_USER}_read`
+    await pool.query('INSERT INTO roles (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING', [ROLE_S3_READ, 'S3 read role'])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [S3_READER, ROLE_S3_READ])
+    const readGrant = await inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewSheet, roleIds: [ROLE_S3_READ], actorId: 'u_s3_puller' }))
+    expect(readGrant).toEqual({ sheetId: overviewSheet, granted: [ROLE_S3_READ], alreadyGranted: [] })
+    const readRows = await pool.query("SELECT perm_code FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'role' AND subject_id = $2", [overviewSheet, ROLE_S3_READ])
+    expect(readRows.rows).toEqual([{ perm_code: 'spreadsheet:read' }])
+    const again = await inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewSheet, roleIds: [ROLE_S3_READ] }))
+    expect(again.alreadyGranted).toEqual([ROLE_S3_READ])
+    const reader = await capsOf(overviewSheet, { userId: S3_READER, permissions: [] as string[], isAdminRole: false })
+    expect(reader.canRead).toBe(true)
+    for (const key of WRITE_KEYS) expect(reader[key], `reader ${key}`).toBe(false)
+    await expect(inTx((cq) => grantStockPreparationOverviewRoleRead(cq, { sheetId: overviewTwinSheet, roleIds: [ROLE_S3_READ] })))
+      .rejects.toMatchObject({ status: 409, code: 'STOCK_PREP_OVERVIEW_GRANT_NOT_OVERVIEW' })
+    const twinReadRows = await pool.query("SELECT 1 FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_id = $2", [overviewTwinSheet, ROLE_S3_READ])
+    expect(twinReadRows.rowCount).toBe(0)
+    await pool.query('DELETE FROM user_roles WHERE user_id = $1', [S3_READER]).catch(() => {})
     expect((await capsOf(overviewSheet, admin)).canExport).toBe(true)
     expect((await capsOf(overviewSheet, floor)).canExport).toBe((await capsOf(overviewTwinSheet, floor)).canExport)
 

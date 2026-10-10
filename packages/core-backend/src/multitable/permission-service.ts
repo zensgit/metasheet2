@@ -1764,6 +1764,8 @@ export async function resolveSheetCapabilities(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
 }> {
   const access = await resolveRequestAccess(req)
   return resolveSheetCapabilitiesForAccess(query, sheetId, access)
@@ -1794,6 +1796,8 @@ export async function resolveSheetCapabilitiesForAccess(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
 }> {
   const baseCapabilities = deriveCapabilities(access.permissions, access.isAdminRole)
   const sheetLiveness = await loadSheetLiveness(query, sheetId)
@@ -1820,10 +1824,13 @@ export async function resolveSheetCapabilitiesForAccess(
     )
   }
   // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): the stock-preparation project
-  // overview is plugin-maintained. Whatever the grants resolved, a person keeps read/export only — for
-  // EVERY access, administrators included (no isAdminRole short-circuit, unlike the projection fence).
-  // Readability and listing are untouched: canRead passes through as resolved.
-  if ((await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)) {
+  // overview is plugin-maintained. Whatever the grants resolved, a person keeps read / export / access
+  // management only — for EVERY access, administrators included (no isAdminRole short-circuit, unlike the
+  // projection fence). Readability and listing are untouched: canRead passes through as resolved.
+  // Fix round 1 (R12): the lookup issues NO statement for an id that cannot be an overview (the derived-id
+  // prefilter in stock-preparation-overview-contract.ts), so an ordinary sheet costs what it cost before.
+  const stockPrepOverview = (await loadStockPreparationOverviewSheetIds(query, [sheetId])).has(sheetId)
+  if (stockPrepOverview) {
     capabilities = restrictStockPreparationOverviewCapabilities(capabilities, true)
   }
   return {
@@ -1832,6 +1839,10 @@ export async function resolveSheetCapabilitiesForAccess(
     capabilityOrigin: deriveCapabilityOrigin(baseCapabilities, capabilities, sheetScope, access.isAdminRole),
     sheetLiveness,
     ...(sheetScope ? { sheetScope } : {}),
+    // Fix round 1 (R1 / R11): the fact the clamp acted on, for the two callers that must refuse MORE than
+    // a capability bit says — the grant routes (no level above read) and the comment writes. Present only
+    // on an overview, so every other caller's result is unchanged in shape.
+    ...(stockPrepOverview ? { stockPrepOverview: true as const } : {}),
   }
 }
 
@@ -1852,6 +1863,8 @@ export async function resolveSheetReadableCapabilities(
    * legitimately needs to see a deleted sheet. See multitable/sheet-liveness.ts.
    */
   sheetLiveness: SheetLiveness
+  /** S3 fix round 1: present (true) only when the sheet is the stock-preparation project overview. */
+  stockPrepOverview?: true
 }> {
   return resolveSheetCapabilities(req, query, sheetId)
 }
