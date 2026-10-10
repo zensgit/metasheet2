@@ -794,11 +794,14 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '备料表由拉取人员新建:有拉取权限的人按「从PLM拉取数据」时,系统会先问是否为它新建一张表。没有拉取权限请联系拉取人员。',
     enNext: 'A pull operator creates the sheet: when someone with pull permission presses 从PLM拉取数据, the system first asks whether to create one. Without that permission, contact a pull operator.',
   }),
+  // S4 fix round 1: archiving stops the PULL, the decisions and the handoff — it does NOT freeze the
+  // grid (grants are untouched; 「打开(已归档)」 still deep-links to the fill view), so no sentence may
+  // say the sheet cannot be filled in.
   STOCK_PREPARATION_PROJECT_ARCHIVED: Object.freeze({
-    zh: '这个项目的备料表已经归档,只能打开查看,不能再拉取或改动。',
-    en: 'This project’s stock-preparation sheet is archived: it can be opened and read, but not pulled into or changed.',
-    zhNext: '要继续用,请联系拉取人员恢复这张表;恢复后再拉取。不会新建第二张表。',
-    enNext: 'To use it again, ask a pull operator to restore it, then pull. A second sheet is never created.',
+    zh: '这个项目的备料表已经归档,不能再拉取、确认裁决或通知下一步,所以这一步没有做,什么都没有改动。',
+    en: 'This project’s stock-preparation sheet is archived, so it can no longer be pulled into and its decisions and handoff are paused; this step was not done and nothing changed.',
+    zhNext: '表本身还在,有这张表权限的人仍可以打开并照常填写。要恢复拉取和裁决,请联系拉取人员恢复这张表;不会新建第二张表。',
+    enNext: 'The sheet itself is still there, and anyone with access to it can still open it and fill it in. To pull or decide again, ask a pull operator to restore it; a second sheet is never created.',
   }),
   STOCK_PREPARATION_PROJECT_TARGET_LIMIT: Object.freeze({
     zh: '这家工厂的项目备料表已经到上限(含已归档的),这次没有新建。',
@@ -811,6 +814,87 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     en: 'This project’s stock-preparation sheet was created a moment ago (perhaps by a colleague at the same time).',
     zhNext: '不用再建,直接打开或拉取即可;不会出现两张表。',
     enNext: 'No need to create it again — open it or pull into it. There will never be two sheets.',
+  }),
+  // S4 (ADR §6, register R-38): the archive / restore refusals. A transition whose starting state no
+  // longer holds (a colleague got there first) and a typed confirmation that does not match — none of
+  // them changed anything, and none is cleared by pressing again.
+  STOCK_PREPARATION_PROJECT_ALREADY_ARCHIVED: Object.freeze({
+    zh: '这个项目的备料表已经是归档状态了(可能同事刚刚归档过),这次没有改动。',
+    en: 'This project’s stock-preparation sheet is already archived (perhaps a colleague just archived it); nothing changed.',
+    zhNext: '不用再归档;表里仍可以照常填写。要恢复拉取和裁决,请拉取人员恢复这张表。',
+    enNext: 'No need to archive it again; the sheet can still be filled in as usual. To pull or decide again, a pull operator restores it.',
+  }),
+  STOCK_PREPARATION_PROJECT_NOT_ARCHIVED: Object.freeze({
+    zh: '这个项目的备料表没有归档(可能同事刚刚恢复过),这次没有改动。',
+    en: 'This project’s stock-preparation sheet is not archived (perhaps a colleague just restored it); nothing changed.',
+    zhNext: '不用恢复,直接打开或拉取即可。',
+    enNext: 'No need to restore it — open it or pull into it.',
+  }),
+  STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH: Object.freeze({
+    zh: '确认时输入的项目号和这个项目对不上,所以没有归档也没有恢复,什么都没有改动。',
+    en: 'The project number typed to confirm does not match this project, so nothing was archived or restored and nothing changed.',
+    zhNext: '请照页面上显示的项目号原样再输入一次(字母大小写也要一致)。',
+    enNext: 'Type the project number exactly as the page shows it (letter case included) and try again.',
+  }),
+  // S3 (ADR §5, register R-37): the project-level columns and the overview refresh. The 422 names
+  // the FIELD (the page adds which one), never the value; the three overview refusals are deployment
+  // states a retry does not clear.
+  STOCK_PREPARATION_PROJECT_FIELDS_INVALID: Object.freeze({
+    zh: '负责人、备注、计划完成里有一项不符合要求,这次没有保存,什么都没有改动。',
+    en: 'One of owner, note or planned finish does not meet the rules, so nothing was saved and nothing changed.',
+    zhNext: '改一下再保存:负责人最多 80 个字,备注最多 500 个字,计划完成要填一个真实的日期。',
+    enNext: 'Fix it and save again: owner is at most 80 characters, note at most 500, and planned finish must be a real date.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED: Object.freeze({
+    zh: '系统没能确认项目总览表是只读的,为保护数据这次没有刷新,什么都没有改动。',
+    en: 'The system could not confirm the project overview sheet is read-only, so it was not refreshed, to protect the data; nothing changed.',
+    zhNext: '这不是您操作的问题,再点也一样 —— 请把这条报错代码给平台管理员(服务器需要升级)。',
+    enNext: 'This is not something you did, and pressing again will not change it — give a platform administrator this error code (the server needs an upgrade).',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SCHEMA_INCOMPLETE: Object.freeze({
+    zh: '项目总览表缺了几列,这次没有刷新,什么都没有改动。',
+    en: 'The project overview sheet is missing some columns, so it was not refreshed; nothing changed.',
+    zhNext: '再点也一样 —— 请把这条报错代码给平台管理员核对总览表。各项目自己的备料表不受影响。',
+    enNext: 'Pressing again will not change it — give a platform administrator this error code to check the overview sheet. Each project’s own sheet is unaffected.',
+  }),
+  // S3 fix round 1 (R6 / R8 / E2).
+  STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT: Object.freeze({
+    zh: '项目总览表还没建,这次没有刷新,什么都没有改动。',
+    en: 'The project overview has not been created yet, so nothing was refreshed and nothing changed.',
+    zhNext: '请拉取人员点「建立项目总览」(建第一张项目表时也会自动建);建好之后再刷新。',
+    enNext: 'Ask a pull operator to press "Create the project overview" (it is also created with the first project sheet), then refresh.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED: Object.freeze({
+    zh: '这套服务器还不能把项目总览表设成只读,为保护数据这次什么都没有建、没有改。',
+    en: 'This server cannot make the project overview read-only yet, so nothing was created or changed, to protect the data.',
+    zhNext: '再点也一样 —— 需要平台管理员升级服务器;请把这条报错代码给管理员。',
+    enNext: 'Pressing again will not change it — a platform administrator has to upgrade the server; give an administrator this error code.',
+  }),
+  // S3 fix round 2 (F4): the refresh never waits for another overview update; it says so and does nothing.
+  STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY: Object.freeze({
+    zh: '项目总览表正在被另一次更新改写,这次刷新没有做任何事,什么都没有改动。',
+    en: 'The project overview is being updated by another run right now, so this refresh did nothing and nothing changed.',
+    zhNext: '稍等一会儿再点「刷新项目总览」;正在进行的那次更新完成后,总览就是最新的。',
+    enNext: 'Wait a moment and press "Refresh the project overview" again; once the running update finishes, the overview is current.',
+  }),
+  // S3 follow-up C: the refresh wrote some rows but could not write every project — the overview is NOT current.
+  STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE: Object.freeze({
+    zh: '项目总览表这次只刷新了一部分,有的项目没能写进去,所以总览还不是最新的。',
+    en: 'The project overview was only partly refreshed: some projects could not be written, so the overview is not current yet.',
+    zhNext: '没写进去的项目已经记下了;过一会儿再点「刷新项目总览」。如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'The projects that were not written are remembered; press "Refresh the project overview" again in a moment. If it keeps happening, give a platform administrator this error code.',
+  }),
+  STOCK_PREPARATION_PROJECT_ROUTE_FAILED: Object.freeze({
+    zh: '这一步没有完成,请稍后再试一次。',
+    en: 'This step did not complete; try again in a moment.',
+    zhNext: '如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'If it keeps happening, give a platform administrator this error code.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE: Object.freeze({
+    zh: '这套系统还建不了项目总览表,这次没有刷新,什么都没有改动。',
+    en: 'This system cannot create the project overview sheet yet, so nothing was refreshed and nothing changed.',
+    zhNext: '需要平台管理员升级服务器;这不是您能修的,请把这条报错代码给管理员。',
+    enNext: 'A platform administrator has to upgrade the server — this is not something you can fix; give an administrator this error code.',
   }),
   STOCK_PREPARATION_PROJECT_NO_REQUIRED: Object.freeze({
     zh: '这一步需要先填项目号。',
@@ -1813,8 +1897,8 @@ export const STOCK_PREP_SYNC_REASON_PLAIN: Record<string, StockPrepPlainEntry> =
   PLAN_PROJECT_SHEET_ARCHIVED: Object.freeze({
     zh: '这个项目的备料表已经归档,不能再拉取',
     en: 'This project’s stock-preparation sheet is archived, so it cannot be pulled into',
-    zhNext: '要继续用,请联系拉取人员恢复这张表;什么都没有改动。',
-    enNext: 'To use it again, ask a pull operator to restore the sheet. Nothing was changed.',
+    zhNext: '表里仍可以照常填写;要再拉取,请联系拉取人员恢复这张表。什么都没有改动。',
+    enNext: 'The sheet can still be filled in as usual; to pull into it again, ask a pull operator to restore it. Nothing was changed.',
   }),
   PLAN_TARGET_NOT_OURS: Object.freeze({
     zh: '系统核对不了这张备料表属于您的工厂,为保护数据没有试算',
@@ -2220,8 +2304,8 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
     en: 'This project has its own stock-preparation sheet.',
   }),
   status_archived: Object.freeze({
-    zh: '这个项目的备料表已归档,可以打开查看,不能再拉取或改动。',
-    en: 'This project’s stock-preparation sheet is archived: it can be opened and read, not pulled into or changed.',
+    zh: '这个项目的备料表已归档:不能再拉取、确认裁决或通知下一步;表里仍可以打开和照常填写。',
+    en: 'This project’s stock-preparation sheet is archived: it can no longer be pulled into, and its decisions and handoff are paused; it can still be opened and filled in as usual.',
   }),
   absent_can_create: Object.freeze({
     zh: '按「从PLM拉取数据」时,系统会先问您是否为它新建一张备料表。',
@@ -2235,9 +2319,11 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
     zh: '要继续拉取,请联系拉取人员恢复这张表。',
     en: 'To pull into it again, please contact a pull operator (拉取人员) to restore it.',
   }),
+  // S4 (R-38): the restore entry exists now — 「恢复这张表」 on this line and 「恢复并重新拉取」 in the pull
+  // panel, both for a pull operator only.
   restore_pending: Object.freeze({
-    zh: '恢复由拉取人员操作(恢复入口随后上线);现在可以先打开查看。',
-    en: 'A pull operator restores it (the restore entry ships next); you can open and read it now.',
+    zh: '您可以恢复这张表,恢复后可以重新拉取、确认裁决和通知下一步;在那之前表里也照样可以打开和填写。',
+    en: 'You can restore this sheet; after that it can be pulled into again and its decisions and handoff resume. Until then it can still be opened and filled in.',
   }),
   confirm_create: Object.freeze({
     zh: '将为这个项目号新建一张备料表:',
@@ -2266,16 +2352,37 @@ export const STOCK_PREP_PROJECT_TARGET_PLAIN: Record<string, StockPrepPlainEntry
   confirm_write_action: Object.freeze({ zh: '确认写入', en: 'Write it' }),
   confirm_write_cancel: Object.freeze({ zh: '先不写', en: 'Not now' }),
   confirm_archive: Object.freeze({
-    zh: '归档后这张表和里面的数据都还在,只是不能再拉取或改动;拉取人员可以随时恢复。',
-    en: 'After archiving, the sheet and its data stay; it just cannot be pulled into or changed. A pull operator can restore it at any time.',
+    zh: '归档后这张表和里面的数据都还在,有表权限的人仍可以打开和照常填写;只是不能再拉取、确认裁决或通知下一步。拉取人员可以随时恢复。',
+    en: 'After archiving, the sheet and its data stay and anyone with access can still open it and fill it in; it just can no longer be pulled into, and its decisions and handoff are paused. A pull operator can restore it at any time.',
   }),
   confirm_restore: Object.freeze({
-    zh: '恢复后可以继续拉取和填写;不会新建第二张表。',
-    en: 'After restoring, the sheet can be pulled into and filled again; no second sheet is created.',
+    zh: '恢复后可以重新拉取、确认裁决和通知下一步;不会新建第二张表。',
+    en: 'After restoring, the sheet can be pulled into again and its decisions and handoff resume; no second sheet is created.',
   }),
   remove_vs_archive: Object.freeze({
     zh: '「从列表移除」只在这台电脑上、不删数据;「归档项目」由拉取人员操作,可以恢复。',
     en: '"Remove from list" only affects this computer and deletes nothing; "Archive project" is a pull operator’s action and can be undone.',
+  }),
+  // S4 (ADR §6, register R-38) — the archive / restore controls and their typed confirmation. The
+  // operator types the project number shown on the page; nothing is sent until it matches, and the
+  // server checks it again.
+  archive_action: Object.freeze({ zh: '归档项目', en: 'Archive project' }),
+  restore_action: Object.freeze({ zh: '恢复这张表', en: 'Restore this sheet' }),
+  restore_and_repull_action: Object.freeze({ zh: '恢复并重新拉取', en: 'Restore and pull again' }),
+  confirm_type_project_no: Object.freeze({
+    zh: '请输入项目号确认:',
+    en: 'Type the project number to confirm:',
+  }),
+  confirm_archive_action: Object.freeze({ zh: '确认归档', en: 'Archive it' }),
+  confirm_restore_action: Object.freeze({ zh: '确认恢复', en: 'Restore it' }),
+  confirm_lifecycle_cancel: Object.freeze({ zh: '先不改', en: 'Not now' }),
+  archived_done: Object.freeze({
+    zh: '已归档:表和里面的数据都还在,仍可以打开和照常填写;要再拉取、确认裁决或通知下一步,请先恢复。',
+    en: 'Archived: the sheet and its data are all still there and can still be opened and filled in. To pull, decide or hand off again, restore it first.',
+  }),
+  restored_done: Object.freeze({
+    zh: '已恢复:可以重新拉取、确认裁决和通知下一步,用的还是原来那张表。',
+    en: 'Restored: it can be pulled into again and its decisions and handoff resume — it is the same sheet as before.',
   }),
   // S2 fix round 1 (refuter #5): the state read failed for a reason other than "switch off". The flow
   // STOPS — it never falls back to the old run on a guess — and offers to read again.
@@ -2340,6 +2447,128 @@ export function stockPrepProjectTargetWritePreviewText(planned: {
     zh: `预览:这次将写入 ${writes} 行(新增 ${planned.add}、更新 ${planned.update}、标成无效 ${planned.inactive}),${planned.skip} 行已经是最新的。确认后才会写入。`,
     en: `Preview: this will write ${writes} rows (${planned.add} added, ${planned.update} updated, ${planned.inactive} marked inactive); ${planned.skip} rows are already current. Nothing is written until you confirm.`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// 项目总览表 + 项目级列 (ADR adr-stock-prep-project-sheets-20261008 §5; S3, register R-37)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every sentence the S3 surfaces say: the three project-level fields on 项目备料页's sheet-state line
+ * (labels, 保存, 已保存, the archived read-only line, the per-field 422 lines), the home page's
+ * 刷新项目总览 / 打开项目总览 and its 「已归档（N）」 section, and 项目查询's 含已归档 toggle and
+ * 已归档 tag. Front-end ids only (nothing server-side emits them).
+ *
+ * TWO RULES. (1) The 422 lines name the FIELD and its rule — never the value the operator typed.
+ * (2) S4's fix round 1 holds here too: archiving freezes these three columns (the route answers 409),
+ * NOT the grid — the archived lines say the sheet can still be opened and filled in.
+ */
+export const STOCK_PREP_PROJECT_OVERVIEW_PLAIN: Record<string, StockPrepPlainEntry> = Object.freeze({
+  fields_title: Object.freeze({ zh: '项目级信息', en: 'Project-level details' }),
+  field_responsibleLabel: Object.freeze({ zh: '负责人', en: 'Owner' }),
+  field_note: Object.freeze({ zh: '备注', en: 'Note' }),
+  field_plannedFinishOn: Object.freeze({ zh: '计划完成', en: 'Planned finish' }),
+  fields_hint: Object.freeze({
+    zh: '这三项只在这里改,项目总览表里只读显示;不会写进物料行。',
+    en: 'These three are edited only here and shown read-only on the project overview; they are never written into the material rows.',
+  }),
+  fields_save_action: Object.freeze({ zh: '保存', en: 'Save' }),
+  fields_saving: Object.freeze({ zh: '正在保存…', en: 'Saving…' }),
+  fields_saved: Object.freeze({ zh: '已保存', en: 'Saved' }),
+  fields_archived_readonly: Object.freeze({
+    zh: '已归档，不能改这三项;表里仍可以打开和照常填写。',
+    en: 'Archived — these three cannot be changed; the sheet itself can still be opened and filled in.',
+  }),
+  fields_archived_refused: Object.freeze({
+    zh: '这个项目已归档,负责人、备注、计划完成不能再改,这次什么都没有改动。',
+    en: 'This project is archived, so owner, note and planned finish can no longer be changed; nothing changed.',
+    zhNext: '表里仍可以打开和照常填写;要改这三项,请拉取人员先恢复这张表。',
+    enNext: 'The sheet can still be opened and filled in; to change these three, ask a pull operator to restore it first.',
+  }),
+  fields_invalid_responsibleLabel: Object.freeze({
+    zh: '「负责人」最多 80 个字,这次没有保存。',
+    en: '"Owner" is at most 80 characters; nothing was saved.',
+  }),
+  fields_invalid_note: Object.freeze({
+    zh: '「备注」最多 500 个字,这次没有保存。',
+    en: '"Note" is at most 500 characters; nothing was saved.',
+  }),
+  fields_invalid_plannedFinishOn: Object.freeze({
+    zh: '「计划完成」要填一个真实的日期(年-月-日),这次没有保存。',
+    en: '"Planned finish" must be a real date (year-month-day); nothing was saved.',
+  }),
+  overview_refresh_action: Object.freeze({ zh: '刷新项目总览', en: 'Refresh the project overview' }),
+  // S3 fix round 1 (R6): only a pull operator creates the overview; a refresh inside the cooldown does nothing.
+  overview_ensure_action: Object.freeze({ zh: '建立项目总览', en: 'Create the project overview' }),
+  overview_ensuring: Object.freeze({ zh: '正在建立…', en: 'Creating…' }),
+  overview_ensured: Object.freeze({ zh: '项目总览已建好。', en: 'The project overview is ready.' }),
+  overview_absent_hint: Object.freeze({
+    zh: '项目总览还没建;拉取人员建第一张项目表时会自动建,也可以由拉取人员点「建立项目总览」。',
+    en: 'The project overview has not been created yet; it is created with the first project sheet, or a pull operator can press "Create the project overview".',
+  }),
+  overview_cooled: Object.freeze({
+    zh: '刚刚刷新过,数字已经是最新的;过一会儿再刷新。',
+    en: 'It was refreshed a moment ago and the numbers are current; refresh again in a little while.',
+  }),
+  fields_invalid_control: Object.freeze({
+    zh: '负责人和备注里不能有换行、制表符这类看不见的控制字符,这次没有保存。',
+    en: 'Owner and note cannot contain invisible control characters such as line breaks or tabs; nothing was saved.',
+  }),
+  overview_refreshing: Object.freeze({ zh: '正在刷新…', en: 'Refreshing…' }),
+  overview_open_action: Object.freeze({ zh: '打开项目总览', en: 'Open the project overview' }),
+  overview_truncated: Object.freeze({
+    zh: '项目太多,这次只刷新到上限。',
+    en: 'There are too many projects; this refresh stopped at the limit.',
+  }),
+  archived_tag: Object.freeze({ zh: '已归档', en: 'Archived' }),
+  home_archived_section: Object.freeze({ zh: '已归档', en: 'Archived' }),
+  query_include_archived: Object.freeze({ zh: '含已归档', en: 'Include archived' }),
+})
+
+export function stockPrepProjectOverviewPlain(id: string): StockPrepPlainEntry | null {
+  return lookup(STOCK_PREP_PROJECT_OVERVIEW_PLAIN, id)
+}
+
+/** 「已归档（N）」 / "Archived (N)" — the home page's collapsed section heading. */
+export function stockPrepHomeArchivedHeading(count: number): StockPrepPlainText {
+  const base = STOCK_PREP_PROJECT_OVERVIEW_PLAIN.home_archived_section
+  return { zh: `${base.zh}（${count}）`, en: `${base.en} (${count})` }
+}
+
+/** 「截至 hh:mm」's clock, in the reader's local time. Null when the stamp is not a time. */
+export function stockPrepClockText(iso: string): string | null {
+  const parsed = new Date(iso)
+  if (Number.isNaN(parsed.getTime())) return null
+  const hh = String(parsed.getHours()).padStart(2, '0')
+  const mm = String(parsed.getMinutes()).padStart(2, '0')
+  return `${hh}:${mm}`
+}
+
+/**
+ * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus a clause for the projects whose
+ * sheet could not be read this time and one for a refresh that stopped at its bound. Counts only.
+ */
+export function stockPrepProjectOverviewRefreshText(result: {
+  projectCount: number
+  unreadableCount: number | null
+  truncated: boolean
+  countsAt: string
+}): StockPrepPlainText {
+  const clock = stockPrepClockText(result.countsAt)
+  let zh = clock ? `已刷新 ${result.projectCount} 个项目（截至 ${clock}）` : `已刷新 ${result.projectCount} 个项目`
+  let en = clock ? `Refreshed ${result.projectCount} project(s) (as of ${clock})` : `Refreshed ${result.projectCount} project(s)`
+  const unreadable = result.unreadableCount ?? 0
+  if (unreadable > 0) {
+    zh += `;其中 ${unreadable} 个项目的表这次没读到,数字没有更新`
+    en += `; ${unreadable} project sheet(s) could not be read this time and keep their old numbers`
+  }
+  zh += '。'
+  en += '.'
+  if (result.truncated) {
+    zh += STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.zh
+    en += ` ${STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_truncated.en}`
+  }
+  return { zh, en }
 }
 
 /**

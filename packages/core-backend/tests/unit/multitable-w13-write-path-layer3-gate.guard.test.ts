@@ -572,6 +572,14 @@ const WRITE_PORTS: Record<PortId, Port> = {
         {
           disposition: 'EXEMPT',
           reason:
+            'S3 fix round 2 (F3) stock-preparation overview port (plugin-integration-core only): delegates to the ' +
+            "same regular records API's patchRecord, NOT RecordService.patchRecord — actor-less plugin-SDK write, " +
+            'its sheet DERIVED by the host for the named project and re-checked (registry owner + overview stamp) ' +
+            'before every write. The overview is read-only for every person; this is its only writer.',
+        },
+        {
+          disposition: 'EXEMPT',
+          reason:
             'P4 transaction-scoped records wrapper: delegates to the host-owned unit-of-work patchRecord, ' +
             'NOT RecordService.patchRecord. It remains actor-less and is additionally constrained to the ' +
             'four sheets declared by the stock-preparation persist operation.',
@@ -633,6 +641,14 @@ const WRITE_PORTS: Record<PortId, Port> = {
             "Regular records wrapper: delegates to multitable/records.ts's OWN createRecord, NOT " +
             'RecordService.createRecord — actor-less plugin-SDK path, no per-subject identity to gate ' +
             'against. Enumerated as its own port below (records.ts.createRecord).',
+        },
+        {
+          disposition: 'EXEMPT',
+          reason:
+            'S3 fix round 2 (F3) stock-preparation overview port (plugin-integration-core only): delegates to the ' +
+            "same regular records API's createRecord, NOT RecordService.createRecord — actor-less plugin-SDK " +
+            'write, its sheet DERIVED by the host for the named project and re-checked (registry owner + overview ' +
+            'stamp) before every write.',
         },
         {
           disposition: 'EXEMPT',

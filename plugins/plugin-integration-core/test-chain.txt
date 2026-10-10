@@ -76,6 +76,8 @@ node __tests__/stock-preparation-project-targets.test.cjs
 node __tests__/stock-preparation-project-target-routes.test.cjs
 node __tests__/stock-preparation-project-target-call-site-guard.test.cjs
 node __tests__/stock-preparation-project-target-pack-reinstall.test.cjs
+node __tests__/stock-preparation-project-target-archive.test.cjs
+node __tests__/stock-preparation-project-overview.test.cjs
 node __tests__/stock-preparation-audit-store.test.cjs
 node __tests__/stock-preparation-audit-migration.test.cjs
 node __tests__/stock-preparation-option-sync.test.cjs
@@ -88,6 +90,7 @@ node __tests__/stock-preparation-conflict-policies.test.cjs
 node __tests__/stock-preparation-confirmation-decisions.test.cjs
 node __tests__/stock-preparation-own-base.test.cjs
 node __tests__/stock-preparation-permission-matrix.test.cjs
+node __tests__/stock-preparation-members-routes.test.cjs
 node __tests__/stock-preparation-prep-line-export.test.cjs
 node __tests__/stock-preparation-prep-line-export-tenant-wall.test.cjs
 node __tests__/stock-preparation-preflight.test.cjs

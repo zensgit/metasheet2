@@ -11,6 +11,15 @@ import {
   normalizeStockPreparationGrantRoleIds,
 } from './stock-preparation-project-sheet-grant-contract'
 import {
+  STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+  StockPreparationOverviewRecordsWriteError,
+  StockPreparationOverviewStructureWriteError,
+  StockPreparationOverviewSystemKindError,
+  isStockPreparationOverviewSheetIdCandidate,
+} from './stock-preparation-overview-contract'
+import {
   getMultitableRequestMetadataCache,
   runWithMultitableRequestMetadataCache,
 } from './request-metadata-cache'
@@ -67,6 +76,13 @@ export type MultitableScopeHooks = {
     input: AssertPluginSheetScopeInput,
   ) => Promise<void | AssertPluginSheetScopeOutcome>
   isSheetOwnedByProject?: (input: { sheetId: string; projectId: string }) => Promise<boolean>
+  /**
+   * S3 fix round 2 (F3; register R-37): does the host's `meta_sheets.system_kind` say this sheet is the
+   * read-only stock-preparation project overview? Asked only for ids of the host-derived shape (no other id can
+   * be the overview). Missing → every derived-shape GENERIC record write is refused as `unverifiable`, and the
+   * overview port refuses too: an un-wired host never guesses "not the overview".
+   */
+  isStockPreparationOverviewSheet?: (input: { sheetId: string }) => Promise<boolean>
   runStockPreparationPersistUnitOfWork?: <T>(
     input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
@@ -315,6 +331,20 @@ export async function assertPluginOwnsObject(
  */
 const STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN = 'plugin-integration-core'
 
+/**
+ * S3 follow-ups, fix round 1 (read-once): a plain copy of `source`'s own enumerable values EXCEPT the `excluded` keys
+ * — each value read once, the excluded ones never read. The caller reads the excluded (checked) keys itself, once,
+ * and forwards the copy + those values. Not native object rest: V8 reads an excluded getter during `{ a, ...rest }`.
+ */
+function copyInputValuesExcept(source: object, excluded: readonly string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const key of Object.keys(source)) {
+    if (excluded.includes(key)) continue
+    out[key] = (source as Record<string, unknown>)[key]
+  }
+  return out
+}
+
 export function createPluginScopedMultitableApi(
   multitable: MultitableAPI,
   pluginName: string,
@@ -363,6 +393,90 @@ export function createPluginScopedMultitableApi(
     cache.assertedSheetScopes.add(key)
   }
 
+  /**
+   * S3 fix round 2 (F3; register R-37): the GENERIC record writes below never write the read-only
+   * stock-preparation project overview — for ANY plugin, including the overview's own plugin, whose
+   * pipelines / multitable target adapter take their sheet id from external-system config. Only an id of the
+   * host-derived shape can be the overview (no statement for any other id); for one, the host's stamp decides,
+   * and a host that cannot answer is refused as `unverifiable`. The overview is written only through the
+   * `records.stockPreparationOverview` port (plugin-integration-core only, below).
+   */
+  const refuseGenericOverviewRecordWrite = async (sheetId: unknown): Promise<void> => {
+    if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return
+    if (!hooks.isStockPreparationOverviewSheet) throw new StockPreparationOverviewRecordsWriteError('unverifiable')
+    if ((await hooks.isStockPreparationOverviewSheet({ sheetId })) !== false) {
+      throw new StockPreparationOverviewRecordsWriteError('generic_write')
+    }
+  }
+
+  /**
+   * S3 follow-up E (register R-37): the overview's STRUCTURE (columns, field properties, display names, views)
+   * is written only by the overview module's own provisioning — `ensureObject` with the overview `systemKind`
+   * (the gate below) and, right after it, `ensureView` with the same marker. Every object-keyed structural write
+   * naming the overview OBJECT is refused here, before any hook or host call (a pure check: the overview object id
+   * is only ever provisioned stamped, so nothing legitimate reaches these methods with it). This closes the
+   * config-driven paths (field-option sync, customer-pack install, additive repair) whose objectId is not the
+   * overview module's.
+   */
+  const refuseOverviewObjectStructureWrite = (objectId: unknown): void => {
+    if (objectId === STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+      throw new StockPreparationOverviewStructureWriteError('structure_write')
+    }
+  }
+
+  /**
+   * S3 follow-up E: `ensureView` names a SHEET, not an object. A view on the STAMPED overview is admitted only as the
+   * overview module's provisioning step: the port plugin, the overview `systemKind` marker, and the sheet id derived
+   * for (projectId, the overview object) — all pure checks, here. A marker on anything but this project's derived
+   * overview sheet is refused like the `ensureObject` gate refuses a misused kind. Answers whether the call carries
+   * the (valid) marker. Pure and independent of what the sheet is, so it reveals nothing and runs before any IO.
+   */
+  const assertOverviewViewMarker = (input: { projectId: string; sheetId: unknown; systemKind: unknown }): boolean => {
+    const { projectId, sheetId, systemKind } = input
+    if (systemKind === undefined || systemKind === null) return false
+    if (pluginName !== STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN) throw new StockPreparationOverviewSystemKindError('plugin')
+    if (systemKind !== STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND) throw new StockPreparationOverviewSystemKindError('kind')
+    if (sheetId !== multitable.provisioning.getObjectSheetId(projectId, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID)) {
+      throw new StockPreparationOverviewSystemKindError('object')
+    }
+    return true
+  }
+
+  /**
+   * S3 follow-up E: an UNMARKED `ensureView` on the stamped overview is refused: a derived-shape id is looked up (the
+   * host's stamp decides; a host that cannot answer is `unverifiable`); an id of any other shape is never the overview
+   * and costs no statement. Fix round 1 (no oracle): this runs only AFTER the sheet-scope check, so a plugin that does
+   * not own the sheet gets the scope refusal it gets for any foreign sheet — it never learns which id is the overview.
+   */
+  const refuseUnmarkedOverviewView = async (sheetId: unknown): Promise<void> => {
+    if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return
+    if (!hooks.isStockPreparationOverviewSheet) throw new StockPreparationOverviewStructureWriteError('unverifiable')
+    if ((await hooks.isStockPreparationOverviewSheet({ sheetId })) !== false) {
+      throw new StockPreparationOverviewStructureWriteError('structure_write')
+    }
+  }
+
+  /**
+   * S3 fix round 2 (F3): the overview port's ONE target. The caller names a PROJECT, never a sheet: the id is
+   * derived here for that (namespace-checked) project, must have the derived shape, must be registered to THIS
+   * plugin (the strict hook, no `observe` tolerance) and must carry the host's overview stamp — every write
+   * re-checks, so a sheet the stamp left (or never had) is never written through the port.
+   */
+  const resolveOverviewRecordsSheet = async (projectId: unknown): Promise<string> => {
+    if (typeof projectId !== 'string') throw new MultitableProjectNamespaceError(pluginName, String(projectId))
+    assertProjectIdAllowedForPlugin(pluginName, projectId)
+    const sheetId = multitable.provisioning.getObjectSheetId(projectId, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID)
+    if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) throw new StockPreparationOverviewRecordsWriteError('not_overview')
+    if (!hooks.assertSheetOwnedByPlugin || !hooks.isStockPreparationOverviewSheet) {
+      throw new StockPreparationOverviewRecordsWriteError('unverifiable')
+    }
+    await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+    if ((await hooks.isStockPreparationOverviewSheet({ sheetId })) !== true) {
+      throw new StockPreparationOverviewRecordsWriteError('not_overview')
+    }
+    return sheetId
+  }
+
   return {
     provisioning: {
       getObjectSheetId: (projectId, objectId) => {
@@ -381,6 +495,11 @@ export function createPluginScopedMultitableApi(
         assertProjectIdAllowedForPlugin(pluginName, projectId)
         return multitable.provisioning.getObjectViewId(projectId, objectId, viewId)
       },
+      // S3 fix round 1 (R8c): the host's declaration that it stamps a requested `systemKind` at INSERT and
+      // reports it back. A boolean about the HOST, not about any object — forwarded as-is (only `true`
+      // counts), so a plugin can fail closed BEFORE any write on a host that would create an ordinary,
+      // writable sheet where a read-only one was meant.
+      ...(multitable.provisioning?.supportsSystemKindStamp === true ? { supportsSystemKindStamp: true } : {}),
       findObjectSheet: async (input) => {
         assertProjectIdAllowedForPlugin(pluginName, input.projectId)
         return multitable.provisioning.findObjectSheet(input)
@@ -424,26 +543,40 @@ export function createPluginScopedMultitableApi(
       },
       // W2: additive-only field write — a WRITE capability, so it must pass the same
       // object-scope check as ensureObject/patchObjectFieldProperty (never bare-forward).
+      // S3 follow-ups, fix round 1 (read-once): projectId / objectId are read ONCE into plain values (the rest of the
+      // input copied once beside them) and THAT snapshot is what the checks see and the host receives — a getter
+      // cannot show the overview refusal and the scope hook one object and the host another.
       ensureMissingObjectFields: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        // S3 follow-up E: never a column onto the read-only overview (pure, before any IO).
+        refuseOverviewObjectStructureWrite(objectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.ensureMissingObjectFields(input)
+        return multitable.provisioning.ensureMissingObjectFields({ ...rest, projectId, objectId } as typeof input)
       },
       // Default-view provisioning — a WRITE capability against the plugin's own object,
       // so it takes exactly the same two assertions as ensureMissingObjectFields:
       // project-namespace, then object scope. Never bare-forwarded.
+      // Fix round 1 (read-once): the checked values are the forwarded values (see ensureMissingObjectFields).
       ensureObjectDefaultView: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        // S3 follow-up E: the overview's views are its own provisioning's (pure, before any IO).
+        refuseOverviewObjectStructureWrite(objectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.ensureObjectDefaultView(input)
+        return multitable.provisioning.ensureObjectDefaultView({ ...rest, projectId, objectId } as typeof input)
       },
       // W2/P2-3: forward the ATOMIC repair transaction, wrapping the tx-bound surface so
       // scope STILL applies INSIDE the transaction. The READ/WRITE methods
@@ -471,9 +604,15 @@ export function createPluginScopedMultitableApi(
               return surface.readObjectFieldsContent(input)
             },
             ensureMissingObjectFields: async (input) => {
-              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-              await hooks.assertObjectScope?.({ pluginName, projectId: input.projectId, objectId: input.objectId })
-              return surface.ensureMissingObjectFields(input)
+              // Fix round 1 (read-once): the checked values are the forwarded values.
+              const projectId = input.projectId
+              const objectId = input.objectId
+              const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              // S3 follow-up E: never a column onto the read-only overview, inside the repair transaction too.
+              refuseOverviewObjectStructureWrite(objectId)
+              await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
+              return surface.ensureMissingObjectFields({ ...rest, projectId, objectId } as typeof input)
             },
           }
           return fn(scoped)
@@ -507,6 +646,8 @@ export function createPluginScopedMultitableApi(
               const projectId = input.projectId
               const objectId = input.objectId
               assertProjectIdAllowedForPlugin(pluginName, projectId)
+              // S3 follow-up E: the overview's display names are its own provisioning's (pure, before any IO).
+              refuseOverviewObjectStructureWrite(objectId)
               await hooks.assertObjectScope?.({ pluginName, projectId, objectId })
               return multitable.provisioning.relabelObjectDisplayNames!({
                 projectId,
@@ -589,32 +730,143 @@ export function createPluginScopedMultitableApi(
             },
           }
         : {}),
+      // S3 fix round 1 (R1): G1 for the PROJECT OVERVIEW — the configured roles get READ on the overview
+      // sheet. The same least-privilege posture and the same order as `grantSheetRoleWrite` above, each
+      // step refusing before the next does any IO; the one difference is WHICH object: only the overview
+      // object id is admitted (a project sheet, the main table or any other object is refused here, and the
+      // host re-checks the sheet's `stock_prep_overview` kind inside its write transaction). The level is
+      // the host's literal `spreadsheet:read`; nothing here can ask for more.
+      ...(typeof multitable.provisioning?.grantOverviewRoleRead === 'function'
+        && pluginName === STOCK_PREPARATION_PROJECT_SHEET_GRANT_PORT_PLUGIN
+        ? {
+            grantOverviewRoleRead: async (input: {
+              projectId: string
+              sheetId: string
+              objectId: string
+              roleIds: string[]
+              actorId?: string | null
+            }) => {
+              const projectId = input.projectId
+              const sheetId = input.sheetId
+              const objectId = input.objectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              const roleIds = normalizeStockPreparationGrantRoleIds(input.roleIds)
+              if (objectId !== STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_OVERVIEW_GRANT_OBJECT_NOT_OVERVIEW',
+                  'an overview read grant may target only the stock-preparation project overview object',
+                  { field: 'objectId' },
+                )
+              }
+              if (typeof sheetId !== 'string' || sheetId.trim().length === 0
+                || multitable.provisioning.getObjectSheetId(projectId, objectId) !== sheetId) {
+                throw new StockPreparationProjectSheetGrantError(
+                  422,
+                  'STOCK_PREP_PROJECT_SHEET_GRANT_SHEET_MISMATCH',
+                  'the sheet is not the one derived for this project and objectId',
+                  { objectId },
+                )
+              }
+              if (!hooks.assertSheetOwnedByPlugin) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'unverifiable')
+              }
+              await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+              const ownedByProject = hooks.isSheetOwnedByProject
+                ? await hooks.isSheetOwnedByProject({ sheetId, projectId })
+                : await multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
+              if (ownedByProject !== true) {
+                throw new MultitableSheetScopeError(pluginName, sheetId, 'other_project')
+              }
+              return multitable.provisioning.grantOverviewRoleRead!({
+                projectId,
+                sheetId,
+                objectId,
+                roleIds,
+                actorId: typeof input.actorId === 'string' && input.actorId.trim() ? input.actorId.trim() : null,
+              })
+            },
+          }
+        : {}),
+      // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5): `systemKind` is a HOST-OWNED stamp — the
+      // server-owned `meta_sheets.system_kind` that makes a sheet a system sheet (undeletable, clamped to
+      // read/export for every person). A plugin may ask for it in exactly one case, checked here BEFORE any
+      // hook or host call: the plugin is `plugin-integration-core` (the G1 port's least-privilege posture),
+      // the kind is the overview kind, and the descriptor is the overview object. Anything else that names a
+      // kind is 403 MULTITABLE_SYSTEM_KIND_FORBIDDEN with nothing written. Each value is read ONCE and the
+      // checked values are what the hook / host receive (a getter cannot show the gate one object and the
+      // host another). A call without `systemKind` takes the pre-S3 path unchanged.
       ensureObject: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        // S3 follow-ups, fix round 1 (read-once): projectId, systemKind and the descriptor id are read ONCE — with or
+        // without a kind — and the forwarded input is that plain snapshot (the descriptor copied once with the id that
+        // was checked), so a getter cannot show the overview refusal / the kind gate one object and the hook / host
+        // another.
+        const projectId = input.projectId
+        const systemKind = input.systemKind
+        const inputDescriptor = input.descriptor
+        const rest = copyInputValuesExcept(input, ['projectId', 'systemKind', 'descriptor'])
+        const objectId = inputDescriptor?.id
+        const descriptor = inputDescriptor === undefined || inputDescriptor === null
+          ? inputDescriptor
+          : { ...copyInputValuesExcept(inputDescriptor, ['id']), id: objectId } as typeof inputDescriptor
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        // S3 follow-up E: the overview object is only ever provisioned STAMPED. An ensure of it without the kind
+        // (which would create an ordinary sheet at its id, or add columns to the stamped one) is refused here,
+        // pure, before any hook or host call; the stamped ensure takes the gate below.
+        if ((systemKind === undefined || systemKind === null) && objectId === STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+          throw new StockPreparationOverviewStructureWriteError('structure_write')
+        }
+        if (systemKind !== undefined && systemKind !== null) {
+          if (pluginName !== STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN) {
+            throw new StockPreparationOverviewSystemKindError('plugin')
+          }
+          if (systemKind !== STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND) {
+            throw new StockPreparationOverviewSystemKindError('kind')
+          }
+          if (objectId !== STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID) {
+            throw new StockPreparationOverviewSystemKindError('object')
+          }
+        }
+        const forwarded = {
+          ...rest,
+          projectId,
+          descriptor,
+          ...(systemKind !== undefined ? { systemKind } : {}),
+        } as typeof input
         if (hooks.ensureObjectInScope) {
           return hooks.ensureObjectInScope({
             pluginName,
-            ...input,
+            ...forwarded,
           })
         }
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.descriptor.id,
+          projectId: forwarded.projectId,
+          objectId: forwarded.descriptor.id,
         })
-        const result = await multitable.provisioning.ensureObject(input)
+        const result = await multitable.provisioning.ensureObject(forwarded)
         await hooks.claimObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.descriptor.id,
+          projectId: forwarded.projectId,
+          objectId: forwarded.descriptor.id,
           sheetId: result.sheet.id,
         })
         return result
       },
+      // S3 follow-up E: each value is read ONCE; the `systemKind` marker (the overview module's) is checked purely and
+      // never forwarded — the host's ensureView takes no kind. Fix round 1 (no oracle): the unmarked-overview refusal
+      // runs AFTER the sheet-scope check, so a foreign plugin probing the overview id meets the same scope refusal as
+      // for any foreign sheet; integration-core's own unmarked call on its overview is still refused.
       ensureView: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-        await hooks.assertSheetScope?.({ pluginName, sheetId: input.sheetId })
-        return multitable.provisioning.ensureView(input)
+        const projectId = input.projectId
+        const sheetId = input.sheetId
+        const descriptor = input.descriptor
+        const systemKind = input.systemKind
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        const marked = assertOverviewViewMarker({ projectId, sheetId, systemKind })
+        await hooks.assertSheetScope?.({ pluginName, sheetId })
+        if (!marked) await refuseUnmarkedOverviewView(sheetId)
+        return multitable.provisioning.ensureView({ projectId, sheetId, descriptor })
       },
       // READ-ONLY view existence/content, scoped exactly like the field read below it:
       // project namespace, then object scope. It is strictly NARROWER than the `ensureView`
@@ -632,13 +884,19 @@ export function createPluginScopedMultitableApi(
         return multitable.provisioning.findObjectView(input)
       },
       patchObjectFieldProperty: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
+        // Fix round 1 (read-once): the checked values are the forwarded values (see ensureMissingObjectFields).
+        const projectId = input.projectId
+        const objectId = input.objectId
+        const rest = copyInputValuesExcept(input, ['projectId', 'objectId'])
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        // S3 follow-up E: never a field property change on the read-only overview (pure, before any IO).
+        refuseOverviewObjectStructureWrite(objectId)
         await hooks.assertObjectScope?.({
           pluginName,
-          projectId: input.projectId,
-          objectId: input.objectId,
+          projectId,
+          objectId,
         })
-        return multitable.provisioning.patchObjectFieldProperty(input)
+        return multitable.provisioning.patchObjectFieldProperty({ ...rest, projectId, objectId } as typeof input)
       },
       getObjectField: async (input) => {
         // Read-only, but same project/object scope enforcement as the patch path.
@@ -692,22 +950,66 @@ export function createPluginScopedMultitableApi(
         await assertSheetScopeOnce(input.sheetId)
         return multitable.records.queryRecords(input)
       },
+      // S3 fix round 2 (F3): the three generic WRITES read `sheetId` ONCE, assert scope on it, refuse the
+      // stock-preparation overview on it, and forward exactly that value (a getter cannot show the checks one
+      // sheet and the host another).
       createRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.createRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.createRecord({ ...input, sheetId })
       },
       getRecord: async (input) => {
         await assertSheetScopeOnce(input.sheetId)
         return multitable.records.getRecord(input)
       },
       patchRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.patchRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.patchRecord({ ...input, sheetId })
       },
       deleteRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.deleteRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.deleteRecord({ ...input, sheetId })
       },
+      // S3 fix round 2 (F3): read-only — would a generic write to this (own) sheet be refused as a read-only
+      // system sheet? Same scope assertion as a read; a non-string id is simply not one.
+      isReadOnlySystemSheet: async (input) => {
+        const sheetId = input?.sheetId
+        if (typeof sheetId !== 'string') return false
+        await assertSheetScopeOnce(sheetId)
+        if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return false
+        if (!hooks.isStockPreparationOverviewSheet) return true
+        return (await hooks.isStockPreparationOverviewSheet({ sheetId })) !== false
+      },
+      // S3 fix round 2 (F3): THE overview write port — plugin-integration-core only. Takes a PROJECT id; the
+      // sheet is derived and re-checked (ownership + stamp) on every write by `resolveOverviewRecordsSheet`.
+      ...(pluginName === STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN
+        ? {
+            stockPreparationOverview: {
+              createRecord: async (input: { projectId: string; data: Record<string, unknown> }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.createRecord({ sheetId, data: input.data })
+              },
+              patchRecord: async (input: { projectId: string; recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.patchRecord({
+                  sheetId,
+                  recordId: input.recordId,
+                  changes: input.changes,
+                  ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+                })
+              },
+              deleteRecord: async (input: { projectId: string; recordId: string }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.deleteRecord({ sheetId, recordId: input.recordId })
+              },
+            },
+          }
+        : {}),
       runStockPreparationPersistUnitOfWork: async (input, operation) => {
         if (!hooks.runStockPreparationPersistUnitOfWork) {
           throw new MultitableUnitOfWorkUnavailableError()
@@ -722,6 +1024,9 @@ export function createPluginScopedMultitableApi(
         // callback allowlist from raw input.sheetIds would permit a whitespace variant the host
         // never locked (and would refuse the trimmed id the host did lock).
         const normalized = validateStockPreparationPersistUnitOfWorkInput(input)
+        // S3 fix round 2 (F3): the unit of work's create / patch are generic record writes too — no declared
+        // sheet may be the stock-preparation overview (refused before the host opens the transaction).
+        for (const sheetId of normalized.sheetIds) await refuseGenericOverviewRecordWrite(sheetId)
         const allowedSheetIds = new Set(normalized.sheetIds)
         return hooks.runStockPreparationPersistUnitOfWork(
           { ...normalized, pluginName },

@@ -1254,12 +1254,18 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       'confirmationQueue.projectDirectory',
       'confirmationQueue.valueEntry',
       'handoff.advance',
+      // S3 (R-37): the O2(a) project-level columns (read / update) and the overview refresh are
+      // OPERATE as the ADR writes them (§5) — a floor operator sets 负责人 / 备注 / 计划完成 on the
+      // project they work and rebuilds the read-only overview; none of the three pulls anything.
+      'projectFields.read',
+      'projectFields.update',
+      'projectOverview.refresh',
       // 一个项目一张备料表 (S2, R-36): the floor READS its project's sheet state and the registry
       // list; creating a sheet is the PULL tier and is not in this list.
       'projectTarget.list',
       'projectTarget.read',
     ],
-    'P-14: the eight OPERATE capabilities the floor holds (six kept by the owner + the two project-sheet reads)',
+    'P-14: the eleven OPERATE capabilities the floor holds (six kept by the owner + the two project-sheet reads + the three S3 routes)',
   )
   for (const entry of keptByTheFloor) {
     assert.equal(
@@ -1275,6 +1281,38 @@ async function theFloorOperatorNoLongerPullsAndThePullerDoes() {
       'refused',
       `P-14: pull alone is refused ${entry.capability}`,
     )
+  }
+
+  // S4 (R-38) — THE PULL-TIER MEMBERS OF THE MANIFEST. The project-sheet create (S2) and, since S4,
+  // archive / restore — the owner gave 归档 / 恢复 to the 拉取人员 (Q2), not to the floor. Read out of
+  // the manifest and pinned by NAME (so a re-tiered capability, or a fourth PULL member, reds here),
+  // then driven actor by actor: the floor operator is refused at the gate with zero host work, the
+  // 拉取人员 / stock-prep:admin / platform admin pass, and pull without operate (or alone) is refused.
+  const pullTier = STOCK_PREP_WORKBENCH_CAPABILITIES.filter((entry) => entry.code === STOCK_PREP_PULL)
+  assert.deepEqual(
+    pullTier.map((entry) => entry.capability).sort(),
+    // S3 fix round 1 (R6): + the overview ENSURE — creating the read-only overview is provisioning, the
+    // PULL tier's (R-35), so the OPERATE refresh no longer creates it.
+    ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore'],
+    'P-14: exactly four PULL-tier manifest capabilities — create, archive, restore, overview ensure',
+  )
+  for (const entry of pullTier) {
+    for (const [user, expected, who] of [
+      [OPERATOR, 'refused', 'the floor operator (read+operate, no pull)'],
+      [PULLER_NO_OPERATE, 'refused', 'pull without operate'],
+      [PULLER_ORPHAN, 'refused', 'pull alone'],
+      [PULLER, 'admitted', 'the 拉取人员'],
+      [WORKBENCH_ADMIN, 'admitted', 'stock-prep:admin (the ladder)'],
+      [PLATFORM_ADMIN, 'admitted', 'the platform admin'],
+    ]) {
+      routes.resetHostCalls()
+      assert.equal(
+        await gateVerdict(routes, { method: entry.method, routePath: entry.path, user, actionId: pull, body: { confirmProjectNo: 'P-14' } }),
+        expected,
+        `P-14: ${who} is ${expected} at ${entry.capability}`,
+      )
+      if (expected === 'refused') assert.equal(routes.hostCallCount(), 0, `P-14: …and the refusal at ${entry.capability} cost no host call`)
+    }
   }
 }
 

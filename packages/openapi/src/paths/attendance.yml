@@ -1883,6 +1883,7 @@ paths:
                 properties:
                   ok: { type: boolean }
                   data: { $ref: '#/components/schemas/AttendanceSettings' }
+                  runtimeGates: { $ref: '#/components/schemas/AttendanceRuntimeGates' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
     put:

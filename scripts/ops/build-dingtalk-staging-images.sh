@@ -7,6 +7,7 @@ IMAGE_TAG="${IMAGE_TAG:-}"
 BUILD_SOURCE="${BUILD_SOURCE:-https://github.com/zensgit/metasheet2}"
 IMAGE_PROVENANCE_FILE="${IMAGE_PROVENANCE_FILE:-}"
 STAGING_DEPLOY_SCOPE="${STAGING_DEPLOY_SCOPE:-backend}"
+VITE_MULTITABLE_RANGE_FILL_ENABLED="${VITE_MULTITABLE_RANGE_FILL_ENABLED-false}"
 
 function info() {
   echo "[build-dingtalk-staging-images] $*" >&2
@@ -36,6 +37,11 @@ require_control_free_path "${IMAGE_PROVENANCE_FILE}"
 [[ "${BUILD_SOURCE}" == "https://github.com/zensgit/metasheet2" ]] || die "BUILD_SOURCE must be the canonical repository URL"
 [[ "${STAGING_DEPLOY_SCOPE}" == "backend" || "${STAGING_DEPLOY_SCOPE}" == "full" ]] \
   || die "STAGING_DEPLOY_SCOPE must be backend or full"
+[[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" || "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "false" ]] \
+  || die "VITE_MULTITABLE_RANGE_FILL_ENABLED must be literal true or false"
+if [[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" ]]; then
+  [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]] || die "range fill requires a full-scope frontend build"
+fi
 [[ -f "${SOURCE_DIR}/Dockerfile.backend" ]] || die "source checkout is missing the backend Dockerfile"
 if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
   [[ -f "${SOURCE_DIR}/Dockerfile.frontend" ]] || die "source checkout is missing the frontend Dockerfile"
@@ -82,7 +88,11 @@ docker image inspect "${BACKEND_IMAGE}" >/dev/null
 images=("${BACKEND_IMAGE}")
 if [[ "${STAGING_DEPLOY_SCOPE}" == "full" ]]; then
   info "Web image identity validated"
-  docker build -f "${BUILD_CONTEXT}/Dockerfile.frontend" "${COMMON_BUILD_ARGS[@]}" -t "${WEB_IMAGE}" "${BUILD_CONTEXT}"
+  WEB_BUILD_ARGS=("${COMMON_BUILD_ARGS[@]}")
+  if [[ "${VITE_MULTITABLE_RANGE_FILL_ENABLED}" == "true" ]]; then
+    WEB_BUILD_ARGS+=(--build-arg "VITE_MULTITABLE_RANGE_FILL_ENABLED=true")
+  fi
+  docker build -f "${BUILD_CONTEXT}/Dockerfile.frontend" "${WEB_BUILD_ARGS[@]}" -t "${WEB_IMAGE}" "${BUILD_CONTEXT}"
   docker image inspect "${WEB_IMAGE}" >/dev/null
   images+=("${WEB_IMAGE}")
 fi
