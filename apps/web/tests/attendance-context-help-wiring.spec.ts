@@ -15,6 +15,7 @@ import {
 } from '../src/views/attendance/attendanceContextHelp'
 import { blockedSpreadsheetMessage } from '../src/views/attendance/importFileGuard'
 import { xlsxConvertFailureMessage } from '../src/views/attendance/importXlsxConvert'
+import { formatAttendanceDateKey } from '../src/views/attendance/attendanceDateTimePresentation'
 
 vi.mock('../src/composables/usePlugins', () => ({
   usePlugins: () => ({
@@ -168,6 +169,18 @@ describe('W5-2 context-help wiring', () => {
   // 'self-request-center' mount (inside AttendanceView.vue's overview anomalies/request card).
   // ---------------------------------------------------------------------------
   it("self overview: the Adjustment Request card carries context help with ④evidence_link — clicking it presets missing_punch, loads the SELF trace endpoint, and scrolls to the trace section", async () => {
+    // Civil-date defaults stay empty until rules/me names an IANA zone. This
+    // mount supplies one so the missing_punch click still has a workDate.
+    vi.mocked(apiFetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input)
+      if (url.includes('/api/attendance/rules/me')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: { runtimeRule: { timezone: 'Asia/Shanghai' } },
+        })
+      }
+      return emptyAttendanceResponse()
+    })
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi(8)
@@ -194,6 +207,7 @@ describe('W5-2 context-help wiring', () => {
     const traceUrl = new URL(traceCalls[0], 'http://localhost')
     expect(traceUrl.pathname).toBe('/api/attendance/decision-trace')
     expect(traceUrl.searchParams.get('category')).toBe('missing_punch')
+    expect(traceUrl.searchParams.get('workDate')).toBe(formatAttendanceDateKey(new Date(), 'Asia/Shanghai'))
     // §4.1: self face — the URL never carries a userId parameter.
     expect(traceCalls[0].includes('userId')).toBe(false)
 

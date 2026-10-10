@@ -59,6 +59,11 @@ function textResponse(status: number, text: string, headers: Record<string, stri
   } as unknown as Response
 }
 
+function attendanceRequestPath(url: string): string {
+  const queryAt = url.indexOf('?')
+  return queryAt === -1 ? url : url.slice(0, queryAt)
+}
+
 async function flushUi(cycles = 6): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
@@ -3524,7 +3529,7 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members' && method === 'GET') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && method === 'GET') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -3540,10 +3545,10 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/managers' && method === 'GET') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/managers' && method === 'GET') {
         return jsonResponse(200, { ok: true, data: { items: [...managers], total: managers.length } })
       }
-      if (url === '/api/attendance/groups/group-a/managers' && method === 'POST') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/managers' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}')) as Record<string, unknown>
         managerPostBodies.push(body)
         managers.push({
@@ -3703,10 +3708,10 @@ describe('Attendance admin regressions', () => {
         if (index >= 0) savedGroups.splice(index, 1)
         return jsonResponse(200, { ok: true, data: { id: 'group-b' } })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, { ok: true, data: { items: [], total: 3 } })
       }
-      if (url === '/api/attendance/groups/group-copy/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-copy/members') {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
       }
       return emptyAttendanceResponse()
@@ -3846,8 +3851,8 @@ describe('Attendance admin regressions', () => {
     await flushUi(10)
 
     const requestedUrls = vi.mocked(apiFetch).mock.calls.map(([input]) => String(input))
-    expect(requestedUrls).toContain('/api/attendance/groups/group-a/members')
-    expect(requestedUrls).toContain('/api/attendance/groups/group-a/managers')
+    expect(requestedUrls.some((url) => attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && url.includes('pageSize=200'))).toBe(true)
+    expect(requestedUrls.some((url) => attendanceRequestPath(url) === '/api/attendance/groups/group-a/managers' && url.includes('pageSize=200'))).toBe(true)
   })
 
   it('keeps a direct group route authoritative through delayed list hydration and stable prop rerenders', async () => {
@@ -3900,8 +3905,8 @@ describe('Attendance admin regressions', () => {
     await flushUi(8)
 
     const requestedUrls = vi.mocked(apiFetch).mock.calls.map(([input]) => String(input))
-    expect(requestedUrls).toContain('/api/attendance/groups/group-a/members')
-    expect(requestedUrls).toContain('/api/attendance/groups/group-a/managers')
+    expect(requestedUrls.some((url) => attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && url.includes('pageSize=200'))).toBe(true)
+    expect(requestedUrls.some((url) => attendanceRequestPath(url) === '/api/attendance/groups/group-a/managers' && url.includes('pageSize=200'))).toBe(true)
 
     resolveGroups(jsonResponse(200, {
       ok: true,
@@ -4166,7 +4171,7 @@ describe('Attendance admin regressions', () => {
           },
         })
       }
-      if (url === '/api/attendance/groups/group-a/members' && method === 'POST') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members' && method === 'POST') {
         const body = JSON.parse(String(init?.body || '{}'))
         memberPostBodies.push(body)
         const createdUserIds = Array.isArray(body.userIds) ? body.userIds : []
@@ -4178,7 +4183,7 @@ describe('Attendance admin regressions', () => {
         })))
         return jsonResponse(200, { ok: true, data: { items: groupMembers, total: groupMembers.length } })
       }
-      if (url === '/api/attendance/groups/group-a/members') {
+      if (attendanceRequestPath(url) === '/api/attendance/groups/group-a/members') {
         return jsonResponse(200, { ok: true, data: { items: groupMembers, total: groupMembers.length } })
       }
       if (url.startsWith('/api/attendance/groups?')) {
