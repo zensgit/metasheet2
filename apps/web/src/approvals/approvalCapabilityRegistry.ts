@@ -65,8 +65,8 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed" — both ODs are recorded
   // (a) in the §4 ratification block). ALSO admitted on `handler` since W1-1d (Lock-3 §1.5 forward
   // row "`user_group` (K1) … ADMIT", carried by HANDLER_ASSIGNEE_SOURCE_KINDS). The cc-as-recipient
-  // row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not admit it") is deferred to its
-  // own slice and is NOT added here.
+  // row (OD-L1-7(a), §2.3 "a SEPARATE row — the approver row does not admit it") is NOT this
+  // approver row: it lives under `assigneeSourcesByNodeType.cc` below.
   user_group: '用户组',
   // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
   // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
@@ -159,9 +159,10 @@ const HANDLER_OPERATION_POLICY_CAPABILITIES: ApprovalOperationPolicyCapability[]
   { id: 'transfer', label: '允许转交', policyKeys: ['allowTransfer'] },
 ]
 
-/** The shipped registry. Only `approval` and `handler` nodes have an assignee-source roster and an
+/** The shipped registry. `approval` and `handler` nodes have an assignee-source roster and an
+ *  operation-policy roster; `cc` has the single Lock-1 "`user_group` (cc)" row (see below) and no
  *  operation-policy roster; every other node type gets neither, and the backend rejects
- *  `nodeOperationPolicy` on them at the authoring choke (Lock-5 gate A-5). */
+ *  `nodeOperationPolicy` on non-approval/handler nodes at the authoring choke (Lock-5 gate A-5). */
 export const DEFAULT_APPROVAL_CAPABILITY_REGISTRY: ApprovalCapabilityRegistry = {
   assigneeSourcesByNodeType: {
     approval: SHIPPED_ASSIGNEE_SOURCE_KIND_ORDER.map((kind) => ({
@@ -176,6 +177,15 @@ export const DEFAULT_APPROVAL_CAPABILITY_REGISTRY: ApprovalCapabilityRegistry = 
       kind,
       label: APPROVAL_ASSIGNEE_SOURCE_LABELS[kind],
     })),
+    // Lock-1 §2.3 registry row "`user_group` (cc) | 用户组 | `cc` | OD-L1-7 decided; cc normalize
+    // path landed (a separate row — the approver row does not admit it)". Admitted by OD-L1-7(a)
+    // in the SAME slice that landed the backend cc normalize path + executor expansion and this
+    // FE's cc target picker. The row is LOAD-BEARING, not descriptive: the cc editor
+    // (`ApprovalGraphNodeConfigEditor.vue` `ccTargetTypeOptions`) offers 用户组 in its target-type
+    // select ONLY when this row is present — M4 "rendered only when present in the registry for
+    // that node type" holds for the cc half mechanically. A cc node has no assigneeSources[]; the
+    // `kind` names the lock's row, and the option it admits is `CcNodeConfig.targetType:'group'`.
+    cc: [{ kind: 'user_group', label: APPROVAL_ASSIGNEE_SOURCE_LABELS.user_group }],
   },
   operationPoliciesByNodeType: {
     approval: APPROVAL_OPERATION_POLICY_CAPABILITIES,

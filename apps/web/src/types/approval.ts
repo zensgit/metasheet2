@@ -18,6 +18,13 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
+/**
+ * Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc node's OWN target vocabulary. Byte-mirrors backend
+ * `ApprovalCcTargetType` (packages/core-backend/src/types/approval-product.ts): the two legacy kinds
+ * plus `'group'` (用户组). A SEPARATE alias from `ApprovalAssigneeType`, which also types the legacy
+ * approver `assigneeType` — OD-L1-7 widens the cc half only ("cc is a second contract, not a rider").
+ */
+export type ApprovalCcTargetType = 'user' | 'role' | 'group'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 // P1-C + Lock-1 K6: threshold (N-of-M / 门槛会签) and sequential (依次审批) are the fourth and
 // fifth shipped engine modes. This union byte-mirrors backend
@@ -347,7 +354,9 @@ export type ApprovalAssigneeSource =
    * authoring picker is a TYPED multi-select restricted to groups bound to the template's org
    * (`/api/approval-templates/directory/member-groups?orgId=`) — never a free-text/raw-id input; a
    * group outside the binding fails publish (values-free 400), never at dispatch. Cc-as-recipient
-   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
+   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape — it landed as
+   * `CcNodeConfig.targetType: 'group'` (the "`user_group` (cc)" registry row), sharing only the
+   * bound-group picker and the backend's snapshot map + publish gate.
    */
   | { kind: 'user_group'; groupIds: string[] }
   /**
@@ -396,7 +405,14 @@ export interface ConditionRule {
 }
 
 export interface CcNodeConfig {
-  targetType: ApprovalAssigneeType
+  /**
+   * Lock-1 OD-L1-7(a): `'group'` names bound member-group ids in `targetIds` (picked from the same
+   * org-scoped bound-group list the approver `user_group` picker uses). The template keeps the
+   * group reference; the backend executor expands it per member at dispatch, so persisted cc
+   * records stay user/role. An off-enum persisted value is carried VERBATIM by the editor (G-16 —
+   * never coerced) and flagged by `validateCcEdits`; the backend remains the sole arbiter.
+   */
+  targetType: ApprovalCcTargetType
   targetIds: string[]
 }
 

@@ -75,6 +75,7 @@ import {
   isApprovalAddSignMode,
   type ApprovalAddSignAggregation,
   type ApprovalAddSignMode,
+  isApprovalCcTargetType,
 } from '../types/approval-product'
 import {
   ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
@@ -83,6 +84,8 @@ import {
 } from './approval-add-sign-after'
 import {
   ApprovalGraphExecutor,
+  type ApprovalCcEvent,
+  readGroupMemberIdsSnapshot,
   type ApprovalGraphAssignment,
   type ApprovalGraphAssignmentResolver,
   type ApprovalGraphAutoApprovalEvent,
@@ -4046,7 +4049,13 @@ function normalizeApprovalGraph(
         }
         break
       case 'cc':
-        if ((node.config.targetType !== 'user' && node.config.targetType !== 'role')
+        // Lock-1 §K1 / OD-L1-7(a) — the cc half's OWN normalize path ("cc is a second contract,
+        // not a rider"): the accepted set is exactly APPROVAL_CC_TARGET_TYPES ('user' | 'role' |
+        // 'group'), enumerated, never permissive (G-4). Whether a 'group' id is a REAL group bound
+        // to the publishing org is the PUBLISH gate's job (`assertUserGroupSourcesBoundToOrg`,
+        // same split as the approver `user_group` source) — normalize stays a shape check so a
+        // stored draft remains readable/re-saveable while being fixed.
+        if (!isApprovalCcTargetType(node.config.targetType)
           || !Array.isArray(node.config.targetIds)
           || node.config.targetIds.some((entry) => !isNonEmptyString(entry))) {
           failValidation(context, `approvalGraph.nodes[${index}].config must define targetType and targetIds`)
@@ -5604,23 +5613,43 @@ export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: Runtim
 }
 
 /**
- * Lock-1 §K1: every group id referenced by a `user_group` source, over ANY graph — typed on the
- * plain `ApprovalGraph` shape (not `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors
- * above: the publish HARD GATE (`assertUserGroupSourcesBoundToOrg`) must run BEFORE
- * `buildRuntimeGraph` (on the same `approvalGraph` the other publish-time authoring gates read),
- * while the create-time freeze runs AFTER (`asRuntimeGraph`'s published/frozen graph) —
- * `RuntimeGraph extends ApprovalGraph`, so one function structurally serves both call sites. Node
- * types `approval` AND `handler` — Lock-3 §1.5's forward row ("`user_group` (K1) … ADMIT" on a
- * handler) landed by W1-1d: a group id referenced ONLY by a handler node must be frozen too, else
- * the handler's `groupMemberIds` lookup finds nothing, resolves EMPTY and fails
- * `APPROVAL_ASSIGNEE_EMPTY` at dispatch (R-13 silent-skip class). Still NOT `cc`: cc-as-recipient
- * (OD-L1-7) is a SEPARATE contract deferred to its own slice, so there is no cc-node group shape
- * to scan for yet — the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s own doc comment names:
- * keep detector scope in exact lockstep with what is actually admitted.
+ * Lock-1 OD-L1-7(a) — the group ids ONE cc node references: its `targetIds` when (and only when)
+ * `targetType === 'group'`; `[]` for a user / role cc node. Trimmed exactly as the approver
+ * collector below trims a `user_group` source's `groupIds`, so the create-time freeze
+ * (`fetchMemberGroupSnapshot`) and the publish gate read the same normalized id set.
+ */
+function ccNodeGroupTargetIds(config: unknown): string[] {
+  if (!isRecord(config) || config.targetType !== 'group' || !Array.isArray(config.targetIds)) return []
+  return config.targetIds
+    .map((groupId: unknown) => (typeof groupId === 'string' ? groupId.trim() : ''))
+    .filter((groupId: string) => groupId.length > 0)
+}
+
+/**
+ * Lock-1 §K1: every group id referenced by a `user_group` source OR (OD-L1-7(a)) by a cc node's
+ * `targetType:'group'` target, over ANY graph — typed on the plain `ApprovalGraph` shape (not
+ * `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors above: the publish HARD GATE
+ * (`assertUserGroupSourcesBoundToOrg`) must run BEFORE `buildRuntimeGraph` (on the same
+ * `approvalGraph` the other publish-time authoring gates read), while the create-time freeze runs
+ * AFTER (`asRuntimeGraph`'s published/frozen graph) — `RuntimeGraph extends ApprovalGraph`, so one
+ * function structurally serves both call sites. Detector scope stays in exact lockstep with what is
+ * actually admitted (the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s doc comment names):
+ * the approver arm reads `approval` AND `handler` nodes — the §2.3 registry row plus Lock-3 §1.5's
+ * forward row ("`user_group` (K1) … ADMIT" on a handler) landed by W1-1d: a group id referenced
+ * ONLY by a handler node must be frozen too, else the handler's `groupMemberIds` lookup finds
+ * nothing, resolves EMPTY and fails `APPROVAL_ASSIGNEE_EMPTY` at dispatch (R-13 silent-skip class)
+ * — and the cc arm — the separate "`user_group` (cc)" registry row, landed by the OD-L1-7 slice —
+ * reads `cc` nodes only. The cc arm is what lets a group cc target be FROZEN into `groupMemberIds`
+ * at create, which is the only membership source the executor's cc arm reads (never a live read
+ * at dispatch).
  */
 export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
   const groupIds = new Set<string>()
   for (const node of approvalGraph.nodes) {
+    if (node.type === 'cc') {
+      for (const groupId of ccNodeGroupTargetIds(node.config)) groupIds.add(groupId)
+      continue
+    }
     if (node.type !== 'approval' && node.type !== 'handler') continue
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
@@ -5646,12 +5675,33 @@ export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph)
  * forward row, W1-1d) — the node loop must stay in lockstep with `collectApprovalGraphMemberGroupIds`
  * above: a handler-carried group id that the collector freezes but this gate never checked would be
  * the one way a foreign/dangling group reaches an instance.
+ *
+ * OD-L1-7(a) — a cc node's `targetType:'group'` targets pass through the SAME gate (same curated
+ * set, same code, same fail-closed-at-publish-never-at-dispatch posture — §K1 "a group id that does
+ * not exist or is outside the org binding is … fail-closed at publish"); the details name the node
+ * key and the offending `targetIndex` (a cc node has no source array, so no `sourceIndex`).
  */
 export function assertUserGroupSourcesBoundToOrg(
   approvalGraph: ApprovalGraph,
   curatedGroupIds: ReadonlySet<string>,
 ): void {
   for (const node of approvalGraph.nodes) {
+    if (node.type === 'cc') {
+      const ccConfig: unknown = node.config
+      if (!isRecord(ccConfig) || ccConfig.targetType !== 'group' || !Array.isArray(ccConfig.targetIds)) continue
+      ccConfig.targetIds.forEach((rawGroupId: unknown, targetIndex: number) => {
+        const groupId = typeof rawGroupId === 'string' ? rawGroupId.trim() : ''
+        if (!groupId || !curatedGroupIds.has(groupId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} cc targetIds[${targetIndex}] references a group not bound to this organization`,
+            400,
+            'APPROVAL_ASSIGNEE_GROUP_NOT_BOUND',
+            { nodeKey: node.key, targetIndex, groupId, reason: 'not-bound' },
+          )
+        }
+      })
+      continue
+    }
     if (node.type !== 'approval' && node.type !== 'handler') continue
     // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
     // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
@@ -8447,6 +8497,9 @@ export class ApprovalProductService {
         // RA-1b: thread `[]` (not null) — genuine-empty curated roles → membership false → DEFAULT route.
         roles: requesterSnapshot.directoryRoles ?? [],
       },
+      // Lock-1 OD-L1-7(a): the frozen group member map baked above — the cc arm expands a 'group'
+      // cc target from it (per member), exactly as the resolver expands an approver `user_group`.
+      groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
     })
     return {
       bundle,
@@ -10388,6 +10441,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
@@ -11403,6 +11460,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
 
       if (scannedEffect === 'transfer') {
@@ -11752,6 +11813,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
@@ -14819,7 +14884,7 @@ export class ApprovalProductService {
     instanceId: string,
     version: number,
     status: string,
-    ccEvents: Array<{ nodeKey: string; targetType: 'user' | 'role'; targetId: string }>,
+    ccEvents: ApprovalCcEvent[],
   ): Promise<void> {
     for (const event of ccEvents) {
       await this.insertApprovalRecord(client, instanceId, {
@@ -14833,8 +14898,13 @@ export class ApprovalProductService {
         toVersion: version,
         metadata: {
           nodeKey: event.nodeKey,
+          // The persisted row shape stays `user` / `role`: a 'group' cc target (OD-L1-7(a)) is
+          // expanded per member by the executor, and each member row carries the expanding
+          // `groupId` for audit ("why was I cc'd") — additive, so every reader matching on
+          // targetType/targetId (cc tab, unread badge, comment candidates, readability) is unchanged.
           targetType: event.targetType,
           targetId: event.targetId,
+          ...(event.groupId ? { groupId: event.groupId } : {}),
         },
       })
     }
