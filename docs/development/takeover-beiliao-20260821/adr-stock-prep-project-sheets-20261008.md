@@ -343,16 +343,26 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
      - **R63**（S0 已在包里）：迁移跑完后，在「角色管理」手工建 id 为 `stock-prep_puller` 的角色（`stock-prep:read` + `operate` + `pull`），任命拉取人员并「开通插件使用」。R63 上机清单（私有记录）就是这么写的：角色在迁移之后建，id **恰为** `stock-prep_puller`（不是别的写法），所以 R64 的 S5a 迁移会采纳它，而不是另建一个。
      - **R64**（S5a）：迁移播种四个内置角色（零成员）。`stock-prep_puller` 已存在则**原样采纳**（不改名、不改码、不动成员；迁移日志只记 id，以及它的码集是否与模板一致——是 / 否，缺几个、多几个，不列码名）；其余三个新建；某个内置显示名已被别的角色占用时，新建的那个显示名带「（内置）」后缀。某个内置 id 在 `roles` 里不存在、却残留着该 id 的 `user_roles` 或 `role_permissions` 行（被删角色留下的；Kysely 建的库这两列对 `roles` 没有外键）时，**跳过这个模板**（不建、不绑码），日志只记 id 和两个计数，残留行原样保留——上机后看迁移日志里有没有 `NOT created`，有就由现场先处理残留行，再在角色管理里按同一 id 手工建。迁移跑完、对一线放开之前完成主管理员任命和「开通插件使用」，并给主管理员配好委托范围（§11.1）。
   2. 备份，升级，迁移，开关保持关闭。
-  3. 按第 1 步的名单任命；旧一线角色 `stock-prep-operator` 迁到 `stock-prep_frontline`（§11.2）。用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`，**必须在 S5a 迁移之后**（`stock-prep_frontline` 不存在时脚本拒绝，退出码 2）；**在任何服务器上运行都是 owner 动作**：
+  3. 按第 1 步的名单任命；旧一线角色 `stock-prep-operator` 迁到 `stock-prep_frontline`（§11.2）。用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`，**必须在 S5a 迁移之后**（`stock-prep_frontline` 不存在时脚本拒绝，退出码 2），**并且必须在第 6 步把 `stock-prep_frontline` 写进 G1 角色清单 `MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS` 之前**（G1 会给清单里的角色写项目表授权行，目标角色一旦有了旧角色没有的表级授权，脚本的「凭空多得」检查就会拒绝）；**在任何服务器上运行都是 owner 动作**：
+     - **`--apply` 之前先手工核对**：① S5a 迁移日志里有没有 `NOT created`（某个内置 id 残留成员行或码行而被跳过）、`code set equals the template: no`（被采纳的同 id 角色码集与模板不同），有就先由现场处理（处理残留行后按同一 id 手工建 / 在角色管理里核对码），迁移不替现场决定；② 在审批设计器里查有没有审批模板按 id（或显示名）把旧角色写成审批人或抄送对象——脚本不读也不改审批模板，搬完后从这些模板发起的新审批仍会指派 / 抄送给已没有成员的旧角色，要先在设计器里改指向；
      - 先不带参数跑一次 dry-run：只读事务，只打印计数和 `--apply` 会得出的判定，不写任何东西；
      - 再 `--apply`：成员（`user_roles`）和以该角色为主体的表级授权行（`spreadsheet_permissions` 中 `subject_type = 'role'` 的行）在一个事务里搬到 `stock-prep_frontline`，可重跑（第二次什么都不写）；
-     - 旧角色已空后，可另加 `--delete-empty-old-role` 删除旧角色（只删它自己的码和角色行）；还有指名旧角色的待接受邀请（`user_invites` 的 pending 行）时拒绝删除，dry-run 打印这个数；
-     - 脚本会拒绝（退出码 2，不写）的情形：旧角色持有新角色没有的码（成员搬走会**失去**它们）；新角色持有旧角色没有的码、表级或视图 / 字段 / 记录 / 历史审计授权行、或指派给新角色的在途审批，而旧角色里有还不在新角色的成员要搬（他们会**凭空多得**这些；刚播种的 `stock-prep_frontline` 没有这些，dry-run 一律打印这几项计数）；旧角色是视图 / 字段 / 记录权限或历史审计授权的主体；有指派给旧角色的在途审批；`stock-prep_frontline` 已有旧角色以外的成员而又有表级授权要搬；
-     - **R64 上机的 owner 决策点**：演示机旧角色 `stock-prep-operator` 预计持有三个手工加的平台码 `approvals:read`、`approvals:write`、`multitable:submit-approval`（frontline plan 记录），所以 dry-run 会报「会失去」、`--apply` 会拒绝，直到操作员二选一：① **推荐**：新建一个单独的平台角色持有这三个码、授给同一批成员，再从旧角色去掉这三个码——内置角色里保持没有平台码；② 给 `stock-prep_frontline` 补上这三个码——内置一线角色从此带平台码，与 §11.4 对自定义角色「平台码永不出现」的口径不同。只从旧角色去掉则一线失去记录送审。由 owner 在 R64 上机时决定；
-     - 脚本不改审批模板里按角色 id 写死的引用（要在审批设计器里改指向）；检查与搬迁之间，别的会话并发任命 / 改角色 / 加授权有一个很小的时间窗（任命不锁角色行），所以 `--apply` 在维护窗口里跑、期间不动角色。
+     - 旧角色已空后，可另加 `--delete-empty-old-role` 删除旧角色（只删它自己的码和角色行）。搬完后在同一事务里重读，只有旧角色已没有成员、没有任何 role 主体授权行（`spreadsheet_permissions` 及视图 / 字段 / 记录权限、历史审计授权）、没有在途或任何状态的角色审批席位、没有角色抄送记录、也没有指名它的待接受邀请（`user_invites` 的 pending 行）时才删；仍有待接受邀请或审批席位 / 抄送记录时，在任何写入之前就拒绝删除，dry-run 打印这些数；
+     - 脚本会拒绝（退出码 2，不写）的情形，就是下面这几条，没有别的（比较的是两个角色，不是每个成员经其它角色得到的有效权限，所以可能拒绝一个其实无害的搬迁）：
+       - `stock-prep_frontline` 不存在；
+       - 旧角色持有新角色没有的码且仍有成员（成员会**失去**它们）；
+       - 旧角色仍有成员，且有按角色指派给旧角色的审批席位（**任何状态**，`approval_assignments` 中 `assignment_type = 'role'`）或抄送给旧角色的记录（`approval_records` 中 `action = 'cc'`、`metadata->>'targetType' = 'role'`），按角色 id 或去空白后的显示名匹配：审批实例的可读性对席位不看 `is_active`、也认角色抄送（`approval-instance-readability.ts` 的 `canReadApprovalInstance`，列表侧 `ApprovalBridgeService.ts` 同口径），成员搬走就**失去**这些历史审批的读权限，而脚本不搬席位也不搬抄送（修复轮 2 新增，dry-run 打印两个计数）；
+       - 新角色持有旧角色没有的码、role 主体授权行（表级按「同表且同级别」比较；视图 / 字段 / 记录权限、历史审计授权）、指派给新角色的在途审批、任何状态的角色审批席位或角色抄送记录（经新角色 id / 显示名可达、经旧角色不可达），而旧角色里有还不在新角色的成员要搬（他们会**凭空多得**这些；刚播种的 `stock-prep_frontline` 全为 0，dry-run 一律打印这几项计数）；
+       - 旧角色是视图 / 字段 / 记录权限或历史审计授权的主体（按角色 id）；
+       - 有指派给旧角色的在途审批（按角色 id）；
+       - `stock-prep_frontline` 已有旧角色以外的成员而又有表级授权要搬；
+       - 带 `--delete-empty-old-role` 时：仍有指名旧角色的待接受邀请，或仍有指名旧角色的审批席位 / 抄送记录（它们搬不走；以后有人按同一 id 或显示名重建角色，就会读到这些审批）；
+     - **脚本不检查、也不改**：审批模板里对旧角色的引用（见上面 `--apply` 之前的核对）；指名旧角色的待接受邀请（不改指向；成员关系本身是建用户时写的 `user_roles` 行，照常搬走；邀请只挡 `--delete-empty-old-role`）；上面没列到的任何按角色 id 或名字引用角色的表或配置（脚本只读上面列出的表）；
+     - **R64 上机的 owner 决策点：旧角色上的平台码只有方案 ① 一条路**。演示机旧角色 `stock-prep-operator` 预计持有三个手工加的平台码 `approvals:read`、`approvals:write`、`multitable:submit-approval`（frontline plan 记录），所以 dry-run 会报「会失去」、`--apply` 会拒绝。**① 唯一受支持的做法**：在角色管理里新建一个单独的平台角色持有这三个码，授给同一批成员，再从旧角色去掉这三个码，然后再跑脚本——内置角色里保持没有平台码。**② 给 `stock-prep_frontline` 补上这三个码：不可接受。** 委托任命只校验角色 id 的前缀（`admin-users.ts:3160-3168` 的 `roleIdMatchesNamespaces`，写入口 `role-assignment.ts:168-171` 同口径，都不看角色带了哪些码），而 `approvals`、`multitable` 两个资源不受命名空间准入控制（`namespace-admission.ts:11-25` 的 `NON_NAMESPACED_PERMISSION_RESOURCES`）；`stock-prep_frontline` 一旦带上这三个码，`stock-prep_admin` 的委托管理员就能经任命它把审批写权限发给任何人，违反 §11.3「主管理员不能做：平台码」。脚本的拒绝提示也只指向 ①。只从旧角色去掉三个码（不建单独角色）则一线失去记录送审，须 owner 明确接受；
+     - 检查与搬迁之间，别的会话并发任命 / 改角色 / 加授权有一个很小的时间窗（任命不锁角色行），所以 `--apply` 在维护窗口里跑、期间不动角色和审批。
   4. **定时试拉换账号**：脚本只调 dry-run 和 apply（`scheduled-pull.mjs:368-374`），用的如果是一线账号，升级后会 403；换成拉取人员账号。走 legacy `integration:read` / `integration:write` 的账号不受影响（`workbench-access.cjs:272,278`）。
   5. **撤销一线在旧表上的授权**，或降为只读（`univer-meta.ts:9797`），免得一线继续往一张没人读的表里填；暂停挂在旧表上的自动化（0924 §1）。
-  6. 在 `app.env` 写入开关和 G1 角色清单，重启。
+  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。
   7. 拉取人员把每个项目建一次表；建表前定时试拉会把它们当 ABSENT 跳过。
   8. 只读核对：GET target 的行数要和表格 All Records 一致。
   9. 通知客户：自动化、提醒、自建视图都是按表配置的，新项目表不会自动带过去；旧表里已填的人工列不会带进新表，新表第一次拉取后人工列是空的。
