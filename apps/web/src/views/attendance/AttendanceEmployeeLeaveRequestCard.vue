@@ -115,6 +115,10 @@
           }}
         </button>
       </div>
+      <p v-if="daysHint" class="leave-card__hint" data-leave-card-days-hint>{{ daysHint }}</p>
+      <p v-if="annualDayBlock" class="leave-card__hint leave-card__hint--error" data-leave-card-annual-block>
+        {{ annualDayBlock }}
+      </p>
     </div>
 
     <label
@@ -158,7 +162,7 @@
         class="leave-card__btn leave-card__btn--primary"
         type="button"
         data-leave-card-submit
-        :disabled="submitting || leaveTypes.length === 0"
+        :disabled="submitting || leaveTypes.length === 0 || Boolean(annualDayBlock)"
         @click="emit('submit')"
       >
         {{ submitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
@@ -169,7 +173,14 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { AttendanceLeaveQuickFillKind } from './halfDayLeaveHelper'
+import {
+  annualLeaveExceedsTypeDayMessage,
+  annualLeaveMinutesExceedTypeDay,
+} from './annualLeaveDayContract'
+import {
+  formatLeaveTypeDaysHint,
+  type AttendanceLeaveQuickFillKind,
+} from './halfDayLeaveHelper'
 import {
   formatLeaveDurationHours,
   minutesFromDateTimeRange,
@@ -182,7 +193,9 @@ type TranslateFn = (en: string, zh: string) => string
 interface LeaveTypeOption {
   id: string
   name: string
+  code?: string
   requiresAttachment?: boolean
+  defaultMinutesPerDay?: number | null
 }
 
 interface LeaveRequestFormFields {
@@ -242,6 +255,19 @@ const durationUnitLabel = computed(() => (
     ? props.tr('min', '分钟')
     : props.tr('hours', '小时')
 ))
+
+const daysHint = computed(() => formatLeaveTypeDaysHint(
+  parsedMinutes.value,
+  selectedLeaveType.value?.defaultMinutesPerDay,
+  props.tr,
+))
+
+const annualDayBlock = computed(() => {
+  const leaveType = selectedLeaveType.value
+  const minutes = parsedMinutes.value
+  if (!annualLeaveMinutesExceedTypeDay(leaveType, minutes) || minutes == null) return ''
+  return annualLeaveExceedsTypeDayMessage(Number(leaveType?.defaultMinutesPerDay), minutes, props.tr)
+})
 
 function syncMinutesFromRange(): void {
   const minutes = minutesFromDateTimeRange(
@@ -348,6 +374,10 @@ function toggleDurationUnit(): void {
   color: #8f959e;
   font-size: 12px;
   line-height: 1.4;
+}
+
+.leave-card__hint--error {
+  color: #d83931;
 }
 
 .leave-card__presets {
