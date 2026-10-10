@@ -16568,12 +16568,12 @@ function isAttendanceReportFieldCatalogSeedEnabled() {
   return parseBoolean(process.env.ATTENDANCE_REPORT_FIELD_CATALOG_SEED, true)
 }
 
-// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): the
-// launch endpoint `POST /api/attendance/requests/:id/cancel-round` stays OFF until phase D acceptance
-// passes. Default OFF; gates ONLY the launch — every other cancel-round route is unaffected. Read at
-// call time, never at module load, so both branches are exercisable in a single process.
+// Cancel-round product entry A2 (owner 2026-09-29, 「Attendance-side + OFF flag (Recommended)」): gates ONLY the
+// launch `POST /api/attendance/requests/:id/cancel-round`; every other cancel-round route is unaffected. Default
+// OFF; ON only for the exact literal 'true' (AGENTS.md; no trim, no case folding, no '1' / 'yes', so NOT parseBoolean);
+// registered in scripts/ops/global-history-flag-manifest.mjs. Read at call time, never at module load.
 function isAttendanceCancelRoundEntryEnabled() {
-  return parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)
+  return process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED === 'true'
 }
 
 function confidenceRank(value) {
