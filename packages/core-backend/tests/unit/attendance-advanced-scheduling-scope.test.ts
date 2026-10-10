@@ -121,8 +121,29 @@ describe('attendance advanced scheduling scope foundation', () => {
       ['DELETE', '/api/attendance/rotation-assignments/:id'],
     ]
     scopedSchedulerRoutes.forEach(([method, path]) => expectDirectAsyncRoute(method, path))
-    expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentScopeTarget')
+    const assignmentWriteRoutes = scopedSchedulerRoutes.filter(([method]) => method !== 'GET')
+    for (const [method, path] of assignmentWriteRoutes) {
+      const needle = `'${method}',\n      '${path}'`
+      const start = pluginSource.indexOf(needle)
+      expect(start, needle).toBeGreaterThan(-1)
+      const next = pluginSource.indexOf('context.api.http.addRoute(', start + needle.length)
+      const body = pluginSource.slice(start, next === -1 ? undefined : next)
+      expect(body).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
+    }
+    expect(pluginSource).toContain('resolveAttendanceScheduleAssignmentDispatchMemberships')
     expect(pluginSource).toContain('assertAttendanceScheduleAssignmentDispatchAllowed')
+    expect(pluginSource).not.toContain('resolveAttendanceScheduleAssignmentScopeTarget')
+    const dispatchGuard = pluginSource.match(
+      /async function assertAttendanceScheduleAssignmentDispatchAllowed\([\s\S]*?\n    async function canEditAttendanceScheduleGroup/,
+    )?.[0] ?? ''
+    expect(dispatchGuard).toContain('attendanceScheduleAssignmentDispatchScopeAllowsMembership')
+    expect(dispatchGuard).not.toContain('assertAttendanceSchedulerScopeAllowed')
+    expect(pluginSource).toMatch(
+      /function attendanceScheduleAssignmentDispatchScopeAllowsMembership[\s\S]*?attendanceSchedulerScopeAllowsActorActionFactsImpl/,
+    )
+    expect(pluginSource).toMatch(
+      /function attendanceSchedulerScopeAllowsActorActionFacts\(scopeRow, actorContext, action, facts\) \{\n      return attendanceSchedulerScopeAllowsActorActionFactsImpl\(scopeRow, actorContext, action, facts\)/,
+    )
     expect(pluginSource).toContain('assertAttendanceScheduleGroupEditAllowed')
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleDispatchAllowed')
     expect(pluginSource).toContain('assertAttendanceGroupFixedScheduleRebuildAllowed')
@@ -311,6 +332,101 @@ describe('attendance advanced scheduling scope foundation', () => {
     expect(helpers.attendanceSchedulerScopeAllowsActorActionTarget({ ...scope, isActive: false }, actor, 'dispatch', {
       scheduleGroupIds: ['sg-1'],
       userIds: ['u-1'],
+    })).toBe(false)
+  })
+
+  it('authorizes assignment dispatch from one in-scope membership instead of full group coverage', () => {
+    const actor = {
+      userId: 'scheduler-1',
+      roles: [],
+      roleTags: [],
+    }
+    const scope = {
+      subjectType: 'user',
+      subjectRef: 'scheduler-1',
+      actions: ['dispatch', 'view', 'export'],
+      isActive: true,
+      scope: {
+        scheduleGroupIds: ['sg-a'],
+        attendanceGroupIds: [],
+        userIds: [],
+        departments: [],
+        roles: ['ops'],
+        roleTags: ['line_scheduler'],
+      },
+    }
+
+    expect(helpers.attendanceSchedulerScopeMatchesTarget(scope, {
+      scheduleGroupIds: ['sg-a', 'sg-b'],
+      userIds: ['worker-1'],
+    })).toBe(false)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership(scope, actor, 'worker-1', {
+      schedule_group_id: 'sg-a',
+      attendance_group_id: null,
+      department_ref: 'dept-a',
+    })).toBe(true)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership(scope, actor, 'worker-1', {
+      schedule_group_id: 'sg-b',
+      attendance_group_id: null,
+      department_ref: 'dept-b',
+    })).toBe(false)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership({
+      ...scope,
+      scope: {
+        ...scope.scope,
+        scheduleGroupIds: [],
+        userIds: ['worker-1'],
+      },
+    }, actor, 'worker-1', {
+      schedule_group_id: 'sg-b',
+    })).toBe(true)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership({
+      ...scope,
+      scope: {
+        ...scope.scope,
+        scheduleGroupIds: [],
+        userIds: ['worker-1'],
+      },
+    }, actor, 'worker-2', {
+      schedule_group_id: 'sg-b',
+    })).toBe(false)
+    const splitDimensionScope = {
+      ...scope,
+      scope: {
+        ...scope.scope,
+        departments: ['dept-b'],
+      },
+    }
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership(splitDimensionScope, actor, 'worker-1', {
+      schedule_group_id: 'sg-a',
+      department_ref: 'dept-a',
+    })).toBe(false)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership(splitDimensionScope, actor, 'worker-1', {
+      schedule_group_id: 'sg-b',
+      department_ref: 'dept-b',
+    })).toBe(false)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership(splitDimensionScope, actor, 'worker-1', {
+      schedule_group_id: 'sg-a',
+      department_ref: 'dept-b',
+    })).toBe(true)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership({
+      ...scope,
+      scope: {
+        scheduleGroupIds: [],
+        attendanceGroupIds: [],
+        userIds: [],
+        departments: [],
+        roles: ['ops'],
+        roleTags: [],
+      },
+    }, actor, 'worker-1', {
+      schedule_group_id: 'sg-a',
+    })).toBe(false)
+    expect(helpers.attendanceScheduleAssignmentDispatchScopeAllowsMembership({
+      ...scope,
+      actions: ['view'],
+    }, actor, 'worker-1', {
+      schedule_group_id: 'sg-a',
     })).toBe(false)
   })
 })
