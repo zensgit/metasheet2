@@ -751,6 +751,31 @@ npx vitest run approval-detail-instance-consistency approval-store-detail-genera
 # and in this batch before wiring.
 npx vitest run approval-detail-can-decide-current-node --reporter=dot
 
+# 退回候选 (return candidates), 2026-10-09: ONE token added — `approval-detail-return-candidates`, a
+# NEW spec (apps/web/tests/approval-detail-return-candidates.spec.ts) over the mounted
+# ApprovalDetailView. It pins the 退回 target list against the three checks the server's return
+# dispatch applies (handler cursor, parallel region, target off the executor's visited approval
+# trail). It covers both DTO shapes — the detail read carries `currentNodeType`, an action response
+# carries `currentNodeKeys` — and the owner-visible choices: no graph ⇒ today's unfiltered list,
+# only the instance's own template / pinned version may judge it, and the pinned version wins over a
+# drifted live template.
+#
+# SUBSTRING COLLISIONS, checked mechanically in BOTH directions against every token already in this
+# file, using the counting rule of scripts/ops/required-web-lane-exec-block.mjs `allVitestTokens`
+# (drop comment lines, join backslash continuations, keep every logical line containing
+# `vitest run`, strip a trailing `|| exit $?`, take every non-flag positional): 553 tokens on 19
+# gating lines before this change, 554 on 20 after, no duplicates, identical to the committed
+# apps/web/scripts/run-required-web-tests.tokens manifest. No existing token contains the new one,
+# and the new one contains no existing token. In particular the five pre-existing
+# `approval-detail-*` tokens (approval-detail-can-decide-current-node,
+# approval-detail-column-row-key, approval-detail-field, approval-detail-instance-consistency,
+# approval-detail-record-table) are unrelated to it in both directions. It matches exactly ONE file
+# under apps/web (none under apps/web/verification, which vitest's default include also collects).
+# Verified green in isolation at the wiring commit (`npx vitest run approval-detail-return-candidates
+# --reporter=dot` → "Test Files 1 passed"), and before wiring in one batch with its three
+# neighbouring detail-view specs.
+npx vitest run approval-detail-return-candidates --reporter=dot
+
 # 审批可发现性 (approval discoverability), 2026-09-07. Tokens are BARE BASENAMES, as
 # packages/core-backend/tests/unit/approval-ci-coverage-enumeration.ts's T1 tier requires (each of
 # these files matches /^approval.*\.(test|spec)\.ts$/, and an incidental substring match is
@@ -868,6 +893,29 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # of `StockPreparationOnboardingReadiness` (the closest neighbours, `StockPreparationOperatorHome` /
 # `StockPreparationOperatorProjectDirectory`, diverge at `StockPreparationOp…`), and it is not a
 # substring of any of them; it matches exactly one file on disk.
+# 一个项目一张备料表 S4 (ADR adr-stock-prep-project-sheets-20261008 §6, register R-38, 2026-10-09): ONE
+# token added, `StockPreparationProjectArchive` — the NEW spec (apps/web/tests/
+# StockPreparationProjectArchive.spec.ts) for archive / restore: the client (POST, body exactly
+# `{ confirmProjectNo }`, no query), the typed-confirmation flow, 项目备料页's 「归档项目」 / 「恢复这张表」
+# controls, the pull panel's 「恢复并重新拉取」, the removed 「恢复入口随后上线」 placeholder and the PA-ALIGN
+# block the permission-matrix suite defers to for the two new manifest controls. Named so that the S2
+# token `StockPreparationProjectTarget` is NOT a substring of it (a `…ProjectTargetArchive` name would
+# have been matched by that token too). Substring collision checked in BOTH directions: no existing
+# token is a substring of `StockPreparationProjectArchive` (its neighbours `StockPreparationProjectBoard`
+# / `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
+# of any token, and it matches exactly one file on disk.
+#
+# 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
+# token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
+# StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
+# create-before-preview flow), the pull panel's create / re-pull / preview prompts, 项目备料页's
+# sheet-state line, 今天要处理's 「每个项目一张备料表」 line, the Q8 「平台登记」 rename, and the PT-ALIGN
+# block the permission-matrix suite defers to for the three new manifest controls. Substring collision
+# checked in BOTH directions: no existing token is a substring of `StockPreparationProjectTarget` (its
+# nearest neighbours `StockPreparationProjectSync.spec.ts` / `StockPreparationProjectSyncPanel.spec.ts`
+# / `StockPreparationProjectWorkspaceView` diverge right after `StockPreparationProject`), it is not a
+# substring of any of them, and it matches exactly one file on disk.
+#
 # 「记录与排查」面板 (P1-4/P1-5, 暗装, 2026-09-08) added `StockPreparationOpsPanel` — the NEW spec
 # (apps/web/tests/StockPreparationOpsPanel.spec.ts) for the audit-reverse-lookup + deployment-health
 # panel: 六格三态 (idle/ready/forbidden/unavailable, never a fourth colour), `allSettled` isolation
@@ -1823,10 +1871,12 @@ exec npx vitest run \
   StockPreparationOpsPanel \
   StockPreparationPosturePlainLanguage \
   StockPreparationPrepLineView \
+  StockPreparationProjectArchive \
   StockPreparationProjectBoard \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
   StockPreparationProjectSyncPanel.spec.ts \
+  StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
   StockPreparationScenarioBAcceptance \

@@ -214,9 +214,9 @@ const ROUTES = [
   // oracle across tenants. Path-addressed by projectNo because the board IS one project; the number
   // never reaches an audit row. See stock-preparation-project-board.cjs.
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/board', 'stockPreparationOperatorProjectBoard'],
-  // 一个项目一张备料表 — S1 (ADR adr-stock-prep-project-sheets-20261008 §2 / §4; register R-35). ALL
-  // THREE answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED, with ZERO IO, unless
-  // MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is the exact literal 'true'.
+  // 一个项目一张备料表 — S1 (ADR adr-stock-prep-project-sheets-20261008 §2 / §4; register R-35) and S4
+  // (§6; register R-38). ALL FIVE answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED, with ZERO IO,
+  // unless MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is the exact literal 'true'.
   //   GET  target  — the project's registry state (absent / active / archived), its deep-link handles
   //                  and row counts; OPERATE, same gate and tenant derivation as the board above, so a
   //                  floor operator can see whether their project has a sheet. `may.*` is computed on
@@ -227,10 +227,20 @@ const ROUTES = [
   //                  server-side, an EMPTY closed request body, at most 200 rows per tenant, audited.
   //                  201 created / 200 already registered; the G1 role grant follows the create.
   //   GET  project-targets — the tenant's registry rows (handles and enums only); OPERATE.
+  //   POST target/archive  — S4: 归档代替删除 (Q2). active → archived on the REGISTRY ROW ONLY: the
+  //                  sheet is neither soft- nor hard-deleted, its grants, rows, ledger and handoff
+  //                  cursor are untouched. PULL tier; the body is the closed allowlist
+  //                  `{ confirmProjectNo }`, which must repeat the path's project number; audited
+  //                  `project_target_archive` once. Archiving an archived project is a typed 409.
+  //   POST target/restore  — S4: archived → active, same gate, same body, audited
+  //                  `project_target_restore` once; restoring an active project is a typed 409. The
+  //                  200 cap is not re-checked (an archived row already counts against it).
   // The static `project-targets` segment cannot collide with `projects/:projectNo/...`.
   ['GET', '/api/integration/stock-preparation/project-targets', 'stockPreparationProjectTargetList'],
   ['GET', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetGet'],
   ['POST', '/api/integration/stock-preparation/projects/:projectNo/target', 'stockPreparationProjectTargetCreate'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/archive', 'stockPreparationProjectTargetArchive'],
+  ['POST', '/api/integration/stock-preparation/projects/:projectNo/target/restore', 'stockPreparationProjectTargetRestore'],
   // #3751 MVP W5b (#3890): values-free audit trail over the stock-prep write surface.
   ['GET', '/api/integration/stock-preparation/audit', 'stockPreparationAuditList'],
   // 工作台里选源 — WHICH source the pull action reads, chosen in the workbench instead of in a server
@@ -503,6 +513,10 @@ const {
   grantProjectSheetRoles,
   projectSheetViewHandles,
   buildProjectTargetBinding,
+  // S2 (ADR §2 「客户包」): the deployment's customer pack, re-placed onto each project sheet.
+  planProjectSheetCustomerPacks,
+  preflightProjectSheetCustomerPacks,
+  installProjectSheetCustomerPacks,
 } = require('./stock-preparation-project-targets.cjs')
 const { StockPreparationProjectTargetStoreError } = require('./stock-preparation-project-target-store.cjs')
 // DEPLOYMENT PREFLIGHT: the one read that aggregates every "this deployment cannot run stock-prep
@@ -1779,6 +1793,49 @@ const VALID_STOCK_PREPARATION_PROJECT_TARGET_QUERY_KEYS = new Set(['tenantId', '
 // cannot drift.
 const STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION = 'project_target_create'
 const STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION = 'project_target_grant'
+// S4 (ADR §6, register R-38): the archive / restore body is ONE key — the typed confirmation — and
+// the two lifecycle actions migration 088 already declared for this slice (no new vocabulary).
+const VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS = new Set(['confirmProjectNo'])
+const STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION = 'project_target_archive'
+const STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION = 'project_target_restore'
+const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH'
+
+/**
+ * S4: the archive / restore REQUEST — pure, no IO, so a malformed or mismatched request costs nothing.
+ * The body is the closed allowlist `{ confirmProjectNo }`; the path's project number must be a plain
+ * project number; the confirmation must repeat it EXACTLY (both sides trimmed the same way, nothing
+ * else folded — no case folding, no prefix match). The refusal names the FIELD and never echoes
+ * either value. Returns the path's project number.
+ */
+function stockPreparationProjectTargetLifecycleRequest(req) {
+  const body = normalizeStockPreparationConfirmBody(
+    requestBody(req),
+    VALID_STOCK_PREPARATION_PROJECT_TARGET_LIFECYCLE_BODY_KEYS,
+    'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID',
+  )
+  const projectNo = firstString(requestParams(req).projectNo)
+  if (!projectNo || !isValidStockPrepProjectNo(projectNo)) {
+    throw new HttpRouteError(400, 'STOCK_PREPARATION_PROJECT_TARGET_REQUEST_INVALID', 'projectNo is required and must be a plain project number', { field: 'projectNo' })
+  }
+  const confirmProjectNo = typeof body.confirmProjectNo === 'string' ? body.confirmProjectNo.trim() : ''
+  if (confirmProjectNo !== projectNo) {
+    throw new HttpRouteError(400, STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE, 'confirmProjectNo must repeat the project number in the path exactly', { field: 'confirmProjectNo' })
+  }
+  return projectNo
+}
+
+/** S4: what archive / restore answer — the row's handles and enums, `may.*` from its new status. */
+function stockPreparationProjectTargetLifecycleResponse(projectNo, row) {
+  return {
+    projectNo,
+    status: row.status,
+    sheetId: row.sheetId,
+    archivedAt: row.archivedAt,
+    restoredAt: row.restoredAt,
+    // The caller passed the PULL gate, so the only thing left to decide is the state.
+    may: { create: false, archive: row.status === 'active', restore: row.status === 'archived' },
+  }
+}
 // SOURCE preflight. `externalSystemId` is the ONE addition, and it is a REGISTERED-SYSTEM SELECTOR,
 // not a connection: it names a row the caller's tenant already owns, and everything about how to
 // reach that row — host, credentials, driver — stays server-held exactly as it is for every other
@@ -3971,6 +4028,16 @@ function requireStockPreparationAudit() {
     }
     return stockPreparationProjectTargets
   }
+  // S4: the two lifecycle routes need the store's archive / restore on top of the S1 surface. Kept
+  // apart from the S1 check so an older store binding still serves the S1 routes; the lifecycle
+  // routes fail closed (the same 501) without both methods.
+  function requireStockPreparationProjectTargetLifecycle() {
+    const store = requireStockPreparationProjectTargets()
+    if (typeof store.archive !== 'function' || typeof store.restore !== 'function') {
+      throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot archive or restore here')
+    }
+    return store
+  }
   const tableActions = createStockPreparationTableActionRegistry({
     actions: configuredTableActions,
     resolveSourceBinding: stockPreparationSourceBinding
@@ -3980,7 +4047,7 @@ function requireStockPreparationAudit() {
         }
       : null,
     resolveProjectTarget: stockPreparationProjectTargets
-      ? async ({ tenantId, projectNo, targetPurpose }) => resolveProjectTargetForAction({
+      ? async ({ tenantId, projectNo, targetPurpose, extensionFieldIds }) => resolveProjectTargetForAction({
           store: stockPreparationProjectTargets,
           provisioning: context && context.api && context.api.multitable && context.api.multitable.provisioning,
           // The caller's OWN staging project — the tenant the registry is keyed by. Never a request
@@ -3989,6 +4056,9 @@ function requireStockPreparationAudit() {
           tenantId,
           projectNo,
           targetPurpose,
+          // S2: the looked-up action's own declared `ext_` band (server config, threaded by the
+          // registry from the normalized action) — never a request field.
+          extensionFieldIds,
           env: process.env,
         })
       : null,
@@ -6928,15 +6998,18 @@ function requireStockPreparationAudit() {
       assertAuthoritativeLargeBomExpansion(job)
       const action = assertStockPreparationTargetReady(job.actionSnapshot)
       // R1: the plan reads existing rows FROM THE SNAPSHOT's sheet, so a snapshot that no longer names
-      // the project's registered sheet is refused here, before that read. A READ lookup: an archived
-      // project still resolves its sheet for a plan; the apply-start below is where archived refuses.
+      // the project's registered sheet is refused here, before that read. S4 (ADR §6, R-38): a WRITE
+      // lookup — the plan is the large-BOM lane's preview of a write, exactly as the dry run is the
+      // small lane's, and the §6 table puts 大 BOM with dry-run / apply: an archived project refuses
+      // 409 STOCK_PREPARATION_PROJECT_ARCHIVED here, before the field probe and the existing-row read,
+      // instead of planning a write that apply-start would then refuse. (Was 'read' in S1.)
       assertLargeBomJobTargetMatchesProjectTarget(
         action.target,
         await tableActions.getTableAction({
           ...routeScope,
           actionId,
           projectNo: job.parameters && job.parameters.projectNo,
-          targetPurpose: 'read',
+          targetPurpose: 'write',
         }),
         'expansion',
       )
@@ -8816,10 +8889,24 @@ function requireStockPreparationAudit() {
     // CREATE + REGISTER + GRANT. R-35's named exception to R-11: a PULLER provisions ONE sheet, from
     // the frozen template, with every identifier derived server-side and an EMPTY request body.
     // Ordering: switch → gate → body/number shape → scope → audit vocabulary probe (migration 088)
-    // → cap (pre-count, so nothing is provisioned past it) → registry read → provision → register
-    // (E1: the store re-checks the cap under a per-tenant advisory lock, in the same transaction as
-    // its insert) → audit → grant → audit. A race partner's insert is arbitrated by the registry's
-    // unique index (the store maps 23505 to 409).
+    // → registry read, then ONE of two legs:
+    //   create — customer-pack PLAN + PRE-FLIGHT + tenant-claim door (S2, reads only; every refusal
+    //            decidable without the sheet) → cap (pre-count, so nothing is provisioned past it) →
+    //            provision → customer-pack INSTALL (S2) → register (E1: the store re-checks the cap
+    //            under a per-tenant advisory lock, in the same transaction as its insert) → audit →
+    //            grant → audit;
+    //   replay — grant → audit FIRST (healed whatever the packs do), then the pack heal → audit.
+    // A race partner's insert is arbitrated by the registry's unique index (the store maps 23505
+    // to 409).
+    //
+    // S2 (ADR §2 「客户包」, register R-36): the deployment's customer pack is installed onto the new
+    // sheet BEFORE the registry row is written, and every refusal decidable without the sheet is
+    // asked BEFORE the sheet is provisioned. So a repeating refusal (no field-permission port, a
+    // role deleted on the host, a claimless login for a write-scope pack, a band no pack covers)
+    // provisions nothing; only a genuine mid-install host failure can leave a provisioned,
+    // unregistered sheet — at most ONE per project number (ensure-if-absent by the derived objectId),
+    // reused by the retry, which is the same POST, and not counted by the 200 cap until registered.
+    // The 200 replay heals an already registered sheet the same way.
     async stockPreparationProjectTargetCreate(req, res) {
       const user = requireAccess(req, STOCK_PREP_PULL)
       requireProjectSheetsEnabled()
@@ -8845,15 +8932,120 @@ function requireStockPreparationAudit() {
       if (existing && existing.status === 'archived') {
         throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it instead of creating a second one', { field: 'projectNo' })
       }
+      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
+      // G1 — the host grant is ON CONFLICT DO NOTHING, so running it again heals a grant that failed
+      // after the row was registered and never adds a second permission row. Server-configured roles
+      // only; a refusal from the host propagates.
+      const healGrant = async (target) => {
+        const outcome = await grantProjectSheetRoles({
+          provisioning,
+          projectId: targetProjectId,
+          sheetId: target.sheetId,
+          objectId: target.objectId,
+          roleIds: resolveProjectSheetGrantRoleIds(process.env),
+          actorId: actor,
+        })
+        if (outcome.attempted) {
+          await audit.append({
+            tenantId,
+            projectId: projectNo,
+            action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+            subjectId: target.sheetId,
+            mode: outcome.granted > 0 ? 'granted' : 'already_granted',
+            actor,
+            detail: { roleCount: outcome.roleCount, granted: outcome.granted, alreadyGranted: outcome.alreadyGranted },
+          })
+        }
+        return outcome
+      }
+      // S2 — WHICH CUSTOMER PACKS THE SHEET MUST CARRY. The DEPLOYMENT's own action, read as an
+      // env-binding probe ('readiness' is never overlaid by the registry): its env target objectId
+      // keys the install ledger, its declared `extensionFieldIds` is the band the packs must cover.
+      // A deployment without the pull action configured has no band and no env object, so there is
+      // nothing to carry over; any OTHER lookup failure propagates before anything is provisioned.
+      // Server config only — the request body is the empty allowlist above.
+      const planPacks = async () => {
+        let deploymentAction = null
+        try {
+          deploymentAction = await tableActions.getTableAction({
+            actionId: PLM_STOCK_PREPARATION_ACTION_ID,
+            tenantId,
+            targetPurpose: 'readiness',
+          })
+        } catch (error) {
+          const code = error && error.code
+          if (code !== 'TABLE_ACTION_NOT_CONFIGURED' && code !== 'TABLE_ACTION_NOT_FOUND') throw error
+          deploymentAction = null
+        }
+        return planProjectSheetCustomerPacks({
+          tenantId,
+          projectId: targetProjectId,
+          deploymentObjectId: deploymentAction && deploymentAction.target ? deploymentAction.target.objectId : null,
+          extensionFieldIds: deploymentAction ? deploymentAction.extensionFieldIds : undefined,
+          packCatalog: customerPackCatalog,
+          packInstallStore: stockPreparationPackInstalls,
+        })
+      }
+      const installPacks = (plan, objectId) => installProjectSheetCustomerPacks({
+        plan,
+        provisioning,
+        projectId: targetProjectId,
+        tenantId,
+        projectNo,
+        objectId,
+        packInstallStore: stockPreparationPackInstalls,
+        fieldPermissions: stockPreparationFieldPermissions,
+        tenantClaimVerified: scope.tenantClaimVerified === true,
+        logger: routeLogger,
+      })
       let registered = existing
       let created = false
       let provisioned = null
-      if (!registered) {
+      let packs = null
+      let grant = null
+      if (registered) {
+        // THE 200 REPLAY. The G1 grant heal runs FIRST and on its own (S2 fix round 1): a pack plan
+        // or install refusal below must not leave the role grant unhealed. Then the pack heal — a
+        // pack missing from the sheet's own ledger, at an older version, or whose `ext_` columns the
+        // field-existence probe no longer finds is (re)installed; one already in place costs no
+        // host write.
+        //
+        // S4 fix round 1 (R-38): the `existing` read above is OUTSIDE the tenant lock, and an archive
+        // can commit after it. So the heal runs inside `withActiveRowLocked`: the registry row is
+        // re-read under the SAME per-tenant advisory lock archive / restore take, an archived row
+        // refuses 409 STOCK_PREPARATION_PROJECT_ARCHIVED before any grant or pack write, and the lock
+        // is held across the heal so an archive arriving meanwhile waits for it.
+        if (typeof store.withActiveRowLocked !== 'function') {
+          throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot re-check a registered sheet under its lock here')
+        }
+        const healed = await store.withActiveRowLocked({ tenantId, projectNo }, async (locked) => {
+          const lockedGrant = await healGrant(locked)
+          const replayPlan = await planPacks()
+          const lockedPacks = await installPacks(replayPlan, locked.objectId)
+          return { row: locked, grant: lockedGrant, packs: lockedPacks }
+        })
+        registered = healed.row
+        grant = healed.grant
+        packs = healed.packs
+      } else {
+        // THE CREATE. Every refusal decidable without the sheet comes BEFORE provisioning (S2 fix
+        // round 1, the cap boundary): band coverage, the installer's own sheet-independent
+        // pre-flight per pack, and the tenant-claim door for write-scope packs. See the ordering
+        // note above this handler.
+        const createPlan = await planPacks()
+        await preflightProjectSheetCustomerPacks({
+          plan: createPlan,
+          provisioning,
+          fieldPermissions: stockPreparationFieldPermissions,
+          tenantClaimVerified: scope.tenantClaimVerified === true,
+        })
         // THE CAP counts archived rows too (§6: an archived sheet is a live sheet).
         const registeredCount = await store.count({ tenantId })
         if (registeredCount >= MAX_PROJECT_TARGETS_PER_TENANT) {
           throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_TARGET_LIMIT', `this tenant already has ${MAX_PROJECT_TARGETS_PER_TENANT} registered stock-preparation project sheets (archived included)`, { limit: MAX_PROJECT_TARGETS_PER_TENANT })
         }
+        // Ensure-if-absent by the DERIVED objectId: a retry after a mid-install failure reuses this
+        // one table, so a project number can never own two.
         provisioned = await provisionProjectSheet({
           context,
           projectId: targetProjectId,
@@ -8861,6 +9053,8 @@ function requireStockPreparationAudit() {
           projectNo,
           env: process.env,
         })
+        // S2: INSTALL BEFORE REGISTER — see the ordering note above this handler.
+        packs = await installPacks(createPlan, provisioned.objectId)
         registered = await store.create({
           tenantId,
           projectNo,
@@ -8886,29 +9080,37 @@ function requireStockPreparationAudit() {
           },
         })
       }
-      // G1 — on the fresh create AND on an idempotent replay: the host grant is ON CONFLICT DO
-      // NOTHING, so a replay heals a grant that failed after the row was registered and never adds
-      // a second permission row. Server-configured roles only; a refusal from the host propagates.
-      const provisioning = context && context.api && context.api.multitable && context.api.multitable.provisioning
-      const grant = await grantProjectSheetRoles({
-        provisioning,
-        projectId: targetProjectId,
-        sheetId: registered.sheetId,
-        objectId: registered.objectId,
-        roleIds: resolveProjectSheetGrantRoleIds(process.env),
-        actorId: actor,
-      })
-      if (grant.attempted) {
+      // S2: the pack install is audited under the EXISTING `project_target_create` action (it is
+      // the part of creating the sheet that makes it usable), with its own closed mode — no new
+      // vocabulary migration. Written only when a pack actually landed (installed or reinstalled);
+      // values-free: counts, and the pack ids (deployment slugs) as a version count map.
+      const landedPackCount = packs ? packs.installedPackCount + packs.reinstalledPackCount : 0
+      if (landedPackCount > 0) {
+        const packVersions = {}
+        for (const entry of packs.packs) {
+          if (entry.outcome === 'installed' || entry.outcome === 'reinstalled') packVersions[entry.packId] = entry.packVersion
+        }
         await audit.append({
           tenantId,
           projectId: projectNo,
-          action: STOCK_PREPARATION_PROJECT_TARGET_GRANT_AUDIT_ACTION,
+          action: STOCK_PREPARATION_PROJECT_TARGET_CREATE_AUDIT_ACTION,
           subjectId: registered.sheetId,
-          mode: grant.granted > 0 ? 'granted' : 'already_granted',
+          mode: 'customer_pack_installed',
           actor,
-          detail: { roleCount: grant.roleCount, granted: grant.granted, alreadyGranted: grant.alreadyGranted },
+          detail: {
+            installedPackCount: packs.installedPackCount,
+            reinstalledPackCount: packs.reinstalledPackCount,
+            alreadyInstalledPackCount: packs.alreadyInstalledPackCount,
+            notInCatalogPackCount: packs.notInCatalogPackCount,
+            declaredExtensionFieldCount: packs.declaredExtensionFieldCount,
+            createdFieldCount: packs.packs.reduce((total, entry) => total + entry.createdFieldCount, 0),
+            stampedFieldCount: packs.packs.reduce((total, entry) => total + entry.stampedFieldCount, 0),
+            packVersions,
+          },
         })
       }
+      // G1 on the CREATE leg — after the registry row exists (the replay leg healed it above).
+      if (!grant) grant = await healGrant(registered)
       const handles = projectSheetViewHandles({ provisioning, projectId: targetProjectId, objectId: registered.objectId })
       return sendOk(res, {
         projectNo,
@@ -8925,8 +9127,93 @@ function requireStockPreparationAudit() {
           granted: grant.granted,
           alreadyGranted: grant.alreadyGranted,
         },
+        // S2: what the customer-pack carry-over did, as counts (values-free).
+        customerPacks: {
+          planned: packs ? packs.packs.length : 0,
+          installed: packs ? packs.installedPackCount : 0,
+          reinstalled: packs ? packs.reinstalledPackCount : 0,
+          alreadyInstalled: packs ? packs.alreadyInstalledPackCount : 0,
+          notInCatalog: packs ? packs.notInCatalogPackCount : 0,
+        },
         ...(provisioned ? { todoView: { created: provisioned.todoView.created === true, skipped: provisioned.todoView.skipped || null } } : {}),
       }, created ? 201 : 200)
+    },
+
+    // ── 一个项目一张备料表 S4 (ADR §6, register R-38): ARCHIVE AND RESTORE ───────────────────────────
+    //
+    // 归档代替删除 (Q2). Both routes change ONE registry row (status + its outcome columns) and append
+    // ONE audit row — nothing else. The sheet is never soft- or hard-deleted, renamed or re-granted;
+    // its rows, the confirmation ledger and the handoff cursor are untouched; so neither route makes a
+    // single host call (no provisioning, no records, no grant port). What archiving DOES change is how
+    // every OTHER route resolves this project: the overlay answers 409 ARCHIVED to every write-purpose
+    // lookup and keeps serving reads (§6 route table), and the scheduled pull skips it.
+    //
+    // ORDER, pinned by the call-site guard exactly as for the S1 routes: the PULL gate (S0's tier;
+    // `stock-prep:admin` and the platform admin pass through the ladder) → the switch → the request
+    // (pure: body allowlist + `confirmProjectNo` must repeat the path number) → the host-vouched
+    // scope → the store → the audit vocabulary probe → the transition (one transaction, the tenant's
+    // advisory lock, the row FOR UPDATE, a typed 409 when the precondition fails) → the audit row.
+    //
+    // KNOWN LIMIT, the same as the create's (R-35 (a)): the audit append runs after the transition's
+    // transaction has committed; an append that fails leaves the transition in place, unaudited, and
+    // the request answers the append's error.
+    async stockPreparationProjectTargetArchive(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const projectNo = stockPreparationProjectTargetLifecycleRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargetLifecycle()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const archived = await store.archive({ tenantId, projectNo, actorId: actor })
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_TARGET_ARCHIVE_AUDIT_ACTION,
+        subjectId: archived.sheetId,
+        mode: 'archived',
+        actor,
+        detail: { fromStatus: 'active', toStatus: 'archived' },
+      })
+      return sendOk(res, stockPreparationProjectTargetLifecycleResponse(projectNo, archived))
+    },
+
+    // RESTORE. archived → active, then the web runs the ordinary re-pull flow (ADR §4: 「恢复并重新拉取」).
+    // No second sheet can appear: the sheet id is derived and archiving never touched the sheet. The
+    // 200 cap is not re-checked — the row was counted while archived (§6).
+    async stockPreparationProjectTargetRestore(req, res) {
+      const user = requireAccess(req, STOCK_PREP_PULL)
+      requireProjectSheetsEnabled()
+      const audit = requireStockPreparationAudit()
+      const projectNo = stockPreparationProjectTargetLifecycleRequest(req)
+      const scope = await resolveOperatorValueScope({
+        user,
+        authenticatedTenantId: req.authenticatedTenantId,
+        explicitTenantIds: collectExplicitTenantIds(req, {}),
+        tenantPrincipalDirectory,
+      })
+      const tenantId = scope.tenantId
+      const store = requireStockPreparationProjectTargetLifecycle()
+      await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION, '088', tenantId)
+      const actor = user.id || user.email
+      const restored = await store.restore({ tenantId, projectNo, actorId: actor })
+      await audit.append({
+        tenantId,
+        projectId: projectNo,
+        action: STOCK_PREPARATION_PROJECT_TARGET_RESTORE_AUDIT_ACTION,
+        subjectId: restored.sheetId,
+        mode: 'restored',
+        actor,
+        detail: { fromStatus: 'archived', toStatus: 'active' },
+      })
+      return sendOk(res, stockPreparationProjectTargetLifecycleResponse(projectNo, restored))
     },
 
     async stockPreparationProjectTargetList(req, res) {
@@ -9464,6 +9751,26 @@ function requireStockPreparationAudit() {
           ...(firstString(input.resolutionAction) ? { resolutionAction: firstString(input.resolutionAction) } : {}),
         },
       })
+      // S4 (ADR §6 「confirm 裁决 … 同一个 409（不改账本，不发钉钉）」, register R-38). With the
+      // project-sheets switch on, a decision whose LEDGER ROW names an archived project is refused
+      // 409 STOCK_PREPARATION_PROJECT_ARCHIVED and the ledger is not patched. The check runs INSIDE
+      // the write, on the one row the write itself located and is about to patch — keyed by that
+      // row's own project cell and the VERIFIED tenant, never by anything the caller sent — so it
+      // cannot be skipped by a soft lookup that failed or by a project number the audit column's
+      // shape floor drops. The intent row above still lands first, exactly as for every other refusal
+      // of this route ("audit row + error"). A registry read that fails PROPAGATES: with the switch on,
+      // "could not tell whether the project is archived" is not "it is not archived". A row naming no
+      // project, or a project the registry does not hold, is unchanged. Switch off: no hook at all,
+      // so the write is byte-identical to before S4.
+      const assertProjectWritable = stockPreparationProjectSheetsEnabled(process.env)
+        ? async (ledgerProjectNo) => {
+          if (!ledgerProjectNo) return
+          const registered = await requireStockPreparationProjectTargets().get({ tenantId, projectNo: ledgerProjectNo })
+          if (registered && registered.status === 'archived') {
+            throw new HttpRouteError(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'this project\'s stock-preparation sheet is archived; restore it before confirming its decisions', { field: 'projectNo' })
+          }
+        }
+        : undefined
       const result = await confirmConfirmationDecision({
         recordsApi: getMultitableRecordsApi(),
         provisioning: getMultitableProvisioning(),
@@ -9476,6 +9783,7 @@ function requireStockPreparationAudit() {
         resolvedAuxValue: input.resolvedAuxValue,
         notes: input.notes,
         confirmedBy: user.id || user.email,
+        ...(assertProjectWritable ? { assertProjectWritable } : {}),
       })
       return sendOk(res, result)
     },

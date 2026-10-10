@@ -284,6 +284,19 @@ describe('O2 / R-11 — /stock-prep permission matrix (front end)', () => {
  */
 const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-operator-project-board',
+  // 一个项目一张备料表 (S2, R-36). The three project-sheet controls live on 项目备料页 (the sheet-state
+  // line), on the pull panel (the 「新建备料表并拉取」 confirmation) and on 今天要处理 (the
+  // 「每个项目一张备料表」 line) — never on this view — and each renders only once the server has
+  // answered with the default-OFF switch on. Their alignment, both directions, per actor, is asserted
+  // on those surfaces in apps/web/tests/StockPreparationProjectTarget.spec.ts (PT-ALIGN).
+  'stock-prep-project-target-status',
+  'stock-prep-project-target-create',
+  'stock-prep-project-target-list',
+  // S4 (R-38): archive / restore live on 项目备料页's sheet-state line, PULL tier, rendered only on the
+  // state the server says the action fits. Their alignment, both directions, per actor, is asserted
+  // on that line in apps/web/tests/StockPreparationProjectArchive.spec.ts (PA-ALIGN).
+  'stock-prep-project-target-archive',
+  'stock-prep-project-target-restore',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

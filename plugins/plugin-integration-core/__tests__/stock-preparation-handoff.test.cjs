@@ -3046,8 +3046,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // and the header list stayed in step through the deletion above.
   // 一个项目一张备料表 (S1) added THREE — the project-target GET, CREATE and LIST (the scope header's
   // section D, items 11–13): the registry they read is keyed by the tenant this scope proves.
-  assert.equal(callSites, 13, 'G9: thirteen call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun']) {
+  // S4 (R-38) added TWO — ARCHIVE and RESTORE (section D, items 14–15): the row they flip is keyed by
+  // the same proven tenant.
+  assert.equal(callSites, 15, 'G9: fifteen call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name
