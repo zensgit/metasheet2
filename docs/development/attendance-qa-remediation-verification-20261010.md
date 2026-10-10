@@ -2,13 +2,21 @@
 
 ## 当前结论
 
-2026-10-10 已获得公开 Draft PR 与 CI 的明确授权；[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布，最终提交上的远端 CI 尚未出结果。此前各轮“待发布授权”记录保留为当次冻结状态。PR 合并、部署与真实数据操作继续 HOLD。
+2026-10-10 已获得公开 Draft PR 与 CI 的明确授权；[Draft PR #6300](https://github.com/zensgit/metasheet2/pull/6300) 已发布。首轮远端 CI 在两个源域清单登记处失败，登记已补齐、定向回归通过；最终提交上的远端 CI 尚未完成。此前各轮“待发布授权”记录保留为当次冻结状态。PR 合并、部署与真实数据操作继续 HOLD。
 
 冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支当前正常对齐固定 main 快照 `00caf5f639`；历次 main 合并均无冲突，测试链并集无丢项，本地检查结果及各批冻结身份见下文。
 
 本轮独立审阅发现并修复一个 P2：跨午夜的旧刷新，以及审批后迟到的历史请求，均可能覆盖新一天的本人签到状态。两个入口已补齐开始时刻/最终规则时区保护；反例在修复前失败、修复后通过，完整前端回归与 Astra 最终复核通过。原 QA 环境、真实历史、性能与远端 CI 尚未验证，不能声称附件 20 项全部解决。
 
 首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，早期正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。该批合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，对应回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。各批证据保留自己的冻结代码身份；当前代码见下一节。
+
+## 首轮远端 CI 与源域清单登记
+
+head `63f14abd7f1cf2f9930f7f870eb2682bfc2a13b5` 的 [Node 20 作业](https://github.com/zensgit/metasheet2/actions/runs/38020430064/job/114120065008)在主测试步骤有 3 个失败断言：W7 派生域缺少新增顺序 helper 的分类，Intl 站点清单缺少历史诊断的无小时年月日 formatter（29 个实际站点、28 个登记）。该步另有 18480 项通过、1722 项跳过；后续新增数据库守卫及合成夹具步骤因此跳过，不能作为远端通过证据。
+
+修复已将 helper 加入 calculation 集合，继续接受 W6 模块引用与 HTTP 路由消费两项禁令；Intl 清单按现有 date-only 规则登记 `localDay`，不授予 `allowsHourOption`。扫描域、覆盖等式、禁令和正控制保留。Node 20 上三个完整守卫 spec 共 39 项通过（W7 preservation 13、Intl 16、W6 import graph 10），历史运维契约另 4 项通过，均无失败或跳过。Sol 完成两处最窄登记修复及回归，Astra 独立审阅实际 diff 通过；两个生产文件字节未变。新提交将重新运行最终 head 的 required CI。
+
+同 head 的 attendance-web-guard 与 web-tests 已实际执行 today/prefill/timeline/dashboard 整文件 9/19/19/102 项，均无失败或跳过；考勤门禁另执行既有 Chromium 补卡浏览器 6 项，不能与本地 mock 的 8 项混计。这些首轮结果保留该 head 身份，后续验收以新 head 的新作业为准。
 
 ## #6296 对齐后的当前代码
 
