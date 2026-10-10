@@ -7,9 +7,11 @@
  *
  * 为什么不能照搬 #5680 的「中间件首位必须是门」判据：
  *   本批 67 条写路由里只有 `canary-routes.ts` 的 4 条把门放在中间件位（`requireAdminRole()`）。
- *   其余 63 条的门在**处理器体内的第一条语句**（`ensurePlatformAdmin` / `ensureRoleDelegationAdmin` /
- *   `isAdmin` 直调）；用 `router.stack` 看中间件链，只会看到「首位 = `authenticate`（仅认证）」或
- *   「首位 = 唯一的处理器」。照搬结构判据会把这 63 条全判红（假红），进而逼人为了过测试去挪代码。
+ *   其余 63 条的门在**处理器体内**（`ensurePlatformAdmin` / `ensureRoleDelegationAdmin` / `isAdmin` 直调）：
+ *   58 条是处理器第一条语句（56 条平台门 + 2 条委派门）；reactivate / force-reactivate / compensate 3 条
+ *   先调 helper，helper 的第一条语句是门；restore 1 条先做无副作用的 mode 解析再过门（见登记表注释）；
+ *   permissions 1 条先判 pool 与身份再直调 `isAdmin`（2026-10-10 刷新时逐条实读）。
+ *   用 `router.stack` 看中间件链，只会看到「首位 = `authenticate`（仅认证）」或「首位 = 唯一的处理器」。照搬结构判据会把这 63 条全判红（假红），进而逼人为了过测试去挪代码。
  *   所以这里换成两条断言，缺一不可：
  *     (A) 行为：逐条写路由，非管理员 -> 该 router 既有的拒绝码，且下游 service / DB / 审计零调用；
  *     (B) 清单双向反查：从 `router.stack` 枚举出的写路由集合，必须与本文件的登记表**双向**相等。
