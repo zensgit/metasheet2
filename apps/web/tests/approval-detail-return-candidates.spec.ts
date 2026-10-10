@@ -8,62 +8,47 @@ vi.setConfig({ testTimeout: 15_000 })
 import { createApp, defineComponent, h, nextTick, ref, type App as VueApp } from 'vue'
 
 /**
- * 退回 (return) candidates on the mounted ApprovalDetailView — the FE mirror of the server's
- * return gate.
+ * 退回 (return) candidates on the mounted ApprovalDetailView: the server's list, else the legacy list.
  *
- * `dispatchAction` (packages/core-backend/src/services/ApprovalProductService.ts) refuses a return
- * in three places, and every candidate it refuses used to be offered anyway, as an option that could
- * only ever 409:
+ * Both instance DTO carriers ship `returnableNodeKeys` (#6293): the targets the server's return gate
+ * would accept right now, walked server-side on the instance's FROZEN runtime graph. That list is the
+ * only source of truth. The client-side mirror of the gate that #6291 added (own-graph identity,
+ * drift, node-type / parallel-region / upstream filters, a graph-derived cursor type) is gone (G-4):
  *
- *   | server check                                                     | 409 code                                 | FE gate                                          | tests       |
- *   |------------------------------------------------------------------|------------------------------------------|--------------------------------------------------|-------------|
- *   | (a) current node is a handler (Lock-3 §2.2 verb gate)            | APPROVAL_HANDLER_ACTION_NOT_ALLOWED      | cursor type `'handler'` (DTO field, else graph)  | T5, T5b     |
- *   | (b) instance is in a parallel region (`isInParallelRegion`)      | APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED  | `currentNodeKeys` non-empty, or cursor type      | T6, T6b,    |
- *   |                                                                  |                                          | `'parallel'`                                     | T6c         |
- *   | (c) target not in `ApprovalGraphExecutor                         | APPROVAL_RETURN_TARGET_INVALID           | visited key must be a node of the instance's     | T14         |
- *   |     .listVisitedApprovalNodeKeysUntil(current).slice(0, -1)`     |                                          | OWN graph, an `approval` node, outside every     | T2, T3, T4  |
- *   |     — the walker stops AT the cursor                             |                                          | parallel region, and UPSTREAM of the cursor      | T11, T12,   |
- *   |                                                                  |                                          | (skipped for a cursor the graph lacks)           | T15         |
+ *   | the DTO's `returnableNodeKeys`        | 退回 offers                                                    | tests          |
+ *   |---------------------------------------|----------------------------------------------------------------|----------------|
+ *   | an array                              | that list verbatim, in the server's order, labelled from the   | TS1, TS3, TS3b |
+ *   |                                       | template; history and graph play no part                       |                |
+ *   | `[]`                                  | nothing: the button is hidden although history holds keys      | TS2, TS2b, L2  |
+ *   | absent / `null` — not computed (an    | the legacy list: every visited key but the cursor, `start` and | T1, TS4, L1    |
+ *   | older server, or no walkable frozen   | `end`, first occurrence in history order. The graph is NOT     |                |
+ *   | graph)                                | consulted; the server's gate still 409s an illegal target      |                |
+ *   | anything, on a non-pending instance   | nothing                                                        | L3, L3b        |
  *
- * plus the choices around (c) that are owner-visible: no graph reachable ⇒ today's unfiltered list
- * (T7); an absent `currentNodeType` is never read as "handler" (T8); only this instance's own
- * template / pinned version may judge it (T9, T9b, T9c), and the template only while its LATEST
- * version IS the pinned one — a later version (drift) or no version id to compare counts as no graph
- * (T13, T13b); with the template drifted, an admin's pinned version still judges (T10). T1 is the
- * positive control every "hidden" assertion leans on.
+ * T1 is the positive control the `[]` cases lean on (TS2 is T1's fixture with `[]` as the only
+ * difference), and L1 is L2's (the same fixture, field absent vs `[]`).
  *
- * THE SERVER'S OWN LIST (TS1–TS4): both DTO builders now ship `returnableNodeKeys`, the targets the
- * return gate would accept right now, walked server-side on the frozen graph. When the DTO carries
- * that array the view offers it verbatim and bypasses every mirror above — a strict subset of what
- * history + graph would offer is all that appears (TS1), `[]` hides 退回 even where the mirrors would
- * offer a target (TS2), a key the mirrors would drop, or that history never held, is still offered
- * because the server wins (TS3, TS3b) — while `null` / absent means "not computed" and falls through
- * to the mirrors, which every other test here exercises (TS4).
- *
- * NOT mirrored (no test can pin a gate that does not exist; recorded in the view): an approval node
- * on a condition branch the form no longer resolves to is still offered, and a trail node nobody
- * visited (an admin forward jump skipped it) is never offered.
- *
- * Two DTO shapes are exercised on purpose, because the two builders do not ship the same fields and
- * the store publishes an action response into the slot the detail read fills: the DETAIL READ
- * (ApprovalBridgeService `toUnifiedDTO`) carries `currentNodeType` and never `currentNodeKeys`; an
- * ACTION RESPONSE (ApprovalProductService `toUnifiedApprovalDTO`) carries `currentNodeKeys` and
- * never `currentNodeType`.
- *
- * Graph fixture (the canvas joins a parallel region at the next real node, as
- * `insertParallelGateway` does — there is no "join" node type):
+ * The instance's own template is loaded in every test. Under its graph the server's legal set for a
+ * cursor at approval_2 is exactly [approval_1], so a test that still sees cc / handler /
+ * parallel-branch / downstream keys proves the graph was not used to filter (the canvas joins a
+ * parallel region at the next real node, as `insertParallelGateway` does — there is no "join" node
+ * type):
  *
  *   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ approval_2 → approval_3 → end
  *
- * with history rows at approval_1, cc_1, handler_1, approval_p1 and approval_2 (the cursor). The
- * server's legal set for a cursor at approval_2 is exactly [approval_1]. T11/T12 use a plain linear
- * start → approval_1 → approval_2 → approval_3 → end, with history in `/history`'s own newest-first
- * order and a 退回 row carrying the RETURNING node's key, as the server writes it.
+ * TS1 / TS3b use a plain linear start → approval_1 → approval_2 → approval_3 → end. History is in
+ * `/history`'s own newest-first order, and a 退回 row carries the RETURNING node's key, as the server
+ * writes it.
+ *
+ * Two DTO shapes are exercised (TS2b), because the store publishes an action response
+ * (ApprovalProductService `toUnifiedApprovalDTO`, never a `currentNodeType`) into the slot the detail
+ * read (ApprovalBridgeService `toUnifiedDTO`) fills.
  *
  * Harness copied from approval-member-bar-operation-policy.spec.ts (mocked approvals store exposing
  * `activeApproval` / `history` as getters, element-plus stubs that render a real <select>/<option>),
- * with the template store mock made controllable per test through mutable `activeTemplate` /
- * `activeVersion` holders.
+ * with the template store mock's `activeTemplate` / `activeVersion` held in mutable refs: the view
+ * still reads both (`nodeLabel` names the options from the own template, `pinnedGraph` feeds the
+ * upcoming-node timeline).
  */
 
 vi.mock('vue-router', async () => {
@@ -306,48 +291,6 @@ function instanceGraph() {
   }
 }
 
-/**
- * A graph under which NONE of this instance's visited keys is a legal target (approval_1 sits inside
- * a parallel region; cc_1 / handler_1 / approval_p1 do not exist). Judging the instance by it empties
- * the list and hides 退回 — so a test that still sees the legacy list proves it was NOT used.
- */
-function graphThatRejectsEveryVisitedKey() {
-  return {
-    nodes: [
-      { key: 'start', type: 'start', name: '发起', config: {} },
-      {
-        key: 'parallel_9',
-        type: 'parallel',
-        name: '并行分支',
-        config: { branches: ['edge_a', 'edge_b'], joinMode: 'all', joinNodeKey: 'approval_2' },
-      },
-      approvalNode('approval_1', '并行审批 A'),
-      approvalNode('approval_9', '并行审批 B'),
-      approvalNode('approval_2', '二级审批'),
-      { key: 'end', type: 'end', name: '结束', config: {} },
-    ],
-    edges: [
-      { key: 'edge_s', source: 'start', target: 'parallel_9' },
-      { key: 'edge_a', source: 'parallel_9', target: 'approval_1' },
-      { key: 'edge_b', source: 'parallel_9', target: 'approval_9' },
-      { key: 'edge_ja', source: 'approval_1', target: 'approval_2' },
-      { key: 'edge_jb', source: 'approval_9', target: 'approval_2' },
-      { key: 'edge_e', source: 'approval_2', target: 'end' },
-    ],
-  }
-}
-
-/** The live template after an edit that deleted approval_1 (drift since this instance started). */
-function liveGraphWithoutApproval1() {
-  const graph = instanceGraph()
-  return {
-    nodes: graph.nodes.filter((node) => node.key !== 'approval_1'),
-    edges: graph.edges
-      .filter((edge) => edge.source !== 'approval_1')
-      .map((edge) => (edge.target === 'approval_1' ? { ...edge, target: 'cc_1' } : edge)),
-  }
-}
-
 /** start → approval_1 → approval_2 → approval_3 → end */
 function linearGraph() {
   return {
@@ -367,30 +310,17 @@ function linearGraph() {
   }
 }
 
-/**
- * The template DTO: its `approvalGraph` is the graph of its LATEST version (`getTemplate` serves
- * `latest`), so `latestVersionId` says which version that is. Defaults to this instance's pinned
- * version (no drift).
- */
-function template(
-  id: string,
-  approvalGraph: unknown,
-  versionIds: { latestVersionId?: string | null; activeVersionId?: string | null } = {},
-) {
+/** The instance's own template DTO; its latest version is the one this instance is pinned to. */
+function template(id: string, approvalGraph: unknown) {
   return {
     id,
     name: '报销',
     status: 'published',
     activeVersionId: VERSION_ID,
     latestVersionId: VERSION_ID,
-    ...versionIds,
     formSchema: { fields: [] },
     approvalGraph,
   }
-}
-
-function version(id: string, templateId: string, approvalGraph: unknown) {
-  return { id, templateId, version: 1, status: 'published', formSchema: { fields: [] }, approvalGraph, runtimeGraph: null }
 }
 
 function seat(nodeKey: string) {
@@ -398,8 +328,9 @@ function seat(nodeKey: string) {
 }
 
 /**
- * The DETAIL-READ shape at approval_2 (`currentNodeType` present, no `currentNodeKeys`). `user_1`
- * holds the seat, so 退回's other gates (canDecide, allowReturn, desktop layout) are all open.
+ * The DETAIL-READ shape at approval_2 (`currentNodeType` present, no `currentNodeKeys`), WITHOUT
+ * `returnableNodeKeys` — what a server before #6293 sends; a test adds the field to model #6293.
+ * `user_1` holds the seat, so 退回's other gates (canDecide, allowReturn, desktop layout) are all open.
  */
 function detailRead(overrides: Record<string, unknown> = {}): any {
   return {
@@ -429,16 +360,31 @@ function actionResponse(overrides: Record<string, unknown> = {}): any {
   return rest
 }
 
-function historyRow(id: string, nodeKey: string) {
-  return { id, action: 'approve', actorId: 'user_2', actorName: '李四', comment: null, metadata: { nodeKey } }
-}
-
-/** A 退回 audit row: `nodeKey` is the node that RETURNED (the server's return branch writes it so). */
-function returnRow(id: string, nodeKey: string, targetNodeKey: string) {
-  return { id, action: 'return', actorId: 'user_3', actorName: '王五', comment: null, metadata: { nodeKey, targetNodeKey } }
+/** A `/history` row: `metadata.nodeKey` is the node the row was written at (for a 退回, the RETURNING node). */
+function historyRow(id: string, nodeKey: string, action = 'approve') {
+  return { id, action, actorId: 'user_2', actorName: '李四', comment: null, metadata: { nodeKey } }
 }
 
 const VISITED = ['approval_1', 'cc_1', 'handler_1', 'approval_p1', 'approval_2']
+
+/**
+ * L1–L3's history, newest first: approval_3 returned the instance to approval_2 (the cursor) after a
+ * full first pass — approve @approval_2, both parallel branches, handle @handler_1, cc @cc_1,
+ * approve and an earlier 评论 @approval_1, created @start. It holds every kind of key the legacy rule
+ * keeps or drops: a downstream key (approval_3), parallel-branch keys, a handler and a cc key, a
+ * repeated key (approval_1), the cursor and `start`.
+ */
+const RETURNED_TO_APPROVAL_2 = [
+  historyRow('h9', 'approval_3', 'return'),
+  historyRow('h8', 'approval_2'),
+  historyRow('h7', 'approval_p2'),
+  historyRow('h6', 'approval_p1'),
+  historyRow('h5', 'handler_1', 'handle'),
+  historyRow('h4', 'cc_1', 'cc'),
+  historyRow('h3', 'approval_1'),
+  historyRow('h2', 'approval_1', 'comment'),
+  historyRow('h1', 'start', 'created'),
+]
 
 function q(container: HTMLElement, testid: string): HTMLElement | null {
   return container.querySelector(`[data-testid="${testid}"]`)
@@ -448,7 +394,7 @@ beforeEach(() => {
   useLocale().setLocale('zh-CN')
 })
 
-describe('退回 candidates mirror the server return gate (mounted ApprovalDetailView)', () => {
+describe('退回 candidates: the server list, else the legacy list (mounted ApprovalDetailView)', () => {
   let app: VueApp<Element> | null = null
   let container: HTMLDivElement | null = null
 
@@ -530,220 +476,62 @@ describe('退回 candidates mirror the server return gate (mounted ApprovalDetai
     expect(offeredKeys(), `no candidate may be offered: ${reason}`).toEqual([])
   }
 
-  it('T1 positive control: approval_1 (a linear approval node before the cursor) is offered and 退回 renders', async () => {
+  it('T1 positive control: with no server list, approval_1 (visited, not the cursor) is offered and 退回 renders', async () => {
     await mountView()
     await openReturnDialog()
     expect(offered()).toContainEqual(['approval_1', '一级审批'])
   })
 
-  it('T2 (c) node type: cc_1 is not offered — a cc node never joins the walker trail', async () => {
+  it('L1 field absent: the legacy list — every visited key but the cursor and start, first occurrence in history order; the graph is not consulted', async () => {
+    // The pre-#6293 DTO shape (`detailRead` never sets `returnableNodeKeys`). The instance's own
+    // template is loaded, and under it only approval_1 is legal at approval_2, so offering the
+    // downstream approval_3, both parallel branches, handler_1 and cc_1 proves no client-side filter
+    // is applied (the owner-approved fallback; the server's gate answers an illegal pick with its own
+    // 409). approval_1 appears once although history holds it twice; approval_2 (the cursor) and
+    // start never appear. Labels come from the own template.
+    mockHistory.value = RETURNED_TO_APPROVAL_2
     await mountView()
     await openReturnDialog()
-    expect(offeredKeys()).toContain('approval_1')
-    expect(offeredKeys()).not.toContain('cc_1')
+    expect(offered()).toEqual([
+      ['approval_3', '三级审批'],
+      ['approval_p2', '并行审批 2'],
+      ['approval_p1', '并行审批 1'],
+      ['handler_1', '办理'],
+      ['cc_1', '抄送'],
+      ['approval_1', '一级审批'],
+    ])
   })
 
-  it('T3 (c) node type: handler_1 is not offered — a handler node never joins the walker trail', async () => {
+  it('L2 server []: 退回 is hidden although the same history gives L1 six legacy targets', async () => {
+    // L1's fixture with the server's empty list as the ONLY difference: `[]` is "nothing is legal",
+    // never "not computed".
+    mockActiveApproval.value = detailRead({ returnableNodeKeys: [] })
+    mockHistory.value = RETURNED_TO_APPROVAL_2
     await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toContain('approval_1')
-    expect(offeredKeys()).not.toContain('handler_1')
+    expectNoReturnOffered('the server computed no legal target')
   })
 
-  it('T4 (c) parallel region: approval_p1 is not offered although its region has already joined', async () => {
+  it('L3 a non-pending instance offers nothing (the field-absent shape the server sends for it)', async () => {
+    // The server leaves `returnableNodeKeys` absent on a non-pending instance; L1's history alone
+    // would give six legacy targets.
+    mockActiveApproval.value = detailRead({ status: 'approved' })
+    mockHistory.value = RETURNED_TO_APPROVAL_2
     await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toContain('approval_1')
-    expect(offeredKeys()).not.toContain('approval_p1')
-    // All three exclusions together leave exactly the server's legal set for a cursor at approval_2.
-    expect(offeredKeys()).toEqual(['approval_1'])
+    expectNoReturnOffered('the instance is no longer pending')
   })
 
-  it("T5 (a) detail read: currentNodeType 'handler' hides 退回 even with a legal-looking candidate", async () => {
-    // Same cursor (approval_2) and graph as T1 — the DTO's type field is the ONLY difference.
-    mockActiveApproval.value = detailRead({ currentNodeType: 'handler' })
+  it('L3b defence in depth: a non-pending instance offers nothing even if its DTO carried a server list', async () => {
+    // Unreachable from the #6293 server (L3 is the shape it sends); pins that the status check comes
+    // before the server list.
+    mockActiveApproval.value = detailRead({ status: 'approved', returnableNodeKeys: ['approval_1'] })
+    mockHistory.value = RETURNED_TO_APPROVAL_2
     await mountView()
-    expectNoReturnOffered('the server answers APPROVAL_HANDLER_ACTION_NOT_ALLOWED at a handler node')
+    expectNoReturnOffered('the status check precedes the server list')
   })
 
-  it("T5b (a) action response: no currentNodeType, but the instance's own graph says the cursor is a handler", async () => {
-    // An action response (e.g. after a 评论 at the handler) carries no `currentNodeType`; the cursor's
-    // type then comes from the instance's own graph. approval_1 would otherwise be a candidate.
-    mockActiveApproval.value = actionResponse({ currentNodeKey: 'handler_1', assignments: [seat('handler_1')] })
-    mockHistory.value = [historyRow('h1', 'approval_1'), historyRow('h2', 'cc_1')]
-    await mountView()
-    expectNoReturnOffered('the cursor is a handler node in the instance graph')
-  })
-
-  it('T6 (b) action response: two pending branches in currentNodeKeys hide 退回', async () => {
-    // No graph, so nothing but `currentNodeKeys` can be what hides it (the fork's graph type would
-    // hide it on its own otherwise). Without this arm the legacy list would be offered.
-    mockActiveTemplate.value = null
-    mockActiveApproval.value = actionResponse({
-      currentNodeKey: 'parallel_1',
-      currentNodeKeys: ['approval_p1', 'approval_p2'],
-      assignments: [seat('approval_p1')],
-    })
-    mockHistory.value = [historyRow('h1', 'approval_1'), historyRow('h2', 'cc_1'), historyRow('h3', 'handler_1')]
-    await mountView()
-    expectNoReturnOffered('the server answers APPROVAL_RETURN_IN_PARALLEL_UNSUPPORTED')
-  })
-
-  it('T6b (b) action response: ONE pending branch left (a joinMode-all sibling finished) still hides 退回', async () => {
-    // The 并行中 badge reads `>= 2` and would call this linear; the server still refuses the return
-    // (the stored cursor is still the fork — see the wp1 parallel-gateway API test's mid-region
-    // `currentNodeKeys: ['compliance_review']`).
-    mockActiveTemplate.value = null
-    mockActiveApproval.value = actionResponse({
-      currentNodeKey: 'parallel_1',
-      currentNodeKeys: ['approval_p2'],
-      assignments: [seat('approval_p2')],
-    })
-    mockHistory.value = [
-      historyRow('h1', 'approval_1'),
-      historyRow('h2', 'cc_1'),
-      historyRow('h3', 'handler_1'),
-      historyRow('h4', 'approval_p1'),
-    ]
-    await mountView()
-    expectNoReturnOffered('one pending branch is still a parallel region on the server')
-  })
-
-  it("T6c (b) detail read: currentNodeType 'parallel' at the fork with no currentNodeKeys hides 退回", async () => {
-    // The detail read never ships `currentNodeKeys`; inside a region its `currentNodeType` is the
-    // fork's own type. No graph, so the DTO field is the only signal.
-    mockActiveTemplate.value = null
-    mockActiveApproval.value = detailRead({
-      currentNodeKey: 'parallel_1',
-      currentNodeType: 'parallel',
-      assignments: [seat('approval_p1')],
-    })
-    mockHistory.value = [historyRow('h1', 'approval_1'), historyRow('h2', 'cc_1'), historyRow('h3', 'handler_1')]
-    await mountView()
-    expectNoReturnOffered('the detail read says the cursor is the parallel fork')
-  })
-
-  it('T7 no graph (activeVersion and activeTemplate both null): the legacy list — every visited key but the cursor', async () => {
-    // Owner-visible choice: when the template cannot be loaded the list stays what it was before the
-    // filter existed (the server's own check still refuses an illegal target), rather than 退回
-    // disappearing for every viewer who cannot read the template.
-    mockActiveTemplate.value = null
-    mockActiveVersion.value = null
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
-  })
-
-  it('T8 absent currentNodeType (older server / action response) is not read as a handler — candidates still offered', async () => {
-    mockActiveApproval.value = actionResponse()
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it("T9 identity: ANOTHER template left in the app-wide store never judges this instance (legacy list)", async () => {
-    // A failed load leaves the previous template in the store. Were it used, approval_1 (inside its
-    // parallel region) and every other visited key (absent there) would be dropped and 退回 would
-    // vanish; ignored, the legacy list is offered.
-    mockActiveTemplate.value = template('tpl_other', graphThatRejectsEveryVisitedKey())
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
-  })
-
-  it("T9b identity: a version that is not this instance's pinned version is skipped for the instance's own template", async () => {
-    // Same template, different version id (e.g. left over from another instance of it).
-    mockActiveVersion.value = version('ver_rc_other', TEMPLATE_ID, graphThatRejectsEveryVisitedKey())
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it("T9c identity: a version with this instance's version id but ANOTHER template id is skipped (defence in depth)", async () => {
-    // Version ids are globally unique, so the server cannot produce this; it pins the templateId half
-    // of the pinned-version identity check, which the version-id half otherwise masks.
-    mockActiveVersion.value = version(VERSION_ID, 'tpl_other', graphThatRejectsEveryVisitedKey())
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it('T10 the pinned (frozen) version wins over a drifted live template', async () => {
-    // The template's latest version (ver_rc_2) has since deleted approval_1; the instance's pinned
-    // version still has it, and the pinned version is what the server walks. (The drifted template
-    // is not this instance's graph at all — T13 — so here the admin-only pinned version is the one
-    // graph that can judge; without it the legacy list would be offered.)
-    mockActiveVersion.value = version(VERSION_ID, TEMPLATE_ID, instanceGraph())
-    mockActiveTemplate.value = template(TEMPLATE_ID, liveGraphWithoutApproval1(), { latestVersionId: 'ver_rc_2' })
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it('T11 (c) upstream: after approval_3 returned to approval_1, nothing at or after the cursor is offered (button absent)', async () => {
-    // History still holds approval_2 and approval_3 (the 退回 row carries the RETURNING node), both
-    // downstream of the cursor; the walker stops at approval_1, so the server's legal set is [].
-    mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
-    mockActiveApproval.value = detailRead({ currentNodeKey: 'approval_1', currentNodeType: 'approval', assignments: [seat('approval_1')] })
-    mockHistory.value = [returnRow('h3', 'approval_3', 'approval_1'), historyRow('h2', 'approval_2'), historyRow('h1', 'approval_1')]
-    await mountView()
-    expectNoReturnOffered('the walker stops at the cursor; nothing downstream of approval_1 is on the trail')
-  })
-
-  it('T12 (c) upstream: after approval_1 re-approves, only approval_1 is offered at approval_2 — not the downstream approval_3', async () => {
-    mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
-    mockActiveApproval.value = detailRead({ currentNodeKey: 'approval_2', currentNodeType: 'approval', assignments: [seat('approval_2')] })
-    mockHistory.value = [
-      historyRow('h4', 'approval_1'),
-      returnRow('h3', 'approval_3', 'approval_1'),
-      historyRow('h2', 'approval_2'),
-      historyRow('h1', 'approval_1'),
-    ]
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it("T13 drift: a template whose LATEST version is not this instance's pinned version never judges it (legacy list)", async () => {
-    // An ordinary member's only graph source is the template, which serves its latest version. Here a
-    // later version deleted approval_1: judged by it, approval_1 — still legal on the frozen graph the
-    // server walks — would be dropped and 退回 would vanish. Unjudged, the legacy list is offered.
-    mockActiveTemplate.value = template(TEMPLATE_ID, liveGraphWithoutApproval1(), { latestVersionId: 'ver_rc_2' })
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
-  })
-
-  it('T13b drift: an instance DTO without templateVersionId is never judged — not even by a template DTO without latestVersionId', async () => {
-    // Nothing proves which version such a template holds: `undefined === undefined` is not a match.
-    mockActiveApproval.value = detailRead({ templateVersionId: undefined })
-    mockActiveTemplate.value = template(TEMPLATE_ID, graphThatRejectsEveryVisitedKey(), { latestVersionId: undefined })
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
-  })
-
-  it('T14 (c) a visited key the instance graph does not carry is not offered — the trail holds graph nodes only', async () => {
-    mockHistory.value = [...mockHistory.value, historyRow('h6', 'approval_ghost')]
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it('T15 (c) a cursor the instance graph does not carry skips only the upstream filter — node type and region still apply', async () => {
-    // Nothing to anchor "upstream" to, and an inconsistent cursor must not empty the list on its own
-    // (the server stays the authority): approval_2 and approval_3 stay, cc_1 / handler_1 /
-    // approval_p1 are still dropped.
-    mockActiveApproval.value = detailRead({ currentNodeKey: 'approval_unknown', assignments: [seat('approval_unknown')] })
-    mockHistory.value = [...VISITED, 'approval_3'].map((nodeKey, index) => historyRow(`h${index + 1}`, nodeKey))
-    await mountView()
-    await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1', 'approval_2', 'approval_3'])
-  })
-
-  it('TS1 server list preferred: history + graph would offer approval_2 and approval_1; only the server\'s key appears', async () => {
-    // Linear graph, cursor at approval_3, both earlier approvals in history: the client mirror would
-    // offer ['approval_2', 'approval_1'] (history order). The server's list is a strict subset.
+  it("TS1 server list preferred: the legacy list would offer approval_2 and approval_1; only the server's key appears", async () => {
+    // Linear graph, cursor at approval_3, both earlier approvals in history: the legacy list would be
+    // ['approval_2', 'approval_1'] (history order). The server's list is a strict subset of it.
     mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
     mockActiveApproval.value = detailRead({
       currentNodeKey: 'approval_3',
@@ -757,16 +545,23 @@ describe('退回 candidates mirror the server return gate (mounted ApprovalDetai
     expect(offered()).toEqual([['approval_1', '一级审批']])
   })
 
-  it('TS2 server []: 退回 is hidden even though history + graph would offer approval_1', async () => {
+  it('TS2 server []: 退回 is hidden even though the legacy list would offer approval_1', async () => {
     // Same fixture as T1 (the positive control), with the server's empty list as the ONLY difference.
     mockActiveApproval.value = detailRead({ returnableNodeKeys: [] })
     await mountView()
     expectNoReturnOffered('the server computed no legal target')
   })
 
-  it('TS3 server wins over the client filter: a key the mirrors would drop (approval_p1, inside a parallel region) is offered', async () => {
-    // T4 pins that the client filter drops approval_p1 from exactly this history + graph; the server's
-    // list carries it, so it is offered, in the server's order, labelled from the own template.
+  it('TS2b the server list is read on the action-response shape too (no currentNodeType; the store publishes it into the same slot)', async () => {
+    mockActiveApproval.value = actionResponse({ returnableNodeKeys: [] })
+    await mountView()
+    expectNoReturnOffered('an action response carrying an empty server list')
+  })
+
+  it('TS3 no client filter over the server list: approval_p1 (a parallel-branch node) is offered when the server lists it', async () => {
+    // T1's fixture, where the legacy list would offer four keys. The server's two keys appear as
+    // given — in its order, labelled from the own template — and nothing drops approval_p1, which a
+    // client-side gate mirror would (it sits inside a parallel region).
     mockActiveApproval.value = detailRead({ returnableNodeKeys: ['approval_1', 'approval_p1'] })
     await mountView()
     await openReturnDialog()
@@ -774,8 +569,8 @@ describe('退回 candidates mirror the server return gate (mounted ApprovalDetai
   })
 
   it('TS3b server wins over history: a trail node nobody visited (an admin forward jump skipped approval_2) is offered', async () => {
-    // The #6291 residual in the other direction: history never held approval_2, so the mirrors could
-    // not offer it; the server's walk lists it, and the view offers the server's list verbatim.
+    // History never held approval_2, so the legacy list could not offer it; the server's walk lists
+    // it, and the view offers the server's list verbatim.
     mockActiveTemplate.value = template(TEMPLATE_ID, linearGraph())
     mockActiveApproval.value = detailRead({
       currentNodeKey: 'approval_3',
@@ -789,16 +584,10 @@ describe('退回 candidates mirror the server return gate (mounted ApprovalDetai
     expect(offered()).toEqual([['approval_1', '一级审批'], ['approval_2', '二级审批']])
   })
 
-  it('TS4 null / absent is "not computed": the mirrors still decide (same answer as T1 and T4)', async () => {
+  it('TS4 null is "not computed", exactly like an absent field: the legacy list (T1\'s fixture, every visited key but the cursor)', async () => {
     mockActiveApproval.value = detailRead({ returnableNodeKeys: null })
     await mountView()
     await openReturnDialog()
-    expect(offeredKeys()).toEqual(['approval_1'])
-  })
-
-  it('TS2b the server list is read on the action-response shape too (no currentNodeType; the store publishes it into the same slot)', async () => {
-    mockActiveApproval.value = actionResponse({ returnableNodeKeys: [] })
-    await mountView()
-    expectNoReturnOffered('an action response carrying an empty server list')
+    expect(offeredKeys()).toEqual(['approval_1', 'cc_1', 'handler_1', 'approval_p1'])
   })
 })

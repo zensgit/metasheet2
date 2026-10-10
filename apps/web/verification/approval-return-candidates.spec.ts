@@ -4,47 +4,47 @@ import { expect, test, type Locator, type Page } from '@playwright/test'
 // Element Plus (the dialog AND the select dropdown), driven through
 // approval-return-candidates-harness.ts, which only swaps fixture state in once the dev-mode API has
 // loaded. Which targets the 退回 dialog offers, and whether the 退回 button renders at all, is
-// production code: `returnableNodes` in ApprovalDetailView.vue. The jsdom specs
+// production code: `returnableNodes` in ApprovalDetailView.vue — the DTO's `returnableNodeKeys` when
+// it carries the field, else the legacy list (no client-side filter since G-4). The jsdom specs
 // (tests/approval-detail-return-candidates.spec.ts) stub Element Plus with a native <select>; this
 // lane reads the options Element Plus actually renders into its teleported dropdown.
 //
 // Graph (identity-consistent with the instance: template tpl_1, latestVersionId = pinned ver_1_1):
 //   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ join_1 → approval_2 → approval_3 → end
 // Every fixture is a state a server can be in: the #6293 server for the scenarios that carry
-// `returnableNodeKeys`, a server before #6293 for the field-less ones (the harness header says
-// which is which). What the return path reads is in the wire's shape (the harness header lists the
-// display-only values it simplifies).
+// `returnableNodeKeys`, a server before #6293 for the field-less one, `legacy` (the harness header
+// says which is which). What the return path reads is in the wire's shape (the harness header lists
+// the display-only values it simplifies).
 // The main history holds approval_1, cc_1, handler_1, approval_p1, join_1, approval_2 and approval_3
-// (a 退回 from approval_3 back to approval_2), so every exclusion rule has a visited key to drop;
-// the handler-cursor, server-empty and parallel scenarios carry the first pass that leads to their
-// cursor (server-empty adds the viewer's 评论 at handler_1).
+// (a 退回 from approval_3 back to approval_2), so the legacy list carries a visited key of every
+// kind the server's walker leaves out (cc, handler, parallel branch, past the cursor); server-empty
+// carries the first pass that leads to its handler_1 cursor plus the viewer's 评论 there.
 //
 //   scenario (harness)                | expectation                                | production rule pinned
 //   ----------------------------------|--------------------------------------------|---------------------------------------------
 //   server-list                       | 退回 shown; options exactly [approval_1]    | the DTO's `returnableNodeKeys` is the list
-//   server-empty & template=drifted   | no 退回 button                              | `[]` hides 退回 where the no-graph legacy list
-//                                     |                                            | would offer cc_1 / approval_1 (a #6293 action
+//   server-empty & template=drifted   | no 退回 button                              | `[]` hides 退回 where the legacy list would
+//                                     |                                            | offer cc_1 / approval_1 (a #6293 action
 //                                     |                                            | response at handler_1: rule (b) sends [])
-//   server-list-wins                  | 退回 shown; options exactly [approval_1]    | the server list wins over a DISAGREEING mirror
-//                                     |                                            | with the graph present: after an admin forward
-//                                     |                                            | jump history never held approval_1 (mirror: no
-//                                     |                                            | candidates), the server's walker still lists it
-//   client-mirror                     | 退回 shown; options exactly [approval_1]    | no server field → mirror: own graph, approval
-//                                     |                                            | nodes only, outside parallel regions, upstream
-//                                     |                                            | of the cursor, cursor itself excluded
-//   handler-cursor                    | no 退回 button                              | a cursor AT a handler node hides 退回 (DTO type
-//                                     |                                            | and own graph agree; history holds approval_1)
-//   parallel-state                    | no 退回 button                              | a parallel frontier / fork cursor hides 退回
+//   server-list-wins                  | 退回 shown; options exactly [approval_1]    | the server list wins over history: after an
+//                                     |                                            | admin forward jump history never held
+//                                     |                                            | approval_1 (legacy list: no candidates), the
+//                                     |                                            | server's walker still lists it
+//   legacy                            | the legacy list, /history order            | no server field → every visited key but the
+//                                     |                                            | cursor / start, with the own graph loaded: no
+//                                     |                                            | client-side filter (the owner-approved
+//                                     |                                            | fallback, 缺省回退 legacy)
 //   submit                            | request {action:'return',                  | the chosen option's KEY is what is sent
 //                                     |   targetNodeKey:'approval_1'}              |
-//   server-list & template=drifted    | options exactly [approval_1]               | the server list decides even with no own graph
-//   client-mirror & template=drifted  | the legacy unfiltered list, /history order | no own graph (drift) → the pre-filter list
-//   handler-cursor & template=drifted | no 退回 button                              | with no own graph, the DTO's `currentNodeType`
-//                                     |                                            | alone hides 退回
+//   server-list & template=drifted    | options exactly [approval_1]               | the server list decides with no own graph
 //
-// `server-list` alone cannot tell the server list from the mirror (with the graph in place both
-// compute [approval_1]). `server-list-wins`, the drifted server-list row and the drifted
-// server-empty row can; the last is the one where `[]`, as opposed to an absent field, decides.
+// Every server-list row disagrees with the legacy list its own fixture would get without the field
+// (six options for the main history, cc_1 / approval_1 for server-empty's, none for
+// server-list-wins'), so a view that ignored the server's list fails each of them; server-empty is
+// the one where `[]`, as opposed to an absent field, decides. `legacy` fails if a client-side filter
+// is put back (the own graph is loaded, and under it only approval_1 is legal). The drifted rows
+// predate G-4, when the client mirror judged by the graph; they now pin only that the server's list
+// decides with no own graph in the store.
 //
 // Every scenario first proves the action bar is there (the 转交 button: same `canDecide` /
 // desktop gates as 退回, and a verb the server accepts at a handler cursor too), so a missing 退回
@@ -57,10 +57,10 @@ const HARNESS = '/verification/approval-return-candidates-harness.html'
 // Node names of the harness graph. None occurs in the dev-mode template, so a label below also
 // proves the view named its options from the harness graph.
 const APPROVAL_1 = '部门经理初审'
-// No graph of its own: every visited key but the cursor / start / end, first occurrence in the
-// order the history was given (newest first): approval_3, join_1, approval_p1, handler_1, cc_1,
-// approval_1. Rows of one server transaction tie on `occurred_at`, so this pins that the view keeps
-// the order it is served, not an order the server guarantees among tied rows.
+// The legacy list (no server field): every visited key but the cursor / start / end, first
+// occurrence in the order the history was given (newest first): approval_3, join_1, approval_p1,
+// handler_1, cc_1, approval_1. Rows of one server transaction tie on `occurred_at`, so this pins
+// that the view keeps the order it is served, not an order the server guarantees among tied rows.
 const LEGACY_UNFILTERED = ['总经理终审', '会签结果抄送', '法务会签', '资料补正办理', '抄送人事', APPROVAL_1]
 
 async function openHarness(page: Page, query: string): Promise<void> {
@@ -131,7 +131,7 @@ test('server-list: the DTO\'s returnableNodeKeys is the 退回 option list, verb
   await expectReturnOptions(page, '?scenario=server-list', [APPROVAL_1], 'rc-server-list-1440.png')
 })
 
-test('server-empty (template drifted): [] at a handler cursor hides 退回 where the no-graph legacy list would offer 抄送人事 / 部门经理初审', async ({ page }) => {
+test('server-empty (template drifted): [] at a handler cursor hides 退回 where the legacy list would offer 抄送人事 / 部门经理初审', async ({ page }) => {
   await expectNoReturnButton(page, '?scenario=server-empty&template=drifted')
 })
 
@@ -139,18 +139,8 @@ test('server-list-wins: after an admin forward jump history never held approval_
   await expectReturnOptions(page, '?scenario=server-list-wins', [APPROVAL_1], 'rc-server-list-wins-1440.png')
 })
 
-test('client-mirror: without the server field only approval_1 survives (cc / handler / parallel-branch / downstream / cursor dropped)', async ({ page }) => {
-  await expectReturnOptions(page, '?scenario=client-mirror', [APPROVAL_1], 'rc-client-mirror-1440.png')
-})
-
-test('handler-cursor: a cursor at handler_1 hides 退回 although history holds the upstream approval_1', async ({ page }) => {
-  await expectNoReturnButton(page, '?scenario=handler-cursor')
-})
-
-test('parallel-state: a parallel frontier at the fork hides 退回', async ({ page }) => {
-  await expectNoReturnButton(page, '?scenario=parallel-state')
-  // The fixture really reached the page: the 并行中 badge names both branches from the harness graph.
-  await expect(page.locator('.approval-detail__parallel-badge')).toHaveText('并行中 · 法务会签 / 合规会签')
+test('legacy: without the server field (a server before #6293) the legacy list comes back in /history order, own graph loaded', async ({ page }) => {
+  await expectReturnOptions(page, '?scenario=legacy', LEGACY_UNFILTERED, 'rc-legacy-1440.png')
 })
 
 test('submit: choosing the offered target sends a return to approval_1 (recorded, no HTTP)', async ({ page }) => {
@@ -173,14 +163,6 @@ test('submit: choosing the offered target sends a return to approval_1 (recorded
   ])
 })
 
-test('template drifted: the server list still decides — exactly approval_1, where the mirror has no graph', async ({ page }) => {
+test('template drifted: the server list still decides — exactly approval_1, with no own graph in the store', async ({ page }) => {
   await expectReturnOptions(page, '?scenario=server-list&template=drifted', [APPROVAL_1], 'rc-drifted-server-list-1440.png')
-})
-
-test('template drifted, no server field: the legacy unfiltered list comes back in /history order', async ({ page }) => {
-  await expectReturnOptions(page, '?scenario=client-mirror&template=drifted', LEGACY_UNFILTERED, 'rc-drifted-legacy-1440.png')
-})
-
-test('template drifted, handler cursor: with no own graph the DTO\'s currentNodeType alone hides 退回', async ({ page }) => {
-  await expectNoReturnButton(page, '?scenario=handler-cursor&template=drifted')
 })
