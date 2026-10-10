@@ -164,7 +164,7 @@ test.describe('attendance admin deep forms share Holidays and Settings chrome', 
     const guideShot = 'attendance-admin-import-guide-1440.png'
     await page.screenshot({ path: `${OUT}/${guideShot}`, fullPage: false })
     publish(guideShot)
-    await expectTwoColumns(page, '#attendance-admin-import > .attendance__admin-grid')
+    await expectTwoColumns(page, '#attendance-admin-import > .attendance__admin-grid:not(.attendance__import-advanced)')
     await expectControlHeight(page, '#attendance-import-mode')
     await scrollBelowSticky(page, '#attendance-import-rule-set')
     const formShot = 'attendance-admin-import-form-1440.png'
