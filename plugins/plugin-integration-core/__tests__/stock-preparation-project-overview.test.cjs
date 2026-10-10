@@ -1426,6 +1426,57 @@ test('O-22 (F3) the overview is written only through the host overview port; the
   } finally { h.restore() }
 })
 
+// ── O-23 ───────────────────────────────────────────────────────────────────────────────────────────
+// Fix round 2 (F4): the writer re-checks the dirty set AFTER its lock is released and before it stops.
+test('O-23 (F4) an event that lands after the writer drained but before it stopped (its lock transaction finishing) is not stranded: the writer goes round once more', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    assert.equal((await refresh(h, FLOOR)).statusCode, 200)
+    const rowOf = () => overviewRows(h).filter((row) => logical(row, 'projectNo') === PROJECT)
+    assert.equal(logical(rowOf()[0], 'status'), 'active')
+    // Hold the FIRST overview-lock transaction after it has finished (drained, lock released) but before the
+    // writer sees it return — the window between "drained" and "not running any more".
+    const OVERVIEW_KEY = `stock-prep-project-overview:${TENANT}`
+    let armed = true
+    let signalFinished
+    const finished = new Promise((resolve) => { signalFinished = resolve })
+    let releaseWindow
+    const window = new Promise((resolve) => { releaseWindow = resolve })
+    const realTransaction = h.db.transaction
+    h.db.transaction = async (fn) => {
+      let overviewTx = false
+      const out = await realTransaction.call(h.db, async (trx) => fn({
+        ...trx,
+        async tryAdvisoryXactLock(key) {
+          if (key === OVERVIEW_KEY) overviewTx = true
+          return trx.tryAdvisoryXactLock(key)
+        },
+      }))
+      if (overviewTx && armed) {
+        armed = false
+        signalFinished()
+        await window
+      }
+      return out
+    }
+    // Event 1 becomes the writer, drains its project, and is held in the window.
+    const first = patchFields(h, FLOOR, { note: NOTE })
+    await finished
+    // Event 2, IN the window: the writer is still running, so it is only marked dirty and deferred.
+    const archived = await archive(h, PULLER, PROJECT)
+    assert.equal(archived.statusCode, 200, JSON.stringify(archived.body))
+    assert.equal(logical(rowOf()[0], 'status'), 'active', 'nothing re-projected yet — the writer is in its window')
+    releaseWindow()
+    assert.equal((await first).statusCode, 200)
+    assert.equal(rowOf().length, 1)
+    assert.equal(logical(rowOf()[0], 'status'), 'archived', 'the writer went round again after its lock was released')
+    assert.equal(logical(rowOf()[0], 'note'), NOTE)
+    h.db.transaction = realTransaction
+  } finally { h.restore() }
+})
+
 async function main() {
   let failed = 0
   for (const [name, fn] of tests) {
