@@ -161,8 +161,8 @@ attendanceFeatureOverride
 attendanceOverviewRequestReveal
 attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
-attendanceTodayWorkbench
 AttendanceScheduledFeatureStatus
+attendanceTodayWorkbench
 attendanceUserPickerEndpoint
 automation-action-summary
 automation-condition-legacy-person-picker
