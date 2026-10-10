@@ -72,6 +72,10 @@ interface FakeDbState {
   roleUpdatedAt: Map<string, string>
   rolePermissions: Map<string, string[]>
   members: Map<string, string[]>
+  /** `delegated_role_admin_scopes` (department audience), one entry per row. */
+  delegatedScopes?: Array<{ admin_user_id: string; namespace: string }>
+  /** `delegated_role_admin_member_groups` (member-group audience), one entry per row. */
+  delegatedGroupScopes?: Array<{ admin_user_id: string; namespace: string }>
 }
 
 function cloneState(state: FakeDbState): FakeDbState {
@@ -80,6 +84,8 @@ function cloneState(state: FakeDbState): FakeDbState {
     roleUpdatedAt: new Map(state.roleUpdatedAt),
     rolePermissions: new Map(Array.from(state.rolePermissions, ([k, v]) => [k, [...v]])),
     members: new Map(Array.from(state.members, ([k, v]) => [k, [...v]])),
+    delegatedScopes: (state.delegatedScopes ?? []).map((row) => ({ ...row })),
+    delegatedGroupScopes: (state.delegatedGroupScopes ?? []).map((row) => ({ ...row })),
   }
 }
 
@@ -99,6 +105,12 @@ function makeFakeDb(options: {
   state: FakeDbState
   /** Injects a failure at a chosen statement, to exercise the rollback. */
   failOn?: (sql: string, params: unknown[]) => Error | null
+  /**
+   * Whether deleting a `roles` row cascades into `role_permissions` / `user_roles`. True models the
+   * SQL migration set (033_create_rbac_core.sql); FALSE models the schema this repo's migration
+   * chain actually builds (no role_id foreign key at all), where nothing but the route removes them.
+   */
+  roleDeleteCascades?: boolean
 }) {
   const catalog = new Set(options.catalog)
   const statements: Array<{ sql: string; params: unknown[] }> = []
@@ -150,13 +162,40 @@ function makeFakeDb(options: {
     if (/^DELETE FROM roles WHERE id=/i.test(norm)) {
       const id = String(params[0])
       const existed = state.roleNames.delete(id)
-      state.rolePermissions.delete(id)
-      // ON DELETE CASCADE on BOTH children (migrations/033_create_rbac_core.sql:17 and :36).
-      // Modelling the user_roles half is what makes "read the members before the delete"
-      // a testable property instead of a code-shape preference: a fan-out that looked them
-      // up afterwards finds nobody here, exactly as it would in Postgres.
-      state.members.delete(id)
+      if (options.roleDeleteCascades !== false) {
+        state.rolePermissions.delete(id)
+        // ON DELETE CASCADE on BOTH children (migrations/033_create_rbac_core.sql:17 and :36).
+        // Modelling the user_roles half is what makes "read the members before the delete"
+        // a testable property instead of a code-shape preference: a fan-out that looked them
+        // up afterwards finds nobody here, exactly as it would in Postgres.
+        state.members.delete(id)
+      }
       return { rows: [], rowCount: existed ? 1 : 0 }
+    }
+    // The membership writer (rbac/role-assignment.ts unassignUserRoles) and its audience cleanup.
+    if (/^DELETE FROM user_roles WHERE role_id = \$2 AND user_id = ANY\(\$1::text\[\]\) RETURNING user_id$/i.test(norm)) {
+      const [userIds, roleId] = [(params[0] as string[]) || [], String(params[1])]
+      const current = state.members.get(roleId) || []
+      const removed = current.filter((userId) => userIds.includes(userId))
+      state.members.set(roleId, current.filter((userId) => !userIds.includes(userId)))
+      return { rows: removed.map((user_id) => ({ user_id })), rowCount: removed.length }
+    }
+    if (/^SELECT user_id, role_id FROM user_roles WHERE user_id = ANY\(\$1::text\[\]\)$/i.test(norm)) {
+      const userIds = (params[0] as string[]) || []
+      const rows: Array<Record<string, unknown>> = []
+      for (const [roleId, memberIds] of state.members) {
+        for (const userId of memberIds) if (userIds.includes(userId)) rows.push({ user_id: userId, role_id: roleId })
+      }
+      return { rows, rowCount: rows.length }
+    }
+    const audienceDelete = /^DELETE FROM (delegated_role_admin_scopes|delegated_role_admin_member_groups) WHERE admin_user_id = ANY\(\$1::text\[\]\) AND namespace = \$2 RETURNING admin_user_id$/i.exec(norm)
+    if (audienceDelete) {
+      const key = audienceDelete[1] === 'delegated_role_admin_scopes' ? 'delegatedScopes' : 'delegatedGroupScopes'
+      const [userIds, namespace] = [(params[0] as string[]) || [], String(params[1])]
+      const rows = state[key] ?? []
+      const removed = rows.filter((row) => userIds.includes(row.admin_user_id) && row.namespace === namespace)
+      state[key] = rows.filter((row) => !removed.includes(row))
+      return { rows: removed.map((row) => ({ admin_user_id: row.admin_user_id })), rowCount: removed.length }
     }
     if (/^SELECT user_id FROM user_roles WHERE role_id=/i.test(norm)) {
       const members = state.members.get(String(params[0])) || []
@@ -203,6 +242,12 @@ function makeFakeDb(options: {
     statements,
     permissionsOf: (roleId: string) => [...(state.rolePermissions.get(roleId) || [])].sort(),
     nameOf: (roleId: string) => state.roleNames.get(roleId),
+    membersOf: (roleId: string) => [...(state.members.get(roleId) || [])].sort(),
+    /** Audience rows per `user:namespace`, department and member-group counted separately. */
+    audienceOf: (userId: string, namespace: string) => ({
+      departments: (state.delegatedScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
+      groups: (state.delegatedGroupScopes ?? []).filter((row) => row.admin_user_id === userId && row.namespace === namespace).length,
+    }),
     /** ATOMIC: the callback's writes survive only if it resolves. */
     transaction: async <T>(handler: (client: { query: typeof run }) => Promise<T>): Promise<T> => {
       const snapshot = cloneState(state)
@@ -1126,5 +1171,319 @@ describe('POST /api/roles — the same authority boundary as PUT', () => {
     expect((res.body as { error: { code: string } }).error.code).toBe('UNKNOWN_PERMISSION_CODE')
     expect(db.nameOf('role-new')).toBeUndefined()
     expect(db.statements.some((s) => /^INSERT INTO role_permissions/i.test(s.sql.trim()))).toBe(false)
+  })
+})
+
+// ------------------------------------------------- admin-level codes and admin-role deletes
+
+/**
+ * A role id, an admin-equivalent role and an ordinary one, all with members, plus delegated-admin
+ * audience in two namespaces. `cascade: false` is the schema this repo's migration chain builds.
+ */
+function seedAdminRoles(options: { cascade?: boolean; failOn?: (sql: string, params: unknown[]) => Error | null } = {}) {
+  return makeFakeDb({
+    catalog: [...CATALOG, 'attendance:read', 'attendance:admin', 'Attendance:Admin', 'crm:read', 'crm:admin'],
+    failOn: options.failOn,
+    roleDeleteCascades: options.cascade ?? false,
+    state: {
+      roleNames: new Map([
+        ['role-1', '备料角色'],
+        ['attendance_lead', '考勤组长'],
+        ['crm_admin', 'CRM 管理员'],
+        ['crm_lead', 'CRM 组长'],
+        ['hr_admin', 'HR 管理员'],
+        ['admin', 'platform admin'],
+      ]),
+      roleUpdatedAt: new Map([
+        ['role-1', SEEDED_UPDATED_AT],
+        ['attendance_lead', SEEDED_UPDATED_AT],
+        ['crm_admin', SEEDED_UPDATED_AT],
+        ['crm_lead', SEEDED_UPDATED_AT],
+        ['hr_admin', SEEDED_UPDATED_AT],
+        ['admin', SEEDED_UPDATED_AT],
+      ]),
+      rolePermissions: new Map([
+        ['role-1', ['attendance:read', 'roles:read']],
+        ['attendance_lead', ['attendance:read', 'attendance:admin']],
+        ['crm_admin', ['crm:read']],
+        ['crm_lead', ['crm:read', 'crm:admin']],
+        ['hr_admin', []],
+        ['admin', ['*:*']],
+      ]),
+      members: new Map([
+        ['role-1', ['user-a', 'user-b']],
+        ['attendance_lead', ['user-c']],
+        ['crm_admin', ['user-a', 'user-b']],
+        ['crm_lead', ['user-c']],
+        ['hr_admin', ['user-a']],
+        ['admin', ['owner-9']],
+      ]),
+      delegatedScopes: [
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'hr' },
+      ],
+      delegatedGroupScopes: [
+        { admin_user_id: 'user-a', namespace: 'crm' },
+        { admin_user_id: 'user-b', namespace: 'crm' },
+        { admin_user_id: 'user-a', namespace: 'hr' },
+      ],
+    },
+  })
+}
+
+/** Statements that WRITE membership or audience — the cleanup's whole footprint. */
+function membershipWrites(db: ReturnType<typeof makeFakeDb>): string[] {
+  return db.statements
+    .map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    .filter((sql) => /^DELETE FROM (user_roles|delegated_role_admin_scopes|delegated_role_admin_member_groups)\b/i.test(sql))
+}
+
+describe('ADMIN-LEVEL codes in the role editor — only a platform admin adds or removes them (owner ruling 「只有平台管理员能任命 *_admin」)', () => {
+  it('EDITOR: a roles:write holder cannot add `attendance:admin` to a role that is already assigned (PUT) — the members do not become admins', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:admin', 'attendance:read', 'roles:read'] }, res)
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+    expect(db.membersOf('role-1')).toEqual(['user-a', 'user-b'])
+    expect(rbacServiceMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode, entry.meta.offendingCount]))
+      .toEqual([['update_denied', 'PERMISSION_ESCALATION_FORBIDDEN', 1]])
+  })
+
+  it('EDITOR: the same grant re-sent as POST on the existing id is refused too, and so is `<ns>:*`', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+
+    for (const code of ['attendance:admin', 'crm:admin']) {
+      const res = mockResponse()
+      await postRole({ id: 'role-1', name: '备料角色', permissions: [code] }, res)
+      expect({ code, status: res.statusCode }).toEqual({ code, status: 403 })
+      expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    }
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+  })
+
+  it('EDITOR is SYMMETRIC: a roles:write holder cannot remove `attendance:admin` from an admin-equivalent role either', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:read'] }, res, 'attendance_lead')
+
+    expect(res.statusCode).toBe(403)
+    expect((res.body as { error: { code: string } }).error.code).toBe('PERMISSION_ESCALATION_FORBIDDEN')
+    expect(db.permissionsOf('attendance_lead')).toEqual(['attendance:admin', 'attendance:read'])
+  })
+
+  it('EDITOR NORMALISATION: whitespace and case variants of an admin-level code are refused the same way; an ordinary code still passes', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+
+    // ` attendance:admin ` is trimmed on write to `attendance:admin`; `Attendance:Admin` is a
+    // catalogued code that the predicate folds to admin-level (over-refusal, never admission).
+    for (const variant of [' attendance:admin ', 'Attendance:Admin']) {
+      const res = mockResponse()
+      await putRole({ permissions: ['attendance:read', 'roles:read', variant] }, res)
+      expect({ variant, status: res.statusCode, code: (res.body as { error?: { code: string } }).error?.code })
+        .toEqual({ variant, status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    }
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'roles:read'])
+
+    // POSITIVE CONTROL — the same caller still edits ordinary codes.
+    const ordinary = mockResponse()
+    await putRole({ permissions: ['attendance:read', 'crm:read', 'roles:read'] }, ordinary)
+    expect(ordinary.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:read', 'crm:read', 'roles:read'])
+  })
+
+  it('EDITOR: a platform administrator still adds `attendance:admin` (the gate narrows, it does not brick)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await putRole({ permissions: ['attendance:admin', 'attendance:read', 'roles:read'] }, res)
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('role-1')).toEqual(['attendance:admin', 'attendance:read', 'roles:read'])
+  })
+})
+
+describe('DELETE of a namespace main-admin or admin-equivalent role — platform admin only; memberships and audience go with it', () => {
+  it('a roles:write holder cannot delete `<ns>_admin`: 403, role, memberships and audience intact, refusal audited', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: {
+        code: 'PROTECTED_ROLE_FORBIDDEN',
+        message: 'Only a platform administrator may delete a namespace admin role',
+        details: { roleId: 'crm_admin' },
+      },
+    })
+    expect(db.nameOf('crm_admin')).toBe('CRM 管理员')
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 2, groups: 1 })
+    expect(membershipWrites(db)).toEqual([])
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['delete_denied', 'PROTECTED_ROLE_FORBIDDEN']])
+  })
+
+  it('a roles:write holder cannot delete an admin-equivalent role either (judged by its codes, counted, never echoed)', async () => {
+    const db = seedAdminRoles()
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(403)
+    const body = res.body as { error: { code: string; details: Record<string, unknown> } }
+    expect(body.error.code).toBe('PROTECTED_ROLE_FORBIDDEN')
+    expect(body.error.details).toEqual({ roleId: 'crm_lead', escalatingCount: 1 })
+    expect(JSON.stringify(res.body)).not.toContain('crm:admin')
+    expect(db.nameOf('crm_lead')).toBe('CRM 组长')
+    expect(db.membersOf('crm_lead')).toEqual(['user-c'])
+    expect(deniedAuditEntries()[0].meta.offendingCount).toBe(1)
+  })
+
+  it('a platform admin deletes `<ns>_admin` on the no-FK schema: memberships gone, that namespace\'s audience gone (another namespace\'s stays), audited, one transaction', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('crm_admin')).toBeUndefined()
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+    expect(db.audienceOf('user-b', 'crm')).toEqual({ departments: 0, groups: 0 })
+    expect(db.audienceOf('user-a', 'hr')).toEqual({ departments: 1, groups: 1 })
+    expect(db.membersOf('hr_admin')).toEqual(['user-a'])
+    // Every write went through the transaction client (pool.query is the same interpreter here,
+    // so assert the route never called it for DML).
+    expect(pgMocks.poolQuery.mock.calls.filter((call) => /^\s*(DELETE|INSERT|UPDATE)/i.test(String(call[0])))).toEqual([])
+    expect(pgMocks.transaction).toHaveBeenCalledTimes(1)
+    // Post-commit: per-member cache fan-out, the cleanup audit (counts, trigger role_deleted) and the delete entry.
+    expect(rbacServiceMocks.invalidateUserPerms.mock.calls.map((call) => call[0]).sort()).toEqual(['user-a', 'user-b'])
+    const cleanupAudits = auditMocks.auditLog.mock.calls
+      .map((call) => call[0] as { resourceType: string; resourceId: string; meta: Record<string, unknown> })
+      .filter((entry) => entry.resourceType === 'delegated-admin-scope')
+    expect(cleanupAudits.map((entry) => [entry.resourceId, entry.meta.trigger, entry.meta.scopeRows, entry.meta.groupScopeRows]).sort())
+      .toEqual([['user-a:crm', 'role_deleted', 2, 1], ['user-b:crm', 'role_deleted', 0, 1]])
+    const deleteEntry = writeAuditEntries().find((entry) => entry.action === 'delete') as unknown as { meta: Record<string, unknown> }
+    expect(deleteEntry.meta.membershipsRemoved).toBe(2)
+    expect(deleteEntry.meta.membersInvalidated).toBe(2)
+  })
+
+  it('a platform admin deletes an admin-equivalent role: its memberships go (no audience DML — the role derives no namespace)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('crm_lead')).toEqual([])
+    expect(membershipWrites(db).every((sql) => /^DELETE FROM user_roles/i.test(sql))).toBe(true)
+    expect(membershipWrites(db)).toHaveLength(1)
+  })
+
+  it('ORDER: the membership removal runs BEFORE the role row goes, so it still finds the members where the FK cascades', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: true })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    // With the cascade a removal placed after the DELETE would find nobody and clear no audience.
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+    const statements = db.statements.map((statement) => statement.sql.replace(/\s+/g, ' ').trim())
+    const removal = statements.findIndex((sql) => /^DELETE FROM user_roles/i.test(sql))
+    const roleDelete = statements.findIndex((sql) => /^DELETE FROM roles WHERE id=/i.test(sql))
+    expect(removal).toBeGreaterThanOrEqual(0)
+    expect(removal).toBeLessThan(roleDelete)
+  })
+
+  it('ATOMIC: a failure in the audience cleanup rolls back the membership removal and keeps the role', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({
+      cascade: false,
+      failOn: (sql) => (/DELETE FROM delegated_role_admin_member_groups/i.test(sql)
+        ? Object.assign(new Error('could not serialize access'), { code: '40P01' })
+        : null),
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(500)
+    expect(res.body).toEqual({ ok: false, error: { code: 'ROLE_WRITE_FAILED', message: 'Role write failed' } })
+    expect(db.nameOf('crm_admin')).toBe('CRM 管理员')
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 2, groups: 1 })
+  })
+
+  it('memberships that outlived an earlier delete of the role row are removed when the id is deleted again (platform admin)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    // The pre-fix state: the `roles` row is gone, the memberships (and so the identity) are not.
+    const first = mockResponse()
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    await deleteRole(first, 'crm_admin')
+    expect(first.statusCode).toBe(403) // and a non-platform caller still cannot use this path
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    await db.run('DELETE FROM roles WHERE id=$1', ['crm_admin'])
+    expect(db.nameOf('crm_admin')).toBeUndefined()
+    expect(db.membersOf('crm_admin')).toEqual(['user-a', 'user-b'])
+
+    const res = mockResponse()
+    await deleteRole(res, 'crm_admin')
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.audienceOf('user-a', 'crm')).toEqual({ departments: 0, groups: 0 })
+  })
+
+  it('the seeded platform-admin role is NOT emptied of members by its own delete (a lock-out is a separate decision)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.membersOf('admin')).toEqual(['owner-9'])
+    expect(membershipWrites(db)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — an ordinary role is still deleted by any roles:write holder, with no membership statement', async () => {
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'role-1')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.nameOf('role-1')).toBeUndefined()
+    expect(membershipWrites(db)).toEqual([])
   })
 })
