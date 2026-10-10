@@ -41,6 +41,13 @@ const SYNTHETIC_TOKEN = 'synthetic-session-token-not-a-jwt'
 const SYNTHETIC_EMAIL = 'synthetic-admin@ci.invalid'
 const SYNTHETIC_PASSWORD = 'synthetic-admin-password-1'
 const ROUTE_PATH = '/api/admin/directory/local/accounts'
+// W1-6 owner ruling 2026-10-10: the bare-anchor leftover stays blocking; its copy names the leftover,
+// what can leave it, and how an operator proceeds. Byte-identical in sh and ps1 (parity test below).
+const BARE_ANCHOR_MESSAGE =
+  'found a bare local org anchor (a local org anchor with no directory account, department or org membership; '
+  + 'an interrupted run or a failed local-directory call on an earlier server version can leave one); nothing was written '
+  + '-- on a fresh install, complete it by calling POST /api/admin/directory/local/accounts for the admin manually; '
+  + 'on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step'
 
 // The step's three read-only statements, pinned VERBATIM. They are the tenancy guard (gate r1
 // P2-1): any semantic change to either twin must change these literals in the same PR, and the
@@ -329,19 +336,46 @@ for (const { name, run, enabled } of RUNNERS) {
     })
   }
 
-  test(`${name}: a bare local anchor left by an interrupted run is reported, not mistaken for an upgrade`, opts, async () => {
+  test(`${name}: a bare local anchor is reported (blocking, exit 1), not mistaken for an upgrade`, opts, async () => {
     const fixture = makeFixture()
     try {
       await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
         const result = await run(fixture, { apiBase, stub: { STUB_EMPTINESS: '0:1', STUB_LEFTOVER: '1:0:0:0' } })
-        assert.notEqual(result.status, 0)
+        // Owner ruling 2026-10-10 (W1-6): the leftover check stays BLOCKING -- exit status 1, pinned.
+        assert.equal(result.status, 1, result.output)
         assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
-        assert.match(
-          result.output,
-          /found a local org anchor with no directory account, department or org membership \(an earlier run or directory call was interrupted\); nothing was written -- complete it by calling POST/,
-        )
+        assert.ok(result.output.includes(BARE_ANCHOR_MESSAGE), result.output)
+        // The copy says what the leftover is, what can leave it, and both ways forward.
+        assert.match(result.output, /found a bare local org anchor \(a local org anchor with no directory account, department or org membership;/)
+        assert.match(result.output, /an interrupted run or a failed local-directory call on an earlier server version can leave one/)
+        assert.match(result.output, /on a fresh install, complete it by calling POST \/api\/admin\/directory\/local\/accounts for the admin manually/)
+        assert.match(result.output, /on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step/)
+        assert.equal(fixture.readSql().filter(chunk => chunk === EXPECTED_POSTCONDITION_SQL).length, 0)
         assert.doesNotMatch(result.output, /skipped: org membership or directory data already exists/)
         assertStepLinesValuesFree(result.output)
+      })
+    } finally {
+      fixture.cleanup()
+    }
+  })
+
+  test(`${name}: the escape hatch the bare-anchor copy recommends works -- VERIFY_LOGIN=0 skips the step (exit 0)`, opts, async () => {
+    const fixture = makeFixture()
+    try {
+      await withBackend({ routeStatus: 200 }, async ({ apiBase, calls }) => {
+        const result = await run(fixture, {
+          apiBase,
+          verifyLogin: '0',
+          stub: { STUB_EMPTINESS: '0:1', STUB_LEFTOVER: '1:0:0:0' },
+        })
+        assert.equal(result.status, 0, result.output)
+        assert.equal(calls.filter(call => call.url === ROUTE_PATH).length, 0)
+        assert.match(result.output, /Local org bootstrap: skipped: it needs a logged-in admin session/)
+        assert.ok(!result.output.includes(BARE_ANCHOR_MESSAGE), result.output)
+        const sql = fixture.readSql()
+        for (const pinned of [EXPECTED_EMPTINESS_SQL, EXPECTED_LEFTOVER_ANCHOR_SQL, EXPECTED_POSTCONDITION_SQL]) {
+          assert.equal(sql.filter(chunk => chunk === pinned).length, 0)
+        }
       })
     } finally {
       fixture.cleanup()
@@ -616,7 +650,7 @@ test('parity: sh and ps1 print the same values-free step messages', () => {
     'but the local org anchor and the admin membership are already complete (one active anchor, exactly one active membership; another run may have created them); nothing else was written',
     'no anchor and no membership were written (safe to re-run)',
     'a re-run will not repair it -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually',
-    'found a local org anchor with no directory account, department or org membership (an earlier run or directory call was interrupted); nothing was written -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually',
+    BARE_ANCHOR_MESSAGE,
     'the read-only leftover-anchor check failed; nothing was written',
     'the read-only leftover-anchor check returned an unexpected shape; nothing was written',
     'the admin login response carried a session token of an unexpected shape; nothing was written',

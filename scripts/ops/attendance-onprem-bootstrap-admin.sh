@@ -340,15 +340,17 @@ else
   fi
 
   if [[ "$emptiness_counts" == "0:1" ]]; then
-    # No membership anywhere and exactly one directory integration: recognise the leftover of an
-    # interrupted earlier call (a bare local anchor and nothing else) instead of calling it an upgrade.
+    # No membership anywhere and exactly one directory integration: recognise a bare local anchor (and
+    # nothing else) instead of calling it an upgrade. The server now creates the anchor inside the same
+    # transaction as the account / link / membership, so it can only be the leftover of an earlier
+    # server version (an interrupted run or a failed local-directory call). Stays blocking (non-zero).
     leftover_counts="$(local_org_read_counts "$LOCAL_ORG_LEFTOVER_ANCHOR_SQL" "read-only leftover-anchor check")" \
       || local_org_die "the read-only leftover-anchor check failed; nothing was written"
     if [[ ! "$leftover_counts" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]]; then
       local_org_die "the read-only leftover-anchor check returned an unexpected shape; nothing was written"
     fi
     if [[ "$leftover_counts" == "1:0:0:0" ]]; then
-      local_org_die "found a local org anchor with no directory account, department or org membership (an earlier run or directory call was interrupted); nothing was written -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually"
+      local_org_die "found a bare local org anchor (a local org anchor with no directory account, department or org membership; an interrupted run or a failed local-directory call on an earlier server version can leave one); nothing was written -- on a fresh install, complete it by calling POST /api/admin/directory/local/accounts for the admin manually; on an existing deployment, re-run with VERIFY_LOGIN=0 to skip this step"
     fi
   fi
 
