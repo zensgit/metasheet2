@@ -96,6 +96,12 @@ interface DingTalkRequestOptions {
   timeoutMs?: number
   /** Overall abort signal: cancels the in-flight attempt AND any retry backoff immediately. */
   signal?: AbortSignal
+  /**
+   * `false`: the transport's log line for a rejected (non-2xx) response carries the status and a
+   * fixed note instead of the upstream message (callers that store a redacted form themselves).
+   * Default: the message is logged, as before.
+   */
+  logUpstreamMessage?: boolean
 }
 
 export interface DingTalkDepartment {
@@ -200,6 +206,7 @@ async function requestDingTalkJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
@@ -225,6 +232,7 @@ async function requestDingTalkDirectoryJson(
     fetchFn: options?.fetchFn,
     timeoutMs: options?.timeoutMs,
     signal: options?.signal,
+    logUpstreamMessage: options?.logUpstreamMessage,
   })
 }
 
