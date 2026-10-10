@@ -42,6 +42,10 @@ import { checkTableExists } from './_patterns'
  *      logged, and the upgrade carries on. The leftover rows are neither deleted nor changed: who
  *      they belong to is the site's call (they are invisible in 角色管理, which lists `roles` rows).
  *      Once they are dealt with, the role can be created by hand under the same id.
+ *   5. LEFTOVER GRANT ROWS → LOG ONLY. Rows in the role-subject grant tables (ROLE_SUBJECT_GRANT_TABLES)
+ *      that already name a template id this migration then CREATES are left as found and do not
+ *      skip the template (no behaviour change); one line with the id and per-table counts is logged
+ *      so the site can review them before assigning anyone the role.
  *
  * THE IDS ARE LITERALS (ADR §11.2-2). `buildPluginRoleId` would turn `stock-prep` into
  * `stock_prep_<kind>`, which matches neither `roleIdMatchesNamespace('stock-prep', …)` (delegated
@@ -238,6 +242,27 @@ async function logAdoption(db: Kysely<unknown>, template: StockPrepRoleTemplate)
   )
 }
 
+/** Rule 5's log line: role-subject grant rows already naming a just-created id (counts only). */
+async function logLeftoverGrantRows(db: Kysely<unknown>, roleId: string): Promise<void> {
+  const counts: string[] = []
+  for (const table of ROLE_SUBJECT_GRANT_TABLES) {
+    if (!(await checkTableExists(db, table))) continue
+    const counted = await sql<{ count: number }>`
+      SELECT count(*)::int AS count
+        FROM ${sql.table(table)}
+       WHERE subject_type = 'role'
+         AND subject_id = ${roleId}
+    `.execute(db)
+    const rows = Number(counted.rows[0]?.count ?? 0)
+    if (rows > 0) counts.push(`${table}: ${rows}`)
+  }
+  if (counts.length === 0) return
+  log(
+    `role ${roleId} created, but role-subject grant row(s) already name this id (left behind by a deleted role; `
+    + `left as found, and they apply to whoever is given the role) — ${counts.join(', ')}; review them before assigning anyone`,
+  )
+}
+
 async function displayNameTakenByAnotherRole(db: Kysely<unknown>, template: StockPrepRoleTemplate): Promise<boolean> {
   const clash = await sql<{ taken: number }>`
     SELECT 1 AS taken
@@ -306,6 +331,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
         ? `role ${template.id} created with ${template.permissions.length} code(s); its display name was already used by another role, so it carries the ${STOCK_PREP_ROLE_TEMPLATE_NAME_CLASH_SUFFIX} suffix`
         : `role ${template.id} created with ${template.permissions.length} code(s)`,
     )
+    await logLeftoverGrantRows(db, template.id)
   }
 }
 

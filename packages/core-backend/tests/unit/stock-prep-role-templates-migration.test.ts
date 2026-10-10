@@ -24,7 +24,11 @@
  *        that has no `roles` row → that template is skipped (no role row, no code, not in the
  *        ledger), the rows are left as found, one values-free line (id + two counts); a later down()
  *        leaves them alone. One case per table, so dropping either count turns a case red.
- *   T-11 ADOPTION LOG says whether the adopted role's code set equals the template's (T-05: no).
+ *   T-11 ADOPTION LOG says whether the adopted role's code set equals the template's (T-05: no);
+ *        T-11b / T-11c differ on ONE side each (extra codes only / a missing code only), so dropping
+ *        either half of the equality turns a case red.
+ *   T-13 LEFTOVER GRANT ROWS (fix round 2): role-subject grant rows already naming a template id the
+ *        migration then creates are logged (id + per-table counts), left as found, and skip nothing.
  *   T-12 down() ignores a ledger id that is not a template id (the filter that only a real-DB
  *        scenario caught before).
  *
@@ -150,6 +154,9 @@ function createFakeDb(state: FakeState, recorded: Recorded[] = []): Kysely<unkno
       return []
     }],
     [/^SELECT role_id FROM stock_prep_role_template_seeds ORDER BY role_id$/, () => [...(state.ledger ?? [])].sort().map((role_id) => ({ role_id }))],
+    [/^SELECT count\(\*\)::int AS count FROM "([a-z_]+)" WHERE subject_type = 'role' AND subject_id = \$1$/, (m, p) => [{
+      count: (state.grants[m[1]] ?? []).filter((g) => g.subject_type === 'role' && g.subject_id === p[0]).length,
+    }]],
     [new RegExp(`^SELECT EXISTS \\( SELECT 1 FROM user_roles WHERE role_id IN ${LIST} \\) AS assigned$`), (m, p) => {
       const ids = pick(p, m[1])
       return [{ assigned: state.userRoles.some((r) => ids.includes(r.role_id)) }]
@@ -455,6 +462,59 @@ describe('S5a stock-prep role templates — fix round 1 (T-10..T-12)', () => {
     expect(loggedSince(logStart).filter((line) => line.includes('stock-prep_puller'))).toEqual([
       `${PREFIX}role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change); code set equals the template: yes (template codes missing: 0, extra codes: 0)`,
     ])
+  })
+
+  // Fix round 2: T-05 differs on BOTH sides and T-11 on neither, so dropping either half of
+  // `missing === 0 && extra === 0` survived them. One case per side.
+  it('T-11b: an adopted role holding every template code PLUS extra codes logs "no (0, N)"', async () => {
+    const state = freshState()
+    state.roles.push({ id: 'stock-prep_puller', name: '数据管理员（拉取人员）' })
+    for (const code of ['stock-prep:pull', 'stock-prep:operate', 'stock-prep:read', 'approvals:read', 'multitable:manage-schema']) {
+      state.rolePermissions.push({ role_id: 'stock-prep_puller', permission_code: code })
+    }
+    const logStart = logSpy.mock.calls.length
+    await up(createFakeDb(state))
+    expect(loggedSince(logStart).filter((line) => line.includes('stock-prep_puller'))).toEqual([
+      `${PREFIX}role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change); code set equals the template: no (template codes missing: 0, extra codes: 2)`,
+    ])
+  })
+
+  it('T-11c: an adopted role missing a template code and holding nothing extra logs "no (N, 0)"', async () => {
+    const state = freshState()
+    state.roles.push({ id: 'stock-prep_puller', name: '数据管理员（拉取人员）' })
+    for (const code of ['stock-prep:operate', 'stock-prep:read']) state.rolePermissions.push({ role_id: 'stock-prep_puller', permission_code: code })
+    const logStart = logSpy.mock.calls.length
+    await up(createFakeDb(state))
+    expect(loggedSince(logStart).filter((line) => line.includes('stock-prep_puller'))).toEqual([
+      `${PREFIX}role stock-prep_puller already exists; adopted unchanged (no rename, no code change, no member change); code set equals the template: no (template codes missing: 1, extra codes: 0)`,
+    ])
+  })
+
+  it('T-13: role-subject grant rows already naming a template id it then CREATES are logged by table and count, left as found, and do not skip it', async () => {
+    const state = freshState()
+    state.grants.field_permissions.push({ subject_type: 'role', subject_id: 'stock-prep_frontline' }, { subject_type: 'role', subject_id: 'stock-prep_frontline' })
+    state.grants.spreadsheet_permissions.push(
+      { subject_type: 'role', subject_id: 'stock-prep_frontline' },
+      // decoys: another role, and a non-role subject that carries the id
+      { subject_type: 'role', subject_id: 'stock-prep_puller_x' },
+      { subject_type: 'member-group', subject_id: 'stock-prep_frontline' },
+    )
+    const grantsBefore = JSON.stringify(state.grants)
+    const recorded: Recorded[] = []
+    const logStart = logSpy.mock.calls.length
+    await up(createFakeDb(state, recorded))
+    expect(roleOf(state, 'stock-prep_frontline')).toEqual({ id: 'stock-prep_frontline', name: '一线填写' })
+    expect(codesOf(state, 'stock-prep_frontline')).toEqual(['stock-prep:operate', 'stock-prep:read'])
+    expect(state.ledger).toContain('stock-prep_frontline')
+    expect(JSON.stringify(state.grants)).toBe(grantsBefore)
+    expect(recorded.filter((r) => WRITE.test(r.sql) && /permissions|grants/.test(r.sql) && !r.sql.startsWith('INSERT INTO role_permissions'))).toEqual([])
+    const log = loggedSince(logStart)
+    expect(log.filter((line) => line.includes('stock-prep_frontline'))).toEqual([
+      `${PREFIX}role stock-prep_frontline created with 2 code(s)`,
+      `${PREFIX}role stock-prep_frontline created, but role-subject grant row(s) already name this id (left behind by a deleted role; left as found, and they apply to whoever is given the role) — spreadsheet_permissions: 1, field_permissions: 2; review them before assigning anyone`,
+    ])
+    // the other three templates had none: no such line for them
+    expect(log.filter((line) => line.includes('grant row(s) already name this id'))).toHaveLength(1)
   })
 
   it('T-12: down() acts only on ledger ids that are ALSO template ids — a foreign ledger id is never deleted', async () => {
