@@ -51,9 +51,11 @@ export interface FailureTextOptions {
 }
 
 /**
- * `instanceof` that tolerates a missing class: a test that replaces a module with a factory can leave an
- * imported class `undefined`, and `x instanceof undefined` throws. A missing class simply matches nothing,
- * which only ever makes the answer MORE conservative (the fixed sentence).
+ * `instanceof` that tolerates a value that is not a constructor (`x instanceof undefined` throws): such an
+ * entry simply matches nothing, which only ever makes the answer MORE conservative (the fixed sentence).
+ * Note this does not protect module load: with vitest, a factory mock that omits an exported class makes
+ * the import itself throw, and the allow-lists in admin-directory.ts / directory-sync.ts read their classes
+ * at load time — a factory mock of a module they import must re-export every listed class.
  */
 function isInstanceOf(value: unknown, ctor: unknown): boolean {
   return typeof ctor === 'function' && value instanceof (ctor as FixedSentenceErrorClass)
