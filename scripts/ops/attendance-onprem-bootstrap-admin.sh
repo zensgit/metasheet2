@@ -253,23 +253,116 @@ WHERE p.code IN (
 ON CONFLICT (user_id, permission_code) DO NOTHING;
 SQL
 
+login_response_file=""
+admin_session_token=""
 if [[ "$VERIFY_LOGIN" == "1" ]]; then
   [[ -n "$API_BASE" ]] || die "VERIFY_LOGIN=1 requires API_BASE (example: http://127.0.0.1/api)"
   api="${API_BASE%/}"
+  login_response_file="$(mktemp)"
+  trap 'rm -f "$login_response_file"' EXIT
   info "Verifying admin login via ${api}/auth/login"
   login_code="$(
-    curl -sS -o /tmp/attendance-admin-login-check.json -w '%{http_code}' \
+    curl -sS -o "$login_response_file" -w '%{http_code}' \
       -X POST "${api}/auth/login" \
       -H 'Content-Type: application/json' \
       --data "{\"email\":\"${ADMIN_EMAIL}\",\"password\":\"${ADMIN_PASSWORD}\"}" || true
   )"
   if [[ "$login_code" != "200" ]]; then
-    if [[ -f /tmp/attendance-admin-login-check.json ]]; then
-      body="$(cat /tmp/attendance-admin-login-check.json)"
+    if [[ -f "$login_response_file" ]]; then
+      body="$(cat "$login_response_file")"
     else
       body=""
     fi
     die "Admin login verification failed (HTTP ${login_code}) ${body:0:240}"
+  fi
+  admin_session_token="$(
+    node -e '
+      const fs = require("fs");
+      let parsed = {};
+      try { parsed = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); } catch {}
+      const token = parsed?.data?.token || parsed?.token || "";
+      process.stdout.write(String(token));
+    ' "$login_response_file" || true
+  )"
+fi
+
+# ---------------------------------------------------------------------------------------------
+# Fresh-install local org bootstrap (W1-6; owner ruling 2026-10-10 「W1-6 按此形状实现」).
+#
+# On a FRESH install only (user_orgs AND directory_integrations both empty), the logged-in
+# bootstrap admin calls the EXISTING route POST /api/admin/directory/local/accounts with its own
+# user id. That route's existing code creates the deployment's local org anchor
+# (getOrCreateLocalIntegration) and the admin's active org membership; this script writes NO
+# anchor/membership SQL of its own -- every psql statement below is a read-only count.
+#
+# Upgrade / directory-already-configured installs (either table has rows) are left untouched.
+# Re-running is a no-op because the first successful run makes both tables non-empty.
+#
+# Fail-closed: any error exits non-zero with a values-free message. NOTE: the route commits the
+# anchor before the membership transaction, so a failure inside that transaction can leave an
+# anchor without a membership. That state is DETECTED by the read-only postcondition below (and
+# reported, exit non-zero) -- it is not rolled back by this script, and a re-run will skip
+# because the anchor makes directory_integrations non-empty; finish it by calling the same route
+# manually. The PowerShell twin (multitable-onprem-bootstrap-admin.ps1) carries the same step,
+# SQL and messages; scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs pins parity.
+# ---------------------------------------------------------------------------------------------
+LOCAL_ORG_LOG_PREFIX="Local org bootstrap"
+
+function local_org_die() {
+  die "${LOCAL_ORG_LOG_PREFIX}: $*"
+}
+
+function local_org_info() {
+  info "${LOCAL_ORG_LOG_PREFIX}: $*"
+}
+
+function local_org_read_counts() {
+  local sql="$1"
+  psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -X -A -t \
+    -v v_user_id="$admin_user_id" <<<"$sql" | tr -d '[:space:]'
+}
+
+LOCAL_ORG_EMPTINESS_SQL="SELECT (SELECT count(*) FROM user_orgs) || ':' || (SELECT count(*) FROM directory_integrations);"
+LOCAL_ORG_POSTCONDITION_SQL="SELECT (SELECT count(*) FROM directory_integrations WHERE provider = 'local' AND org_id = 'default' AND status = 'active') || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE) || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE AND org_id = 'default');"
+
+if [[ "$VERIFY_LOGIN" != "1" ]]; then
+  local_org_info "skipped: it needs a logged-in admin session (VERIFY_LOGIN=1 with a running backend); nothing was written"
+else
+  [[ -n "$admin_session_token" ]] || local_org_die "the admin login response carried no session token; nothing was written"
+
+  emptiness_counts="$(local_org_read_counts "$LOCAL_ORG_EMPTINESS_SQL")" \
+    || local_org_die "the read-only emptiness check failed; nothing was written"
+  if [[ ! "$emptiness_counts" =~ ^[0-9]+:[0-9]+$ ]]; then
+    local_org_die "the read-only emptiness check returned an unexpected shape; nothing was written"
+  fi
+
+  if [[ "$emptiness_counts" != "0:0" ]]; then
+    local_org_info "skipped: org membership or directory data already exists (upgrade or directory already configured); nothing was written"
+  else
+    local_org_info "fresh install detected (no org membership, no directory integration); creating the local org anchor and the admin membership via POST ${api}/admin/directory/local/accounts"
+    local_org_body="$(
+      node -e 'process.stdout.write(JSON.stringify({ localUserId: process.argv[1] }))' "$admin_user_id"
+    )" || local_org_die "could not build the request body; nothing was written"
+    local_org_response_file="$(mktemp)"
+    local_org_code="$(
+      curl -sS -o "$local_org_response_file" -w '%{http_code}' \
+        -X POST "${api}/admin/directory/local/accounts" \
+        -H 'Content-Type: application/json' \
+        -H "Authorization: Bearer ${admin_session_token}" \
+        --data "$local_org_body" || true
+    )"
+    rm -f "$local_org_response_file"
+
+    postcondition_counts="$(local_org_read_counts "$LOCAL_ORG_POSTCONDITION_SQL")" \
+      || local_org_die "the route returned HTTP ${local_org_code} and the read-only postcondition check failed; the org state is UNKNOWN -- inspect it before re-running"
+
+    if [[ "$local_org_code" == "200" && "$postcondition_counts" == "1:1:1" ]]; then
+      local_org_info "OK: local org anchor and admin membership created (one active anchor, exactly one active membership)"
+    elif [[ "$postcondition_counts" == "0:0:0" ]]; then
+      local_org_die "the route returned HTTP ${local_org_code}; no anchor and no membership were written (safe to re-run)"
+    else
+      local_org_die "the route returned HTTP ${local_org_code} and left a PARTIAL state (anchors=${postcondition_counts%%:*}); a re-run will skip -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually"
+    fi
   fi
 fi
 

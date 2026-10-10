@@ -401,6 +401,7 @@ ON CONFLICT (user_id, permission_code) DO NOTHING;
   "v_user_id=$adminUserId"
 ))
 
+$adminSessionToken = ''
 if ($resolvedVerifyLogin -eq '1') {
   $loginBody = @{
     email = $resolvedAdminEmail
@@ -412,6 +413,16 @@ if ($resolvedVerifyLogin -eq '1') {
     $response = Invoke-WebRequest -UseBasicParsing -Uri (($resolvedApiBase.TrimEnd('/')) + '/auth/login') -Method Post -ContentType 'application/json' -Body $loginBody -TimeoutSec 30
     if ($response.StatusCode -ne 200) {
       throw "Admin login verification failed (HTTP $($response.StatusCode))"
+    }
+    try {
+      $loginPayload = $response.Content | ConvertFrom-Json
+      if ($loginPayload.data -and $loginPayload.data.token) {
+        $adminSessionToken = [string]$loginPayload.data.token
+      } elseif ($loginPayload.token) {
+        $adminSessionToken = [string]$loginPayload.token
+      }
+    } catch {
+      $adminSessionToken = ''
     }
   }
   catch {
@@ -428,6 +439,92 @@ if ($resolvedVerifyLogin -eq '1') {
     }
 
     throw "Admin login verification failed (HTTP $statusCode) $details"
+  }
+}
+
+# ---------------------------------------------------------------------------------------------
+# Fresh-install local org bootstrap (W1-6; owner ruling 2026-10-10 「W1-6 按此形状实现」).
+# Twin of the same step in attendance-onprem-bootstrap-admin.sh -- same gate, same read-only SQL,
+# same route, same messages (pinned by scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs).
+#
+# On a FRESH install only (user_orgs AND directory_integrations both empty), the logged-in
+# bootstrap admin calls the EXISTING route POST /api/admin/directory/local/accounts with its own
+# user id. That route's existing code creates the deployment's local org anchor
+# (getOrCreateLocalIntegration) and the admin's active org membership; this script writes NO
+# anchor/membership SQL of its own -- every psql statement below is a read-only count.
+#
+# Upgrade / directory-already-configured installs (either table has rows) are left untouched.
+# Re-running is a no-op because the first successful run makes both tables non-empty.
+#
+# Fail-closed: any error throws with a values-free message. NOTE: the route commits the anchor
+# before the membership transaction, so a failure inside that transaction can leave an anchor
+# without a membership. That state is DETECTED by the read-only postcondition below (and
+# reported) -- it is not rolled back by this script, and a re-run will skip because the anchor
+# makes directory_integrations non-empty; finish it by calling the same route manually.
+# ---------------------------------------------------------------------------------------------
+$localOrgLogPrefix = 'Local org bootstrap'
+$localOrgEmptinessSql = @'
+SELECT (SELECT count(*) FROM user_orgs) || ':' || (SELECT count(*) FROM directory_integrations);
+'@
+$localOrgPostconditionSql = @'
+SELECT (SELECT count(*) FROM directory_integrations WHERE provider = 'local' AND org_id = 'default' AND status = 'active') || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE) || ':' || (SELECT count(*) FROM user_orgs WHERE user_id = :'v_user_id' AND is_active = TRUE AND org_id = 'default');
+'@
+
+function Read-LocalOrgCounts {
+  param([string]$Sql, [string]$Description)
+
+  $raw = Invoke-PsqlCapture -Description $Description -PsqlCommand $resolvedPsqlCommand -DatabaseUrl $databaseUrl -Sql $Sql -Variables @(
+    "v_user_id=$adminUserId"
+  ) -TrimOutput
+  return ($raw -replace '\s', '')
+}
+
+if ($resolvedVerifyLogin -ne '1') {
+  Write-Info "${localOrgLogPrefix}: skipped: it needs a logged-in admin session (VerifyLogin=1 with a running backend); nothing was written"
+} else {
+  if ([string]::IsNullOrWhiteSpace($adminSessionToken)) {
+    throw "${localOrgLogPrefix}: the admin login response carried no session token; nothing was written"
+  }
+
+  try {
+    $emptinessCounts = Read-LocalOrgCounts -Sql $localOrgEmptinessSql -Description "${localOrgLogPrefix}: read-only emptiness check"
+  } catch {
+    throw "${localOrgLogPrefix}: the read-only emptiness check failed; nothing was written"
+  }
+  if ($emptinessCounts -notmatch '^[0-9]+:[0-9]+$') {
+    throw "${localOrgLogPrefix}: the read-only emptiness check returned an unexpected shape; nothing was written"
+  }
+
+  if ($emptinessCounts -ne '0:0') {
+    Write-Info "${localOrgLogPrefix}: skipped: org membership or directory data already exists (upgrade or directory already configured); nothing was written"
+  } else {
+    $localOrgUrl = ($resolvedApiBase.TrimEnd('/')) + '/admin/directory/local/accounts'
+    Write-Info "${localOrgLogPrefix}: fresh install detected (no org membership, no directory integration); creating the local org anchor and the admin membership via POST $localOrgUrl"
+    $localOrgBody = @{ localUserId = $adminUserId } | ConvertTo-Json -Compress
+    $localOrgCode = 0
+    try {
+      $localOrgResponse = Invoke-WebRequest -UseBasicParsing -Uri $localOrgUrl -Method Post -ContentType 'application/json' -Headers @{ Authorization = "Bearer $adminSessionToken" } -Body $localOrgBody -TimeoutSec 30
+      $localOrgCode = [int]$localOrgResponse.StatusCode
+    } catch {
+      if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+        $localOrgCode = [int]$_.Exception.Response.StatusCode
+      }
+    }
+
+    try {
+      $postconditionCounts = Read-LocalOrgCounts -Sql $localOrgPostconditionSql -Description "${localOrgLogPrefix}: read-only postcondition check"
+    } catch {
+      throw "${localOrgLogPrefix}: the route returned HTTP $localOrgCode and the read-only postcondition check failed; the org state is UNKNOWN -- inspect it before re-running"
+    }
+
+    if ($localOrgCode -eq 200 -and $postconditionCounts -eq '1:1:1') {
+      Write-Info "${localOrgLogPrefix}: OK: local org anchor and admin membership created (one active anchor, exactly one active membership)"
+    } elseif ($postconditionCounts -eq '0:0:0') {
+      throw "${localOrgLogPrefix}: the route returned HTTP $localOrgCode; no anchor and no membership were written (safe to re-run)"
+    } else {
+      $anchorCount = ($postconditionCounts -split ':')[0]
+      throw "${localOrgLogPrefix}: the route returned HTTP $localOrgCode and left a PARTIAL state (anchors=$anchorCount); a re-run will skip -- complete it by calling POST /api/admin/directory/local/accounts for the admin manually"
+    }
   }
 }
 
