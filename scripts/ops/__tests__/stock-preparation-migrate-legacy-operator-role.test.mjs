@@ -408,6 +408,16 @@ test('refuses when the target holds a code and a table grant the old role lacks 
   assert.ok(dry.out.includes(`gains — role-subject table grants of ${TARGET} not held by ${OLD}: 1`))
   assert.ok(dry.out.some((line) => line.startsWith('--apply would refuse') && line.includes('would gain')))
   assertValuesFree(dry.out)
+  // each widening alone refuses too: the extra code only, the extra table grant only
+  const codeOnly = baseState()
+  codeOnly.rolePermissions.push({ role_id: TARGET, permission_code: 'stock-prep:pull' })
+  const grantOnly = baseState()
+  grantOnly.sheetGrants.push({ sheet_id: 'sheet-other', user_id: null, subject_type: 'role', subject_id: TARGET, perm_code: 'spreadsheet:write', created_at: 't6' })
+  for (const [label, single] of [['code only', codeOnly], ['table grant only', grantOnly]]) {
+    const { code, writes } = await runMain(['--apply'], single)
+    assert.equal(code, EXIT_REFUSED, label)
+    assert.deepEqual(writes, [], label)
+  }
 })
 
 test('refuses when the target is the subject of view / field / record / history-audit rows or of active role approvals the old role lacks', async () => {
