@@ -26,6 +26,115 @@
 # assignee/follower/comment/delete calls and their code mappings) and `tasks-detail-m3.spec.ts`
 # (subtasks, membership, followers, comments, delete-with-inline-confirm) added.
 #
+# M4 frontend, slice FE-0 (design docs/development/task-m4-frontend-design-20261007.md §9; the
+# owner ratified the M4 pack on 2026-10-07): `tasks-labels.spec.ts` added — the ZH / EN label tables
+# (`tasks/labels.ts`) that TasksView / TasksTodoBadge / tasksDateDisplay now read from: key
+# parity, per-language value checks, a rendered-text sweep of both surfaces in each locale, and a
+# post-mount locale flip. Later M4 slices each add their own spec file here.
+#
+# M4 frontend, slice FE-1 (design §3, §13 FE-1): `tasks-api-m4.spec.ts` added — the M4 API client
+# functions (settings, PATCH /api/tasks/:id, lists, members, items, groups): request shapes,
+# strict parsers, code mappings, the refused path segments, the shared paging loop, and the pure
+# pre-check module `tasks/tasksDraft.ts`. Every M4 route is on the PR-3a branch (not on main);
+# every cell mocks the transport.
+#
+# M4 frontend, slice FE-2 (design §8, §13 FE-2): `tasks-badge-m4.spec.ts` added — the badge's
+# switched-off scope (`data-scope`, no numeral, the three renderings told apart by attribute string)
+# and its `tasks:counts-updated` subscription (`tasks/useTasksCountsRealtime.ts`: an event is one
+# re-read, the payload is never read, the 60 s poll stays as the fallback, teardown on unmount),
+# plus the gate: the real shell with the auto-connect policy forced on opens exactly one socket
+# with the badge and none while the feature is off, without tasks:read, or on a public route. The
+# backend emitter (PR-3c) is not built; the event name is coded to the contract and re-checked when
+# it lands. `tasks-labels.spec.ts` gains the switched-off copy in both locales.
+#
+# M4 frontend, slice FE-3 (design §2.1-§2.2, §4.5, §7.1): `tasks-settings-view.spec.ts` added —
+# the settings page `/tasks/settings` (`views/tasks/TasksSettingsView.vue`) and its entry on the
+# list header: read states, the form's starting values, the request carrying only the changed keys
+# (bodies compared byte for byte), the daily reminder's time-zone rule and the browser-zone
+# fill-in, each 422 code next to its field, the org guidance block, the page banner, the badge
+# notification on success, one save at a time, and results that land after the page was left.
+# `tasks-routes.spec.ts` gains the new route's meta, its registration before the task-id route and
+# the gate cells for the new path; `tasks-labels.spec.ts` sweeps the new page in both locales.
+#
+# M4 frontend, slice FE-4 (design §4.3, §7.2, §7.3): `tasks-detail-m4.spec.ts` added — the task
+# detail page's editor (`PATCH /api/tasks/:id` under `expectedVersion`) and its lists section: when
+# each renders, the request bodies (only the changed keys, the zone carried with a date, a cleared
+# date sending its time as null, minutes-form times, the reminder only when touched), the
+# pre-checks and every 422 code next to its field, the 409 reload that keeps the draft and takes
+# the reloaded version, the draft across other reloads and route edges, one detail action at a
+# time, late results, and the lists section's names, picker, add / remove and safe path segments.
+# The list-item routes are on the PR-3a branch (not on main). The six specs that mount TasksView
+# gain mock entries for the new calls; `tasks-labels.spec.ts` sweeps the new sections in both
+# locales.
+#
+# M4 frontend, slice FE-5 (design §2.1, §2.4, §4.1, §4.2, §5.1): `tasks-lists-sidebar.spec.ts` and
+# `tasks-list-detail.spec.ts` added. The first covers the lists sidebar on the /tasks list page
+# (`views/tasks/TaskListsSidebar.vue`): its read states, paging, archived lists hidden until asked
+# for, create with the name pre-check, its test ids kept apart from the list page's, and the lists
+# bus as the sidebar and the task page hear it. The second covers the list page `/task-lists/:id`
+# (`views/tasks/TaskListView.vue`): page states taken from the list read alone, ids that are not
+# safe path segments, the controls each role sees, rename / archive / unarchive, the items section
+# that survives a backend without item routes, add / remove a task, one write at a time, late
+# results, route edges and the activity panel. The item routes are on the PR-3a branch (not on
+# main). `tasks-routes.spec.ts` gains the new route's meta and gate cells; the six specs
+# that mount TasksView gain mock entries for the sidebar's calls; `tasks-labels.spec.ts` sweeps both
+# new surfaces in both locales.
+#
+# M4 frontend, slice FE-6 (design §4.0, §5): `tasks-list-members.spec.ts` added — the members dialog
+# of the list page (`views/tasks/TaskListMembersDialog.vue`): the roster read and its states, the
+# controls each viewer sees (role, the viewer's own row, the creator and owner rows, the viewer id
+# while it resolves), the request bodies, every error code next to the control that caused it, the
+# roster replaced from each write's response, transfer with its list re-read, leave with the way
+# back to /tasks, one write at a time shared with the page, focus and the keyboard, route edges and
+# late results. The member routes are coded to the PR-3a contract (not on main); every cell mocks
+# the transport. `tasks-labels.spec.ts` sweeps the dialog in both locales.
+#
+# M4 frontend, slice FE-7 (design §2.4, §4.4, §4.6, §6): `tasks-groups.spec.ts` added — the
+# grouping board (`views/tasks/TaskGroupBoard.vue`) on the list page and in the assigned view
+# (`views/tasks/TaskPersonalGroups.vue`), and its order and move rules (`tasks/tasksGroupBoard.ts`):
+# the order of groups, placed rows and the unsorted tail, the flat rows while the group reads are
+# out or failed, the default group (null in every PUT, no id before its first write), the request
+# body of every keyboard and drag move, the optimistic order and its undo, each error code's spot,
+# the re-reads after each write, reordering held off when the board's index space is not the
+# server's, the group writes, one write at a time with the page, focus and late results. The group
+# routes are coded to the PR-3a contract (not on main); every cell mocks the transport. The specs
+# that mount TasksView or the list page gain mock entries for the new reads; `tasks-labels.spec.ts`
+# sweeps the board in both locales.
+#
+# M4 frontend, slice FE-8 (closeout; no new file, so still twenty-three whole-file args):
+# `tasks-detail-m4.spec.ts` gains the member controls that follow the detail's `canManageMembers`
+# (owner ruling of 2026-10-07: adding or removing assignees and followers takes a direct role on the
+# task), with the fallback to `canEdit` for a body without the key, the lists section's add picker
+# on the same ability, and the 422 `INACTIVE_ORG_MEMBER` copy at the assignee, follower and create
+# forms; `tasks-api-m4.spec.ts` the parser and the three write points; `tasks-labels.spec.ts` the
+# English copy of those spots; `tasks-list-detail.spec.ts` the add-task 404 copy that names the
+# direct-role rule; `tasks-list-members.spec.ts` the members dialog taking focus back after a write
+# (a browser drops focus off a control it disables, which left Escape and the Tab wrap unheard).
+#
+# M4 frontend, gate fix round (no new file, still twenty-three whole-file args):
+# `tasks-detail-m4.spec.ts` gains main's M3 detail body (no editor without the S4 group), both
+# halves of the [fe-19] rebase and focus after the lists section's confirmation and the editor's
+# discard; `tasks-api-m4.spec.ts` the pure rebase rules; `tasks-list-members.spec.ts` focus that
+# stays inside the dialog when the transfer or leave confirmation opens or closes;
+# `tasks-list-detail.spec.ts`, `tasks-groups.spec.ts`, `tasks-lists-sidebar.spec.ts` and
+# `tasks-settings-view.spec.ts` late-result guards, focus after a confirmation or a rename form opens
+# or closes, and the rules that retire a stale outcome; `tasks-labels.spec.ts` the English depth
+# label.
+#
+# M4 frontend, slice FE-c (design §8.2-§8.3, re-checked against the PR-3c emitter; one new file,
+# so twenty-four whole-file args): `tasks-counts-realtime.spec.ts` added — the badge's counts
+# signal after the re-check: an event is followed by exactly one pending-count request when its
+# window closes, with the viewer's zone (the gate-26 frontend cells, candidates until the lock PR
+# merges); a burst or a steady stream of signals is one request per window; a signal while a read
+# is in flight still gets a read that starts after it, and the older answer cannot overwrite it; a
+# read that starts while a window is open answers it; a hidden tab still reads; unmount closes the
+# window; the payload is never touched; the client never emits on its socket; the event name is
+# spelled once in the web source; the poll shows a write that sent this tab no signal; a settings
+# save re-reads the badge with no socket at all; and on the real shell the socket closes when the
+# route moves to the login page or the feature goes off, and reopens with the new token after a
+# second sign-in. `tasks-badge-m4.spec.ts` keeps its cells, rewritten where a signal now waits for
+# its window.
+#
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE
 # regression on the /tasks skeleton surface into a visible red.
@@ -96,22 +205,32 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tasks web guard specs (targeted)
-        # Fourteen whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
+        # Twenty-four whole-file args, listed explicitly. Do not replace with a name filter, glob, skip, or
         # continue-on-error — a filter matching zero tests exits green.
         run: |
           pnpm --filter @metasheet/web exec vitest run \
             tests/App.spec.ts \
             tests/tasks-api-m3.spec.ts \
+            tests/tasks-api-m4.spec.ts \
             tests/tasks-api.spec.ts \
+            tests/tasks-badge-m4.spec.ts \
             tests/tasks-badge.spec.ts \
             tests/tasks-context.spec.ts \
+            tests/tasks-counts-realtime.spec.ts \
             tests/tasks-detail-m3.spec.ts \
+            tests/tasks-detail-m4.spec.ts \
             tests/tasks-detail-view.spec.ts \
+            tests/tasks-groups.spec.ts \
+            tests/tasks-labels.spec.ts \
+            tests/tasks-list-detail.spec.ts \
+            tests/tasks-list-members.spec.ts \
             tests/tasks-list-view.spec.ts \
+            tests/tasks-lists-sidebar.spec.ts \
             tests/tasks-nav-badge.spec.ts \
             tests/tasks-nav-feature-gate.spec.ts \
             tests/tasks-nav-relogin.spec.ts \
             tests/tasks-routes.spec.ts \
+            tests/tasks-settings-view.spec.ts \
             tests/tasks-view-transitions.spec.ts \
             tests/tasks-view.spec.ts \
             --reporter=verbose

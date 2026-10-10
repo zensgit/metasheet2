@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { RouteRecordRaw } from 'vue-router'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import { appRoutes } from '../src/router/appRoutes'
 import {
   buildRouteGuardContext,
@@ -230,6 +231,219 @@ describe('tasks route feature gate (tasks session feature off -> redirect home, 
         flags,
       })
       const decision = resolveRouteGuardDecision({ path: '/tasks', meta: routeByPath('/tasks').meta }, guardCtx)
+      expect(decision).toEqual({ action: 'redirect', target: '/home' })
+    } finally {
+      localStorage.removeItem('user_roles')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// M4 FE-3 — /tasks/settings (frontend design docs/development/task-m4-frontend-design-20261007.md
+// §2.1, §10.1): the same gate as /tasks, a static path listed before /tasks/:id, and the gate-22
+// cells above copied for the new path.
+// ---------------------------------------------------------------------------------------------
+
+describe('tasks settings route (M4 FE-3, design §2.1)', () => {
+  it('exports a lazy /tasks/settings route named tasks-settings with the /tasks gate, loading TasksSettingsView.vue', () => {
+    const route = routeByPath('/tasks/settings')
+
+    expect(route.name).toBe('tasks-settings')
+    expect(route.meta).toEqual({
+      title: 'Task Settings',
+      titleZh: '任务设置',
+      requiresAuth: true,
+      requiredFeature: 'tasks',
+      permissions: ['tasks:read'],
+    })
+    expectGuardRelevantProjection(route)
+    expect(isLazyViewLoader(route.component, 'TasksSettingsView.vue')).toBe(true)
+  })
+
+  it('is listed before /tasks/:id', () => {
+    const settingsIndex = appRoutes.findIndex((item) => item.path === '/tasks/settings')
+    const detailIndex = appRoutes.findIndex((item) => item.path === '/tasks/:id')
+    expect(settingsIndex).toBeGreaterThanOrEqual(0)
+    expect(detailIndex).toBeGreaterThanOrEqual(0)
+    expect(settingsIndex).toBeLessThan(detailIndex)
+  })
+
+  it('a router built from appRoutes resolves /tasks/settings to tasks-settings, not to a task id', () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: appRoutes })
+    expect(router.resolve('/tasks/settings').name).toBe('tasks-settings')
+    expect(router.resolve('/tasks/settings').params).toEqual({})
+    expect(router.resolve('/tasks/tsk_1').name).toBe('task-detail')
+    expect(router.resolve('/tasks/tsk_1').params).toEqual({ id: 'tsk_1' })
+    expect(router.resolve('/tasks').name).toBe('tasks')
+  })
+})
+
+describe('tasks settings route guard decisions (gate 22 cells for /tasks/settings, stubbed context)', () => {
+  const ctx = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
+    hasFeature: () => true,
+    hasPermission: () => true,
+    attendanceFocused: false,
+    plmWorkbenchFocused: false,
+    resolveHomePath: () => '/HOME',
+    ...over,
+  })
+  const meta = () => routeByPath('/tasks/settings').meta
+
+  it('allow cell: the tasks feature on, hasPermission(tasks:read)=true and both focus flags false', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks/settings', meta: meta() },
+      ctx({ hasFeature: (feature) => feature === 'tasks', hasPermission: (p) => p === 'tasks:read' }),
+    )
+    expect(decision).toEqual({ action: 'allow' })
+  })
+
+  it('redirect cell: hasPermission(tasks:read)=false redirects to ctx.resolveHomePath()', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks/settings', meta: meta() },
+      ctx({ hasPermission: () => false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/HOME' })
+  })
+
+  it('attendance-focus cell: attendanceFocused=true, plmWorkbenchFocused=false redirects to /attendance', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks/settings', meta: meta() },
+      ctx({ hasPermission: () => true, attendanceFocused: true, plmWorkbenchFocused: false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/attendance' })
+  })
+
+  it('plm-focus cell: plmWorkbenchFocused=true, attendanceFocused=false redirects to /plm', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks/settings', meta: meta() },
+      ctx({ hasPermission: () => true, plmWorkbenchFocused: true, attendanceFocused: false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/plm' })
+  })
+
+  it('feature-off cell: the tasks feature off redirects to ctx.resolveHomePath() even though every permission passes', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/tasks/settings', meta: meta() },
+      ctx({ hasFeature: (feature) => feature !== 'tasks', hasPermission: () => true }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/HOME' })
+  })
+
+  it('real store defaults (no session loaded: tasks off) + an administrator through the real useAuth: /tasks/settings redirects to /home', () => {
+    localStorage.setItem('user_roles', JSON.stringify(['admin']))
+    try {
+      const auth = useAuth()
+      expect(auth.hasPermission('tasks:read')).toBe(true)
+      const flags = useFeatureFlags()
+      expect(flags.hasFeature('tasks')).toBe(false)
+
+      const guardCtx = buildRouteGuardContext({
+        auth: { hasPermission: auth.hasPermission, getAccessSnapshot: auth.getAccessSnapshot },
+        flags,
+      })
+      const decision = resolveRouteGuardDecision({ path: '/tasks/settings', meta: meta() }, guardCtx)
+      expect(decision).toEqual({ action: 'redirect', target: '/home' })
+    } finally {
+      localStorage.removeItem('user_roles')
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// M4 FE-5 — /task-lists/:id (frontend design docs/development/task-m4-frontend-design-20261007.md
+// §2.1, §10.1): the same gate as /tasks, no index page, and the gate-22 cells copied for the path.
+// ---------------------------------------------------------------------------------------------
+
+describe('task list route (M4 FE-5, design §2.1)', () => {
+  it('exports a lazy /task-lists/:id route named task-list-detail with the /tasks gate, loading TaskListView.vue', () => {
+    const route = routeByPath('/task-lists/:id')
+
+    expect(route.name).toBe('task-list-detail')
+    expect(route.meta).toEqual({
+      title: 'Task Lists',
+      titleZh: '任务清单',
+      requiresAuth: true,
+      requiredFeature: 'tasks',
+      permissions: ['tasks:read'],
+    })
+    expectGuardRelevantProjection(route)
+    expect(isLazyViewLoader(route.component, 'TaskListView.vue')).toBe(true)
+  })
+
+  it('a router built from appRoutes resolves /task-lists/:id with the id; /task-lists alone is no page of its own', () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: appRoutes })
+    expect(router.resolve('/task-lists/tl_1').name).toBe('task-list-detail')
+    expect(router.resolve('/task-lists/tl_1').params).toEqual({ id: 'tl_1' })
+    expect(router.resolve('/task-lists/a%2Fb').params).toEqual({ id: 'a/b' })
+    expect(router.resolve('/task-lists').name).toBe('not-found')
+    expect(appRoutes.filter((item) => item.path.startsWith('/task-lists')).map((item) => item.path)).toEqual(['/task-lists/:id'])
+  })
+})
+
+describe('task list route guard decisions (gate 22 cells for /task-lists/:id, stubbed context)', () => {
+  const ctx = (over: Partial<RouteGuardPolicyContext> = {}): RouteGuardPolicyContext => ({
+    hasFeature: () => true,
+    hasPermission: () => true,
+    attendanceFocused: false,
+    plmWorkbenchFocused: false,
+    resolveHomePath: () => '/HOME',
+    ...over,
+  })
+  const meta = () => routeByPath('/task-lists/:id').meta
+
+  it('allow cell: the tasks feature on, hasPermission(tasks:read)=true and both focus flags false', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/task-lists/tl_1', meta: meta() },
+      ctx({ hasFeature: (feature) => feature === 'tasks', hasPermission: (p) => p === 'tasks:read' }),
+    )
+    expect(decision).toEqual({ action: 'allow' })
+  })
+
+  it('redirect cell: hasPermission(tasks:read)=false redirects to ctx.resolveHomePath()', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/task-lists/tl_1', meta: meta() },
+      ctx({ hasPermission: () => false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/HOME' })
+  })
+
+  it('attendance-focus cell: attendanceFocused=true, plmWorkbenchFocused=false redirects to /attendance', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/task-lists/tl_1', meta: meta() },
+      ctx({ hasPermission: () => true, attendanceFocused: true, plmWorkbenchFocused: false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/attendance' })
+  })
+
+  it('plm-focus cell: plmWorkbenchFocused=true, attendanceFocused=false redirects to /plm', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/task-lists/tl_1', meta: meta() },
+      ctx({ hasPermission: () => true, plmWorkbenchFocused: true, attendanceFocused: false }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/plm' })
+  })
+
+  it('feature-off cell: the tasks feature off redirects to ctx.resolveHomePath() even though every permission passes', () => {
+    const decision = resolveRouteGuardDecision(
+      { path: '/task-lists/tl_1', meta: meta() },
+      ctx({ hasFeature: (feature) => feature !== 'tasks', hasPermission: () => true }),
+    )
+    expect(decision).toEqual({ action: 'redirect', target: '/HOME' })
+  })
+
+  it('real store defaults (no session loaded: tasks off) + an administrator through the real useAuth: /task-lists/:id redirects to /home', () => {
+    localStorage.setItem('user_roles', JSON.stringify(['admin']))
+    try {
+      const auth = useAuth()
+      expect(auth.hasPermission('tasks:read')).toBe(true)
+      const flags = useFeatureFlags()
+      expect(flags.hasFeature('tasks')).toBe(false)
+
+      const guardCtx = buildRouteGuardContext({
+        auth: { hasPermission: auth.hasPermission, getAccessSnapshot: auth.getAccessSnapshot },
+        flags,
+      })
+      const decision = resolveRouteGuardDecision({ path: '/task-lists/tl_1', meta: meta() }, guardCtx)
       expect(decision).toEqual({ action: 'redirect', target: '/home' })
     } finally {
       localStorage.removeItem('user_roles')
