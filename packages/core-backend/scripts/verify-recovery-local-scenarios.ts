@@ -36,4 +36,3 @@ export function qualifyManualTargetPair(
     : { result: 'HOLD' as const, staleWorkerClaimQualified: false,
       holdReason: 'RECOVERY_LOCAL_BACKUP_MANUAL_SCENARIO_PAIR_UNQUALIFIED' }
 }
-
