@@ -179,25 +179,26 @@ export function deriveGrantNamespaces(grant: {
 /**
  * A caller-supplied executor — the caller's TRANSACTION client — for the two admission reads below.
  * Absent, they run on the pool, as before. Present, they run on that one connection, so a caller
- * deciding inside a transaction under row locks decides on what its locks protect.
+ * deciding inside a transaction under row locks decides on what its locks protect. Each read names
+ * its SQL literal at BOTH seams (no forwarding adapter), so a static sweep of a call path through
+ * here (tests/helpers/attendance-w6-call-path-closure.ts) classifies both as resolved literals.
  */
 export type NamespaceAdmissionQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
 
-const poolAdmissionQuery: NamespaceAdmissionQueryFn = (sql, params) => query(sql, params)
+const USER_NAMESPACE_ROLE_CONTEXT_SQL = `SELECT ur.role_id, rp.permission_code
+       FROM user_roles ur
+       LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
+       WHERE ur.user_id = $1`
 
-function admissionExecutor(runQuery: NamespaceAdmissionQueryFn | undefined): NamespaceAdmissionQueryFn {
-  return typeof runQuery === 'function' ? runQuery : poolAdmissionQuery
-}
+const USER_NAMESPACE_ADMISSIONS_SQL = `SELECT namespace, enabled, source, granted_by, updated_by, created_at, updated_at
+       FROM user_namespace_admissions
+       WHERE user_id = $1`
 
 async function fetchUserNamespaceRoleContext(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<UserNamespaceRoleContext> {
   try {
-    const result = await admissionExecutor(runQuery)(
-      `SELECT ur.role_id, rp.permission_code
-       FROM user_roles ur
-       LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
-       WHERE ur.user_id = $1`,
-      [userId],
-    )
+    const result = typeof runQuery === 'function'
+      ? await runQuery(USER_NAMESPACE_ROLE_CONTEXT_SQL, [userId])
+      : await query<UserRolePermissionRow>(USER_NAMESPACE_ROLE_CONTEXT_SQL, [userId])
 
     const roleIds = new Set<string>()
     const namespaces = new Set<string>()
@@ -236,12 +237,9 @@ async function fetchUserNamespaceRoleContext(userId: string, runQuery?: Namespac
 
 async function fetchNamespaceAdmissions(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<Map<string, NamespaceAdmissionRow>> {
   try {
-    const result = await admissionExecutor(runQuery)(
-      `SELECT namespace, enabled, source, granted_by, updated_by, created_at, updated_at
-       FROM user_namespace_admissions
-       WHERE user_id = $1`,
-      [userId],
-    )
+    const result = typeof runQuery === 'function'
+      ? await runQuery(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
+      : await query<NamespaceAdmissionRow>(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
     admissionsTableUnavailable = false
     return new Map(
       (result.rows as NamespaceAdmissionRow[])
