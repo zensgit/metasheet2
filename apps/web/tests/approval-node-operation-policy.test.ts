@@ -9,7 +9,9 @@ import type {
 import {
   buildApprovalGraph,
   draftFromTemplate,
+  setStepEmptyAssigneeFallbackIds,
   unsupportedTemplateAuthoringReason,
+  validateTemplateApprovalFlow,
 } from '../src/approvals/templateAuthoring'
 import {
   SAME_PERSON_EXPLICIT_CHOICE_LABELS,
@@ -620,6 +622,61 @@ describe('W1-1a — Lock-4 F4-B authoring: the shared fallback helpers', () => {
   })
 })
 
+describe('W1-1a — Lock-4 F4-B authoring: LINEAR editor writes the fallback through the typed pickers', () => {
+  function designatedLinearDraft(fallback?: EmptyAssigneeFallback) {
+    return draftFromTemplate(tpl(linearGraph({
+      assigneeSources: [{ kind: 'requester' }],
+      emptyAssigneePolicy: fallback ? 'designated' : 'error',
+      ...(fallback ? { emptyAssigneeFallback: fallback } : {}),
+    })))
+  }
+  function approvalConfig(graph: ApprovalGraph): Record<string, unknown> {
+    return graph.nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+  }
+
+  it("picking 'designated' + a role through the picker emits exactly { emptyAssigneePolicy:'designated', emptyAssigneeFallback:{ roleIds } }", () => {
+    const draft = designatedLinearDraft()
+    draft.steps[0]!.emptyAssigneePolicy = 'designated'
+    setStepEmptyAssigneeFallbackIds(draft.steps[0]!, 'role', ['approval-admin'])
+    const config = approvalConfig(buildApprovalGraph(draft))
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+  })
+
+  it('adding users keeps the roles (one side at a time), and the emitted object is pruned', () => {
+    const draft = designatedLinearDraft({ roleIds: ['approval-admin'] })
+    setStepEmptyAssigneeFallbackIds(draft.steps[0]!, 'user', ['u1', '', 'u1'])
+    expect(approvalConfig(buildApprovalGraph(draft)).emptyAssigneeFallback).toEqual({ userIds: ['u1'], roleIds: ['approval-admin'] })
+  })
+
+  it('switching away omits the key, switching BACK restores the last-entered targets (the approvalThreshold posture)', () => {
+    const draft = designatedLinearDraft({ userIds: ['u1'] })
+    draft.steps[0]!.emptyAssigneePolicy = 'auto-approve'
+    expect(Object.prototype.hasOwnProperty.call(approvalConfig(buildApprovalGraph(draft)), 'emptyAssigneeFallback')).toBe(false)
+    draft.steps[0]!.emptyAssigneePolicy = 'designated'
+    expect(approvalConfig(buildApprovalGraph(draft)).emptyAssigneeFallback).toEqual({ userIds: ['u1'] })
+  })
+
+  it('B-s10 FE mirror: designated with NO target is a SAVE-blocking error (the backend rejects it on create/update, APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED)', () => {
+    const draft = designatedLinearDraft({ userIds: ['u1'] })
+    setStepEmptyAssigneeFallbackIds(draft.steps[0]!, 'user', [])
+    expect(draft.steps[0]!.emptyAssigneeFallback).toBeUndefined()
+    const designatedError = (errors: string[]) => errors.some((e) => e.includes('转交指定人员'))
+    expect(designatedError(validateTemplateApprovalFlow(draft))).toBe(true)
+    // minimal ≡ the 保存草稿 gate (collectTemplateSaveMinimum) — must block there too.
+    expect(designatedError(validateTemplateApprovalFlow(draft, { minimal: true }))).toBe(true)
+    // values-free: the message names the step and the policy only, never an id.
+    expect(validateTemplateApprovalFlow(draft).find((e) => e.includes('转交指定人员'))).not.toContain('u1')
+  })
+
+  it('POSITIVE CONTROLS — a designated step WITH a target, and a non-designated step with no fallback, pass the same check', () => {
+    const withTarget = designatedLinearDraft({ roleIds: ['approval-admin'] })
+    expect(validateTemplateApprovalFlow(withTarget).some((e) => e.includes('转交指定人员'))).toBe(false)
+    const plain = designatedLinearDraft()
+    expect(validateTemplateApprovalFlow(plain).some((e) => e.includes('转交指定人员'))).toBe(false)
+  })
+})
+
 describe('W1-1a — Lock-4 F4-B authoring: CANVAS editor carries the fallback in the edit model', () => {
   it('the seed is IDENTITY: present when persisted, absent (not even an undefined key) when not', () => {
     const withKey = approvalNodeEditsFromGraph(complexGraphWithF4B({ roleIds: ['approval-admin'] }))
@@ -767,5 +824,58 @@ describe('W1-1a — Lock-4 F4-C: option rendering (M8 honesty — business label
     expect(options.map((o) => o.label).join('|')).not.toContain('transfer_to_ceo')
     // POSITIVE CONTROL — a known value adds no such option (the branch is value-selected).
     expect(samePersonChoiceOptions({ samePersonPolicy: 'transfer_dept_head' }).some((o) => o.value === SAME_PERSON_UNKNOWN_SELECT_VALUE)).toBe(false)
+  })
+})
+
+describe('W1-1a — Lock-4 F4-C on the CANVAS path: round-trip + write-through + X-3', () => {
+  const known: AutoApprovalPolicy[] = [
+    { mergeWithRequester: true },
+    { mergeWithRequester: true, samePersonPolicy: 'auto_skip' },
+    { samePersonPolicy: 'self_approve' },
+    { samePersonPolicy: 'transfer_direct_manager', actorMode: 'system' },
+    { samePersonPolicy: 'transfer_dept_head' },
+  ]
+
+  it('a template carrying ANY known samePersonPolicy is EDITABLE on the complex path (the key joined the nested allowlist)', () => {
+    for (const policy of known) {
+      expect(unsupportedTemplateAuthoringReason(tpl(complexGraph({ assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: policy }))), JSON.stringify(policy)).toBeNull()
+    }
+  })
+
+  it('an untouched seed + rebuild is byte-identical for every known shape (no existing graph changes shape)', () => {
+    for (const policy of known) {
+      const graph = complexGraph({ assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: policy })
+      const rebuilt = applyApprovalNodeEditsToGraph(graph, approvalNodeEditsFromGraph(graph))
+      expect(rebuilt.nodes.find((n) => n.key === 'approval_1')!.config, JSON.stringify(policy)).toEqual(
+        graph.nodes.find((n) => n.key === 'approval_1')!.config,
+      )
+    }
+  })
+
+  it('write-through: a pick applied to the edit lands in the rebuilt node config', () => {
+    const graph = complexGraph({ assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: { mergeWithRequester: true } })
+    const edits = approvalNodeEditsFromGraph(graph)
+    edits.approval_1!.autoApprovalPolicy = applySamePersonChoice(edits.approval_1!.autoApprovalPolicy, 'transfer_direct_manager')
+    const config = applyApprovalNodeEditsToGraph(graph, edits).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(config.autoApprovalPolicy).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+
+    edits.approval_1!.autoApprovalPolicy = applySamePersonChoice(edits.approval_1!.autoApprovalPolicy, 'default')
+    const cleared = applyApprovalNodeEditsToGraph(graph, edits).nodes.find((n) => n.key === 'approval_1')!.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(cleared, 'autoApprovalPolicy')).toBe(false)
+  })
+
+  it('gate X-3 on BOTH paths: an off-enum samePersonPolicy forces read-only; a known value stays editable (value-selected)', () => {
+    const off = { assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: { samePersonPolicy: 'transfer_to_ceo' } }
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(off)))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(off)))).not.toBeNull()
+    const on = { assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' } }
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(on)))).toBeNull()
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(on)))).toBeNull()
+  })
+
+  it('POSITIVE CONTROL — a genuinely unknown autoApprovalPolicy KEY still forces read-only (the allowlist widened by ONE key, not removed)', () => {
+    const cfg = { assigneeSources: [{ kind: 'requester' }], autoApprovalPolicy: { mergeWithRequester: true, futureFlag: true } }
+    expect(unsupportedTemplateAuthoringReason(tpl(complexGraph(cfg)))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(tpl(linearGraph(cfg)))).not.toBeNull()
   })
 })

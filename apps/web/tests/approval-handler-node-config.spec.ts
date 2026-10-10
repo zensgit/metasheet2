@@ -130,8 +130,12 @@ function createStubConfigApi(seed: Record<string, Partial<Edit>>): ApprovalNodeC
     setApprovalNodeMode: () => {},
     approvalNodeEmptyPolicy: () => 'error',
     setApprovalNodeEmptyPolicy: () => {},
-    approvalNodeMergeWithRequester: () => false,
-    setApprovalNodeMergeWithRequester: () => {},
+    // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+    // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+    // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+    // full TemplateAuthoringView mounts.
+    setApprovalNodeSamePersonPolicy: () => {},
+    setApprovalNodeEmptyAssigneeFallbackIds: () => {},
     handlerNodeMode: (k: string) => edits[k]?.handlerMode ?? 'all',
     setHandlerNodeMode: (k: string, mode: any) => { const e = edits[k]; if (e) e.handlerMode = mode },
     handlerNodeOpinionRequired: (k: string) => Boolean(edits[k]?.opinionRequired),
@@ -245,7 +249,11 @@ describe('Lock-3 handler config surface + inspector tabs', () => {
     // approval-only controls ABSENT (M7 — no inert theater).
     expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
     expect(c.querySelector('[data-testid="approval-node-empty-policy"]')).toBeNull()
-    expect(c.querySelector('[data-testid="approval-node-merge-with-requester"]')).toBeNull()
+    // W1-1a: the 自审合并 checkbox became the four-value same-person select, and the empty-assignee
+    // 'designated' fallback pickers joined the same approval-only grid — none may render on a handler.
+    expect(c.querySelector('[data-testid="approval-node-same-person-policy"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]')).toBeNull()
   })
 
   it('Lock-7 G-13: a handler field set to readonly renders NO readonly honesty hint (readonly is enforced server-side, not disclosed-as-pending)', () => {

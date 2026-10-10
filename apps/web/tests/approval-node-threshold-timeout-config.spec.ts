@@ -151,8 +151,12 @@ function createStubConfigApi(
     timeoutJumpTargetOptions: () => [{ key: 'approval_2', label: '二审' }],
     approvalNodeEmptyPolicy: () => 'error',
     setApprovalNodeEmptyPolicy: () => {},
-    approvalNodeMergeWithRequester: () => false,
-    setApprovalNodeMergeWithRequester: () => {},
+    // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+    // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+    // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+    // full TemplateAuthoringView mounts.
+    setApprovalNodeSamePersonPolicy: () => {},
+    setApprovalNodeEmptyAssigneeFallbackIds: () => {},
     handlerNodeMode: () => 'all',
     setHandlerNodeMode: () => {},
     handlerNodeOpinionRequired: () => false,

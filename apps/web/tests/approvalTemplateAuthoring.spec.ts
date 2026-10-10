@@ -16,6 +16,8 @@ import {
   createEmptyTemplateDraft,
   draftFromTemplate,
   graphReadOnlyReason,
+  setStepSamePersonChoice,
+  stepSamePersonControlState,
   unsupportedTemplateAuthoringReason,
   validateTemplateApprovalFlow,
   validateTemplateDraft,
@@ -194,7 +196,14 @@ const ElSelect = defineComponent({
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
       onChange: (event: Event) => {
-        const value = (event.target as HTMLSelectElement).value
+        const target = event.target as HTMLSelectElement
+        // W1-1a stub fidelity (test-only; mirrors approval-template-authoring-canvas-inspector.spec.ts's
+        // P1-B/P2(b) fix): a real el-select `multiple` emits an ARRAY via `update:model-value`, not the
+        // native single string. Gated on the `multiple` DOM attribute (fallthrough from the real
+        // template binding), so every single-value select in this file is unaffected. No test in this
+        // file drove a multi-select's change event before (the linear setters would have thrown on a
+        // string), so no prior assertion depended on the old single-string behavior.
+        const value = target.multiple ? Array.from(target.selectedOptions).map((option) => option.value) : target.value
         this.$emit('update:modelValue', value)
         this.$emit('change', value)
       },
@@ -1271,29 +1280,114 @@ describe('approval template authoring helpers', () => {
     expect(reason).toContain('暂不支持')
   })
 
-  // T7/T8 — P2-1 fix: the LINEAR branch checked only top-level config keys, so a node carrying
-  // `autoApprovalPolicy.samePersonPolicy` (F4-C; not in `BACKEND_AUTO_APPROVAL_POLICY_KEYS`, so
-  // backend `normalizeAutoApprovalPolicy` silently re-synthesizes `mergeWithRequester:true` from it
-  // on every save) looked editable. The complex path already ran the nested
-  // `hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)` check (:1067); the
-  // linear path now runs the SAME check, so both editors agree.
-  it('T7: samePersonPolicy carrier forces the linear editor read-only (was wrongly editable)', () => {
-    const autoSkip = unsupportedTemplateAuthoringReason(
-      buildAutoApprovalTemplate({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' } as AutoApprovalPolicy),
-    )
-    expect(autoSkip).not.toBeNull()
-    expect(autoSkip).toContain('暂不支持')
+  // T7/T8 — history: the P2-1 fix made a linear node carrying `autoApprovalPolicy.samePersonPolicy`
+  // READ-ONLY, because the shipped 自审合并 checkbox owned only `mergeWithRequester` and could not
+  // clear a persisted `auto_skip`/`transfer_*` (backend `normalizeAutoApprovalPolicy` re-synthesizes
+  // `mergeWithRequester:true` from 'auto_skip' on every save — the self-revert class). W1-1a
+  // (Lock-4 F4-C, RATIFIED) INVERTS T7: the four-value control now owns BOTH carriers, so the key
+  // joins the nested allowlist and such a template opens EDITABLE. Only an OFF-ENUM value stays
+  // read-only (T7b, gate X-3). T8 stays as the bare-carrier control.
+  it('T7 (inverted by W1-1a): a samePersonPolicy carrier opens the linear editor EDITABLE for every ratified value', () => {
+    for (const policy of [
+      { mergeWithRequester: true, samePersonPolicy: 'auto_skip' },
+      { samePersonPolicy: 'self_approve' },
+      { samePersonPolicy: 'transfer_direct_manager' },
+      { samePersonPolicy: 'transfer_dept_head', actorMode: 'system' },
+    ] as AutoApprovalPolicy[]) {
+      expect(unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate(policy)), JSON.stringify(policy)).toBeNull()
+    }
+  })
 
-    const transfer = unsupportedTemplateAuthoringReason(
-      buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_direct_manager' } as AutoApprovalPolicy),
+  it('T7b (gate X-3): an OFF-ENUM samePersonPolicy still forces the linear editor read-only — positive control: T7 above, same fixture, known value', () => {
+    const reason = unsupportedTemplateAuthoringReason(
+      buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy),
     )
-    expect(transfer).not.toBeNull()
+    expect(reason).not.toBeNull()
+    expect(reason).toContain('暂不支持')
   })
 
   it('T8: a bare mergeWithRequester carrier (no samePersonPolicy) stays editable — negative control for T7', () => {
     // Guards against a T7 fix that over-widens hasKeyOutside and traps the T3 baseline too.
     const reason = unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate({ mergeWithRequester: true }))
     expect(reason).toBeNull()
+  })
+
+  // ── W1-1a (Lock-4 §2 F4-C) — the LINEAR half of the four-value control. ──────────────────────
+  function rebuiltPolicy(draft: ReturnType<typeof draftFromTemplate>): AutoApprovalPolicy | undefined {
+    return (buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig).autoApprovalPolicy
+  }
+
+  it('T9: hydrate keeps BOTH raw carriers and the displayed choice is derived from them (runtime-faithful)', () => {
+    const cases: Array<[AutoApprovalPolicy, string]> = [
+      [{ mergeWithRequester: true }, 'auto_skip'],
+      [{ mergeWithRequester: true, samePersonPolicy: 'auto_skip' }, 'auto_skip'],
+      [{ samePersonPolicy: 'self_approve' }, 'self_approve'],
+      [{ samePersonPolicy: 'transfer_direct_manager' }, 'transfer_direct_manager'],
+      [{ samePersonPolicy: 'transfer_dept_head' }, 'transfer_dept_head'],
+      [{ samePersonPolicy: 'self_approve', mergeWithRequester: true }, 'auto_skip'],
+      [{ mergeAdjacentApprover: true }, 'default'],
+    ]
+    for (const [policy, expected] of cases) {
+      const step = draftFromTemplate(buildAutoApprovalTemplate(policy)).steps[0]
+      expect(step.mergeWithRequester, JSON.stringify(policy)).toBe(policy.mergeWithRequester === true)
+      expect(step.samePersonPolicy, JSON.stringify(policy)).toBe(policy.samePersonPolicy)
+      expect(stepSamePersonControlState(step), JSON.stringify(policy)).toEqual({ kind: 'editable', choice: expected })
+    }
+  })
+
+  it('T10: an UNTOUCHED step re-saves byte-identical for every shape — a bare legacy carrier never gains samePersonPolicy (lock: "no existing graph changes shape")', () => {
+    for (const policy of [
+      { mergeWithRequester: true },
+      { mergeWithRequester: true, samePersonPolicy: 'auto_skip' },
+      { samePersonPolicy: 'self_approve' },
+      { samePersonPolicy: 'transfer_direct_manager', mergeAdjacentApprover: true, actorMode: 'system' },
+      { samePersonPolicy: 'self_approve', mergeWithRequester: true },
+    ] as AutoApprovalPolicy[]) {
+      expect(rebuiltPolicy(draftFromTemplate(buildAutoApprovalTemplate(policy))), JSON.stringify(policy)).toEqual(policy)
+    }
+  })
+
+  it("T11: picks write BOTH carriers — 'auto_skip' adds samePersonPolicy + mergeWithRequester (default (a)); leaving it DELETES mergeWithRequester", () => {
+    const draft = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    setStepSamePersonChoice(draft.steps[0], 'self_approve')
+    // The discriminating case: with only `samePersonPolicy` written, the backend would keep
+    // mergeWithRequester:true and the merge cascade would still auto-skip while the UI says 本人审批.
+    expect(rebuiltPolicy(draft)).toEqual({ samePersonPolicy: 'self_approve' })
+    setStepSamePersonChoice(draft.steps[0], 'transfer_dept_head')
+    expect(rebuiltPolicy(draft)).toEqual({ samePersonPolicy: 'transfer_dept_head' })
+    setStepSamePersonChoice(draft.steps[0], 'auto_skip')
+    expect(rebuiltPolicy(draft)).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
+  })
+
+  it("T12: '默认' OMITS both keys (default (b)) — the whole autoApprovalPolicy is dropped when nothing else is left, siblings survive otherwise", () => {
+    const bare = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' }))
+    setStepSamePersonChoice(bare.steps[0], 'default')
+    expect(bare.steps[0].samePersonPolicy).toBeUndefined()
+    expect(bare.steps[0].mergeWithRequester).toBe(false)
+    expect('autoApprovalPolicy' in (buildApprovalGraph(bare).nodes[1]?.config as ApprovalNodeConfig)).toBe(false)
+
+    const withSiblings = draftFromTemplate(buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_direct_manager', mergeAdjacentApprover: true, actorMode: 'system' }))
+    setStepSamePersonChoice(withSiblings.steps[0], 'default')
+    expect(rebuiltPolicy(withSiblings)).toEqual({ mergeAdjacentApprover: true, actorMode: 'system' })
+  })
+
+  it("T13: an explicit 'self_approve' is written ONLY when picked — a fresh step stays absent (no node policy, so the template-level policy still applies there)", () => {
+    const draft = createEmptyTemplateDraft()
+    expect(stepSamePersonControlState(draft.steps[0])).toEqual({ kind: 'editable', choice: 'default' })
+    expect('autoApprovalPolicy' in (buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig)).toBe(false)
+    setStepSamePersonChoice(draft.steps[0], 'self_approve')
+    expect((buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig).autoApprovalPolicy).toEqual({ samePersonPolicy: 'self_approve' })
+  })
+
+  it('T14: re-picking the current projection is a no-op, and an off-enum persisted value is never overwritten by the setter (X-3)', () => {
+    const legacy = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    setStepSamePersonChoice(legacy.steps[0], 'auto_skip')
+    expect(rebuiltPolicy(legacy)).toEqual({ mergeWithRequester: true })
+
+    const unknown = draftFromTemplate(buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy))
+    expect(stepSamePersonControlState(unknown.steps[0])).toEqual({ kind: 'unknown' })
+    setStepSamePersonChoice(unknown.steps[0], 'default')
+    expect(unknown.steps[0].samePersonPolicy).toBe('transfer_to_ceo')
   })
 })
 
@@ -1998,7 +2092,7 @@ describe('TemplateAuthoringView', () => {
     }
   }
 
-  it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the self-approver toggle (E) together, editable', async () => {
+  it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the same-person control (E) together, editable', async () => {
     setRouteParams({ id: 'tpl_combo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } }),
@@ -2007,7 +2101,12 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-step-user-picker"]')).not.toBeNull() // A renders
-    expect(container!.querySelector('[data-testid="approval-step-merge-with-requester"]')).not.toBeNull() // E renders, same step
+    // E renders, same step — W1-1a: the four-value control replaced the 自审合并 checkbox and projects
+    // the persisted bare carrier { mergeWithRequester: true } as 自动通过 ('auto_skip').
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.value).toBe('auto_skip')
+    expect(samePerson.disabled).toBe(false)
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // editable, not fail-closed
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
   })
@@ -2702,9 +2801,11 @@ describe('TemplateAuthoringView', () => {
     const mode = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
     mode.value = 'all'
     mode.dispatchEvent(new Event('change'))
-    const merge = container!.querySelector('[data-testid="approval-node-merge-with-requester"]') as HTMLInputElement
-    merge.checked = true
-    merge.dispatchEvent(new Event('change'))
+    // W1-1a: the four-value same-person control replaced the 自审合并 checkbox on the canvas path too.
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    samePerson.value = 'auto_skip'
+    samePerson.dispatchEvent(new Event('change'))
     const fieldAccess = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
     fieldAccess.value = 'hidden'
     fieldAccess.dispatchEvent(new Event('change'))
@@ -2713,8 +2814,201 @@ describe('TemplateAuthoringView', () => {
     const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
     const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
     expect(approval.config.approvalMode).toBe('all')
-    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    // Implementer default (a): 'auto_skip' writes samePersonPolicy AND keeps the shipped carrier in sync.
+    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
     expect(approval.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
+  })
+
+  // ── W1-1a (Lock-4 F4-B / F4-C) — the CANVAS-path node config editor (flag-off structured list
+  // mounts the same ApprovalGraphNodeConfigEditor the Canvas inspector hosts). Directory fetches are
+  // not mocked in this file, so picker options come from the view's own placeholder synthesis for the
+  // persisted ids (`ensure*OptionVisible`) — the same mechanism the shipped static_role picker uses.
+  it('W1-1a canvas: designated targets + the four-value same-person control hydrate, edit and save through the node config editor', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'], roleIds: ['approval-admin'] },
+        autoApprovalPolicy: { mergeWithRequester: true },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    const emptyPolicy = container!.querySelector('[data-testid="approval-node-empty-policy"]') as HTMLSelectElement
+    expect(emptyPolicy.value).toBe('designated')
+    expect(Array.from(emptyPolicy.options).map((option) => option.value)).toEqual(['error', 'auto-approve', 'designated'])
+    const userPicker = container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement
+    const rolePicker = container!.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]') as HTMLSelectElement
+    expect(userPicker.value).toBe('u-fallback')
+    expect(rolePicker.value).toBe('approval-admin')
+    // C7 raw-id census spirit: a hydrated target the directory page has not loaded renders a business
+    // placeholder label, never the raw id.
+    expect(userPicker.textContent).not.toContain('u-fallback')
+    expect(rolePicker.textContent).not.toContain('approval-admin')
+    expect(container!.querySelector('[data-testid="approval-node-empty-fallback-hint"]')).not.toBeNull()
+
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('auto_skip')
+    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')).toBeNull()
+    samePerson.value = 'transfer_direct_manager'
+    samePerson.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')).not.toBeNull()
+
+    // Drop the user target, keep the role (one side at a time).
+    for (const option of Array.from(userPicker.options)) option.selected = false
+    userPicker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
+    expect(approval.config.emptyAssigneePolicy).toBe('designated')
+    expect(approval.config.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+    // INVARIANT (default (a)): leaving 自动通过 deleted the shipped carrier — no co-present merge flag.
+    expect(approval.config.autoApprovalPolicy).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+  })
+
+  it('W1-1a canvas: clearing every designated target blocks 保存草稿 with the B-s10 preview (nothing reaches the server)', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_bs10' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { roleIds: ['approval-admin'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    const rolePicker = container!.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]') as HTMLSelectElement
+    for (const option of Array.from(rolePicker.options)) option.selected = false
+    rolePicker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('转交指定人员')
+    expect(summary!.textContent).not.toContain('approval-admin')
+  })
+
+  // ── W1-1a — the LINEAR step editor (flag off, linear template). ─────────────────────────────
+  it('W1-1a linear: a persisted designated role + transfer_dept_head hydrate; 默认 drops the node policy; the fallback re-saves verbatim', async () => {
+    setRouteParams({ id: 'tpl_w11a_linear' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'designated',
+              emptyAssigneeFallback: { roleIds: ['approval-admin'] },
+              autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const emptyPolicy = container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(emptyPolicy.value).toBe('designated')
+    const rolePicker = container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]') as HTMLSelectElement
+    expect(rolePicker.value).toBe('approval-admin')
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]')).not.toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('transfer_dept_head')
+    expect(Array.from(samePerson.options).map((option) => option.value))
+      .toEqual(['default', 'self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'])
+    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')).not.toBeNull()
+
+    samePerson.value = 'default'
+    samePerson.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')).toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes[1].config
+    expect('autoApprovalPolicy' in config).toBe(false)
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+  })
+
+  it("W1-1a linear: choosing 转交指定人员 renders the typed pickers and blocks save until a target is chosen", async () => {
+    await mountView()
+    setInput('approval-template-name', '报销审批')
+    const emptyPolicy = container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]')).toBeNull()
+    emptyPolicy.value = 'designated'
+    emptyPolicy.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-hint"]')).not.toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')!.textContent).toContain('转交指定人员')
+  })
+
+  it('W1-1a linear (gate X-3): an off-enum persisted samePersonPolicy opens read-only, the control shows an honest label — never the raw value', async () => {
+    setRouteParams({ id: 'tpl_w11a_x3' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: { samePersonPolicy: 'transfer_to_ceo' },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(true)
+    expect(samePerson.value).toBe('__unknown__')
+    expect(samePerson.textContent).not.toContain('transfer_to_ceo')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
@@ -3774,9 +4068,10 @@ describe('TemplateAuthoringView', () => {
 
       ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
       await flushUi()
-      const nodeSelfApproverCheckbox = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-      expect(nodeSelfApproverCheckbox).not.toBeNull()
-      expect(nodeSelfApproverCheckbox.checked).toBe(true)
+      // W1-1a: the node-level four-value control still projects the untouched bare carrier as 自动通过.
+      const nodeSamePersonControl = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+      expect(nodeSamePersonControl).not.toBeNull()
+      expect(nodeSamePersonControl.value).toBe('auto_skip')
 
       ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
       await flushUi()
@@ -3787,16 +4082,22 @@ describe('TemplateAuthoringView', () => {
       const payload = publishTemplateSpy.mock.calls.at(-1)?.[1] as { policy: { autoApproval?: Record<string, unknown> } }
       expect(payload.policy.autoApproval).toEqual({ mergeAdjacentApprover: true })
       // The template-level tier switch must never have written into the node's own config.
+      // W1-1a (Lock-4 F4-C: "no existing graph changes shape"): the persisted bare carrier reaches
+      // the server EXACTLY as it was — the four-value control never adds samePersonPolicy to an
+      // untouched node (publish persists the draft through updateTemplate first).
+      const saved = updateTemplateSpy.mock.calls.at(-1)?.[1] as { approvalGraph: { nodes: Array<{ key: string; config: Record<string, unknown> }> } }
+      expect(saved.approvalGraph.nodes.find((node) => node.key === 'approval_1')?.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
     })
   })
 
-  it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
+  it('T7: wires the same-person control (自动通过) through the mounted view into the saved payload', async () => {
     await mountView()
 
     setInput('approval-template-name', '请假审批')
-    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-    mergeToggle.checked = true
-    mergeToggle.dispatchEvent(new Event('change'))
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    samePerson.value = 'auto_skip'
+    samePerson.dispatchEvent(new Event('change'))
     await flushUi()
 
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
@@ -3804,7 +4105,8 @@ describe('TemplateAuthoringView', () => {
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    // Implementer default (a): both carriers, exactly the shape the backend persists for 'auto_skip'.
+    expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
   })
 
   it('G-1: opens a complex (parallel) graph READ-ONLY but save-able — preserves the graph on save, never flattens', async () => {
@@ -3888,9 +4190,9 @@ describe('TemplateAuthoringView', () => {
 
     await mountView()
 
-    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-    expect(mergeToggle).not.toBeNull()
-    expect(mergeToggle.disabled).toBe(true)
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.disabled).toBe(true)
   })
 
   it('B1-07: dirty-draft tracking arms the browser leave protection, and only when dirty', async () => {

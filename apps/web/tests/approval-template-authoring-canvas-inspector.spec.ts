@@ -2151,8 +2151,12 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       timeoutJumpTargetOptions: () => [],
       approvalNodeEmptyPolicy: () => 'error',
       setApprovalNodeEmptyPolicy: () => {},
-      approvalNodeMergeWithRequester: () => false,
-      setApprovalNodeMergeWithRequester: () => {},
+      // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+      // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+      // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+      // full TemplateAuthoringView mounts.
+      setApprovalNodeSamePersonPolicy: () => {},
+      setApprovalNodeEmptyAssigneeFallbackIds: () => {},
       approvalNodeFieldAccess: (nodeKey: string, fieldId: string) =>
         (edits[nodeKey]?.fieldPermissions.find((p) => p.fieldId === fieldId)?.access as any) ?? 'editable',
       setApprovalNodeFieldAccess: (nodeKey: string, fieldId: string, access: any) => {
@@ -2295,7 +2299,8 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     // `querySelector` at the inspector root cannot distinguish from "moved to the wrong tab").
     const modeControl = tabbed.container.querySelector('[data-testid="approval-node-mode"]')
     const emptyPolicyControl = tabbed.container.querySelector('[data-testid="approval-node-empty-policy"]')
-    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-merge-with-requester"]')
+    // W1-1a: 自审策略 is now the four-value same-person select (Lock-0 L0-1 keeps it in 审批人设置).
+    const mergeControl = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]')
     expect(modeControl).not.toBeNull()
     expect(emptyPolicyControl).not.toBeNull()
     expect(mergeControl).not.toBeNull()
@@ -2315,6 +2320,38 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
     expect(tabbedAssignee.contains(fieldPermRow)).toBe(false)
 
     tabbed.unmount()
+  })
+
+  it("W1-1a: the 'designated' fallback pickers + same-person hint render INSIDE 审批人设置 (Lock-0 L0-1) — positive control: no pickers under 报错", () => {
+    const node = makeApprovalNode('approval_x')
+    const baseApi = createStubConfigApi({ approval_x: { assigneeSources: [{ kind: 'direct_manager' }] } })
+    const designatedApi: ApprovalNodeConfigEditorApi = { ...baseApi, approvalNodeEmptyPolicy: () => 'designated' }
+
+    const tabbed = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: designatedApi })
+    const assignee = tabbed.container.querySelector('[data-testid="approval-node-section-assignee"]') as HTMLElement
+    const fieldPerms = tabbed.container.querySelector('[data-testid="approval-node-section-field-permissions"]') as HTMLElement
+    for (const testId of [
+      'approval-node-empty-fallback-user-picker',
+      'approval-node-empty-fallback-role-picker',
+      'approval-node-empty-fallback-hint',
+      'approval-node-same-person-policy',
+      'approval-node-same-person-hint',
+    ]) {
+      const control = tabbed.container.querySelector(`[data-testid="${testId}"]`)
+      expect(control, testId).not.toBeNull()
+      expect(assignee.contains(control), testId).toBe(true)
+      expect(fieldPerms.contains(control), testId).toBe(false)
+    }
+    // The 默认 option leads and is selected for a node with no policy (default (b): the key is omitted).
+    const samePerson = tabbed.container.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    tabbed.unmount()
+
+    const plain = mountDirectInspector({ node, registry: DEFAULT_APPROVAL_CAPABILITY_REGISTRY, api: baseApi })
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]')).toBeNull()
+    expect(plain.container.querySelector('[data-testid="approval-node-same-person-policy"]')).not.toBeNull()
+    plain.unmount()
   })
 
   it('A-1 positive control: a registry WITH a ratified operation policy renders a third 操作权限 tab', () => {

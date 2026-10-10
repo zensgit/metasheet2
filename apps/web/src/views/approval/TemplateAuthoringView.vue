@@ -915,20 +915,89 @@
                 需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
               </p>
             </el-form-item>
+            <!-- W1-1a (Lock-4 §3 F4-B, OD-L4-3(a)): 'designated' joins 报错/自动通过; its targets ride the
+                 ONE key `emptyAssigneeFallback`, filled through the SAME typed directory pickers the
+                 static_user/static_role sources use (D0 §10.2 — never a raw-id input). 转审批管理员 is
+                 expressed by designating the approval-admin ROLE (OD-L4-3(a)), not a separate option. -->
             <el-form-item label="空审批人策略">
-              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct">
+              <el-select v-model="step.emptyAssigneePolicy" :disabled="readOnly" class="ms-w-100pct" data-testid="approval-step-empty-policy">
                 <el-option label="报错" value="error" />
                 <el-option label="自动通过" value="auto-approve" />
+                <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
               </el-select>
             </el-form-item>
-            <el-form-item label="自审策略">
-              <el-checkbox
-                v-model="step.mergeWithRequester"
-                :disabled="readOnly"
-                data-testid="approval-step-merge-with-requester"
+            <!-- Full-width, label-on-top rows (same layout fix as the canvas editor): the labels and
+                 honesty hints are long, so a half-width grid column would squeeze the control. -->
+            <template v-if="step.emptyAssigneePolicy === 'designated'">
+              <el-form-item label="转交给（用户）" label-position="top" class="template-authoring__wide">
+                <el-select
+                  :model-value="step.emptyAssigneeFallback?.userIds ?? []"
+                  multiple
+                  filterable
+                  remote
+                  :remote-method="onUserSearch"
+                  :loading="directory.usersLoading.value"
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  placeholder="搜索用户名 / 邮箱"
+                  data-testid="approval-step-empty-fallback-user-picker"
+                  @update:model-value="(ids: string[]) => onStepEmptyFallbackIds(step, 'user', ids)"
+                  @visible-change="(visible: boolean) => visible && onUserSearch('')"
+                >
+                  <el-option
+                    v-for="user in directory.users.value"
+                    :key="user.id"
+                    :label="directoryUserDisplayLabel(user)"
+                    :value="user.id"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="转交给（角色）" label-position="top" class="template-authoring__wide">
+                <el-select
+                  :model-value="step.emptyAssigneeFallback?.roleIds ?? []"
+                  multiple
+                  filterable
+                  :disabled="readOnly"
+                  class="ms-w-100pct"
+                  placeholder="选择角色"
+                  data-testid="approval-step-empty-fallback-role-picker"
+                  @update:model-value="(ids: string[]) => onStepEmptyFallbackIds(step, 'role', ids)"
+                >
+                  <el-option
+                    v-for="role in directory.roles.value"
+                    :key="role.id"
+                    :label="directoryRoleDisplayLabel(role)"
+                    :value="role.id"
+                  />
+                </el-select>
+                <p class="template-authoring__hint" data-testid="approval-step-empty-fallback-hint">{{ EMPTY_ASSIGNEE_DESIGNATED_HINT }}</p>
+              </el-form-item>
+            </template>
+            <!-- W1-1a (Lock-4 §2 F4-C): the four-value same-person control REPLACES the shipped 自审合并
+                 checkbox and owns `mergeWithRequester` + `samePersonPolicy` together (implementer
+                 default (a)); 默认 omits both keys (default (b)). The displayed value is DERIVED from the
+                 step's two raw carriers, so an untouched legacy node re-saves byte-identical. -->
+            <el-form-item label="审批人与发起人为同一人时" label-position="top" class="template-authoring__wide">
+              <el-select
+                :model-value="stepSamePersonSelectValue(step)"
+                :disabled="readOnly || stepSamePersonControlState(step).kind !== 'editable'"
+                class="ms-w-100pct"
+                data-testid="approval-step-same-person-policy"
+                @update:model-value="(value: string) => onStepSamePersonSelect(step, value)"
               >
-                发起人自动通过（自审合并）
-              </el-checkbox>
+                <el-option
+                  v-for="option in stepSamePersonOptions(step)"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+              <p class="template-authoring__hint" data-testid="approval-step-same-person-hint">{{ SAME_PERSON_OVERRIDE_HINT }}</p>
+              <p
+                v-if="isSamePersonTransferValue(stepSamePersonSelectValue(step))"
+                class="template-authoring__hint"
+                data-testid="approval-step-same-person-transfer-hint"
+              >{{ SAME_PERSON_TRANSFER_HINT }}</p>
             </el-form-item>
           </div>
           <!-- P1-C (T1-1) node-level SLA timeout. A linear graph is never inside a parallel region
@@ -1105,7 +1174,7 @@
               </el-radio>
             </el-radio-group>
             <p class="template-authoring__hint">
-              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；仅对未单独设置去重规则的审批节点生效，返回上一节点后该节点重新计入本轮去重历史。
+              同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；审批节点单独设置了自动审批规则（例如「审批人与发起人为同一人时」选择了默认以外的选项）时，该节点不再沿用本设置；返回上一节点后该节点重新计入本轮去重历史。
             </p>
             <!-- M8 honesty (adversarial-gate P3-1, PR #4967): mergeAdjacentApprover has a second,
                  real server effect beyond the dedup cascade — it also exempts the graph from two
@@ -1517,6 +1586,20 @@ import {
   type TemplateAuthoringDraft,
   moveItemToIndex,
   isTemplateDedupTierLocked,
+  // W1-1a (Lock-4 F4-B / F4-C) — shared same-person / designated-fallback helpers + copy.
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_OVERRIDE_HINT,
+  SAME_PERSON_TRANSFER_HINT,
+  applySamePersonChoice,
+  samePersonChoiceFromSelectValue,
+  samePersonChoiceOptions,
+  samePersonSelectValue,
+  setStepEmptyAssigneeFallbackIds,
+  setStepSamePersonChoice,
+  stepAutoApprovalPolicy,
+  stepSamePersonControlState,
+  withEmptyAssigneeFallbackIds,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
@@ -2408,18 +2491,30 @@ function setApprovalNodeEmptyPolicy(nodeKey: string, policy: EmptyAssigneePolicy
   const edit = approvalNodeEditFor(nodeKey)
   if (edit) edit.emptyAssigneePolicy = policy
 }
-function approvalNodeMergeWithRequester(nodeKey: string): boolean {
-  return Boolean(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy?.mergeWithRequester)
-}
-function setApprovalNodeMergeWithRequester(nodeKey: string, enabled: boolean): void {
+// W1-1a (Lock-4 §2 F4-C) — the canvas half of the four-value 审批人与发起人为同一人时 control. It
+// REPLACES the shipped 自审合并 checkbox setter (`setApprovalNodeMergeWithRequester`) and goes through
+// the SAME `applySamePersonChoice` the linear editor's `setStepSamePersonChoice` mirrors: both owned
+// keys are deleted first and every sibling (`mergeAdjacentApprover` / `dedupeHistoricalApprover` /
+// `actorMode`) is kept — the delete-key-keep-siblings pattern (Lock-4 OD-L4-6). A no-op for an
+// unknown persisted value (X-3) or a pick equal to the current projection, so an untouched node's
+// `autoApprovalPolicy` is never rewritten. `null` removes the key (the canvas grammar).
+function setApprovalNodeSamePersonPolicy(nodeKey: string, value: string): void {
   const edit = approvalNodeEditFor(nodeKey)
   if (!edit) return
-  const policy = edit.autoApprovalPolicy && edit.autoApprovalPolicy !== null
-    ? { ...edit.autoApprovalPolicy }
-    : {}
-  if (enabled) policy.mergeWithRequester = true
-  else delete policy.mergeWithRequester
-  edit.autoApprovalPolicy = Object.keys(policy).length > 0 ? policy : null
+  const choice = samePersonChoiceFromSelectValue(value)
+  if (!choice) return
+  const next = applySamePersonChoice(edit.autoApprovalPolicy, choice)
+  if (next === edit.autoApprovalPolicy) return
+  edit.autoApprovalPolicy = next ?? null
+}
+// W1-1a (Lock-4 §3 F4-B) — the canvas 'designated' target pickers. Same pruning as the linear
+// `setStepEmptyAssigneeFallbackIds`; clearing every target sets `null` (key removed), which
+// `validateApprovalNodeEdits` then reports as designated-without-target before save.
+function setApprovalNodeEmptyAssigneeFallbackIds(nodeKey: string, side: 'user' | 'role', ids: string[]): void {
+  const edit = approvalNodeEditFor(nodeKey)
+  if (!edit) return
+  edit.emptyAssigneeFallback = withEmptyAssigneeFallbackIds(edit.emptyAssigneeFallback, side, ids) ?? null
+  syncApprovalNodeOptions(nodeKey)
 }
 // ── P1-C (T1-1) node-level timeout — approval-node-only; `null` explicitly clears (mirrors the
 // `autoApprovalPolicy` null-clears-it convention above). `undefined` fields are ONLY ever produced
@@ -3443,6 +3538,30 @@ function setStepIds(step: ApprovalStepDraft, ids: string[]): void {
   step.idsText = ids.join(', ')
 }
 
+// W1-1a (Lock-4 §2 F4-C) — linear four-value control adapters. The displayed value / options are
+// DERIVED from the same `stepAutoApprovalPolicy` object `buildStepConfig` emits, so what the author
+// sees and what is saved cannot diverge.
+function stepSamePersonSelectValue(step: ApprovalStepDraft): string {
+  return samePersonSelectValue(stepAutoApprovalPolicy(step))
+}
+function stepSamePersonOptions(step: ApprovalStepDraft): Array<{ value: string; label: string }> {
+  return samePersonChoiceOptions(stepAutoApprovalPolicy(step))
+}
+function onStepSamePersonSelect(step: ApprovalStepDraft, value: string): void {
+  if (readOnly.value) return
+  const choice = samePersonChoiceFromSelectValue(value)
+  if (!choice) return
+  setStepSamePersonChoice(step, choice)
+}
+function isSamePersonTransferValue(value: string): boolean {
+  return value === 'transfer_direct_manager' || value === 'transfer_dept_head'
+}
+// W1-1a (Lock-4 §3 F4-B) — linear 'designated' target pickers; re-sync so chips keep their labels.
+function onStepEmptyFallbackIds(step: ApprovalStepDraft, side: 'user' | 'role', ids: string[]): void {
+  setStepEmptyAssigneeFallbackIds(step, side, ids)
+  syncStepOptions(step)
+}
+
 // P1-C (T1-1): business labels for the timeout effect picker — never the raw enum string.
 const STEP_TIMEOUT_EFFECT_OPTION_LABELS: Record<SupportedNodeTimeoutEffect, string> = {
   remind: '催办提醒',
@@ -3481,6 +3600,10 @@ async function onUserSearch(query: string): Promise<void> {
   // Keep already-selected ids visible as chips even if the new search page omits them —
   // across linear steps, complex approval nodes, and CC user targets.
   for (const step of draft.value.steps) {
+    // W1-1a: a 'designated' step's fallback users are chips in their own picker (C7: never a raw id).
+    if (step.emptyAssigneePolicy === 'designated') {
+      for (const id of step.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    }
     if (step.sourceKind !== 'static_user') continue
     for (const id of parseIdsText(step.idsText)) directory.ensureUserOptionVisible(id)
   }
@@ -3510,6 +3633,11 @@ function syncStepOptions(step: ApprovalStepDraft): void {
   } else if (step.sourceKind === 'user_group') {
     // Lock-1 §K1: keep an authored group id visible even if it fell off the CURRENT bound page.
     for (const id of step.groupIds) directory.ensureMemberGroupOptionVisible(id)
+  }
+  // W1-1a (Lock-4 F4-B): the 'designated' fallback pickers are independent of the source kind.
+  if (step.emptyAssigneePolicy === 'designated') {
+    for (const id of step.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    for (const id of step.emptyAssigneeFallback?.roleIds ?? []) directory.ensureRoleOptionVisible(id)
   }
 }
 
@@ -3542,6 +3670,11 @@ function syncApprovalNodeOptions(nodeKey: string): void {
       for (const id of approvalSourceGroupIds(nodeKey, sourceIndex)) directory.ensureMemberGroupOptionVisible(id)
     }
   })
+  // W1-1a (Lock-4 F4-B): keep the 'designated' fallback chips visible too (C7: never a raw id).
+  if (edit.emptyAssigneePolicy === 'designated') {
+    for (const id of edit.emptyAssigneeFallback?.userIds ?? []) directory.ensureUserOptionVisible(id)
+    for (const id of edit.emptyAssigneeFallback?.roleIds ?? []) directory.ensureRoleOptionVisible(id)
+  }
 }
 
 function syncAllApprovalNodeOptions(): void {
@@ -3630,8 +3763,10 @@ const nodeConfigEditorApi: ApprovalNodeConfigEditorApi = {
   approvalNodeInParallelRegion,
   approvalNodeEmptyPolicy,
   setApprovalNodeEmptyPolicy,
-  approvalNodeMergeWithRequester,
-  setApprovalNodeMergeWithRequester,
+  // W1-1a: the four-value same-person control + the 'designated' fallback pickers (they replace the
+  // shipped approvalNodeMergeWithRequester / setApprovalNodeMergeWithRequester checkbox pair).
+  setApprovalNodeSamePersonPolicy,
+  setApprovalNodeEmptyAssigneeFallbackIds,
   approvalNodeTimeout,
   setApprovalNodeTimeoutEnabled,
   setApprovalNodeTimeoutAfterMinutes,

@@ -875,6 +875,10 @@
             需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
           </p>
         </el-form-item>
+        <!-- W1-1a (Lock-4 §3 F4-B, OD-L4-3(a)): 'designated' joins 报错/自动通过; its targets ride the ONE
+             key `emptyAssigneeFallback`, filled through the SAME typed directory pickers as the
+             static_user/static_role sub-form above (D0 §10.2 — never a raw-id input). Approval-only:
+             this whole grid never renders for a handler node (§1.2). -->
         <el-form-item label="空审批人策略">
           <el-select
             :model-value="approvalNodeEmptyPolicy(node.key)"
@@ -885,15 +889,84 @@
           >
             <el-option label="报错" value="error" />
             <el-option label="自动通过" value="auto-approve" />
+            <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
           </el-select>
         </el-form-item>
-        <el-form-item label="自审策略">
-          <el-checkbox
-            :model-value="approvalNodeMergeWithRequester(node.key)"
-            :disabled="readOnly"
-            data-testid="approval-node-merge-with-requester"
-            @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
-          >发起人自动通过（自审合并）</el-checkbox>
+        <!-- Full-width, label-on-top rows: outside an <el-form>, an item's label auto-sizes to its text, so
+             in the narrow inspector a long label (or the hint copy) left the control 0px wide —
+             found by the browser lane (approval-canvas-sole-surface.spec.ts, W1-1a test). -->
+        <template v-if="approvalNodeEmptyPolicy(node.key) === 'designated'">
+          <el-form-item label="转交给（用户）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'user')"
+              multiple
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-empty-fallback-user-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'user', ids)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="转交给（角色）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'role')"
+              multiple
+              filterable
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="选择角色"
+              data-testid="approval-node-empty-fallback-role-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'role', ids)"
+            >
+              <el-option
+                v-for="role in directoryRoles"
+                :key="role.id"
+                :label="formatRoleLabel(role)"
+                :value="role.id"
+              />
+            </el-select>
+            <p class="template-authoring__hint" data-testid="approval-node-empty-fallback-hint">{{ EMPTY_ASSIGNEE_DESIGNATED_HINT }}</p>
+          </el-form-item>
+        </template>
+        <!-- W1-1a (Lock-4 §2 F4-C): the four-value same-person control REPLACES the shipped 自审合并
+             checkbox (implementer default (a)) and owns `mergeWithRequester` + `samePersonPolicy`
+             together; 默认 omits both keys (default (b)). Value/options are DERIVED from the live edit's
+             `autoApprovalPolicy` via the shared helpers, so the canvas and linear editors agree. -->
+        <el-form-item label="审批人与发起人为同一人时" label-position="top" class="template-authoring__approval-node-policy-wide">
+          <el-select
+            :model-value="approvalNodeSamePersonValue(node.key)"
+            :disabled="readOnly || !approvalNodeSamePersonEditable(node.key)"
+            class="ms-w-100pct"
+            data-testid="approval-node-same-person-policy"
+            @update:model-value="(value: string) => setApprovalNodeSamePersonPolicy(node.key, value)"
+          >
+            <el-option
+              v-for="option in approvalNodeSamePersonOptions(node.key)"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <p class="template-authoring__hint" data-testid="approval-node-same-person-hint">{{ SAME_PERSON_OVERRIDE_HINT }}</p>
+          <p
+            v-if="isSamePersonTransferValue(approvalNodeSamePersonValue(node.key))"
+            class="template-authoring__hint"
+            data-testid="approval-node-same-person-transfer-hint"
+          >{{ SAME_PERSON_TRANSFER_HINT }}</p>
         </el-form-item>
       </div>
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
@@ -1177,6 +1250,14 @@ import {
   CC_TARGET_TYPES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
+  // W1-1a (Lock-4 F4-B / F4-C) — the SAME helpers + copy the linear editor uses.
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_OVERRIDE_HINT,
+  SAME_PERSON_TRANSFER_HINT,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonSelectValue,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1396,8 +1477,27 @@ function nodeTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): strin
 }
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
-const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
-const setApprovalNodeMergeWithRequester = api.setApprovalNodeMergeWithRequester
+// W1-1a (Lock-4 §2 F4-C / §3 F4-B) — writers live on the api (the view owns every mutation); the
+// displayed state is DERIVED here from the live edit through the shared pure helpers.
+const setApprovalNodeSamePersonPolicy = api.setApprovalNodeSamePersonPolicy
+const setApprovalNodeEmptyAssigneeFallbackIds = api.setApprovalNodeEmptyAssigneeFallbackIds
+function approvalNodeSamePersonValue(nodeKey: string): string {
+  return samePersonSelectValue(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+function approvalNodeSamePersonOptions(nodeKey: string): Array<{ value: string; label: string }> {
+  return samePersonChoiceOptions(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+/** False for an X-3 unknown persisted value — the control renders read-only (never re-projected). */
+function approvalNodeSamePersonEditable(nodeKey: string): boolean {
+  return samePersonControlState(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy).kind === 'editable'
+}
+function isSamePersonTransferValue(value: string): boolean {
+  return value === 'transfer_direct_manager' || value === 'transfer_dept_head'
+}
+function approvalNodeEmptyFallbackIds(nodeKey: string, side: 'user' | 'role'): string[] {
+  const fallback = approvalNodeEditFor(nodeKey)?.emptyAssigneeFallback
+  return [...((side === 'user' ? fallback?.userIds : fallback?.roleIds) ?? [])]
+}
 // Lock-3 §1.1 — handler-only controls (办理模式 / 办理意见).
 const handlerNodeMode = api.handlerNodeMode
 const setHandlerNodeMode = api.setHandlerNodeMode
@@ -1762,6 +1862,12 @@ const { node } = toRefs(props)
 
 .template-authoring__approval-node-policy {
   margin-top: 8px;
+}
+
+/* W1-1a: the designated-fallback pickers and the four-value same-person select span the whole policy
+   grid (their labels and honesty hints are long; a half-width column squeezed the control to 0px). */
+.template-authoring__approval-node-policy-wide {
+  grid-column: 1 / -1;
 }
 
 /* Lock-0 L0-1: transparent section wrappers — no border/shadow of their own (parent §3.2). */
