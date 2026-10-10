@@ -567,6 +567,8 @@ const {
   grantProjectOverviewRoles,
   updateProjectOverviewRow,
   PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+  // S3 follow-up C: the typed 503 of a refresh that could not write every project (audited `incomplete`).
+  STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
 } = require('./stock-preparation-project-overview.cjs')
 // 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
 // decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
@@ -1105,6 +1107,30 @@ const ROUTE_FAILURE_LOGGABLE_CODES = Object.freeze([
 ])
 const ROUTE_FAILURE_LOGGABLE_CODE_SET = new Set(ROUTE_FAILURE_LOGGABLE_CODES)
 const ROUTE_FAILURE_UNLISTED_CODE = 'UNLISTED'
+// S3 follow-ups, fix round 1: a failure the handler ALREADY logged with its own typed, values-free line (today only
+// the overview refresh's REFRESH_INCOMPLETE) is not logged a second time by the wrapper's generic `route failed …`
+// line. The mark is a MODULE-PRIVATE symbol on the thrown object itself (never a code a caller could set, never
+// enumerable, so never serialized): only the handler that logged it sets it, right after its own warn. Both sides
+// are synchronous and never throw — a frozen error just keeps the generic line; an exotic thrown value is unmarked.
+const ROUTE_FAILURE_LOGGED_BY_HANDLER = Symbol('routeFailureLoggedByHandler')
+
+function markRouteFailureLoggedByHandler(error) {
+  try {
+    Object.defineProperty(error, ROUTE_FAILURE_LOGGED_BY_HANDLER, { value: true, enumerable: false })
+  } catch {
+    // Not markable: the wrapper logs its generic line as before.
+  }
+}
+
+function routeFailureLoggedByHandler(error) {
+  try {
+    if (error === null || typeof error !== 'object') return false
+    const own = Object.getOwnPropertyDescriptor(error, ROUTE_FAILURE_LOGGED_BY_HANDLER)
+    return Boolean(own && own.value === true)
+  } catch {
+    return false
+  }
+}
 
 // The code a route-failure log line carries: the response's own code when it is in the closed list
 // above, the fixed placeholder otherwise. Synchronous, no I/O, never throws — a thrown `null` or a
@@ -1871,6 +1897,23 @@ const STOCK_PREPARATION_PROJECT_CONFIRM_MISMATCH_CODE = 'STOCK_PREPARATION_PROJE
 // records counts only.
 const STOCK_PREPARATION_PROJECT_FIELDS_UPDATE_AUDIT_ACTION = 'project_fields_update'
 const STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION = 'project_overview_refresh'
+
+/** The `project_overview_refresh` audit detail of one run's summary: counts and booleans only (`refreshed` and `incomplete`). */
+function projectOverviewRefreshAuditDetail(summary) {
+  return {
+    projectCount: summary.projectCount,
+    countedCount: summary.countedCount,
+    unreadableCount: summary.unreadableCount,
+    boundedCount: summary.boundedCount,
+    rowsCreated: summary.rowsCreated,
+    rowsUpdated: summary.rowsUpdated,
+    rowsUnchanged: summary.rowsUnchanged,
+    rowsRemovedDuplicate: summary.rowsRemovedDuplicate,
+    rowsRemovedOrphan: summary.rowsRemovedOrphan,
+    truncated: summary.truncated,
+    ledgerReady: summary.ledgerReady,
+  }
+}
 
 /**
  * S3 fix round 1 (E2): the S3 handlers answer only TYPED refusals. Anything else that escapes them — a
@@ -9766,12 +9809,12 @@ function requireStockPreparationAudit() {
         })
       }
       projectOverviewRefreshStartedAt.set(tenantId, nowMs)
+      const actor = user.id || user.email
       try {
         const store = requireStockPreparationProjectOverview()
         await requireStockPreparationAuditVocabulary(audit, STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION, '088', tenantId)
         // Derived from the VERIFIED scope, never from the request (the write-guard suite pins this form).
         const targetProjectId = resolveIntegrationStagingProjectId(scope.tenantId, undefined)
-        const actor = user.id || user.email
         const result = await refreshProjectOverview({
           provisioning: getMultitableProvisioning(),
           recordsApi: getMultitableRecordsApi(),
@@ -9785,24 +9828,35 @@ function requireStockPreparationAudit() {
           subjectId: result.sheetId,
           mode: 'refreshed',
           actor,
-          detail: {
-            projectCount: result.projectCount,
-            countedCount: result.countedCount,
-            unreadableCount: result.unreadableCount,
-            boundedCount: result.boundedCount,
-            rowsCreated: result.rowsCreated,
-            rowsUpdated: result.rowsUpdated,
-            rowsUnchanged: result.rowsUnchanged,
-            rowsRemovedDuplicate: result.rowsRemovedDuplicate,
-            rowsRemovedOrphan: result.rowsRemovedOrphan,
-            truncated: result.truncated,
-            ledgerReady: result.ledgerReady,
-          },
+          detail: projectOverviewRefreshAuditDetail(result),
         })
         return sendOk(res, { fresh: true, ...result })
       } catch (error) {
-        // A refresh that did not complete is not "fresh": the next click may try again at once.
+        // A refresh that did not complete is not "fresh": the next click may try again at once — BUSY (another
+        // writer held the lock, here or in another process) and REFRESH_INCOMPLETE included.
         projectOverviewRefreshStartedAt.delete(tenantId)
+        // S3 follow-up C: some projects could not be written. The run is audited as `incomplete` with its counts
+        // and the failed count (never a value), one values-free warn names the first failure's CODE, and the
+        // typed 503 is the answer — never `fresh: true`.
+        if (error && error.code === STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE && error.summary) {
+          const failedProjectCount = error.details && Number.isInteger(error.details.failedProjectCount) ? error.details.failedProjectCount : 0
+          await audit.append({
+            tenantId,
+            action: STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_AUDIT_ACTION,
+            subjectId: error.summary.sheetId,
+            mode: 'incomplete',
+            actor,
+            detail: { ...projectOverviewRefreshAuditDetail(error.summary), failedProjectCount },
+          })
+          if (routeLogger && typeof routeLogger.warn === 'function') {
+            routeLogger.warn('[plugin-integration-core] stock-prep project overview refresh could not write every project; those stay marked for the next update', {
+              code: loggableOverviewUpdateCode(error.cause),
+              failedProjectCount,
+            })
+            // Fix round 1: this typed line IS the log of this answer — the wrapper adds no generic UNLISTED line.
+            markRouteFailureLoggedByHandler(error)
+          }
+        }
         throw error
       }
     },
@@ -12146,7 +12200,8 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
       try {
         return await handler(req, res)
       } catch (error) {
-        if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError)) {
+        // Fix round 1: a failure its handler already logged with a typed line is not logged twice.
+        if (logger && typeof logger.warn === 'function' && !(error instanceof HttpRouteError) && !routeFailureLoggedByHandler(error)) {
           // R2: method + route TEMPLATE + one closed-list code (loggableRouteFailureCode). No request
           // value — no param, no query, no id — is interpolated. Same single synchronous call as
           // before, on the same branches, right before the unchanged `sendError`.
