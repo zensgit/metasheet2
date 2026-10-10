@@ -5,7 +5,8 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { assertNoEnvironmentFiles, cleanEnvironment, CONFIG, DEADLINE_MS, fileHash, main, MAX_OUTPUT, parsePublicArguments,
+import { assertNoEnvironmentFiles, capture, childFailureDiagnostic, cleanEnvironment, CONFIG, DEADLINE_MS, fileHash, main, MAX_OUTPUT,
+  parseChildFailureFrame, parsePublicArguments, parseWorkerFailureReceipt, reportOuterResult,
   reportStartupFailure, startupFailureDiagnostic, TEST_FILES, validateTaskReceipt } from './run-stock-preparation-yida-browser-ci.mjs'
 import { assertOwnedScratch, assertPlainOwnedTree, SCRATCH_OWNER } from './lib/stock-preparation-plm-owned-pg.mjs'
 
@@ -280,4 +281,219 @@ test('owned scratch rejects a forged marker and foreign cleanup tree before any 
 test('finite output and total deadline remain bounded', () => {
   assert.equal(MAX_OUTPUT, 32 * 1024 * 1024)
   assert.equal(DEADLINE_MS, 15 * 60 * 1000)
+})
+
+const sha = raw => createHash('sha256').update(raw).digest('hex')
+const bootstrapFrame = stage => Buffer.from('YIDA_BROWSER_CI_BOOTSTRAP_STAGE ' +
+  JSON.stringify({ stage, reason: 'BOOTSTRAP_FAILED' }) + '\nYIDA_BROWSER_CI_BOOTSTRAP_FAILED\n')
+function diagnosticOwner() {
+  return { hashes: Object.fromEntries(['stock-preparation-browser-network-isolation.cjs',
+    'stock-preparation-plm-owned-pg.mjs'].map(name => [path.join(lib, name), fileHash(path.join(lib, name))])) }
+}
+function failedWorkerReceipt(ownerSha, sourceSha, failureStage = 'PG_START') {
+  return { protocol: 'YIDA_BROWSER_CI_NATIVE_V1', ownerSha, sourceSha, passed: false,
+    cleanup: 'not-started', tests: 0, sentinels: 0, business: 0, isolatedNetwork: true,
+    unixIpcIsolated: false, sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage }
+}
+async function syntheticChild(fn, { stdout = '', stderr = '', code = 1, script,
+  executable = process.execPath, args } = {}) {
+  const sandbox = path.join(root, 'tmp', 'yida-browser-contract-' + randomUUID())
+  await fs.mkdir(sandbox, { recursive: true, mode: 0o700 })
+  const previousExitCode = process.exitCode
+  try {
+    const terminal = await capture(executable, args ?? ['-e', script ??
+      'process.stdout.write(' + JSON.stringify(stdout) + ');process.stderr.write(' + JSON.stringify(stderr) + ');process.exit(' + code + ')'],
+    root, cleanEnvironment(), sandbox, 'namespace', 5000)
+    await fn({ terminal, sandbox })
+  } finally {
+    process.exitCode = previousExitCode
+    assert.equal(path.dirname(sandbox), path.join(root, 'tmp'))
+    assert.match(path.basename(sandbox), /^yida-browser-contract-[a-f0-9-]{36}$/u)
+    await fs.rm(sandbox, { recursive: true, force: false })
+  }
+}
+
+test('child protocol accepts only a complete bounded fixed frame, never secret text or unknown labels', () => {
+  for (const stage of ['BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_OWNER', 'BOOTSTRAP_PATHS', 'BOOTSTRAP_SOURCE_INTEGRITY',
+    'BOOTSTRAP_NAMESPACE', 'BOOTSTRAP_LINKS', 'BOOTSTRAP_LO_UP', 'BOOTSTRAP_EXEC']) {
+    assert.deepEqual(parseChildFailureFrame(bootstrapFrame(stage)), { stage, reason: 'BOOTSTRAP_FAILED' })
+  }
+  assert.deepEqual(parseChildFailureFrame(Buffer.from('YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED {"stage":"OWNER","reason":"PATH_INVALID"}\n')),
+    { stage: 'OWNER', reason: 'PATH_INVALID' })
+  assert.deepEqual(parseChildFailureFrame(Buffer.alloc(0)), { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN' })
+  for (const raw of [bootstrapFrame('SYNTHETIC_SECRET'), Buffer.from('synthetic-secret\n' + bootstrapFrame('BOOTSTRAP_OWNER')),
+    Buffer.from('YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED {"stage":"OWNER","reason":"SYNTHETIC_SECRET"}\n'),
+    Buffer.alloc(1025), Buffer.from('unshare: synthetic-secret'), Buffer.from(bootstrapFrame('BOOTSTRAP_OWNER').toString().trim()),
+    Buffer.concat([bootstrapFrame('BOOTSTRAP_OWNER'), Buffer.from('\n')])]) {
+    assert.deepEqual(parseChildFailureFrame(raw), { stage: 'UNKNOWN', reason: 'INVALID' })
+  }
+})
+
+test('worker diagnostic validates raw receipt hash, all fields, stage and bounded exit values', () => {
+  const ownerSha = 'a'.repeat(64), sourceSha = 'b'.repeat(64)
+  for (const stage of ['PG_START', 'PG_READY', 'VITEST_SPAWN', 'EXIT', 'VALIDATE', 'CLEANUP']) {
+    const raw = Buffer.from(JSON.stringify(failedWorkerReceipt(ownerSha, sourceSha, stage)))
+    assert.deepEqual(parseWorkerFailureReceipt(raw, sha(raw), ownerSha, sourceSha), { stage, reason: 'WORKER_REJECTED' })
+    assert.deepEqual(parseWorkerFailureReceipt(raw, 'c'.repeat(64), ownerSha, sourceSha), { stage: 'UNKNOWN', reason: 'INVALID' })
+  }
+  for (const change of [value => { value.failureStage = 'SYNTHETIC_SECRET' }, value => { value.secret = 'synthetic-secret' },
+    value => { value.cleanup = 'synthetic-secret' }, value => { value.ownerSha = 'synthetic-secret' },
+    value => { value.tests = 70 }, value => { value.isolatedNetwork = false }]) {
+    const value = failedWorkerReceipt(ownerSha, sourceSha); change(value)
+    const raw = Buffer.from(JSON.stringify(value))
+    assert.deepEqual(parseWorkerFailureReceipt(raw, sha(raw), ownerSha, sourceSha), { stage: 'UNKNOWN', reason: 'INVALID' })
+  }
+  for (const code of [null, 0, 1, 255, -1, 256, 1.5, 'synthetic-secret']) {
+    const value = failedWorkerReceipt(ownerSha, sourceSha, 'EXIT')
+    value.result = { code, signaled: code === null, timedOut: false, interrupted: false,
+      outputExceeded: false, error: false, bytes: 0, passed: false }
+    const raw = Buffer.from(JSON.stringify(value))
+    assert.equal(parseWorkerFailureReceipt(raw, sha(raw), ownerSha, sourceSha).reason,
+      code === null || Number.isInteger(code) && code >= 0 && code <= 255 ? 'WORKER_REJECTED' : 'INVALID')
+  }
+})
+
+test('child diagnostic ignores hostile terminal getters and forged public status without reads', () => {
+  let reads = 0
+  const hostile = new Proxy({}, { get: () => { reads++; throw new Error('synthetic-secret') },
+    ownKeys: () => { reads++; throw new Error('synthetic-secret') } })
+  for (const terminal of [hostile, { code: 99, reason: 'synthetic-secret', error: new Error('synthetic-secret') }, null]) {
+    assert.deepEqual(childFailureDiagnostic(terminal, hostile, hostile, hostile), {
+      protocol: 'YIDA_BROWSER_CI_FAILURE_V1', stage: 'UNKNOWN', reason: 'INVALID', childExit: null,
+      signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false })
+  }
+  assert.equal(reads, 0)
+})
+
+test('production capture and outer caller publish bootstrap rejection before unchanged false result', async () => {
+  await syntheticChild(({ terminal, sandbox }) => {
+    const owner = diagnosticOwner(), lines = []
+    assert.equal(reportOuterResult(owner, 'a'.repeat(64), terminal, sandbox, line => lines.push(line)), false)
+    assert.equal(process.exitCode, 1)
+    assert.deepEqual(JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)), {
+      protocol: 'YIDA_BROWSER_CI_FAILURE_V1', stage: 'BOOTSTRAP_LO_UP', reason: 'BOOTSTRAP_FAILED',
+      childExit: 1, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false })
+    assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
+  }, { stderr: bootstrapFrame('BOOTSTRAP_LO_UP').toString() })
+})
+
+test('missing receipts, signals and nonprotocol child logs remain bounded fixed failures', async () => {
+  for (const fixture of [{ code: 255 }, { stderr: 'synthetic-secret ' + bootstrapFrame('BOOTSTRAP_LINKS') },
+    { script: 'process.kill(process.pid,"SIGTERM")' }]) {
+    await syntheticChild(({ terminal, sandbox }) => {
+      const lines = [], owner = diagnosticOwner()
+      assert.equal(reportOuterResult(owner, 'a'.repeat(64), terminal, sandbox, line => lines.push(line)), false)
+      const diagnostic = JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length))
+      assert(diagnostic.childExit === null || Number.isInteger(diagnostic.childExit) && diagnostic.childExit >= 0 && diagnostic.childExit <= 255)
+      assert.equal(typeof diagnostic.signaled, 'boolean')
+      assert.equal(lines.join('\n').includes('synthetic-secret'), false)
+      assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
+      if (fixture.code === 255) assert.equal(diagnostic.stage, 'NO_FAILURE_FRAME_OBSERVED')
+    }, fixture)
+  }
+})
+
+test('production receipt consumer rejects cleanup failure and missing, changed or hardlinked bytes', async () => {
+  const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64), sourceSha = sha(JSON.stringify(owner.hashes))
+  const receipt = failedWorkerReceipt(ownerSha, sourceSha, 'CLEANUP')
+  receipt.cleanup = 'stop-failed-data-retained'
+  const raw = JSON.stringify(receipt), stdout = 'YIDA_BROWSER_CI_RECEIPT_SHA256 ' + sha(raw) + '\n'
+  for (const variant of ['valid', 'missing', 'changed', 'hardlink', 'mode']) {
+    await syntheticChild(async ({ terminal, sandbox }) => {
+      const file = path.join(sandbox, 'receipt.json')
+      if (variant !== 'missing') await fs.writeFile(file, variant === 'changed' ? raw + ' ' : raw, { mode: 0o600 })
+      if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'receipt-alias.json'))
+      if (variant === 'mode') await fs.chmod(file, 0o644)
+      const lines = []
+      assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false)
+      const diagnostic = JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length))
+      assert.deepEqual([diagnostic.stage, diagnostic.reason], variant === 'valid' ? ['CLEANUP', 'WORKER_REJECTED'] : ['UNKNOWN', 'INVALID'])
+      assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
+      assert.equal(process.exitCode, 1)
+    }, { stdout })
+  }
+})
+
+test('diagnostic log hash, file mode, byte budget and source failures are fixed and never affect success', async () => {
+  for (const variant of ['hash', 'hardlink', 'mode', 'oversize']) {
+    await syntheticChild(async ({ terminal, sandbox }) => {
+      const file = path.join(sandbox, 'namespace.stderr.log')
+      if (variant === 'hash') await fs.appendFile(file, 'synthetic-secret')
+      if (variant === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
+      if (variant === 'mode') await fs.chmod(file, 0o644)
+      const diagnostic = childFailureDiagnostic(terminal, sandbox, 'a'.repeat(64), 'b'.repeat(64))
+      assert.deepEqual([diagnostic.stage, diagnostic.reason], ['UNKNOWN', 'INVALID'])
+      assert.equal(JSON.stringify(diagnostic).includes('synthetic-secret'), false)
+    }, { stderr: variant === 'oversize' ? 'x'.repeat(1025) : bootstrapFrame('BOOTSTRAP_OWNER').toString() })
+  }
+  await syntheticChild(async ({ terminal, sandbox }) => {
+    const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64)
+    // Original success criteria still govern even if the diagnostic view is
+    // unavailable. No new protocol serves as a capability or success fallback.
+    await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify({ ownerSha,
+      sourceSha: sha(JSON.stringify(owner.hashes)), cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }), { mode: 0o600 })
+    const lines = []
+    assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), true)
+    assert.deepEqual(lines, ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+    owner.hashes[path.join(lib, 'stock-preparation-plm-owned-pg.mjs')] = '0'.repeat(64)
+    lines.length = 0
+    assert.equal(reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line)), false)
+    assert.deepEqual([JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)).stage,
+      JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)).reason], ['SOURCE_INTEGRITY', 'POST_HASH_REJECTED'])
+  }, { code: 0, stderr: 'synthetic-secret-mixed-log' })
+})
+
+test('source wiring only: Python and worker phase labels and parent diagnostic consumer remain connected', async () => {
+  const runnerSource = await fs.readFile(path.join(root, 'scripts/ops/run-stock-preparation-yida-browser-ci.mjs'), 'utf8')
+  const helperSource = await fs.readFile(path.join(lib, 'stock-preparation-yida-browser-ci-namespace.py'), 'utf8')
+  assert.match(runnerSource, /reportOuterResult\(owner, ownerSha, terminal, evidence\)/u)
+  assert.match(runnerSource, /failureStage, result/u)
+  assert.match(runnerSource, /console\.log\('YIDA_BROWSER_CI_RECEIPT_SHA256 ' \+ hash\(receiptRaw\)\)/u)
+  for (const stage of ['PG_START', 'PG_READY', 'VITEST_SPAWN', 'EXIT', 'VALIDATE']) assert.match(runnerSource, new RegExp("stage = '" + stage + "'", 'u'))
+  assert.match(runnerSource, /failureStage = 'CLEANUP'/u)
+  assert.match(helperSource, /sys\.stderr\.write\('YIDA_BROWSER_CI_BOOTSTRAP_STAGE '/u)
+  assert.match(helperSource, /sys\.stderr\.write\('YIDA_BROWSER_CI_BOOTSTRAP_FAILED\\n'\)/u)
+  for (const stage of ['BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_OWNER', 'BOOTSTRAP_PATHS', 'BOOTSTRAP_SOURCE_INTEGRITY',
+    'BOOTSTRAP_NAMESPACE', 'BOOTSTRAP_LINKS', 'BOOTSTRAP_LO_UP', 'BOOTSTRAP_EXEC']) assert.match(helperSource, new RegExp("phase = '" + stage + "'", 'u'))
+})
+
+test('production outer caller rejects each single failure against an otherwise successful capture and receipt', async () => {
+  for (const fault of ['none', 'cleanup', 'tests', 'passed', 'terminal', 'source']) {
+    await syntheticChild(async ({ terminal, sandbox }) => {
+      const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64), probe = path.join(sandbox, 'source-probe.mjs')
+      await fs.writeFile(probe, '// synthetic original source', { mode: 0o600 })
+      owner.hashes[probe] = fileHash(probe)
+      const receipt = { ownerSha, sourceSha: sha(JSON.stringify(owner.hashes)),
+        cleanup: 'stopped-owned-pg-removed', passed: true, tests: 70 }
+      if (fault === 'cleanup') receipt.cleanup = 'stop-failed-data-retained'
+      if (fault === 'tests') receipt.tests = 69
+      if (fault === 'passed') receipt.passed = false
+      await fs.writeFile(path.join(sandbox, 'receipt.json'), JSON.stringify(receipt), { mode: 0o600 })
+      // Mutate only a private synthetic source byte, keeping owner hashes and
+      // receipt sourceSha unchanged so no second check masks this guard.
+      if (fault === 'source') await fs.appendFile(probe, '\n// synthetic persistent drift')
+      const lines = [], passed = reportOuterResult(owner, ownerSha, terminal, sandbox, line => lines.push(line))
+      assert.equal(passed, fault === 'none', fault)
+      if (fault === 'none') assert.deepEqual(lines,
+        ['YIDA_BROWSER_CI_RESULT {"passed":true,"tests":70,"business":65,"sentinels":5}'])
+      else {
+        assert.equal(process.exitCode, 1, fault)
+        assert.equal(lines.length, 2, fault)
+        assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}', fault)
+      }
+    }, { code: fault === 'terminal' ? 1 : 0 })
+  }
+})
+
+test('actual fixed Python helper produces the safe first-gate failure frame without a namespace', async () => {
+  await syntheticChild(async ({ terminal, sandbox }) => {
+    // No owner argument: len(argv) fails before PID, owner reads, ip, setpriv
+    // or namespace work. Only this first gate is exercised by this fixture.
+    assert.equal(terminal.code, 1)
+    assert.equal(terminal.passed, false)
+    const raw = await fs.readFile(path.join(sandbox, 'namespace.stderr.log'))
+    assert.deepEqual(parseChildFailureFrame(raw), { stage: 'BOOTSTRAP_ARGUMENTS', reason: 'BOOTSTRAP_FAILED' })
+    assert.deepEqual([childFailureDiagnostic(terminal, sandbox, 'a'.repeat(64), 'b'.repeat(64)).stage,
+      childFailureDiagnostic(terminal, sandbox, 'a'.repeat(64), 'b'.repeat(64)).reason], ['BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_FAILED'])
+  }, { executable: '/usr/bin/python3', args: [path.join(lib, 'stock-preparation-yida-browser-ci-namespace.py')] })
 })

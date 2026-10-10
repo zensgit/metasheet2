@@ -44,6 +44,63 @@ const fail = code => {
   return error
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
+const captureDiagnostics = new WeakMap()
+const bootstrapStages = new Set(['BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_OWNER', 'BOOTSTRAP_PATHS',
+  'BOOTSTRAP_SOURCE_INTEGRITY', 'BOOTSTRAP_NAMESPACE', 'BOOTSTRAP_LINKS', 'BOOTSTRAP_LO_UP', 'BOOTSTRAP_EXEC'])
+const workerStages = new Set(['PG_START', 'PG_READY', 'VITEST_SPAWN', 'EXIT', 'VALIDATE', 'CLEANUP'])
+const DIAGNOSTIC_BYTES = 1024
+
+// Match the entire bounded protocol, never search arbitrary child stderr for
+// plausible labels. Unknown labels/text are fixed INVALID, never echoed.
+export function parseChildFailureFrame(raw) {
+  if (!Buffer.isBuffer(raw) || raw.length > DIAGNOSTIC_BYTES) return { stage: 'UNKNOWN', reason: 'INVALID' }
+  if (raw.length === 0) return { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN' }
+  const text = raw.toString('utf8')
+  const bootstrap = /^YIDA_BROWSER_CI_BOOTSTRAP_STAGE \{"stage":"([A-Z_]+)","reason":"BOOTSTRAP_FAILED"\}\nYIDA_BROWSER_CI_BOOTSTRAP_FAILED\n(?![\s\S])/u.exec(text)
+  if (bootstrap && bootstrapStages.has(bootstrap[1])) return { stage: bootstrap[1], reason: 'BOOTSTRAP_FAILED' }
+  const startup = /^YIDA_BROWSER_CI_FAILED\nYIDA_BROWSER_CI_STARTUP_FAILED \{"stage":"([A-Z_]+)","reason":"([A-Z_]+)"\}\n(?![\s\S])/u.exec(text)
+  if (startup && startupStages.has(startup[1]) && (startupReasons.has(startup[2]) || startup[2] === 'INTERNAL')) {
+    return { stage: startup[1], reason: startup[2] }
+  }
+  return { stage: 'UNKNOWN', reason: 'INVALID' }
+}
+
+function diagnosticBytes(file, expectedSha, limit) {
+  assert.match(expectedSha, /^[a-f0-9]{64}$/u)
+  assert(plain(file, false, 0o600).size <= limit)
+  const raw = fs.readFileSync(file)
+  assert(raw.length <= limit)
+  assert.equal(hash(raw), expectedSha)
+  return raw
+}
+
+export function parseWorkerFailureReceipt(raw, expectedSha, ownerSha, sourceSha) {
+  try {
+    assert(Buffer.isBuffer(raw) && raw.length < 16384)
+    assert.equal(hash(raw), expectedSha)
+    const value = JSON.parse(raw)
+    assert.deepEqual(Object.keys(value).sort(), ['protocol', 'ownerSha', 'sourceSha', 'passed', 'cleanup',
+      'tests', 'sentinels', 'business', 'isolatedNetwork', 'unixIpcIsolated',
+      'sameProcessHostileCodeIsolated', 'filesystemIsolated', 'failureStage',
+      ...(Object.hasOwn(value, 'result') ? ['result'] : [])].sort())
+    assert.equal(value.protocol, 'YIDA_BROWSER_CI_NATIVE_V1')
+    assert.equal(value.ownerSha, ownerSha); assert.equal(value.sourceSha, sourceSha)
+    assert.equal(value.passed, false)
+    assert(['not-started', 'stopped-owned-pg-removed', 'stop-failed-data-retained'].includes(value.cleanup))
+    assert.equal(value.tests, 0); assert.equal(value.sentinels, 0); assert.equal(value.business, 0)
+    assert.equal(value.isolatedNetwork, true)
+    for (const key of ['unixIpcIsolated', 'sameProcessHostileCodeIsolated', 'filesystemIsolated']) assert.equal(value[key], false)
+    assert(workerStages.has(value.failureStage))
+    if (Object.hasOwn(value, 'result')) {
+      const result = value.result
+      assert.deepEqual(Object.keys(result).sort(), ['code', 'signaled', 'timedOut', 'interrupted', 'outputExceeded', 'error', 'bytes', 'passed'].sort())
+      assert(result.code === null || Number.isInteger(result.code) && result.code >= 0 && result.code <= 255)
+      for (const key of ['signaled', 'timedOut', 'interrupted', 'outputExceeded', 'error', 'passed']) assert.equal(typeof result[key], 'boolean')
+      assert(Number.isSafeInteger(result.bytes) && result.bytes >= 0)
+    }
+    return { stage: value.failureStage, reason: 'WORKER_REJECTED' }
+  } catch { return { stage: 'UNKNOWN', reason: 'INVALID' } }
+}
 
 export function startupFailureDiagnostic(error, stage) {
   return Object.freeze({ stage: startupStages.has(stage) ? stage : 'RUNTIME',
@@ -187,9 +244,10 @@ export function validateTaskReceipt(receipt) {
 
 // Every stream is bounded and private. Closing is awaited after signaling.
 // Timed-out cleanup is never advertised as proven or followed by broad removal.
-async function capture(executable, args, cwd, env, evidence, name, milliseconds, namespaceOwner) {
+export async function capture(executable, args, cwd, env, evidence, name, milliseconds, namespaceOwner) {
   const handles = Object.fromEntries(['stdout', 'stderr'].map(stream =>
     [stream, fs.openSync(path.join(evidence, name + '.' + stream + '.log'), 'wx', 0o600)]))
+  const digests = Object.fromEntries(['stdout', 'stderr'].map(stream => [stream, createHash('sha256')]))
   const child = spawn(executable, args, { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
   let timedOut = false, interrupted = false, outputExceeded = false, error = false, bytes = 0, closed = false, escalation, gracefulRetry
   let terminationRequested = false
@@ -232,7 +290,10 @@ async function capture(executable, args, cwd, env, evidence, name, milliseconds,
     bytes += chunk.length
     if (bytes > MAX_OUTPUT) { outputExceeded = true; terminate(); return }
     try {
-      for (let offset = 0; offset < chunk.length;) offset += fs.writeSync(handles[stream], chunk, offset, chunk.length - offset)
+      for (let offset = 0; offset < chunk.length;) {
+        const count = fs.writeSync(handles[stream], chunk, offset, chunk.length - offset)
+        digests[stream].update(chunk.subarray(offset, offset + count)); offset += count
+      }
     } catch { error = true; terminate() }
   })
   const terminal = await new Promise(resolve => child.once('close', (code, childSignal) => {
@@ -241,7 +302,11 @@ async function capture(executable, args, cwd, env, evidence, name, milliseconds,
     for (const fd of Object.values(handles)) { fs.fsyncSync(fd); fs.closeSync(fd) }
     resolve({ code, signaled: childSignal !== null, timedOut, interrupted, outputExceeded, error, bytes })
   }))
-  return { ...terminal, passed: terminal.code === 0 && !terminal.signaled && !timedOut && !interrupted && !outputExceeded && !error }
+  const result = { ...terminal, passed: terminal.code === 0 && !terminal.signaled && !timedOut && !interrupted && !outputExceeded && !error }
+  captureDiagnostics.set(result, { stdoutSha: digests.stdout.digest('hex'), stderrSha: digests.stderr.digest('hex'),
+    childExit: Number.isInteger(terminal.code) && terminal.code >= 0 && terminal.code <= 255 ? terminal.code : null,
+    signaled: terminal.signaled, timedOut, interrupted, outputExceeded, error })
+  return result
 }
 
 async function namespaceInit(owner, ownerPath, ownerSha) {
@@ -270,10 +335,12 @@ async function worker(owner, ownerPath, ownerSha) {
   fs.mkdirSync(scratchDir, { mode: 0o700 })
   privateWrite(path.join(scratchDir, 'owner.json'), JSON.stringify({ owner: SCRATCH_OWNER, nonce, repoRoot: root, pid: process.pid }))
   let database, result, passed = false, cleanup = 'not-started', interrupted = false
+  let stage = 'PG_START', failureStage = null
   const signal = () => { interrupted = true }
   process.once('SIGTERM', signal); process.once('SIGINT', signal)
   try {
     database = await startOwnedPostgres({ repoRoot: root, scratchDir, pgBin: owner.pgBin, env: cleanEnvironment(process.env) })
+    stage = 'PG_READY'
     if (interrupted) throw fail('INTERRUPTED')
     verifyHashes(owner)
     const tasks = path.join(evidence, 'tasks.json'), json = path.join(evidence, 'vitest.json')
@@ -283,8 +350,11 @@ async function worker(owner, ownerPath, ownerSha) {
     const args = [owner.cli, 'run', '--config', CONFIG, '--reporter=verbose', ...TEST_FILES,
       '--reporter=json', '--reporter=' + owner.collector, '--outputFile.json=' + json]
     native.assertBrowserNetworkIsolation()
+    stage = 'VITEST_SPAWN'
     result = await capture(owner.node, args, backend, env, evidence, 'vitest', DEADLINE_MS - 120000)
+    stage = 'EXIT'
     assert(result.passed && !interrupted)
+    stage = 'VALIDATE'
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
@@ -293,22 +363,71 @@ async function worker(owner, ownerPath, ownerSha) {
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
     passed = true
-  } catch { process.exitCode = 1 } finally {
+  } catch { failureStage = stage; process.exitCode = 1 } finally {
     if (database) {
       try { await database.stop(); assert.equal(fs.readdirSync(scratchDir).filter(name => name.startsWith('pg-')).length, 0); cleanup = 'stopped-owned-pg-removed' }
-      catch { cleanup = 'stop-failed-data-retained'; passed = false; process.exitCode = 1 }
+      catch { cleanup = 'stop-failed-data-retained'; failureStage = 'CLEANUP'; passed = false; process.exitCode = 1 }
     }
-    try { verifyHashes(owner) } catch { passed = false; process.exitCode = 1 }
+    try { verifyHashes(owner) } catch { failureStage = 'VALIDATE'; passed = false; process.exitCode = 1 }
     process.removeListener('SIGTERM', signal); process.removeListener('SIGINT', signal)
-    if (interrupted) { passed = false; process.exitCode = 1 }
+    if (interrupted) { failureStage = 'CLEANUP'; passed = false; process.exitCode = 1 }
     // Credentials never appear in this receipt. Scratch and private logs stay
     // available; only the original owned-PG module removes its own PG subtree.
-    privateWrite(path.join(evidence, 'receipt.json'), JSON.stringify({ protocol: owner.protocol,
+    const receiptRaw = JSON.stringify({ protocol: owner.protocol,
       ownerSha, sourceSha: hash(JSON.stringify(owner.hashes)), passed, cleanup,
       tests: passed ? 70 : 0, sentinels: passed ? 5 : 0, business: passed ? 65 : 0,
       isolatedNetwork: isolation.isolatedNetwork, unixIpcIsolated: false,
-      sameProcessHostileCodeIsolated: false, filesystemIsolated: false, result }))
+      sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage, result })
+    privateWrite(path.join(evidence, 'receipt.json'), receiptRaw)
+    // Private namespace stdout: binds only the observed receipt bytes, never
+    // grants authority or changes the original success/cleanup requirements.
+    console.log('YIDA_BROWSER_CI_RECEIPT_SHA256 ' + hash(receiptRaw))
   }
+}
+
+export function childFailureDiagnostic(terminal, evidence, ownerSha, sourceSha, postHashesVerified = true) {
+  const observed = captureDiagnostics.get(terminal)
+  const status = observed ? { childExit: observed.childExit, signaled: observed.signaled,
+    timedOut: observed.timedOut, interrupted: observed.interrupted,
+    outputExceeded: observed.outputExceeded, error: observed.error }
+    : { childExit: null, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false }
+  let frame = { stage: 'UNKNOWN', reason: 'INVALID' }
+  if (observed && postHashesVerified === true) {
+    try {
+      const stdout = diagnosticBytes(path.join(evidence, 'namespace.stdout.log'), observed.stdoutSha, DIAGNOSTIC_BYTES)
+      const receiptFrame = /^YIDA_BROWSER_CI_RECEIPT_SHA256 ([a-f0-9]{64})\n(?![\s\S])/u.exec(stdout.toString('utf8'))
+      if (receiptFrame) {
+        const raw = diagnosticBytes(path.join(evidence, 'receipt.json'), receiptFrame[1], 16383)
+        frame = parseWorkerFailureReceipt(raw, receiptFrame[1], ownerSha, sourceSha)
+      } else if (stdout.length === 0) {
+        frame = parseChildFailureFrame(diagnosticBytes(path.join(evidence, 'namespace.stderr.log'), observed.stderrSha, DIAGNOSTIC_BYTES))
+      }
+    } catch { /* An unavailable/untrusted diagnostic view conveys no detail. */ }
+  } else if (observed && postHashesVerified === false) frame = { stage: 'SOURCE_INTEGRITY', reason: 'POST_HASH_REJECTED' }
+  return Object.freeze({ protocol: 'YIDA_BROWSER_CI_FAILURE_V1', ...frame, ...status })
+}
+
+// Keep the original pass checks together with their production reporting
+// caller, so synthetic refusal fixtures can exercise actual failure wiring.
+export function reportOuterResult(owner, ownerSha, terminal, evidence, write = console.log) {
+  let passed = false, postHashesVerified = false
+  try {
+    verifyHashes(owner)
+    postHashesVerified = true
+    const receiptPath = path.join(evidence, 'receipt.json')
+    assert(plain(receiptPath, false, 0o600).size < 16384)
+    const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
+    assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
+    assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
+    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 70)
+    passed = terminal.passed
+  } catch { /* Original refusal remains; diagnostics carry only fixed fields. */ }
+  if (!passed) write('YIDA_BROWSER_CI_CHILD_FAILED ' + JSON.stringify(
+    childFailureDiagnostic(terminal, evidence, ownerSha, hash(JSON.stringify(owner.hashes)), postHashesVerified)))
+  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 70 : 0,
+    business: passed ? 65 : 0, sentinels: passed ? 5 : 0 }))
+  if (!passed) process.exitCode = 1
+  return passed
 }
 
 async function outer(args, setStage) {
@@ -349,20 +468,7 @@ async function outer(args, setStage) {
   setStage('NAMESPACE')
   const terminal = await capture('/usr/bin/unshare', argv, root, cleanEnvironment(process.env), evidence,
     'namespace', DEADLINE_MS, { ...owner, ownerPath, ownerSha })
-  let passed = false
-  try {
-    verifyHashes(owner)
-    const receiptPath = path.join(evidence, 'receipt.json')
-    assert(plain(receiptPath, false, 0o600).size < 16384)
-    const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
-    assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
-    assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
-    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 70)
-    passed = terminal.passed
-  } catch { /* Fixed public result only; detail remains in private evidence. */ }
-  console.log('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 70 : 0,
-    business: passed ? 65 : 0, sentinels: passed ? 5 : 0 }))
-  if (!passed) process.exitCode = 1
+  reportOuterResult(owner, ownerSha, terminal, evidence)
 }
 
 export async function main(args = process.argv.slice(2)) {
