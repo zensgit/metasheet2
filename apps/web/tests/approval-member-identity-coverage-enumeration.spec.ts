@@ -507,6 +507,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     // reasoning (the visible option text is `target.label`, never a raw id).
     ['src/views/approval/TemplateGroupSections.vue', ':data-testid="`template-group-section-move-${item.id}`"'],
   ]),
+  // A1 (2026-10-09): the central leave-preset note on the preset cards. `preset.id` is the closed built-in preset key
+  // ('leave', ...); the mustache renders the static note text the lookup returns, never the key.
+  ...group('OUT-OF-SCOPE', 'a static built-in PRESET key used only to look up a copy string (presetBoundaryNote) -- the mustache renders the returned note text, never the key, and the key is not a member identity', [
+    ['src/views/approval/TemplateAuthoringView.vue', '{{ presetBoundaryNote(preset.id) }}'],
+  ]),
 
   // ---- OUT-OF-SCOPE: non-person entity ids (approval instance / template / version row) in a data-testid, route path, or a function-call argument (not a rendered id -- the FUNCTION'S RETURN is what renders) ----
   ...group('OUT-OF-SCOPE', 'an APPROVAL INSTANCE id (not a person id) -- a data-testid, or the argument to a helper whose OWN return is what renders, never the id itself', [

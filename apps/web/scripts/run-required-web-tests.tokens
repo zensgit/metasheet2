@@ -64,6 +64,7 @@ approval-graph-summary
 approval-graph-topology-edit
 approval-handler-node-authoring
 approval-handler-node-config
+approval-leave-preset-boundary-note
 approval-lock8-field-type-census
 approval-member-action-dialog-grammar
 approval-member-bar-operation-policy
@@ -138,12 +139,16 @@ approvalTemplateVersionHistory
 approvalUserPicker
 asyncStateBlock
 attendance-admin-regressions
+attendance-approval-option-hint
+attendance-approval-option-wiring
 attendance-date-only-format
 attendance-experience-entrypoints
 attendance-import-preview-regression.spec.ts
 attendance-punch-outcome
 attendance-record-timeline
 attendance-records-route-redirect
+attendance-scheduled-feature-status-wiring
+attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
 attendanceAdminEndpointCompatibility
 attendanceCapabilityUnavailable
@@ -157,6 +162,7 @@ attendanceOverviewRequestReveal
 attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
 attendanceTodayWorkbench
+AttendanceScheduledFeatureStatus
 attendanceUserPickerEndpoint
 automation-action-summary
 automation-condition-legacy-person-picker

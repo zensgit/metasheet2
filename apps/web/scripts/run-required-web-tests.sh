@@ -1516,6 +1516,7 @@ exec npx vitest run \
   approval-graph-topology-edit \
   approval-handler-node-authoring \
   approval-handler-node-config \
+  approval-leave-preset-boundary-note \
   approval-member-action-dialog-grammar \
   approval-member-identity-coverage-enumeration \
   approval-node-threshold-timeout-config \
@@ -1579,6 +1580,10 @@ exec npx vitest run \
   approvalUserPicker \
   asyncStateBlock \
   attendance-record-timeline \
+  attendance-approval-option-hint \
+  attendance-approval-option-wiring \
+  attendance-scheduled-feature-status-wiring \
+  attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
   attendanceAdminEndpointCompatibility \
   attendanceCapabilityUnavailable \
@@ -1592,6 +1597,7 @@ exec npx vitest run \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
   attendanceTodayWorkbench \
+  AttendanceScheduledFeatureStatus \
   attendanceUserPickerEndpoint \
   automation-action-summary \
   automation-condition-legacy-person-picker \
