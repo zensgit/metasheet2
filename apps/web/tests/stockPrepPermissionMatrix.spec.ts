@@ -304,6 +304,9 @@ const CONTROLS_NOT_ON_THE_QUEUE_VIEW: readonly string[] = Object.freeze([
   'stock-prep-project-fields',
   'stock-prep-project-fields-save',
   'stock-prep-project-overview-refresh',
+  // S3 fix round 1 (R6): 「建立项目总览」 (PULL) lives on the same home line, rendered only while the server says
+  // the overview is absent; PO-ALIGN asserts it renders for exactly the actors the server grants.
+  'stock-prep-project-overview-ensure',
 ])
 
   /** The control testids actually present in the DOM, restricted to the manifest's control set. */

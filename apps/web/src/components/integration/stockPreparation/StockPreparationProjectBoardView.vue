@@ -20,12 +20,14 @@
       :can-pull="canRunPull"
       :project-targets="projectTargetList"
       :can-refresh-overview="canRefreshOverview"
+      :can-ensure-overview="canEnsureOverview"
       :target-api="projectTargetApi"
       @open-project="onHomeOpenProject"
       @open-project-in-queue="onHomeOpenProjectInQueue"
       @focus-quick-open="focusProjectNoInput"
       @open-multitable="onHomeOpenMultitable"
       @overview-refreshed="loadProjectTargetList"
+      @overview-ensured="loadProjectTargetList"
     />
 
     <!-- 线框 C ①: the way BACK. Without it `?projectNo=` is a one-way door — once an operator opens
@@ -1912,7 +1914,7 @@ function holdsLifecycleCapability(capability: 'projectTarget.archive' | 'project
  * S4's archive / restore and S3's project-fields / overview-refresh all go through it.
  */
 function holdsWorkbenchCapability(
-  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh',
+  capability: 'projectTarget.archive' | 'projectTarget.restore' | 'projectFields.read' | 'projectFields.update' | 'projectOverview.refresh' | 'projectOverview.ensure',
 ): boolean {
   return grantedStockPrepCapabilities(auth.getAccessSnapshot()).includes(capability)
 }
@@ -1982,6 +1984,8 @@ const lifecycleNoticeText = computed<StockPrepPlainEntry>(() => {
 //
 // 「刷新项目总览」 lives on the home page; this page only resolves whether the caller holds it.
 const canRefreshOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.refresh'))
+// S3 fix round 1 (R6): 「建立项目总览」 is the PULL tier's (the manifest's projectOverview.ensure row).
+const canEnsureOverview = computed<boolean>(() => holdsWorkbenchCapability('projectOverview.ensure'))
 
 /** This project's three project-level texts; null = no form (not loaded, absent, switch off, no right, unreadable). */
 const projectFields = ref<StockPrepProjectFieldsState | null>(null)
@@ -2074,7 +2078,10 @@ const fieldsNoticeText = computed<StockPrepPlainEntry>(() => {
   if (notice.kind === 'unchanged') return { zh: '', en: '' }
   if (notice.code === 'STOCK_PREPARATION_PROJECT_ARCHIVED') return fieldsPlain('fields_archived_refused')
   if (notice.code === 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID') {
-    const specific = notice.field && notice.field !== 'body' ? stockPrepProjectOverviewPlain(`fields_invalid_${notice.field}`) : null
+    // S3 fix round 1 (R13): a 400 under this code is the control-character refusal, whichever field it names.
+    const specific = notice.status === 400
+      ? stockPrepProjectOverviewPlain('fields_invalid_control')
+      : (notice.field && notice.field !== 'body' ? stockPrepProjectOverviewPlain(`fields_invalid_${notice.field}`) : null)
     const general = stockPrepErrorPlain('STOCK_PREPARATION_PROJECT_FIELDS_INVALID')
     return specific ? { zh: specific.zh, en: specific.en, zhNext: general.zhNext, enNext: general.enNext } : general
   }

@@ -7,10 +7,11 @@
 //   POST /api/integration/stock-preparation/projects/:projectNo/target/archive   PULL (S4, R-38)
 //   POST /api/integration/stock-preparation/projects/:projectNo/target/restore   PULL (S4, R-38)
 //   GET  /api/integration/stock-preparation/projects/:projectNo/target/project-fields   OPERATE (S3, R-37)
-//   PUT  /api/integration/stock-preparation/projects/:projectNo/target/project-fields   OPERATE (S3, R-37)
+//   PATCH /api/integration/stock-preparation/projects/:projectNo/target/project-fields  OPERATE (S3, R-37)
 //   POST /api/integration/stock-preparation/project-overview/refresh                    OPERATE (S3, R-37)
+//   POST /api/integration/stock-preparation/project-overview/ensure                     PULL (S3 fix round 1)
 //
-// All eight answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
+// All nine answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the server's default-OFF
 // switch is off. That answer is how this module knows the switch is off — and with it off, the pull
 // panel walks EXACTLY the flow it walked before S2 (`kind: 'legacy'` below): no confirmation, no
 // create, no extra sentence.
@@ -47,7 +48,7 @@
 //
 // PROJECT-LEVEL COLUMNS AND THE OVERVIEW (S3, ADR §5 O2(a) / Q5, register R-37). Three texts per
 // project — 负责人 / 备注 / 计划完成 — read and written through their own pair of routes, and a refresh
-// of the host-read-only overview sheet. The PUT body is the server's CLOSED whitelist and carries
+// of the host-read-only overview sheet. The PATCH body is the server's CLOSED whitelist and carries
 // ONLY the keys the operator changed (`stockPrepProjectFieldsChangedPatch`); a 422 names the FIELD
 // (`details.field`, clamped to the whitelist here) and never echoes the value.
 //
@@ -105,6 +106,11 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED',
   'STOCK_PREPARATION_PROJECT_OVERVIEW_SCHEMA_INCOMPLETE',
   'STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE',
+  // S3 fix round 1 (R-37): the refresh before any overview exists (only a puller creates it), an older
+  // host / database that cannot stamp it read-only, and the S3 routes' one values-free 500.
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT',
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED',
+  'STOCK_PREPARATION_PROJECT_ROUTE_FAILED',
 ])
 
 /**
@@ -136,7 +142,7 @@ export interface StockPrepProjectFieldsState {
   may: { update: boolean }
 }
 
-/** PUT …/target/project-fields — the row after the write, and which keys the server changed. */
+/** PATCH …/target/project-fields — the row after the write, and which keys the server changed. */
 export interface StockPrepProjectFieldsSaved {
   status: StockPrepProjectTargetStatus
   fields: StockPrepProjectFields
@@ -147,17 +153,26 @@ export interface StockPrepProjectFieldsSaved {
 /** Only the keys being changed; `null` (or an empty string) clears a field. */
 export type StockPrepProjectFieldsPatch = Partial<Record<StockPrepProjectFieldKey, string | null>>
 
-/** The overview sheet's deep-link handles, as the registry list carries them. All null until the first refresh. */
+/**
+ * Why there is (or is not) an overview handle (S3 fix round 1, R8b): `ready` = the host reports the
+ * STAMPED, read-only overview; `absent` = not created yet (a puller creates it); `not_stamped` = a sheet the
+ * server refuses sits at its id; `unavailable` = an older host or the lookup failed.
+ */
+export type StockPrepProjectOverviewStatus = 'ready' | 'absent' | 'not_stamped' | 'unavailable'
+const STOCK_PREP_PROJECT_OVERVIEW_STATUSES: readonly StockPrepProjectOverviewStatus[] = Object.freeze(['ready', 'absent', 'not_stamped', 'unavailable'])
+
+/** The overview sheet's deep-link handles, as the registry list carries them. Null handles unless `status` is `ready`. */
 export interface StockPrepProjectOverviewHandles {
+  status: StockPrepProjectOverviewStatus
   sheetId: string | null
   activeViewId: string | null
   archivedViewId: string | null
 }
 
-/** POST …/project-overview/refresh — handles, counts and booleans only. */
+/** POST …/project-overview/refresh that RAN (`fresh: true`) — handles, counts and booleans only. */
 export interface StockPrepProjectOverviewRefreshResult {
+  fresh: true
   sheetId: string
-  sheetCreated: boolean
   activeViewId: string | null
   archivedViewId: string | null
   projectCount: number
@@ -167,9 +182,27 @@ export interface StockPrepProjectOverviewRefreshResult {
   rowsCreated: number | null
   rowsUpdated: number | null
   rowsUnchanged: number | null
+  rowsRemovedDuplicate: number | null
+  rowsRemovedOrphan: number | null
   truncated: boolean
   ledgerReady: boolean | null
   countsAt: string
+}
+
+/** POST …/project-overview/refresh inside the server's cooldown (`fresh: false`): nothing was done. */
+export interface StockPrepProjectOverviewRefreshCooled {
+  fresh: false
+  cooldownSeconds: number
+  retryAfterSeconds: number
+}
+
+/** POST …/project-overview/ensure (PULL) — the overview's handles and what its G1 READ grant did. */
+export interface StockPrepProjectOverviewEnsureResult {
+  sheetId: string
+  created: boolean
+  activeViewId: string | null
+  archivedViewId: string | null
+  grant: { attempted: boolean; skipped: string | null; roleCount: number; granted: number; alreadyGranted: number }
 }
 
 export interface StockPrepProjectTargetState {
@@ -227,8 +260,8 @@ export interface StockPrepProjectTargetList {
   limit: number | null
   items: StockPrepProjectTargetListItem[]
   /**
-   * S3 (R-37): the overview sheet's handles — all null until the first refresh created it. Always
-   * set by the clamp; optional only so an older test double still type-checks.
+   * S3 (R-37): the overview sheet's handles — null unless the server reports the STAMPED overview
+   * (`status: 'ready'`). Always set by the clamp; optional only so an older test double still type-checks.
    */
   overview?: StockPrepProjectOverviewHandles
 }
@@ -344,15 +377,22 @@ export function clampStockPrepProjectTargetList(raw: unknown): StockPrepProjectT
     })
   }
   // S3: tolerant — an older server sends no `overview`; that reads as 「还没有总览表」, never as an error.
+  // Fix round 1 (R8b): a handle is honoured ONLY with `status: 'ready'` (the server's word that the host
+  // reports the stamped, read-only overview); any other status — or none — carries no handle at all.
   const overview = isRecord(raw.overview) ? raw.overview : {}
+  const overviewStatus: StockPrepProjectOverviewStatus = STOCK_PREP_PROJECT_OVERVIEW_STATUSES.includes(overview.status as StockPrepProjectOverviewStatus)
+    ? (overview.status as StockPrepProjectOverviewStatus)
+    : 'unavailable'
+  const ready = overviewStatus === 'ready' && handleOf(overview.sheetId) !== null
   return {
     count: items.length,
     limit: countOf(raw.limit),
     items,
     overview: {
-      sheetId: handleOf(overview.sheetId),
-      activeViewId: handleOf(overview.activeViewId),
-      archivedViewId: handleOf(overview.archivedViewId),
+      status: ready ? 'ready' : (overviewStatus === 'ready' ? 'unavailable' : overviewStatus),
+      sheetId: ready ? handleOf(overview.sheetId) : null,
+      activeViewId: ready ? handleOf(overview.activeViewId) : null,
+      archivedViewId: ready ? handleOf(overview.archivedViewId) : null,
     },
   }
 }
@@ -396,7 +436,7 @@ export function clampStockPrepProjectFieldsState(raw: unknown): StockPrepProject
   }
 }
 
-/** The PUT project-fields payload, or null. The write only ever lands on an ACTIVE sheet. */
+/** The PATCH project-fields payload, or null. The write only ever lands on an ACTIVE sheet. */
 export function clampStockPrepProjectFieldsSaved(raw: unknown): StockPrepProjectFieldsSaved | null {
   if (!isRecord(raw)) return null
   const status = statusOf(raw.status)
@@ -406,16 +446,26 @@ export function clampStockPrepProjectFieldsSaved(raw: unknown): StockPrepProject
   return { status, fields, updatedAt: timestampOf(raw.updatedAt), changed }
 }
 
-/** The refresh summary, or null. Strict on the four facts the page states: the sheet, the count, the clock, truncation. */
-export function clampStockPrepProjectOverviewRefresh(raw: unknown): StockPrepProjectOverviewRefreshResult | null {
+/**
+ * The refresh answer, or null. Fix round 1 (R6): either a run (`fresh: true`, strict on the four facts the
+ * page states: the sheet, the count, the clock, truncation) or the cooldown (`fresh: false`, nothing done).
+ */
+export function clampStockPrepProjectOverviewRefresh(raw: unknown): StockPrepProjectOverviewRefreshResult | StockPrepProjectOverviewRefreshCooled | null {
   if (!isRecord(raw)) return null
+  if (raw.fresh === false) {
+    const cooldownSeconds = countOf(raw.cooldownSeconds)
+    const retryAfterSeconds = countOf(raw.retryAfterSeconds)
+    if (cooldownSeconds === null || retryAfterSeconds === null) return null
+    return { fresh: false, cooldownSeconds, retryAfterSeconds }
+  }
+  if (raw.fresh !== true) return null
   const sheetId = handleOf(raw.sheetId)
   const projectCount = countOf(raw.projectCount)
   const countsAt = timestampOf(raw.countsAt)
-  if (!sheetId || projectCount === null || !countsAt || typeof raw.sheetCreated !== 'boolean' || typeof raw.truncated !== 'boolean') return null
+  if (!sheetId || projectCount === null || !countsAt || typeof raw.truncated !== 'boolean') return null
   return {
+    fresh: true,
     sheetId,
-    sheetCreated: raw.sheetCreated,
     activeViewId: handleOf(raw.activeViewId),
     archivedViewId: handleOf(raw.archivedViewId),
     projectCount,
@@ -425,9 +475,32 @@ export function clampStockPrepProjectOverviewRefresh(raw: unknown): StockPrepPro
     rowsCreated: countOf(raw.rowsCreated),
     rowsUpdated: countOf(raw.rowsUpdated),
     rowsUnchanged: countOf(raw.rowsUnchanged),
+    rowsRemovedDuplicate: countOf(raw.rowsRemovedDuplicate),
+    rowsRemovedOrphan: countOf(raw.rowsRemovedOrphan),
     truncated: raw.truncated,
     ledgerReady: boolOrNull(raw.ledgerReady),
     countsAt,
+  }
+}
+
+/** The ensure answer (PULL), or null. Strict on the sheet handle and `created`. */
+export function clampStockPrepProjectOverviewEnsure(raw: unknown): StockPrepProjectOverviewEnsureResult | null {
+  if (!isRecord(raw)) return null
+  const sheetId = handleOf(raw.sheetId)
+  if (!sheetId || typeof raw.created !== 'boolean') return null
+  const grant = isRecord(raw.grant) ? raw.grant : {}
+  return {
+    sheetId,
+    created: raw.created,
+    activeViewId: handleOf(raw.activeViewId),
+    archivedViewId: handleOf(raw.archivedViewId),
+    grant: {
+      attempted: grant.attempted === true,
+      skipped: typeof grant.skipped === 'string' && /^[a-z_]{1,40}$/.test(grant.skipped) ? grant.skipped : null,
+      roleCount: countOf(grant.roleCount) ?? 0,
+      granted: countOf(grant.granted) ?? 0,
+      alreadyGranted: countOf(grant.alreadyGranted) ?? 0,
+    },
   }
 }
 
@@ -540,7 +613,15 @@ export interface StockPreparationProjectTargetApi {
   /** S3 (R-37). Optional for the same reason; a double without them simply shows no fields / no refresh. */
   getProjectFields?(projectNo: string): Promise<StockPrepProjectFieldsState>
   updateProjectFields?(projectNo: string, patch: StockPrepProjectFieldsPatch): Promise<StockPrepProjectFieldsSaved>
-  refreshOverview?(): Promise<StockPrepProjectOverviewRefreshResult>
+  refreshOverview?(): Promise<StockPrepProjectOverviewRefreshResult | StockPrepProjectOverviewRefreshCooled>
+  /** S3 fix round 1 (R6): the PULL tier's explicit overview creation (+ its G1 READ grant). */
+  ensureOverview?(): Promise<StockPrepProjectOverviewEnsureResult>
+  /**
+   * S3 fix round 1 (R1): may THIS caller actually open the overview? Asked of the HOST — the multitable
+   * context of the overview's sheet/view, whose `canRead` is the host's own decision (sheet grants, the
+   * G1 READ grant, admin) — never assumed from a workbench capability.
+   */
+  probeOverviewReadable?(handles: { sheetId: string; viewId: string }): Promise<boolean>
 }
 
 async function readEnvelope<T>(response: Response | undefined, route: string, clamp: (raw: unknown) => T | null): Promise<T> {
@@ -618,7 +699,7 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
       return readEnvelope(response, route, clampStockPrepProjectFieldsState)
     },
     async updateProjectFields(projectNo: string, patch: StockPrepProjectFieldsPatch) {
-      const route = 'PUT …/projects/:projectNo/target/project-fields'
+      const route = 'PATCH …/projects/:projectNo/target/project-fields'
       const body: StockPrepProjectFieldsPatch = {}
       for (const key of STOCK_PREP_PROJECT_FIELD_KEYS) {
         if (!Object.prototype.hasOwnProperty.call(patch, key)) continue
@@ -626,7 +707,7 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
         body[key] = typeof value === 'string' && value.trim() !== '' ? value.trim() : null
       }
       const response = await apiFetch(`${TARGET_BASE}/projects/${encodeURIComponent(projectNo)}/target/project-fields`, {
-        method: 'PUT',
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
@@ -640,6 +721,29 @@ export function createStockPreparationProjectTargetApi(scope: IntegrationScope):
         body: JSON.stringify({}),
       })
       return readEnvelope(response, route, clampStockPrepProjectOverviewRefresh)
+    },
+    async ensureOverview() {
+      const route = 'POST …/project-overview/ensure'
+      const response = await apiFetch(`${TARGET_BASE}/project-overview/ensure`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      return readEnvelope(response, route, clampStockPrepProjectOverviewEnsure)
+    },
+    async probeOverviewReadable(handles: { sheetId: string; viewId: string }) {
+      // The host's own capability resolution for this sheet — the same read the workbench makes when it
+      // opens a sheet. Any refusal, any failure, any answer that is not an explicit `canRead: true` → false.
+      try {
+        const response = await apiFetch(`/api/multitable/context?sheetId=${encodeURIComponent(handles.sheetId)}&viewId=${encodeURIComponent(handles.viewId)}`)
+        if (!response?.ok) return false
+        const payload = await response.json().catch(() => null) as unknown
+        const data = isRecord(payload) && isRecord(payload.data) ? payload.data : null
+        const capabilities = data && isRecord(data.capabilities) ? data.capabilities : null
+        return capabilities?.canRead === true
+      } catch {
+        return false
+      }
     },
   }
 }
@@ -849,6 +953,8 @@ export async function saveStockPreparationProjectFields(
 
 export type StockPrepProjectOverviewRefreshOutcome =
   | { kind: 'done'; result: StockPrepProjectOverviewRefreshResult }
+  /** Fix round 1 (R6): the server's cooldown — nothing was done; try again in `retryAfterSeconds`. */
+  | { kind: 'cooled'; retryAfterSeconds: number }
   | { kind: 'refused'; status: number; code: string | null }
 
 export async function refreshStockPreparationProjectOverview(
@@ -856,9 +962,40 @@ export async function refreshStockPreparationProjectOverview(
 ): Promise<StockPrepProjectOverviewRefreshOutcome> {
   if (!api || typeof api.refreshOverview !== 'function') return { kind: 'refused', status: 0, code: null }
   try {
-    return { kind: 'done', result: await api.refreshOverview() }
+    const answer = await api.refreshOverview()
+    if (answer.fresh === false) return { kind: 'cooled', retryAfterSeconds: answer.retryAfterSeconds }
+    return { kind: 'done', result: answer }
   } catch (error) {
     return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
+  }
+}
+
+export type StockPrepProjectOverviewEnsureOutcome =
+  | { kind: 'done'; result: StockPrepProjectOverviewEnsureResult }
+  | { kind: 'refused'; status: number; code: string | null }
+
+/** Fix round 1 (R6): 「建立项目总览」 — the PULL tier creates the read-only overview; the server re-checks the gate. */
+export async function ensureStockPreparationProjectOverview(
+  api: StockPreparationProjectTargetApi | null,
+): Promise<StockPrepProjectOverviewEnsureOutcome> {
+  if (!api || typeof api.ensureOverview !== 'function') return { kind: 'refused', status: 0, code: null }
+  try {
+    return { kind: 'done', result: await api.ensureOverview() }
+  } catch (error) {
+    return { kind: 'refused', status: projectTargetErrorStatus(error), code: projectTargetErrorCode(error) }
+  }
+}
+
+/** Fix round 1 (R1): whether to offer 「打开项目总览」 — the host decides; no handle or no probe → no. */
+export async function probeStockPreparationProjectOverviewReadable(
+  api: StockPreparationProjectTargetApi | null,
+  handles: { sheetId: string; viewId: string } | null,
+): Promise<boolean> {
+  if (!handles || !api || typeof api.probeOverviewReadable !== 'function') return false
+  try {
+    return (await api.probeOverviewReadable(handles)) === true
+  } catch {
+    return false
   }
 }
 

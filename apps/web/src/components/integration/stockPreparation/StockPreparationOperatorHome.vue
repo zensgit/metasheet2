@@ -79,18 +79,34 @@
         {{ bi(oneSheetPerProject.zh, oneSheetPerProject.en) }}
         {{ bi(`已经有 ${projectTargets.count} 个项目建了表。`, `${projectTargets.count} project(s) have a sheet so far.`) }}
       </p>
-      <!-- 项目总览表 (S3, ADR §5, register R-37). 「刷新项目总览」 is the projectOverview.refresh control
-           of the workbench manifest (OPERATE): rendered only for a holder of that capability, and only
-           inside this block — i.e. once the list answered (switch on). 「打开项目总览」 is a plain deep
-           link to the overview's 「进行中」 view, rendered only when the server issued both handles; the
-           sheet is host-level read-only, so opening it grants nothing. -->
+      <!-- 项目总览表 (S3, ADR §5, register R-37), only inside this block — i.e. once the list answered
+           (switch on). Fix round 1:
+             「建立项目总览」 — the projectOverview.ensure control (PULL): only while the server says the
+               overview is ABSENT and only for a holder of that capability (R6);
+             「刷新项目总览」 — the projectOverview.refresh control (OPERATE): only once a STAMPED overview
+               exists (the server never creates one on a refresh);
+             「打开项目总览」 — a deep link to the 「进行中」 view, rendered only when the HOST answered that this
+               caller can read the sheet (R1: probed, never assumed — the sheet is host-level read-only, so
+               opening it grants nothing, but a link the caller cannot open is not offered). -->
       <p
-        v-if="canRefreshOverview || overviewOpenTarget"
+        v-if="showEnsureOverview || showRefreshOverview || overviewOpenTarget"
         class="sp-home__overview"
         data-testid="stock-prep-project-overview"
       >
         <button
-          v-if="canRefreshOverview"
+          v-if="showEnsureOverview"
+          type="button"
+          class="sp-home__link"
+          data-testid="stock-prep-project-overview-ensure"
+          :disabled="overviewBusy"
+          @click="onEnsureOverview"
+        >
+          {{ overviewBusy
+            ? bi(overviewPlain('overview_ensuring').zh, overviewPlain('overview_ensuring').en)
+            : bi(overviewPlain('overview_ensure_action').zh, overviewPlain('overview_ensure_action').en) }}
+        </button>
+        <button
+          v-if="showRefreshOverview"
           type="button"
           class="sp-home__link"
           data-testid="stock-prep-project-overview-refresh"
@@ -110,6 +126,13 @@
         >
           {{ bi(overviewPlain('overview_open_action').zh, overviewPlain('overview_open_action').en) }}
         </button>
+      </p>
+      <p
+        v-if="showOverviewAbsentHint"
+        class="sp-home__overview-result"
+        data-testid="stock-prep-project-overview-absent"
+      >
+        {{ bi(overviewPlain('overview_absent_hint').zh, overviewPlain('overview_absent_hint').en) }}
       </p>
       <p
         v-if="overviewNotice"
@@ -378,7 +401,7 @@
 // main action, and not a `--ms-color-primary` fill. The criterion then holds literally on this screen
 // too (zero filled primaries), and the one filled primary in the whole tab stays where §3 wireframe C
 // ③ puts it: the workspace's 「下一步」 bar.
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useLocale } from '../../../composables/useLocale'
 import EmptyState from '../../status/EmptyState.vue'
 import type { IntegrationScope } from '../../../services/integration/workbench'
@@ -418,8 +441,12 @@ import {
 } from '../../../services/integration/stockPreparation/plainLanguage'
 import {
   createStockPreparationProjectTargetApi,
+  ensureStockPreparationProjectOverview,
+  probeStockPreparationProjectOverviewReadable,
   refreshStockPreparationProjectOverview,
   stockPrepProjectOverviewOpenTarget,
+  type StockPrepProjectOverviewEnsureOutcome,
+  type StockPrepProjectOverviewEnsureResult,
   type StockPrepProjectOverviewRefreshOutcome,
   type StockPrepProjectOverviewRefreshResult,
   type StockPrepProjectTargetList,
@@ -456,6 +483,11 @@ const props = withDefaults(
      * archive / restore controls. Defaults to `false`: no principal, no button.
      */
     canRefreshOverview?: boolean
+    /**
+     * S3 fix round 1 (R6): whether THIS viewer holds `projectOverview.ensure` (PULL) — resolved by the
+     * parent from the same manifest mirror. Defaults to `false`.
+     */
+    canEnsureOverview?: boolean
     /** Test seam ONLY (S3) — the project-target client for the refresh. Null in production: built from `scope`. */
     targetApi?: StockPreparationProjectTargetApi | null
   }>(),
@@ -467,6 +499,7 @@ const props = withDefaults(
     canPull: true,
     projectTargets: null,
     canRefreshOverview: false,
+    canEnsureOverview: false,
     targetApi: null,
   },
 )
@@ -490,6 +523,8 @@ const emit = defineEmits<{
   (e: 'open-multitable', target?: { sheetId: string; viewId: string }): void
   /** S3: the overview was refreshed — the parent re-reads the registry list (counts, handles). */
   (e: 'overview-refreshed', result: StockPrepProjectOverviewRefreshResult): void
+  /** S3 fix round 1 (R6): the overview was created (or found) by a puller — the parent re-reads the list. */
+  (e: 'overview-ensured', result: StockPrepProjectOverviewEnsureResult): void
   /**
    * 从列表移除 (客户反馈 2026-09-24 #1a / A8) — informational only. Every OTHER mutation on this page
    * follows the contract at the top of `props`: this component reads nothing from storage and asks the
@@ -665,15 +700,45 @@ function overviewPlain(id: string): StockPrepPlainEntry {
   return stockPrepProjectOverviewPlain(id) ?? { zh: id, en: id }
 }
 
-/** The last refresh's answer on THIS page — it carries the handles before the parent's list re-read lands. */
-const refreshedOverview = ref<StockPrepProjectOverviewRefreshResult | null>(null)
+/** The last refresh / ensure answer on THIS page — it carries the handles before the parent's list re-read lands. */
+const refreshedOverview = ref<{ sheetId: string; activeViewId: string | null } | null>(null)
 
-/** 「打开项目总览」's target: the freshest pair of handles, never a half link. */
-const overviewOpenTarget = computed(() => stockPrepProjectOverviewOpenTarget(refreshedOverview.value)
-  ?? stockPrepProjectOverviewOpenTarget(props.projectTargets?.overview ?? null))
+function targetApiOf() {
+  return props.targetApi ?? createStockPreparationProjectTargetApi(props.scope)
+}
+
+/** The overview's handles as known now: this page's last answer, else the server's list (only a STAMPED one). */
+const overviewHandles = computed(() => stockPrepProjectOverviewOpenTarget(refreshedOverview.value)
+  ?? (props.projectTargets?.overview?.status === 'ready' ? stockPrepProjectOverviewOpenTarget(props.projectTargets.overview) : null))
+
+/**
+ * S3 fix round 1 (R1): may THIS caller open the overview? The HOST answers (the multitable context's
+ * `canRead` for the overview sheet) — a floor operator without the G1 READ grant is not offered a link
+ * the host would refuse. Re-asked whenever the handles change; a stale answer is dropped.
+ */
+const overviewReadable = ref(false)
+let overviewProbeGeneration = 0
+watch(overviewHandles, async (handles) => {
+  overviewProbeGeneration += 1
+  const generation = overviewProbeGeneration
+  overviewReadable.value = false
+  if (!handles) return
+  const readable = await probeStockPreparationProjectOverviewReadable(targetApiOf(), handles)
+  if (generation === overviewProbeGeneration) overviewReadable.value = readable
+}, { immediate: true })
+
+/** 「打开项目总览」's target: handles the host said this caller can read — never a half link, never a guess. */
+const overviewOpenTarget = computed(() => (overviewReadable.value ? overviewHandles.value : null))
+
+/** The overview exists (the server reported it stamped, or this page just ensured / refreshed it). */
+const overviewExists = computed(() => overviewHandles.value !== null)
+const overviewAbsent = computed(() => !overviewExists.value && props.projectTargets?.overview?.status === 'absent')
+const showRefreshOverview = computed(() => props.canRefreshOverview && overviewExists.value)
+const showEnsureOverview = computed(() => props.canEnsureOverview && overviewAbsent.value)
+const showOverviewAbsentHint = computed(() => overviewAbsent.value && !props.canEnsureOverview && props.canRefreshOverview)
 
 const overviewBusy = ref(false)
-const overviewNotice = ref<StockPrepProjectOverviewRefreshOutcome | null>(null)
+const overviewNotice = ref<StockPrepProjectOverviewRefreshOutcome | StockPrepProjectOverviewEnsureOutcome | null>(null)
 
 /**
  * 刷新项目总览 — a write-shaped click, so its answer is VISIBLE either way (G3): the one result line,
@@ -685,11 +750,31 @@ async function onRefreshOverview(): Promise<void> {
   overviewBusy.value = true
   overviewNotice.value = null
   try {
-    const outcome = await refreshStockPreparationProjectOverview(props.targetApi ?? createStockPreparationProjectTargetApi(props.scope))
+    const outcome = await refreshStockPreparationProjectOverview(targetApiOf())
     overviewNotice.value = outcome
     if (outcome.kind === 'done') {
-      refreshedOverview.value = outcome.result
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
       emit('overview-refreshed', outcome.result)
+    }
+  } finally {
+    overviewBusy.value = false
+  }
+}
+
+/**
+ * 建立项目总览 (S3 fix round 1, R6) — a puller's write-shaped click: the answer is visible either way. The
+ * server re-checks the PULL gate and the switch; on success the parent re-reads the list (handles + status).
+ */
+async function onEnsureOverview(): Promise<void> {
+  if (overviewBusy.value || !props.canEnsureOverview) return
+  overviewBusy.value = true
+  overviewNotice.value = null
+  try {
+    const outcome = await ensureStockPreparationProjectOverview(targetApiOf())
+    overviewNotice.value = outcome
+    if (outcome.kind === 'done') {
+      refreshedOverview.value = { sheetId: outcome.result.sheetId, activeViewId: outcome.result.activeViewId }
+      emit('overview-ensured', outcome.result)
     }
   } finally {
     overviewBusy.value = false
@@ -699,7 +784,10 @@ async function onRefreshOverview(): Promise<void> {
 const overviewNoticeText = computed<StockPrepPlainEntry>(() => {
   const notice = overviewNotice.value
   if (!notice) return { zh: '', en: '' }
-  if (notice.kind === 'done') return stockPrepProjectOverviewRefreshText(notice.result)
+  if (notice.kind === 'done') {
+    return 'fresh' in notice.result ? stockPrepProjectOverviewRefreshText(notice.result) : overviewPlain('overview_ensured')
+  }
+  if (notice.kind === 'cooled') return overviewPlain('overview_cooled')
   return stockPrepErrorPlain(notice.code ?? '')
 })
 

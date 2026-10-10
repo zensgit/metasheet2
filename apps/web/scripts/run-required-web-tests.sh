@@ -896,7 +896,7 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # 一个项目一张备料表 S3 (ADR adr-stock-prep-project-sheets-20261008 §5, register R-37, 2026-10-09): ONE
 # token added, `StockPreparationProjectOverview` — the NEW spec (apps/web/tests/
 # StockPreparationProjectOverview.spec.ts) for the project overview and the O2(a) project-level
-# columns: the client (GET / PUT project-fields — the PUT body carries ONLY the changed keys — and
+# columns: the client (GET / PATCH project-fields — the PATCH body carries ONLY the changed keys — and
 # POST project-overview/refresh), the cross-language posture mirror against the plugin's
 # `projectOverviewPosture` (the `*-vocab-mirror` precedent; 「已归档」 first), 今天要处理's 「已归档（N）」
 # section and 刷新 / 打开项目总览, 项目备料页's fields form (read / save / archived / 422), 项目查询's

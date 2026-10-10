@@ -857,6 +857,25 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '再点也一样 —— 请把这条报错代码给平台管理员核对总览表。各项目自己的备料表不受影响。',
     enNext: 'Pressing again will not change it — give a platform administrator this error code to check the overview sheet. Each project’s own sheet is unaffected.',
   }),
+  // S3 fix round 1 (R6 / R8 / E2).
+  STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT: Object.freeze({
+    zh: '项目总览表还没建,这次没有刷新,什么都没有改动。',
+    en: 'The project overview has not been created yet, so nothing was refreshed and nothing changed.',
+    zhNext: '请拉取人员点「建立项目总览」(建第一张项目表时也会自动建);建好之后再刷新。',
+    enNext: 'Ask a pull operator to press "Create the project overview" (it is also created with the first project sheet), then refresh.',
+  }),
+  STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED: Object.freeze({
+    zh: '这套服务器还不能把项目总览表设成只读,为保护数据这次什么都没有建、没有改。',
+    en: 'This server cannot make the project overview read-only yet, so nothing was created or changed, to protect the data.',
+    zhNext: '再点也一样 —— 需要平台管理员升级服务器;请把这条报错代码给管理员。',
+    enNext: 'Pressing again will not change it — a platform administrator has to upgrade the server; give an administrator this error code.',
+  }),
+  STOCK_PREPARATION_PROJECT_ROUTE_FAILED: Object.freeze({
+    zh: '这一步没有完成,请稍后再试一次。',
+    en: 'This step did not complete; try again in a moment.',
+    zhNext: '如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'If it keeps happening, give a platform administrator this error code.',
+  }),
   STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE: Object.freeze({
     zh: '这套系统还建不了项目总览表,这次没有刷新,什么都没有改动。',
     en: 'This system cannot create the project overview sheet yet, so nothing was refreshed and nothing changed.',
@@ -2465,6 +2484,22 @@ export const STOCK_PREP_PROJECT_OVERVIEW_PLAIN: Record<string, StockPrepPlainEnt
     en: '"Planned finish" must be a real date (year-month-day); nothing was saved.',
   }),
   overview_refresh_action: Object.freeze({ zh: '刷新项目总览', en: 'Refresh the project overview' }),
+  // S3 fix round 1 (R6): only a pull operator creates the overview; a refresh inside the cooldown does nothing.
+  overview_ensure_action: Object.freeze({ zh: '建立项目总览', en: 'Create the project overview' }),
+  overview_ensuring: Object.freeze({ zh: '正在建立…', en: 'Creating…' }),
+  overview_ensured: Object.freeze({ zh: '项目总览已建好。', en: 'The project overview is ready.' }),
+  overview_absent_hint: Object.freeze({
+    zh: '项目总览还没建;拉取人员建第一张项目表时会自动建,也可以由拉取人员点「建立项目总览」。',
+    en: 'The project overview has not been created yet; it is created with the first project sheet, or a pull operator can press "Create the project overview".',
+  }),
+  overview_cooled: Object.freeze({
+    zh: '刚刚刷新过,数字已经是最新的;过一会儿再刷新。',
+    en: 'It was refreshed a moment ago and the numbers are current; refresh again in a little while.',
+  }),
+  fields_invalid_control: Object.freeze({
+    zh: '负责人和备注里不能有换行、制表符这类看不见的控制字符,这次没有保存。',
+    en: 'Owner and note cannot contain invisible control characters such as line breaks or tabs; nothing was saved.',
+  }),
   overview_refreshing: Object.freeze({ zh: '正在刷新…', en: 'Refreshing…' }),
   overview_open_action: Object.freeze({ zh: '打开项目总览', en: 'Open the project overview' }),
   overview_truncated: Object.freeze({

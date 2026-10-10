@@ -5,8 +5,8 @@ import { createRequire } from 'node:module'
 // 一个项目一张备料表 — S3 项目总览表 + 项目级列 (ADR adr-stock-prep-project-sheets-20261008 §5;
 // register R-37).
 //
-//   PO-CLIENT  GET / PUT …/target/project-fields and POST …/project-overview/refresh: verbs, paths, the
-//              scope query on the read only, the PUT body = ONLY the changed keys, the strict clamps, a
+//   PO-CLIENT  GET / PATCH …/target/project-fields and POST …/project-overview/refresh | ensure: verbs, paths,
+//              the scope query on the read only, the PATCH body = ONLY the changed keys, the strict clamps, a
 //              422's `details.field` clamped to the whitelist (never the value), DISABLED recognised, a
 //              malformed 2xx never a state; the registry list's new `overview` handles and counts.
 //   PO-MIRROR  the cross-language posture mirror: the web's `stockPrepPosture` and the plugin's
@@ -23,6 +23,11 @@ import { createRequire } from 'node:module'
 //   PO-ALIGN   the three new manifest controls render for EXACTLY the actors the SERVER grants (the plugin
 //              module, imported live), on the surface they live on; the client rows are byte-equal to the
 //              plugin's (F-01 for these rows).
+//
+// FIX ROUND 1 (register R-37): PATCH (R9); the refresh's `fresh: false` cooldown answer and the 409 ABSENT
+// line (R6); 「建立项目总览」 (PULL) only while the server says the overview is absent; a handle only for a
+// STAMPED overview (`status: 'ready'`, R8b); 「打开项目总览」 only when the HOST says this caller can read it
+// (R1, the multitable context probe), never assumed.
 //
 // Synthetic, obviously-fake project numbers and texts only.
 
@@ -70,9 +75,11 @@ import {
   StockPreparationProjectTargetCallError,
   clampStockPrepProjectFieldsSaved,
   clampStockPrepProjectFieldsState,
+  clampStockPrepProjectOverviewEnsure,
   clampStockPrepProjectOverviewRefresh,
   clampStockPrepProjectTargetList,
   createStockPreparationProjectTargetApi,
+  probeStockPreparationProjectOverviewReadable,
   isStockPrepProjectSheetsDisabled,
   saveStockPreparationProjectFields,
   stockPrepProjectFieldsChangedPatch,
@@ -133,7 +140,8 @@ const SYN_DAY = '2026-11-30'
 const COUNTS_AT = '2026-10-09T06:07:00.000Z'
 
 const FLOOR = ['stock-prep:read', 'stock-prep:operate']
-const S3_CAPABILITIES = ['projectFields.read', 'projectFields.update', 'projectOverview.refresh']
+const S3_CAPABILITIES = ['projectFields.read', 'projectFields.update', 'projectOverview.refresh', 'projectOverview.ensure']
+const READY_OVERVIEW = { status: 'ready' as const, sheetId: OVERVIEW_SHEET, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW }
 
 function ok(data: unknown, status = 200): Response {
   return new Response(JSON.stringify({ ok: true, data }), { status })
@@ -172,8 +180,8 @@ function fieldsState(status: 'active' | 'archived' = 'active', overrides: Partia
 
 function refreshResult(overrides: Partial<StockPrepProjectOverviewRefreshResult> = {}): StockPrepProjectOverviewRefreshResult {
   return {
+    fresh: true,
     sheetId: OVERVIEW_SHEET,
-    sheetCreated: true,
     activeViewId: OVERVIEW_ACTIVE_VIEW,
     archivedViewId: OVERVIEW_ARCHIVED_VIEW,
     projectCount: 3,
@@ -183,6 +191,8 @@ function refreshResult(overrides: Partial<StockPrepProjectOverviewRefreshResult>
     rowsCreated: 3,
     rowsUpdated: 0,
     rowsUnchanged: 0,
+    rowsRemovedDuplicate: 0,
+    rowsRemovedOrphan: 0,
     truncated: false,
     ledgerReady: true,
     countsAt: COUNTS_AT,
@@ -195,7 +205,7 @@ function registryList(overview: Partial<NonNullable<StockPrepProjectTargetList['
     count: 1,
     limit: 200,
     items: [{ projectNo: PROJECT, status: 'active', sheetId: SHEET, rowCount: 12, activeRowCount: 10, countsBounded: false }],
-    overview: { sheetId: null, activeViewId: null, archivedViewId: null, ...overview },
+    overview: { status: 'absent', sheetId: null, activeViewId: null, archivedViewId: null, ...overview },
   }
 }
 
@@ -315,11 +325,14 @@ function routeBoardApi(options: {
   fieldsPut?: (body: unknown) => Response
   list?: () => Response
   directory?: () => Response
+  context?: () => Response
 } = {}): void {
   h.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
     const method = String(init?.method ?? 'GET')
+    // Fix round 1 (R1): the HOST's own answer to "may this caller read the overview?".
+    if (path.startsWith('/api/multitable/context')) return (options.context ?? (() => ok({ capabilities: { canRead: true } })))()
     if (path.includes('/target/project-fields')) {
-      if (method === 'PUT') return (options.fieldsPut ?? (() => refused(404, 'NOT_ROUTED_IN_THIS_SUITE')))(init?.body ? JSON.parse(String(init.body)) : null)
+      if (method === 'PATCH') return (options.fieldsPut ?? (() => refused(404, 'NOT_ROUTED_IN_THIS_SUITE')))(init?.body ? JSON.parse(String(init.body)) : null)
       return (options.fieldsGet ?? (() => ok(fieldsState())))()
     }
     if (path.includes('/project-targets')) return (options.list ?? (() => ok(registryList())))()
@@ -375,7 +388,7 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
       .toEqual({ responsibleLabel: null, note: null, plannedFinishOn: null })
   })
 
-  it('PUT project-fields: NO query, the body carries ONLY the keys in the patch (trimmed; empty = null)', async () => {
+  it('PATCH project-fields: NO query, the body carries ONLY the keys in the patch (trimmed; empty = null)', async () => {
     h.apiFetch.mockImplementation(async () => ok({ projectNo: PROJECT, status: 'active', fields: { responsibleLabel: SYN_OWNER, note: 'n2', plannedFinishOn: null }, updatedAt: '2026-10-09T05:30:00.000Z', changed: ['note', 'plannedFinishOn'] }))
     const api = createStockPreparationProjectTargetApi(SCOPE)
     const saved = await api.updateProjectFields!(PROJECT, { note: '  n2 ', plannedFinishOn: '' })
@@ -384,9 +397,9 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
     // A key outside the whitelist never leaves the browser.
     await api.updateProjectFields!(PROJECT, { note: null, sneaky: 'x' } as never)
     expect(callsOf('/project-fields')).toEqual([
-      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PUT', body: JSON.stringify({ note: 'n2', plannedFinishOn: null }) },
-      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PUT', body: JSON.stringify({ responsibleLabel: SYN_OWNER }) },
-      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PUT', body: JSON.stringify({ note: null }) },
+      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PATCH', body: JSON.stringify({ note: 'n2', plannedFinishOn: null }) },
+      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PATCH', body: JSON.stringify({ responsibleLabel: SYN_OWNER }) },
+      { path: `/api/integration/stock-preparation/projects/${PROJECT}/target/project-fields`, method: 'PATCH', body: JSON.stringify({ note: null }) },
     ])
     // The write only ever lands on an ACTIVE sheet; `changed` is clamped to the whitelist.
     expect(clampStockPrepProjectFieldsSaved({ status: 'archived', fields: {}, changed: [] })).toBeNull()
@@ -416,15 +429,43 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
     expect(clampStockPrepProjectOverviewRefresh({ ...refreshResult(), sheetId: null })).toBeNull()
     expect(clampStockPrepProjectOverviewRefresh({ ...refreshResult(), countsAt: 'not a time' })).toBeNull()
     expect(clampStockPrepProjectOverviewRefresh({ ...refreshResult(), truncated: 'no' })).toBeNull()
+    expect(clampStockPrepProjectOverviewRefresh({ ...refreshResult(), fresh: undefined })).toBeNull()
+    // Fix round 1 (R6): the cooldown answer — nothing was done; strict on its two numbers.
+    expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })).toEqual({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })
+    expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 60 })).toBeNull()
     h.apiFetch.mockImplementation(async () => ok({}))
     const malformed = await api.refreshOverview!().catch((caught) => caught)
     expect((malformed as StockPreparationProjectTargetCallError).malformed).toBe(true)
   })
 
+  it('POST ensure (fix round 1, R6): NO query, an empty body, a strict clamp on the handle and `created`', async () => {
+    h.apiFetch.mockImplementation(async () => ok({ sheetId: OVERVIEW_SHEET, created: true, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW, grant: { attempted: true, skipped: null, roleCount: 2, granted: 2, alreadyGranted: 0 } }))
+    const api = createStockPreparationProjectTargetApi(SCOPE)
+    expect(await api.ensureOverview!()).toEqual({ sheetId: OVERVIEW_SHEET, created: true, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW, grant: { attempted: true, skipped: null, roleCount: 2, granted: 2, alreadyGranted: 0 } })
+    expect(callsOf('/project-overview')).toEqual([{ path: '/api/integration/stock-preparation/project-overview/ensure', method: 'POST', body: '{}' }])
+    expect(clampStockPrepProjectOverviewEnsure({ created: true })).toBeNull()
+    expect(clampStockPrepProjectOverviewEnsure({ sheetId: OVERVIEW_SHEET })).toBeNull()
+  })
+
+  it('the readability probe (fix round 1, R1) asks the HOST\'s multitable context and believes only an explicit canRead: true', async () => {
+    const api = createStockPreparationProjectTargetApi(SCOPE)
+    const handles = { sheetId: OVERVIEW_SHEET, viewId: OVERVIEW_ACTIVE_VIEW }
+    h.apiFetch.mockImplementation(async () => ok({ capabilities: { canRead: true, canEditRecord: false } }))
+    expect(await api.probeOverviewReadable!(handles)).toBe(true)
+    expect(callsOf('/api/multitable/context').map((call) => call.path)).toEqual([`/api/multitable/context?sheetId=${OVERVIEW_SHEET}&viewId=${OVERVIEW_ACTIVE_VIEW}`])
+    for (const answer of [() => refused(403, 'FORBIDDEN'), () => ok({ capabilities: { canRead: false } }), () => ok({ capabilities: {} }), () => ok({}), () => new Response('not json', { status: 200 })]) {
+      h.apiFetch.mockImplementation(async () => answer())
+      expect(await api.probeOverviewReadable!(handles)).toBe(false)
+    }
+    h.apiFetch.mockImplementation(async () => { throw new Error('network down') })
+    expect(await api.probeOverviewReadable!(handles)).toBe(false)
+    expect(await probeStockPreparationProjectOverviewReadable(api, null)).toBe(false)
+  })
+
   it('all three answer the switch-off 404 as DISABLED; a 422 names the FIELD (whitelisted) and never carries the value', async () => {
     h.apiFetch.mockImplementation(async () => refused(404, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
     const api = createStockPreparationProjectTargetApi(SCOPE)
-    for (const call of [() => api.getProjectFields!(PROJECT), () => api.updateProjectFields!(PROJECT, { note: 'x' }), () => api.refreshOverview!()]) {
+    for (const call of [() => api.getProjectFields!(PROJECT), () => api.updateProjectFields!(PROJECT, { note: 'x' }), () => api.refreshOverview!(), () => api.ensureOverview!()]) {
       const error = await call().catch((caught) => caught)
       expect(isStockPrepProjectSheetsDisabled(error)).toBe(true)
     }
@@ -442,12 +483,19 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
     const list = clampStockPrepProjectTargetList({
       items: [{ projectNo: PROJECT, status: 'active', sheetId: SHEET, rowCount: 12, activeRowCount: 10, countsBounded: false, missingComponentsCount: 2, procurementOpenCount: 5, warehouseOpenCount: 7, lastPullCode: 'TARGET_SCHEMA_INCOMPLETE' }],
       limit: 200,
-      overview: { sheetId: OVERVIEW_SHEET, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW },
+      overview: { ...READY_OVERVIEW },
     })!
-    expect(list.overview).toEqual({ sheetId: OVERVIEW_SHEET, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW })
+    expect(list.overview).toEqual(READY_OVERVIEW)
     expect(list.items[0]).toMatchObject({ missingComponentsCount: 2, procurementOpenCount: 5, warehouseOpenCount: 7, lastPullCode: 'TARGET_SCHEMA_INCOMPLETE' })
     const older = clampStockPrepProjectTargetList({ items: [{ projectNo: PROJECT, status: 'active', sheetId: SHEET }], limit: 200 })!
-    expect(older.overview).toEqual({ sheetId: null, activeViewId: null, archivedViewId: null })
+    expect(older.overview).toEqual({ status: 'unavailable', sheetId: null, activeViewId: null, archivedViewId: null })
+    // Fix round 1 (R8b): handles are honoured ONLY with `status: 'ready'` — any other status carries none.
+    for (const status of ['absent', 'not_stamped', 'unavailable', 'bogus', undefined]) {
+      const list2 = clampStockPrepProjectTargetList({ items: [], limit: 200, overview: { ...READY_OVERVIEW, status } })!
+      expect(list2.overview?.sheetId, String(status)).toBeNull()
+      expect(list2.overview?.activeViewId, String(status)).toBeNull()
+    }
+    expect(clampStockPrepProjectTargetList({ items: [], limit: 200, overview: { status: 'ready', sheetId: null } })!.overview?.status).toBe('unavailable')
     expect(older.items[0]).toMatchObject({ missingComponentsCount: null, procurementOpenCount: null, warehouseOpenCount: null, lastPullCode: null })
   })
 
@@ -457,6 +505,10 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
       'STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED',
       'STOCK_PREPARATION_PROJECT_OVERVIEW_SCHEMA_INCOMPLETE',
       'STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE',
+      // Fix round 1.
+      'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT',
+      'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED',
+      'STOCK_PREPARATION_PROJECT_ROUTE_FAILED',
     ]) {
       expect(STOCK_PREP_PROJECT_TARGET_ERROR_CODES).toContain(code)
       const entry = STOCK_PREP_ERROR_PLAIN[code]
@@ -598,19 +650,20 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
     expect(testid(root, 'stock-prep-operator-home-archived')).not.toBeNull()
   })
 
-  it('刷新项目总览: busy while in flight, then 「已刷新 N 个项目（截至 hh:mm）」; the open link follows the refresh', async () => {
+  it('刷新项目总览: busy while in flight, then 「已刷新 N 个项目（截至 hh:mm）」; the open link is offered once the host says it is readable', async () => {
     let resolveRefresh: (value: StockPrepProjectOverviewRefreshResult) => void = () => undefined
     const refreshOverview = vi.fn(() => new Promise<StockPrepProjectOverviewRefreshResult>((resolve) => { resolveRefresh = resolve }))
+    const probeOverviewReadable = vi.fn(async () => true)
     const onOverviewRefreshed = vi.fn()
     const onOpenMultitable = vi.fn()
     const root = mount(StockPreparationOperatorHome as Component, {
-      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(),
-      canRefreshOverview: true, targetApi: { refreshOverview } as unknown as StockPreparationProjectTargetApi,
+      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(READY_OVERVIEW),
+      canRefreshOverview: true, targetApi: { refreshOverview, probeOverviewReadable } as unknown as StockPreparationProjectTargetApi,
       onOverviewRefreshed, onOpenMultitable,
     })
     await flush()
-    // No handles yet (never refreshed) → no open link.
-    expect(testid(root, 'stock-prep-project-overview-open')).toBeNull()
+    // The host was ASKED (R1) about exactly the overview's handles.
+    expect(probeOverviewReadable).toHaveBeenCalledWith({ sheetId: OVERVIEW_SHEET, viewId: OVERVIEW_ACTIVE_VIEW })
     ;(testid(root, 'stock-prep-project-overview-refresh') as HTMLButtonElement).click()
     await nextTick()
     expect(disabled(root, 'stock-prep-project-overview-refresh')).toBe(true)
@@ -631,10 +684,10 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
   })
 
   it('a refused refresh shows the refusal\'s own plain line and code; DISABLED reads as the switch-off sentence', async () => {
-    for (const [code, status] of [['STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED', 409], ['STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', 404]] as const) {
+    for (const [code, status] of [['STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED', 503], ['STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', 404]] as const) {
       const refreshOverview = vi.fn(async () => { throw new StockPreparationProjectTargetCallError(status, 'POST', { code }) })
       const root = mount(StockPreparationOperatorHome as Component, {
-        scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(),
+        scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(READY_OVERVIEW),
         canRefreshOverview: true, targetApi: { refreshOverview } as unknown as StockPreparationProjectTargetApi,
       })
       await flush()
@@ -647,25 +700,57 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
     }
   })
 
-  it('the open link renders from the list\'s handles only when BOTH are present; nothing renders with the switch off', async () => {
+  it('a refresh inside the server\'s cooldown says so and does nothing else (fix round 1, R6)', async () => {
+    const refreshOverview = vi.fn(async () => ({ fresh: false as const, cooldownSeconds: 60, retryAfterSeconds: 37 }))
+    const onOverviewRefreshed = vi.fn()
+    const root = mount(StockPreparationOperatorHome as Component, {
+      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(READY_OVERVIEW),
+      canRefreshOverview: true, targetApi: { refreshOverview } as unknown as StockPreparationProjectTargetApi, onOverviewRefreshed,
+    })
+    await flush()
+    await press(root, 'stock-prep-project-overview-refresh')
+    const result = testid(root, 'stock-prep-project-overview-result')
+    expect(result?.dataset.result).toBe('cooled')
+    expect(result?.textContent).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled.zh)
+    expect(onOverviewRefreshed).not.toHaveBeenCalled()
+  })
+
+  it('「打开项目总览」 is offered ONLY when the host says this caller can read the overview (fix round 1, R1); never for a non-ready handle', async () => {
     const onOpenMultitable = vi.fn()
+    // (a) readable: a floor operator WITHOUT the refresh right gets the link (a deep link grants nothing).
+    let probe = vi.fn(async () => true)
     let root = mount(StockPreparationOperatorHome as Component, {
       scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true,
-      projectTargets: registryList({ sheetId: OVERVIEW_SHEET, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW }),
+      projectTargets: registryList(READY_OVERVIEW), targetApi: { probeOverviewReadable: probe } as unknown as StockPreparationProjectTargetApi,
       onOpenMultitable,
     })
     await flush()
-    // A floor operator WITHOUT the refresh right still gets the link (a deep link grants nothing).
     expect(testid(root, 'stock-prep-project-overview-refresh')).toBeNull()
     await press(root, 'stock-prep-project-overview-open')
     expect(onOpenMultitable).toHaveBeenCalledWith({ sheetId: OVERVIEW_SHEET, viewId: OVERVIEW_ACTIVE_VIEW })
     unmountAll()
+    // (b) the host says NO (no read grant on the overview): no link, however the handles look.
+    probe = vi.fn(async () => false)
     root = mount(StockPreparationOperatorHome as Component, {
-      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList({ sheetId: OVERVIEW_SHEET }),
+      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true,
+      projectTargets: registryList(READY_OVERVIEW), targetApi: { probeOverviewReadable: probe } as unknown as StockPreparationProjectTargetApi,
     })
     await flush()
+    expect(probe).toHaveBeenCalledTimes(1)
     expect(testid(root, 'stock-prep-project-overview-open')).toBeNull()
     unmountAll()
+    // (c) handles without a READY status (or half handles): no probe, no link.
+    for (const overview of [{ ...READY_OVERVIEW, status: 'not_stamped' as const }, { status: 'ready' as const, sheetId: OVERVIEW_SHEET, activeViewId: null, archivedViewId: null }]) {
+      probe = vi.fn(async () => true)
+      root = mount(StockPreparationOperatorHome as Component, {
+        scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(overview),
+        targetApi: { probeOverviewReadable: probe } as unknown as StockPreparationProjectTargetApi,
+      })
+      await flush()
+      expect(probe).not.toHaveBeenCalled()
+      expect(testid(root, 'stock-prep-project-overview-open')).toBeNull()
+      unmountAll()
+    }
     root = mount(StockPreparationOperatorHome as Component, { scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, canRefreshOverview: true })
     await flush()
     expect(testid(root, 'stock-prep-project-overview-refresh')).toBeNull()
@@ -673,11 +758,12 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
   })
 
   it('the board routes 「打开项目总览」 as-is and 「打开备料多维表」 through its fill-target resolver, unchanged', async () => {
-    const list = registryList({ sheetId: OVERVIEW_SHEET, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW })
+    const list = registryList(READY_OVERVIEW)
     const targetApi = {
       get: vi.fn(async () => targetState()),
       create: vi.fn(async () => { throw new Error('unexpected create') }),
       list: vi.fn(async () => list),
+      probeOverviewReadable: vi.fn(async () => true),
     } as StockPreparationProjectTargetApi
     routeBoardApi({ directory: () => ok({ ...legacyDirectory(), fillTarget: { sheetId: 'sheet_syn_env', viewId: 'view_syn_env' } }) })
     const onOpenMultitable = vi.fn()
@@ -715,7 +801,7 @@ describe('PO-BOARD — 项目备料页\'s project-level fields', () => {
     expect(disabled(root, 'stock-prep-project-fields-save')).toBe(false)
     await press(root, 'stock-prep-project-fields-save')
     expect(putBody).toEqual({ note: 'n2' })
-    expect(callsOf('/project-fields').filter((call) => call.method === 'PUT').map((call) => call.body)).toEqual([JSON.stringify({ note: 'n2' })])
+    expect(callsOf('/project-fields').filter((call) => call.method === 'PATCH').map((call) => call.body)).toEqual([JSON.stringify({ note: 'n2' })])
     const result = testid(root, 'stock-prep-project-fields-result')
     expect(result?.dataset.result).toBe('saved')
     expect(result?.textContent).toContain('已保存')
@@ -768,6 +854,8 @@ describe('PO-BOARD — 项目备料页\'s project-level fields', () => {
     for (const [answer, expectZh, field] of [
       [() => refused(422, 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID', { field: 'plannedFinishOn' }), STOCK_PREP_PROJECT_OVERVIEW_PLAIN.fields_invalid_plannedFinishOn.zh, 'plannedFinishOn'],
       [() => refused(409, 'STOCK_PREPARATION_PROJECT_ARCHIVED'), STOCK_PREP_PROJECT_OVERVIEW_PLAIN.fields_archived_refused.zh, ''],
+      // Fix round 1 (R13): the 400 control-character refusal reads as its own line, whichever field it names.
+      [() => refused(400, 'STOCK_PREPARATION_PROJECT_FIELDS_INVALID', { field: 'note', reason: 'control_character' }), STOCK_PREP_PROJECT_OVERVIEW_PLAIN.fields_invalid_control.zh, 'note'],
       [() => refused(404, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'), STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_SHEETS_DISABLED.zh, ''],
     ] as const) {
       h.apiFetch.mockReset()
@@ -884,7 +972,7 @@ describe('PO-ALIGN — rendered S3 controls equal granted capabilities', () => {
    * (`gated: false`) — the second isolates the CLIENT's own guard: with the server out of the way,
    * only the page's capability check can keep a control off screen.
    */
-  function targetApi(options: { gated: boolean; list?: StockPrepProjectTargetList }): StockPreparationProjectTargetApi & { getProjectFields: ReturnType<typeof vi.fn>; refreshOverview: ReturnType<typeof vi.fn> } {
+  function targetApi(options: { gated: boolean; list?: StockPrepProjectTargetList }): StockPreparationProjectTargetApi & { getProjectFields: ReturnType<typeof vi.fn>; refreshOverview: ReturnType<typeof vi.fn>; ensureOverview: ReturnType<typeof vi.fn> } {
     const granted = (capability: string) => !options.gated || serverGranted(h.roles, h.permissions).includes(capability)
     return {
       get: vi.fn(async () => {
@@ -908,23 +996,29 @@ describe('PO-ALIGN — rendered S3 controls equal granted capabilities', () => {
         if (!granted('projectOverview.refresh')) throw forbidden()
         return refreshResult()
       }),
+      ensureOverview: vi.fn(async () => {
+        if (!granted('projectOverview.ensure')) throw forbidden()
+        return { sheetId: OVERVIEW_SHEET, created: true, activeViewId: OVERVIEW_ACTIVE_VIEW, archivedViewId: OVERVIEW_ARCHIVED_VIEW, grant: { attempted: false, skipped: 'no_roles_configured', roleCount: 0, granted: 0, alreadyGranted: 0 } }
+      }),
+      probeOverviewReadable: vi.fn(async () => true),
     }
   }
 
-  it('the client rows for the three capabilities are BYTE-EQUAL to the plugin module\'s (F-01 for these rows)', () => {
+  it('the client rows for the four S3 capabilities are BYTE-EQUAL to the plugin module\'s (F-01 for these rows)', () => {
     const pick = (rows: readonly { capability: string }[]) => rows.filter((row) => S3_CAPABILITIES.includes(row.capability))
     const server = pick(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES)
     expect(server.map((row) => row.capability)).toEqual(S3_CAPABILITIES)
     expect(JSON.stringify(pick(STOCK_PREP_WORKBENCH_CAPABILITIES))).toBe(JSON.stringify(server))
     expect((server as Array<{ code: string; method: string; control: string }>).map((row) => [row.code, row.method, row.control])).toEqual([
       ['stock-prep:operate', 'GET', 'stock-prep-project-fields'],
-      ['stock-prep:operate', 'PUT', 'stock-prep-project-fields-save'],
+      ['stock-prep:operate', 'PATCH', 'stock-prep-project-fields-save'],
       ['stock-prep:operate', 'POST', 'stock-prep-project-overview-refresh'],
+      ['stock-prep:pull', 'POST', 'stock-prep-project-overview-ensure'],
     ])
     // Position: right after the S4 lifecycle rows, in both manifests.
     const order = (rows: readonly { capability: string }[]) => rows.map((row) => row.capability)
     const clientOrder = order(STOCK_PREP_WORKBENCH_CAPABILITIES)
-    expect(clientOrder.slice(clientOrder.indexOf('projectTarget.restore'), clientOrder.indexOf('projectTarget.restore') + 4))
+    expect(clientOrder.slice(clientOrder.indexOf('projectTarget.restore'), clientOrder.indexOf('projectTarget.restore') + 5))
       .toEqual(['projectTarget.restore', ...S3_CAPABILITIES])
     expect(clientOrder).toEqual(order(backendAccess.STOCK_PREP_WORKBENCH_CAPABILITIES))
   })
@@ -985,8 +1079,9 @@ describe('PO-ALIGN — rendered S3 controls equal granted capabilities', () => {
         routeBoardApi()
         resetStockPreparationOperatorHomeDirectoryThrottle()
         // The list answers everyone here so the button's OWN guard is what decides (the list's gate is PT-ALIGN's).
+        // A STAMPED overview exists (fix round 1: the refresh renders only then).
         const api = targetApi({ gated })
-        api.list = vi.fn(async () => registryList())
+        api.list = vi.fn(async () => registryList(READY_OVERVIEW))
         const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectTargetApi: api })
         await flush()
         expect(testid(root, 'stock-prep-project-target-list'), `${actor.name}: the list line is on screen`).not.toBeNull()
@@ -1002,5 +1097,48 @@ describe('PO-ALIGN — rendered S3 controls equal granted capabilities', () => {
     }
     // Anti-vacuity: floor, puller, stock-prep:admin and the platform admin — in both runs.
     expect(rendered).toBe(8)
+  })
+
+  it('建立项目总览 (fix round 1, R6) renders iff the SERVER grants projectOverview.ensure — and only while the overview is absent; every rendered button is actionable', async () => {
+    let rendered = 0
+    for (const gated of [true, false]) {
+      for (const actor of ACTORS) {
+        h.roles = actor.roles
+        h.permissions = actor.permissions
+        const granted = serverGranted(actor.roles, actor.permissions)
+        routeBoardApi()
+        resetStockPreparationOperatorHomeDirectoryThrottle()
+        const api = targetApi({ gated })
+        api.list = vi.fn(async () => registryList())
+        const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectTargetApi: api })
+        await flush()
+        const button = testid(root, 'stock-prep-project-overview-ensure')
+        expect(button !== null, `${actor.name} (gated=${gated}): ensure`).toBe(granted.includes('projectOverview.ensure'))
+        // A refresh holder who cannot create it is told who can.
+        expect(testid(root, 'stock-prep-project-overview-absent') !== null, `${actor.name}: absent hint`)
+          .toBe(granted.includes('projectOverview.refresh') && !granted.includes('projectOverview.ensure'))
+        if (button) {
+          rendered += 1
+          await press(root, 'stock-prep-project-overview-ensure')
+          const result = testid(root, 'stock-prep-project-overview-result')
+          expect(result?.dataset.result, actor.name).toBe('done')
+          expect(result?.textContent).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_ensured.zh)
+          expect(api.ensureOverview).toHaveBeenCalledTimes(1)
+        }
+        unmountAll()
+      }
+    }
+    // Anti-vacuity: puller, stock-prep:admin and the platform admin — in both runs.
+    expect(rendered).toBe(6)
+    // A READY overview offers no ensure button to anyone.
+    h.roles = ['admin']
+    h.permissions = ['integration:admin']
+    routeBoardApi()
+    resetStockPreparationOperatorHomeDirectoryThrottle()
+    const api = targetApi({ gated: true })
+    api.list = vi.fn(async () => registryList(READY_OVERVIEW))
+    const root = mount(StockPreparationProjectBoardView as Component, { scope: SCOPE, projectTargetApi: api })
+    await flush()
+    expect(testid(root, 'stock-prep-project-overview-ensure')).toBeNull()
   })
 })
