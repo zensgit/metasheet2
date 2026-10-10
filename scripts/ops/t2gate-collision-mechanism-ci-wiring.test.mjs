@@ -24,6 +24,8 @@ import {
 // scripts/ops guard by name, so a standalone new file would run nowhere. Same precedent as this
 // file hosting the shared helper's mutation coverage (see the header note).
 import './python-interpreter.test.mjs'
+// File-input byte preservation, fail-closed errors and cleanup share this required CI home.
+import './ci-realdb-yaml-input.test.mjs'
 
 // `extractTestExcludeArrayBody` / `quotedExcludeEntries` / `isQuotedInTestExclude` originated in
 // THIS file and are re-exported here (via the shared module) so any pre-existing external import
