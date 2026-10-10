@@ -2,15 +2,25 @@
 
 ## 当前结论
 
-冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支已先后正常合并 `main` `548c1d5834`、`0f17cf6085` 与最新冻结快照 `20c705add7`，均无冲突；测试链两边合并后无丢项，本地 merge/CI 守卫与 provenance 检查均有结果，详见下文。
+冻结的本地验收回执记录了本切片若干代码修复与合成验证；它明确没有声称 20 项 QA 问题全部修复。实现分支已先后正常合并 `main` `548c1d5834`、`0f17cf6085` 、`20c705add7` 与当前冻结快照 `e0205875d7`，均无冲突；测试链两边合并后无丢项，本地 merge/CI 守卫与 provenance 检查均有结果，详见下文。
 
 本轮独立审阅发现并修复一个 P2：跨午夜的旧刷新，以及审批后迟到的历史请求，均可能覆盖新一天的本人签到状态。两个入口已补齐开始时刻/最终规则时区保护；反例在修复前失败、修复后通过，完整前端回归与 Astra 最终复核通过。原 QA 环境、真实历史、性能与远端 CI 尚未验证，不能声称附件 20 项全部解决。
 
-首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。本轮合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，最终回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。本文件后续提交仅承载文档/计数回执，代码身份以上述提交和源文件哈希为准。
+首轮回执：[`verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)，基线 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，首轮修复 `62d6801c5f`。实现分支 `codex/attendance-qa-completion-20261009`，早期正常合并提交 `c9674c0ab3`，竞态修复提交 `0841cf65ab740b9191ecfcc5cd8f12f87871ebb0`，代码树 `e37e1d079ffb790460930051f50ed2d8ee6f2f98`。该批合并检查见 [`merge-alignment-results.json`](../../artifacts/attendance-qa-goal-20261010/merge-alignment-results.json)，对应回执见 [`final-verification.json`](../../artifacts/attendance-qa-goal-20261010/final-verification.json)。各批证据保留自己的冻结代码身份；当前代码见下一节。
 
-## 目标恢复后的最新 main 对齐
+## #6285 对齐后的当前代码
 
-目标状态已恢复为 `active`。最新正常合并快照为 `20c705add7c86fdabb486e834735f9a1913e6de2`，合并提交 `7eff381b9b37df0bff684be8045d13246a504713`，树 `6d440078048cf68e1a87807d7065458f44577904`；无冲突，未 rebase、未强推。
+本地正常合并固定 main 快照 `e0205875d7e523466f68f2ecb0ecd19c25b9cbbf`，合并提交 `895acd06b7678d7d2add1eac4f183318eee28591`，树 `177793708e5b8fbdf724b767db97f36cb4f46da0`；无冲突、无手工源码解冲突、未 rebase 或强推。
+
+#6285 修改员工/管理页面样式，并将日历覆盖配置移到节假日页面，故完整 View 哈希已变化。Sol 比对确认 11 个关键保护函数/监听器、today/prefill 两个纯 helper 与 dashboard 整文件保持不变，测试链并集无丢项。Astra 独立核对实际 staged blobs/tree：员工模板保留，四申请卡行为代码不变，未发现新的兼容性缺陷；该结论不等于独立执行本轮测试。
+
+在上述树上使用 Node 20 新跑 5 文件 **287 通过、0 失败/跳过**（admin 145、dashboard 102、presentation 21、task home 10、today helper 9）；完整 web 类型脚本通过，包含 app、approval verification 和 stock-prep verification。既有本地合成 Chromium 8 项桌面/手机用例、Vite 构建与 provenance 通过；构建保留原有 large-chunk 提示。未改动的 backend/数据库/ops 套件未重跑，继续保留原冻结身份；本轮浏览器 8 项不包括 #6285 新增的 admin 浏览器用例。
+
+证据：[`attendance-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/attendance-main-alignment.json)、[`attendance-main-adversarial-review.json`](../../artifacts/attendance-qa-goal-20261010/attendance-main-adversarial-review.json)。本地日志为 `attendance-main-affected-frontend.log`、`attendance-main-web-typecheck.log`、`attendance-main-browser.log`、`attendance-main-web-build.log` 和 `attendance-main-provenance.log`。公开 Draft PR/远端 CI 仍待批准，PR 合并、部署与真实历史操作保持 HOLD。
+
+## 目标恢复后的 20c705 main 对齐
+
+当次目标状态已恢复为 `active`。当次正常合并快照为 `20c705add7c86fdabb486e834735f9a1913e6de2`，合并提交 `7eff381b9b37df0bff684be8045d13246a504713`，树 `6d440078048cf68e1a87807d7065458f44577904`；无冲突，未 rebase、未强推。
 
 这次 main 新增 #6294 的审批 return-candidates 浏览器验证与 #6248 的 task design-lock 修订；考勤 View/dashboard 源码哈希仍与已审阅代码相同，考勤 CI/manifest/test-chain 路径无改动或丢项。Node 20 上新跑审批 verification 类型检查与 provenance 均通过，审批浏览器 CI 接线契约 **3 通过、0 失败/跳过**。Playwright `--list` 收集到 **9 文件、64 项测试**，其中新增 return-candidates 10 项；这只是收集证明，未执行这些浏览器用例。未改动的考勤和数据库套件未重复执行，继续保留各自原冻结身份。
 
@@ -38,7 +48,7 @@
 | Token/gating 清单 | 559 tokens 与 20 gating 一致 | 一致性检查；不代表原 QA 接受 |
 | Provenance | PASS | 来源 `artifacts/attendance-qa-goal-20261010/merge-alignment-results.json`；不证明部署或发布 |
 
-## 最终代码上的复跑
+## 0841 代码上的复跑
 
 以下为 main 合并与两个竞态入口修复后的新运行，使用 Node 20.20.2；各批次有重叠，不相加。
 

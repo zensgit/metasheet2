@@ -4,7 +4,7 @@
 
 本文记录针对 QA 问题（#5986、#5990、#5558）的有限修复范围。依据包括冻结的本地验收回执 [`artifacts/attendance-qa-fix-20261009/verification.json`](../../artifacts/attendance-qa-fix-20261009/verification.json)、既有[今日状态设计](attendance-no-historical-today-fallback-design-20260923.md)，以及规范员工总览交互的[任务优先 design-lock](attendance-employee-overview-task-first-design-lock-20260716.md)。
 
-首轮代码基线为 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，修复提交为 `62d6801c5f`。先后正常合并 `main` 的 `548c1d5834`、`0f17cf6085`，目标恢复 active 后再无冲突合并 `20c705add7`（合并提交 `7eff381b9b`）；考勤源码哈希未改变。最新证据见验证文档的“目标恢复后的最新 main 对齐”及 [`resumed-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/resumed-main-alignment.json)。这份设计不代表所有 QA 项已通过，也不代表已部署或获得业务验收。代码、本地验证、远端 CI、原 QA 环境验收及真实历史处理分别记录。
+首轮代码基线为 `a16a12aca35d46b6b621ae12f49b380b50b95b48`，修复提交为 `62d6801c5f`。先后正常合并 `main` 的 `548c1d5834`、`0f17cf6085`、`20c705add7`，当前再无冲突合并固定快照 `e0205875d7`（#6285，合并提交 `895acd06b7`）。#6285 改动了考勤模板与样式；本次修复的关键函数、两个纯 helper 和 dashboard 回归测试保持不变。最新证据见验证文档的“#6285 对齐后的当前代码”及 [`attendance-main-alignment.json`](../../artifacts/attendance-qa-goal-20261010/attendance-main-alignment.json)。这份设计不代表所有 QA 项已通过，也不代表已部署或获得业务验收。代码、本地验证、远端 CI、原 QA 环境验收及真实历史处理分别记录。
 
 ## 问题与成功标准
 
