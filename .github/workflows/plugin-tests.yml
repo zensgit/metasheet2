@@ -876,6 +876,17 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend test
 
+      - name: Time Machine test resource adapters
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/multitable-recovery-openbao-custody.test.ts \
+            tests/unit/multitable-recovery-archive-remote-object-store.test.ts \
+            tests/unit/multitable-recovery-remote-composition.test.ts \
+            tests/unit/multitable-recovery-resource-config.test.ts \
+            tests/unit/multitable-recovery-resource-launchers.test.ts
+          pnpm --filter @metasheet/core-backend exec tsc --noEmit -p scripts/tsconfig.recovery-resources.json
+          pnpm --filter @metasheet/core-backend exec tsc --noEmit -p scripts/tsconfig.recovery-resource-transport.json
+
       # scripts/ops/__tests__/*.test.mjs — a plain SHELL GLOB, not individually-named files like the
       # steps above. Every OTHER `node --test scripts/ops/<name>.test.mjs` step in this job exists
       # because that file is invisible to `pnpm --filter core-backend test` AND to every workspace

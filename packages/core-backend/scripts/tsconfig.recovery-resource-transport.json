@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.recovery-resources.json",
+  "compilerOptions": { "strict": true },
+  "include": ["../src/multitable/recovery-resource-https.ts"],
+  "exclude": []
+}

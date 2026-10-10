@@ -1,0 +1,22 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "noEmit": true
+  },
+  "include": [
+    "../src/**/*",
+    "../core/**/*",
+    "../tests/unit/multitable-recovery-openbao-custody.test.ts",
+    "../tests/unit/multitable-recovery-archive-remote-object-store.test.ts",
+    "../tests/unit/multitable-recovery-remote-composition.test.ts",
+    "../tests/unit/multitable-recovery-resource-config.test.ts",
+    "../tests/unit/multitable-recovery-resource-launchers.test.ts",
+    "./verify-recovery-openbao.mts",
+    "./start-recovery-object-service.mts",
+    "./start-recovery-remote.mts",
+    "../types/**/*.d.ts",
+    "../src/types/**/*.d.ts"
+  ],
+  "exclude": ["../src/**/*.test.ts", "../src/**/__tests__/**", "../core/**/*.test.ts"]
+}
