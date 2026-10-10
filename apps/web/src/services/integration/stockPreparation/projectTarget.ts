@@ -111,6 +111,9 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT',
   'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED',
   'STOCK_PREPARATION_PROJECT_ROUTE_FAILED',
+  // S3 fix round 2 (F4; R-37): another update of the tenant's overview is running — the refresh did nothing
+  // and did not wait for it.
+  'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY',
 ])
 
 /**

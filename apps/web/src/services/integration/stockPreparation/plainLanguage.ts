@@ -870,6 +870,13 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '再点也一样 —— 需要平台管理员升级服务器;请把这条报错代码给管理员。',
     enNext: 'Pressing again will not change it — a platform administrator has to upgrade the server; give an administrator this error code.',
   }),
+  // S3 fix round 2 (F4): the refresh never waits for another overview update; it says so and does nothing.
+  STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY: Object.freeze({
+    zh: '项目总览表正在被另一次更新改写,这次刷新没有做任何事,什么都没有改动。',
+    en: 'The project overview is being updated by another run right now, so this refresh did nothing and nothing changed.',
+    zhNext: '稍等一会儿再点「刷新项目总览」;正在进行的那次更新完成后,总览就是最新的。',
+    enNext: 'Wait a moment and press "Refresh the project overview" again; once the running update finishes, the overview is current.',
+  }),
   STOCK_PREPARATION_PROJECT_ROUTE_FAILED: Object.freeze({
     zh: '这一步没有完成,请稍后再试一次。',
     en: 'This step did not complete; try again in a moment.',

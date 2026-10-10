@@ -509,6 +509,8 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
       'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT',
       'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED',
       'STOCK_PREPARATION_PROJECT_ROUTE_FAILED',
+      // Fix round 2 (F4): the refresh that found another overview update running.
+      'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY',
     ]) {
       expect(STOCK_PREP_PROJECT_TARGET_ERROR_CODES).toContain(code)
       const entry = STOCK_PREP_ERROR_PLAIN[code]
@@ -684,7 +686,7 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
   })
 
   it('a refused refresh shows the refusal\'s own plain line and code; DISABLED reads as the switch-off sentence', async () => {
-    for (const [code, status] of [['STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED', 503], ['STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', 404]] as const) {
+    for (const [code, status] of [['STOCK_PREPARATION_PROJECT_OVERVIEW_NOT_STAMPED', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT', 409], ['STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED', 503], ['STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY', 409], ['STOCK_PREPARATION_PROJECT_SHEETS_DISABLED', 404]] as const) {
       const refreshOverview = vi.fn(async () => { throw new StockPreparationProjectTargetCallError(status, 'POST', { code }) })
       const root = mount(StockPreparationOperatorHome as Component, {
         scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(READY_OVERVIEW),
