@@ -32,6 +32,8 @@ export default defineConfig({
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
+      // Range fill: real JWT + PostgreSQL atomicity, run whole-file in the post-migrate multitable gate.
+      'tests/integration/multitable-range-fill-realdb.test.ts',
       'tests/integration/admin-users.api.test.ts',
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',

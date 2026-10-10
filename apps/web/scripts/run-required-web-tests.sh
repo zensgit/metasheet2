@@ -1790,6 +1790,10 @@ exec npx vitest run \
   multitable-phase8 \
   multitable-phase9 \
   multitable-qrcode-field \
+  multitable-range-fill-flag \
+  multitable-range-fill-interaction \
+  multitable-range-fill-planner \
+  multitable-range-fill-writer \
   multitable-record-approval-panel \
   multitable-record-approval-progress \
   multitable-record-approval-submit \

@@ -54,6 +54,17 @@ test('frontend build gets a bounded build-only heap budget', () => {
   assert.doesNotMatch(stages[1], /NODE_OPTIONS|max-old-space-size/)
 })
 
+test('frontend range fill flag is a default-off build argument only', () => {
+  const raw = readRepoFile('Dockerfile.frontend')
+  const runtime = raw.split(/^FROM nginx:[^\n]+$/m)[1]
+  assert.ok(runtime)
+  const arg = raw.indexOf('ARG VITE_MULTITABLE_RANGE_FILL_ENABLED=false')
+  const env = raw.match(/^ENV VITE_MULTITABLE_RANGE_FILL_ENABLED=\$\{?VITE_MULTITABLE_RANGE_FILL_ENABLED}?$/m)
+  const build = raw.indexOf('pnpm --filter @metasheet/web build')
+  assert.ok(arg >= 0 && env && env.index > arg && build > env.index)
+  assert.doesNotMatch(runtime, /VITE_MULTITABLE_RANGE_FILL_ENABLED/)
+})
+
 test('frontend heap fix retains typecheck before bundling', () => {
   const pkg = JSON.parse(readRepoFile('apps', 'web', 'package.json'))
   // Since 2026-10-07 the script itself pins a 4 GB heap for both tools: GitHub-hosted runners of a
