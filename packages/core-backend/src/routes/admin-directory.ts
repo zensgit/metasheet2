@@ -63,6 +63,8 @@ import { PasswordPolicyError } from '../auth/password-policy-error'
 // NOT a directory error: thrown by the alias claim inside admission (directory-sync.ts) with a fixed sentence.
 import { LoginAliasClaimError } from '../auth/login-alias-service'
 import { isAdmin as isRbacAdmin } from '../rbac/service'
+// R-41: values-free by design (names the env vars, never their values) — shown as it is on the config routes.
+import { EncryptionMaterialError } from '../security/encrypted-secrets'
 // Roadmap §7.8 "Validate cron at save time" — see `isDirectoryScheduleCronValid` below for why this is
 // `SimpleCronExpression` (the SAME class `directory-sync-scheduler.ts` uses to actually run the job) rather
 // than the multitable automation scheduler's own cron parser.
@@ -179,14 +181,23 @@ function sendDirectoryConfigFailure(
   jsonError(res, 400, code, failure.text)
 }
 
-/** R-41: the developer-authored sentences the DingTalk work-notification and approval-card config routes show. */
-const DINGTALK_CONFIG_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [DingTalkConfigValidationError]
-/** R-41: the developer-authored sentences the directory-test route shows (input, missing integration, corp allowlist). */
+/**
+ * R-41: the developer-authored sentences the DingTalk work-notification and approval-card config routes show.
+ * EncryptionMaterialError: production refusing to encrypt / decrypt the stored Agent ID or link secret because
+ * ENCRYPTION_KEY / ENCRYPTION_SALT are unset or the built-in defaults — the operator's next step, named without
+ * any value.
+ */
+const DINGTALK_CONFIG_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [DingTalkConfigValidationError, EncryptionMaterialError]
+/**
+ * R-41: the developer-authored sentences the directory-test route shows (input, missing integration, corp
+ * allowlist, and the stored appSecret it cannot decrypt for want of encryption material).
+ */
 const DIRECTORY_TEST_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   DirectoryValidationError,
   DirectoryNotFoundError,
   DirectoryConflictError,
   DingTalkCorpNotAllowedError,
+  EncryptionMaterialError,
 ]
 
 // Mirrors `directory-sync.ts`'s private `normalizeText` so the save-time gate below sees exactly the same

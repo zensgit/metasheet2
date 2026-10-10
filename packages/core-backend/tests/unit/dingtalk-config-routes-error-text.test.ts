@@ -272,6 +272,38 @@ describe('R-41 — provider, transport and driver failures reach the body as a f
   })
 })
 
+describe('R-41 follow-up — production refusing to encrypt / decrypt shows its own values-free sentence (400, as before)', () => {
+  const MATERIAL_SENTENCE =
+    'Invalid encryption material for production: ENCRYPTION_KEY not configured / not set; ENCRYPTION_SALT not configured / not set'
+
+  beforeEach(() => {
+    vi.stubEnv('NODE_ENV', 'production')
+    vi.stubEnv('ENCRYPTION_KEY', '')
+    vi.stubEnv('ENCRYPTION_SALT', '')
+  })
+
+  it('work-notification save: the Agent ID cannot be encrypted → 400 with the EncryptionMaterialError sentence', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ errcode: 0, access_token: 'token-test', expires_in: 7200 }))
+    const res = await invoke('put', '/dingtalk/work-notification', { body: { integrationId: INTEGRATION_ID, agentId: '123456' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({ ok: false, error: { code: 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED', message: MATERIAL_SENTENCE, details: undefined } })
+  })
+
+  it('approval-card secret generate: the secret cannot be encrypted → 400 with the sentence', async () => {
+    const res = await invoke('post', '/integrations/:integrationId/approval-card-config/secret/generate', { params: { integrationId: INTEGRATION_ID } })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({ ok: false, error: { code: 'APPROVAL_CARD_SECRET_GENERATE_FAILED', message: MATERIAL_SENTENCE, details: undefined } })
+  })
+
+  it('directory test: the stored appSecret cannot be decrypted → 400 with the sentence', async () => {
+    storedRow = { ...STORED_ROW, provider: 'dingtalk', corp_id: 'dingcorp', config: { appKey: 'app-key-test', appSecret: 'enc:not-decryptable-without-material' } }
+    const res = await invoke('post', '/integrations/test', { body: { integrationId: INTEGRATION_ID, name: 'DingTalk CN', corpId: 'dingcorp', appKey: 'k' } })
+    expect(res.statusCode).toBe(400)
+    expect(res.body).toEqual({ ok: false, error: { code: 'DIRECTORY_TEST_FAILED', message: MATERIAL_SENTENCE, details: undefined } })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('R-41 — client.ts: a 2xx without the expected field is a typed DingTalkIncompleteResponseError', () => {
   it('gettoken without access_token: typed, errcode kept, message unchanged, not a business rejection', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ errcode: 0, errmsg: 'ok', message: PROVIDER_TEXT }))

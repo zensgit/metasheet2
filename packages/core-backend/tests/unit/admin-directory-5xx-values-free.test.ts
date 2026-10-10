@@ -139,6 +139,7 @@ import {
   DingTalkTimeoutError,
 } from '../../src/integrations/dingtalk/transport'
 import { adminDirectoryRouter } from '../../src/routes/admin-directory'
+import { EncryptionMaterialError } from '../../src/security/encrypted-secrets'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const ROUTE_SOURCE = fs.readFileSync(path.resolve(HERE, '../../src/routes/admin-directory.ts'), 'utf8')
@@ -187,6 +188,12 @@ const rejectWith = (fn: ReturnType<typeof vi.fn>) => (error: unknown) => {
 }
 const helper = (code: string, fallback: string): Outcome => ({ kind: 'helper', code, fallback })
 const configTyped = (message: string) => ({ make: () => new DingTalkConfigValidationError(message), message })
+/** R-41 follow-up: production refusing to encrypt / decrypt for want of material — values-free, shown as it is. */
+const ENCRYPTION_MATERIAL_ISSUES = ['ENCRYPTION_KEY not configured / not set', 'ENCRYPTION_SALT uses the built-in default placeholder value']
+const encryptionMaterialTyped = {
+  make: () => new EncryptionMaterialError([...ENCRYPTION_MATERIAL_ISSUES]),
+  message: `Invalid encryption material for production: ${ENCRYPTION_MATERIAL_ISSUES.join('; ')}`,
+}
 const fixed500 = (code: string, message: string): Outcome => ({ kind: 'fixed', status: 500, code, message, logged: false })
 
 const INTEGRATION = { integrationId: 'd1000000-0000-4000-8000-000000000001' }
@@ -208,7 +215,7 @@ const CATCH_SITES: Site[] = [
       kind: 'config400',
       code: 'DINGTALK_WORK_NOTIFICATION_TEST_FAILED',
       fallback: 'Failed to test DingTalk work notification Agent ID',
-      typed: [configTyped('DingTalk Agent ID must be 1-32 numeric characters'), configTyped('DingTalk directory integration not found')],
+      typed: [configTyped('DingTalk Agent ID must be 1-32 numeric characters'), configTyped('DingTalk directory integration not found'), encryptionMaterialTyped],
     },
   },
   {
@@ -219,7 +226,7 @@ const CATCH_SITES: Site[] = [
       kind: 'config400',
       code: 'DINGTALK_WORK_NOTIFICATION_SAVE_FAILED',
       fallback: 'Failed to save DingTalk work notification Agent ID',
-      typed: [configTyped('integrationId is required'), configTyped('DingTalk appSecret is required')],
+      typed: [configTyped('integrationId is required'), configTyped('DingTalk appSecret is required'), encryptionMaterialTyped],
     },
   },
   {
@@ -269,7 +276,7 @@ const CATCH_SITES: Site[] = [
       kind: 'config400',
       code: 'APPROVAL_CARD_SECRET_GENERATE_FAILED',
       fallback: 'Failed to generate approval card link secret',
-      typed: [configTyped('DingTalk directory integration not found')],
+      typed: [configTyped('DingTalk directory integration not found'), encryptionMaterialTyped],
     },
   },
   {
@@ -280,7 +287,7 @@ const CATCH_SITES: Site[] = [
       kind: 'config400',
       code: 'APPROVAL_CARD_CONFIG_SAVE_FAILED',
       fallback: 'Failed to save approval card config',
-      typed: [configTyped('publicAppUrl must be an absolute http(s) URL'), configTyped('publicAppUrl must use http or https')],
+      typed: [configTyped('publicAppUrl must be an absolute http(s) URL'), configTyped('publicAppUrl must use http or https'), encryptionMaterialTyped],
     },
   },
   {
@@ -299,6 +306,7 @@ const CATCH_SITES: Site[] = [
           make: () => new DingTalkCorpNotAllowedError('Directory integration corpId is required when DINGTALK_ALLOWED_CORP_IDS is configured', null),
           message: 'Directory integration corpId is required when DINGTALK_ALLOWED_CORP_IDS is configured',
         },
+        encryptionMaterialTyped,
       ],
     },
   },

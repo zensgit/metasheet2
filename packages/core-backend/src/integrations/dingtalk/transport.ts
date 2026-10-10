@@ -98,14 +98,22 @@ export class DingTalkMalformedResponseError extends Error {
  * and every such caller keeps treating this one exactly as it treated that. The message is the text the plain
  * Error carried (it may be provider text — it is for the logs); the body rides along in `responseBody` so the
  * provider's code survives for admin surfaces, which show only that code (directory/directory-failure-text.ts).
+ *
+ * `responseBody` is NON-enumerable (readable as `error.responseBody`, never written by JSON.stringify or by a
+ * logger serialising `{ error }` meta): the body of `contact/users/me` can carry the user's profile fields.
  */
 export class DingTalkIncompleteResponseError extends Error {
-  readonly responseBody: Record<string, unknown>
+  declare readonly responseBody: Record<string, unknown>
 
   constructor(message: string, responseBody: Record<string, unknown>) {
     super(message)
     this.name = 'DingTalkIncompleteResponseError'
-    this.responseBody = responseBody
+    Object.defineProperty(this, 'responseBody', {
+      value: responseBody,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    })
   }
 }
 
