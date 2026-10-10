@@ -62,8 +62,8 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // org binding + picker end to end (registry table row: 用户组 / approval; "Admitted when:
   // OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed" — both ODs are recorded
   // (a) in the §4 ratification block). NOT admitted on `handler` (see HANDLER_ASSIGNEE_SOURCE_KINDS
-  // below). The cc-as-recipient row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not
-  // admit it") is deferred to its own slice and is NOT added here.
+  // below). The cc-as-recipient row (OD-L1-7(a), §2.3 "a SEPARATE row — the approver row does not
+  // admit it") is NOT this approver row: it lives under `assigneeSourcesByNodeType.cc` below.
   user_group: '用户组',
   // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
   // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
