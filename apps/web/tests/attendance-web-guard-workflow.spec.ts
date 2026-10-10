@@ -344,6 +344,26 @@ describe('attendance web guard workflow contract', () => {
     }
   })
 
+  // Reviewer finding F4 (2026-10-08) and gate r3 P3-1 (2026-10-09): the eight cancel-round entry specs were
+  // wired into this guard at both registration points (push `paths` + the changed-file classifier) and
+  // the targeted run list; before this test nothing pinned them, so dropping them again stayed green.
+  it('keeps the cancel-round entry specs in the classifier and targeted run list', () => {
+    const targetedRun = targetedRunCommand(workflow)
+    for (const spec of [
+      'cancelRoundEntryApproverList',
+      'cancelRoundEntryAttendancePanel',
+      'cancelRoundEntryCenterRoute',
+      'cancelRoundEntryContract',
+      'cancelRoundEntryCore',
+      'cancelRoundEntryDetailView',
+      'cancelRoundEntrySurfaces',
+      'cancelRoundEntryTodoCenter',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
   it('keeps employee 常用 icon specs in the classifier and targeted run list', () => {
     const targetedRun = targetedRunCommand(workflow)
     for (const spec of [
@@ -356,6 +376,34 @@ describe('attendance web guard workflow contract', () => {
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
+  // A1 「提示与实际状态」 (gate r1 P3-2): these five specs already ran in the required lane, but the slice touches
+  // AttendanceView.vue and plugin-attendance/index.cjs, which trigger THIS path-filtered guard, so they belong here
+  // too - in push.paths, in the PR classifier (two occurrences of each path) and as exact words of the targeted
+  // command. The sixth A1 spec (the central leave-preset note) is registered in approval-web-guard.yml.
+  it('keeps the A1 hints-and-status specs and their helper in the classifier and targeted run list', () => {
+    for (const spec of [
+      'attendance-approval-option-hint',
+      'attendance-approval-option-wiring',
+      'attendance-scheduled-feature-status',
+      'attendance-scheduled-feature-status-wiring',
+      'AttendanceScheduledFeatureStatus',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+    }
+    expect(workflow.match(/apps\/web\/tests\/helpers\/attendanceA1Harness\.ts/g)).toHaveLength(2)
+    const words = targetedRunCommand(workflow).trim().split(/\s+/)
+    for (const token of [
+      'attendance-approval-option-hint',
+      'attendance-approval-option-wiring',
+      // full name on purpose: the bare prefix would also select the -wiring sibling
+      'attendance-scheduled-feature-status.spec.ts',
+      'attendance-scheduled-feature-status-wiring',
+      'AttendanceScheduledFeatureStatus',
+    ]) {
+      expect(words).toContain(token)
     }
   })
 })

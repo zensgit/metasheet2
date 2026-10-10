@@ -283,7 +283,8 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
     await flushUi()
     expect(dispatchActionSpy).not.toHaveBeenCalled()
     expect(getApprovalMock).toHaveBeenCalledWith('apv_orig_1')
-    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve' }]])
+    // F1: the decision names the round the pre-read confirmed (the row's own instance)
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
     expect(elSuccessSpy).toHaveBeenCalledWith('审批已通过')
   })
 
@@ -299,7 +300,7 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
     ;(container!.querySelector('[data-testid="approval-row-reject-confirm"]') as HTMLButtonElement).click()
     await flushUi()
     expect(dispatchActionSpy).not.toHaveBeenCalled()
-    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-2/cancel-round/actions', { action: 'reject', comment: '时间冲突' }]])
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-2/cancel-round/actions', { action: 'reject', comment: '时间冲突', expectedRoundId: 'round-of-cr_2' }]])
   })
 
   it('a no-seat 403 keeps the server message (same as the approval side); an unresolvable leave never falls back', async () => {
@@ -331,7 +332,7 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
     await flushUi()
     expect(dispatchActionSpy).toHaveBeenCalledTimes(1)
     expect(dispatchActionSpy).toHaveBeenCalledWith('apv_plain', { action: 'approve' })
-    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve' }]])
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
   })
 })
 
@@ -350,6 +351,24 @@ describe('ApprovalCenterView — a stale cancel-round row is never decided', () 
     expect(elSuccessSpy).not.toHaveBeenCalled()
     expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('未执行任何操作'))
     // the stale row is not left on screen: the list is reloaded
+    expect(loadPendingSpy).toHaveBeenCalled()
+  })
+
+  it('inline 通过: the pre-read matched, but the SERVER refuses the named round as no longer current (409) — 「未执行任何操作」, never the withdraw copy, and the list reloads', async () => {
+    actionResponses.push(() =>
+      jsonResponse(409, { ok: false, error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' } }))
+    mockPendingApprovals.value = [cancelRow('cr_1', 'apv_orig_1')]
+    await mountView()
+    ;(container!.querySelector('[data-testid="approval-row-approve-cr_1"]') as HTMLButtonElement).click()
+    await flushUi()
+    loadPendingSpy.mockClear()
+    ;(document.querySelector('[data-el-popconfirm-confirm^="确认通过"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-1/cancel-round/actions', { action: 'approve', expectedRoundId: 'round-of-cr_1' }]])
+    expect(dispatchActionSpy).not.toHaveBeenCalled()
+    expect(elSuccessSpy).not.toHaveBeenCalled()
+    expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('未执行任何操作'))
+    expect(elErrorSpy).not.toHaveBeenCalledWith(expect.stringContaining('已有审批人处理过'))
     expect(loadPendingSpy).toHaveBeenCalled()
   })
 
