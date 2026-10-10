@@ -2916,7 +2916,7 @@ describe('TemplateAuthoringView', () => {
               assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
               approvalMode: 'single',
               emptyAssigneePolicy: 'designated',
-              emptyAssigneeFallback: { roleIds: ['approval-admin'] },
+              emptyAssigneeFallback: { userIds: ['u-fallback'], roleIds: ['approval-admin'] },
               autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' },
             },
           },
@@ -2936,7 +2936,12 @@ describe('TemplateAuthoringView', () => {
     expect(emptyPolicy.value).toBe('designated')
     const rolePicker = container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]') as HTMLSelectElement
     expect(rolePicker.value).toBe('approval-admin')
-    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]')).not.toBeNull()
+    const userPicker = container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(userPicker.value).toBe('u-fallback')
+    // C7 raw-id census spirit (the lexical census does not scan `:label` bindings): hydrated targets
+    // the directory page has not loaded render a business placeholder label, never the raw id.
+    expect(userPicker.textContent).not.toContain('u-fallback')
+    expect(rolePicker.textContent).not.toContain('approval-admin')
     const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
     expect(samePerson.value).toBe('transfer_dept_head')
     expect(Array.from(samePerson.options).map((option) => option.value))
@@ -2954,7 +2959,7 @@ describe('TemplateAuthoringView', () => {
     const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes[1].config
     expect('autoApprovalPolicy' in config).toBe(false)
     expect(config.emptyAssigneePolicy).toBe('designated')
-    expect(config.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+    expect(config.emptyAssigneeFallback).toEqual({ userIds: ['u-fallback'], roleIds: ['approval-admin'] })
   })
 
   it("W1-1a linear: choosing 转交指定人员 renders the typed pickers and blocks save until a target is chosen", async () => {
