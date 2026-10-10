@@ -379,6 +379,25 @@ describe('attendance web guard workflow contract', () => {
     }
   })
 
+  it('runs today and record-timeline regressions in both attendance and required lanes', () => {
+    const targeted = targetedRunCommand(workflow).trim().split(/\s+/)
+    const required = requiredLaneExecCommand(
+      readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'),
+    ).split(/\s+/)
+    for (const spec of [
+      'attendanceTodayWorkbench',
+      'attendanceRecordRequestPrefill',
+      'attendance-record-timeline',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targeted).toContain(spec)
+      expect(required).toContain(spec)
+    }
+    for (const module of ['attendanceTodayWorkbench', 'attendanceRecordRequestPrefill']) {
+      expect(workflow.match(new RegExp(`apps/web/src/views/attendance/${module}\\.ts`, 'g'))).toHaveLength(2)
+    }
+  })
+
   // A1 「提示与实际状态」 (gate r1 P3-2): these five specs already ran in the required lane, but the slice touches
   // AttendanceView.vue and plugin-attendance/index.cjs, which trigger THIS path-filtered guard, so they belong here
   // too - in push.paths, in the PR classifier (two occurrences of each path) and as exact words of the targeted

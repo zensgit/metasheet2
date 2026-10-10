@@ -1,0 +1,202 @@
+{
+  "preMergeHead": "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf",
+  "fixedMain": "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf",
+  "beforeHashes": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1",
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": "fe5dbcc75627756b859d89e374fcaea39b23624438903e06b669aaaff1fc6fe9",
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": "09fa2876e77e4f44bf7e50a9c724627ae88cdd2ea42bf3d3d3fec97294dc0885"
+  },
+  "protectedSymbols": {
+    "async function loadRecords()": {
+      "byteIdentical": true
+    },
+    "async function loadTodayAttendanceRecord(": {
+      "byteIdentical": true
+    },
+    "async function refreshAll()": {
+      "byteIdentical": true
+    },
+    "async function loadRecordTimeline(": {
+      "byteIdentical": true
+    },
+    "async function prefillRequestFromRecordTimeline(": {
+      "byteIdentical": true
+    },
+    "async function prefillRequestFromAnomaly(": {
+      "byteIdentical": true
+    },
+    "async function submitRequest()": {
+      "byteIdentical": true
+    },
+    "async function openDedicatedMakeupRequestCard(": {
+      "byteIdentical": true
+    },
+    "async function openDedicatedLeaveRequestCard(": {
+      "byteIdentical": true
+    },
+    "async function openDedicatedOvertimeRequestCard(": {
+      "byteIdentical": true
+    },
+    "todayDateWatcher": {
+      "byteIdentical": true
+    }
+  },
+  "afterHashes": {
+    "apps/web/src/views/AttendanceView.vue": "1f902bda0090eeaf1bed21dd6c7ac6697745953b50479848c952ab93f4389ae5",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1",
+    "apps/web/src/views/attendance/attendanceTodayWorkbench.ts": "fe5dbcc75627756b859d89e374fcaea39b23624438903e06b669aaaff1fc6fe9",
+    "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts": "09fa2876e77e4f44bf7e50a9c724627ae88cdd2ea42bf3d3d3fec97294dc0885"
+  },
+  "unchangedProtectedFiles": true,
+  "testChainUnion": {
+    ".github/workflows/plugin-tests.yml": {
+      "finalCount": 795,
+      "sourceSets": {
+        "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf": {
+          "priorCount": 795,
+          "missingFromMerged": []
+        },
+        "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf": {
+          "priorCount": 792,
+          "missingFromMerged": []
+        }
+      }
+    },
+    ".github/workflows/attendance-web-guard.yml": {
+      "finalCount": 154,
+      "sourceSets": {
+        "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf": {
+          "priorCount": 154,
+          "missingFromMerged": []
+        },
+        "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf": {
+          "priorCount": 149,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "apps/web/scripts/run-required-web-tests.sh": {
+      "finalCount": 559,
+      "sourceSets": {
+        "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf": {
+          "priorCount": 559,
+          "missingFromMerged": []
+        },
+        "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf": {
+          "priorCount": 556,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "apps/web/scripts/run-required-web-tests.tokens": {
+      "finalCount": 559,
+      "sourceSets": {
+        "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf": {
+          "priorCount": 559,
+          "missingFromMerged": []
+        },
+        "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf": {
+          "priorCount": 556,
+          "missingFromMerged": []
+        }
+      }
+    },
+    "plugins/plugin-integration-core/test-chain.txt": {
+      "finalCount": 241,
+      "sourceSets": {
+        "f6a99a1f839c147b628c82fc7b8c33c695fdc8cf": {
+          "priorCount": 241,
+          "missingFromMerged": []
+        },
+        "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf": {
+          "priorCount": 241,
+          "missingFromMerged": []
+        }
+      }
+    }
+  },
+  "conflicts": "",
+  "head": "895acd06b7678d7d2add1eac4f183318eee28591",
+  "mergeHead": "e0205875d7e523466f68f2ecb0ecd19c25b9cbbf",
+  "indexTree": "177793708e5b8fbdf724b767db97f36cb4f46da0",
+  "validation": {
+    "node": "v20.20.2",
+    "pnpm": "10.33.0",
+    "affectedFrontend": {
+      "files": 5,
+      "passed": 287,
+      "failed": 0,
+      "skipped": 0,
+      "perFile": [
+        {
+          "file": "tests/attendance-admin-regressions.spec.ts",
+          "tests": 145
+        },
+        {
+          "file": "tests/attendance-selfservice-dashboard.spec.ts",
+          "tests": 102
+        },
+        {
+          "file": "tests/attendanceEmployeeWorkspacePresentation.spec.ts",
+          "tests": 21
+        },
+        {
+          "file": "tests/AttendanceAdminTaskHome.spec.ts",
+          "tests": 10
+        },
+        {
+          "file": "tests/attendanceTodayWorkbench.spec.ts",
+          "tests": 9
+        }
+      ],
+      "exitCode": 0,
+      "log": "attendance-main-affected-frontend.log"
+    },
+    "webTypecheck": {
+      "command": "pnpm --filter @metasheet/web type-check",
+      "appProjectBuild": true,
+      "approvalVerification": true,
+      "stockPreparationVerification": true,
+      "exitCode": 0,
+      "log": "attendance-main-web-typecheck.log"
+    },
+    "stagedOwnedPathsWhitespaceCheck": {
+      "exitCode": 0
+    },
+    "syntheticBrowser": {
+      "command": "node ../../node_modules/@playwright/test/cli.js test --config artifacts/attendance-qa-browser-config.ts --workers=1",
+      "cwd": "apps/web",
+      "exitCode": 0,
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0,
+      "viewports": [
+        "1440x900",
+        "390x844"
+      ],
+      "scope": "Existing ignored local mock harness; excludes new main admin browser cases and original QA environment",
+      "log": "attendance-main-browser.log"
+    },
+    "viteBuild": {
+      "command": "node node_modules/vite/bin/vite.js build",
+      "cwd": "apps/web",
+      "exitCode": 0,
+      "warning": "Existing large-chunk advisory",
+      "log": "attendance-main-web-build.log"
+    },
+    "provenance": {
+      "command": "node plugins/plugin-integration-core/__tests__/sealed-export-package-provenance.test.cjs",
+      "exitCode": 0,
+      "result": "OK",
+      "log": "attendance-main-provenance.log"
+    }
+  },
+  "manualConflictResolutions": [],
+  "state": "COMMITTED",
+  "finalIndexTree": "177793708e5b8fbdf724b767db97f36cb4f46da0",
+  "trackedUnstaged": "",
+  "committedTree": "177793708e5b8fbdf724b767db97f36cb4f46da0",
+  "independentCompatibilityReview": "attendance-main-adversarial-review.json",
+  "evidenceBoundary": "All reported new runs use fixed main e0205875 alignment tree. Earlier unchanged backend/database/ops results retain original frozen identities. No public PR, remote CI, deployment, customer history or original QA acceptance."
+}

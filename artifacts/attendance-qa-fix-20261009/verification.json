@@ -1,0 +1,623 @@
+{
+  "schema_version": 1,
+  "verification_date": "2026-10-09",
+  "timezone": "Asia/Taipei",
+  "verdict": "LOCAL_FIXES_AND_SYNTHETIC_VALIDATION_COMPLETE_ORIGINAL_QA_ACCEPTANCE_PENDING",
+  "all_twenty_items_fixed": false,
+  "baseline": {
+    "sha": "a16a12aca35d46b6b621ae12f49b380b50b95b48",
+    "branch": "codex/attendance-qa-completion-20261009",
+    "state": "frozen code patch in the commit containing this receipt",
+    "prior_read_only_audit_sha": "6e22ba91a47545a43abba3c7348b4589ed0329b2"
+  },
+  "input": {
+    "archive": "metasheet-attendance-qa-pack-2026-09-12.tar.gz",
+    "sha256": "f616ab4a5c51529c357e346df44be05bf9c75a4785ebddc488d48f395545b515",
+    "credentials_used": false,
+    "document_instructions_treated_as_evidence_only": true
+  },
+  "delivery": {
+    "status": "DRAFT_HOLD",
+    "issue_references": [
+      5986,
+      5990,
+      5558
+    ],
+    "pr_published": false,
+    "committed": true,
+    "remote_ci_for_this_change": "not_run",
+    "merged": false,
+    "deployed": false,
+    "production_changed": false,
+    "real_history_repaired": false
+  },
+  "verification": {
+    "runtime": {
+      "node": "20.20.2",
+      "pnpm": "10.33.0",
+      "database": "isolated disposable synthetic PostgreSQL 15"
+    },
+    "frontend_final": {
+      "timezone": "UTC",
+      "files": 14,
+      "passed": 290,
+      "failed": 0,
+      "test_files": [
+        "tests/attendance-web-guard-workflow.spec.ts",
+        "tests/attendance-overview-priority.spec.ts",
+        "tests/attendance-date-only-format.spec.ts",
+        "tests/attendanceTodayWorkbench.spec.ts",
+        "tests/accountIdentityDisplay.spec.ts",
+        "tests/attendance-records-route-redirect.spec.ts",
+        "tests/attendanceEmployeeMakeupRequestCard.spec.ts",
+        "tests/attendanceEmployeeWorkspacePresentation.spec.ts",
+        "tests/attendance-rules-me-contract-sync.spec.ts",
+        "tests/attendanceRecordRequestPrefill.spec.ts",
+        "tests/attendanceEmployeeLeaveRequestCard.spec.ts",
+        "tests/attendance-punch-outcome.spec.ts",
+        "tests/attendance-record-timeline.spec.ts",
+        "tests/attendance-selfservice-dashboard.spec.ts"
+      ],
+      "log": "frontend-final-complete.log"
+    },
+    "frontend_timezone_neighbor": {
+      "timezone": "America/Los_Angeles",
+      "files": 3,
+      "passed": 47,
+      "failed": 0,
+      "test_files": [
+        "tests/attendanceTodayWorkbench.spec.ts",
+        "tests/attendanceRecordRequestPrefill.spec.ts",
+        "tests/attendance-record-timeline.spec.ts"
+      ],
+      "log": "frontend-final-la.log"
+    },
+    "browser": {
+      "engine": "Chromium",
+      "passed": 8,
+      "failed": 0,
+      "viewport_widths": [
+        1440,
+        390
+      ],
+      "scope": "local mocked UI only; temporary harness and screenshots retained in ignored artifacts; not a CI or original-environment run",
+      "log": "browser.log",
+      "screenshots_root": "browser/"
+    },
+    "typecheck_and_build": {
+      "web_vue_tsc_build_force": "passed",
+      "backend_tsc_no_emit": "passed",
+      "web_vite_build": "passed",
+      "build_warning": "existing large-chunk advisory; not performance acceptance",
+      "logs": [
+        "web-typecheck.log",
+        "backend-typecheck.log",
+        "web-vite-build.log"
+      ]
+    },
+    "backend_live_order": {
+      "code": "ATTENDANCE_LIVE_PUNCH_ORDER_SYNTHETIC_EVIDENCE",
+      "baseCommit": "a16a12aca35d46b6b621ae12f49b380b50b95b48",
+      "runtime": "Node 20.20.2",
+      "database": "isolated synthetic PostgreSQL 15, fully migrated",
+      "httpDatabase": {
+        "files": 1,
+        "passed": 7,
+        "failed": 0
+      },
+      "unitCalculatorAndMergePolicy": {
+        "files": 3,
+        "passed": 91,
+        "failed": 0
+      },
+      "canonicalAndAuthoritativeBoundaryNeighbors": {
+        "files": 2,
+        "passed": 30,
+        "failed": 0
+      },
+      "guardMutation": {
+        "neuteredGuardFailed": 3,
+        "nonMatchingCasesSkipped": 4,
+        "guardBytesRestored": true,
+        "restoredHttpDatabasePassed": 7
+      },
+      "covered": [
+        "Shanghai and Taipei early-in late-out remain one workday with original raw instants and polarity",
+        "ordinary and final-merge reversed pairs return exact 409 and roll back raw event and daily projection",
+        "checkout-only and repeated punches retain existing contract",
+        "published overnight pair remains on starting workday with original raw instants",
+        "canonical legacy and authoritative route-neighbor contracts remain green"
+      ],
+      "syntaxChecksPassed": 2,
+      "historyRepaired": false,
+      "productionChanged": false,
+      "logs": [
+        "backend-order-integration.log",
+        "backend-order-unit.log",
+        "backend-order-mutation.log",
+        "backend-order-boundary-neighbors.log"
+      ]
+    },
+    "backend_neighbors": {
+      "swap_api": {
+        "passed": 12,
+        "failed": 0,
+        "log": "neighbor-swap-api.log"
+      },
+      "selected_punch_api": {
+        "passed": 4,
+        "skipped": 162,
+        "failed": 0,
+        "log": "neighbor-punch-api.log"
+      }
+    },
+    "selfservice_fixture": {
+      "scope": "disposable local synthetic database only",
+      "rbac_bypass": false,
+      "token_claims_trusted": false,
+      "admin_read_denied": true,
+      "seed_passes": 2,
+      "active_leave_types": 1,
+      "active_overtime_rules": 1,
+      "published_manual_swap_assignments": 2,
+      "submitted_and_persistence_verified": {
+        "leave": 1,
+        "overtime": 1,
+        "swap": 1
+      },
+      "cancelled_requests": 3,
+      "log": "selfservice-fixture.log"
+    },
+    "ops_contracts": {
+      "node_scope_and_history": {
+        "passed": 14,
+        "failed": 0,
+        "log": "ops-node-contracts-final.log"
+      },
+      "ci_wiring": {
+        "passed": 264,
+        "failed": 0,
+        "log": "ci-wiring-final.log"
+      },
+      "fixture_runner": {
+        "passed": 198,
+        "failed": 0,
+        "log": "fixture-runner-contracts.log"
+      },
+      "history_adverse_checks": {
+        "passed": 4,
+        "failed": 0,
+        "log": "backend-review-history-final.log"
+      },
+      "history_synthetic_real_database": {
+        "microsecond_comparisons": 2,
+        "foreign_scope_empty": true,
+        "log": "history-realdb-proof.log"
+      },
+      "note": "These suites overlap in coverage and are not summed into a unique overall assertion count."
+    },
+    "mutation_and_red_evidence": [
+      {
+        "guard": "today history reuse scope",
+        "expected_failures": 4,
+        "restored_exact": true,
+        "logs": [
+          "frontend-today-scope-mutation-red.log",
+          "frontend-today-scope-mutation-restore.log"
+        ]
+      },
+      {
+        "guard": "legacy final projection order",
+        "expected_failures": 3,
+        "restored_exact": true,
+        "logs": [
+          "backend-order-mutation.log",
+          "backend-order-evidence.json"
+        ]
+      },
+      {
+        "regression": "historical prefill source scope",
+        "pre_fix_failures": 3,
+        "log": "frontend-prefill-scope-red.log"
+      },
+      {
+        "regression": "mutable timeline subject and raw-event ownership",
+        "pre_fix_failures": 2,
+        "log": "frontend-prefill-event-scope-red.log"
+      }
+    ],
+    "migrations": {
+      "applied": 435,
+      "replay_pending": 0,
+      "schema_changes_added": false
+    },
+    "screenshots": [
+      "screenshots/today-desktop.png",
+      "screenshots/today-mobile.png"
+    ]
+  },
+  "ci_wiring": {
+    "new_or_newly_required_frontend_specs": [
+      "attendanceTodayWorkbench",
+      "attendanceRecordRequestPrefill",
+      "attendance-record-timeline"
+    ],
+    "two_point_registration": [
+      ".github/workflows/attendance-web-guard.yml",
+      "apps/web/scripts/run-required-web-tests.sh"
+    ],
+    "required_token_manifest": "apps/web/scripts/run-required-web-tests.tokens",
+    "backend_db_registration": ".github/workflows/plugin-tests.yml attendance-real-db-integration",
+    "local_fixture_rehearsal_registration": ".github/workflows/plugin-tests.yml",
+    "remote_execution_not_implied": true
+  },
+  "items": [
+    {
+      "id": "timezone_display",
+      "problem": "Overview/calendar/requests/report timezone mismatch",
+      "prior_audit_status": "fixed_in_code",
+      "status": "existing_fix_locally_verified",
+      "current_finding": "Effective rule timezone drives overview, calendar and request context; reports use persisted record/event timezone with an explicit unavailable state.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original environment timezone display and deployment identity need a new acceptance run.",
+      "source_paths": [
+        "apps/web/src/views/AttendanceView.vue",
+        "apps/web/src/views/attendance/attendanceDateTimePresentation.ts"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    },
+    {
+      "id": "day_split_pairing",
+      "problem": "Taipei morning in and evening out split across work dates",
+      "prior_audit_status": "partially_addressed",
+      "status": "synthetic_database_verified",
+      "current_finding": "Synthetic real-database tests preserve early-in/evening-out on one Shanghai or Taipei workday and preserve the published overnight starting workday with original event instants.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "The original reported employee/day has not been queried or repaired; explicit client timezone precedence is not changed.",
+      "source_paths": [
+        "packages/core-backend/tests/integration/attendance-live-punch-order.db.test.ts"
+      ],
+      "local_evidence_logs": [
+        "backend-order-integration.log"
+      ]
+    },
+    {
+      "id": "reverse_pair",
+      "problem": "Later check-in joins an existing checkout and yields out-before-in",
+      "prior_audit_status": "remaining_legacy_behavior",
+      "status": "new_write_guard_fixed_locally_verified",
+      "current_finding": "The final legacy live projection, including optional merge output, rejects out-before-in with ATTENDANCE_PUNCH_ORDER_CONFLICT (409) inside the transaction; both raw event and projection roll back.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Existing reversed records are not repaired. This does not replace or broaden authoritative-engine contracts.",
+      "source_paths": [
+        "plugins/plugin-attendance/lib/attendance-live-punch-order.cjs",
+        "plugins/plugin-attendance/index.cjs"
+      ],
+      "local_evidence_logs": [
+        "backend-order-integration.log",
+        "backend-order-mutation.log",
+        "backend-order-boundary-neighbors.log"
+      ]
+    },
+    {
+      "id": "zero_minutes",
+      "problem": "Paired short punches have zero work minutes",
+      "prior_audit_status": "requires_policy_specific_assessment",
+      "status": "policy_specific_assessment_required",
+      "current_finding": "Short intervals may legitimately round down to zero. The new order guard prevents new reversed pairs in the covered legacy live path; valid long-pair tests remain positive.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Confirm the original rule, rounding and persisted pair before classifying every zero-minute record as a defect.",
+      "source_paths": [
+        "plugins/plugin-attendance/index.cjs"
+      ],
+      "local_evidence_logs": [
+        "backend-order-unit.log",
+        "backend-order-integration.log"
+      ]
+    },
+    {
+      "id": "large_late_early",
+      "problem": "Extreme late and early minute values",
+      "prior_audit_status": "not_established_as_bug",
+      "status": "not_established_as_bug",
+      "current_finding": "Late/early values follow the configured work window; an all-day window can explain large values.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Validate the intended policy and original record. No blanket metric rewrite is claimed.",
+      "source_paths": [
+        "plugins/plugin-attendance/index.cjs"
+      ],
+      "local_evidence_logs": []
+    },
+    {
+      "id": "historical_drift",
+      "problem": "Historical timestamp drift or persisted punch polarity changes",
+      "prior_audit_status": "not_confirmed_resolved",
+      "status": "diagnostic_added_history_unverified",
+      "current_finding": "A scoped read-only observation tool compares persisted records and raw events. PostgreSQL retains timestamp microseconds for boundary and reversed-pair comparisons; successful output contains only codes and counts.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "No original historical data was read, rewritten or backfilled. Drift and ownership still require an approved, bounded data investigation.",
+      "source_paths": [
+        "scripts/ops/attendance-history-reconcile.mjs"
+      ],
+      "local_evidence_logs": [
+        "ops-node-contracts-final.log",
+        "backend-review-history-final.log",
+        "history-realdb-proof.log"
+      ]
+    },
+    {
+      "id": "missing_punch",
+      "problem": "Successful morning check-in missing from reports",
+      "prior_audit_status": "not_confirmed_resolved",
+      "status": "diagnostic_added_history_unverified",
+      "current_finding": "The read-only observation tool counts missing boundaries and missing raw-event linkage without synthesizing events.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "The original missing event or record has not been restored or proven present.",
+      "source_paths": [
+        "scripts/ops/attendance-history-reconcile.mjs"
+      ],
+      "local_evidence_logs": [
+        "history-realdb-proof.log"
+      ]
+    },
+    {
+      "id": "completed_pair_polarity",
+      "problem": "Completed checkout displayed as In / still clocked in",
+      "prior_audit_status": "fixed_mapping_with_remaining_today_state_bug",
+      "status": "code_and_synthetic_verified",
+      "current_finding": "In/out remain distinct and a completed current-day pair displays clocked out. Today UI now uses the date/session-bound self record with an unknown state until the read succeeds.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Recheck the original deployed build; persisted historical polarity is outside this repair.",
+      "source_paths": [
+        "apps/web/src/views/attendance/AttendanceEmployeeWorkspace.vue",
+        "apps/web/src/views/AttendanceView.vue"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    },
+    {
+      "id": "today_fallback",
+      "problem": "No today record but historical record drives today clock state and CTA",
+      "prior_audit_status": "confirmed_remaining_bug",
+      "status": "fixed_locally_verified",
+      "current_finding": "History cannot substitute for today. Reuse requires a verified self/session/date-complete history page; otherwise a separate self-today read leaves history filters unchanged. Midnight and session changes invalidate stale results; failures and invalid rule timezones do not imply unpunched.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original-environment deployment and user acceptance remain pending.",
+      "source_paths": [
+        "apps/web/src/views/attendance/attendanceTodayWorkbench.ts",
+        "apps/web/src/views/AttendanceView.vue"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log",
+        "frontend-today-scope-red.log",
+        "frontend-today-scope-mutation-red.log",
+        "frontend-today-scope-mutation-restore.log",
+        "browser.log"
+      ]
+    },
+    {
+      "id": "punch_latency",
+      "problem": "Working state lasts 15-30 seconds and reports take several seconds",
+      "prior_audit_status": "partially_addressed_no_performance_acceptance",
+      "status": "partial_ui_fix_performance_unverified",
+      "current_finding": "Existing punch-button release and post-response refresh behavior remain covered by mounted regression tests.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "No original-environment latency measurements, load test or performance service-level acceptance was performed.",
+      "source_paths": [
+        "apps/web/src/views/AttendanceView.vue"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    },
+    {
+      "id": "rules_override",
+      "problem": "rules/me rejects override headers",
+      "prior_audit_status": "fixed_in_code",
+      "status": "existing_fix_locally_verified",
+      "current_finding": "The rules/me call omits the complete forbidden override-header set and its source-synchronized contract is in the focused passing suite.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original deployment and real-session rules availability still need verification.",
+      "source_paths": [
+        "apps/web/src/views/attendance/rulesMeContract.ts",
+        "apps/web/tests/attendance-rules-me-contract-sync.spec.ts"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    },
+    {
+      "id": "leave_blocker",
+      "problem": "No selectable active leave type",
+      "prior_audit_status": "fixture_code_ready_runtime_unverified",
+      "status": "synthetic_fixture_flow_verified",
+      "current_finding": "The shipped synthetic fixture SQL is exercised twice idempotently in a disposable database. One active leave type is selectable; a leave request is persisted, checked and cancelled under strict RBAC.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "No original QA fixture was seeded and no original account submitted a leave request in this run. Business policy and balance approval remain separate.",
+      "source_paths": [
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
+      ],
+      "local_evidence_logs": [
+        "selfservice-fixture.log"
+      ]
+    },
+    {
+      "id": "overtime_blocker",
+      "problem": "No selectable active overtime rule",
+      "prior_audit_status": "fixture_code_ready_runtime_unverified",
+      "status": "synthetic_fixture_flow_verified",
+      "current_finding": "The local rehearsal verifies one active overtime rule and persists, checks and cancels an overtime request under strict RBAC.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original QA configuration, deployment and overtime acceptance remain pending.",
+      "source_paths": [
+        "scripts/ops/attendance-selfservice-fixture-verify.mts"
+      ],
+      "local_evidence_logs": [
+        "selfservice-fixture.log"
+      ]
+    },
+    {
+      "id": "swap_blocker",
+      "problem": "No usable published single-day assignments",
+      "prior_audit_status": "fixture_code_ready_runtime_unverified",
+      "status": "synthetic_fixture_flow_verified",
+      "current_finding": "Two published manual single-day assignments are seeded idempotently; the local self-service swap request is persisted, checked and cancelled. Generated/range assignments remain intentionally excluded.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original QA configuration and a real participant swap acceptance are unverified.",
+      "source_paths": [
+        "scripts/ops/attendance-selfservice-fixture-verify.mts",
+        "packages/core-backend/tests/integration/attendance-shift-swap.test.ts"
+      ],
+      "local_evidence_logs": [
+        "selfservice-fixture.log",
+        "neighbor-swap-api.log"
+      ]
+    },
+    {
+      "id": "raw_events",
+      "problem": "Derived row exists but detail says No raw punch events",
+      "prior_audit_status": "historical_data_unverified_and_test_maintenance_gap",
+      "status": "navigation_and_prefill_fixed_history_unverified",
+      "current_finding": "Timeline tests use the actual reports route. Empty raw history, unavailable endpoint and missing timezone remain explicit. One-shot report-to-request prefill preserves exact source instants; edited times use the historical timezone, reject gaps and disclose repeated-time policy. Loaded query scope and event user identity prevent cross-user/org relabeling; stale responses are discarded.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "No absent historical raw events are reconstructed. Real historic linkage and original-environment endpoint availability remain unverified.",
+      "source_paths": [
+        "apps/web/src/views/AttendanceView.vue",
+        "apps/web/src/views/attendance/attendanceRecordRequestPrefill.ts",
+        "apps/web/tests/attendance-record-timeline.spec.ts"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log",
+        "frontend-final-la.log",
+        "frontend-prefill-scope-red.log",
+        "frontend-prefill-event-scope-red.log"
+      ]
+    },
+    {
+      "id": "field_config",
+      "problem": "Field config Degraded",
+      "prior_audit_status": "degradation_not_by_itself_a_defect",
+      "status": "degraded_state_not_by_itself_a_defect",
+      "current_finding": "The existing UI distinguishes metadata backing degradation and built-in fallback fields.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Original metadata backing availability and repair were not established by this local task.",
+      "source_paths": [
+        "apps/web/src/views/AttendanceView.vue"
+      ],
+      "local_evidence_logs": []
+    },
+    {
+      "id": "identity_header",
+      "problem": "Truncated top-nav identity and wrong shared-browser account",
+      "prior_audit_status": "distinguishable_identity_available_visual_acceptance_unverified",
+      "status": "existing_logic_locally_verified_visual_scope_pending",
+      "current_finding": "Account identity display logic retains distinguishing suffixes and full-value tooltip; focused identity tests pass.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Shared-browser identity behavior and original multi-device visual acceptance were not exercised.",
+      "source_paths": [
+        "apps/web/src/App.vue",
+        "apps/web/tests/accountIdentityDisplay.spec.ts"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    },
+    {
+      "id": "zero_balances",
+      "problem": "Annual leave and compensatory balances zero",
+      "prior_audit_status": "not_established_as_bug",
+      "status": "not_established_as_bug",
+      "current_finding": "Zero balances can be valid without grants. The fixture rehearsal does not grant or alter leave balances.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "Validate entitlement/grant policy and the original account before assigning a balance defect.",
+      "source_paths": [
+        "plugins/plugin-attendance/index.cjs"
+      ],
+      "local_evidence_logs": []
+    },
+    {
+      "id": "session_count",
+      "problem": "22 session records including 11 active and 11 revoked",
+      "prior_audit_status": "not_established_as_bug",
+      "status": "not_established_as_bug",
+      "current_finding": "The existing active-session filter means not revoked; it does not assert concurrently online devices.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "No original shared-session or device-state acceptance was conducted.",
+      "source_paths": [
+        "apps/web/src/views/SessionCenterView.vue"
+      ],
+      "local_evidence_logs": []
+    },
+    {
+      "id": "records_route",
+      "problem": "/attendance/records blank legacy route",
+      "prior_audit_status": "redirect_covered_in_code",
+      "status": "existing_redirect_locally_verified",
+      "current_finding": "The legacy records route redirect is covered by the focused passing suite.",
+      "original_qa_acceptance": "not_run",
+      "remaining_scope": "The original deployed route still needs a build-identified acceptance run.",
+      "source_paths": [
+        "apps/web/tests/attendance-records-route-redirect.spec.ts"
+      ],
+      "local_evidence_logs": [
+        "frontend-final-complete.log"
+      ]
+    }
+  ],
+  "additional_repairs": [
+    {
+      "scope": "dedicated request defaults",
+      "behavior": "Leave, overtime and swap defaults use rule-timezone today; makeup retains eligible anomaly date and otherwise uses today.",
+      "issue_reference": 5990
+    },
+    {
+      "scope": "ops import request organization",
+      "behavior": "Import probe, batch and CSV paths retain the explicit configured organization across applicable helper call sites; no non-default organization silently falls back.",
+      "paths": [
+        "scripts/ops/attendance-import-scope.mjs",
+        "scripts/ops/attendance-import-perf.mjs",
+        "scripts/ops/attendance-smoke-api.mjs",
+        "scripts/verify-attendance-production-flow.mjs"
+      ]
+    },
+    {
+      "scope": "acceptance entrypoint maintenance",
+      "behavior": "The existing production-flow verifier uses the current dedicated makeup card; this local change is not a production verifier execution."
+    }
+  ],
+  "release_gates": [
+    {
+      "gate": "implementation and focused local verification",
+      "status": "passed"
+    },
+    {
+      "gate": "review and fresh remote required CI at published head",
+      "status": "pending"
+    },
+    {
+      "gate": "original QA deployment identity and configuration",
+      "status": "pending_scope_and_execution"
+    },
+    {
+      "gate": "real historical event/record reconciliation or repair",
+      "status": "not_performed; separate bounded authorization and evidence required"
+    },
+    {
+      "gate": "original environment latency and business acceptance",
+      "status": "not_performed"
+    },
+    {
+      "gate": "merge or deployment",
+      "status": "DRAFT_HOLD; not requested or performed"
+    }
+  ],
+  "evidence_handling": {
+    "contains_credentials": false,
+    "contains_real_subject_identifiers": false,
+    "contains_environment_hosts_or_addresses": false,
+    "logs_are_local_references_not_upload_instructions": true
+  }
+}

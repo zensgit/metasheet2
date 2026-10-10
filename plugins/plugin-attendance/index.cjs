@@ -32,6 +32,7 @@ const {
 const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-group-fixed-schedule-producer-key.cjs')
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
+const { hasReversedLivePunchOrder } = require('./lib/attendance-live-punch-order.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -23182,6 +23183,11 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
     }
   }
 
+  // Still inside the canonical transaction: refusal rolls back the raw event and
+  // projection together, including a reversal introduced by the optional merge.
+  if (hasReversedLivePunchOrder(record)) {
+    throw new HttpError(409, 'ATTENDANCE_PUNCH_ORDER_CONFLICT', 'Check-out cannot precede check-in; review the work date and existing punches')
+  }
   return { event, record, workDateResolution: punchWorkDateResolution }
 }
 

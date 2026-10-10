@@ -1,0 +1,47 @@
+{
+  "preMergeHead": "5151a2db4d518911a79d17af18f3a18edd8390d6",
+  "expectedMain": "0f17cf6085c0c6e52a73a847e41e7f3525936120",
+  "beforeHashes": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "afterHashes": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "sourceHashesPreserved": true,
+  "head": "5151a2db4d518911a79d17af18f3a18edd8390d6",
+  "mergeHead": "0f17cf6085c0c6e52a73a847e41e7f3525936120",
+  "indexTree": "27a360c496f35d72e9244ac4d17db490945b82f4",
+  "conflicts": "",
+  "ownedPathChanges": "",
+  "testChainPreserved": true,
+  "validation": {
+    "node": "v20.20.2",
+    "pnpm": "10.33.0",
+    "dashboardTodayHelper": {
+      "exitCode": 0,
+      "files": 2,
+      "dashboard": 102,
+      "helper": 9,
+      "passed": 111,
+      "skipped": 0,
+      "log": "continuation-dashboard-today-helper.log"
+    },
+    "provenance": {
+      "exitCode": 0,
+      "result": "OK",
+      "log": "continuation-provenance.log"
+    }
+  },
+  "state": "MERGED_NOT_COMMITTED",
+  "finalized": {
+    "merge_commit": "c8f0a2e228729d9df6a4702dfb4b187a2b02f611",
+    "merge_tree": "27a360c496f35d72e9244ac4d17db490945b82f4",
+    "validate_all_exit_code": 0,
+    "validate_all_log": "continuation-validate-all.log",
+    "web_build_exit_code": 0,
+    "web_build_log": "continuation-web-build.log",
+    "note": "Initial MERGED_NOT_COMMITTED fields describe the tested pre-commit snapshot; finalized merge tree equals that index tree."
+  }
+}

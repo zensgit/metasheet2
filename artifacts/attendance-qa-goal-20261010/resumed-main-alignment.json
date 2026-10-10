@@ -1,0 +1,54 @@
+{
+  "preMergeHead": "f7e4e63d2fa0f6a9f8d8463a8df50e0c624cffe3",
+  "expectedMain": "20c705add7c86fdabb486e834735f9a1913e6de2",
+  "beforeHashes": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "afterHashes": {
+    "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+  },
+  "sourceHashesPreserved": true,
+  "head": "7eff381b9b37df0bff684be8045d13246a504713",
+  "mergeHead": "20c705add7c86fdabb486e834735f9a1913e6de2",
+  "indexTree": "6d440078048cf68e1a87807d7065458f44577904",
+  "conflicts": "",
+  "ownedPathChanges": "",
+  "testChainPreserved": true,
+  "validation": {
+    "node": "v20.20.2",
+    "pnpm": "10.33.0",
+    "approvalVerificationTypecheck": {
+      "command": "vue-tsc --noEmit -p tsconfig.verification-approval.json",
+      "exitCode": 0,
+      "log": "resumed-approval-verification-typecheck.log"
+    },
+    "provenance": {
+      "exitCode": 0,
+      "result": "OK",
+      "log": "resumed-provenance.log"
+    },
+    "approvalBrowserCiContract": {
+      "command": "node --test scripts/ops/approval-browser-ci-wiring.test.mjs",
+      "exitCode": 0,
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0,
+      "log": "resumed-approval-ci-contract.log"
+    },
+    "approvalBrowserCollection": {
+      "command": "node ../../node_modules/@playwright/test/cli.js test --list --config playwright.approval-verification.config.ts",
+      "cwd": "apps/web",
+      "exitCode": 0,
+      "tests": 64,
+      "files": 9,
+      "newReturnCandidatesTests": 10,
+      "executed": false,
+      "log": "resumed-approval-browser-list.log"
+    }
+  },
+  "state": "COMMITTED",
+  "committedTree": "6d440078048cf68e1a87807d7065458f44577904",
+  "evidenceBoundary": "Attendance source and owned test-chain files are unchanged; earlier attendance and database results retain their frozen identities. New approval browser cases were collected, not executed. No PR, remote CI, deployment, or original QA acceptance."
+}
