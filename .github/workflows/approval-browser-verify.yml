@@ -26,6 +26,11 @@ name: Approval Browser Verify
 # P7-B0 extends the lane with Canvas sole-surface acceptance against the mounted production
 # TemplateAuthoringView at desktop/tablet/mobile widths. The collection preflight below prevents a
 # testMatch removal from turning this browser contract into a vacuous green.
+#
+# 退回 candidates extend the lane with a real ApprovalDetailView harness on an identity-consistent
+# cc / handler / parallel graph (approval-return-candidates.spec.ts): which targets the 退回 dialog
+# offers (the server's list verbatim, else the client mirror), when 退回 is hidden, and the recorded
+# `return` request. Its screenshots upload as rc-*.png.
 
 on:
   workflow_dispatch:
@@ -164,4 +169,5 @@ jobs:
             apps/web/verification-output/afb-*.png
             apps/web/verification-output/p5c-*.png
             apps/web/verification-output/p7-canvas-*.png
+            apps/web/verification-output/rc-*.png
           if-no-files-found: warn
