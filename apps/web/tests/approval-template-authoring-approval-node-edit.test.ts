@@ -11,13 +11,17 @@ import {
 import {
   addAssigneeSourceCard,
   applyApprovalNodeEditsToGraph,
+  applyApprovalTypeChoice,
+  approvalNodeEditOmitsAssigneeSources,
   approvalNodeEditsFromGraph,
+  isSourcelessAutoApproveNode,
   legalPriorApproverNodeKeys,
   placeholderRoleNodeKeys,
   removeAssigneeSourceCard,
   validateApprovalNodeEdits,
   type ApprovalNodeEdits,
 } from '../src/approvals/approvalNodeEdit'
+import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 
 // Approval-node editing inside the graph authoring model. PURE-LOGIC tests (no .vue)
 // so they run under approval-web-guard. The GATE is topology + cross-phase + WITHIN-NODE
@@ -848,4 +852,185 @@ describe('I3 — LINEAR path assignee-source-kind allowlist (fail-closed, closes
       expect(unsupportedTemplateAuthoringReason(buildTemplate(graph))).toBeNull()
     })
   }
+})
+
+// ── Lock-4 §1 F4-A — the canvas edit model for approvalType (审批类型) ─────────────────────────────
+// docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A: "Assignee resolution is SKIPPED,
+// so an empty source list is legal here and only here". The backend 400s an EMPTY `assigneeSources`
+// array even for auto_approve (`normalizeApprovalAssigneeSources`: "must not be empty"), so a
+// sourceless node carries NO key at all. Before this slice such a node was never seeded into the edit
+// model (it was cloned verbatim and was not editable on the canvas).
+const F4A_EDIT_GRAPH: ApprovalGraph = {
+  nodes: [
+    { key: 'start', type: 'start', name: '发起', config: {} },
+    { key: 'auto_1', type: 'approval', name: '自动', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' } as never },
+    { key: 'manual_1', type: 'approval', name: '主管', config: { assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'all', emptyAssigneePolicy: 'error' } },
+    { key: 'approval_legacy', type: 'approval', name: '旧式', config: { assigneeType: 'role', assigneeIds: ['legacy_role'], approvalMode: 'single' } },
+    { key: 'handler_1', type: 'handler', name: '办理', config: { assigneeSources: [{ kind: 'requester' }] } },
+    { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+    { key: 'end', type: 'end', name: '结束', config: {} },
+  ],
+  edges: [
+    { key: 'e1', source: 'start', target: 'auto_1' },
+    { key: 'e2', source: 'auto_1', target: 'manual_1' },
+    { key: 'e3', source: 'manual_1', target: 'approval_legacy' },
+    { key: 'e4', source: 'approval_legacy', target: 'handler_1' },
+    { key: 'e5', source: 'handler_1', target: 'cc_1' },
+    { key: 'e6', source: 'cc_1', target: 'end' },
+  ],
+}
+
+describe('Lock-4 §1 F4-A — seeding and rebuilding a sourceless auto_approve node on the canvas', () => {
+  it('isSourcelessAutoApproveNode admits ONLY an approval node that is auto_approve with no assignee carrier at all', () => {
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'auto_1'))).toBe(true)
+    // POSITIVE CONTROLS — each neighbouring shape is excluded.
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'manual_1'))).toBe(false)
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'approval_legacy'))).toBe(false)
+    expect(isSourcelessAutoApproveNode(node(F4A_EDIT_GRAPH, 'handler_1'))).toBe(false)
+    expect(isSourcelessAutoApproveNode({ key: 'x', type: 'approval', name: 'x', config: { approvalType: 'manual' } as never })).toBe(false)
+    expect(isSourcelessAutoApproveNode({ key: 'x', type: 'approval', name: 'x', config: { approvalType: 'auto_approve', assigneeType: 'role', assigneeIds: ['r'] } as never })).toBe(false)
+  })
+
+  it('seeds the sourceless node (empty card list + omit flag); a legacy node is still NOT seeded; a pre-F4-A node gets no approvalType key', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(edits.auto_1).toEqual({
+      nodeKey: 'auto_1',
+      assigneeSources: [],
+      approvalMode: 'single',
+      approvalType: 'auto_approve',
+      omitAssigneeSources: true,
+      emptyAssigneePolicy: 'error',
+    })
+    expect(edits.approval_legacy).toBeUndefined()
+    expect(Object.prototype.hasOwnProperty.call(edits.manual_1, 'approvalType')).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(edits.manual_1, 'omitAssigneeSources')).toBe(false)
+  })
+
+  it('an untouched seed rebuilds the WHOLE graph byte-for-byte (key order included)', () => {
+    const rebuilt = applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, approvalNodeEditsFromGraph(F4A_EDIT_GRAPH))
+    expect(JSON.stringify(rebuilt)).toBe(JSON.stringify(F4A_EDIT_GRAPH))
+  })
+
+  it('approvalNodeEditOmitsAssigneeSources: auto_approve AND the omit flag, never on a handler', () => {
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: 'auto_approve', omitAssigneeSources: true })).toBe(true)
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: 'auto_approve' })).toBe(false)
+    expect(approvalNodeEditOmitsAssigneeSources({ approvalType: null, omitAssigneeSources: true })).toBe(false)
+    expect(approvalNodeEditOmitsAssigneeSources({ nodeType: 'handler', approvalType: 'auto_approve', omitAssigneeSources: true })).toBe(false)
+  })
+})
+
+describe('Lock-4 §1 F4-A — applyApprovalTypeChoice (the canvas 审批类型 radio mutation)', () => {
+  it('自动通过 on a manual node: the rebuild carries approvalType and NO assigneeSources key (never []), while the cards stay as scratch', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)).toBe(true)
+    expect(edits.manual_1!.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1'] }])
+    const config = node(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits), 'manual_1').config as Record<string, unknown>
+    expect(config.approvalType).toBe('auto_approve')
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+
+  it('人工审批 straight after 自动通过 restores the node byte-for-byte: an arrow-key traversal of the native radiogroup is lossless (canvas history does not record config edits, A-8)', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(JSON.stringify(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits))).toBe(JSON.stringify(F4A_EDIT_GRAPH))
+  })
+
+  it('人工审批 on a SEEDED sourceless node removes the key and lands on one valid requester card (never a ≥1-source error)', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(applyApprovalTypeChoice(edits.auto_1!, 'manual', false)).toBe(true)
+    expect(edits.auto_1!.approvalType).toBeNull()
+    expect(edits.auto_1!.assigneeSources).toEqual([{ kind: 'requester' }])
+    const config = node(applyApprovalNodeEditsToGraph(F4A_EDIT_GRAPH, edits), 'auto_1').config as Record<string, unknown>
+    expect(config).toEqual({ approvalMode: 'single', emptyAssigneePolicy: 'error', assigneeSources: [{ kind: 'requester' }] })
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+  })
+
+  it("an explicit persisted 'manual' is left as it is by 人工审批; toggled away and back it is saved ABSENT (absent ≡ manual — implementer default)", () => {
+    const graph: ApprovalGraph = clone(F4A_EDIT_GRAPH)
+    ;(node(graph, 'manual_1').config as Record<string, unknown>).approvalType = 'manual'
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(edits.manual_1!.approvalType).toBe('manual')
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect((node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config as Record<string, unknown>).approvalType).toBe('manual')
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    const config = node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'approvalType')).toBe(false)
+    expect(config.assigneeSources).toEqual([{ kind: 'static_user', userIds: ['u1'] }])
+  })
+
+  it('refuses 自动通过 inside a parallel region and on a handler edit, leaving the edit untouched; 人工审批 stays allowed in a parallel region', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    const manualBefore = JSON.stringify(edits.manual_1)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', true)).toBe(false)
+    expect(JSON.stringify(edits.manual_1)).toBe(manualBefore)
+    const handlerBefore = JSON.stringify(edits.handler_1)
+    expect(applyApprovalTypeChoice(edits.handler_1!, 'auto_approve', false)).toBe(false)
+    expect(applyApprovalTypeChoice(edits.handler_1!, 'manual', false)).toBe(false)
+    expect(JSON.stringify(edits.handler_1)).toBe(handlerBefore)
+    // POSITIVE CONTROL — the refusal is region-selected: the same choice outside the region lands.
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'manual', true)).toBe(true)
+    expect(applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)).toBe(true)
+  })
+
+  it('choosing 自动通过 again on an auto_approve node that still CARRIES sources drops them (the notice action)', () => {
+    const graph: ApprovalGraph = clone(F4A_EDIT_GRAPH)
+    ;(node(graph, 'manual_1').config as Record<string, unknown>).approvalType = 'auto_approve'
+    const edits = approvalNodeEditsFromGraph(graph)
+    expect(approvalNodeEditOmitsAssigneeSources(edits.manual_1!)).toBe(false)
+    expect(Object.prototype.hasOwnProperty.call(node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config, 'assigneeSources')).toBe(true)
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(approvalNodeEditOmitsAssigneeSources(edits.manual_1!)).toBe(true)
+    expect(Object.prototype.hasOwnProperty.call(node(applyApprovalNodeEditsToGraph(graph, edits), 'manual_1').config, 'assigneeSources')).toBe(false)
+  })
+})
+
+describe('Lock-4 §1 F4-A — validateApprovalNodeEdits and the publish placeholder checklist', () => {
+  const sourceErrors = (errors: string[], key: string) => errors.filter((error) => error.includes(key) && (error.includes('审批人来源') || error.includes('配置无效')))
+
+  it("omitted scratch cards are NOT validated (they are never sent); POSITIVE CONTROL: the same cards are validated once 人工审批 makes them live", () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    edits.manual_1!.assigneeSources = [{ kind: 'static_user', userIds: [] }]
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(sourceErrors(validateApprovalNodeEdits(edits), 'manual_1')).toEqual([])
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(sourceErrors(validateApprovalNodeEdits(edits), 'manual_1')).toHaveLength(1)
+  })
+
+  it('a manual node with zero cards still fails the ≥1 rule; the same zero-card list is legal ONLY on an omitted auto_approve node', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    expect(validateApprovalNodeEdits(edits)).toEqual([])
+    edits.auto_1!.omitAssigneeSources = false
+    expect(validateApprovalNodeEdits(edits).some((error) => error.includes('auto_1') && error.includes('至少需要一个审批人来源'))).toBe(true)
+  })
+
+  it('mirrors APPROVAL_NODE_AUTO_TYPE_PARALLEL_UNSUPPORTED: auto_approve inside a parallel region blocks save; POSITIVE CONTROL: outside it does not', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    const parallelError = (errors: string[]) => errors.filter((error) => error.includes('auto_1') && error.includes('不支持自动通过'))
+    expect(parallelError(validateApprovalNodeEdits(edits, undefined, new Set(['auto_1'])))).toHaveLength(1)
+    expect(parallelError(validateApprovalNodeEdits(edits, undefined, new Set(['manual_1'])))).toHaveLength(0)
+  })
+
+  it("an off-union approvalType ('auto_reject') on an approval edit, and ANY approvalType on a handler edit, are errors; POSITIVE CONTROL: the known values are not", () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    ;(edits.manual_1 as { approvalType?: unknown }).approvalType = 'auto_reject'
+    ;(edits.handler_1 as { approvalType?: unknown }).approvalType = 'auto_approve'
+    const errors = validateApprovalNodeEdits(edits)
+    expect(errors.some((error) => error.includes('manual_1') && error.includes('审批类型无效'))).toBe(true)
+    expect(errors.some((error) => error.includes('handler_1') && error.includes('不支持审批类型'))).toBe(true)
+    const clean = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    clean.manual_1!.approvalType = 'manual'
+    expect(validateApprovalNodeEdits(clean).some((error) => error.includes('审批类型'))).toBe(false)
+  })
+
+  it('a placeholder role left on an omitted scratch card is not flagged for publish; POSITIVE CONTROL: it is flagged once live', () => {
+    const edits = approvalNodeEditsFromGraph(F4A_EDIT_GRAPH)
+    edits.manual_1!.assigneeSources = [{ kind: 'static_role', roleIds: [APPROVAL_ROLE_CONFIGURE_SENTINEL] }]
+    applyApprovalTypeChoice(edits.manual_1!, 'auto_approve', false)
+    expect(placeholderRoleNodeKeys(edits)).toEqual([])
+    applyApprovalTypeChoice(edits.manual_1!, 'manual', false)
+    expect(placeholderRoleNodeKeys(edits)).toEqual(['manual_1'])
+  })
 })

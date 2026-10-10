@@ -5,7 +5,10 @@ import {
   draftFromTemplate,
   graphReadOnlyReason,
   isComplexApprovalGraph,
+  setStepApprovalType,
+  stepOmitsAssigneeSources,
   unsupportedTemplateAuthoringReason,
+  validateTemplateApprovalFlow,
 } from '../src/approvals/templateAuthoring'
 
 // G-1 — complex-graph load-preserve + anti-flatten. These are PURE-LOGIC tests (no .vue / no
@@ -353,5 +356,196 @@ describe('G-1 graphReadOnlyReason — complex graphs render read-only but stay s
     })
     expect(graphReadOnlyReason(template)).toBeNull()
     expect(unsupportedTemplateAuthoringReason(template)).not.toBeNull()
+  })
+})
+
+// ── Lock-4 §1 F4-A — `approvalType` (审批类型) through BOTH editors ─────────────────────────────────
+// docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A, §2.3, gates X-2/X-3 (their
+// approvalType analogs), OD-L4-2(a). The backend rebuild re-emits the key (allowlist 1); before this
+// slice the FE forced every carrying template READ-ONLY (allowlists 2 and 3 lacked it), and widening
+// only those two would have DROPPED the key on the linear save and invented a `requester` source for
+// a sourceless auto_approve node. Fixtures are in the backend-NORMALIZED shape (the rebuild's key
+// order; `approvalMode`/`emptyAssigneePolicy` present, since the linear builder always emits both),
+// so `JSON.stringify` equality pins KEY ORDER as well — `toEqual` would not.
+
+function f4aLinearGraph(config: Record<string, unknown>): ApprovalGraph {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '审批人 1', config: config as never },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+    ],
+  }
+}
+
+// The cc node forces the preserved-graph (canvas) path.
+function f4aComplexGraph(config: Record<string, unknown>): ApprovalGraph {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      { key: 'approval_1', type: 'approval', name: '主管', config: config as never },
+      { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'approval_1' },
+      { key: 'e2', source: 'approval_1', target: 'cc_1' },
+      { key: 'e3', source: 'cc_1', target: 'end' },
+    ],
+  }
+}
+
+const F4A_SOURCELESS_AUTO = { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+const F4A_CONFIGS: Array<[string, Record<string, unknown>]> = [
+  ['auto_approve with NO assignee carrier', F4A_SOURCELESS_AUTO],
+  [
+    'auto_approve that still carries a source (only an API save produces one)',
+    { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' },
+  ],
+  [
+    "an explicit 'manual'",
+    { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'manual', emptyAssigneePolicy: 'error' },
+  ],
+  [
+    'sourceless auto_approve whose person-only settings are hidden but must survive verbatim',
+    {
+      approvalMode: 'all',
+      approvalType: 'auto_approve',
+      emptyAssigneePolicy: 'auto-approve',
+      autoApprovalPolicy: { mergeWithRequester: true },
+      fieldPermissions: [{ fieldId: 'amount', access: 'readonly' }],
+      timeout: { afterMinutes: 30, effect: 'remind' },
+    },
+  ],
+]
+
+describe('Lock-4 §1 F4-A — approvalType keeps a template EDITABLE in both editors (gate X-2 analog)', () => {
+  for (const [label, config] of F4A_CONFIGS) {
+    it(`LINEAR and CANVAS: ${label} is editable (not forced read-only)`, () => {
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aLinearGraph(config)))).toBeNull()
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aComplexGraph(config)))).toBeNull()
+    })
+  }
+
+  it('POSITIVE CONTROL — signaturePolicy still forces read-only on both paths, so the allowlists were widened for approvalType and not removed', () => {
+    const config = { ...F4A_SOURCELESS_AUTO, signaturePolicy: { required: true } }
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aLinearGraph(config)))).not.toBeNull()
+    expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aComplexGraph(config)))).not.toBeNull()
+  })
+})
+
+describe('Lock-4 §1 F4-A — an approvalType outside the FE union stays READ-ONLY on both paths (gate X-3 analog, OD-L4-2(a))', () => {
+  it("'auto_reject' (deferred, no inert third option) and other off-union values force read-only on the linear AND the canvas path", () => {
+    for (const value of ['auto_reject', 'AUTO_APPROVE', '', 42, null]) {
+      const config = { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: value, emptyAssigneePolicy: 'error' }
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aLinearGraph(config))), JSON.stringify(value)).not.toBeNull()
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aComplexGraph(config))), JSON.stringify(value)).not.toBeNull()
+    }
+  })
+
+  it('POSITIVE CONTROL — the SAME shape with a known value is editable, so read-only is value-selected', () => {
+    for (const value of ['manual', 'auto_approve']) {
+      const config = { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: value, emptyAssigneePolicy: 'error' }
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aLinearGraph(config))), value).toBeNull()
+      expect(unsupportedTemplateAuthoringReason(buildTemplate(f4aComplexGraph(config))), value).toBeNull()
+    }
+  })
+})
+
+describe("Lock-4 §1 F4-A — approvalType round-trips BYTE-FOR-BYTE through each editor's save build (the silent-drop pin)", () => {
+  for (const [label, config] of F4A_CONFIGS) {
+    it(`LINEAR (steps → buildStepConfig): ${label}`, () => {
+      const graph = f4aLinearGraph(config)
+      const draft = draftFromTemplate(buildTemplate(graph))
+      expect(draft.preservedGraph).toBeUndefined()
+      expect(draft.steps).toHaveLength(1)
+      expect(JSON.stringify(buildApprovalGraph(draft))).toBe(JSON.stringify(graph))
+    })
+
+    it(`CANVAS (approvalNodeEdits → applyApprovalNodeEditsToGraph): ${label}`, () => {
+      const graph = f4aComplexGraph(config)
+      const draft = draftFromTemplate(buildTemplate(graph))
+      expect(draft.preservedGraph).toBeDefined()
+      expect(JSON.stringify(buildApprovalGraph(draft))).toBe(JSON.stringify(graph))
+    })
+  }
+
+  it('a sourceless auto_approve node hydrates with the omit flag on the linear path (no phantom requester source)', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aLinearGraph(F4A_SOURCELESS_AUTO)))
+    expect(draft.steps[0]?.approvalType).toBe('auto_approve')
+    expect(stepOmitsAssigneeSources(draft.steps[0]!)).toBe(true)
+  })
+
+  it('a sourceless auto_approve node is SEEDED into the canvas edit model, so it is editable rather than cloned past', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aComplexGraph(F4A_SOURCELESS_AUTO)))
+    expect(draft.approvalNodeEdits?.approval_1).toMatchObject({
+      nodeKey: 'approval_1',
+      approvalType: 'auto_approve',
+      omitAssigneeSources: true,
+      assigneeSources: [],
+    })
+  })
+
+  it('POSITIVE CONTROL — the round-trip is not vacuous: choosing 人工审批 on the sourceless step DOES change the bytes (key removed, the requester default becomes the live source)', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aLinearGraph(F4A_SOURCELESS_AUTO)))
+    setStepApprovalType(draft.steps[0]!, 'manual')
+    const config = buildApprovalGraph(draft).nodes.find((node) => node.key === 'approval_1')!.config
+    expect(JSON.stringify(config)).toBe(
+      JSON.stringify({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }),
+    )
+  })
+})
+
+describe('Lock-4 §1 F4-A — linear 审批类型 authoring (setStepApprovalType)', () => {
+  const MANUAL_STATIC = { assigneeSources: [{ kind: 'static_user', userIds: ['u1', 'u2'] }], approvalMode: 'all', emptyAssigneePolicy: 'error' }
+  const idsError = (errors: string[]) => errors.filter((error) => error.includes('需要填写用户/角色 id'))
+
+  it('自动通过 omits assigneeSources (never [] and never the hidden scratch) and emits approvalType where the backend rebuild puts it', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aLinearGraph(MANUAL_STATIC)))
+    setStepApprovalType(draft.steps[0]!, 'auto_approve')
+    expect(stepOmitsAssigneeSources(draft.steps[0]!)).toBe(true)
+    const config = buildApprovalGraph(draft).nodes.find((node) => node.key === 'approval_1')!.config
+    expect(JSON.stringify(config)).toBe(JSON.stringify({ approvalMode: 'all', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }))
+  })
+
+  it('人工审批 after 自动通过 restores the configured source: an accidental traversal of the radiogroup is lossless (bytes equal the original)', () => {
+    const graph = f4aLinearGraph(MANUAL_STATIC)
+    const draft = draftFromTemplate(buildTemplate(graph))
+    setStepApprovalType(draft.steps[0]!, 'auto_approve')
+    setStepApprovalType(draft.steps[0]!, 'manual')
+    expect(JSON.stringify(buildApprovalGraph(draft))).toBe(JSON.stringify(graph))
+  })
+
+  it('the hidden scratch source is not validated while omitted; POSITIVE CONTROL: the same source is validated again once live', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aLinearGraph(MANUAL_STATIC)))
+    const step = draft.steps[0]!
+    step.idsText = ''
+    setStepApprovalType(step, 'auto_approve')
+    expect(validateTemplateApprovalFlow(draft)).toEqual([])
+    expect(validateTemplateApprovalFlow(draft, { minimal: true })).toEqual([])
+    setStepApprovalType(step, 'manual')
+    expect(idsError(validateTemplateApprovalFlow(draft))).toHaveLength(1)
+  })
+
+  it('an auto_approve step that still CARRIES a source keeps validating it (it is saved); dropping it is an explicit choice of 自动通过', () => {
+    const draft = draftFromTemplate(buildTemplate(f4aLinearGraph({
+      assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }],
+      approvalMode: 'single',
+      approvalType: 'auto_approve',
+      emptyAssigneePolicy: 'error',
+    })))
+    const step = draft.steps[0]!
+    expect(stepOmitsAssigneeSources(step)).toBe(false)
+    step.idsText = ''
+    expect(idsError(validateTemplateApprovalFlow(draft))).toHaveLength(1)
+    setStepApprovalType(step, 'auto_approve')
+    expect(stepOmitsAssigneeSources(step)).toBe(true)
+    expect(idsError(validateTemplateApprovalFlow(draft))).toHaveLength(0)
+    const config = buildApprovalGraph(draft).nodes.find((node) => node.key === 'approval_1')!.config as Record<string, unknown>
+    expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
   })
 })
