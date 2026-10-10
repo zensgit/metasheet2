@@ -17,7 +17,7 @@
 2. **一个迁移装下 M5 的全部 DDL**：`tasks` 加 4 列，新建 7 张表（依赖、字段三表、附件两表、投影映射）与附件行删除触发器（§2）。附件两表与触发器随 PR-4a 是 S30 ③ 的已裁取值；投影映射表也放进来是 D1 的缺省（`ASSUMPTION`，§7 [a-06]），这样 PR-4b、PR-4c 都不带 DDL，可以在冻结后并行起草。
 3. **接口**：PR-4a 新增 16 条路由（重复 1、里程碑 1、依赖 5、字段定义 4、字段绑定 4、字段值 1），改动 5 条既有路由的形状（complete 的请求体、详情、`GET /api/tasks` 与清单任务项两条列表读、删除；待办 `/api/tasks/pending` 不改，§3.8），全部挂在 `TASKS_ENABLED` 的同一个 `tasksRouter()` 上，**不新增任何 `TASKS_*` 读点、不新增开关**（§3）。
 4. **锁**：所有写走 `withOrgStructure`；S09 已裁的锁序包装器 `withTaskLockOrder` 在 PR-4a 落地并首次武装 `M5|7|锁序控件`，不新增第四处取锁字面量；生产上取结构锁的两处（`withOrgStructure`、`createTask`）与取调度 leader 锁的一处都改经包装器，正向格因此记录得到真实的取锁序列（§4.2、§6.1）。
-5. **门**：PR-4a 承载既有 `M5|7|锁序控件` 与 `M5|10|P2子集` 中属于它的格，以及候选门 27（重复）、29（依赖）、30（字段）和 G1 的候选子集行；候选行要等锁修订写进 `arm-set` 才计分（§6）。
+5. **门**：PR-4a 承载既有 `M5|7|锁序控件` 与 `M5|10|P2子集` 中属于它的格，以及候选门 27（重复）、29（依赖）、30（字段）、G1 的候选子集行与字段第二租户的门 1 子集行 `M5|1|字段第二租户`；候选行要等锁修订写进 `arm-set` 才计分（§6）。
 6. **仍待 owner 的**：本文自选 37 项（§7.1；a-11 已收回）；任务 E 的三个问题与四项偏离里影响 PR-4a 的部分（§7.2）；候选门行入锁的那次修订（§7.3）；冻结稿 v3 新增的 4 个问题 Q1–Q4（§7.4）。
 
 ---
@@ -47,7 +47,7 @@
 
 ### 1.3 切片顺序（依赖）
 
-开工前提：分支从当时的 `origin/main` 起，叠上 #6249。PR-3b 已在 main（见头部的基线漂移）；PR-4a 不用 `TaskScheduler`（§4.6），但每个新写事件的调用点都照 PR-3b 的写法同事务入队（§4.4）。
+开工前提：分支从当时的 `origin/main` 起，叠上 #6249。PR-3b 已在 main（见头部的基线沿革）；PR-4a 不用 `TaskScheduler`（§4.6），但每个新写事件的调用点都照 PR-3b 的写法同事务入队（§4.4）。
 
 | 切片 | 内容 | 依赖 | 回归 |
 |---|---|---|---|
@@ -258,7 +258,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 - 行级失败统一回 404 `{ error: { code: 'NOT_FOUND' } }`，响应与目标不存在时完全一样，不区分不存在、他 org、已软删、看不见、看得见但没有这项能力；行级从不返回 403。
 - 请求体与路径参数的校验排在行级能力判定之后：看不到的对象不论请求体如何都是 404。
 - 本文写 `can(roles, …)` 的地方，`roles` 都是 `resolveTaskRoles` 给出的完整角色集，含清单身份（S11、S13、S35 与 S26 的取值写法）。只看直接角色的判定有两处，都写明了：G1 的 `canCompleteForAll`（只比较创建人），以及沿用 PR-3a `[own-53]` 的增删负责人与关注人（本 PR 不改）。
-- 错误码：纯函数的 `reason` 转大写即 HTTP 码；`not_found` / `forbidden` / `cross_org` ⇒ 404；`has_children` 沿用 M3 的 409 `HAS_CHILDREN`；`VERSION_CONFLICT` 409 不变；其余 422。错误体只有 `{ error: { code } }`（`[a-14]`）。
+- 错误码：纯函数的 `reason` 转大写即 HTTP 码；`not_found` / `forbidden` / `cross_org` ⇒ 404；`has_children` 沿用 M3 的 409 `HAS_CHILDREN`；成员型字段值的 `not_a_candidate` ⇒ 422 `INACTIVE_ORG_MEMBER`（与 R17 的 helper 同码，§3.7、`[a-31]`）；`VERSION_CONFLICT` 409 不变；其余 422。错误体只有 `{ error: { code } }`（`[a-14]`）。
 - 空操作 200，不写行、不写事件。
 - 路径里不可打印的 id ⇒ 发 SQL 之前 404；请求体里的任务域 id 必须过 `isValidTaskDomainId`（四合取），不过 ⇒ 422（门 10 的 id 两格）。
 - 列表用 PR-3a 的分页合同 `{ items, total }`、`limit` 1..100 缺省 100、`offset` ≥ 0（R15、S34）；每个分页读都有冻结的稳定排序键（§3.4 候选、§3.5 `GET`），最后一键是 `id`。两处有意不分页：`GET /api/tasks/:id/dependencies`（两个数组，每任务前置加后置至多 50，D18）与 `GET /api/task-lists/:id/field-bindings`（`{ items }`，每清单绑定至多 50，D18）。两者结果集有上限，不收 `limit` / `offset`、不带 `total`（`[a-34]`）。
@@ -298,7 +298,7 @@ PR-4b / 4c 将按下表把行映射成任务 E 的输入；对不上的地方在
 
 - 一次性守卫：锁内查本任务是否已有 `recurrence_spawned` 事件（D3）；库里再有 §2.2 的唯一索引兜底。reopen 之后再完成不派生第二次。
 - 新一期的日期与提醒（E05、S16）：新的 `due_date` 由 `nextOccurrenceDueDate` 算出，`start_date` 与它顺延相同的民用天数，`due_time`、`start_time`、`time_zone` 照抄，`due_at` 用 `computeDueAt` 重算。`remind_at`：上一期有提醒 ⇒ 新一期保持相对新 `due_at` 的同一提前量；上一期没有 ⇒ 按系列创建人的 `default_remind_policy` 经 `computeDefaultRemindAt` 计算（任务 E `planSpawn` 返回的两种指示）。新一期的 `created` 事件就是它的提醒下界，PR-3b 的扫描据此判断是否该提醒。
-- 派生的人员（`[a-15]`）：新一期的负责人、关注人，以及成员型字段取值里的每个用户 id，都过同一个在职判定：R17 / N2 对负责人与关注人、S25 对成员型取值定的都是它，即 `services/task-org-members.ts` 的 `findActiveOrgMembers`。锁内对「负责人 ∪ 关注人 ∪ 成员型取值里的 id」只查一次。不在职的 id 不写进新一期：不写它的负责人行、关注人行；成员型取值去掉这些 id，去掉后为空则新一期没有这一字段的取值行（与 `[a-09]` 一致）。哪些取值是成员型按字段定义判断，定义经 §4.7 的字段 builder 读出。加关注人时调用者本人免查（PR-3a 的 `[own-16]`），这一条不适用于派生：照抄来的每个 id 都要查。去掉的 id 不写事件，也不让完成失败，完成照常 200。直接写入路径对同一判定答 422（§3.7、M3 加关注人）；派生改为去掉，因为它没有一个能改请求体重试的调用者。`task-org-members.ts` 头注的调用方清单在同一 PR 加上派生。
+- 派生的人员（`[a-15]`）：新一期的负责人、关注人，以及成员型字段取值里的每个用户 id，都过同一个在职判定：R17 / N2 对负责人与关注人、S25 对成员型取值定的都是它，即 `services/task-org-members.ts` 的 `findActiveOrgMembers`。锁内对「负责人 ∪ 关注人 ∪ 成员型取值里的 id」只查一次。不在职的 id 不写进新一期：不写它的负责人行、关注人行；成员型取值去掉这些 id，去掉后为空则新一期没有这一字段的取值行（与 `[a-09]` 一致）。哪些取值是成员型按字段定义判断，定义经 §4.7 的字段 builder 读出。加关注人时调用者本人免查（PR-3a 的 `[own-16]`），这一条不适用于派生：照抄来的每个 id 都要查。去掉的 id 不写事件，也不让完成失败，完成照常 200。直接写入路径对同一判定答 422（§3.7 的写取值；M4 起加关注人，R17）；派生改为去掉，因为它没有一个能改请求体重试的调用者。`task-org-members.ts` 头注的调用方清单在同一 PR 加上派生。
 - 派生的清单项与字段值照抄（成员型取值按上一条过滤），不写 `list_added` / `item_added` 事件（任务 E `planSpawn` 只给两条事件；`[a-30]`）。
 - 派生不发通知（S33）：新任务的 `created` 不在可通知闭集里。
 - `PATCH` 清空有规则任务的截止日不拒绝（`[a-27]`）；之后它完成时不派生。下面的顺序保证这种状态只是「不派生」，不会让完成失败。
@@ -446,7 +446,7 @@ write；行级 = 任务 `can(roles,'edit')` **且** 该字段绑在包含此任�
 
 - 所有写走 `withOrgStructure(orgId, run)`：首句 `SET TRANSACTION ISOLATION LEVEL READ COMMITTED`，取 org 结构锁，锁后在同一连接上重读决定这次写的全部行，再调纯函数，事件同事务写入（与 M2–M4 同一协议）。加边、删边按 E07 属于结构写，判环之前必须在这把锁里把整张依赖图重新读一遍。
 - 读路径不进事务、不取锁。
-- **锁序包装器**（S09，owner 2026-10-09 裁定的取值）：`withTaskLockOrder(query)` 放在 `src/db/task-advisory-locks.ts`。每个事务在自己的 `query` 上建一个实例，经它取锁：structure = 1、fence = 2（PR-4c 接入 canonical fence 步）、projection = 3；同一事务里 rank 递减即抛 `TaskLockOrderViolation`。实例按先后记录这个事务取过的锁，测试经只供测试的记录钩子读出。抛出点在包装层；三处 `pg_advisory_xact_lock(hashtext(` 字面量仍只在三个登记导出里，门 7 的多重集不变。lane 是 `tasks-realdb`。
+- **锁序包装器**（S09，owner 2026-10-09 裁定的取值）：`withTaskLockOrder(query)` 放在 `src/db/task-advisory-locks.ts`。每个事务在自己的 `query` 上建一个实例，经它取锁：structure = 1、fence = 2（PR-4c 接入 canonical fence 步）、projection = 3；同一事务里 rank 递减即抛 `TaskLockOrderViolation`。实例按先后记录这个事务取过的锁，测试经只供测试的记录钩子读出；它只在 helper 成功返回之后记录，helper 抛出的错误原样再抛（调度 tick 靠取锁报出的 SQLSTATE 判定自己是 follower，包装器不能改写它）。抛出点在包装层；三处 `pg_advisory_xact_lock(hashtext(` 字面量仍只在三个登记导出里，门 7 的多重集不变。lane 是 `tasks-realdb`。
 - **生产路径一律经包装器**（S09 的取值是包装器进生产码，而不是只在测试里记录）：今天生产上取结构锁的只有两处，`withOrgStructure`（`services/task-records.ts:83`，取锁在 `:93`）与自开事务的 `createTask`（同文件，取锁在 `:127`）；PR-4a 把两处都改成经包装器取 rank 1。投影锁今天没有调用者，PR-4c 接入时经包装器取 rank 3。改完之后，三个取锁 helper 在生产码里除包装器之外没有调用者（§6.1 有静态格钉住）。M2–M5 的结构写都经 `withOrgStructure`，所以每一条都落在包装器的记录里。
 - **调度 leader 锁**（`[a-36]`）：锁 §6.4 定了它不与另外两把任务锁同处一个事务，但 S09 没有给它 rank，包装器怎样执行这一条是本文的取值。缺省：leader 在包装器里是独占的，同一事务已持有任一 rank 锁时再取 leader，或已持有 leader 时再取任一 rank 锁，都抛 `TaskLockOrderViolation`。为让这条规则在生产上真起作用，`services/task-scheduler.ts:428` 的取锁也改经包装器；它的 tick 事务只取这一把锁，行为不变。
 - 本 PR 的业务写只取结构锁；不取投影锁、不取 fence。对调度器只改取锁的入口（上一条）。
@@ -474,7 +474,7 @@ PR-4a 合并后，详情与列表读 `tasks.is_milestone` 等新列：凡 `TASKS
 
 ### 4.6 与 PR-3b、PR-4b、PR-4c 的边界
 
-- PR-3b 已在 main（头部的基线漂移）。PR-4a 不用 `TaskScheduler`：派生在请求事务内完成。它用的是 PR-3b 的 producer：新写事件的调用点同事务入队（§4.4）。
+- PR-3b 已在 main（头部的基线沿革）。PR-4a 不用 `TaskScheduler`：派生在请求事务内完成。它用的是 PR-3b 的 producer：新写事件的调用点同事务入队（§4.4）。
 - PR-4b 在本迁移的两张附件表上写路由与 GC，不再带 DDL；`TASK_NOTIFIABLE_EVENTS` 加 `attachment_added` 归 PR-4b（S33）。
 - PR-4c 在映射表上写 reconcile；投影列 `isMilestone`、`dependencies`、自定义字段列的来源就是本文的列与表。
 - 两者对本文的任何形状改动都先改本文。
