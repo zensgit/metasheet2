@@ -433,6 +433,10 @@ describe('PO-CLIENT — the project-fields and overview-refresh routes', () => {
     // Fix round 1 (R6): the cooldown answer — nothing was done; strict on its two numbers.
     expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })).toEqual({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })
     expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 60 })).toBeNull()
+    // S3 follow-ups 2 (item 1): the after-INCOMPLETE cooldown keeps its flag — only the literal true.
+    expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 15, retryAfterSeconds: 9, incomplete: true })).toStrictEqual({ fresh: false, cooldownSeconds: 15, retryAfterSeconds: 9, incomplete: true })
+    expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 15, retryAfterSeconds: 9, incomplete: 'yes' })).toStrictEqual({ fresh: false, cooldownSeconds: 15, retryAfterSeconds: 9 })
+    expect(clampStockPrepProjectOverviewRefresh({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })).toStrictEqual({ fresh: false, cooldownSeconds: 60, retryAfterSeconds: 42 })
     h.apiFetch.mockImplementation(async () => ok({}))
     const malformed = await api.refreshOverview!().catch((caught) => caught)
     expect((malformed as StockPreparationProjectTargetCallError).malformed).toBe(true)
@@ -717,6 +721,33 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
     expect(result?.dataset.result).toBe('cooled')
     expect(result?.textContent).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled.zh)
     expect(onOverviewRefreshed).not.toHaveBeenCalled()
+  })
+
+  it('S3 follow-ups 2 (item 1): the cooldown after an INCOMPLETE refresh says the overview is NOT current — never 「数字已经是最新的」', async () => {
+    const refreshOverview = vi.fn(async () => ({ fresh: false as const, cooldownSeconds: 15, retryAfterSeconds: 9, incomplete: true as const }))
+    const onOverviewRefreshed = vi.fn()
+    const root = mount(StockPreparationOperatorHome as Component, {
+      scope: SCOPE, directory: legacyDirectory(), directoryLoaded: true, projectTargets: registryList(READY_OVERVIEW),
+      canRefreshOverview: true, targetApi: { refreshOverview } as unknown as StockPreparationProjectTargetApi, onOverviewRefreshed,
+    })
+    await flush()
+    await press(root, 'stock-prep-project-overview-refresh')
+    const result = testid(root, 'stock-prep-project-overview-result')
+    expect(result?.dataset.result).toBe('cooled')
+    expect(result?.textContent).toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled_incomplete.zh)
+    expect(result?.textContent).not.toContain(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled.zh)
+    expect(result?.textContent).not.toContain('数字已经是最新的')
+    expect(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled_incomplete.zh).toContain('还不是最新的')
+    expect(STOCK_PREP_PROJECT_OVERVIEW_PLAIN.overview_cooled_incomplete.en).toContain('not current')
+    expect(onOverviewRefreshed).not.toHaveBeenCalled()
+  })
+
+  it('S3 follow-ups 2 (item 2): the INCOMPLETE next step promises only what survives a server restart — a later refresh redoes every project; nothing is said to be "remembered"', () => {
+    const entry = STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE
+    expect(entry.zhNext).toContain('有项目没写进去,稍后再点「刷新项目总览」会重做全部项目')
+    expect(entry.zhNext).not.toMatch(/记下|记住|记着/)
+    expect(entry.enNext).toContain('redoes every project')
+    expect(String(entry.enNext).toLowerCase()).not.toMatch(/remember/)
   })
 
   it('「打开项目总览」 is offered ONLY when the host says this caller can read the overview (fix round 1, R1); never for a non-ready handle', async () => {

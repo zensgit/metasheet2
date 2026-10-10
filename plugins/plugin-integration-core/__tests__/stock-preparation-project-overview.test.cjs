@@ -88,6 +88,13 @@
 //         healed by number (b); a later success in the same run clears an earlier failure (c); a failure the handler
 //         did not log itself still gets the wrapper's generic line (d).
 //
+// S3 FOLLOW-UPS 2 (the follow-up PR's final-judge notes, register R-37):
+//   O-30  (item 1) a 503 REFRESH_INCOMPLETE keeps the SHORTER PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS (15 s) from
+//         when the run ended: a click inside it is 200 fresh:false + incomplete:true with no refresh IO; BUSY (O-25)
+//         still leaves no cooldown.
+//   O-31  (item 4) the INCOMPLETE warn (O-31) and the per-event warn (O-31b) name the last failure that still stands,
+//         never an earlier one the same run healed.
+//
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -156,6 +163,8 @@ const realDateNow = Date.now
 let clockOffsetMs = 0
 Date.now = () => realDateNow() + clockOffsetMs
 const passCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS + 1000 }
+/** Follow-ups 2 (item 1): the SHORTER cooldown a 503 REFRESH_INCOMPLETE leaves behind, on the same clock. */
+const passIncompleteCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS + 1000 }
 /** Fix round 1: the per-event writer's per-project retry backoff is on the same in-process `Date.now()`. */
 const passRetryBackoff = () => { clockOffsetMs += overview.__internals.OVERVIEW_EVENT_RETRY_BACKOFF_MS + 1000 }
 
@@ -1569,7 +1578,7 @@ test('O-25 (follow-up B) another process holds the overview lock: the refresh ro
 
 // ── O-26 ───────────────────────────────────────────────────────────────────────────────────────────
 // S3 follow-up C: a refresh never reports `fresh: true` over a project it could not write.
-test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRESH_INCOMPLETE (counts only), audited `incomplete`, cooldown cleared, the project stays DIRTY and the next writer heals it', async () => {
+test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRESH_INCOMPLETE (counts only), audited `incomplete`, the project stays DIRTY and the next writer heals it', async () => {
   const logger = capturingLogger()
   const h = mount({ logger })
   try {
@@ -1613,7 +1622,9 @@ test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRES
     assert.equal((await patchFields(h, FLOOR, { note: NOTE })).statusCode, 200)
     assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
     assert.equal(state.dirty.size, 0)
-    // The cooldown was cleared by the incomplete answer: the next click refreshes (no clock step) and is fresh.
+    // Follow-ups 2 (item 1): the incomplete answer left the SHORTER cooldown (O-30), long past by now (the retry-backoff
+    // step above is longer): the next click refreshes and is fresh.
+    assert.ok(overview.__internals.OVERVIEW_EVENT_RETRY_BACKOFF_MS > overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS)
     const again = await refresh(h, FLOOR)
     assert.equal(again.statusCode, 200, JSON.stringify(again.body))
     assert.equal(again.body.data.fresh, true)
@@ -1797,8 +1808,9 @@ test('O-28 (fix round 1) failed projects are retried BOUNDED by per-event writer
     assert.equal(ownNote(), `${NOTE}-c1`, 'the event\'s own project is updated within the backoff')
     assert.equal(state.dirty.has(PROJECT), false)
 
-    // (d) THE REFRESH IS THE FULL PASS: host back, NO clock step — still inside the backoff of the last retries (and
-    // no cooldown: the 503 above cleared it) — and every retry mark is drained.
+    // (d) THE REFRESH IS THE FULL PASS: host back, NO clock step — still inside the backoff of the last retries (the
+    // 503 above left only the shorter INCOMPLETE cooldown, long past after (b)'s clock steps) — and every retry mark is
+    // drained.
     hostDown = false
     const ok = await refresh(h, FLOOR)
     assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
@@ -1829,6 +1841,8 @@ test('O-29a (fix round 1) a project-less overview row whose delete fails is COUN
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.equal(state.dirty.size, 0, 'no project number → nothing to re-mark')
     h.overviewPort.deleteRecord = realDelete
+    // Follow-ups 2 (item 1): the 503 left the shorter INCOMPLETE cooldown; the next refresh after it removes the row.
+    passIncompleteCooldown()
     const ok = await refresh(h, FLOOR)
     assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
     assert.equal(ok.body.data.rowsRemovedOrphan, 1, 'the next refresh removes it')
@@ -1918,6 +1932,166 @@ test('O-29d (fix round 1, log-noise control) a refresh that fails otherwise stil
     const res = await refresh(h, FLOOR)
     assert.equal(res.statusCode, 500)
     assert.deepEqual(logger.warnings.filter((w) => /route failed/.test(w.message)).map((w) => w.meta), [{ code: 'UNLISTED' }])
+  } finally { h.restore() }
+})
+
+// ── O-30 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2 (item 1): a refresh that RAN and answered 503 REFRESH_INCOMPLETE keeps a (shorter) cooldown.
+test('O-30 (follow-ups 2, item 1) a 503 REFRESH_INCOMPLETE keeps the SHORTER cooldown from when the run ENDED: a click inside it is 200 fresh:false + incomplete:true with no refresh IO; past it the rebuild runs again; a success then stamps the 60 s cooldown without `incomplete`', async () => {
+  const INCOMPLETE_MS = overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS
+  assert.equal(INCOMPLETE_MS, 15 * 1000, 'the constant stated in the PR body')
+  assert.ok(INCOMPLETE_MS < overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, 'shorter than the success cooldown')
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let hostDown = true
+    let failedAttempts = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (hostDown && input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        failedAttempts += 1
+        // The first rebuild is SLOW: 20 s pass on the in-process clock before it fails — longer than the INCOMPLETE
+        // cooldown, so a cooldown measured from the START would already be over when the 503 is answered.
+        if (failedAttempts === 1) clockOffsetMs += 20 * 1000
+        throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const first = await refresh(h, FLOOR)
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    const attemptsAfterFirst = failedAttempts
+    assert.ok(attemptsAfterFirst >= 1)
+
+    // RIGHT AFTER the 503: the cooldown holds — 200 fresh:false, flagged incomplete, NO registry / host / records / audit work.
+    const audits = h.auditAppends.length
+    const dbCalls = h.db.calls.length
+    const hostCalls = h.provisioning.calls.length
+    const recordCalls = h.records.calls.length
+    const cooled = await refresh(h, FLOOR)
+    assert.equal(cooled.statusCode, 200, `a click right after an INCOMPLETE refresh is cooled, not a second full rebuild: ${JSON.stringify(cooled.body)}`)
+    assert.deepEqual(Object.keys(cooled.body.data).sort(), ['cooldownSeconds', 'fresh', 'incomplete', 'retryAfterSeconds'])
+    assert.equal(cooled.body.data.fresh, false)
+    assert.equal(cooled.body.data.incomplete, true, 'the page must never call this overview current')
+    assert.equal(cooled.body.data.cooldownSeconds, 15)
+    assert.ok(cooled.body.data.retryAfterSeconds >= 1 && cooled.body.data.retryAfterSeconds <= 15, String(cooled.body.data.retryAfterSeconds))
+    assert.deepEqual([h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length], [audits, dbCalls, hostCalls, recordCalls], 'inside the INCOMPLETE cooldown: no registry, host, records or audit work')
+    assert.equal(failedAttempts, attemptsAfterFirst, 'no project write was attempted again')
+
+    // Still inside it 10 s later (from the END of the run).
+    clockOffsetMs += 10 * 1000
+    const still = await refresh(h, FLOOR)
+    assert.equal(still.statusCode, 200)
+    assert.equal(still.body.data.fresh, false)
+    assert.equal(failedAttempts, attemptsAfterFirst)
+
+    // Past it (but far inside the 60 s success cooldown): the full rebuild runs again — and, still failing, is 503 again.
+    passIncompleteCooldown()
+    const again = await refresh(h, FLOOR)
+    assert.equal(again.statusCode, 503, JSON.stringify(again.body))
+    assert.ok(failedAttempts > attemptsAfterFirst, 'the rebuild ran again once the shorter cooldown was over')
+
+    // Host back: past the INCOMPLETE cooldown the refresh is fresh, and a click right after it is the 60 s success
+    // cooldown — WITHOUT the incomplete flag (the success replaced the incomplete stamp).
+    hostDown = false
+    passIncompleteCooldown()
+    const ok = await refresh(h, FLOOR)
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.fresh, true)
+    const cooledOk = await refresh(h, FLOOR)
+    assert.deepEqual(Object.keys(cooledOk.body.data).sort(), ['cooldownSeconds', 'fresh', 'retryAfterSeconds'])
+    assert.equal(cooledOk.body.data.cooldownSeconds, 60)
+  } finally { h.restore() }
+})
+
+// ── O-31 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2 (item 4): the logged cause is a failure that still STANDS when the run stops.
+test('O-31 (follow-ups 2, item 4) the INCOMPLETE warn names the code of the last failure that still stands — not an earlier failure the same run healed', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let projectCreates = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      const no = input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')]
+      if (no === PROJECT) {
+        projectCreates += 1
+        if (projectCreates === 1) {
+          // The FIRST failure of the run — healed below by the drain of an event deferred into this refresh.
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      if (no === PROJECT_B) throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 1, 'only the project that still fails is counted')
+    assert.equal(projectCreates, 2, 'the healed project failed once in the full pass and was written by the drain')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING', failedProjectCount: 1 }], 'the warn names the failure that stands, never the healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
+  } finally { h.restore() }
+})
+
+test('O-31b (follow-ups 2, item 4) the PER-EVENT path: the logged code is the last failure that still stands — an earlier failure of the same writer run that a deferred event healed is not named', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    assert.equal((await refresh(h, FLOOR)).statusCode, 200, 'both rows exist; the events below PATCH them')
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realPatch = h.overviewPort.patchRecord
+    const rowProject = (recordId) => logical(overviewRows(h).find((row) => row.id === recordId), 'projectNo')
+    let projectPatches = 0
+    h.overviewPort.patchRecord = async (input = {}) => {
+      const no = rowProject(input.recordId)
+      if (no === PROJECT) {
+        projectPatches += 1
+        if (projectPatches === 1) {
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      if (no === PROJECT_B) throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realPatch(input)
+    }
+    // The writer: an event on PROJECT whose own patch is held, then fails.
+    const writing = patchFields(h, FLOOR, { note: `${NOTE}-1` })
+    await entered
+    // Two events deferred into that running writer: PROJECT again (its re-projection will succeed) and PROJECT_B (fails).
+    assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-2` })).statusCode, 200)
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE }, PROJECT_B)).statusCode, 200)
+    releaseGate()
+    assert.equal((await writing).statusCode, 200, 'the event stands')
+    assert.equal(projectPatches, 2, 'PROJECT failed once, then the drain wrote it')
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'note'), `${NOTE}-2`, 'healed in the same run')
+    const warns = logger.warnings.filter((w) => /overview row could not be updated/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING' }], 'the writer logs the failure that stands, never the healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
   } finally { h.restore() }
 })
 

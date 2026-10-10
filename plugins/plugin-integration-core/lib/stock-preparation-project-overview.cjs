@@ -97,6 +97,12 @@ const OVERVIEW_PROJECT_ROW_READ_LIMIT = 50
 // window after a refresh started (per tenant, per process) another click answers 200 `fresh: false` with
 // no refresh IO. Stated in register R-37.
 const PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS = 60 * 1000
+// S3 follow-ups 2 (item 1): a refresh that RAN but could not write every project (503 REFRESH_INCOMPLETE) keeps a
+// SHORTER cooldown, measured from when that run ENDED (a full rebuild may itself take longer than this): under a
+// persistent failure an OPERATE caller can no longer rerun the full rebuild back to back. Any other refresh that did
+// not complete (409 BUSY — nothing ran — or any other error) still leaves no cooldown. Per tenant, per process, like
+// the 60 s one.
+const PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS = 15 * 1000
 
 // The main-template columns the per-project count reads (ADR §5): the project narrowing, the
 // validity flag, and the two 「完成」 booleans whose NOT-true rows are the two 未完成 counts.
@@ -732,7 +738,8 @@ function overviewBusyError() {
 // 503 — the counts of what failed, never a value or a host message — instead of `fresh: true`; the projects that
 // failed stay DIRTY (see `runOverviewWriter`) so this process's next overview writer retries them. The rows that
 // were written stay written. `summary` (the run's counts, for the route's `incomplete` audit) and `cause` (the
-// first failure, whose CODE alone the route may log) are non-enumerable: they never reach a response body.
+// last failure that still stands when the run stops, whose CODE alone the route may log — follow-ups 2, item 4)
+// are non-enumerable: they never reach a response body.
 const REFRESH_INCOMPLETE_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE'
 
 function overviewRefreshIncompleteError({ failedProjectCount, summary, cause }) {
@@ -876,30 +883,49 @@ async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne,
 /**
  * The per-project reconcile the per-event update and the refresh's drain share: this project's overview rows are
  * read, duplicates deleted, and the row created / patched only when its projection changed; a project that is
- * no longer registered has its rows removed. Failures are collected (the first is kept) so one project cannot
- * stop the others; the caller decides whether to surface it.
+ * no longer registered has its rows removed. Failures are collected so one project cannot stop the others; the
+ * caller decides whether to surface them.
  *
  * S3 follow-up C: `failed` holds every project whose LAST attempt in this run failed (a later success in the same
  * run — an event re-marked it — takes it out again); `runOverviewWriter` puts them back into the dirty set when it
  * stops, and the refresh answers REFRESH_INCOMPLETE while any is left. `unkeyedFailureCount` counts failed deletes
  * of overview rows that carry no project number (nothing to re-mark; the next refresh retries them).
+ *
+ * S3 follow-ups 2 (item 4): `lastUnhealedError()` is the error a caller logs the CODE of — the most recent failure
+ * that is STILL failed when asked (a project-less one never heals within the run). Not the run's first failure: a
+ * later success in the same run can take that one back, and a log naming it would point at a failure that no longer
+ * stands while the one that does goes unnamed.
  */
 function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId, sheet, locale, now }) {
   let scopedPromise = null
+  // projectNo → { error, seq } of its latest failure in this run; the latest project-less failure; a run-local order.
+  const failureByProjectNo = new Map()
+  let lastUnkeyedFailure = null
+  let failureSeq = 0
   const ctx = {
     summary: emptySummary(0),
-    firstError: null,
     outcome: null,
     failed: new Map(),
     unkeyedFailureCount: 0,
     recordFailure(no, flags, error) {
-      if (!ctx.firstError) ctx.firstError = error
+      failureSeq += 1
       if (!no) {
         ctx.unkeyedFailureCount += 1
+        lastUnkeyedFailure = { error, seq: failureSeq }
         return
       }
       const previous = ctx.failed.get(no)
       ctx.failed.set(no, { recount: (flags && flags.recount === true) || Boolean(previous && previous.recount === true) })
+      failureByProjectNo.set(no, { error, seq: failureSeq })
+    },
+    /** The most recent failure of this run that a later success did not take back; null when none stands. */
+    lastUnhealedError() {
+      let last = lastUnkeyedFailure
+      for (const [no, entry] of failureByProjectNo) {
+        if (!ctx.failed.has(no)) continue
+        if (!last || entry.seq > last.seq) last = entry
+      }
+      return last ? last.error : null
     },
     async drainOne(no, flags = {}) {
       try {
@@ -1107,7 +1133,8 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
   // → not fresh. Never swallowed into a success.
   const failedProjectCount = drainFailedCount(drain)
   if (failedProjectCount > 0) {
-    throw overviewRefreshIncompleteError({ failedProjectCount, summary: run.value, cause: drain.firstError })
+    // Follow-ups 2 (item 4): the cause is a failure that still stands — never one the same run healed.
+    throw overviewRefreshIncompleteError({ failedProjectCount, summary: run.value, cause: drain.lastUnhealedError() })
   }
   return run.value
 }
@@ -1122,7 +1149,7 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
  * every FRESH dirty project and at most OVERVIEW_EVENT_RETRY_MAX_PROJECTS earlier failures past their backoff (fix
  * round 1), release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
  * rows; the others do not). BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's
- * outcome. The first failure of the drain is rethrown for that log.
+ * outcome. The last failure of the drain that still stands (follow-ups 2, item 4) is rethrown for that log.
  */
 async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenantId, projectId, projectNo, recount = false, locale, now = () => new Date() } = {}) {
   const api = requireProvisioning(provisioning)
@@ -1143,7 +1170,8 @@ async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenan
   // earlier failures, none within OVERVIEW_EVENT_RETRY_BACKOFF_MS of its failure; its own project is a fresh mark.
   const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne, failed: drain.failed, retryPolicy: OVERVIEW_EVENT_RETRY_POLICY })
   if (run.busy) return { outcome: 'busy', sheetId: sheet.sheetId }
-  if (drainFailedCount(drain) > 0) throw drain.firstError
+  // Follow-ups 2 (item 4): the logged code is a failure that still stands — never one the same run healed.
+  if (drainFailedCount(drain) > 0) throw drain.lastUnhealedError()
   return { outcome: drain.outcome || 'updated', sheetId: sheet.sheetId, ...drain.summary }
 }
 
@@ -1153,6 +1181,7 @@ module.exports = {
   STOCK_PREPARATION_PROJECT_OVERVIEW_FIELD_IDS,
   MAX_PROJECT_OVERVIEW_ROWS,
   PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS,
+  PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS,
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE: REFRESH_INCOMPLETE_CODE,
   StockPreparationProjectOverviewError,
   projectOverviewPosture,
