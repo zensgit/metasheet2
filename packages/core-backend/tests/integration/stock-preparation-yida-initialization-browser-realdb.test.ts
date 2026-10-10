@@ -58,16 +58,21 @@ databaseSuite('Approved A isolated initialization browser — empty slot and act
     expect([host.tokenPayloads.length, host.formPayloads.length]).toEqual([0, 0])
   }
   async function noPrivateControls() {
-    for (const field of materialFields) {
-      const control = ui!.page.getByTestId('sp-yida-init-' + field)
-      if (await control.count()) expect(await control.inputValue()).toBe('')
+    // Inspect presence and clearing together: initialization can unmount the
+    // fieldset between separate browser calls. Never return private values.
+    const controls = await ui!.page.evaluate(fields => fields.map(({ label, kind }) => {
+      const nodes = document.querySelectorAll(`[data-testid="sp-yida-init-${label}"]`)
+      const control = nodes[0]
+      return { label, count: nodes.length, absentOrEmpty: nodes.length === 0 || (nodes.length === 1
+        && control instanceof HTMLInputElement && control.type === kind
+        && (kind === 'checkbox' ? !control.checked : control.value === '')) }
+    }), [...materialFields.map(label => ({ label, kind: 'password' })),
+      ...['review', 'organization'].map(label => ({ label, kind: 'text' })),
+      { label: 'ack', kind: 'checkbox' }])
+    for (const control of controls) {
+      expect(control.count, control.label).toBeLessThanOrEqual(1)
+      expect(control.absentOrEmpty, control.label).toBe(true)
     }
-    for (const field of ['review', 'organization']) {
-      const control = ui!.page.getByTestId('sp-yida-init-' + field)
-      if (await control.count()) expect(await control.inputValue()).toBe('')
-    }
-    const acknowledgment = ui!.page.getByTestId('sp-yida-init-ack')
-    if (await acknowledgment.count()) expect(await acknowledgment.isChecked()).toBe(false)
   }
   async function readPersistence(): Promise<BrowserPersistence> {
     const actual = await ui!.page.evaluate(async () => {
