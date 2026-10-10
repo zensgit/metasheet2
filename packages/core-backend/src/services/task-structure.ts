@@ -12,7 +12,9 @@
  */
 import { query, transaction } from '../db/pg'
 import {
+  buildTaskByIdCondition,
   can,
+  canChangeTaskMembers,
   resolveTaskRoles,
   type TaskRole,
 } from '../tasks/task-access'
@@ -46,17 +48,21 @@ import {
 } from '../tasks/task-tree'
 import { isPrintableId, isStorableText, isValidMemberId } from './task-create'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
+import { assertActiveOrgMembers } from './task-org-members'
 import {
   assertRowAbility,
   fail,
   groupUserIdsByTask,
+  loadActorListMemberships,
   loadAssignees,
+  loadRowRoles,
   loadTask,
   plainDb,
   withOrgStructure,
   writeChangedAssignees,
   writeTaskDoneState,
   type Db,
+  type LoadedTask,
   type Row,
 } from './task-records'
 
@@ -80,14 +86,32 @@ async function loadFollowerIds(db: Db, taskId: string): Promise<string[]> {
   return result.rows.map((row) => String(row.user_id))
 }
 
+/** Role set including list identity (`loadRowRoles`, RULED(2026-10-07): [R04]). */
 async function loadRoles(db: Db, taskId: string, createdBy: string, actorId: string): Promise<TaskRole[]> {
-  const assignees = await loadAssignees(db, taskId)
-  const followers = await db.query(`SELECT user_id FROM task_followers WHERE task_id = $1`, [taskId])
-  return resolveTaskRoles({
-    createdBy,
-    assigneeIds: assignees.map((row) => row.userId),
-    followerIds: followers.rows.map((row) => String(row.user_id)),
-  }, actorId)
+  const { roles } = await loadRowRoles(db, { taskId, createdBy, actorId })
+  return roles
+}
+
+/**
+ * RULED(2026-10-07): [own-53]: the assignee and follower rows of `taskId`, read on
+ * the locked client, after `canChangeTaskMembers` (a direct role: creator or assignee) has allowed
+ * `actorId` to change them. Otherwise the same 404 as a missing task (ASSUMPTION(task-m4):
+ * [own-09]), before the request body or the path user id is looked at. The rows are the input of
+ * the pure transition that follows.
+ */
+async function loadMembersForChange(
+  db: Db,
+  task: LoadedTask,
+  input: { taskId: string; actorId: string },
+): Promise<{ assignees: TaskAssigneeRow[]; followers: string[] }> {
+  const assignees = await loadAssignees(db, input.taskId)
+  const followers = await loadFollowerIds(db, input.taskId)
+  const allowed = canChangeTaskMembers({
+    task: { createdBy: task.createdBy, assigneeIds: assignees.map((row) => row.userId), followerIds: followers },
+    me: input.actorId,
+  })
+  if (!allowed) fail(404, 'NOT_FOUND')
+  return { assignees, followers }
 }
 
 interface MembershipEventLike {
@@ -263,9 +287,10 @@ export async function getParentCandidates(input: {
     titleById.set(id, String(row.title))
     createdByById.set(id, String(row.created_by))
   }
-  const [assigneeRows, followerRows] = await Promise.all([
+  const [assigneeRows, followerRows, membershipsByTask] = await Promise.all([
     query<Row>(`SELECT task_id, user_id FROM task_assignees WHERE task_id = ANY($1)`, [ids]),
     query<Row>(`SELECT task_id, user_id FROM task_followers WHERE task_id = ANY($1)`, [ids]),
+    loadActorListMemberships(plainDb, ids, input.actorId),
   ])
   const assigneesByTask = groupUserIdsByTask(assigneeRows.rows)
   const followersByTask = groupUserIdsByTask(followerRows.rows)
@@ -276,7 +301,7 @@ export async function getParentCandidates(input: {
       createdBy: createdByById.get(id) ?? '',
       assigneeIds: assigneesByTask.get(id) ?? [],
       followerIds: followersByTask.get(id) ?? [],
-    }, input.actorId), 'edit'))
+    }, input.actorId, membershipsByTask.get(id) ?? []), 'edit'))
     .map((id) => ({ id, title: titleById.get(id) ?? '' }))
   return { items }
 }
@@ -288,9 +313,8 @@ export async function getParentCandidates(input: {
 export async function addAssignee(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<MembershipResponse> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { assignees: rows } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(bodyField(input.body, 'userId'))
-    const rows = await loadAssignees(db, input.taskId)
     const now = new Date()
     const result = applyAddAssignee({
       mode: task.mode,
@@ -302,6 +326,12 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
     })
     if (result.ok === false) fail(422, 'LIMIT')
     if (result.events.length > 0) {
+      // RULED(2026-10-07): [R17] [N2] a new assignee must be an active member of the
+      // org (task-org-members.ts), else 422 INACTIVE_ORG_MEMBER and nothing is written. Only for an
+      // addition the pure function made, so a re-add stays a no-op without a lookup; after the
+      // direct-role check ([own-53]) and the id check above. ASSUMPTION(task-m4): [own-16] never for
+      // the caller adding themselves.
+      if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
       await db.query(
         `INSERT INTO task_assignees (task_id, user_id, completed_at, assigned_by) VALUES ($1, $2, NULL, $3)
          ON CONFLICT (task_id, user_id) DO NOTHING`,
@@ -317,9 +347,8 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
 export async function removeAssignee(input: { orgId: string; actorId: string; taskId: string; userId: string }): Promise<MembershipResponse> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { assignees: rows } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(input.userId)
-    const rows = await loadAssignees(db, input.taskId)
     const now = new Date()
     const result = applyRemoveAssignee({
       mode: task.mode,
@@ -406,12 +435,14 @@ export async function switchCompletionMode(input: { orgId: string; actorId: stri
 export async function addFollower(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<{ id: string; followers: string[] }> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { followers } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(bodyField(input.body, 'userId'))
-    const followers = await loadFollowerIds(db, input.taskId)
     const result = applyAddFollower({ followers, userId, actorId: input.actorId })
     if (result.ok === false) fail(422, 'LIMIT')
     if (result.events.length > 0) {
+      // RULED(2026-10-07): [R17] [N2] the same check for a new follower, at the same point and,
+      // ASSUMPTION(task-m4): [own-16], with the same exemption as addAssignee.
+      if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
       await db.query(
         `INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2) ON CONFLICT (task_id, user_id) DO NOTHING`,
         [input.taskId, userId],
@@ -425,9 +456,8 @@ export async function addFollower(input: { orgId: string; actorId: string; taskI
 export async function removeFollower(input: { orgId: string; actorId: string; taskId: string; userId: string }): Promise<{ id: string; followers: string[] }> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { followers } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(input.userId)
-    const followers = await loadFollowerIds(db, input.taskId)
     const result = applyRemoveFollower({ followers, userId, actorId: input.actorId })
     if (result.events.length > 0) {
       await db.query(`DELETE FROM task_followers WHERE task_id = $1 AND user_id = $2`, [input.taskId, userId])
@@ -584,10 +614,8 @@ export async function listComments(input: {
  * the one checked just before the transaction.
  */
 async function lockLiveTaskForComment(db: Db, taskId: string, orgId: string): Promise<void> {
-  const result = await db.query(
-    `SELECT 1 FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR KEY SHARE`,
-    [taskId, orgId],
-  )
+  const cond = buildTaskByIdCondition({ taskIdParam: taskId, orgParam: orgId })
+  const result = await db.query(`SELECT 1 FROM tasks WHERE ${cond.sql} FOR KEY SHARE`, cond.params)
   if (result.rows.length === 0) fail(404, 'NOT_FOUND')
 }
 
@@ -729,10 +757,8 @@ async function lockTaskRowForDelete(db: Db, taskId: string, orgId: string): Prom
   await db.query(`SELECT set_config('statement_timeout', $1, true)`, [DELETE_ROW_LOCK_TIMEOUT])
   let rows: Row[]
   try {
-    const result = await db.query(
-      `SELECT 1 FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE`,
-      [taskId, orgId],
-    )
+    const cond = buildTaskByIdCondition({ taskIdParam: taskId, orgParam: orgId })
+    const result = await db.query(`SELECT 1 FROM tasks WHERE ${cond.sql} FOR UPDATE`, cond.params)
     rows = result.rows
   } catch (err) {
     const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
@@ -767,13 +793,9 @@ export async function deleteTaskById(input: { orgId: string; actorId: string; ta
   return withOrgStructure(input.orgId, async (db) => {
     await lockTaskRowForDelete(db, input.taskId, input.orgId)
     const task = await loadTask(db, input.taskId, input.orgId)
-    const assignees = await loadAssignees(db, input.taskId)
-    const followers = await db.query(`SELECT user_id FROM task_followers WHERE task_id = $1`, [input.taskId])
-    const roles = resolveTaskRoles({
-      createdBy: task.createdBy,
-      assigneeIds: assignees.map((row) => row.userId),
-      followerIds: followers.rows.map((row) => String(row.user_id)),
-    }, input.actorId)
+    // List roles never grant `delete`; resolved the same way as every other site so the role set
+    // here cannot drift from the detail's `canDelete`.
+    const roles = await loadRoles(db, input.taskId, task.createdBy, input.actorId)
     const childrenResult = await db.query(
       `SELECT id FROM tasks WHERE parent_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
       [input.taskId, input.orgId],

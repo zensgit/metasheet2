@@ -31,6 +31,10 @@
 //     role alone is 403.
 //   * Row-level visibility: a task the caller has no role on, a soft-deleted task, or a task in
 //     another org is 404 NOT_FOUND for reads and writes alike.
+//   * Preflight, before any seed row: the P0-A and M3 task tables and the RBAC tables exist; the
+//     three M4 tables the task routes read exist (task_list_items, task_list_members,
+//     task_user_settings; a missing one fails by name); the catalog carries tasks:read and
+//     tasks:write; and no row exists yet for any identity of the stamp.
 //   * Cases, in order:
 //       gate        subject GET /api/tasks/context is 403 before its admission row exists, 200
 //                   with orgId = ORG_ID after.
@@ -264,6 +268,9 @@ async function resolveTokens() {
 
 // --- preflight ---------------------------------------------------------------------------
 
+/** Tables the task routes read since M4 PR-3a (role resolution and /pending-count). */
+export const M4_TASK_TABLES = Object.freeze(['task_list_items', 'task_list_members', 'task_user_settings'])
+
 async function preflightDatabase() {
   const row = (await q(
     `SELECT
@@ -283,6 +290,22 @@ async function preflightDatabase() {
   const tablesReady = Object.values(row).every((value) => value === true)
   ok(tablesReady, 'DB assertion channel reachable and the P0-A and M3 task tables exist', row)
   if (!tablesReady) throw new Error('staging DB is missing task tables (or RBAC tables), or DATABASE_URL points at the wrong database: the tasks migrations may not be applied yet')
+
+  // M4 PR-3a: this image's task routes read three M4 tables on every role resolution and on
+  // /pending-count, so without the M4 migration they answer 500 (42P01). Refuse here, by name,
+  // instead of surfacing that as an HTTP assertion failure further down.
+  const m4Row = (await q(
+    `SELECT
+       to_regclass('public.task_list_items') IS NOT NULL AS task_list_items_ok,
+       to_regclass('public.task_list_members') IS NOT NULL AS task_list_members_ok,
+       to_regclass('public.task_user_settings') IS NOT NULL AS task_user_settings_ok`,
+  ))[0] || {}
+  const m4Ready = M4_TASK_TABLES.every((table) => m4Row[`${table}_ok`] === true)
+  ok(m4Ready, 'M4 task tables exist (task_list_items, task_list_members, task_user_settings)', m4Row)
+  if (!m4Ready) {
+    const missing = M4_TASK_TABLES.filter((table) => m4Row[`${table}_ok`] !== true)
+    throw new Error(`M4 task tables do not exist (${missing.join(', ')}): the task routes in this image need the M4 migration`)
+  }
 
   const permRow = (await q(
     `SELECT count(*)::int AS n FROM permissions WHERE code IN ('tasks:read', 'tasks:write')`,
