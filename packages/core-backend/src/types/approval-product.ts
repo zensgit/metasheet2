@@ -20,13 +20,30 @@ export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'reques
 export type ApprovalMode = 'single' | 'all' | 'any' | 'threshold' | 'sequential'
 
 /**
- * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry: exactly SEVEN of the
- * shipped kinds. `continuous_managers` is excluded (corpus C-2 lists 连续多级上级 for approvers, not
- * handlers), and `requester_choice` — though now shipped (Lock-1 K2) and §1.5 says it ADMITS once
- * Lock-1 lands — is NOT added here: §1.5 says "each row lands in the SAME slice as its kind", and
- * gate G-13 freezes the seven-member set by exact-set equality (adding a kind must FAIL). Widening
- * to requester_choice is a separate follow-up decision, not P4-A. This is the per-node-type M4
- * fail-closed registry: a handler config carrying any kind outside this set is rejected at authoring.
+ * Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry (the per-node-type M4
+ * fail-closed registry: a handler config carrying any kind outside this set is rejected at
+ * authoring, `APPROVAL_HANDLER_SOURCE_KIND_UNSUPPORTED`). Three layers, each ratified text:
+ *
+ *  1. The base roster — SEVEN of the originally shipped eight kinds. `continuous_managers` is
+ *     excluded (corpus C-2 lists 连续多级上级 for approvers, not handlers; OD-L3-6(a)).
+ *  2. Lock-2 §2.4 — the two contact-derived rows (`approval` AND `handler`), 7→9.
+ *  3. Lock-3 §1.5's FORWARD rows, quoted verbatim: "Forward rows, conditional on Lock-1 landing:
+ *     `user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b) ADMIT (corpus C-2
+ *     lists 用户组 / 提交人自选); `prior_node_approver` (K3) and `continuous_dept_heads` (K4) do NOT;
+ *     Lock-2's 表单内部门 admits when it exists. Each row lands in the same slice as its kind, per
+ *     Lock-1 §2.3." Lock-1 is RATIFIED and on main, so the condition is met; the K1/K2/K5-b slices
+ *     landed approval-only and deferred this widening, which W1-1d now lands as its own slice:
+ *     9→12. ONLY the three named rows widen — K3 and K4 stay rejected, and the handler
+ *     empty-assignee/fallback key stays rejected (§1.2 / OD-L3-2(a); the F4-B handler arm is a
+ *     separate, unratified decision).
+ *
+ * Gate G-13 pins this set by EXACT-set equality (not count, not subset, not the full
+ * `ApprovalAssigneeSourceKind` union): growth is a reviewed decision made in the same commit as
+ * the test update, never a silent widening. The three forward kinds also need every create/publish
+ * collector that bakes their snapshot input to read HANDLER nodes (`collectApprovalGraphMemberGroupIds`,
+ * `assertUserGroupSourcesBoundToOrg`, `collectRuntimeGraphRequesterChoiceSources`,
+ * `runtimeGraphUsesDeptHeadChain` in ApprovalProductService.ts) — admitting a kind here without its
+ * collector arm is the R-13 "silent skip" class (the node resolves EMPTY and fails at dispatch).
  */
 export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'static_user',
@@ -40,11 +57,19 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   // `approval` AND `handler` ("The handler rows are corpus-evidenced, not an M11 widening (C-6);
   // Lock-3 §1.5's forward-row sentence names only 表单内部门 although its own roster lists
   // 表单内联系人, so the two contact-derived rows supply what fell between the locks"). Each row
-  // lands in the SAME slice as its kind, so the exact-set roster grows 7→9 here — deliberately,
+  // lands in the SAME slice as its kind, so the exact-set roster grew 7→9 here — deliberately,
   // with the G-13 exact-set tests updated in the same commit (they exist to make this growth a
   // reviewed decision, not to forbid ratified rows).
   'form_field_user_manager',
   'form_field_user_dept_head',
+  // Lock-3 §1.5 forward rows (RATIFIED; W1-1d, 2026-10-10) — "`user_group` (K1), `requester_choice`
+  // (K2) and `dept_head_at_level` (K5-b) ADMIT". 9→12, strictly these three; the G-13 exact-set
+  // tests (FE approval-handler-node-authoring.spec.ts, BE approval-handler-node-registry.test.ts)
+  // are updated in the same commit. Each kind's create/publish collector gained its handler arm in
+  // the same slice (see the doc comment above) — never admit a kind here without that arm.
+  'user_group',
+  'requester_choice',
+  'dept_head_at_level',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 

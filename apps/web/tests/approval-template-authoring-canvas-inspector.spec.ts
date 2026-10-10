@@ -2907,7 +2907,7 @@ describe('Lock-0 P1-A — registry-driven tab membership + roster (direct mount)
       unmount()
     })
 
-    // A `handler` node's own "add defaults from the seven-member handler roster" case is covered in
+    // A `handler` node's own "add defaults from the handler roster" case is covered in
     // approval-handler-node-config.spec.ts's stub, which (unlike this file's createStubConfigApi)
     // already implements handlerNodeMode/handlerNodeOpinionRequired — required for a handler node
     // to render at all through THIS harness's `installStubs`.

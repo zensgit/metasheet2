@@ -2628,7 +2628,7 @@ function approvalSourceCount(nodeKey: string): number {
 }
 // P1-B "＋添加审批人": appends one new card with the given default kind (the caller — the config
 // editor — reads it from the registry roster, never hand-picks one, so a `handler` node's add
-// button never seeds a kind outside its seven-member roster). Delegates to the pure, independently
+// button never seeds a kind outside its handler roster). Delegates to the pure, independently
 // unit-tested `addAssigneeSourceCard` (approvalNodeEdit.ts). Deliberately does NOT clear the P1-1
 // kind-switch cache: an append never shifts any EXISTING card's index (it only grows the array at
 // the end), so a card the author already configured-then-switched-away-from keeps its cached

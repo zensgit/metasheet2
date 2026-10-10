@@ -41,7 +41,9 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   continuous_managers: '连续多级上级',
   manager_at_level: '指定层级上级',
   // Lock-1 §K2 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the scope
-  // validation + submit-time chooser end to end (registry table row: 提交人自选 / approval).
+  // validation + submit-time chooser end to end (registry table row: 提交人自选 / approval). ALSO
+  // admitted on `handler` since W1-1d (Lock-3 §1.5 forward row "`requester_choice` (K2) … ADMIT";
+  // the submit-time chooser in ApprovalNewView.vue reads handler nodes too).
   requester_choice: '提交人自选',
   // Lock-1 §K4 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the
   // deptHeadChainIds snapshot + resolver arm end to end (registry table row:
@@ -49,8 +51,8 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   continuous_dept_heads: '连续多级部门负责人',
   // Lock-1 §K5-b (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the resolver arm
   // end to end (registry table row: 指定层级部门负责人 / approval; "Admitted when: K4 landed").
-  // NOT admitted on `handler` — Lock-3 §1.5's forward ADMIT row is a separate follow-up (see
-  // HANDLER_ASSIGNEE_SOURCE_KINDS below, which deliberately does not include this kind).
+  // ALSO admitted on `handler` since W1-1d — Lock-3 §1.5's forward row ("`dept_head_at_level`
+  // (K5-b) ADMIT"), carried by HANDLER_ASSIGNEE_SOURCE_KINDS (types/approval.ts).
   dept_head_at_level: '指定层级部门负责人',
   // Lock-1 §K3 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the dominance
   // validator + caller-supplied decider resolution end to end (registry table row: 节点审批人 /
@@ -61,9 +63,10 @@ export const APPROVAL_ASSIGNEE_SOURCE_LABELS: Record<ApprovalAssigneeSourceKind,
   // Lock-1 §K1 (RATIFIED 2026-08-17) — admitted in the SAME slice that lands the resolver arm +
   // org binding + picker end to end (registry table row: 用户组 / approval; "Admitted when:
   // OD-L1-1 + OD-L1-2 decided; resolver, org binding, and picker landed" — both ODs are recorded
-  // (a) in the §4 ratification block). NOT admitted on `handler` (see HANDLER_ASSIGNEE_SOURCE_KINDS
-  // below). The cc-as-recipient row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not
-  // admit it") is deferred to its own slice and is NOT added here.
+  // (a) in the §4 ratification block). ALSO admitted on `handler` since W1-1d (Lock-3 §1.5 forward
+  // row "`user_group` (K1) … ADMIT", carried by HANDLER_ASSIGNEE_SOURCE_KINDS). The cc-as-recipient
+  // row (OD-L1-7, §2.3 "a SEPARATE row — the approver row does not admit it") is deferred to its
+  // own slice and is NOT added here.
   user_group: '用户组',
   // Lock-2 §2.4 (RATIFIED 2026-08-17) — the two contact-derived rows (表单内联系人上级 /
   // 表单内联系人部门负责人), admitted in the SAME slice that lands the publish pins + the
@@ -165,9 +168,10 @@ export const DEFAULT_APPROVAL_CAPABILITY_REGISTRY: ApprovalCapabilityRegistry = 
       kind,
       label: APPROVAL_ASSIGNEE_SOURCE_LABELS[kind],
     })),
-    // Lock-3 §1.5 / OD-L3-6(a) — the handler node's SEVEN-member roster (M4 per-node-type registry).
-    // Reuses the ratified §10.3 labels; `continuous_managers`/`requester_choice`/etc. are absent (G-13
-    // pins this exact set). Order follows HANDLER_ASSIGNEE_SOURCE_KINDS.
+    // Lock-3 §1.5 / OD-L3-6(a) — the handler node's roster (M4 per-node-type registry): the base
+    // seven + Lock-2's two contact rows + Lock-3 §1.5's three forward rows (W1-1d). Reuses the
+    // ratified §10.3 labels; `continuous_managers` / `prior_node_approver` / `continuous_dept_heads`
+    // are absent (G-13 pins this exact set). Order follows HANDLER_ASSIGNEE_SOURCE_KINDS.
     handler: HANDLER_ASSIGNEE_SOURCE_KINDS.map((kind) => ({
       kind,
       label: APPROVAL_ASSIGNEE_SOURCE_LABELS[kind],
