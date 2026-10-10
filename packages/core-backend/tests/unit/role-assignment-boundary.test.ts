@@ -190,12 +190,14 @@ describe('access presets — the namespaces each grant derives', () => {
 
 describe('rbac/role-assignment — scope is required and the bounded arm is derived', () => {
   const attendanceScope: RoleAssignmentScope = { kind: 'namespaces', namespaces: ['attendance'] }
+  // A platform admin acting through the attendance-mounted router (attendance-admin.ts).
+  const attendancePlatformScope: RoleAssignmentScope = { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] }
 
-  it('admits every role id in the exported registries under its own namespace', () => {
+  it('admits every role id in the exported registries under its own namespace (platform admin through the namespace router)', () => {
     const templateRoleIds = Object.values(ATTENDANCE_ROLE_TEMPLATES).map((template) => template.roleId)
     expect(templateRoleIds.length).toBeGreaterThan(0)
     for (const roleId of templateRoleIds) {
-      expect(() => assertRoleAssignable(roleId, attendanceScope), roleId).not.toThrow()
+      expect(() => assertRoleAssignable(roleId, attendancePlatformScope), roleId).not.toThrow()
     }
 
     const presetRoleIds = listAccessPresets()
@@ -203,7 +205,34 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
       .map((preset) => String(preset.roleId))
     expect(presetRoleIds.length).toBeGreaterThan(0)
     for (const roleId of presetRoleIds) {
-      expect(() => assertRoleAssignable(roleId, attendanceScope), roleId).not.toThrow()
+      expect(() => assertRoleAssignable(roleId, attendancePlatformScope), roleId).not.toThrow()
+    }
+  })
+
+  it('the DELEGATED arm admits the same registry ids except the namespace main-admin role (owner ruling 「只有平台管理员能任命 *_admin」)', () => {
+    const registryRoleIds = Array.from(new Set([
+      ...Object.values(ATTENDANCE_ROLE_TEMPLATES).map((template) => template.roleId),
+      ...listAccessPresets()
+        .filter((preset) => preset.productMode === 'attendance' && preset.roleId)
+        .map((preset) => String(preset.roleId)),
+    ]))
+    const mainAdminIds = registryRoleIds.filter((roleId) => deriveDelegatedAdminNamespace(roleId) !== null)
+    // Floors: the split is real on both sides, so neither loop below is vacuous.
+    expect(mainAdminIds).toEqual(['attendance_admin'])
+    expect(registryRoleIds.length).toBeGreaterThan(mainAdminIds.length)
+    for (const roleId of registryRoleIds) {
+      if (mainAdminIds.includes(roleId)) {
+        let thrown: unknown
+        try {
+          assertRoleAssignable(roleId, attendanceScope)
+        } catch (error) {
+          thrown = error
+        }
+        expect(thrown, roleId).toBeInstanceOf(RoleAssignmentForbiddenError)
+        expect((thrown as RoleAssignmentForbiddenError).reason, roleId).toBe('main_admin_role')
+      } else {
+        expect(() => assertRoleAssignable(roleId, attendanceScope), roleId).not.toThrow()
+      }
     }
   })
 
@@ -220,17 +249,28 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
     expect(namespaces.length).toBeGreaterThan(0)
 
     for (const namespace of namespaces) {
-      expect(
-        () => assertRoleAssignable(PLATFORM_ADMIN_ROLE_ID, { kind: 'namespaces', namespaces: [namespace] }),
-        namespace,
-      ).toThrow(RoleAssignmentForbiddenError)
+      for (const kind of ['namespaces', 'platform-admin-in-namespaces'] as const) {
+        expect(
+          () => assertRoleAssignable(PLATFORM_ADMIN_ROLE_ID, { kind, namespaces: [namespace] }),
+          `${kind} ${namespace}`,
+        ).toThrow(RoleAssignmentForbiddenError)
+      }
     }
   })
 
   it('POSITIVE CONTROL — the same namespaces admit their own role ids, so the loop above is not refusing everything', () => {
-    expect(isRoleAssignable('attendance_admin', attendanceScope)).toBe(true)
+    expect(isRoleAssignable('attendance_admin', attendancePlatformScope)).toBe(true)
+    expect(isRoleAssignable('attendance', attendancePlatformScope)).toBe(true)
+    expect(isRoleAssignable('attendance_employee', attendanceScope)).toBe(true)
     expect(isRoleAssignable('attendance', attendanceScope)).toBe(true)
     expect(isRoleAssignable(PLATFORM_ADMIN_ROLE_ID, attendanceScope)).toBe(false)
+    expect(isRoleAssignable(PLATFORM_ADMIN_ROLE_ID, attendancePlatformScope)).toBe(false)
+    // The delegated arm alone refuses the namespace's main-admin role, by the identity predicate:
+    // nested and arbitrary `_admin` ids too, never a lookalike that derives nothing.
+    expect(isRoleAssignable('attendance_admin', attendanceScope)).toBe(false)
+    expect(isRoleAssignable('attendance_data_admin', attendanceScope)).toBe(false)
+    expect(isRoleAssignable('attendance_ADMIN', attendanceScope)).toBe(true)
+    expect(isRoleAssignable('attendance_sysadmin', attendanceScope)).toBe(true)
   })
 
   it('a namespace that is not admission-controlled scopes nothing', () => {
@@ -239,8 +279,10 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
     // the shared resource classification, not from a denylist this test would have to track.
     expect(isRoleAssignable(PLATFORM_ADMIN_ROLE_ID, { kind: 'namespaces', namespaces: ['admin'] })).toBe(false)
     expect(isRoleAssignable('multitable_admin', { kind: 'namespaces', namespaces: ['multitable'] })).toBe(false)
-    // POSITIVE CONTROL for the same arm: an admission-controlled namespace still works.
-    expect(isRoleAssignable('attendance_admin', { kind: 'namespaces', namespaces: ['attendance'] })).toBe(true)
+    expect(isRoleAssignable('multitable_admin', { kind: 'platform-admin-in-namespaces', namespaces: ['multitable'] })).toBe(false)
+    // POSITIVE CONTROL for the same arms: an admission-controlled namespace still works.
+    expect(isRoleAssignable('attendance_employee', { kind: 'namespaces', namespaces: ['attendance'] })).toBe(true)
+    expect(isRoleAssignable('attendance_admin', { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] })).toBe(true)
   })
 
   it('the directory governance seam is bounded by its CONFIG VALIDATOR, not by its scope argument', () => {
@@ -277,6 +319,7 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
   it('an empty or blank role id is refused under every scope', () => {
     for (const scope of [
       { kind: 'platform-admin' } as const,
+      { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] } as const,
       { kind: 'namespaces', namespaces: ['attendance'] } as const,
       { kind: 'fixed', roleIds: ['attendance_employee'] } as const,
     ]) {
@@ -288,28 +331,44 @@ describe('rbac/role-assignment — scope is required and the bounded arm is deri
   it('the writers refuse before issuing any statement (executed)', async () => {
     const statements: string[] = []
     const executor = {
-      query: async (sql: string) => {
+      query: async (sql: string, params?: unknown[]) => {
         statements.push(sql)
+        // The delegated arm locks the role row and reads its codes before the write.
+        if (/FROM roles WHERE id = \$1 FOR SHARE/.test(sql)) return { rows: [{ id: params?.[0] }] }
+        if (/FROM role_permissions WHERE role_id = \$1/.test(sql)) return { rows: [{ permission_code: 'attendance:read' }] }
         return { rows: [] }
       },
     }
     const scope: RoleAssignmentScope = { kind: 'namespaces', namespaces: ['attendance'] }
 
-    await expect(
-      assignUserRoles({ userIds: ['u1'], roleId: PLATFORM_ADMIN_ROLE_ID, scope, executor }),
-    ).rejects.toBeInstanceOf(RoleAssignmentForbiddenError)
-    await expect(
-      unassignUserRoles({ userIds: ['u1'], roleId: PLATFORM_ADMIN_ROLE_ID, scope, executor }),
-    ).rejects.toBeInstanceOf(RoleAssignmentForbiddenError)
+    for (const roleId of [PLATFORM_ADMIN_ROLE_ID, 'attendance_admin']) {
+      await expect(
+        assignUserRoles({ userIds: ['u1'], roleId, scope, executor }),
+      ).rejects.toBeInstanceOf(RoleAssignmentForbiddenError)
+      await expect(
+        unassignUserRoles({ userIds: ['u1'], roleId, scope, executor }),
+      ).rejects.toBeInstanceOf(RoleAssignmentForbiddenError)
+    }
     expect(statements).toEqual([])
 
     // POSITIVE CONTROL — an in-scope role id does reach the executor, so "no statements"
-    // above is a refusal and not a broken harness.
+    // above is a refusal and not a broken harness. Under the delegated arm each write is
+    // preceded by the role-row lock and the code read, on the same executor.
     await assignUserRoles({ userIds: ['u1'], roleId: 'attendance_employee', scope, executor })
     await unassignUserRoles({ userIds: ['u1'], roleId: 'attendance_employee', scope, executor })
-    expect(statements).toHaveLength(2)
+    expect(statements).toHaveLength(6)
+    expect(statements[0]).toMatch(/SELECT id FROM roles WHERE id = \$1 FOR SHARE/)
+    expect(statements[1]).toMatch(/SELECT permission_code FROM role_permissions/)
+    expect(statements[2]).toMatch(/INSERT INTO user_roles/)
+    expect(statements[3]).toMatch(/SELECT id FROM roles WHERE id = \$1 FOR SHARE/)
+    expect(statements[4]).toMatch(/SELECT permission_code FROM role_permissions/)
+    expect(statements[5]).toMatch(/DELETE FROM user_roles/)
+
+    // The platform arms issue the write alone: the code review is confined to the delegated arm.
+    statements.length = 0
+    await assignUserRoles({ userIds: ['u1'], roleId: 'attendance_admin', scope: { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] }, executor })
+    expect(statements).toHaveLength(1)
     expect(statements[0]).toMatch(/INSERT INTO user_roles/)
-    expect(statements[1]).toMatch(/DELETE FROM user_roles/)
   })
 })
 
@@ -703,6 +762,13 @@ describe('role-delegation seam — a boundary refusal answers 403, not 500', () 
   /** Serves the seam's reads by SQL shape, so neither leg depends on a call-ordering count. */
   function installDelegationPg(seen: string[], actorRoleId: string, targetRoleId: string) {
     pgMocks.query.mockReset()
+    // The seam writes inside `transaction()` (the delegated platform-code check reads the role's
+    // codes under a row lock in the same transaction as the write); serve it from the same SQL
+    // router so the write is observable here.
+    pgMocks.transaction.mockReset()
+    pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof pgMocks.query }) => unknown) => (
+      handler({ query: pgMocks.query })
+    ))
     rbacServiceMocks.isAdmin.mockResolvedValue(false)
     pgMocks.query.mockImplementation(async (sql: string) => {
       seen.push(sql)
