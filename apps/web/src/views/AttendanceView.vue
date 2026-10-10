@@ -33823,6 +33823,12 @@ defineExpose({
   gap: var(--ms-space-3);
 }
 
+/* Summary-field choices sit under the template meta fields and use the
+   same three-column desktop rhythm. The import template guide stays at two. */
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .attendance__form-sheet .attendance__template-guide-card,
 .attendance__form-sheet .attendance__payroll-summary-fields {
   gap: var(--ms-space-2);
@@ -33947,7 +33953,8 @@ defineExpose({
   #attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule],
   #attendance-admin-shifts.attendance__form-sheet :deep(.shift-flex__grid),
   #attendance-admin-approval-flows.attendance__form-sheet :deep(.approval-steps__approvers),
-  #attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid {
+  #attendance-admin-payroll-templates.attendance__form-sheet > .attendance__admin-grid,
+  #attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-options {
     grid-template-columns: 1fr;
   }
 

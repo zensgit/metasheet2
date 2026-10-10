@@ -134,9 +134,15 @@ test.describe('attendance admin deep forms share Holidays and Settings chrome', 
       getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
     ))
     expect(templateColumns, 'payroll templates use three columns at desktop').toBe(3)
+    const summaryColumns = await page.locator('[data-payroll-summary-field-options]').evaluate((node) => (
+      getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
+    ))
+    expect(summaryColumns, 'summary field template uses three columns at desktop').toBe(3)
     await expectControlHeight(page, '#attendance-payroll-template-name')
     await expectControlHeight(page, 'label[for="attendance-payroll-template-auto"]')
-    await scrollBelowSticky(page, '#attendance-payroll-template-name')
+    const optionMinHeight = await page.locator('[data-payroll-summary-field-option]').first().evaluate((node) => getComputedStyle(node).minHeight)
+    expect(optionMinHeight).toBe('32px')
+    await scrollBelowSticky(page, '.attendance__payroll-summary-header')
     const name = 'attendance-admin-payroll-templates-1440.png'
     await page.screenshot({ path: `${OUT}/${name}`, fullPage: false })
     publish(name)
