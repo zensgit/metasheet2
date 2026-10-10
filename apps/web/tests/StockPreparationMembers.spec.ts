@@ -248,7 +248,7 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
     h.apiFetch.mockResolvedValueOnce(ok({})).mockResolvedValueOnce(refused(403, 'ROLE_DELEGATION_USER_OUT_OF_SCOPE'))
     expect(await appointStockPrepMember('u_x', 'stock-prep_puller')).toEqual({ admitted: false })
     // Every code this page can meet has its own plain sentence.
-    for (const code of ['STOCK_PREP_MEMBERS_FORBIDDEN', 'ROLE_DELEGATION_SCOPE_REQUIRED', 'STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN', 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE', 'STOCK_PREP_BUILTIN_ROLE_READ_ONLY', 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE', 'STOCK_PREP_CUSTOM_ROLE_LIMIT']) {
+    for (const code of ['STOCK_PREP_MEMBERS_FORBIDDEN', 'ROLE_DELEGATION_SCOPE_REQUIRED', 'STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN', 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', 'STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE', 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES', 'STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED', 'STOCK_PREP_MEMBERS_BUSY', 'STOCK_PREP_BUILTIN_ROLE_READ_ONLY', 'STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE', 'STOCK_PREP_CUSTOM_ROLE_LIMIT']) {
       expect(STOCK_PREP_MEMBERS_ERROR_PLAIN[code], code).toBeTruthy()
     }
   })
@@ -262,6 +262,26 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
     expect(view?.builtInRoles[0].appointable).toBe(false)
     expect(view?.builtInRoles[0].permissionCodes).toEqual(['stock-prep:admin'])
     expect(clampStockPrepMembersView({ ...membersPayload(), enabled: false })).toBeNull()
+  })
+
+  it('SMW-CLAMP (S1): a role carrying anything the page may not hand out is locked, whatever the server\'s other flags say', () => {
+    const view = clampStockPrepMembersView(membersPayload({
+      builtInRoles: [role('stock-prep_frontline', { otherCodeCount: 1, appointable: true })],
+      customRoles: [
+        role(CUSTOM, { locked: true, foreignCodeCount: 1, editable: true, appointable: true }),
+        role('stock-prep_c_00000001', { otherCodeCount: 2, editable: true, appointable: true }),
+        role('stock-prep_c_00000002', { permissionCodes: ['stock-prep:read', 'stock-prep:admin'], editable: true, appointable: true }),
+        role('stock-prep_c_00000003', { foreignCodeCount: 1, editable: true, appointable: true }),
+        role('stock-prep_c_00000004'),
+      ],
+    }))!
+    for (const r of [...view.builtInRoles, ...view.customRoles.slice(0, 4)]) {
+      expect([r.id, r.locked, r.editable, r.appointable]).toEqual([r.id, true, false, false])
+    }
+    expect([view.customRoles[4].locked, view.customRoles[4].editable, view.customRoles[4].appointable]).toEqual([false, true, true])
+    // The main administrator is never "locked" by its own code — it is simply never appointable.
+    const main = clampStockPrepMembersView(membersPayload())!.builtInRoles[0]
+    expect([main.id, main.locked, main.appointable]).toEqual(['stock-prep_admin', false, false])
   })
 
   // ── SMW-SHELL ─────────────────────────────────────────────────────────────────────────────────
@@ -389,6 +409,72 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
     expect(JSON.parse(String((create![1] as RequestInit).body))).toEqual({ name: '采购只读', permissionCodes: ['stock-prep:read'] })
     // After a write the page re-reads the server.
     expect(h.apiFetch.mock.calls.filter(([url]) => url === MEMBERS_URL).length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('SMW-PAGE (S1): a locked role says 「含平台权限，需平台管理员处理」 and offers no edit, table, appoint, revoke or admit control', async () => {
+    const LOCKED = 'stock-prep_c_0badc0de'
+    const member = { userId: 'u_locked_member', name: '丙', email: null, username: null, admitted: false }
+    const payload = membersPayload({
+      builtInRoles: [
+        role('stock-prep_admin', { permissionCodes: ['stock-prep:admin'], appointable: false }),
+        role('stock-prep_frontline', { locked: true, foreignCodeCount: 1, otherCodeCount: 1, appointable: false, members: [member] }),
+      ],
+      customRoles: [
+        role(CUSTOM, { name: '仓库只填两张表', sheetIds: [SHEET_A], otherSheetCount: 0 }),
+        role(LOCKED, { name: '看似自定义', locked: true, foreignCodeCount: 1, otherCodeCount: 1, editable: false, appointable: false, members: [member], sheetIds: [], otherSheetCount: 0 }),
+      ],
+    })
+    answer(() => ok(payload))
+    const root = await mountPage({ kind: 'ready', view: clampStockPrepMembersView(payload)! })
+    for (const id of [LOCKED, 'stock-prep_frontline']) {
+      const el = root.querySelector(`[data-testid="stock-prep-members-role-${id}"]`)!
+      expect(el.querySelector('[data-testid="stock-prep-members-role-locked"]')?.textContent, id).toContain('含平台权限，需平台管理员处理')
+      for (const control of ['stock-prep-members-custom-role-save', 'stock-prep-members-custom-role-add-tables', 'stock-prep-members-revoke', 'stock-prep-members-admit', `stock-prep-members-appoint-form-${id}`, `stock-prep-members-custom-role-name-${id}`]) {
+        expect(el.querySelector(`[data-testid="${control}"]`), `${id} ${control}`).toBeNull()
+      }
+      expect(el.querySelector('[data-testid="stock-prep-members-member"]'), `${id}: members are still listed`).not.toBeNull()
+    }
+    // The unlocked custom role keeps its controls.
+    const open = root.querySelector(`[data-testid="stock-prep-members-role-${CUSTOM}"]`)!
+    expect(open.querySelector('[data-testid="stock-prep-members-role-locked"]')).toBeNull()
+    expect(open.querySelector('[data-testid="stock-prep-members-custom-role-save"]')).not.toBeNull()
+    expect(open.querySelector('[data-testid="stock-prep-members-custom-role-add-tables"]')).not.toBeNull()
+  })
+
+  it('SMW-PAGE (S11): Save sends only what changed — a rename carries no permissionCodes; nothing changed sends nothing', async () => {
+    const ROLE_URL = `${MEMBERS_URL}/custom-roles/${CUSTOM}`
+    const patches = () => h.apiFetch.mock.calls.filter(([url, init]) => url === ROLE_URL && (init as RequestInit | undefined)?.method === 'PATCH').map(([, init]) => JSON.parse(String((init as RequestInit).body)))
+    const scenarios: Array<[string, (root: HTMLDivElement) => void, Array<Record<string, unknown>>]> = [
+      ['rename only', (root) => {
+        const input = root.querySelector(`[data-testid="stock-prep-members-custom-role-name-${CUSTOM}"]`) as HTMLInputElement
+        input.value = '  改名  '
+        input.dispatchEvent(new Event('input'))
+      }, [{ name: '改名' }]],
+      ['codes only', (root) => {
+        (root.querySelector(`[data-testid="stock-prep-members-custom-role-code-${CUSTOM}-stock-prep:operate"]`) as HTMLInputElement).click()
+      }, [{ permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }]],
+      ['both', (root) => {
+        const input = root.querySelector(`[data-testid="stock-prep-members-custom-role-name-${CUSTOM}"]`) as HTMLInputElement
+        input.value = '改名'
+        input.dispatchEvent(new Event('input'))
+        ;(root.querySelector(`[data-testid="stock-prep-members-custom-role-code-${CUSTOM}-stock-prep:read"]`) as HTMLInputElement).click()
+      }, [{ name: '改名', permissionCodes: [] }]],
+      ['nothing', () => {}, []],
+    ]
+    for (const [name, change, expected] of scenarios) {
+      answer(() => ok(membersPayload()), (url, init) => (url === ROLE_URL && init?.method === 'PATCH' ? ok({ roleId: CUSTOM }) : null))
+      const root = await mountPage({ kind: 'ready', view: clampStockPrepMembersView(membersPayload())! })
+      change(root)
+      await flush()
+      ;(root.querySelector(`[data-testid="stock-prep-members-role-${CUSTOM}"] [data-testid="stock-prep-members-custom-role-save"]`) as HTMLButtonElement).click()
+      await flush()
+      expect(patches(), name).toEqual(expected)
+      if (expected.length === 0) expect(root.querySelector('[data-testid="stock-prep-members-notice"]')?.textContent).toContain('没有需要保存的修改')
+      app!.unmount()
+      app = null
+      container!.innerHTML = ''
+      h.apiFetch.mockReset()
+    }
   })
 
   it('SMW-PAGE: the add-tables control only exists when project sheets can be listed', async () => {

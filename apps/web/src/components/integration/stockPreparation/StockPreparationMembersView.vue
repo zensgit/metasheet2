@@ -52,6 +52,9 @@
           <p v-if="role.id === mainAdminRoleId" class="sp-members__hint" data-testid="stock-prep-members-main-admin-note">
             {{ bi('主管理员由平台管理员任命，这里只能查看。', 'The main administrator is appointed by a platform administrator; read-only here.') }}
           </p>
+          <p v-if="role.locked" class="sp-members__warn" data-testid="stock-prep-members-role-locked" role="status">
+            {{ lockedNotice() }}
+          </p>
           <StockPreparationMembersList :role="role" :busy="busy" @revoke="revoke" @admit="admit" />
           <StockPreparationMembersAppointForm v-if="role.appointable" :role-id="role.id" :busy="busy" @appoint="appoint" />
         </template>
@@ -75,7 +78,10 @@
           <strong>{{ role.name || role.id }}</strong>
           <code class="sp-members__token">{{ role.id }}</code>
         </p>
-        <div class="sp-members__edit">
+        <p v-if="role.locked" class="sp-members__warn" data-testid="stock-prep-members-role-locked" role="status">
+          {{ lockedNotice() }}
+        </p>
+        <div v-if="role.editable" class="sp-members__edit">
           <input
             v-model="edits[role.id].name"
             type="text"
@@ -104,7 +110,7 @@
         <p class="sp-members__codes" data-testid="stock-prep-members-custom-role-sheets">
           {{ sheetsLabel(role) }}
         </p>
-        <div v-if="sheetChoices" class="sp-members__tables">
+        <div v-if="sheetChoices && role.editable" class="sp-members__tables">
           <label v-for="choice in addableChoices(role)" :key="choice.projectNo" class="sp-members__check">
             <input
               v-model="tableTicks[role.id]"
@@ -226,6 +232,8 @@ const failure = ref<{ zh: string; en: string; code: string | null } | null>(null
 const notice = ref<{ zh: string; en: string } | null>(null)
 const sheetChoices = ref<Array<{ projectNo: string; sheetId: string; status: string }> | null>(null)
 const edits = reactive<Record<string, { name: string; codes: string[] }>>({})
+/** What each custom role looked like when the page read it — Save sends only what differs (S11). */
+const baselines: Record<string, { name: string; codes: string[] }> = {}
 const tableTicks = reactive<Record<string, string[]>>({})
 const draftName = ref('')
 const draftCodes = ref<string[]>([])
@@ -238,7 +246,9 @@ const editableCodes = computed<string[]>(() => {
 
 function syncEdits(): void {
   for (const role of view.value?.customRoles ?? []) {
-    edits[role.id] = { name: role.name ?? '', codes: role.permissionCodes.filter((code) => editableCodes.value.includes(code)) }
+    const codes = role.permissionCodes.filter((code) => editableCodes.value.includes(code))
+    edits[role.id] = { name: role.name ?? '', codes: [...codes] }
+    baselines[role.id] = { name: (role.name ?? '').trim(), codes: [...codes] }
     tableTicks[role.id] = []
   }
 }
@@ -310,13 +320,34 @@ function createRole(): void {
   })
 }
 
+/**
+ * Save sends ONLY what changed (S11): a rename alone carries no `permissionCodes`, so the server
+ * treats it as a rename — which a delegated admin may do even while the role has members outside
+ * their scope — instead of a codes change it would refuse.
+ */
 function saveRole(roleId: string): void {
   const edit = edits[roleId]
   if (!edit) return
+  const baseline = baselines[roleId] ?? { name: '', codes: [] }
+  const name = edit.name.trim()
+  const codes = edit.codes.filter((code) => editableCodes.value.includes(code))
+  const patch: { name?: string; permissionCodes?: string[] } = {}
+  if (name !== baseline.name) patch.name = name
+  const sameCodes = codes.length === baseline.codes.length && codes.every((code) => baseline.codes.includes(code))
+  if (!sameCodes) patch.permissionCodes = codes
+  if (patch.name === undefined && patch.permissionCodes === undefined) {
+    failure.value = null
+    notice.value = { zh: '没有需要保存的修改。', en: 'Nothing to save.' }
+    return
+  }
   void run(async () => {
-    await updateStockPrepCustomRole(roleId, { name: edit.name.trim(), permissionCodes: edit.codes.filter((code) => editableCodes.value.includes(code)) })
+    await updateStockPrepCustomRole(roleId, patch)
     return { zh: '已保存。', en: 'Saved.' }
   })
+}
+
+function lockedNotice(): string {
+  return bi('含平台权限，需平台管理员处理。', 'Carries platform permissions; a platform administrator has to handle this role.')
 }
 
 function addTables(roleId: string): void {

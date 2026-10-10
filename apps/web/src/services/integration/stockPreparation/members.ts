@@ -52,6 +52,13 @@ export interface StockPrepMembersRole {
   name: string | null
   permissionCodes: string[]
   otherCodeCount: number
+  /** How many of the role's codes this page may not hand out (platform codes, the main-admin code). */
+  foreignCodeCount: number
+  /**
+   * The role carries a code this page may not hand out (someone put it there on the platform role
+   * editor): never editable or appointable here — 「含平台权限，需平台管理员处理」.
+   */
+  locked: boolean
   editable: boolean
   appointable: boolean
   members: StockPrepMembersMember[]
@@ -132,16 +139,30 @@ function clampRole(raw: unknown): StockPrepMembersRole | null {
     if (!userId) continue
     members.push({ userId, name: str(entry.name), email: str(entry.email), username: str(entry.username), admitted: entry.admitted === true })
   }
+  const permissionCodes = codeList(raw.permissionCodes)
+  const otherCodeCount = count(raw.otherCodeCount)
+  const foreignCodeCount = count(raw.foreignCodeCount)
+  // A role carrying anything this page may not hand out is LOCKED, whatever the server's other flags
+  // say: the server's own `locked`, a non-zero foreign / platform code count, or a stock-prep code
+  // outside the selectable list (the main-admin code on a role that is not the main administrator).
+  const locked = id !== STOCK_PREP_MAIN_ADMIN_ROLE_ID && (
+    raw.locked === true
+    || foreignCodeCount > 0
+    || otherCodeCount > 0
+    || permissionCodes.some((code) => !(STOCK_PREP_CUSTOM_ROLE_SELECTABLE_CODES as readonly string[]).includes(code))
+  )
   return {
     id,
     kind,
     installed: raw.installed === true,
     name: str(raw.name),
-    permissionCodes: codeList(raw.permissionCodes),
-    otherCodeCount: count(raw.otherCodeCount),
-    editable: raw.editable === true && kind === 'custom',
+    permissionCodes,
+    otherCodeCount,
+    foreignCodeCount,
+    locked,
+    editable: raw.editable === true && kind === 'custom' && !locked,
     // Never trust a server flag to offer the main administrator (§11.7): the page refuses it locally too.
-    appointable: raw.appointable === true && id !== STOCK_PREP_MAIN_ADMIN_ROLE_ID,
+    appointable: raw.appointable === true && id !== STOCK_PREP_MAIN_ADMIN_ROLE_ID && !locked,
     members,
     outOfScopeMemberCount: count(raw.outOfScopeMemberCount),
     sheetIds: handleList(raw.sheetIds),
@@ -348,7 +369,11 @@ export const STOCK_PREP_MEMBERS_ERROR_PLAIN: Readonly<Record<string, { zh: strin
   STOCK_PREP_CUSTOM_ROLE_PLATFORM_CODE_FORBIDDEN: { zh: '自定义角色只能使用备料的权限。', en: 'A custom role may only carry stock-prep permissions.' },
   STOCK_PREP_CUSTOM_ROLE_CODE_NOT_SELECTABLE: { zh: '自定义角色不能包含「备料主管理员」权限。', en: 'A custom role cannot carry the main-administrator permission.' },
   STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR: { zh: '不能给出您自己没有的权限。', en: 'You cannot grant a permission you do not hold yourself.' },
-  STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_READABLE: { zh: '只能授权您自己能打开的项目表。', en: 'You can only grant project sheets you can open yourself.' },
+  STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE: { zh: '只能授权您自己能编辑的项目表。', en: 'You can only grant project sheets you can edit yourself.' },
+  STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES: { zh: '这个角色含平台权限，需平台管理员处理。', en: 'This role carries platform permissions; a platform administrator has to handle it.' },
+  STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED: { zh: '不能使用内置角色的名称。', en: 'A custom role cannot take a built-in role\'s name.' },
+  STOCK_PREP_CUSTOM_ROLE_CODES_INVALID: { zh: '权限选择不正确，请刷新后重试。', en: 'The permission selection is not valid; reload and retry.' },
+  STOCK_PREP_MEMBERS_BUSY: { zh: '有其他人正在修改成员与权限，请稍后重试。', en: 'Someone else is changing members and permissions; retry shortly.' },
   STOCK_PREP_BUILTIN_ROLE_READ_ONLY: { zh: '内置角色在这里只能查看。', en: 'Built-in roles are read-only here.' },
   STOCK_PREP_CUSTOM_ROLE_MEMBERS_OUT_OF_SCOPE: { zh: '这个角色里有您管理范围以外的成员，它的权限和项目表只能由平台管理员改。', en: 'This role has members outside your delegated scope; only a platform administrator can change what it grants.' },
   STOCK_PREP_CUSTOM_ROLE_LIMIT: { zh: '自定义角色已经到上限（100 个）。', en: 'The custom role limit (100) has been reached.' },
