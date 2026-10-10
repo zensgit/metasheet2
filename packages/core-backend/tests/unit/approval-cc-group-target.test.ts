@@ -134,8 +134,8 @@ describe('OD-L1-7(a) — assertUserGroupSourcesBoundToOrg applies the K1 binding
       caught = error
     }
     expect(caught).toBeInstanceOf(Error)
-    const err = caught as Error & { status?: number; code?: string; details?: Record<string, unknown> }
-    expect(err.status).toBe(400)
+    const err = caught as Error & { statusCode?: number; code?: string; details?: Record<string, unknown> }
+    expect(err.statusCode).toBe(400)
     expect(err.code).toBe('APPROVAL_ASSIGNEE_GROUP_NOT_BOUND')
     expect(err.details).toEqual({ nodeKey: 'cc_1', targetIndex: 1, groupId: 'grp-dangling', reason: 'not-bound' })
     expect(err.message).toContain('cc_1')

@@ -2075,9 +2075,14 @@ describe('ApprovalGraphExecutor — OD-L1-7(a) group cc targets', () => {
       { groupMemberIds: FROZEN },
     )
     expect(() => executor.resolveInitialState()).toThrowError(/CC node cc_group has invalid config/)
-    // Empty targetIds is still invalid for group exactly as for user/role.
+    // A non-string / blank target id is invalid for group exactly as for user/role.
+    const blankTarget = new ApprovalGraphExecutor(linearGraph({ targetType: 'group', targetIds: ['g-1', ' '] }), {}, { groupMemberIds: FROZEN })
+    expect(() => blankTarget.resolveInitialState()).toThrowError(/CC node cc_group has invalid config/)
+    // OBS (pre-existing, unchanged by this slice): `isNonEmptyStringArray([])` is vacuously true, so an
+    // EMPTY targetIds array is not rejected here for ANY kind — it simply yields zero events.
     const noTargets = new ApprovalGraphExecutor(linearGraph({ targetType: 'group', targetIds: [] }), {}, { groupMemberIds: FROZEN })
-    expect(() => noTargets.resolveInitialState()).toThrowError(/CC node cc_group has invalid config/)
+    expect(noTargets.resolveInitialState().ccEvents).toEqual([])
+    expect(new ApprovalGraphExecutor(linearGraph({ targetType: 'user', targetIds: [] }), {}).resolveInitialState().ccEvents).toEqual([])
   })
 
   it('wiring guard: a group target with NO groupMemberIds option supplied throws instead of silently dropping the cc', () => {
