@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 // so `new DirectorySyncInProgressError(...)` here is the same constructor the
 // route's `instanceof` discriminates against in production.
 import {
+  DirectoryConflictError,
+  DirectoryNotFoundError,
   DirectorySyncInProgressError,
   DirectorySyncRunReplayError,
+  DirectoryValidationError,
 } from '../../src/directory/directory-sync'
 // NOT mocked below — this is the REAL class the admin-directory routes reuse for schedule_cron save-time
 // validation (roadmap §7.8), and the SAME class `directory-sync-scheduler.ts` uses to actually run the
@@ -98,6 +101,18 @@ vi.mock('../../src/directory/directory-sync', async (importOriginal) => ({
     .DirectorySyncFrozenByTransferError,
   DirectorySyncRunReplayError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
     .DirectorySyncRunReplayError,
+  // #6163 S6: every directory-sync-backed catch now answers through sendDirectoryFailure, which
+  // discriminates the three typed directory-sync errors with `instanceof` — the same factory trap as
+  // above: leave one out and every error path that reaches the helper throws instead of answering. The
+  // update route's catch checks DirectoryTenantChangeBlockedError first, so it is re-exported too.
+  DirectoryValidationError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectoryValidationError,
+  DirectoryNotFoundError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectoryNotFoundError,
+  DirectoryConflictError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectoryConflictError,
+  DirectoryTenantChangeBlockedError: (await importOriginal<typeof import('../../src/directory/directory-sync')>())
+    .DirectoryTenantChangeBlockedError,
   acknowledgeDirectorySyncAlert: directoryMocks.acknowledgeDirectorySyncAlert,
   admitDirectoryAccountUser: directoryMocks.admitDirectoryAccountUser,
   batchAdmitDirectoryAccountUsers: directoryMocks.batchAdmitDirectoryAccountUsers,
@@ -995,7 +1010,7 @@ describe('adminDirectoryRouter', () => {
   // dingtalk/client — this is the same discriminator production code runs, not a stand-in). Before
   // this fix both branches below folded into the same 400 DINGTALK_WORK_NOTIFICATION_TEST_FAILED
   // code, telling an admin their Agent ID is broken for a message that may have actually arrived.
-  it('reports a distinct outcome-unknown code+message when the test send outcome is ambiguous', async () => {
+  it('reports a distinct outcome-unknown code and a fixed message (no transport text) when the test send outcome is ambiguous', async () => {
     const sendError = Object.assign(new Error('DingTalk request timed out after 10000ms'), {
       outcomeUnknown: true,
     })
@@ -1015,7 +1030,10 @@ describe('adminDirectoryRouter', () => {
       },
     })
     const message = (response.body as { error: { message: string } }).error.message
-    expect(message).toContain('DingTalk request timed out after 10000ms')
+    // #6163 S6: the 502 body is a fixed sentence. The transport's own text (a timeout here; a socket
+    // error would name the peer) goes to the log, never into a 5xx body.
+    expect(message).toBe('DingTalk did not confirm the outcome. The test message may still have been delivered — check the test message on the device before retrying.')
+    expect(message).not.toContain('timed out after 10000ms')
     expect(message.toLowerCase()).toContain('may still have been delivered')
     expect(message.toLowerCase()).toContain('check the test message on the device')
   })
@@ -1596,7 +1614,8 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('surfaces an error when an async sync fails before the run row exists', async () => {
-    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new Error('Directory integration not found'))
+    // #6163 S6: directory-sync throws the TYPED not-found, and the type (not the text) picks the 404.
+    directoryMocks.syncDirectoryIntegration.mockRejectedValue(new DirectoryNotFoundError('Directory integration not found'))
 
     const response = await invokeRoute('post', '/integrations/:integrationId/sync', {
       params: { integrationId: 'missing' },
@@ -1605,6 +1624,10 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(404)
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'DIRECTORY_SYNC_FAILED', message: 'Directory integration not found', details: undefined },
+    })
   })
 
   // DT-HARDEN-05 gate P2-1: a lease conflict is a benign "already running" state and must
@@ -2058,10 +2081,12 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(500)
-    expect(response.body).toMatchObject({
+    // #6163 S6: the route's fixed sentence, never the caught text.
+    expect(response.body).toEqual({
       ok: false,
-      error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'db unreachable' },
+      error: { code: 'DIRECTORY_MANAGER_COVERAGE_FAILED', message: 'Failed to load directory manager binding coverage', details: undefined },
     })
+    expect(JSON.stringify(response.body)).not.toContain('db unreachable')
   })
 
   it('returns the directory inactive-linked backlog metric for an integration (§7.1)', async () => {
@@ -2128,10 +2153,12 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(500)
-    expect(response.body).toMatchObject({
+    // #6163 S6: the route's fixed sentence, never the caught text.
+    expect(response.body).toEqual({
       ok: false,
-      error: { code: 'DIRECTORY_INACTIVE_LINKED_FAILED', message: 'db unreachable' },
+      error: { code: 'DIRECTORY_INACTIVE_LINKED_FAILED', message: 'Failed to load directory inactive-linked metric', details: undefined },
     })
+    expect(JSON.stringify(response.body)).not.toContain('db unreachable')
   })
 
   it('returns a single directory account summary', async () => {
@@ -2161,7 +2188,7 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('returns 400 when a single directory account lookup is missing accountId', async () => {
-    directoryMocks.getDirectoryAccountSummary.mockRejectedValue(new Error('accountId is required'))
+    directoryMocks.getDirectoryAccountSummary.mockRejectedValue(new DirectoryValidationError('accountId is required'))
 
     const response = await invokeRoute('get', '/accounts/:accountId', {
       params: { accountId: '   ' },
@@ -2270,7 +2297,7 @@ describe('adminDirectoryRouter', () => {
 
   it('returns 400 when a directory bind would enable DingTalk grant without openId', async () => {
     directoryMocks.bindDirectoryAccount.mockRejectedValue(
-      new Error('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
+      new DirectoryValidationError('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
     )
 
     const response = await invokeRoute('post', '/accounts/:accountId/bind', {
@@ -2364,7 +2391,7 @@ describe('adminDirectoryRouter', () => {
 
   it('returns 400 when manual admission would enable DingTalk grant without openId', async () => {
     directoryMocks.admitDirectoryAccountUser.mockRejectedValue(
-      new Error('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
+      new DirectoryValidationError('Directory account is missing DingTalk openId and cannot enable DingTalk login grant; resync DingTalk directory or complete DingTalk OAuth binding first'),
     )
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
@@ -2433,8 +2460,8 @@ describe('adminDirectoryRouter', () => {
   })
 
   it('maps by error type, not by prose: an untyped error carrying the same sentence is still 500', async () => {
-    // Pins that the 400 above comes from recognising LoginNameRuleError — the message-regex ladder
-    // was NOT widened, so any other unclassified failure keeps its 500 DIRECTORY_ADMISSION_FAILED.
+    // Pins that the 400 above comes from recognising LoginNameRuleError: an unclassified failure is a
+    // 500 DIRECTORY_ADMISSION_FAILED with the route's fixed sentence (#6163 S6), whatever its text says.
     directoryMocks.admitDirectoryAccountUser.mockRejectedValue(new Error(LOGIN_NAME_RULE_MESSAGE))
 
     const response = await invokeRoute('post', '/accounts/:accountId/admit-user', {
@@ -2446,7 +2473,7 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(500)
     expect(response.body).toMatchObject({
       ok: false,
-      error: { code: 'DIRECTORY_ADMISSION_FAILED' },
+      error: { code: 'DIRECTORY_ADMISSION_FAILED', message: 'Failed to create and bind local user for directory account' },
     })
   })
 
@@ -2637,10 +2664,14 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
-  it('keeps the historical error mapping when a batch-bind commits nothing', async () => {
+  // #6163 S6: a batch that commits nothing answers like the single-item route: the route rethrows the
+  // first item's error AS THROWN (outcome.failedErrors[0], which directory-sync records beside `failed`)
+  // and its TYPE picks the status — no regex over `failed[0].error`.
+  it('answers a batch-bind that commits nothing with the status of its first failure type', async () => {
     directoryMocks.batchBindDirectoryAccounts.mockResolvedValue({
       succeeded: [],
       failed: [{ accountId: 'account-1', error: 'DingTalk account is already bound to another local user' }],
+      failedErrors: [new DirectoryConflictError('DingTalk account is already bound to another local user')],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-bind', {
@@ -2649,6 +2680,14 @@ describe('adminDirectoryRouter', () => {
     })
 
     expect(response.statusCode).toBe(409)
+    expect(response.body).toEqual({
+      ok: false,
+      error: {
+        code: 'DIRECTORY_BATCH_BIND_FAILED',
+        message: 'DingTalk account is already bound to another local user',
+        details: undefined,
+      },
+    })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
 
@@ -2750,10 +2789,11 @@ describe('adminDirectoryRouter', () => {
     })
   })
 
-  it('keeps the historical error mapping when a batch admission commits nothing', async () => {
+  it('answers a batch admission that commits nothing with the status of its first failure type', async () => {
     directoryMocks.batchAdmitDirectoryAccountUsers.mockResolvedValue({
       succeeded: [],
       failed: [{ accountId: 'account-1', error: 'User with this username already exists' }],
+      failedErrors: [new DirectoryConflictError('User with this username already exists')],
     })
 
     const response = await invokeRoute('post', '/accounts/batch-admit-users', {
@@ -2764,7 +2804,7 @@ describe('adminDirectoryRouter', () => {
     expect(response.statusCode).toBe(409)
     expect(response.body).toMatchObject({
       ok: false,
-      error: { code: 'DIRECTORY_BATCH_ADMISSION_FAILED' },
+      error: { code: 'DIRECTORY_BATCH_ADMISSION_FAILED', message: 'User with this username already exists' },
     })
     expect(auditMocks.auditLog).not.toHaveBeenCalled()
   })
