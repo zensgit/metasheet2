@@ -347,6 +347,12 @@ jobs:
       - name: PB4-4 reactivation CI wiring contract
         run: node --test scripts/ops/pb4-4-reactivation-ci-wiring.test.mjs
 
+      # W1-6 CI two-point wiring contract (no DB): the anchor-in-transaction suite (per-writer rollback
+      # + unique-index barrier proofs) must stay wired into BOTH vitest.config.ts (exclude) AND
+      # plugin-tests.yml (directory real-DB step). Dropping either point silently disables the proof.
+      - name: W1-6 anchor-in-transaction CI wiring contract
+        run: node --test scripts/ops/w1-6-anchor-in-transaction-ci-wiring.test.mjs
+
       # B4 CI two-point wiring contract (no DB): the department-bindings FK-chain suite must stay
       # wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       # Dropping either point silently disables the cross-org-FK-impossible proof.
