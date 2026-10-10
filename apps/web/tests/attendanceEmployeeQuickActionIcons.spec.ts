@@ -64,6 +64,11 @@ describe('employee quick-action icons (admin-only)', () => {
     expect(container.querySelector('[data-selfservice-card="actions"]')?.closest('[data-attendance-overview-primary]')).toBeNull()
     expect(container.querySelector('[data-attendance-request-empty]')?.textContent).toContain('暂无待审批')
     expect(container.querySelector('[data-attendance-todo-mark]')?.getAttribute('data-attendance-todo-tone')).toBe('setup')
+    expect(container.querySelector('[data-selfservice-setup-hint]')).toBeNull()
+    const setupPhrase = '可能还没有被分配到考勤组'
+    expect((container.textContent ?? '').split(setupPhrase).length - 1).toBe(1)
+    expect(container.querySelector('[data-selfservice-card="actions"]')?.textContent).not.toContain(setupPhrase)
+    expect(container.querySelector('[data-attendance-overview-attention]')?.textContent).toContain(setupPhrase)
     expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
     expect(container.querySelector('[data-selfservice-action="missing-punch"]')?.getAttribute('data-attendance-ew-icon')).toBe('clock-plus')
     expect(container.querySelector('[data-selfservice-action="leave"]')?.getAttribute('data-attendance-ew-icon')).toBe('calendar')
