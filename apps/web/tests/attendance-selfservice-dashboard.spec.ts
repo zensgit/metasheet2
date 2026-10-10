@@ -3080,6 +3080,79 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
   })
 
+  it('#5986: focused approval history response cannot replace a fresh midnight self read', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    let holdHistory = false
+    let releaseHistory!: () => void
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return jsonResponse(200, { ok: true, data: { items: [{
+          id: 'fresh-next-day', work_date: '2026-04-16', first_in_at: '2026-04-16T00:00:00+08:00', last_out_at: null,
+          work_minutes: 0, status: 'partial', workday_context: { timezone: 'Asia/Shanghai' },
+        }], total: 1 } })
+      }
+      if (holdHistory && url.pathname === '/api/attendance/records') {
+        const response = await baseMock(input, init)
+        return new Promise<Response>(resolve => { releaseHistory = () => resolve(response) })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, {
+      mode: 'overview', initialSectionId: 'attendance-overview-requests', initialRequestId: 'request-focused',
+    })
+    app.mount(container!)
+    await flushUi(16)
+    setFormValue(container!, '#attendance-to-date', '2026-04-16')
+    holdHistory = true
+    findButton(container!, 'Approve').click()
+    await flushUi(48)
+    expect(releaseHistory).toBeTypeOf('function')
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).endsWith('/api/attendance/requests/request-focused/approve'))).toBe(true)
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    releaseHistory()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+  })
+
+  it('#5986: late refresh completion cannot replace a fresh midnight read with pre-midnight history', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    let holdSummary = false
+    let releaseSummary!: () => void
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (holdSummary && url.pathname === '/api/attendance/summary') {
+        const response = await baseMock(input, init)
+        return new Promise<Response>(resolve => { releaseSummary = () => resolve(response) })
+      }
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return jsonResponse(200, { ok: true, data: { items: [{
+          id: 'fresh-next-day', work_date: '2026-04-16', first_in_at: '2026-04-16T00:00:00+08:00', last_out_at: null,
+          work_minutes: 0, status: 'partial', workday_context: { timezone: 'Asia/Shanghai' },
+        }], total: 1 } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+    setFormValue(container!, '#attendance-to-date', '2026-04-16')
+    holdSummary = true
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    expect(releaseSummary).toBeTypeOf('function')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    releaseSummary()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+  })
+
   it('#5986: midnight invalidates an in-flight yesterday read and drops its late response', async () => {
     vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
     const baseMock = vi.mocked(apiFetch).getMockImplementation()!

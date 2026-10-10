@@ -22427,6 +22427,7 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
 }
 
 async function loadRecords() {
+  const recordsStartedAt = heroClockNow.value
   const version = ++historyRecordsLoadVersion
   loadedHistoryScope = null
   const scope = {
@@ -22454,7 +22455,10 @@ async function loadRecords() {
   loadedHistoryScope = { ...scope, total: data.data.total }
   recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
   recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
-  if (showOverview.value && !loading.value) await loadTodayAttendanceRecord()
+  if (showOverview.value && !loading.value) {
+    const reuseHistory = formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    await loadTodayAttendanceRecord(reuseHistory)
+  }
 }
 
 
@@ -22986,6 +22990,7 @@ function consumeDefaultHistoryRangeAlignment(): boolean {
 
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
+  const refreshStartedAt = heroClockNow.value
   loading.value = true
   todayRecordLoadVersion += 1
   todayRecordState.value = 'loading'
@@ -23040,7 +23045,8 @@ async function refreshAll(): Promise<boolean> {
     }
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
-    if (showOverview.value && !await loadTodayAttendanceRecord()) success = false
+    const reuseHistory = formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    if (showOverview.value && !await loadTodayAttendanceRecord(reuseHistory)) success = false
     loading.value = false
   }
   return success
