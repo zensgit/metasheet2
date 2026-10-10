@@ -29,6 +29,7 @@ import {
   tasksClient,
   type TasksListener,
 } from '../helpers/tasks-http-harness'
+import { orgMemberSeeds } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-m3-comments-deletion.db.test.ts requires EXPECT_DB=1')
@@ -145,6 +146,11 @@ function listenerPort(): number {
 }
 const actors = createActorFixture('tasks-m3cd.test', JWT_SECRET)
 
+// RULED(2026-10-07): [N2] an assignee someone else writes must be an active member of the org
+// (design §4.6), so a cell seeds each such id here before the write; afterAll drops exactly those
+// rows. Actors from the fixture above are members already.
+const orgMembers = orgMemberSeeds()
+
 describe('tasks M3 comments and deletion real db', () => {
   beforeAll(async () => {
     listener = await startTasksListener()
@@ -153,6 +159,7 @@ describe('tasks M3 comments and deletion real db', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', [`${ORG_PREFIX}%`])
     await actors.cleanup()
+    await orgMembers.drop()
     await listener?.close()
   })
 
@@ -207,6 +214,7 @@ describe('tasks M3 comments and deletion real db', () => {
     // block this on their own (see the verification doc's mutation table).
     it('a comment id from another task is 404 for its author and for a non-author, and the comment is unchanged', async () => {
       const { orgId, userA, userB } = ids('crosstask')
+      await orgMembers.seed(orgId, [userB])
       const taskOne = await createTask({ orgId, creatorId: userA, title: '任务一', assignees: [userA] })
       // B can comment on task two but has no role on task one.
       const taskTwo = await createTask({ orgId, creatorId: userA, title: '任务二', assignees: [userA, userB] })
@@ -226,6 +234,7 @@ describe('tasks M3 comments and deletion real db', () => {
 
     it('non-author edit/delete is 404', async () => {
       const { orgId, userA, userB } = ids('nonauthor')
+      await orgMembers.seed(orgId, [userB])
       const task = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB] })
       const comment = await addComment({ orgId, actorId: userA, taskId: task.id, body: { body: '作者的评论' } })
       await expect(updateComment({ orgId, actorId: userB, taskId: task.id, commentId: comment.id, body: { body: '别人想改' } }))
@@ -615,6 +624,7 @@ describe('tasks M3 comments and deletion real db', () => {
   describe('task-level comment ability precondition (§3.6 step 1, M3-AUTHZ-3 / M3G-6)', () => {
     it('an author who has since lost access to the task cannot edit or delete their own comment', async () => {
       const { orgId, userA, userB } = ids('lostaccess')
+      await orgMembers.seed(orgId, [userB])
       const task = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB] })
       const comment = await addComment({ orgId, actorId: userB, taskId: task.id, body: { body: 'B 的评论' } })
       // B is removed as assignee and holds no other role (not creator, not
@@ -743,6 +753,7 @@ describe('tasks M3 comments and deletion real db', () => {
     // same task holds its task-row lock.
     it('an in-flight comment write does not block complete, reopen, mode switch, membership, reparent or create on the same task and org', async () => {
       const { orgId, userA, userB } = ids('noblock')
+      await orgMembers.seed(orgId, [userB])
       const task = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA], completionMode: 'all' })
       const other = await createTask({ orgId, creatorId: userA, title: '另一个任务', assignees: [userA] })
       const seeded = await addComment({ orgId, actorId: userA, taskId: task.id, body: { body: '已有评论' } })
@@ -923,6 +934,7 @@ describe('tasks M3 comments and deletion real db', () => {
     // missing id is timed too: it must answer before the org lock as well.
     it('a same-org outsider, an assignee, and a missing id all get the same 404 at once while a comment write holds the row and the org structure lock is held', async () => {
       const { orgId, userA, userB, outsider } = ids('deleteprecheck')
+      await orgMembers.seed(orgId, [userB])
       const task = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB] })
       const seeded = await addComment({ orgId, actorId: userA, taskId: task.id, body: { body: '已有评论' } })
       const bearerB = await actors.bearer(orgId, userB)
@@ -1238,6 +1250,7 @@ describe('tasks M3 comments and deletion real db', () => {
 
     it('is creator-only (404 for a non-creator), writes a deleted_at + deleted event, and a second delete is 404', async () => {
       const { orgId, userA, userB } = ids('creatoronly')
+      await orgMembers.seed(orgId, [userB])
       const task = await createTask({ orgId, creatorId: userA, title: '任务', assignees: [userA, userB] })
       await expect(deleteTaskById({ orgId, actorId: userB, taskId: task.id }))
         .rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
