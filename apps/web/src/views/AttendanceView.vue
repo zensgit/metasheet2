@@ -33229,11 +33229,13 @@ defineExpose({
 }
 
 /* Holidays + Settings form chrome. Scoped to those two admin sections so
-   employee overview and the other admin editors keep their existing layout. */
+   employee overview and the other admin editors keep their existing layout.
+   Density sits one step down the --ms-space scale, and controls use
+   --ms-control-height, so the same cards read as finished rather than loose. */
 .attendance__form-sheet {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-4);
+  gap: var(--ms-space-3);
 }
 
 .attendance__form-sheet > h4,
@@ -33248,7 +33250,7 @@ defineExpose({
 .attendance__form-stack {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-4);
+  gap: var(--ms-space-3);
 }
 
 .attendance__form-card,
@@ -33257,9 +33259,9 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__calendar-preview) {
   display: flex;
   flex-direction: column;
-  gap: var(--ms-space-4);
+  gap: var(--ms-space-3) var(--ms-space-4);
   margin: 0;
-  padding: var(--ms-space-5);
+  padding: var(--ms-space-4);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
@@ -33268,7 +33270,7 @@ defineExpose({
 
 #attendance-admin-settings.attendance__form-sheet .attendance__form-card > .attendance__admin-subsection {
   display: flex;
-  gap: var(--ms-space-3);
+  gap: var(--ms-space-2);
   margin: 0;
   padding: 0;
   border: 0;
@@ -33311,7 +33313,7 @@ defineExpose({
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--ms-space-4);
+  gap: var(--ms-space-3);
 }
 
 .attendance__form-sheet .attendance__admin-grid,
@@ -33319,7 +33321,8 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
 .attendance__form-sheet .attendance__override-filters {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--ms-space-4) var(--ms-space-5);
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
 }
 
 .attendance__form-sheet .attendance__admin-grid--thirds {
@@ -33330,7 +33333,7 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__field),
 .attendance__form-sheet .attendance__override-field {
   min-width: 0;
-  gap: 6px;
+  gap: var(--ms-space-1);
 }
 
 .attendance__form-sheet .attendance__field > span,
@@ -33362,8 +33365,8 @@ defineExpose({
   min-width: 0;
   max-width: 100%;
   box-sizing: border-box;
-  min-height: 36px;
-  padding: 8px 12px;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
   border: 1px solid var(--ms-border);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-card);
@@ -33374,7 +33377,7 @@ defineExpose({
 
 .attendance__form-sheet .attendance__field textarea,
 .attendance__form-sheet :deep(.attendance__field textarea) {
-  min-height: 84px;
+  min-height: calc(var(--ms-control-height) * 2 + var(--ms-space-2));
   resize: vertical;
 }
 
@@ -33393,13 +33396,14 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__field--checkbox),
 .attendance__form-sheet .attendance__field--inline,
 .attendance__form-sheet :deep(.attendance__field--inline) {
+  box-sizing: border-box;
   flex-direction: row;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  min-height: 40px;
+  gap: var(--ms-space-3);
+  min-height: var(--ms-control-height);
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--ms-space-1) var(--ms-space-3);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-page);
@@ -33423,9 +33427,9 @@ defineExpose({
 .attendance__form-sheet fieldset.attendance__field {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px 16px;
+  gap: var(--ms-space-2) var(--ms-space-3);
   margin: 0;
-  padding: 12px 14px;
+  padding: var(--ms-space-2) var(--ms-space-3);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-page);
@@ -33455,7 +33459,7 @@ defineExpose({
 .attendance__form-sheet .attendance__empty,
 .attendance__form-sheet :deep(.attendance__empty) {
   margin: 0;
-  padding: 12px 14px;
+  padding: var(--ms-space-2) var(--ms-space-3);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-page);
   color: var(--ms-text-3);
@@ -33465,8 +33469,8 @@ defineExpose({
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--ms-space-4);
-  padding: var(--ms-space-4) var(--ms-space-5);
+  gap: var(--ms-space-3);
+  padding: var(--ms-space-3) var(--ms-space-4);
   border: 1px solid var(--el-color-primary-light-7);
   border-radius: var(--ms-radius-lg);
   background: var(--el-color-primary-light-9);
@@ -33478,7 +33482,7 @@ defineExpose({
 
 .attendance__form-callout-copy strong {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: var(--ms-space-1);
   color: var(--ms-text-1);
   font-size: 14px;
 }
@@ -33500,8 +33504,8 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__btn) {
   align-self: flex-start;
   width: auto;
-  min-height: 36px;
-  padding: 8px 14px;
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
   border: 1px solid var(--ms-border);
   border-radius: var(--ms-radius-md);
   background: var(--ms-bg-card);
@@ -33526,7 +33530,7 @@ defineExpose({
 #attendance-admin-settings.attendance__form-sheet [data-leave-offset-rule] {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: var(--ms-space-2);
   align-items: center;
   padding: 0;
   border: 0;
@@ -33539,6 +33543,92 @@ defineExpose({
 
 #attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox) {
   grid-column: 1 / -1;
+}
+
+/* Child scoped styles repeat the looser control metrics. Section ids beat
+   those rules inside Holidays and Settings only. */
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-section),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-subsection),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__admin-subsection),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview) {
+  gap: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-layout),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview-header),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview-header) {
+  gap: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-calendar),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-side) {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-panel),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-day-list) {
+  gap: var(--ms-space-2);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__holiday-day-item) {
+  gap: var(--ms-space-2);
+  padding: var(--ms-space-2);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__admin-grid),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__calendar-preview-controls),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__admin-grid),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__calendar-preview-controls) {
+  align-items: center;
+  gap: var(--ms-space-3) var(--ms-space-4);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field) {
+  gap: var(--ms-space-1);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field select),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field input:not([type="checkbox"]):not([type="radio"])),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field select) {
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__field--checkbox),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__field--checkbox) {
+  box-sizing: border-box;
+  gap: var(--ms-space-3);
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet :deep(.attendance__btn),
+#attendance-admin-settings.attendance__form-sheet :deep(.attendance__btn) {
+  min-height: var(--ms-control-height);
+  padding: var(--ms-space-1) var(--ms-space-3);
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__inline-fields,
+#attendance-admin-settings.attendance__form-sheet .attendance__inline-fields {
+  gap: var(--ms-space-1);
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__table,
+#attendance-admin-settings.attendance__form-sheet .attendance__table {
+  margin-top: 0;
+}
+
+#attendance-admin-holidays.attendance__form-sheet .attendance__table td.attendance__table-actions > .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet .attendance__table td.attendance__table-actions > .attendance__btn,
+#attendance-admin-holidays.attendance__form-sheet .attendance__table-actions .attendance__btn,
+#attendance-admin-settings.attendance__form-sheet .attendance__table-actions .attendance__btn {
+  min-height: var(--ms-control-height);
+  margin-right: var(--ms-space-2);
+  margin-bottom: var(--ms-space-1);
 }
 
 @media (max-width: 900px) {
