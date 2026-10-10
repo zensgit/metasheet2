@@ -33,6 +33,7 @@ import type {
 } from '../tests/utils/recovery-archive-process-worker'
 const require = createRequire(import.meta.url)
 const { qualifyManualTargetPair } = require('./verify-recovery-local-scenarios.ts') as typeof import('./verify-recovery-local-scenarios')
+const { finishSeededRecoveryLocalControl } = require('./verify-recovery-local-seeded-control.ts') as typeof import('./verify-recovery-local-seeded-control')
 const { createAndCaptureManualFixture } = require('./verify-recovery-local-manual-http.ts') as typeof import('./verify-recovery-local-manual-http')
 const {
   assertDistinctDirectoryIdentities,
@@ -487,61 +488,11 @@ async function main(): Promise<Record<string, unknown>> {
       receipt: rotatedReceipt,
       recoverySecret,
     }
-    const completed = await runWorker({
-      phase: 'finish',
-      keyId: fixture.archivedKeyId,
-      keyMaterial: { dek: randomBytes(32), wrappedDek: randomBytes(48) },
-      jobId: fixture.jobId,
-      expectedDatabaseName: names.target,
-      local: localWorkerInput,
-    }, targetUrl)
-    assert.equal(completed.kind, 'done')
-    if (completed.kind !== 'done') throw new Error('RECOVERY_LOCAL_BACKUP_WORKER_RESULT_INVALID')
-    console.log(JSON.stringify({ phase: 'worker', outcome: completed.outcome, state: completed.terminal.state }))
-    assert.deepEqual(completed.outcome, { kind: 'completed', swept: 0, chunks: 2 })
-    assert.deepEqual(completed.terminal, { state: 'done', completedCount: '5001' })
-    assert.deepEqual(completed.lifecycle, ['started', 'drained'])
-
-    const drained = await runWorker({
-      phase: 'drain',
-      drainTicks: 158,
-      keyId: fixture.archivedKeyId,
-      keyMaterial: { dek: randomBytes(32), wrappedDek: randomBytes(48) },
-      jobId: fixture.jobId,
-      expectedDatabaseName: names.target,
-      local: localWorkerInput,
-    }, targetUrl)
-    assert.equal(drained.kind, 'drained')
-    if (drained.kind !== 'drained') throw new Error('RECOVERY_LOCAL_BACKUP_DRAIN_RESULT_INVALID')
-    assert.equal(drained.attempts, recoveryLocalBackupRecordCount())
-    assert.equal(drained.completed, recoveryLocalBackupRecordCount())
-    assert.deepEqual(drained.lifecycle, ['started', 'drained'])
-
-    const restoredRows = await readLiveRows(targetRuntime.query, fixture.fixture.sheetId)
-    assert.deepEqual(restoredRows, expectedRestoredRows)
-    const terminal = await targetRuntime.query(
-      `SELECT job.state, job.completed_count::text AS completed_count,
-              sheet.recovery_writer_state,
-              (SELECT count(*)::int FROM public.meta_record_revisions revision
-                WHERE revision.sheet_id=job.sheet_id AND revision.source='restore') AS restore_events,
-              (SELECT count(*)::int FROM public.meta_recovery_archive_derived_effects effect
-                WHERE effect.job_id=job.id) AS effects,
-              (SELECT count(*)::int FROM public.meta_recovery_archive_derived_effects effect
-                WHERE effect.job_id=job.id AND effect.completed_at IS NOT NULL) AS completed_effects
-         FROM public.meta_recovery_archive_jobs job
-         JOIN public.meta_sheets sheet ON sheet.id=job.sheet_id
-        WHERE job.id=$1::uuid`,
-      [fixture.jobId],
-    )
-    assert.deepEqual(terminal.rows, [{
-      state: 'done',
-      completed_count: '5001',
-      recovery_writer_state: null,
-      restore_events: 5001,
-      effects: 5001,
-      completed_effects: 5001,
-    }])
-    assert.equal(await exactOnceRecordCount(targetRuntime.query, fixture.fixture.sheetId), recoveryLocalBackupRecordCount())
+    await finishSeededRecoveryLocalControl({
+      query: targetRuntime.query, jobId: fixture.jobId, keyId: fixture.archivedKeyId,
+      sheetId: fixture.fixture.sheetId, local: localWorkerInput, expectedRestoredRows,
+      runWorker: input => runWorker({ ...input, expectedDatabaseName: names.target }, targetUrl),
+    })
 
     await assertPathMissing(targetAttachmentPath)
     const manualCrash = await runManualTargetChild({
@@ -570,6 +521,13 @@ async function main(): Promise<Record<string, unknown>> {
     assert.deepEqual(await readLiveRows(staleTargetRuntime.query, manual.sheetId), manualSourceLiveRows)
     assert.deepEqual(await readNonceTuples(staleTargetRuntime.query, manual.generationId), manualSourceNonces)
     await assertSourceUnavailable(admin, sourceUrl, names.source, sourceArchive, sourceCustody)
+    await finishSeededRecoveryLocalControl({
+      query: staleTargetRuntime.query, jobId: fixture.jobId, keyId: fixture.archivedKeyId,
+      sheetId: fixture.fixture.sheetId, expectedRestoredRows,
+      local: { archivePath: staleTargetArchive, custodyPath: staleTargetCustody,
+        custodyId, storeId, receipt: rotatedReceipt, recoverySecret },
+      runWorker: input => runWorker({ ...input, expectedDatabaseName: names.staleTarget }, staleTargetUrl),
+    })
     await assertPathMissing(join(staleTargetRoot, 'attachments'))
     const manualStale = await runManualTargetChild({
       scenario: 'stale-worker', backupDigest, databaseName: names.staleTarget,
@@ -1026,8 +984,13 @@ async function runWorker(
   input: Omit<ArchiveProcessWorkerInput, 'applicationName'>,
   targetDatabaseUrl: URL,
 ): Promise<ArchiveProcessWorkerMessage> {
-  assert.equal(input.local?.archivePath.startsWith(`${args.workRoot}/target/`), true)
-  assert.equal(input.local?.custodyPath.startsWith(`${args.workRoot}/target/`), true)
+  const root = targetDatabaseUrl.href === targetUrl.href && input.expectedDatabaseName === names.target
+    ? join(args.workRoot, 'target')
+    : targetDatabaseUrl.href === staleTargetUrl.href && input.expectedDatabaseName === names.staleTarget
+      ? join(args.workRoot, 'stale-target') : undefined
+  assert.ok(root, 'RECOVERY_LOCAL_BACKUP_WORKER_DATABASE_REFUSED')
+  assert.equal(input.local?.archivePath, join(root, 'archive'), 'RECOVERY_LOCAL_BACKUP_WORKER_ARCHIVE_REFUSED')
+  assert.equal(input.local?.custodyPath, join(root, 'custody'), 'RECOVERY_LOCAL_BACKUP_WORKER_CUSTODY_REFUSED')
   const applicationName = `${prefix}_worker_${randomUUID().replaceAll('-', '')}`
   const child = fork(workerPath, [], {
     execArgv: ['--require', require.resolve('tsx/cjs')],
@@ -1210,21 +1173,6 @@ function assertExactLiveRows(
 
 function hashRows(rows: readonly LiveRow[]): string {
   return createHash('sha256').update(JSON.stringify(rows)).digest('hex')
-}
-
-async function exactOnceRecordCount(query: RecoveryArchiveRestoreJobQuery, sheetId: string): Promise<number> {
-  const result = await query(
-    `SELECT count(*)::int AS count
-       FROM (
-         SELECT record_id
-           FROM public.meta_record_revisions
-          WHERE sheet_id=$1 AND source='restore'
-          GROUP BY record_id
-         HAVING count(*)=1
-       ) exact_once`,
-    [sheetId],
-  )
-  return (result.rows[0] as { count: number }).count
 }
 
 async function assertReceiptRetained(

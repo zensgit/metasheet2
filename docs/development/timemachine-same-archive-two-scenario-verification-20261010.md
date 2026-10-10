@@ -90,6 +90,34 @@ Private logs and the post-commit source receipt are under
 `artifacts/tm-stale-target-admission-repair-20261010/`. This fixes a local
 execution blocker; the remaining native and staging gates below are unchanged.
 
+## Imported-control ordering follow-up
+
+The next source audit found an older planned seeded control in the shared dump.
+The production selector orders eligible jobs by creation time. Scenario A had
+finished and drained its copy, but scenario B had not; its setup worker or either
+controlled claim could therefore select the seeded job instead of the genuine
+captured-archive job. A mocked execution of the actual driver's ordered control
+and manual statements reproduced this failure before the repair.
+
+Both targets now finish and drain their own imported control before admitting
+their manual scenario. The existing control assertions were moved to a shared
+test-only sibling module without dropping their finish, lifecycle, restored-row,
+terminal, derived-effect or exactly-once checks. The worker launcher admits only
+the matching owned database URL/name and exact archive/custody roots. Production
+selection policy, job/lease rows, clocks and genuine claims are unchanged.
+
+Ten whole unit files passed 93/93 with zero skips. Acceptance-script typechecking,
+`pnpm validate:all` and patch formatting exited 0. Removing the second control
+caused 1 FAIL / 16 PASS; allowing a different database URL caused 2 FAIL / 15 PASS;
+ignoring derived completion caused 1 FAIL / 16 PASS. Both edited source files
+were restored byte-for-byte, and the full 17-test file then passed.
+
+The tests use mocked worker/database IO and a synthetic fork boundary. They do
+not execute the native driver or start its services. Private logs and the exact
+post-commit receipt are under `artifacts/tm-seeded-control-order-repair-20261010/`.
+Earlier commits' test results remain historical. This follow-up has not been
+published, remotely tested or deployed; the native and staging gates remain open.
+
 ## Remaining gates
 
 | Gate | Verdict |

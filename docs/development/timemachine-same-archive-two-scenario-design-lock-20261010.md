@@ -12,6 +12,8 @@ quiesced SQL dump, immutable archive objects, custody backup and genuine
 captured generation. Each target starts as a distinct empty owned database and
 distinct private filesystem roots. Source database/roots are unavailable before
 either restore. Retain the separate seeded control; it cannot qualify this pair.
+Finish and drain that imported control in each target before admitting its
+manual scenario, so it cannot compete with the genuine captured-archive job.
 
 ## A: process death
 
