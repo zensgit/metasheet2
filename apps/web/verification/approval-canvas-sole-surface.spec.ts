@@ -2,6 +2,8 @@
 // existing mounted-production harness (real Vue Router + Element Plus) and intercepts only the
 // template read. It proves the ordinary authoring path is Canvas-first in Chromium while the
 // explicit flag-off rollback still exposes the structured list.
+// W1-1a (Lock-4 F4-B / F4-C) adds one real-Element-Plus authoring pass through the inspector: the
+// 'designated' empty-assignee option + its typed role picker, and the four-value same-person select.
 import { mkdirSync } from 'node:fs'
 import { expect, test, type Locator, type Page, type Request, type Response } from '@playwright/test'
 
@@ -141,6 +143,40 @@ const LINEAR_TEMPLATE = {
   },
 }
 
+// W1-1a gate r2 P2-1 (C7): one approval node with a static_user source the directory page lists, and
+// a 'designated' fallback user the page does NOT list (synthetic id). The fallback must render as the
+// 未知用户 placeholder, never as its raw id.
+const C7_FALLBACK_RAW_ID = 'u_fallback_unlisted'
+const C7_LISTED_USER = { id: 'u_listed', name: '目录用户甲', email: '' }
+const C7_FALLBACK_TEMPLATE = {
+  ...LINEAR_TEMPLATE,
+  key: 'canvas_c7_fallback_acceptance',
+  name: 'Canvas 验收转交指定人员模板',
+  description: '转交指定人员标签浏览器验收',
+  latestVersionId: 'ver_canvas_c7_1',
+  approvalGraph: {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'approval_1',
+        type: 'approval',
+        name: '指定用户审批',
+        config: {
+          assigneeSources: [{ kind: 'static_user', userIds: [C7_LISTED_USER.id] }],
+          approvalMode: 'single',
+          emptyAssigneePolicy: 'designated',
+          emptyAssigneeFallback: { userIds: [C7_FALLBACK_RAW_ID] },
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'edge-start-approval', source: 'start', target: 'approval_1' },
+      { key: 'edge-approval-end', source: 'approval_1', target: 'end' },
+    ],
+  },
+} as unknown as typeof LINEAR_TEMPLATE
+
 // T5c (test report 2026-10-08): a flow long enough that the page — not one screen — holds the
 // canvas (8 approvals ⇒ 10 layers ⇒ ~1.7k px stage), the shape the tester reported.
 const LONG_FLOW_STEPS = 8
@@ -184,6 +220,10 @@ async function mountFlow(
     template?: typeof COMPLEX_TEMPLATE | typeof LINEAR_TEMPLATE
     route?: 'edit' | 'new'
     enterFlow?: boolean
+    // W1-1a: directory roles served to the typed pickers (default: none, as before).
+    directoryRoles?: Array<{ id: string; name: string }>
+    // W1-1a gate r2 P2-1: the user search page served to every user picker (default: none, as before).
+    directoryUsers?: Array<{ id: string; name: string; email: string }>
   },
 ): Promise<void> {
   const template = options.template ?? COMPLEX_TEMPLATE
@@ -221,7 +261,7 @@ async function mountFlow(
   await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+    body: JSON.stringify({ users: options.directoryUsers ?? [], roles: options.directoryRoles ?? [], groups: [] }),
   }))
   await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
     status: 200,
@@ -400,6 +440,132 @@ test('linear Canvas exposes sequential approval and persists the selected mode',
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 })
 
+// W1-1a (Lock-4 F4-B, OD-L4-3(a) / F4-C): real Element Plus selects in the real inspector. Picks the
+// 'designated' empty-assignee option, a role through the typed role picker (D0 §10.2 — no raw-id
+// input), and 转交直属上级 in the four-value same-person select, then asserts the exact PATCH shape:
+// the role target rides the ONE fallback key, and the same-person pick writes ONLY samePersonPolicy
+// (implementer default (a): any non-auto_skip pick deletes mergeWithRequester).
+test('W1-1a: the inspector authors 转交指定人员 targets and the four-value same-person policy into the saved graph', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+    directoryRoles: [{ id: 'role_approval_admin', name: '审批管理员' }],
+  })
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  await expect(page.locator('[data-testid="approval-node-empty-fallback-role-picker"]')).toHaveCount(0)
+  await page.locator('[data-testid="approval-node-empty-policy"]').click()
+  await page.getByRole('option', { name: '转交指定人员', exact: true }).click()
+  const rolePicker = page.locator('[data-testid="approval-node-empty-fallback-role-picker"]')
+  await expect(rolePicker).toBeVisible()
+  await expect(page.locator('[data-testid="approval-node-empty-fallback-hint"]')).toBeVisible()
+  // Layout regression pin: outside an <el-form> a label auto-sizes, and the first cut of these rows
+  // (half-width grid cells, inline labels) left the same-person select 0px wide in this inspector.
+  for (const testId of ['approval-node-empty-fallback-role-picker', 'approval-node-same-person-policy']) {
+    const box = await page.locator(`[data-testid="${testId}"]`).boundingBox()
+    expect(box?.width ?? 0, `${testId} must not be squeezed by its label`).toBeGreaterThan(200)
+  }
+  await rolePicker.click()
+  await page.getByRole('option', { name: '审批管理员', exact: true }).click()
+  // A `multiple` el-select keeps its dropdown open after a pick, overlaying the controls below it;
+  // Escape closes it (the inspector itself only binds Escape inside its rename input).
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('option', { name: '审批管理员', exact: true })).toBeHidden()
+  // The chip shows the role's business name (typed picker; never the raw id).
+  await expect(rolePicker).toContainText('审批管理员')
+  await expect(rolePicker).not.toContainText('role_approval_admin')
+
+  const samePerson = page.locator('[data-testid="approval-node-same-person-policy"]')
+  await samePerson.click()
+  await page.getByRole('option', { name: '转交发起人的直属上级审批', exact: true }).click()
+  await expect(page.locator('[data-testid="approval-node-same-person-transfer-hint"]')).toBeVisible()
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+
+  const updateRequest = page.waitForRequest((request) => (
+    request.method() === 'PATCH'
+      && /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/.test(request.url())
+  ))
+  await page.click('[data-testid="approval-template-save-button"]')
+  const payload = (await updateRequest).postDataJSON() as {
+    approvalGraph?: { nodes?: Array<{ key?: string; config?: Record<string, unknown> }> }
+  }
+  const config = payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.config ?? {}
+  expect(config.emptyAssigneePolicy).toBe('designated')
+  expect(config.emptyAssigneeFallback).toEqual({ roleIds: ['role_approval_admin'] })
+  expect(config.autoApprovalPolicy).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+})
+
+// W1-1a gate r2 P2-1 (C7) — the real-Element-Plus half of the switch-back pin. Switching 空审批人策略
+// away unmounts the fallback picker while the draft keeps its target; a user search in between
+// replaces the shared option list with a page that omits the target; on the switch back a FRESH
+// el-select mounts with no cached option, and Element Plus labels an option-less value with the raw
+// value (`useSelect.getOption`). The policy-change re-sync puts the placeholder option back first, so
+// the chip reads 未知用户. Run once per editor: the Canvas inspector and the flag-off linear step editor.
+async function switchEmptyPolicyAwaySearchAndBack(
+  page: Page,
+  testIds: { emptyPolicy: string; fallbackUserPicker: string; sourceUserPicker: string },
+): Promise<void> {
+  const fallbackPicker = page.locator(`[data-testid="${testIds.fallbackUserPicker}"]`)
+  // Control: after hydrate the target already reads 未知用户.
+  await expect(fallbackPicker).toContainText('未知用户')
+  await expect(fallbackPicker).not.toContainText(C7_FALLBACK_RAW_ID)
+
+  await page.locator(`[data-testid="${testIds.emptyPolicy}"]`).click()
+  await page.getByRole('option', { name: '报错', exact: true }).click()
+  await expect(fallbackPicker).toHaveCount(0)
+
+  // Open the step's own source user picker: Element Plus emits visible-change(true), the view runs a
+  // user search, and the page (one listed user) omits the fallback target.
+  const search = page.waitForResponse((response) => response.url().includes('/api/approval-templates/directory/users'))
+  await page.locator(`[data-testid="${testIds.sourceUserPicker}"]`).click()
+  await search
+  // Positive control: the search page landed (the listed user's option shows its business name).
+  await expect(page.getByRole('option', { name: C7_LISTED_USER.name, exact: true })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('option', { name: C7_LISTED_USER.name, exact: true })).toBeHidden()
+
+  await page.locator(`[data-testid="${testIds.emptyPolicy}"]`).click()
+  await page.getByRole('option', { name: '转交指定人员', exact: true }).click()
+  await expect(fallbackPicker).toBeVisible()
+  await expect(fallbackPicker).toContainText('未知用户')
+  await expect(fallbackPicker).not.toContainText(C7_FALLBACK_RAW_ID)
+}
+
+test('W1-1a (gate r2 P2-1): the Canvas fallback chip reads 未知用户 after switching 空审批人策略 away, searching, and back — never the raw id', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: C7_FALLBACK_TEMPLATE,
+    directoryUsers: [C7_LISTED_USER],
+  })
+  await canvasNodeSelector(page, 'approval_1').click()
+  await switchEmptyPolicyAwaySearchAndBack(page, {
+    emptyPolicy: 'approval-node-empty-policy',
+    fallbackUserPicker: 'approval-node-empty-fallback-user-picker',
+    sourceUserPicker: 'approval-node-source-user-picker',
+  })
+})
+
+test('W1-1a (gate r2 P2-1): the flag-off linear fallback chip reads 未知用户 after switching 空审批人策略 away, searching, and back — never the raw id', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: false,
+    width: 1440,
+    height: 900,
+    template: C7_FALLBACK_TEMPLATE,
+    directoryUsers: [C7_LISTED_USER],
+  })
+  await expect(page.locator('[data-testid="approval-canvas-workspace"]')).toHaveCount(0)
+  await switchEmptyPolicyAwaySearchAndBack(page, {
+    emptyPolicy: 'approval-step-empty-policy',
+    fallbackUserPicker: 'approval-step-empty-fallback-user-picker',
+    sourceUserPicker: 'approval-step-user-picker',
+  })
+})
+
 test('entering Canvas preserves pre-flow edits and keeps the saved linear draft dirty', async ({ page }) => {
   await mountFlow(page, {
     canvasV2: true,
@@ -470,6 +636,11 @@ test('flag OFF keeps the linear legacy editor editable and saves its real graph'
   await expect(page.locator('[data-testid="approval-template-step-spine"]')).toBeVisible()
   const stepRow = page.locator('[data-testid="approval-template-step-row"]').first()
   await expect(stepRow).toBeVisible()
+  // W1-1a: the linear editor's four-value same-person select renders usable (full-width row) with 默认.
+  const linearSamePerson = page.locator('[data-testid="approval-step-same-person-policy"]').first()
+  await expect(linearSamePerson).toBeVisible()
+  await expect(linearSamePerson).toContainText('默认（跟随模板设置）')
+  expect((await linearSamePerson.boundingBox())?.width ?? 0).toBeGreaterThan(200)
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 
   await stepRow.locator('input').first().fill('财务复核')

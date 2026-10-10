@@ -266,6 +266,13 @@ export default defineConfig({
       // a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-4-reactivation-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/directory-local-integration-reactivation.db.test.ts',
+      // W1-6 (owner ruling 2026-10-10): every local-directory writer creates the org's local anchor
+      // INSIDE its own transaction — eight per-writer rollback proofs (incl. injected faults), a
+      // deterministic two-connection barrier on the anchor's unique index, and mixed first-call
+      // bursts — meaningless without a real DB. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml (both points asserted by w1-6-anchor-in-transaction-ci-wiring.test.mjs).
+      'tests/integration/local-directory-anchor-in-transaction.db.test.ts',
       // Canonical Org MVP B4 (#4215 §5.5): directory_department_bindings buildable FK chain — a
       // cross-org binding is FK-IMPOSSIBLE to insert (both integrations pinned to one org_id column;
       // NOT NULL closes the MATCH SIMPLE hole). Proves rejection BY the org-chain FK by name + the

@@ -68,6 +68,19 @@ const CREATE_USER_RULE_HINTS: Record<PasswordRequirementLocale, { loginName: str
   },
 }
 
+// W1-6: the create form's org selector sends `attendanceOrgId`; the server validates it against an
+// existing org anchor. Values-free: the copy never echoes the org id back.
+const ATTENDANCE_ORG_ERROR_COPY: Record<PasswordRequirementLocale, Record<'ATTENDANCE_ORG_NOT_FOUND' | 'ATTENDANCE_ORG_CONFLICT', string>> = {
+  zh: {
+    ATTENDANCE_ORG_NOT_FOUND: '所选组织尚未在目录中建立，未创建用户；请改选其他组织或不指定组织',
+    ATTENDANCE_ORG_CONFLICT: '所选组织与考勤组/默认班次所属的组织不一致，未创建用户',
+  },
+  en: {
+    ATTENDANCE_ORG_NOT_FOUND: 'The selected organization is not set up in the directory, so the user was not created; choose another organization or leave it unset',
+    ATTENDANCE_ORG_CONFLICT: 'The selected organization does not match the organization of the attendance group or default shift, so the user was not created',
+  },
+}
+
 const KNOWN_PASSWORD_REASONS = new Set<string>(Object.keys(PASSWORD_REASON_COPY.zh))
 
 function isPasswordPolicyReason(value: unknown): value is PasswordPolicyReason {
@@ -116,6 +129,9 @@ export function describeCreateUserError(
   }
   if (error.code === 'INVALID_USERNAME' && details?.rule === 'login_name_ascii') {
     return LOGIN_NAME_RULE_COPY[locale]
+  }
+  if (error.code === 'ATTENDANCE_ORG_NOT_FOUND' || error.code === 'ATTENDANCE_ORG_CONFLICT') {
+    return ATTENDANCE_ORG_ERROR_COPY[locale][error.code]
   }
   return null
 }
