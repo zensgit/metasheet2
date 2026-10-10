@@ -20,7 +20,10 @@
 // capability clamp; automations and comments refused), and this module REFUSES to use a sheet the host
 // does not report as stamped — fail-closed, so an older host cannot leave an unclamped overview behind.
 // The plugin's own records writes do not go through people's capabilities, which is how the
-// projection can be written at all.
+// projection can be written at all — but only through the host's DEDICATED overview port
+// (`records.stockPreparationOverview`, fix round 2 F3): the generic record writes refuse the overview for
+// every plugin, so a pipeline / the multitable target adapter, whose sheet id comes from configuration,
+// cannot reach it.
 //
 // WHO CREATES IT (fix round 1, R6). Only the PULL tier: the project-target create route ensures it
 // (when a project is registered and the overview is absent) and so does the explicit
@@ -36,7 +39,9 @@
 // typed values-free 503.
 //
 // WHEN IT IS WRITTEN. Every write of the overview holds the tenant's OVERVIEW advisory lock
-// (`store.withOverviewLock`, fix round 1 R3):
+// (`store.tryWithOverviewLock`, fix round 1 R3) — a TRY-lock since fix round 2 (F4): nobody waits for it
+// holding a pooled connection; a busy refresh is 409 BUSY and a busy event leaves its project dirty for the
+// running writer to re-project (see "NEVER WAIT FOR THE OVERVIEW LOCK" below):
 //   * the REFRESH (`refreshProjectOverview`, the OPERATE route) rebuilds every row within bounds (at most
 //     the registry's 200 rows; each project's sheet read through at most PULL_TARGET_MAX_PAGES pages —
 //     past that the counts are a floor and `countsBounded` says so), deletes duplicate rows per project
@@ -545,7 +550,7 @@ function sameProjection(existing, next) {
 }
 
 function requireOverviewStore(store) {
-  const required = ['list', 'get', 'listProjectFields', 'getProjectFields', 'recordCounts', 'withOverviewLock']
+  const required = ['list', 'get', 'listProjectFields', 'getProjectFields', 'recordCounts', 'tryWithOverviewLock']
   const missing = required.filter((method) => !store || typeof store[method] !== 'function')
   if (missing.length) {
     throw new StockPreparationProjectOverviewError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here', { requiredMethods: missing })
@@ -553,18 +558,60 @@ function requireOverviewStore(store) {
   return store
 }
 
-/** Delete one overview row through the plugin's own records write port, fenced to the overview sheet. */
-async function deleteOverviewRow(recordsApi, overviewSheetId, record) {
-  await recordsApi.deleteRecord({ sheetId: overviewSheetId, recordId: record.id })
+// ── FIX ROUND 2 (F3): THE OVERVIEW'S OWN WRITE PORT ───────────────────────────────────────────────────
+//
+// The host refuses a GENERIC record write (`records.createRecord` / `patchRecord` / `deleteRecord`) to the
+// stamped overview for every plugin, this one included — that is the surface a pipeline / the multitable target
+// adapter reaches with a sheet id from external-system config. The overview is written ONLY through
+// `records.stockPreparationOverview`, the host port this plugin alone gets: it takes the staging PROJECT id and
+// derives the overview sheet itself, re-checking ownership and the stamp before each write. Reads stay on the
+// generic `queryRecords` (reading the overview is not refused).
+
+/** The host's overview write port, or a values-free 503 before any IO (an older host). */
+function requireOverviewWritePort(recordsApi) {
+  const port = recordsApi && recordsApi.stockPreparationOverview
+  const missing = ['createRecord', 'patchRecord', 'deleteRecord'].filter((method) => !port || typeof port[method] !== 'function')
+  if (!recordsApi || typeof recordsApi.queryRecords !== 'function' || missing.length) {
+    throw new StockPreparationProjectOverviewError(503, HOST_UNSUPPORTED_CODE, 'this host does not offer the project overview\'s own records write port; nothing was written', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID, reason: 'records_port_missing' })
+  }
+  return port
+}
+
+/**
+ * A records surface with the GENERIC shape `createTargetScopedRecordsApi` expects, whose every WRITE goes to the
+ * host's overview port for `projectId` (never naming a sheet), fenced to the overview sheet id the host reported.
+ * Reads go to the generic `queryRecords`.
+ */
+function overviewWriteRecordsApi(recordsApi, { projectId, sheetId }) {
+  const port = requireOverviewWritePort(recordsApi)
+  const fence = (input) => {
+    if (input && input.sheetId !== undefined && input.sheetId !== sheetId) {
+      throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'an overview write tried to leave the overview sheet')
+    }
+  }
+  const api = {
+    queryRecords: (input) => recordsApi.queryRecords(input),
+    async createRecord(input = {}) { fence(input); return port.createRecord({ projectId, data: input.data }) },
+    async patchRecord(input = {}) { fence(input); return port.patchRecord({ projectId, recordId: input.recordId, changes: input.changes }) },
+    async deleteRecord(input = {}) { fence(input); return port.deleteRecord({ projectId, recordId: input.recordId }) },
+  }
+  if (recordsApi.supportsFilterValueLists === true) api.supportsFilterValueLists = true
+  return api
+}
+
+/** Delete one overview row through the overview write port, fenced to the overview sheet. */
+async function deleteOverviewRow(writer, overviewSheetId, record) {
+  await writer.deleteRecord({ sheetId: overviewSheetId, recordId: record.id })
 }
 
 /**
  * Count, stamp the registry (only on change), build the projection and write ONE project's overview row
  * — create when it has none, patch only when the projection (minus 「截至」) changed. `existingRecords`
  * are this project's rows in the overview, oldest first; every one after the first is a race residue and
- * is deleted. Runs under the caller's overview lock.
+ * is deleted. Runs under the caller's overview lock. `recordsApi` (generic, reads) counts the project sheet;
+ * `writer` / `scoped` (the overview port) write the overview.
  */
-async function writeProjectRow({ api, recordsApi, scoped, store, tenant, projectId, overviewSheetId, target, fields, pendingDecisionCount, existingRecords, recount, locale, now, summary }) {
+async function writeProjectRow({ api, recordsApi, writer, scoped, store, tenant, projectId, overviewSheetId, target, fields, pendingDecisionCount, existingRecords, recount, locale, now, summary }) {
   let counts = { ready: false }
   if (recount) {
     counts = await countProjectSheetRows({ recordsApi, provisioning: api, projectId, row: target })
@@ -601,7 +648,7 @@ async function writeProjectRow({ api, recordsApi, scoped, store, tenant, project
   })
   const [keep, ...duplicates] = existingRecords
   for (const duplicate of duplicates) {
-    await deleteOverviewRow(recordsApi, overviewSheetId, duplicate)
+    await deleteOverviewRow(writer, overviewSheetId, duplicate)
     summary.rowsRemovedDuplicate += 1
   }
   if (!keep) {
@@ -629,23 +676,169 @@ function emptySummary(projectCount = 0) {
   }
 }
 
-function requireDeletePort(recordsApi) {
-  if (!recordsApi || typeof recordsApi.deleteRecord !== 'function') {
-    throw new StockPreparationProjectOverviewError(501, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'the records API cannot delete overview rows here; the overview cannot be kept at one row per project')
+// ── FIX ROUND 2 (F4): NEVER WAIT FOR THE OVERVIEW LOCK WHILE HOLDING A CONNECTION ─────────────────────
+//
+// The overview lock (`store.tryWithOverviewLock`) is a TRY-lock: a writer that finds it busy gives up at once
+// (its transaction ends, its pooled connection is released) instead of queueing with a connection held while
+// the holder needs more of them. Two writer kinds, one tenant:
+//   * the REFRESH (OPERATE route) — busy → 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY, nothing done, no wait;
+//   * the PER-EVENT row update (archive / restore / project fields / pull outcome / confirm / create) — busy →
+//     no wait either; its project is RECONCILED by whoever holds the lock in this process.
+// IN-PROCESS, PER TENANT, BEFORE ANY CONNECTION: the writer state below (one per registry store, i.e. per
+// plugin process) records which projects are DIRTY and whether a writer is RUNNING. An event marks its
+// project dirty first; if a writer is running it returns `deferred` without touching the database at all
+// (so in-process waiters hold no connection — not even a busy try). The running writer drains the dirty set
+// INSIDE the lock after its own pass, and after the lock is released re-checks the set synchronously before
+// it stops (JavaScript runs that check and the "not running" flip in one turn, so a mark is either seen by
+// the holder or finds no holder and runs itself). A refresh in flight therefore re-projects every project an
+// event touched while it ran, from the registry as it stands AFTER that event.
+// ACROSS PROCESSES the database try-lock is the only coordination: a writer that loses it to another process
+// leaves its projects dirty here — reconciled by this process's next overview writer — and the next refresh
+// rebuilds everything (register R-37 states this limit).
+
+const BUSY_CODE = 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY'
+
+function overviewBusyError() {
+  return new StockPreparationProjectOverviewError(409, BUSY_CODE, 'another update of this tenant\'s project overview is running; nothing was done — try again in a moment', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
+}
+
+const overviewWriterStatesByStore = new WeakMap()
+
+/** The in-process writer state of ONE tenant's overview: `running` + the dirty projects (projectNo → flags). */
+function overviewWriterState(store, tenant) {
+  let byTenant = overviewWriterStatesByStore.get(store)
+  if (!byTenant) {
+    byTenant = new Map()
+    overviewWriterStatesByStore.set(store, byTenant)
+  }
+  let state = byTenant.get(tenant)
+  if (!state) {
+    state = { running: false, dirty: new Map() }
+    byTenant.set(tenant, state)
+  }
+  return state
+}
+
+function markOverviewProjectDirty(state, projectNo, { recount = false } = {}) {
+  const previous = state.dirty.get(projectNo)
+  state.dirty.set(projectNo, { recount: recount === true || Boolean(previous && previous.recount === true) })
+}
+
+/**
+ * Run ONE writer for the tenant: take the try-lock, run `firstPass` (the refresh's rebuild; none for an event),
+ * drain the dirty set inside the lock, release, and go round again while the set is not empty. Returns
+ * `{ busy: true }` when the FIRST try-lock is busy (another process); a later busy try stops the loop and leaves
+ * what is still dirty for the next writer here. The caller set nothing on `state.running`; this does.
+ */
+async function runOverviewWriter({ registry, tenant, state, firstPass, drainOne }) {
+  state.running = true
+  try {
+    let value
+    for (let pass = 0; ; pass += 1) {
+      if (pass > 0 && state.dirty.size === 0) break
+      const attempt = await registry.tryWithOverviewLock({ tenantId: tenant }, async () => {
+        const out = pass === 0 && typeof firstPass === 'function' ? await firstPass() : undefined
+        while (state.dirty.size > 0) {
+          const batch = [...state.dirty.entries()]
+          state.dirty.clear()
+          for (const [projectNo, flags] of batch) await drainOne(projectNo, flags)
+        }
+        return out
+      })
+      if (!attempt || attempt.acquired !== true) {
+        if (pass === 0) return { busy: true }
+        break
+      }
+      if (pass === 0) value = attempt.value
+    }
+    return { busy: false, value }
+  } finally {
+    state.running = false
   }
 }
 
 /**
- * THE REFRESH (ADR §5, the `POST …/project-overview/refresh` leg; fix round 1 R3 / R6 / R7). Projects
- * into an EXISTING stamped overview only (409 ABSENT otherwise — the PULL tier creates it). Under the
- * tenant's overview lock, within bounds:
+ * The per-project reconcile the per-event update and the refresh's drain share: this project's overview rows are
+ * read, duplicates deleted, and the row created / patched only when its projection changed; a project that is
+ * no longer registered has its rows removed. Failures are collected (the first is kept) so one project cannot
+ * stop the others; the caller decides whether to surface it.
+ */
+function createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId, sheet, locale, now }) {
+  let scopedPromise = null
+  const ctx = {
+    summary: emptySummary(0),
+    firstError: null,
+    outcome: null,
+    async drainOne(no, flags = {}) {
+      try {
+        if (!scopedPromise) {
+          scopedPromise = createTargetScopedRecordsApi(writer, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId })
+        }
+        const scoped = await scopedPromise
+        ctx.summary.projectCount += 1
+        const existing = await scoped.queryRecords({ filters: { projectNo: no }, limit: OVERVIEW_PROJECT_ROW_READ_LIMIT, offset: 0 })
+        if (!Array.isArray(existing)) {
+          throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
+        }
+        const mine = existing.filter((record) => optionalString(readLogicalCell(record, 'projectNo')) === no)
+        const target = await registry.get({ tenantId: tenant, projectNo: no })
+        if (!target) {
+          for (const record of mine) {
+            await deleteOverviewRow(writer, sheet.sheetId, record)
+            ctx.summary.rowsRemovedOrphan += 1
+          }
+          ctx.outcome = ctx.outcome || 'removed'
+          return
+        }
+        const fields = await registry.getProjectFields({ tenantId: tenant, projectNo: no })
+        let pendingDecisionCount = 0
+        try {
+          const pending = await pendingDecisionCountsByProjectNo(recordsApi, api, projectId, no)
+          pendingDecisionCount = pending.byProjectNo.get(no) || 0
+        } catch (error) {
+          pendingDecisionCount = 0
+        }
+        await writeProjectRow({
+          api,
+          recordsApi,
+          writer,
+          scoped,
+          store: registry,
+          tenant,
+          projectId,
+          overviewSheetId: sheet.sheetId,
+          target,
+          fields,
+          pendingDecisionCount,
+          existingRecords: mine,
+          recount: flags.recount === true,
+          locale,
+          now,
+          summary: ctx.summary,
+        })
+        ctx.outcome = 'updated'
+      } catch (error) {
+        if (!ctx.firstError) ctx.firstError = error
+      }
+    },
+  }
+  return ctx
+}
+
+/**
+ * THE REFRESH (ADR §5, the `POST …/project-overview/refresh` leg; fix round 1 R3 / R6 / R7; fix round 2 F3 / F4).
+ * Projects into an EXISTING stamped overview only (409 ABSENT otherwise — the PULL tier creates it). Under the
+ * tenant's overview TRY-lock (busy → 409 BUSY, no wait, nothing done), within bounds:
  *   1. the registry rows of the tenant (≤ 200 projected; more is truncated and said);
  *   2. the ledger's pending counts, once for every project (degrades to zeros, `ledgerReady` says);
  *   3. the overview's own rows (bounded): rows of projects no longer registered (or without a project
  *      number) are deleted, and per project only the first row is kept — the rest are race residue;
  *   4. per registry row: count the project sheet (bounded), stamp the registry only when the counts
- *      changed, create or patch the overview row only when its projection (minus 「截至」) changed.
- * Returns a values-free summary. The caller audits it (`project_overview_refresh`).
+ *      changed, create or patch the overview row only when its projection (minus 「截至」) changed;
+ *   5. (F4) the projects events marked dirty while the refresh ran are re-projected before the lock is
+ *      released — from the registry as it stands after those events.
+ * Every overview write goes through the host's overview port (F3). Returns a values-free summary. The caller
+ * audits it (`project_overview_refresh`).
  */
 async function refreshProjectOverview({ provisioning, recordsApi, store, tenantId, projectId, locale, now = () => new Date() } = {}) {
   const api = requireProvisioning(provisioning)
@@ -653,88 +846,104 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
   const tenant = requiredString(tenantId, 'tenantId')
   const scopedProjectId = requiredString(projectId, 'projectId')
   const registry = requireOverviewStore(store)
-  requireDeletePort(recordsApi)
+  requireOverviewWritePort(recordsApi)
   const sheet = await findProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId })
   if (!sheet) {
     throw new StockPreparationProjectOverviewError(409, ABSENT_CODE, 'the project overview has not been created yet; a puller creates it (it is also created with the first project sheet)', { objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID })
   }
-  return registry.withOverviewLock({ tenantId: tenant }, async () => {
-    // The refresh's own clock — 「截至」 of the facts this run looked at (a row keeps the clock of its
-    // last CHANGED measurement, R7; this is when the overview was last checked against the registry).
-    const refreshedAt = now()
-    const allRows = await registry.list({ tenantId: tenant })
-    const truncated = allRows.length > MAX_PROJECT_OVERVIEW_ROWS
-    const rows = truncated ? allRows.slice(0, MAX_PROJECT_OVERVIEW_ROWS) : allRows
-    const registeredNos = new Set(allRows.map((row) => row.projectNo))
-    const fieldsByProjectNo = await registry.listProjectFields({ tenantId: tenant })
-    let pending = { ready: false, byProjectNo: new Map() }
-    try {
-      pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, null)
-    } catch (error) {
-      pending = { ready: false, byProjectNo: new Map() }
-    }
-    const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
-    const summary = emptySummary(rows.length)
-    const byProjectNo = new Map()
-    let overflow = false
-    for (let page = 0; page < OVERVIEW_READ_MAX_PAGES; page += 1) {
-      const batch = await scoped.queryRecords({ filters: {}, limit: OVERVIEW_READ_PAGE_LIMIT, offset: page * OVERVIEW_READ_PAGE_LIMIT })
-      if (!Array.isArray(batch)) {
-        throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
+  const writer = overviewWriteRecordsApi(recordsApi, { projectId: scopedProjectId, sheetId: sheet.sheetId })
+  const state = overviewWriterState(registry, tenant)
+  // In-process: another overview writer of this tenant is running — answer at once, without a connection.
+  if (state.running) throw overviewBusyError()
+  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
+  const run = await runOverviewWriter({
+    registry,
+    tenant,
+    state,
+    drainOne: drain.drainOne,
+    firstPass: async () => {
+      // The refresh's own clock — 「截至」 of the facts this run looked at (a row keeps the clock of its
+      // last CHANGED measurement, R7; this is when the overview was last checked against the registry).
+      const refreshedAt = now()
+      const allRows = await registry.list({ tenantId: tenant })
+      const truncated = allRows.length > MAX_PROJECT_OVERVIEW_ROWS
+      const rows = truncated ? allRows.slice(0, MAX_PROJECT_OVERVIEW_ROWS) : allRows
+      const registeredNos = new Set(allRows.map((row) => row.projectNo))
+      const fieldsByProjectNo = await registry.listProjectFields({ tenantId: tenant })
+      let pending = { ready: false, byProjectNo: new Map() }
+      try {
+        pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, null)
+      } catch (error) {
+        pending = { ready: false, byProjectNo: new Map() }
       }
-      for (const record of batch) {
-        const no = optionalString(readLogicalCell(record, 'projectNo'))
-        if (!no || !registeredNos.has(no)) {
-          await deleteOverviewRow(recordsApi, sheet.sheetId, record)
-          summary.rowsRemovedOrphan += 1
-          continue
+      const scoped = await createTargetScopedRecordsApi(writer, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
+      const summary = emptySummary(rows.length)
+      const byProjectNo = new Map()
+      let overflow = false
+      for (let page = 0; page < OVERVIEW_READ_MAX_PAGES; page += 1) {
+        const batch = await scoped.queryRecords({ filters: {}, limit: OVERVIEW_READ_PAGE_LIMIT, offset: page * OVERVIEW_READ_PAGE_LIMIT })
+        if (!Array.isArray(batch)) {
+          throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
         }
-        if (!byProjectNo.has(no)) byProjectNo.set(no, [])
-        byProjectNo.get(no).push(record)
+        for (const record of batch) {
+          const no = optionalString(readLogicalCell(record, 'projectNo'))
+          if (!no || !registeredNos.has(no)) {
+            await deleteOverviewRow(writer, sheet.sheetId, record)
+            summary.rowsRemovedOrphan += 1
+            continue
+          }
+          if (!byProjectNo.has(no)) byProjectNo.set(no, [])
+          byProjectNo.get(no).push(record)
+        }
+        if (batch.length < OVERVIEW_READ_PAGE_LIMIT) break
+        if (page === OVERVIEW_READ_MAX_PAGES - 1) overflow = true
       }
-      if (batch.length < OVERVIEW_READ_PAGE_LIMIT) break
-      if (page === OVERVIEW_READ_MAX_PAGES - 1) overflow = true
-    }
-    for (const target of rows) {
-      await writeProjectRow({
-        api,
-        recordsApi,
-        scoped,
-        store: registry,
-        tenant,
-        projectId: scopedProjectId,
-        overviewSheetId: sheet.sheetId,
-        target,
-        fields: fieldsByProjectNo.get(target.projectNo) || null,
-        pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
-        existingRecords: byProjectNo.get(target.projectNo) || [],
-        recount: true,
-        locale,
-        now,
-        summary,
-      })
-    }
-    return {
-      sheetId: sheet.sheetId,
-      activeViewId: sheet.activeViewId,
-      archivedViewId: sheet.archivedViewId,
-      truncated,
-      overflow,
-      ledgerReady: pending.ready === true,
-      countsAt: refreshedAt instanceof Date ? refreshedAt.toISOString() : String(refreshedAt),
-      ...summary,
-    }
+      for (const target of rows) {
+        await writeProjectRow({
+          api,
+          recordsApi,
+          writer,
+          scoped,
+          store: registry,
+          tenant,
+          projectId: scopedProjectId,
+          overviewSheetId: sheet.sheetId,
+          target,
+          fields: fieldsByProjectNo.get(target.projectNo) || null,
+          pendingDecisionCount: pending.byProjectNo.get(target.projectNo) || 0,
+          existingRecords: byProjectNo.get(target.projectNo) || [],
+          recount: true,
+          locale,
+          now,
+          summary,
+        })
+      }
+      return {
+        sheetId: sheet.sheetId,
+        activeViewId: sheet.activeViewId,
+        archivedViewId: sheet.archivedViewId,
+        truncated,
+        overflow,
+        ledgerReady: pending.ready === true,
+        countsAt: refreshedAt instanceof Date ? refreshedAt.toISOString() : String(refreshedAt),
+        ...summary,
+      }
+    },
   })
+  if (run.busy) throw overviewBusyError()
+  return run.value
 }
 
 /**
- * THE PER-EVENT UPDATE (fix round 1, R5; ADR §5 「插件在这些时刻对单个项目行做 upsert」). ONE project's
- * overview row after a create, archive, restore, project-fields change, dry-run / apply outcome or
- * confirmation. A no-op (`outcome: 'overview_absent'`) when there is no overview. Under the tenant's
- * overview lock: the project's existing rows are read, duplicates deleted, and the row created / patched
- * only when its projection changed; a project that is no longer registered has its rows removed.
- * `recount` re-measures the project sheet (the pull outcomes change the rows; the others do not).
- * BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's outcome.
+ * THE PER-EVENT UPDATE (fix round 1, R5; ADR §5 「插件在这些时刻对单个项目行做 upsert」; fix round 2 F3 / F4).
+ * ONE project's overview row after a create, archive, restore, project-fields change, dry-run / apply outcome or
+ * confirmation. A no-op (`outcome: 'overview_absent'`) when there is no overview. The project is marked DIRTY;
+ * if this tenant's overview writer is already running in this process the call returns `deferred` at once (that
+ * writer re-projects it before it stops, no connection taken here); otherwise this call becomes the writer:
+ * try-lock (another process holds it → `busy`, the project stays dirty for this process's next writer), drain
+ * every dirty project, release, re-check. `recount` re-measures the project sheet (the pull outcomes change the
+ * rows; the others do not). BEST-EFFORT BY CONTRACT: the caller catches and logs; this never decides an event's
+ * outcome. The first failure of the drain is rethrown for that log.
  */
 async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenantId, projectId, projectNo, recount = false, locale, now = () => new Date() } = {}) {
   const api = requireProvisioning(provisioning)
@@ -742,52 +951,17 @@ async function updateProjectOverviewRow({ provisioning, recordsApi, store, tenan
   const scopedProjectId = requiredString(projectId, 'projectId')
   const no = requiredString(projectNo, 'projectNo')
   const registry = requireOverviewStore(store)
-  requireDeletePort(recordsApi)
   const sheet = await findProjectOverviewSheet({ provisioning: api, projectId: scopedProjectId })
   if (!sheet) return { outcome: 'overview_absent' }
-  return registry.withOverviewLock({ tenantId: tenant }, async () => {
-    const scoped = await createTargetScopedRecordsApi(recordsApi, { sheetId: sheet.sheetId, objectId: STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID }, { provisioning: api, projectId: scopedProjectId })
-    const existing = await scoped.queryRecords({ filters: { projectNo: no }, limit: OVERVIEW_PROJECT_ROW_READ_LIMIT, offset: 0 })
-    if (!Array.isArray(existing)) {
-      throw new StockPreparationProjectOverviewError(500, 'STOCK_PREPARATION_PROJECT_OVERVIEW_RECORDS_API_INVALID', 'queryRecords must return an array')
-    }
-    const mine = existing.filter((record) => optionalString(readLogicalCell(record, 'projectNo')) === no)
-    const summary = emptySummary(1)
-    const target = await registry.get({ tenantId: tenant, projectNo: no })
-    if (!target) {
-      for (const record of mine) {
-        await deleteOverviewRow(recordsApi, sheet.sheetId, record)
-        summary.rowsRemovedOrphan += 1
-      }
-      return { outcome: 'removed', sheetId: sheet.sheetId, ...summary }
-    }
-    const fields = await registry.getProjectFields({ tenantId: tenant, projectNo: no })
-    let pendingDecisionCount = 0
-    try {
-      const pending = await pendingDecisionCountsByProjectNo(recordsApi, api, scopedProjectId, no)
-      pendingDecisionCount = pending.byProjectNo.get(no) || 0
-    } catch (error) {
-      pendingDecisionCount = 0
-    }
-    await writeProjectRow({
-      api,
-      recordsApi,
-      scoped,
-      store: registry,
-      tenant,
-      projectId: scopedProjectId,
-      overviewSheetId: sheet.sheetId,
-      target,
-      fields,
-      pendingDecisionCount,
-      existingRecords: mine,
-      recount: recount === true,
-      locale,
-      now,
-      summary,
-    })
-    return { outcome: 'updated', sheetId: sheet.sheetId, ...summary }
-  })
+  const writer = overviewWriteRecordsApi(recordsApi, { projectId: scopedProjectId, sheetId: sheet.sheetId })
+  const state = overviewWriterState(registry, tenant)
+  markOverviewProjectDirty(state, no, { recount })
+  if (state.running) return { outcome: 'deferred', sheetId: sheet.sheetId }
+  const drain = createOverviewProjectDrain({ api, recordsApi, writer, registry, tenant, projectId: scopedProjectId, sheet, locale, now })
+  const run = await runOverviewWriter({ registry, tenant, state, firstPass: null, drainOne: drain.drainOne })
+  if (run.busy) return { outcome: 'busy', sheetId: sheet.sheetId }
+  if (drain.firstError) throw drain.firstError
+  return { outcome: drain.outcome || 'updated', sheetId: sheet.sheetId, ...drain.summary }
 }
 
 module.exports = {
@@ -822,5 +996,10 @@ module.exports = {
     HOST_UNSUPPORTED_CODE,
     NOT_STAMPED_CODE,
     ABSENT_CODE,
+    // Fix round 2 (F3 / F4).
+    BUSY_CODE,
+    requireOverviewWritePort,
+    overviewWriteRecordsApi,
+    overviewWriterState,
   },
 }

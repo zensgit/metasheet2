@@ -4156,7 +4156,7 @@ function requireStockPreparationAudit() {
   function requireStockPreparationProjectOverview() {
     const store = requireStockPreparationProjectTargets()
     if (typeof store.listProjectFields !== 'function' || typeof store.recordCounts !== 'function'
-      || typeof store.getProjectFields !== 'function' || typeof store.withOverviewLock !== 'function') {
+      || typeof store.getProjectFields !== 'function' || typeof store.tryWithOverviewLock !== 'function') {
       throw new HttpRouteError(501, 'STOCK_PREPARATION_PROJECT_TARGET_STORE_UNAVAILABLE', 'the project-sheet registry cannot serve the project overview here')
     }
     return store
@@ -4176,7 +4176,7 @@ function requireStockPreparationAudit() {
    */
   async function updateProjectOverviewRowBestEffort(tenantId, projectNo, { recount = false } = {}) {
     if (!stockPreparationProjectSheetsEnabled(process.env)) return null
-    if (!tenantId || !projectNo || !stockPreparationProjectTargets || typeof stockPreparationProjectTargets.withOverviewLock !== 'function') return null
+    if (!tenantId || !projectNo || !stockPreparationProjectTargets || typeof stockPreparationProjectTargets.tryWithOverviewLock !== 'function') return null
     try {
       return await updateProjectOverviewRow({
         provisioning: getMultitableProvisioning(),
@@ -9651,8 +9651,11 @@ function requireStockPreparationAudit() {
     // STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT (the PULL tier creates it: the project-target create route
     // and `ensure` below); it runs under the tenant's overview lock (R3) and a per-tenant cooldown: within
     // PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS of a refresh that started, a call answers 200 `fresh: false` with
-    // no refresh IO (past the operator-scope resolution that names the tenant). Audited
-    // `project_overview_refresh` with counts only.
+    // no refresh IO (past the operator-scope resolution that names the tenant). Fix round 2 (F4): the lock is
+    // a TRY-lock — another overview writer of the tenant running (in this process, or holding the database
+    // lock in another) answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once, nothing done, and the
+    // cooldown stamp is cleared like any refresh that did not complete. Audited `project_overview_refresh`
+    // with counts only.
     async stockPreparationProjectOverviewRefresh(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
       requireProjectSheetsEnabled()

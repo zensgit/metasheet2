@@ -831,6 +831,48 @@ export interface MultitableRecordsAPI {
     input: StockPreparationPersistUnitOfWorkInput,
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
   ): Promise<T>
+  /**
+   * S3 fix round 2 (F3; register R-37): READ-ONLY probe — `true` iff a GENERIC record write to this sheet
+   * would be refused because it is a read-only system sheet (today: the stock-preparation project overview,
+   * `meta_sheets.system_kind = 'stock_prep_overview'`). A writer whose sheet id comes from configuration (the
+   * multitable target adapter) asks first and refuses with its own typed error. Absent on an older host. The
+   * host refuses the write itself either way; this only lets a caller fail earlier and clearer.
+   */
+  isReadOnlySystemSheet?(input: { sheetId: string }): Promise<boolean>
+  /**
+   * S3 fix round 2 (F3; register R-37): THE ONLY write path to the stock-preparation project overview,
+   * exposed only to `plugin-integration-core`. The caller names a PROJECT (its staging project id), never a
+   * sheet: the host derives the overview's sheet id for that project itself, checks the plugin owns it and
+   * that the host stamped it `stock_prep_overview`, and only then writes. The generic `createRecord` /
+   * `patchRecord` / `deleteRecord` (and the persist unit of work) refuse the overview for every plugin.
+   */
+  stockPreparationOverview?: StockPreparationOverviewRecordsPort
+}
+
+/** S3 fix round 2 (F3): see `MultitableRecordsAPI.stockPreparationOverview`. */
+export interface StockPreparationOverviewRecordsPort {
+  createRecord(input: { projectId: string; data: Record<string, unknown> }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  patchRecord(input: {
+    projectId: string
+    recordId: string
+    changes: Record<string, unknown>
+    expectedVersion?: number
+  }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+    data: Record<string, unknown>
+  }>
+  deleteRecord(input: { projectId: string; recordId: string }): Promise<{
+    id: string
+    sheetId: string
+    version: number
+  }>
 }
 
 export interface StockPreparationPersistUnitOfWorkInput {

@@ -64,6 +64,7 @@ import { createTenantPrincipalDirectoryBoundaryV1 } from './services/tenant-prin
 import { StockPreparationFieldPermissionsService } from './services/stock-preparation-field-permissions'
 import { grantStockPreparationProjectSheetRoleWrite } from './services/stock-preparation-project-sheet-grants'
 import { grantStockPreparationOverviewRoleRead } from './services/stock-preparation-overview-grants'
+import { loadStockPreparationOverviewSheetIds } from './multitable/stock-preparation-overview-contract'
 // 通知下一步 (light 备料 handoff): the DingTalk notification seam, injected into plugin-integration-core
 // ONLY, same per-plugin-injected-service shape as the two above. It wraps the EXISTING group-robot
 // machinery (multitable/dingtalk-group-destination-service.ts) — the plugin gets no DingTalk client
@@ -2415,6 +2416,17 @@ export class MetaSheetServer {
               if (!ownsSheet) {
                 throw new MultitableSheetScopeError(pluginName, sheetId, 'unregistered')
               }
+            },
+            // S3 fix round 2 (F3; register R-37): the host's stamp, read for the plugin-scope wrapper — the generic
+            // record writes refuse a sheet this answers `true` for, and the overview port writes only one it
+            // answers `true` for. The contract's column-tolerant, id-prefiltered lookup (one indexed statement for
+            // a derived-shape id, none otherwise).
+            isStockPreparationOverviewSheet: async ({ sheetId }) => {
+              const overviewIds = await loadStockPreparationOverviewSheetIds(
+                (sql, params) => poolManager.get().query(sql, params) as Promise<{ rows: unknown[]; rowCount?: number | null }>,
+                [sheetId],
+              )
+              return overviewIds.has(sheetId)
             },
             assertSheetScope: async ({ sheetId, pluginName }) => {
               const txQuery: MultitableProvisioningQueryFn = async (sql, params) => {

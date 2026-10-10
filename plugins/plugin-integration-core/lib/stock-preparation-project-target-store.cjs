@@ -622,26 +622,33 @@ function createStockPreparationProjectTargetStore({ db, idGenerator = crypto.ran
   }
 
   /**
-   * S3 fix round 1 (R3 / R5): run `fn` holding the tenant's OVERVIEW advisory lock (`PROJECT_OVERVIEW_LOCK_PREFIX`),
-   * in one transaction that only holds the lock — `fn`'s own host calls are not part of it. Every writer of
-   * the overview (the refresh, the per-event row update) runs inside this, so two of them for one tenant
-   * never interleave a read-then-create and leave two rows for one project. Released when `fn` settles.
+   * S3 fix round 1 (R3 / R5), fix round 2 (F4): run `fn` holding the tenant's OVERVIEW advisory lock
+   * (`PROJECT_OVERVIEW_LOCK_PREFIX`) — IF it is free. One transaction that only holds the lock (`fn`'s own host
+   * calls are not part of it); every writer of the overview (the refresh, the per-event row update) runs inside
+   * this, so two of them for one tenant never interleave a read-then-create and leave two rows for one project.
+   *
+   * IT NEVER WAITS (F4). The holder's `fn` needs MORE pool connections for its host calls, so a writer that
+   * BLOCKED on the lock while holding its own pooled connection could, N times over, starve the holder it waits
+   * for. `pg_try_advisory_xact_lock` answers at once: busy → `{ acquired: false }` and the transaction ends
+   * (connection released) without calling `fn`; free → `{ acquired: true, value: await fn() }`, released when
+   * `fn` settles. What a busy writer does instead is the caller's (stock-preparation-project-overview.cjs).
    */
-  async function withOverviewLock(input = {}, fn) {
+  async function tryWithOverviewLock(input = {}, fn) {
     const tenantId = requiredString(input.tenantId, 'tenantId')
     if (typeof fn !== 'function') {
-      throw new Error('withOverviewLock: a callback is required')
+      throw new Error('tryWithOverviewLock: a callback is required')
     }
     return db.transaction(async (trx) => {
-      if (!trx || typeof trx.advisoryXactLock !== 'function') {
-        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose advisoryXactLock')
+      if (!trx || typeof trx.tryAdvisoryXactLock !== 'function') {
+        throw new Error('createStockPreparationProjectTargetStore: the transaction handle must expose tryAdvisoryXactLock')
       }
-      await trx.advisoryXactLock(`${PROJECT_OVERVIEW_LOCK_PREFIX}${tenantId}`)
-      return fn()
+      const acquired = await trx.tryAdvisoryXactLock(`${PROJECT_OVERVIEW_LOCK_PREFIX}${tenantId}`)
+      if (acquired !== true) return { acquired: false }
+      return { acquired: true, value: await fn() }
     })
   }
 
-  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, withOverviewLock }
+  return { get, list, count, create, archive, restore, withActiveRowLocked, updateProjectFields, getProjectFields, listProjectFields, recordPullOutcome, recordCounts, tryWithOverviewLock }
 }
 
 module.exports = {

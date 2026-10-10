@@ -45,6 +45,9 @@ function makeMemoryDb() {
   // transaction's callback settles — so a suite can force the interleaving a missing (or released
   // too early) lock would allow, instead of a lock that only records that it was asked for.
   const lockTails = new Map()
+  // S3 fix round 2 (F4): the keys a transaction HOLDS right now (blocking or try), so the non-blocking
+  // `tryAdvisoryXactLock` answers exactly what PostgreSQL would: false at once while another transaction holds it.
+  const heldKeys = new Set()
   const rowsOf = (table) => {
     if (!tables.has(table)) tables.set(table, [])
     return tables.get(table)
@@ -66,7 +69,15 @@ function makeMemoryDb() {
           const held = new Promise((resolve) => { release = resolve })
           lockTails.set(key, previous.then(() => held))
           await previous
-          releases.push(release)
+          heldKeys.add(key)
+          releases.push(() => { heldKeys.delete(key); release() })
+        },
+        async tryAdvisoryXactLock(key) {
+          calls.push(`tryAdvisoryXactLock:${key}`)
+          if (heldKeys.has(key)) return false
+          heldKeys.add(key)
+          releases.push(() => { heldKeys.delete(key) })
+          return true
         },
       }
       try {
@@ -276,22 +287,79 @@ function makeSourceAdapter(projectNo) {
   }
 }
 
-function makeRecordsApi() {
+/**
+ * S3 fix round 2 (F3): what the HOST does (plugin-scope.ts) — a GENERIC record write to a sheet the host stamped
+ * `stock_prep_overview` is refused for every caller; the overview is written only through
+ * `records.stockPreparationOverview`, which takes a PROJECT id and derives the sheet. `stampedOverviewSheet(id)`
+ * answers from the fake host's provisioning state.
+ */
+const OVERVIEW_OBJECT_ID = 'plm_stock_preparation_project_overview'
+function overviewReadOnlyError() {
+  return Object.assign(new Error('Records of the read-only stock-preparation project overview are written only by its own plugin port'), {
+    status: 403,
+    code: 'STOCK_PREP_OVERVIEW_READ_ONLY',
+    details: { reason: 'generic_write' },
+  })
+}
+
+function makeRecordsApi({ provisioning = null } = {}) {
   const rows = []
   const calls = []
-  return {
+  const stampedOverviewSheet = (sheetId) => Boolean(provisioning) && [...provisioning.objects.entries()].some(([key, object]) => {
+    const slash = key.lastIndexOf('/')
+    return object.systemKind === 'stock_prep_overview' && provisioning.sheetIdOf(key.slice(0, slash), key.slice(slash + 1)) === sheetId
+  })
+  const refuseOverview = (sheetId) => { if (stampedOverviewSheet(sheetId)) throw overviewReadOnlyError() }
+  const api = {
     calls,
     async queryRecords(input = {}) { calls.push(['queryRecords', input.sheetId]); return rows.filter((row) => row.sheetId === input.sheetId).map(clone) },
-    async createRecord(input = {}) { calls.push(['createRecord', input.sheetId]); const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }; rows.push(created); return clone(created) },
-    async patchRecord(input = {}) { calls.push(['patchRecord', input.sheetId]); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
-    // S3 fix round 1 (R3): the plugin SDK delete the overview uses to remove duplicate / orphan rows.
+    async createRecord(input = {}) { calls.push(['createRecord', input.sheetId]); refuseOverview(input.sheetId); const created = { id: `rec_${rows.length + 1}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }; rows.push(created); return clone(created) },
+    async patchRecord(input = {}) { calls.push(['patchRecord', input.sheetId]); refuseOverview(input.sheetId); return { id: input.recordId, sheetId: input.sheetId, version: 2, data: { ...(input.changes || {}) } } },
+    // S3 fix round 1 (R3): the plugin SDK delete (since fix round 2 the overview deletes through its port).
     async deleteRecord(input = {}) {
       calls.push(['deleteRecord', input.sheetId])
+      refuseOverview(input.sheetId)
       const index = rows.findIndex((row) => row.id === input.recordId && row.sheetId === input.sheetId)
       if (index >= 0) rows.splice(index, 1)
       return { id: input.recordId, sheetId: input.sheetId, version: 1 }
     },
   }
+  // S3 fix round 2 (F3): the overview port — the host derives the sheet from the PROJECT and writes only a
+  // stamped overview; it forwards to the CURRENT raw writers (minus the generic refusal) so a suite can still
+  // see / fail them.
+  const portSheet = (projectId) => {
+    const sheetId = provisioning ? provisioning.sheetIdOf(projectId, OVERVIEW_OBJECT_ID) : null
+    if (!sheetId || !stampedOverviewSheet(sheetId)) {
+      throw Object.assign(new Error('not the overview'), { status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'not_overview' } })
+    }
+    return sheetId
+  }
+  api.stockPreparationOverview = {
+    calls: [],
+    async createRecord({ projectId, data } = {}) {
+      const sheetId = portSheet(projectId)
+      api.stockPreparationOverview.calls.push(['createRecord', sheetId])
+      calls.push(['overview.createRecord', sheetId])
+      const created = { id: `rec_${rows.length + 1}`, sheetId, version: 1, data: { ...(data || {}) } }
+      rows.push(created)
+      return clone(created)
+    },
+    async patchRecord({ projectId, recordId, changes } = {}) {
+      const sheetId = portSheet(projectId)
+      api.stockPreparationOverview.calls.push(['patchRecord', sheetId])
+      calls.push(['overview.patchRecord', sheetId])
+      return { id: recordId, sheetId, version: 2, data: { ...(changes || {}) } }
+    },
+    async deleteRecord({ projectId, recordId } = {}) {
+      const sheetId = portSheet(projectId)
+      api.stockPreparationOverview.calls.push(['deleteRecord', sheetId])
+      calls.push(['overview.deleteRecord', sheetId])
+      const index = rows.findIndex((row) => row.id === recordId && row.sheetId === sheetId)
+      if (index >= 0) rows.splice(index, 1)
+      return { id: recordId, sheetId, version: 1 }
+    },
+  }
+  return api
 }
 
 function inertService(methods) {
@@ -368,7 +436,7 @@ function mountProjectSheetRoutes({
   const auditAppends = []
   const provisioning = makeProvisioning({ stampsSystemKind })
   if (envObjectId) seedObject(provisioning, staging, envObjectId, envExtFieldIds)
-  const records = makeRecordsApi()
+  const records = makeRecordsApi({ provisioning })
   const source = makeSourceAdapter(projectNo)
   const db = makeMemoryDb()
   const context = {
@@ -403,7 +471,15 @@ function mountProjectSheetRoutes({
   let n = 0
   services.stockPreparationProjectTargetStore = createStockPreparationProjectTargetStore({ db, idGenerator: () => `pt-${(n += 1)}` })
   services.stockPreparationPackInstallStore = createStockPreparationPackInstallStore({ db, idGenerator: () => `pi-${(n += 1)}` })
-  services.tenantPrincipalDirectory = { async verifyTenantMembership() { return { member: true } } }
+  // S3 fix round 2 (F6): the operator-scope's tenant-membership lookup is IO too — recorded, so a suite can pin
+  // "switch off = not even the scope lookup".
+  const tenantDirectoryCalls = []
+  services.tenantPrincipalDirectory = {
+    async verifyTenantMembership(input = {}) {
+      tenantDirectoryCalls.push({ userId: input.userId, tenantId: input.tenantId })
+      return { member: true }
+    },
+  }
   if (fieldPermissions) services.stockPreparationFieldPermissions = fieldPermissions
   if (sourceBindingStore) services.stockPreparationSourceBindingStore = sourceBindingStore
   for (const entry of ledger) {
@@ -423,7 +499,7 @@ function mountProjectSheetRoutes({
   if (grantRoleIds) process.env[PROJECT_SHEET_GRANT_ROLE_IDS_ENV] = grantRoleIds.join(',')
   httpRoutes.registerIntegrationRoutes({ context, services, logger })
   return {
-    routes, auditAppends, provisioning, records, source, db, context, staging,
+    routes, auditAppends, provisioning, records, source, db, context, staging, tenantDirectoryCalls,
     // S3 fix round 1: the REAL registry store the routes use, for suites that drive the overview module directly.
     projectTargetStore: services.stockPreparationProjectTargetStore,
     projectObjectId: (no = projectNo) => deriveProjectSheetObjectId(tenantId, no),
@@ -480,6 +556,7 @@ module.exports = {
   clone,
   makeMemoryDb,
   makeProvisioning,
+  makeRecordsApi,
   seedObject,
   mountProjectSheetRoutes,
   call,

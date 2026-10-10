@@ -44,10 +44,17 @@
  *   4. The G1 READ port's literal (`STOCK_PREPARATION_OVERVIEW_GRANT_PERM_CODE = 'spreadsheet:read'`), the
  *      only level the plugin's overview grant port can write (services/stock-preparation-overview-grants.ts).
  *
- * WHAT IT DOES NOT DO. It does not hide the sheet, does not narrow who may READ it, and does not touch
- * the plugin SDK records path (`createPluginScopedMultitableApi` → `records.*`), which is a plugin write,
- * not a person's capability, and is how the plugin keeps the overview current. Automations are refused
- * separately, before any write (`automation-executor.ts`, `STOCK_PREP_OVERVIEW_READ_ONLY`).
+ * WHAT IT DOES NOT DO. It does not hide the sheet and does not narrow who may READ it. Automations are
+ * refused separately, before any write (`automation-executor.ts`, `STOCK_PREP_OVERVIEW_READ_ONLY`).
+ *
+ * THE PLUGIN RECORDS PATH (fix round 2, F3). Plugin writes do not go through a person's capabilities, so the
+ * clamp above never sees them. The GENERIC plugin record writes (`createPluginScopedMultitableApi` →
+ * `records.createRecord` / `patchRecord` / `deleteRecord` and the persist unit of work) therefore REFUSE a
+ * stamped overview for every plugin — that is the surface a pipeline / the multitable target adapter reaches
+ * with a sheet id taken from external-system config. The overview is written only through
+ * `records.stockPreparationOverview`, a port exposed to `plugin-integration-core` alone that takes a PROJECT id,
+ * derives the overview's sheet id itself and re-checks ownership and the stamp before each write
+ * (`StockPreparationOverviewRecordsWriteError`).
  *
  * No heavy imports: this module must be requirable from the scope wrapper, provisioning, the capability
  * resolvers and the automation executor without a load cycle.
@@ -184,6 +191,30 @@ export const STOCK_PREP_OVERVIEW_COMMENT_REFUSAL = Object.freeze({
 /** The automation step error for a record action that would write an overview (automation-executor.ts). */
 export const STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL =
   `${STOCK_PREP_OVERVIEW_READ_ONLY_CODE}: automations cannot write the read-only stock-preparation project overview`
+
+/**
+ * S3 fix round 2 (F3; register R-37): the plugin-scope refusal of a RECORD write that would reach the overview
+ * outside its dedicated port, or of a port write that cannot be proven to land on the overview. Values-free:
+ * only which rule refused.
+ *   - `generic_write`: a generic `createRecord` / `patchRecord` / `deleteRecord` / persist unit of work named a
+ *     sheet the host stamped `stock_prep_overview` — the path a pipeline / adapter with a configured sheet id
+ *     takes. Only the `records.stockPreparationOverview` port writes the overview;
+ *   - `unverifiable`: the host wiring cannot say whether a derived-shape sheet is the overview (a missing hook);
+ *     refused rather than guessed, the S1 G1 port's posture;
+ *   - `not_overview`: the port's derived sheet is not (or not yet) the stamped overview — the port never writes
+ *     an ordinary sheet.
+ */
+export class StockPreparationOverviewRecordsWriteError extends Error {
+  readonly status = 403
+  readonly code = STOCK_PREP_OVERVIEW_READ_ONLY_CODE
+  readonly details: { reason: 'generic_write' | 'unverifiable' | 'not_overview' }
+
+  constructor(reason: 'generic_write' | 'unverifiable' | 'not_overview') {
+    super('Records of the read-only stock-preparation project overview are written only by its own plugin port')
+    this.name = 'StockPreparationOverviewRecordsWriteError'
+    this.details = { reason }
+  }
+}
 
 /**
  * Thrown by provisioning when a caller asks to stamp a sheet that ALREADY exists with a different kind

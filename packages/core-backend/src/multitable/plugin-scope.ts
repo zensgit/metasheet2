@@ -14,7 +14,9 @@ import {
   STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN,
   STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID,
   STOCK_PREPARATION_PROJECT_OVERVIEW_SYSTEM_KIND,
+  StockPreparationOverviewRecordsWriteError,
   StockPreparationOverviewSystemKindError,
+  isStockPreparationOverviewSheetIdCandidate,
 } from './stock-preparation-overview-contract'
 import {
   getMultitableRequestMetadataCache,
@@ -73,6 +75,13 @@ export type MultitableScopeHooks = {
     input: AssertPluginSheetScopeInput,
   ) => Promise<void | AssertPluginSheetScopeOutcome>
   isSheetOwnedByProject?: (input: { sheetId: string; projectId: string }) => Promise<boolean>
+  /**
+   * S3 fix round 2 (F3; register R-37): does the host's `meta_sheets.system_kind` say this sheet is the
+   * read-only stock-preparation project overview? Asked only for ids of the host-derived shape (no other id can
+   * be the overview). Missing → every derived-shape GENERIC record write is refused as `unverifiable`, and the
+   * overview port refuses too: an un-wired host never guesses "not the overview".
+   */
+  isStockPreparationOverviewSheet?: (input: { sheetId: string }) => Promise<boolean>
   runStockPreparationPersistUnitOfWork?: <T>(
     input: StockPreparationPersistUnitOfWorkInput & { pluginName: string },
     operation: (records: MultitableRecordsWriteUnitOfWorkAPI) => Promise<T>,
@@ -367,6 +376,43 @@ export function createPluginScopedMultitableApi(
     // registered, which is what every pre-existing implementation and test means.
     if (outcome && outcome.registered === false) return
     cache.assertedSheetScopes.add(key)
+  }
+
+  /**
+   * S3 fix round 2 (F3; register R-37): the GENERIC record writes below never write the read-only
+   * stock-preparation project overview — for ANY plugin, including the overview's own plugin, whose
+   * pipelines / multitable target adapter take their sheet id from external-system config. Only an id of the
+   * host-derived shape can be the overview (no statement for any other id); for one, the host's stamp decides,
+   * and a host that cannot answer is refused as `unverifiable`. The overview is written only through the
+   * `records.stockPreparationOverview` port (plugin-integration-core only, below).
+   */
+  const refuseGenericOverviewRecordWrite = async (sheetId: unknown): Promise<void> => {
+    if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return
+    if (!hooks.isStockPreparationOverviewSheet) throw new StockPreparationOverviewRecordsWriteError('unverifiable')
+    if ((await hooks.isStockPreparationOverviewSheet({ sheetId })) !== false) {
+      throw new StockPreparationOverviewRecordsWriteError('generic_write')
+    }
+  }
+
+  /**
+   * S3 fix round 2 (F3): the overview port's ONE target. The caller names a PROJECT, never a sheet: the id is
+   * derived here for that (namespace-checked) project, must have the derived shape, must be registered to THIS
+   * plugin (the strict hook, no `observe` tolerance) and must carry the host's overview stamp — every write
+   * re-checks, so a sheet the stamp left (or never had) is never written through the port.
+   */
+  const resolveOverviewRecordsSheet = async (projectId: unknown): Promise<string> => {
+    if (typeof projectId !== 'string') throw new MultitableProjectNamespaceError(pluginName, String(projectId))
+    assertProjectIdAllowedForPlugin(pluginName, projectId)
+    const sheetId = multitable.provisioning.getObjectSheetId(projectId, STOCK_PREPARATION_PROJECT_OVERVIEW_OBJECT_ID)
+    if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) throw new StockPreparationOverviewRecordsWriteError('not_overview')
+    if (!hooks.assertSheetOwnedByPlugin || !hooks.isStockPreparationOverviewSheet) {
+      throw new StockPreparationOverviewRecordsWriteError('unverifiable')
+    }
+    await hooks.assertSheetOwnedByPlugin({ pluginName, sheetId })
+    if ((await hooks.isStockPreparationOverviewSheet({ sheetId })) !== true) {
+      throw new StockPreparationOverviewRecordsWriteError('not_overview')
+    }
+    return sheetId
   }
 
   return {
@@ -792,22 +838,66 @@ export function createPluginScopedMultitableApi(
         await assertSheetScopeOnce(input.sheetId)
         return multitable.records.queryRecords(input)
       },
+      // S3 fix round 2 (F3): the three generic WRITES read `sheetId` ONCE, assert scope on it, refuse the
+      // stock-preparation overview on it, and forward exactly that value (a getter cannot show the checks one
+      // sheet and the host another).
       createRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.createRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.createRecord({ ...input, sheetId })
       },
       getRecord: async (input) => {
         await assertSheetScopeOnce(input.sheetId)
         return multitable.records.getRecord(input)
       },
       patchRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.patchRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.patchRecord({ ...input, sheetId })
       },
       deleteRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.deleteRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        await refuseGenericOverviewRecordWrite(sheetId)
+        return multitable.records.deleteRecord({ ...input, sheetId })
       },
+      // S3 fix round 2 (F3): read-only — would a generic write to this (own) sheet be refused as a read-only
+      // system sheet? Same scope assertion as a read; a non-string id is simply not one.
+      isReadOnlySystemSheet: async (input) => {
+        const sheetId = input?.sheetId
+        if (typeof sheetId !== 'string') return false
+        await assertSheetScopeOnce(sheetId)
+        if (!isStockPreparationOverviewSheetIdCandidate(sheetId)) return false
+        if (!hooks.isStockPreparationOverviewSheet) return true
+        return (await hooks.isStockPreparationOverviewSheet({ sheetId })) !== false
+      },
+      // S3 fix round 2 (F3): THE overview write port — plugin-integration-core only. Takes a PROJECT id; the
+      // sheet is derived and re-checked (ownership + stamp) on every write by `resolveOverviewRecordsSheet`.
+      ...(pluginName === STOCK_PREPARATION_OVERVIEW_PORT_PLUGIN
+        ? {
+            stockPreparationOverview: {
+              createRecord: async (input: { projectId: string; data: Record<string, unknown> }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.createRecord({ sheetId, data: input.data })
+              },
+              patchRecord: async (input: { projectId: string; recordId: string; changes: Record<string, unknown>; expectedVersion?: number }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.patchRecord({
+                  sheetId,
+                  recordId: input.recordId,
+                  changes: input.changes,
+                  ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+                })
+              },
+              deleteRecord: async (input: { projectId: string; recordId: string }) => {
+                const sheetId = await resolveOverviewRecordsSheet(input?.projectId)
+                return multitable.records.deleteRecord({ sheetId, recordId: input.recordId })
+              },
+            },
+          }
+        : {}),
       runStockPreparationPersistUnitOfWork: async (input, operation) => {
         if (!hooks.runStockPreparationPersistUnitOfWork) {
           throw new MultitableUnitOfWorkUnavailableError()
@@ -822,6 +912,9 @@ export function createPluginScopedMultitableApi(
         // callback allowlist from raw input.sheetIds would permit a whitespace variant the host
         // never locked (and would refuse the trimmed id the host did lock).
         const normalized = validateStockPreparationPersistUnitOfWorkInput(input)
+        // S3 fix round 2 (F3): the unit of work's create / patch are generic record writes too — no declared
+        // sheet may be the stock-preparation overview (refused before the host opens the transaction).
+        for (const sheetId of normalized.sheetIds) await refuseGenericOverviewRecordWrite(sheetId)
         const allowedSheetIds = new Set(normalized.sheetIds)
         return hooks.runStockPreparationPersistUnitOfWork(
           { ...normalized, pluginName },

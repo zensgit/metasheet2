@@ -156,27 +156,82 @@ function mount(options = {}) {
     const limit = Number(input.limit || hit.length)
     return projectSheet.clone(hit.slice(offset, offset + limit))
   }
+  // Fix round 2 (F3): the HOST refuses a generic record write to the stamped overview for every caller (this
+  // fake mirrors plugin-scope.ts); the overview's own writes go through `records.stockPreparationOverview`,
+  // which names a PROJECT and lets the host derive the sheet. `raw` is what both reach once admitted, so a
+  // suite that injects a failure or a yield into the OVERVIEW writes overrides `h.overviewPort.*`.
+  const isStampedOverview = (sheetId) => [...h.provisioning.objects.entries()].some(([key, object]) => {
+    const slash = key.lastIndexOf('/')
+    return object.systemKind === KIND && h.provisioning.sheetIdOf(key.slice(0, slash), key.slice(slash + 1)) === sheetId
+  })
+  const refuseOverview = (sheetId) => {
+    if (isStampedOverview(sheetId)) {
+      throw Object.assign(new Error('generic write to the overview'), { status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'generic_write' } })
+    }
+  }
+  const raw = {
+    createRecord(input = {}) {
+      seq += 1
+      const created = { id: `rec_${seq}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
+      rows.push(created)
+      return projectSheet.clone(created)
+    },
+    patchRecord(input = {}) {
+      const row = rows.find((candidate) => candidate.id === input.recordId && candidate.sheetId === input.sheetId)
+      assert.ok(row, 'patchRecord addresses a row the fake holds')
+      Object.assign(row.data, input.changes || {})
+      row.version += 1
+      return projectSheet.clone(row)
+    },
+    deleteRecord(input = {}) {
+      const index = rows.findIndex((candidate) => candidate.id === input.recordId && candidate.sheetId === input.sheetId)
+      assert.ok(index >= 0, 'deleteRecord addresses a row the fake holds')
+      rows.splice(index, 1)
+      return { id: input.recordId, sheetId: input.sheetId, version: 1 }
+    },
+  }
   h.records.createRecord = async (input = {}) => {
     h.records.calls.push(['createRecord', input.sheetId])
-    seq += 1
-    const created = { id: `rec_${seq}`, sheetId: input.sheetId, version: 1, data: { ...(input.data || {}) } }
-    rows.push(created)
-    return projectSheet.clone(created)
+    refuseOverview(input.sheetId)
+    return raw.createRecord(input)
   }
   h.records.patchRecord = async (input = {}) => {
     h.records.calls.push(['patchRecord', input.sheetId])
-    const row = rows.find((candidate) => candidate.id === input.recordId && candidate.sheetId === input.sheetId)
-    assert.ok(row, 'patchRecord addresses a row the fake holds')
-    Object.assign(row.data, input.changes || {})
-    row.version += 1
-    return projectSheet.clone(row)
+    refuseOverview(input.sheetId)
+    return raw.patchRecord(input)
   }
   h.records.deleteRecord = async (input = {}) => {
     h.records.calls.push(['deleteRecord', input.sheetId])
-    const index = rows.findIndex((candidate) => candidate.id === input.recordId && candidate.sheetId === input.sheetId)
-    assert.ok(index >= 0, 'deleteRecord addresses a row the fake holds')
-    rows.splice(index, 1)
-    return { id: input.recordId, sheetId: input.sheetId, version: 1 }
+    refuseOverview(input.sheetId)
+    return raw.deleteRecord(input)
+  }
+  const portSheet = (projectId) => {
+    const sheetId = h.provisioning.sheetIdOf(projectId, OVERVIEW_OBJECT)
+    if (!isStampedOverview(sheetId)) throw Object.assign(new Error('not the overview'), { status: 403, code: 'STOCK_PREP_OVERVIEW_READ_ONLY', details: { reason: 'not_overview' } })
+    return sheetId
+  }
+  h.overviewPort = {
+    async createRecord({ projectId, data } = {}) {
+      const sheetId = portSheet(projectId)
+      h.records.calls.push(['overview.createRecord', sheetId])
+      return raw.createRecord({ sheetId, data })
+    },
+    async patchRecord({ projectId, recordId, changes } = {}) {
+      const sheetId = portSheet(projectId)
+      h.records.calls.push(['overview.patchRecord', sheetId])
+      return raw.patchRecord({ sheetId, recordId, changes })
+    },
+    async deleteRecord({ projectId, recordId } = {}) {
+      const sheetId = portSheet(projectId)
+      h.records.calls.push(['overview.deleteRecord', sheetId])
+      return raw.deleteRecord({ sheetId, recordId })
+    },
+  }
+  // The port object the routes see delegates to `h.overviewPort` at call time (so a suite can swap a method).
+  h.records.stockPreparationOverview = {
+    createRecord: (input) => h.overviewPort.createRecord(input),
+    patchRecord: (input) => h.overviewPort.patchRecord(input),
+    deleteRecord: (input) => h.overviewPort.deleteRecord(input),
   }
   h.rows = rows
   return h
@@ -278,6 +333,9 @@ test('O-04 switch OFF: the four routes are 404 DISABLED with zero IO; the gate r
       const res = await run()
       assert.equal(res.statusCode, 404, `${label}: ${JSON.stringify(res.body)}`)
       assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')
+      // Fix round 2 (F6): LITERALLY zero IO — not even the operator scope's tenant-membership lookup, so a
+      // switch check moved below the scope resolution goes red here, route by route.
+      assert.deepEqual(h.tenantDirectoryCalls, [], `${label}: no operator-scope / tenant-membership lookup`)
     }
     assert.deepEqual(h.db.calls, [], 'no registry statement')
     assert.deepEqual(h.provisioning.calls, [], 'no host call')
@@ -288,6 +346,13 @@ test('O-04 switch OFF: the four routes are 404 DISABLED with zero IO; the gate r
       assert.equal(res.statusCode, 403, JSON.stringify(res.body))
     }
     assert.deepEqual(h.db.calls, [])
+    assert.deepEqual(h.tenantDirectoryCalls, [])
+    // Control (the harness CAN see the lookup): with the switch ON the same refresh resolves the operator scope.
+    const on = mount()
+    try {
+      await refresh(on, FLOOR)
+      assert.ok(on.tenantDirectoryCalls.length >= 1, 'switch on: the scope lookup is observable')
+    } finally { on.restore() }
     // Fix round 1 (R9): the update verb is PATCH; there is no PUT route any more.
     assert.equal(h.routes.has(`PUT ${FIELDS_PATH}`), false)
     assert.equal(h.routes.has(`PATCH ${FIELDS_PATH}`), true)
@@ -831,9 +896,9 @@ test('O-14 (R3) one row per project, always: concurrent refreshes under the over
     h.seedRegistryRow(PROJECT)
     h.seedRegistryRow(PROJECT_B)
     assert.equal((await ensure(h, PULLER)).statusCode, 200)
-    // A records API whose createRecord YIELDS before it lands — the window a read-then-create race needs.
-    const realCreate = h.records.createRecord
-    h.records.createRecord = async (input) => {
+    // An overview port whose createRecord YIELDS before it lands — the window a read-then-create race needs.
+    const realCreate = h.overviewPort.createRecord
+    h.overviewPort.createRecord = async (input) => {
       await new Promise((resolve) => setImmediate(resolve))
       await new Promise((resolve) => setImmediate(resolve))
       return realCreate(input)
@@ -845,11 +910,20 @@ test('O-14 (R3) one row per project, always: concurrent refreshes under the over
       tenantId: TENANT,
       projectId: STAGING,
     })
-    const [one, two] = await Promise.all([run(), run()])
+    // Fix round 2 (F4): the second concurrent refresh does not WAIT for the lock — it answers 409 BUSY at
+    // once, having done nothing; the first one writes exactly one row per project.
+    const settled = await Promise.allSettled([run(), run()])
+    const done = settled.filter((r) => r.status === 'fulfilled')
+    const busy = settled.filter((r) => r.status === 'rejected')
+    assert.equal(done.length, 1, JSON.stringify(settled.map((r) => r.status)))
+    assert.equal(busy.length, 1)
+    assert.equal(busy[0].reason.status, 409)
+    assert.equal(busy[0].reason.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
     assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B], 'exactly one row per project')
-    assert.equal(one.rowsCreated + two.rowsCreated, 2)
-    assert.ok(h.db.calls.filter((c) => c === `advisoryXactLock:stock-prep-project-overview:${TENANT}`).length >= 2, 'both runs took the tenant\'s overview lock')
-    h.records.createRecord = realCreate
+    assert.equal(done[0].value.rowsCreated, 2)
+    assert.equal(h.db.calls.filter((c) => c === `tryAdvisoryXactLock:stock-prep-project-overview:${TENANT}`).length, 1, 'only the running refresh asked the database for the lock')
+    assert.equal(h.db.calls.filter((c) => c === `advisoryXactLock:stock-prep-project-overview:${TENANT}`).length, 0, 'nobody BLOCKS on the overview lock')
+    h.overviewPort.createRecord = realCreate
 
     // Pre-existing residue: a duplicate row for one project and a row for a project nobody registered
     // (and one with no project number at all) — the refresh deletes them through the plugin write port.
@@ -863,7 +937,8 @@ test('O-14 (R3) one row per project, always: concurrent refreshes under the over
     assert.equal(cleaned.body.data.rowsRemovedDuplicate, 1)
     assert.equal(cleaned.body.data.rowsRemovedOrphan, 2)
     assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
-    assert.ok(h.records.calls.filter((c) => c[0] === 'deleteRecord').every((c) => c[1] === overviewSheetId(h)), 'deletes touch the overview sheet only')
+    assert.ok(h.records.calls.filter((c) => c[0] === 'overview.deleteRecord').every((c) => c[1] === overviewSheetId(h)), 'deletes touch the overview sheet only')
+    assert.ok(h.records.calls.filter((c) => c[0] === 'overview.deleteRecord').length >= 3, 'the duplicate and orphan deletes went through the overview port')
 
     // A project that LEAVES the registry has its row removed by the next refresh.
     const rows = h.registryRows()
@@ -911,8 +986,8 @@ test('O-15b (R5) the event still answers as before when the overview update thro
     assert.equal((await createTarget(h, PULLER)).statusCode, 201)
     // Every overview write now fails.
     const failing = async () => { throw Object.assign(new Error('overview write failed for PRJ-S3-O1 with a value'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
-    h.records.patchRecord = failing
-    h.records.createRecord = failing
+    h.overviewPort.patchRecord = failing
+    h.overviewPort.createRecord = failing
     const warnsBefore = logger.warnings.length
     const archived = await archive(h)
     assert.equal(archived.statusCode, 200, JSON.stringify(archived.body))
@@ -930,7 +1005,7 @@ test('O-15b (R5) the event still answers as before when the overview update thro
       assert.ok(!JSON.stringify(w).includes(PROJECT) && !JSON.stringify(w).includes('with a value'), 'values-free')
     }
     // A thrown error WITHOUT code shape is logged as UNKNOWN.
-    h.records.patchRecord = async () => { throw new Error('no code here') }
+    h.overviewPort.patchRecord = async () => { throw new Error('no code here') }
     assert.equal((await archive(h)).statusCode, 200)
     assert.deepEqual(logger.warnings.at(-1).meta, { code: 'UNKNOWN' })
   } finally { h.restore() }
@@ -963,6 +1038,12 @@ test('O-15c (R5) the confirmation confirm updates its project\'s row (pending co
   }
   const records = fakes.makeStrictRecordsApi({ stagingProjectId: STAGING, objectIdBySheetId: { [LEDGER_SHEET]: LEDGER_OBJECT, [OVERVIEW_SHEET]: OVERVIEW_OBJECT }, rowsBySheet: { [LEDGER_SHEET]: [ledgerRow], [OVERVIEW_SHEET]: [] } })
   records.deleteRecord = async () => { throw new Error('unexpected delete') }
+  // Fix round 2 (F3): the overview is written only through the host's overview port (project → derived sheet).
+  records.stockPreparationOverview = {
+    async createRecord({ projectId, data }) { assert.equal(projectId, STAGING); return records.createRecord({ sheetId: OVERVIEW_SHEET, data }) },
+    async patchRecord({ projectId, recordId, changes }) { assert.equal(projectId, STAGING); return records.patchRecord({ sheetId: OVERVIEW_SHEET, recordId, changes }) },
+    async deleteRecord() { throw new Error('unexpected delete') },
+  }
   const db = projectSheet.makeMemoryDb()
   const store = createStockPreparationProjectTargetStore({ db, idGenerator: () => 'pt-1' })
   db.rowsOf('integration_stock_prep_project_target').push({
@@ -1114,6 +1195,235 @@ test('O-19 (R10) the store never throws over a pull code\'s shape: UNKNOWN for a
   assert.deepEqual(normalizeProjectPullCode(undefined), { code: null, mapped: false })
   assert.deepEqual(normalizeProjectPullCode('  '), { code: null, mapped: false })
   assert.deepEqual(normalizeProjectPullCode('weird code'), { code: 'UNKNOWN', mapped: true })
+})
+
+// ── O-20 ───────────────────────────────────────────────────────────────────────────────────────────
+// Fix round 2 (F4): nobody waits for the overview lock while holding a pooled connection.
+test('O-20 (F4) a refresh in flight + events: in-process events take NO connection and are re-projected before the lock is released; another process\'s events are busy at once, never waiting', async () => {
+  const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // THE POOL: every transaction that takes (or tries) the tenant's overview lock holds one pooled connection.
+    // Count how many are open at once, and how many ever BLOCK waiting for the lock.
+    const OVERVIEW_KEY = `stock-prep-project-overview:${TENANT}`
+    const pool = { open: 0, maxOpen: 0, waiting: 0, maxWaiting: 0, opened: 0 }
+    const realTransaction = h.db.transaction
+    h.db.transaction = (fn) => realTransaction.call(h.db, async (trx) => {
+      let counted = false
+      const enter = () => {
+        if (counted) return
+        counted = true
+        pool.opened += 1
+        pool.open += 1
+        pool.maxOpen = Math.max(pool.maxOpen, pool.open)
+      }
+      const wrapped = {
+        ...trx,
+        async advisoryXactLock(key) {
+          if (key !== OVERVIEW_KEY) return trx.advisoryXactLock(key)
+          enter()
+          pool.waiting += 1
+          pool.maxWaiting = Math.max(pool.maxWaiting, pool.waiting)
+          try { return await trx.advisoryXactLock(key) } finally { pool.waiting -= 1 }
+        },
+        async tryAdvisoryXactLock(key) {
+          if (key === OVERVIEW_KEY) enter()
+          return trx.tryAdvisoryXactLock(key)
+        },
+      }
+      try { return await fn(wrapped) } finally { if (counted) pool.open -= 1 }
+    })
+    // Hold the refresh INSIDE its lock, mid-pass (it has read the registry and is writing its first row).
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let gated = false
+    h.overviewPort.createRecord = async (input) => {
+      if (!gated) { gated = true; signalEntered(); await gate }
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal(pool.open, 1, 'the refresh holds one connection for the overview lock')
+
+    // IN-PROCESS: an archive while the refresh runs. Its registry change commits; its overview update is DEFERRED
+    // to the running writer — no connection, not even a busy try.
+    const archived = await archive(h, PULLER, PROJECT)
+    assert.equal(archived.statusCode, 200, JSON.stringify(archived.body))
+    assert.equal(pool.opened, 1, 'the in-process event opened no overview-lock transaction')
+
+    // ANOTHER PROCESS: a second registry store over the same database (its own in-process state), five events.
+    // Each answers WITHOUT waiting for the refresh — if any blocked on the lock this would time out.
+    const otherProcess = createStockPreparationProjectTargetStore({ db: h.db })
+    const otherEvent = (projectNo) => overview.updateProjectOverviewRow({ provisioning: h.provisioning, recordsApi: h.records, store: otherProcess, tenantId: TENANT, projectId: STAGING, projectNo })
+    const timeout = new Promise((resolve) => setTimeout(() => resolve('TIMEOUT'), 2000))
+    const outcomes = await Promise.race([Promise.all([1, 2, 3, 4, 5].map(() => otherEvent(PROJECT_B))), timeout])
+    assert.notEqual(outcomes, 'TIMEOUT', 'another process\'s events must not wait for the lock')
+    assert.deepEqual(outcomes.map((o) => o.outcome).sort(), ['busy', 'deferred', 'deferred', 'deferred', 'deferred'])
+    assert.equal(pool.maxWaiting, 0, 'no connection ever BLOCKED on the overview lock')
+    assert.ok(pool.maxOpen <= 2, `at most the holder + one non-blocking try at a time (saw ${pool.maxOpen})`)
+
+    // Let the refresh finish: it re-projects the project the in-process event touched, from the registry as it
+    // stands NOW — its row says 已归档 although the full pass read the registry before the archive.
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    const rowOf = (no) => overviewRows(h).filter((row) => logical(row, 'projectNo') === no)
+    assert.equal(rowOf(PROJECT).length, 1)
+    assert.equal(logical(rowOf(PROJECT)[0], 'status'), 'archived', 'the in-flight refresh did not miss the archive')
+    assert.equal(logical(rowOf(PROJECT)[0], 'postureKey'), 'archived')
+    assert.equal(pool.open, 0, 'every overview-lock connection was released')
+
+    // The other process's BUSY event stays dirty there and is reconciled by its next writer (one call drains it).
+    const later = await otherEvent(PROJECT)
+    assert.equal(later.outcome, 'updated')
+    assert.equal(later.projectCount, 2, 'the earlier busy project was drained together with this one')
+    assert.equal(pool.maxWaiting, 0)
+    h.overviewPort.createRecord = realCreate
+    h.db.transaction = realTransaction
+  } finally { h.restore() }
+})
+
+// ── O-21 ───────────────────────────────────────────────────────────────────────────────────────────
+// Fix round 2 (F5): switch OFF, a per-event caller that REACHES the helper (the confirm: its project number
+// comes from the ledger, whatever the switch) does zero overview IO — the helper's own switch check is the gate.
+test('O-21 (F5) switch OFF (unset or not exactly "true"): the confirm and every other per-event caller do ZERO overview lookups or writes', async () => {
+  const fakes = require(path.join(__dirname, 'fixtures', 'stock-preparation-multitable-fakes.cjs'))
+  const { OBJECT_ID: LEDGER_OBJECT, FIRST_CUT_CONFLICT_TYPE, STATUSES, RESOLUTION_ACTIONS } = require(path.join(LIB, 'stock-preparation-confirmation-decisions.cjs'))
+  const httpRoutes = require(path.join(LIB, 'http-routes.cjs'))
+  const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
+  const LEDGER_SHEET = fakes.derivedSheetId ? fakes.derivedSheetId(STAGING, LEDGER_OBJECT) : 'sheet_ledger_s3'
+  const OVERVIEW_SHEET = 'sheet_overview_s3'
+  const ENV = 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED'
+  const runConfirm = async (envValue) => {
+    const ledgerRow = fakes.physicalRow(STAGING, LEDGER_OBJECT, {
+      decisionId: 'decision_s3_f5', projectNo: PROJECT, conflictType: FIRST_CUT_CONFLICT_TYPE, status: STATUSES.PENDING,
+      inputFingerprint: 'sha16:0123456789abcdef', sourceRevision: 'rev-1',
+    }, 'rec_ledger_f5')
+    ledgerRow.sheetId = LEDGER_SHEET
+    const base = fakes.makeFakeProvisioning({ stagingProjectId: STAGING, sheetIdByObjectId: { [LEDGER_OBJECT]: LEDGER_SHEET, [OVERVIEW_OBJECT]: OVERVIEW_SHEET } })
+    const overviewLookups = []
+    const provisioning = {
+      ...base,
+      supportsSystemKindStamp: true,
+      async findObjectSheet(input) {
+        if (input.objectId === OVERVIEW_OBJECT) overviewLookups.push(input.objectId)
+        const found = await base.findObjectSheet(input)
+        if (!found) return found
+        return { ...found, systemKind: input.objectId === OVERVIEW_OBJECT ? KIND : null }
+      },
+      async ensureObject() { throw new Error('unexpected provisioning write') },
+      getFieldId: (projectId, objectId, fieldId) => fakes.physicalFieldId(projectId, objectId, fieldId),
+      getObjectViewId: (projectId, objectId, viewId) => `view_${objectId.slice(-6)}_${viewId}`,
+    }
+    const records = fakes.makeStrictRecordsApi({ stagingProjectId: STAGING, objectIdBySheetId: { [LEDGER_SHEET]: LEDGER_OBJECT, [OVERVIEW_SHEET]: OVERVIEW_OBJECT }, rowsBySheet: { [LEDGER_SHEET]: [ledgerRow], [OVERVIEW_SHEET]: [] } })
+    const portCalls = []
+    records.stockPreparationOverview = {
+      async createRecord({ data }) { portCalls.push('create'); return records.createRecord({ sheetId: OVERVIEW_SHEET, data }) },
+      async patchRecord({ recordId, changes }) { portCalls.push('patch'); return records.patchRecord({ sheetId: OVERVIEW_SHEET, recordId, changes }) },
+      async deleteRecord() { portCalls.push('delete'); throw new Error('unexpected delete') },
+    }
+    const db = projectSheet.makeMemoryDb()
+    const store = createStockPreparationProjectTargetStore({ db, idGenerator: () => 'pt-f5' })
+    db.rowsOf('integration_stock_prep_project_target').push({
+      id: 'seed', tenant_id: TENANT, project_no: PROJECT, sheet_id: 'sheet_project_s3', object_id: 'plm_stock_preparation_sandbox_p_0123456789abcdef01234567',
+      status: 'active', created_by: 'seed', created_at: new Date('2026-10-08T00:00:00Z'), archived_at: null, updated_at: new Date('2026-10-08T00:00:00Z'),
+    })
+    const lockCalls = []
+    const realTry = store.tryWithOverviewLock
+    store.tryWithOverviewLock = (input, fn) => { lockCalls.push(input.tenantId); return realTry(input, fn) }
+    const routes = new Map()
+    const previous = process.env[ENV]
+    if (envValue === undefined) delete process.env[ENV]
+    else process.env[ENV] = envValue
+    try {
+      httpRoutes.registerIntegrationRoutes({
+        context: { api: { http: { addRoute(method, routePath, handler) { routes.set(`${method.toUpperCase()} ${routePath}`, handler) } }, multitable: { provisioning, records } }, storage: new Map(), config: {} },
+        services: {
+          ...Object.fromEntries(['externalSystemRegistry', 'adapterRegistry', 'pipelineRegistry', 'pipelineRunner', 'deadLetterStore', 'stagingInstaller', 'templateRegistry', 'readSourceConfigStore', 'readSourceCompositionConfigStore', 'bridgeAgentChecklistStore']
+            .map((name) => [name, new Proxy({}, { get: (_target, method) => async () => { throw new Error(`unexpected ${name}.${String(method)}`) } })])),
+          stockPreparationAuditStore: { async append() { return { ok: true } } },
+          stockPreparationProjectTargetStore: store,
+          tenantPrincipalDirectory: { async verifyTenantMembership() { return { member: true } } },
+        },
+        logger: { info() {}, warn() {}, error() {} },
+      })
+      const res = await projectSheet.call(routes, 'POST', '/api/integration/stock-preparation/confirmation-decisions/confirm', {
+        user: FLOOR,
+        body: { decisionId: 'decision_s3_f5', inputFingerprint: 'sha16:0123456789abcdef', resolutionAction: RESOLUTION_ACTIONS.KEEP_MULTIPLE_ROWS },
+      })
+      return { res, overviewLookups, portCalls, lockCalls, overviewRows: records.rows(OVERVIEW_SHEET) }
+    } finally {
+      if (previous === undefined) delete process.env[ENV]
+      else process.env[ENV] = previous
+    }
+  }
+  for (const envValue of [undefined, 'TRUE', 'True', 'true ', '1', '']) {
+    const run = await runConfirm(envValue)
+    assert.equal(run.res.statusCode, 200, `${JSON.stringify(envValue)}: ${JSON.stringify(run.res.body)}`)
+    assert.deepEqual(run.overviewLookups, [], `${JSON.stringify(envValue)}: no overview lookup`)
+    assert.deepEqual(run.lockCalls, [], `${JSON.stringify(envValue)}: no overview lock`)
+    assert.deepEqual(run.portCalls, [], `${JSON.stringify(envValue)}: no overview write`)
+    assert.equal(run.overviewRows.length, 0)
+  }
+  // Control (the fixture CAN see it): exactly 'true' → the confirm looks the overview up and writes its row.
+  const on = await runConfirm('true')
+  assert.equal(on.res.statusCode, 200, JSON.stringify(on.res.body))
+  assert.deepEqual(on.overviewLookups, [OVERVIEW_OBJECT])
+  assert.equal(on.lockCalls.length, 1)
+  assert.deepEqual(on.portCalls, ['create'])
+
+  // The other per-event callers with the switch off: create / archive / restore / project fields are 404 before
+  // anything (O-04), and a dry-run has no project target to update — none of them touches the overview.
+  const off = mount({ switchOn: false })
+  try {
+    off.seedRegistryRow(PROJECT)
+    for (const run of [() => createTarget(off, PULLER), () => archive(off), () => restore(off), () => patchFields(off, FLOOR, { note: NOTE }), () => dryRun(off)]) {
+      await run()
+    }
+    assert.ok(!off.provisioning.calls.some((c) => c[0] === 'findObjectSheet' && c[1] === OVERVIEW_OBJECT), 'no overview lookup')
+    assert.ok(!off.records.calls.some((c) => String(c[0]).startsWith('overview.')), 'no overview write')
+    assert.ok(!off.db.calls.some((c) => String(c).includes('stock-prep-project-overview')), 'no overview lock')
+  } finally { off.restore() }
+})
+
+// ── O-22 ───────────────────────────────────────────────────────────────────────────────────────────
+// Fix round 2 (F3): the overview's rows are written ONLY through the host's overview port.
+test('O-22 (F3) the overview is written only through the host overview port; the generic writes refuse it; a host without the port is 503 before any IO', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.equal(overviewRows(h).length, 1)
+    const generic = h.records.calls.filter((c) => ['createRecord', 'patchRecord', 'deleteRecord'].includes(c[0]) && c[1] === overviewSheetId(h))
+    assert.deepEqual(generic, [], 'no generic record write ever addressed the overview')
+    assert.ok(h.records.calls.some((c) => c[0] === 'overview.createRecord' && c[1] === overviewSheetId(h)), 'the row was created through the port')
+    // The (fake) host refuses a generic write to the stamped overview — what a pipeline / adapter would hit.
+    await assert.rejects(h.records.createRecord({ sheetId: overviewSheetId(h), data: {} }), (error) => error.code === 'STOCK_PREP_OVERVIEW_READ_ONLY')
+    // A per-event update writes through the port too.
+    assert.equal((await archive(h)).statusCode, 200)
+    assert.equal(logical(overviewRows(h)[0], 'status'), 'archived')
+    assert.ok(h.records.calls.some((c) => c[0] === 'overview.patchRecord'), 'the per-event patch went through the port')
+
+    // A host WITHOUT the port: the refresh is a typed 503 before any IO (no lookup, no lock).
+    delete h.records.stockPreparationOverview
+    passCooldown()
+    const callsBefore = h.provisioning.calls.length
+    const dbBefore = h.db.calls.length
+    const refused = await refresh(h, FLOOR)
+    assert.equal(refused.statusCode, 503, JSON.stringify(refused.body))
+    assert.equal(refused.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_HOST_UNSUPPORTED')
+    assert.equal(refused.body.error.details.reason, 'records_port_missing')
+    assert.equal(h.provisioning.calls.length, callsBefore, 'no host lookup')
+    assert.ok(!h.db.calls.slice(dbBefore).some((c) => String(c).includes('stock-prep-project-overview')), 'no overview lock')
+  } finally { h.restore() }
 })
 
 async function main() {
