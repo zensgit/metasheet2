@@ -39,7 +39,11 @@ import { ensureApprovalSchemaReady, grantApprovalWriteForIntegrationActor } from
  *           group fails publish through the SAME gate (400, values-free, `targetIndex` not
  *           `sourceIndex`); a bound group creates and lands ONE `targetType:'user'` cc record PER
  *           frozen member carrying `groupId`; an empty bound group creates with ZERO cc rows
- *           (cc is informational — never a create failure).
+ *           (cc is informational — never a create failure);
+ *  G-4 (ii) the dispatch-side walk: a group cc node AFTER the approval node (the common template
+ *           shape) expands on the `dispatchAction` executor — whose `groupMemberIds` wiring the
+ *           create-site case above never reaches — and the stored graph DTO (`GET
+ *           /api/approval-templates/:id`) returns the GROUP reference, never an expansion.
  */
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
 const TS = Date.now()
@@ -121,6 +125,25 @@ function ccGroupGraph(groupIds: string[]) {
       { key: 's2cc', source: 'start', target: 'cc_group' },
       { key: 'cc2a1', source: 'cc_group', target: 'approval_1' },
       { key: 'a12e', source: 'approval_1', target: 'end' },
+    ],
+  }
+}
+
+// Lock-1 OD-L1-7(a), dispatch side: the SAME cc group node placed AFTER the static gate — the
+// common template shape. It is reached only when the approval walk advances (`dispatchAction`'s
+// executor), never at create, so it exercises the dispatch-side `groupMemberIds` re-threading.
+function ccAfterApprovalGraph(groupIds: string[]) {
+  return {
+    nodes: [
+      { key: 'start', type: 'start', name: 's', config: {} },
+      { key: 'approval_1', type: 'approval', name: 'gate', config: { assigneeSources: [{ kind: 'static_user', userIds: [APPROVER] }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+      { key: 'cc_group', type: 'cc', name: 'cc', config: { targetType: 'group', targetIds: groupIds } },
+      { key: 'end', type: 'end', name: 'e', config: {} },
+    ],
+    edges: [
+      { key: 's2a1', source: 'start', target: 'approval_1' },
+      { key: 'a12cc', source: 'approval_1', target: 'cc_group' },
+      { key: 'cc2e', source: 'cc_group', target: 'end' },
     ],
   }
 }
@@ -628,6 +651,45 @@ describeIfDatabase('Lock-1 §K1 user_group — real-DB create/freeze/dispatch/pu
     const emptyInst = await pool.query<{ status: string; current_node_key: string }>(`SELECT status, current_node_key FROM approval_instances WHERE id = $1`, [emptyIid])
     expect(emptyInst.rows[0]).toMatchObject({ status: 'pending', current_node_key: 'approval_1' })
     await req(base, `/api/approvals/${emptyIid}/actions`, apprTok, { method: 'POST', body: { action: 'approve' } })
+  })
+
+  // ── OD-L1-7(a), dispatch-side walk (gate r1 P2-1 / P3-2) ───────────────────────────────────
+  // The COMMON template shape — cc AFTER the approval node — is reached only through the
+  // dispatch-side executor constructions (`dispatchAction` here; `adminJump` / the timeout effect
+  // share the same wiring, pinned statically in approval-cc-group-target-executor-sites.test.ts),
+  // never through the create site the case above exercises. Without `groupMemberIds` re-threaded
+  // at the dispatch site the executor's wiring guard throws and the approve 500s.
+  it('OD-L1-7(a) dispatch side: a group cc node AFTER the approval node expands on the dispatchAction walk — the stored graph DTO keeps the group reference, approve succeeds and lands one user cc row per frozen member with groupId', async () => {
+    const tid = await createPublished(`ug-${TS}-cc-after`, ccAfterApprovalGraph([groupIdMain]))
+
+    // API DTO leg of the round-trip: the stored graph returns the GROUP reference (type + ids) —
+    // not an expansion, not a re-typed 'user' target.
+    const detail = await req(base, `/api/approval-templates/${tid}`, reqTok)
+    expect(detail.status, await detail.clone().text()).toBe(200)
+    const detailBody = (await detail.json()) as { approvalGraph?: { nodes: Array<{ key: string; type: string; config: Record<string, unknown> }> } }
+    const ccNode = detailBody.approvalGraph?.nodes.find((node) => node.key === 'cc_group')
+    expect(ccNode?.type).toBe('cc')
+    expect(ccNode?.config).toEqual({ targetType: 'group', targetIds: [groupIdMain] })
+
+    const started = await req(base, '/api/approvals', reqTok, { method: 'POST', body: { templateId: tid, formData: { reason: 'r' } } })
+    expect(started.status, await started.clone().text()).toBe(201)
+    const iid = ((await started.json()) as { id: string }).id
+    const pool = poolManager.get()
+    // Nothing fires at create: the cc node sits BEHIND the gate.
+    expect((await pool.query(`SELECT 1 FROM approval_records WHERE instance_id = $1 AND action = 'cc'`, [iid])).rows.length).toBe(0)
+
+    const approved = await req(base, `/api/approvals/${iid}/actions`, apprTok, { method: 'POST', body: { action: 'approve' } })
+    expect(approved.status, await approved.clone().text()).toBeLessThan(300)
+    const ccRows = await pool.query<{ metadata: Record<string, unknown> }>(
+      `SELECT metadata FROM approval_records WHERE instance_id = $1 AND action = 'cc'`,
+      [iid],
+    )
+    expect(ccRows.rows.map((row) => row.metadata.targetId).sort()).toEqual([M1, M2].sort())
+    for (const row of ccRows.rows) {
+      expect(row.metadata).toMatchObject({ nodeKey: 'cc_group', targetType: 'user', groupId: groupIdMain })
+    }
+    const finalInst = await pool.query<{ status: string }>(`SELECT status FROM approval_instances WHERE id = $1`, [iid])
+    expect(finalInst.rows[0].status).toBe('approved')
   })
 
   // ── G-17 — fingerprint lockstep: sorted-order collision, kind-selected ──────────────────────
