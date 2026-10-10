@@ -1,18 +1,20 @@
 <!doctype html>
-<html>
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Attendance employee overview below-fold — browser verification</title>
+    <title>Attendance admin calendar policy move — browser verification</title>
+    <script>
+      localStorage.setItem('metasheet_locale', 'zh-CN')
+    </script>
     <style>
       html, body {
         margin: 0;
         padding: 0;
-        height: 100%;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
         font-size: 14px;
         line-height: 1.5;
-        color: #333;
+        color: var(--ms-text-1, #111827);
         background: var(--ms-bg-page, #f5f6f8);
       }
       #app { min-height: 100%; }
@@ -20,6 +22,6 @@
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="./attendance-employee-overview-below-fold-harness.ts"></script>
+    <script type="module" src="./attendance-admin-calendar-policy-move-harness.ts"></script>
   </body>
 </html>
