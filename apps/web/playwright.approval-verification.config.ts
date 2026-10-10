@@ -24,9 +24,9 @@ import { defineConfig, devices } from '@playwright/test'
 //
 // 退回 candidates add a real ApprovalDetailView harness (approval-return-candidates-harness.html/.ts)
 // on an identity-consistent cc / handler / parallel graph. At 1440 the real Element Plus dropdown
-// offers the server's `returnableNodeKeys` verbatim (`[]` hides 退回), else the client mirror's
-// candidates; a handler cursor or a parallel frontier hides 退回; the confirm records a `return` to
-// the chosen key.
+// offers the server's `returnableNodeKeys` verbatim (`[]` hides 退回), else the legacy unfiltered
+// history list (no client-side filter: the server, #6293, computes the legal targets); the confirm
+// records a `return` to the chosen key.
 //
 // Run: `pnpm --filter @metasheet/web exec playwright test
 //       --config playwright.approval-verification.config.ts` (cwd = apps/web).

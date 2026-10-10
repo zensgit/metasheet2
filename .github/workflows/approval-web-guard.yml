@@ -356,7 +356,7 @@ on:
       - 'apps/web/tests/approval-detail-instance-consistency.spec.ts'
       # Viewer-scoped decision affordance (canDecideCurrentNode) over the mounted detail view.
       - 'apps/web/tests/approval-detail-can-decide-current-node.spec.ts'
-      # 退回 candidates mirror the server's return gate (handler cursor / parallel region / trail).
+      # 退回 candidates: `returnableNodeKeys` verbatim, else the legacy list; no client-side filter.
       - 'apps/web/tests/approval-detail-return-candidates.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
       # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs. ApprovalMetricsView/
@@ -814,7 +814,7 @@ on:
       - 'apps/web/tests/approval-detail-instance-consistency.spec.ts'
       # Viewer-scoped decision affordance (canDecideCurrentNode) over the mounted detail view.
       - 'apps/web/tests/approval-detail-can-decide-current-node.spec.ts'
-      # 退回 candidates mirror the server's return gate (handler cursor / parallel region / trail).
+      # 退回 candidates: `returnableNodeKeys` verbatim, else the legacy list; no client-side filter.
       - 'apps/web/tests/approval-detail-return-candidates.spec.ts'
       - 'apps/web/tests/helpers/approval-test-fixtures.ts'
       # B3-03 (看板钻取): metrics drill-down + approvals-list filter-bar specs (same set as the
