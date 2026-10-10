@@ -2,6 +2,8 @@
 // existing mounted-production harness (real Vue Router + Element Plus) and intercepts only the
 // template read. It proves the ordinary authoring path is Canvas-first in Chromium while the
 // explicit flag-off rollback still exposes the structured list.
+// W1-1a (Lock-4 F4-B / F4-C) adds one real-Element-Plus authoring pass through the inspector: the
+// 'designated' empty-assignee option + its typed role picker, and the four-value same-person select.
 import { mkdirSync } from 'node:fs'
 import { expect, test, type Locator, type Page, type Request, type Response } from '@playwright/test'
 
@@ -184,6 +186,8 @@ async function mountFlow(
     template?: typeof COMPLEX_TEMPLATE | typeof LINEAR_TEMPLATE
     route?: 'edit' | 'new'
     enterFlow?: boolean
+    // W1-1a: directory roles served to the typed pickers (default: none, as before).
+    directoryRoles?: Array<{ id: string; name: string }>
   },
 ): Promise<void> {
   const template = options.template ?? COMPLEX_TEMPLATE
@@ -221,7 +225,7 @@ async function mountFlow(
   await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ users: [], roles: [], groups: [] }),
+    body: JSON.stringify({ users: [], roles: options.directoryRoles ?? [], groups: [] }),
   }))
   await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
     status: 200,
@@ -400,6 +404,64 @@ test('linear Canvas exposes sequential approval and persists the selected mode',
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 })
 
+// W1-1a (Lock-4 F4-B, OD-L4-3(a) / F4-C): real Element Plus selects in the real inspector. Picks the
+// 'designated' empty-assignee option, a role through the typed role picker (D0 §10.2 — no raw-id
+// input), and 转交直属上级 in the four-value same-person select, then asserts the exact PATCH shape:
+// the role target rides the ONE fallback key, and the same-person pick writes ONLY samePersonPolicy
+// (implementer default (a): any non-auto_skip pick deletes mergeWithRequester).
+test('W1-1a: the inspector authors 转交指定人员 targets and the four-value same-person policy into the saved graph', async ({ page }) => {
+  await mountFlow(page, {
+    canvasV2: true,
+    width: 1440,
+    height: 900,
+    template: LINEAR_TEMPLATE,
+    directoryRoles: [{ id: 'role_approval_admin', name: '审批管理员' }],
+  })
+
+  await canvasNodeSelector(page, 'approval_1').click()
+  await expect(page.locator('[data-testid="approval-node-empty-fallback-role-picker"]')).toHaveCount(0)
+  await page.locator('[data-testid="approval-node-empty-policy"]').click()
+  await page.getByRole('option', { name: '转交指定人员', exact: true }).click()
+  const rolePicker = page.locator('[data-testid="approval-node-empty-fallback-role-picker"]')
+  await expect(rolePicker).toBeVisible()
+  await expect(page.locator('[data-testid="approval-node-empty-fallback-hint"]')).toBeVisible()
+  // Layout regression pin: outside an <el-form> a label auto-sizes, and the first cut of these rows
+  // (half-width grid cells, inline labels) left the same-person select 0px wide in this inspector.
+  for (const testId of ['approval-node-empty-fallback-role-picker', 'approval-node-same-person-policy']) {
+    const box = await page.locator(`[data-testid="${testId}"]`).boundingBox()
+    expect(box?.width ?? 0, `${testId} must not be squeezed by its label`).toBeGreaterThan(200)
+  }
+  await rolePicker.click()
+  await page.getByRole('option', { name: '审批管理员', exact: true }).click()
+  // A `multiple` el-select keeps its dropdown open after a pick, overlaying the controls below it;
+  // Escape closes it (the inspector itself only binds Escape inside its rename input).
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('option', { name: '审批管理员', exact: true })).toBeHidden()
+  // The chip shows the role's business name (typed picker; never the raw id).
+  await expect(rolePicker).toContainText('审批管理员')
+  await expect(rolePicker).not.toContainText('role_approval_admin')
+
+  const samePerson = page.locator('[data-testid="approval-node-same-person-policy"]')
+  await samePerson.click()
+  await page.getByRole('option', { name: '转交发起人的直属上级审批', exact: true }).click()
+  await expect(page.locator('[data-testid="approval-node-same-person-transfer-hint"]')).toBeVisible()
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('有未保存更改')
+
+  const updateRequest = page.waitForRequest((request) => (
+    request.method() === 'PATCH'
+      && /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/.test(request.url())
+  ))
+  await page.click('[data-testid="approval-template-save-button"]')
+  const payload = (await updateRequest).postDataJSON() as {
+    approvalGraph?: { nodes?: Array<{ key?: string; config?: Record<string, unknown> }> }
+  }
+  const config = payload.approvalGraph?.nodes?.find((node) => node.key === 'approval_1')?.config ?? {}
+  expect(config.emptyAssigneePolicy).toBe('designated')
+  expect(config.emptyAssigneeFallback).toEqual({ roleIds: ['role_approval_admin'] })
+  expect(config.autoApprovalPolicy).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+})
+
 test('entering Canvas preserves pre-flow edits and keeps the saved linear draft dirty', async ({ page }) => {
   await mountFlow(page, {
     canvasV2: true,
@@ -470,6 +532,11 @@ test('flag OFF keeps the linear legacy editor editable and saves its real graph'
   await expect(page.locator('[data-testid="approval-template-step-spine"]')).toBeVisible()
   const stepRow = page.locator('[data-testid="approval-template-step-row"]').first()
   await expect(stepRow).toBeVisible()
+  // W1-1a: the linear editor's four-value same-person select renders usable (full-width row) with 默认.
+  const linearSamePerson = page.locator('[data-testid="approval-step-same-person-policy"]').first()
+  await expect(linearSamePerson).toBeVisible()
+  await expect(linearSamePerson).toContainText('默认（跟随模板设置）')
+  expect((await linearSamePerson.boundingBox())?.width ?? 0).toBeGreaterThan(200)
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
 
   await stepRow.locator('input').first().fill('财务复核')
