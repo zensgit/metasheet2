@@ -4,48 +4,82 @@
  * WHY. classifyDirectoryFailureText shows a caught error's OWN message only when the error is an instance of a
  * class on the caller's allow-list (`fixedSentenceClasses`): DINGTALK_CONFIG_FIXED_SENTENCES and
  * DIRECTORY_TEST_FIXED_SENTENCES (routes/admin-directory.ts), DIRECTORY_FAILURE_FIXED_SENTENCES
- * (directory/directory-sync.ts) and any inline list. That is safe only while every construction of a listed
- * class is handed a literal, the caller's own input or our own ids — which R-41 checked by hand. One
- * `new DirectoryValidationError(err.message)` anywhere would put provider / driver / transport text back into an
- * admin body, a persisted column or the outbound DingTalk alert, with every R-41 test still green.
+ * (directory/directory-sync.ts) and an inline list in routes/admin-directory.ts. That is safe only while every
+ * listed instance carries a literal, the caller's own input or our own ids — which R-41 checked by hand. One
+ * `new DirectoryValidationError(err.message)` (or one caught listed instance enriched in place with driver text)
+ * would put provider / driver / transport text back into an admin body, a persisted column or the outbound
+ * DingTalk alert, with every R-41 test still green.
  *
  * HOW. TypeScript compiler API, one program per scan (noResolve / noLib, so identifiers resolve to their LOCAL
  * declarations: a catch binding is told apart from a same-named parameter by symbol, not by name).
- *  1. The lists are read FROM SOURCE, never hard-coded here: every variable typed `…FixedSentenceErrorClass…`,
- *     every array literal in a `fixedSentenceClasses:` position, and every array literal passed where a
- *     same-file function declares a `FixedSentenceErrorClass` parameter. Elements may be classes (imported
- *     names are traced to their exported name) or spreads of another list; anything else, a list that is not an
- *     array literal, or a consumer position fed by something that is neither a list nor a pass-through
- *     parameter FAILS CLOSED. Adding a class to a list therefore extends this guard by itself.
- *  2. Every `new <Listed>(…)` (aliases, `ns.Listed`, `require` destructuring and `export { X as Y }` re-exports
- *     included) and every `super(…)` inside a subclass of a listed class — across packages/core-backend/src
- *     and plugins/<name>/lib, plugins/<name>/index.cjs — has each argument checked. It is RED when the value
- *     of an argument
- *       (a) reads `.message` / `.stack` / `.errmsg` / `.responseBody` / `.detail` / `.cause` (dot, bracket or
- *           destructuring);
+ *  1. LISTS are read FROM SOURCE, never hard-coded here: every variable typed `…FixedSentenceErrorClass…`, every
+ *     array literal in a `fixedSentenceClasses:` position, and every array literal passed where a same-file
+ *     function declares a `FixedSentenceErrorClass` parameter. Elements may be classes (imported names are traced
+ *     to their exported name) or spreads of another list. It FAILS CLOSED on: a list that is not an array literal;
+ *     an element that is neither a class name nor a spread of a list; a consumer position fed by something that is
+ *     neither a list nor a pass-through parameter; a list constant that is exported or referenced anywhere but a
+ *     consumer position or a spread into another list (`(LIST as any).push(X)`, handing it elsewhere); a function
+ *     with a `FixedSentenceErrorClass` parameter that is exported, re-exported, referenced as a value, or is a
+ *     method / callback / anonymous function — only direct same-file calls are followed, so a cross-file caller
+ *     could hand it an inline list unseen; and `fixedSentenceClasses` written as a property (`o.fixedSentenceClasses
+ *     = …`) or spelled as a string (computed keys, element access, Reflect / defineProperty writes). Adding a class
+ *     to a list therefore extends this guard by itself.
+ *  2. CONSTRUCTIONS. Every `new <Listed>(…)` (aliases, `ns.Listed`, `require` destructuring and `export { X as Y }`
+ *     re-exports included), every `super(…)` inside a subclass of a listed class, and every listed class's OWN
+ *     `super(…)` — across packages/core-backend/src and plugins/<name>/lib, plugins/<name>/index.cjs — has each
+ *     argument checked. It is RED when the value of an argument
+ *       (a) reads `.message` / `.stack` / `.errmsg` / `.responseBody` / `.detail` / `.cause` / `.hint` / `.where` /
+ *           `.reason` (dot, string-literal bracket, or destructuring);
  *       (b) references a binding introduced by `catch (x)`, by the first parameter of a `.catch(cb)` /
- *           `.then(_, cb)` callback, or of an `.on('error', cb)` listener (resolved by symbol);
+ *           `.then(_, cb)` callback, or of an `.on('error' | <non-literal event>, cb)` listener (resolved by symbol);
  *       (c) — the same, through `String(x)` or a template interpolation (reported separately).
- *     The value is followed through same-file locals (initializer and every assignment, destructuring
- *     included) and through parameters of same-file functions to their same-file call sites. Positions that
- *     cannot carry text are not followed: the condition of `?:`, comparisons, `!`, `typeof`.
- *       (d) a constructed instance whose message is rewritten afterwards (`e.message = …`,
- *           `Object.assign(new Listed(…), …)`, `Object.defineProperty(e, …)`) is red as well.
- *     The listed classes' OWN `super(…)` calls are held to the same rules.
- *  3. A subclass of a listed class anywhere is red unless it is in ALLOWED_SUBCLASSES (empty — a subclass can
- *     carry any message and inherits the `instanceof`).
- *  4. Backstop: every VALUE reference to a listed class must be a `new` callee, an `extends` target, the
- *     right side of `instanceof`, an import / export specifier or an element of a discovered list.
- *     `const C = Listed; new C(m)`, `Reflect.construct(Listed, …)` or handing the class to a factory is red.
- *  5. ARGUMENTS_OUTSIDE_MESSAGE exempts one constructor argument position that, by the class's own
- *     constructor, never reaches the message; the exemption is re-verified against that constructor on every
- *     run (RecoveryConflictError keeps its argument only as `cause`).
- *  6. Non-vacuity: the discovered list keys and the per-class construction counts are pinned, and every listed
- *     class must be declared exactly once.
+ *     The value is followed through same-file locals and module-level bindings: their initializer, every
+ *     assignment (`=`, `+=`, `||=`, `??=`, `&&=`), every write into them (`x.p = v`, `x[k] = v` — key and value),
+ *     every mutating call on them (`push` / `unshift` / `splice` / `set` / `add` / `fill` / `append`, on the
+ *     binding or a member path rooted at it) and `Object.assign(x, …)`; destructuring included. Parameters of
+ *     same-file functions are followed to the arguments of their same-file call sites, to their default value and
+ *     to writes into them. A call to anything is walked into its callee expression and its arguments (never into
+ *     the callee's body). Positions that cannot carry text are not followed: the condition of `?:`, comparisons,
+ *     `!`, `typeof`.
+ *  3. MESSAGE REWRITES. (d) Every write of `message` / `stack` on any target other than `this` anywhere in the
+ *     scanned tree — `x.message = …` (and compound / bracket / destructuring-assignment forms),
+ *     `Object.defineProperty(x, 'message', …)`, `Object.defineProperties(x, { message })`,
+ *     `Object.assign(x, { message })`, `Reflect.set` / `Reflect.defineProperty(x, 'message', …)` — is pinned in
+ *     ALLOWED_MESSAGE_REWRITES with a reason; a new one is red whatever the target (a caught, instanceof-narrowed
+ *     listed instance enriched in place is the realistic case). A fresh listed instance handed to
+ *     Object.assign / defineProperty / Reflect.set is red outright. Inside a listed class, a `this.message` /
+ *     `this.stack` write in the constructor has its value held to rules (a)–(c); anywhere else in the class, and a
+ *     `message` / `stack` / `toString` member, is red.
+ *  4. SUBCLASSES of a listed class anywhere are red unless in ALLOWED_SUBCLASSES (empty — a subclass can carry any
+ *     message and inherits the `instanceof`).
+ *  5. BACKSTOP: every VALUE reference to a listed class must be a `new` callee, an `extends` target, the right side
+ *     of `instanceof`, an import / export specifier or an element of a discovered list. `const C = Listed;
+ *     new C(m)`, `Reflect.construct(Listed, …)` or handing the class to a factory is red.
+ *  6. ARGUMENTS_OUTSIDE_MESSAGE exempts one `new <Listed>(…)` argument position (and the same position of a
+ *     subclass's `super(…)`, which calls that constructor) that, by the class's own constructor, never reaches the
+ *     message — re-verified against that constructor on every run (RecoveryConflictError keeps its argument only
+ *     as `cause`). It never applies to the class's OWN `super(…)`, which is Error's message.
+ *  7. Non-vacuity: the discovered list keys and the per-class construction counts are pinned, every listed class
+ *     must be declared exactly once, and each exemption is shown load-bearing on the real tree.
  *
- * NOT COVERED, deliberately: a value carried in from another FILE (an exported helper's parameter, a module
- * field, a function's return value — calls are walked into their arguments only); `this.x` fields; dynamic
- * property names; text produced by a listed class's own method overrides (no subclass may exist, see 3).
+ * NOT COVERED, deliberately (each is a value the guard cannot see into today; the named sites are values-free by
+ * inspection):
+ *  - function RETURN values, same-file or not: a call is walked into its arguments, not into the callee's body.
+ *    Following bodies would make the walk property-insensitive in the wrong direction — `new
+ *    LoginAliasClaimError(result.code, result.kind)` (auth/login-alias-service.ts:177, :248) would reach
+ *    claimLoginAlias's catch branch, whose `message` does carry driver text but is never read there. Sites resting
+ *    on a return value today: login-alias-service.ts:177, :248 (claimNonEmptyLoginAliases → mapClaimFailure:
+ *    fixed codes), security/encrypted-secrets.ts:153 `new EncryptionMaterialError(issues)` (getEncryptionMaterialIssues
+ *    push-accumulates literals), directory/directory-sync.ts `new PasswordPolicyError(passwordValidation.errors)`
+ *    (validatePassword in auth/password-policy.ts: fixed policy sentences);
+ *  - values from other FILES: an exported helper's parameter, imported constants or module state, `this.x` fields;
+ *  - aliasing through calls: a local mutated by a function it was handed to (`collect(parts)`);
+ *  - non-literal property names: `e[key]` reads, `Object.defineProperty(e, key, …)`, `Object.assign(e, source)`
+ *    with a non-literal source, aliased `Object` / `Reflect` (`const { assign } = Object`), and a
+ *    `fixedSentenceClasses` key computed from non-literal parts;
+ *  - error values that arrive other than through `catch` / `.catch` / `.then(_, cb)` / `.on(…)`: node-style
+ *    callbacks `(err, result) => …`, custom rejection hooks (Promise.allSettled results are covered only through
+ *    their `.reason` reads, rule a).
  * The self-tests at the bottom build in-memory sources and prove each rule fires.
  */
 import { describe, expect, it } from 'vitest'
@@ -58,10 +92,12 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const REPO = path.resolve(HERE, '../../../..')
 const CORE_SRC = 'packages/core-backend/src'
 
-/** (a): property reads that carry provider, driver, transport or caught text. */
-const TEXT_PROPERTIES: ReadonlySet<string> = new Set(['message', 'stack', 'errmsg', 'responseBody', 'detail', 'cause'])
-/** (d): properties whose rewrite after construction changes what the classifier shows. */
+/** (a): property reads that carry provider, driver, transport or caught text (pg's `detail` / `hint` / `where`, allSettled's `reason`). */
+const TEXT_PROPERTIES: ReadonlySet<string> = new Set(['message', 'stack', 'errmsg', 'responseBody', 'detail', 'cause', 'hint', 'where', 'reason'])
+/** (d): properties whose rewrite changes what the classifier shows. */
 const MESSAGE_PROPERTIES: ReadonlySet<string> = new Set(['message', 'stack'])
+/** Mutating calls whose arguments flow into the binding they are called on (`splice` from its third argument). */
+const MUTATING_METHODS: ReadonlySet<string> = new Set(['push', 'unshift', 'splice', 'set', 'add', 'fill', 'append'])
 
 // ── pins ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -96,7 +132,7 @@ const EXPECTED_CONSTRUCTION_COUNTS: Readonly<Record<string, number>> = {
 const ALLOWED_SUBCLASSES: Readonly<Record<string, string>> = {}
 
 interface ArgumentExemption { index: number; reason: string }
-/** Constructor argument positions that never reach the message — each re-verified against the constructor. */
+/** `new <Listed>(…)` argument positions that never reach the message — each re-verified against the constructor. */
 const ARGUMENTS_OUTSIDE_MESSAGE: Readonly<Record<string, ArgumentExemption>> = {
   RecoveryConflictError: {
     index: 0,
@@ -104,7 +140,20 @@ const ARGUMENTS_OUTSIDE_MESSAGE: Readonly<Record<string, ArgumentExemption>> = {
   },
 }
 
-// ── scanner: a pure function of (repo-relative path → text), shared by the real tree and the self-tests ────
+interface RewriteAllowance { count: number; reason: string }
+/** Every `message` / `stack` write on a non-`this` target in the scanned tree: `<file> :: <form>` → count + why. */
+const ALLOWED_MESSAGE_REWRITES: Readonly<Record<string, RewriteAllowance>> = {
+  [`${CORE_SRC}/multitable/field-codecs.ts :: confirm.message =`]: {
+    count: 1,
+    reason: 'A button field\'s confirm-dialog config object (`{ enabled, message }`) being normalised from the field property; not an error.',
+  },
+  [`${CORE_SRC}/routes/admin-failure-envelope.ts :: wrapped.stack =`]: {
+    count: 1,
+    reason: 'toLoggableError wraps a non-Error thrown value in a plain `new Error(…)` for the LOG only and restores that value\'s own stack; a plain Error is on no allow-list.',
+  },
+}
+
+// ── scanner: pure functions of (repo-relative path → text), shared by the real tree and the self-tests ─────
 
 type SourceMap = ReadonlyMap<string, string>
 interface ScanOptions {
@@ -135,6 +184,7 @@ const ASSIGNMENT_OPERATORS: ReadonlySet<ts.SyntaxKind> = new Set([
   ts.SyntaxKind.EqualsToken, ts.SyntaxKind.PlusEqualsToken, ts.SyntaxKind.BarBarEqualsToken,
   ts.SyntaxKind.QuestionQuestionEqualsToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken,
 ])
+const LISTENER_METHODS: ReadonlySet<string> = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'])
 
 function scriptKindOf(file: string): ts.ScriptKind {
   if (/\.(c|m)?js$/.test(file)) return ts.ScriptKind.JS
@@ -168,9 +218,10 @@ function buildProgram(files: SourceMap, roots: readonly string[]): ts.Program {
   })
 }
 
-const relOf = (sf: ts.SourceFile) => sf.fileName.slice(VROOT.length)
+const relOf = (sf: ts.SourceFile) => (sf.fileName.startsWith(VROOT) ? sf.fileName.slice(VROOT.length) : sf.fileName)
 const lineOf = (node: ts.Node) => node.getSourceFile().getLineAndCharacterOfPosition(node.getStart()).line + 1
 const at = (node: ts.Node) => `${relOf(node.getSourceFile())}:${lineOf(node)}`
+const snippet = (node: ts.Node) => node.getText().replace(/\s+/g, ' ').slice(0, 60)
 
 function unwrap(expr: ts.Expression): ts.Expression {
   let e = expr
@@ -189,6 +240,19 @@ const isFunctionLike = (n: ts.Node | undefined): n is ts.ArrowFunction | ts.Func
 const isRequireCall = (e: ts.Expression) => {
   const u = unwrap(e)
   return ts.isCallExpression(u) && ts.isIdentifier(u.expression) && u.expression.text === 'require'
+}
+const isExported = (decl: ts.Declaration) => (ts.getCombinedModifierFlags(decl) & (ts.ModifierFlags.Export | ts.ModifierFlags.Default)) !== 0
+const literalText = (e: ts.Node | undefined): string | undefined => {
+  if (!e) return undefined
+  const u = ts.isExpression(e as ts.Expression) ? unwrap(e as ts.Expression) : e
+  return ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u) ? u.text : undefined
+}
+function inTypePosition(node: ts.Node): boolean {
+  for (let p = node.parent; p && !ts.isSourceFile(p); p = p.parent) {
+    if (ts.isTypeNode(p)) return true
+    if (ts.isStatement(p) || ts.isBlock(p)) return false
+  }
+  return false
 }
 
 function walk(node: ts.Node, fn: (n: ts.Node) => void): void {
@@ -224,6 +288,105 @@ function classNameOf(expr: ts.Expression, checker: ts.TypeChecker, reexports: Re
   return undefined
 }
 
+// ── message / stack rewrites (rule d) — syntactic, shared by the tree-wide census and the listed-class check ──
+
+interface MessageRewrite { prop: string; target: ts.Expression; value: ts.Node | undefined; form: string }
+
+/** `x.message` / `x['stack']` → its target and property. */
+function messageAccess(e: ts.Expression): { target: ts.Expression; prop: string } | undefined {
+  const u = unwrap(e)
+  if (ts.isPropertyAccessExpression(u) && MESSAGE_PROPERTIES.has(u.name.text)) return { target: u.expression, prop: u.name.text }
+  if (ts.isElementAccessExpression(u)) {
+    const key = literalText(u.argumentExpression)
+    if (key && MESSAGE_PROPERTIES.has(key)) return { target: u.expression, prop: key }
+  }
+  return undefined
+}
+
+/** The `message` / `stack` members of an object literal (property, shorthand, method, accessor; literal or computed-literal key). */
+function messageMembersOf(obj: ts.Node | undefined): Array<{ prop: string; value: ts.Node }> {
+  if (!obj || !ts.isExpression(obj as ts.Expression)) return []
+  const o = unwrap(obj as ts.Expression)
+  if (!ts.isObjectLiteralExpression(o)) return []
+  const out: Array<{ prop: string; value: ts.Node }> = []
+  for (const p of o.properties) {
+    if (!p.name) continue
+    const key = ts.isComputedPropertyName(p.name) ? literalText(p.name.expression)
+      : ts.isIdentifier(p.name) || ts.isStringLiteral(p.name) || ts.isNoSubstitutionTemplateLiteral(p.name) ? p.name.text : undefined
+    if (key && MESSAGE_PROPERTIES.has(key)) out.push({ prop: key, value: ts.isPropertyAssignment(p) ? p.initializer : p })
+  }
+  return out
+}
+
+function messageRewritesAt(node: ts.Node): MessageRewrite[] {
+  if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATORS.has(node.operatorToken.kind)) {
+    const left = unwrap(node.left)
+    const direct = messageAccess(left)
+    if (direct) return [{ ...direct, value: node.right, form: `${snippet(direct.target)}.${direct.prop} =` }]
+    if (node.operatorToken.kind === ts.SyntaxKind.EqualsToken && (ts.isObjectLiteralExpression(left) || ts.isArrayLiteralExpression(left))) {
+      const out: MessageRewrite[] = []
+      const pattern = (p: ts.Expression): void => {
+        const u = unwrap(p)
+        const access = messageAccess(u)
+        if (access) {
+          out.push({ ...access, value: node.right, form: `destructuring ${snippet(access.target)}.${access.prop} =` })
+          return
+        }
+        if (ts.isObjectLiteralExpression(u)) {
+          for (const el of u.properties) {
+            if (ts.isPropertyAssignment(el)) pattern(el.initializer)
+            else if (ts.isSpreadAssignment(el)) pattern(el.expression)
+          }
+        } else if (ts.isArrayLiteralExpression(u)) {
+          for (const el of u.elements) pattern(ts.isSpreadElement(el) ? el.expression : el)
+        } else if (ts.isBinaryExpression(u) && u.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+          pattern(u.left)
+        }
+      }
+      pattern(left)
+      return out
+    }
+    return []
+  }
+  if (ts.isCallExpression(node)) {
+    const callee = unwrap(node.expression)
+    if (!ts.isPropertyAccessExpression(callee) || !ts.isIdentifier(callee.expression)) return []
+    const fn = `${callee.expression.text}.${callee.name.text}`
+    const [target, second, third] = node.arguments
+    if (!target) return []
+    if (fn === 'Object.defineProperty' || fn === 'Reflect.defineProperty' || fn === 'Reflect.set') {
+      const key = literalText(second)
+      return key && MESSAGE_PROPERTIES.has(key) ? [{ prop: key, target, value: third, form: `${fn}(${snippet(target)}, '${key}')` }] : []
+    }
+    if (fn === 'Object.defineProperties') {
+      return messageMembersOf(second).map((m) => ({ prop: m.prop, target, value: m.value, form: `${fn}(${snippet(target)}, { ${m.prop} })` }))
+    }
+    if (fn === 'Object.assign') {
+      return node.arguments.slice(1).flatMap((source) => messageMembersOf(source))
+        .map((m) => ({ prop: m.prop, target, value: m.value, form: `Object.assign(${snippet(target)}, { ${m.prop} })` }))
+    }
+  }
+  return []
+}
+const isThisTarget = (e: ts.Expression) => unwrap(e).kind === ts.SyntaxKind.ThisKeyword
+
+/** (d) tree-wide: every `message` / `stack` write on a non-`this` target, `<file> :: <form>` → count. */
+function censusMessageRewrites(files: SourceMap): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const [rel, text] of files) {
+    if (!/\b(message|stack)\b/.test(text)) continue
+    const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true, scriptKindOf(rel))
+    walk(sf, (node) => {
+      for (const r of messageRewritesAt(node)) {
+        if (isThisTarget(r.target)) continue
+        const key = `${rel} :: ${r.form}`
+        out[key] = (out[key] ?? 0) + 1
+      }
+    })
+  }
+  return out
+}
+
 // ── phase 1: the allow-lists ────────────────────────────────────────────────────────────────────────────────
 
 interface ListDiscovery { lists: Map<string, string[]>; listArrays: Set<ts.ArrayLiteralExpression>; failures: string[] }
@@ -238,30 +401,57 @@ function discoverLists(files: SourceMap): ListDiscovery {
   const named = new Map<ts.Node, { key: string; array: ts.ArrayLiteralExpression }>()
   const inline: Array<{ key: string; array: ts.ArrayLiteralExpression }> = []
   const noReexports = new Map<string, string>()
+  const symbolOfReference = (id: ts.Identifier) => (ts.isShorthandPropertyAssignment(id.parent) && id.parent.name === id
+    ? checker.getShorthandAssignmentValueSymbol(id.parent)
+    : checker.getSymbolAtLocation(id))
 
   for (const sf of program.getSourceFiles()) {
     const rel = relOf(sf)
     let inlineCount = 0
     const fixedParams = new Map<ts.Symbol, number[]>()
+    const passThroughs: Array<{ sym: ts.Symbol; name: ts.Identifier }> = []
     const consumers: ts.Expression[] = []
+    const fileLists: Array<{ decl: ts.VariableDeclaration; name: ts.Identifier }> = []
     walk(sf, (node) => {
       if (ts.isVariableDeclaration(node) && typeMentionsFixedSentence(node.type) && ts.isIdentifier(node.name)) {
         const init = node.initializer ? unwrap(node.initializer) : undefined
         if (init && ts.isArrayLiteralExpression(init)) {
           named.set(node, { key: `${rel} ${node.name.text}`, array: init })
+          fileLists.push({ decl: node, name: node.name })
+          if (isExported(node)) failures.push(`${at(node)} allow-list ${node.name.text} is exported — what other files do with it is not seen`)
         } else {
           failures.push(`${at(node)} allow-list ${node.name.text} is not an array literal — the guard cannot read it`)
         }
       }
-      if (isFunctionLike(node) || ts.isMethodDeclaration(node)) {
+      if (isFunctionLike(node) || ts.isMethodDeclaration(node) || ts.isConstructorDeclaration(node) || ts.isGetAccessor(node) || ts.isSetAccessor(node)) {
         const indexes = node.parameters.map((p, i) => (typeMentionsFixedSentence(p.type) ? i : -1)).filter((i) => i >= 0)
-        const fnName = ts.isFunctionDeclaration(node) || ts.isMethodDeclaration(node) ? node.name
-          : ts.isVariableDeclaration(node.parent) ? node.parent.name : undefined
-        const sym = fnName && ts.isIdentifier(fnName) ? checker.getSymbolAtLocation(fnName) : undefined
-        if (sym && indexes.length > 0) fixedParams.set(sym, indexes)
+        if (indexes.length > 0) {
+          const nameNode = ts.isFunctionDeclaration(node) ? node.name
+            : (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) && ts.isVariableDeclaration(node.parent) && node.parent.initializer === node && ts.isIdentifier(node.parent.name) ? node.parent.name
+              : undefined
+          const declNode = ts.isFunctionDeclaration(node) ? node : nameNode ? (node.parent as ts.VariableDeclaration) : undefined
+          const sym = nameNode ? checker.getSymbolAtLocation(nameNode) : undefined
+          if (!nameNode || !declNode || !sym) {
+            failures.push(`${at(node)} a FixedSentenceErrorClass parameter on a method, callback or anonymous function — only named same-file functions are followed`)
+          } else if (isExported(declNode)) {
+            failures.push(`${at(node)} ${nameNode.text} takes a FixedSentenceErrorClass parameter and is exported — a caller in another file could hand it a list unseen`)
+          } else {
+            fixedParams.set(sym, indexes)
+            passThroughs.push({ sym, name: nameNode })
+          }
+        }
       }
       if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && node.name.getText() === 'fixedSentenceClasses') {
         consumers.push(ts.isPropertyAssignment(node) ? node.initializer : node.name)
+      }
+      if (literalText(node) === 'fixedSentenceClasses' && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))) {
+        failures.push(`${at(node)} 'fixedSentenceClasses' spelled as a string (computed key, element access or reflective write) — not followed`)
+      }
+      if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATORS.has(node.operatorToken.kind)) {
+        const left = unwrap(node.left)
+        if (ts.isPropertyAccessExpression(left) && left.name.text === 'fixedSentenceClasses') {
+          failures.push(`${at(node)} fixedSentenceClasses assigned as a property — not followed`)
+        }
       }
     })
     walk(sf, (node) => {
@@ -271,6 +461,20 @@ function discoverLists(files: SourceMap): ListDiscovery {
       const indexes = sym ? fixedParams.get(sym) : undefined
       for (const i of indexes ?? []) if (node.arguments[i]) consumers.push(node.arguments[i])
     })
+    // A pass-through function is followed only through direct same-file calls: any other use fails closed.
+    for (const { sym, name } of passThroughs) {
+      walk(sf, (n) => {
+        if (!ts.isIdentifier(n) || n === name || n.text !== name.text || inTypePosition(n)) return
+        if (ts.isExportSpecifier(n.parent)) {
+          failures.push(`${at(n)} ${name.text} (takes a FixedSentenceErrorClass parameter) is re-exported — a caller in another file could hand it a list unseen`)
+          return
+        }
+        if (symbolOfReference(n) !== sym) return
+        const ref = outermost(n)
+        if (ts.isCallExpression(ref.parent) && ref.parent.expression === ref) return
+        failures.push(`${at(n)} ${name.text} (takes a FixedSentenceErrorClass parameter) is used as a value (\`${snippet(ref.parent)}\`) — only direct same-file calls are followed`)
+      })
+    }
     for (const consumer of consumers) {
       const value = unwrap(consumer)
       if (ts.isArrayLiteralExpression(value)) {
@@ -286,6 +490,25 @@ function discoverLists(files: SourceMap): ListDiscovery {
         if (decl && ts.isParameter(decl) && typeMentionsFixedSentence(decl.type)) continue
       }
       failures.push(`${at(consumer)} a fixed-sentence consumer is fed by \`${consumer.getText()}\`, neither a discovered list nor a pass-through parameter`)
+    }
+    // A list constant is referenced only as a consumer value or spread into another list.
+    const consumerNodes = new Set<ts.Node>(consumers.map((c) => outermost(c)))
+    const fileListArrays = new Set<ts.Node>([...named.values(), ...inline].map((l) => l.array))
+    for (const { decl, name } of fileLists) {
+      const sym = checker.getSymbolAtLocation(name)
+      walk(sf, (n) => {
+        if (!ts.isIdentifier(n) || n === name || n.text !== name.text || inTypePosition(n)) return
+        if (ts.isExportSpecifier(n.parent)) {
+          failures.push(`${at(n)} allow-list ${name.text} is re-exported — what other files do with it is not seen`)
+          return
+        }
+        if (symbolOfReference(n) !== sym) return
+        const ref = outermost(n)
+        if (consumerNodes.has(ref) || consumerNodes.has(n)) return
+        if (ts.isSpreadElement(ref.parent) && fileListArrays.has(ref.parent.parent)) return
+        failures.push(`${at(n)} allow-list ${name.text} is referenced outside a consumer position (\`${snippet(ref.parent)}\`) — a mutation or hand-off is not followed`)
+      })
+      void decl
     }
   }
 
@@ -373,10 +596,19 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
   for (const sf of program.getSourceFiles()) {
     const rel = relOf(sf)
 
-    // Per-file indexes: caught bindings, assignments, call sites.
+    // Per-file indexes: caught bindings, everything that flows into a binding, call sites.
     const caught = new Set<ts.Symbol>()
-    const assignments = new Map<ts.Symbol, ts.Expression[]>()
+    const flowsInto = new Map<ts.Symbol, ts.Node[]>()
     const calls: ts.CallExpression[] = []
+    const record = (sym: ts.Symbol | undefined, value: ts.Node | undefined) => {
+      if (sym && value) flowsInto.set(sym, [...(flowsInto.get(sym) ?? []), value])
+    }
+    /** The binding a member path is rooted at: `x`, `x.a.b`, `x[k]` → x. */
+    const rootSymbolOf = (expr: ts.Expression): ts.Symbol | undefined => {
+      let e = unwrap(expr)
+      while (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) e = unwrap(e.expression)
+      return ts.isIdentifier(e) ? checker.getSymbolAtLocation(e) : undefined
+    }
     const addBinding = (name: ts.BindingName) => {
       if (ts.isIdentifier(name)) {
         const sym = checker.getSymbolAtLocation(name)
@@ -408,17 +640,31 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
           let cb: ts.Expression | undefined
           if (method === 'catch') cb = node.arguments[0]
           else if (method === 'then') cb = node.arguments[1]
-          else if (['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'].includes(method)) {
-            const event = node.arguments[0] ? unwrap(node.arguments[0]) : undefined
-            if (event && (ts.isStringLiteral(event) || ts.isNoSubstitutionTemplateLiteral(event)) && event.text === 'error') cb = node.arguments[1]
+          else if (LISTENER_METHODS.has(method) && node.arguments[0]) {
+            const event = literalText(node.arguments[0])
+            if (event === undefined || event === 'error') cb = node.arguments[1]
           }
           const param = firstParamOf(cb)
           if (param) addBinding(param.name)
+          // Accumulators: a mutating call on a binding (or a member path rooted at it) flows its arguments in.
+          if (MUTATING_METHODS.has(method)) {
+            const root = rootSymbolOf(callee.expression)
+            node.arguments.forEach((a, i) => { if (method !== 'splice' || i >= 2) record(root, a) })
+          }
+          if (ts.isIdentifier(callee.expression) && callee.expression.text === 'Object' && method === 'assign' && node.arguments[0]) {
+            const root = rootSymbolOf(node.arguments[0])
+            for (const source of node.arguments.slice(1)) record(root, source)
+          }
         }
       }
-      if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATORS.has(node.operatorToken.kind) && ts.isIdentifier(unwrap(node.left))) {
-        const sym = checker.getSymbolAtLocation(unwrap(node.left))
-        if (sym) assignments.set(sym, [...(assignments.get(sym) ?? []), node.right])
+      if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATORS.has(node.operatorToken.kind)) {
+        const left = unwrap(node.left)
+        if (ts.isIdentifier(left)) record(checker.getSymbolAtLocation(left), node.right)
+        else if (ts.isPropertyAccessExpression(left) || ts.isElementAccessExpression(left)) {
+          const root = rootSymbolOf(left)
+          record(root, node.right)
+          if (ts.isElementAccessExpression(left)) record(root, left.argumentExpression)
+        }
       }
     })
 
@@ -429,8 +675,8 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
       return undefined
     }
 
-    /** Findings for one argument VALUE (rules a–c), following same-file locals and parameters. */
-    const argumentFindings = (arg: ts.Expression): string[] => {
+    /** Findings for one VALUE (rules a–c), following same-file bindings and parameters. */
+    const argumentFindings = (arg: ts.Node): string[] => {
       const out = new Set<string>()
       const visited = new Set<ts.Symbol>()
       const visit = (node: ts.Node, textual: boolean, via: string): void => {
@@ -449,8 +695,8 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
           return
         }
         if (ts.isElementAccessExpression(node)) {
-          const key = unwrap(node.argumentExpression)
-          if ((ts.isStringLiteral(key) || ts.isNoSubstitutionTemplateLiteral(key)) && TEXT_PROPERTIES.has(key.text)) out.add(`(a) reads ['${key.text}']${via}`)
+          const key = literalText(node.argumentExpression)
+          if (key && TEXT_PROPERTIES.has(key)) out.add(`(a) reads ['${key}']${via}`)
           visit(node.expression, textual, via)
           visit(node.argumentExpression, textual, via)
           return
@@ -489,24 +735,25 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
         const decl = sym.valueDeclaration ?? sym.declarations?.[0]
         if (!decl || decl.getSourceFile() !== sf) return
         const next = `${via} via \`${name}\``
+        for (const value of flowsInto.get(sym) ?? []) visit(value, textual, next)
         if (ts.isVariableDeclaration(decl)) {
           if (decl.initializer) visit(decl.initializer, textual, next)
-          for (const rhs of assignments.get(sym) ?? []) visit(rhs, textual, next)
           return
         }
         if (ts.isBindingElement(decl)) {
           const prop = decl.propertyName ?? decl.name
           if ((ts.isIdentifier(prop) || ts.isStringLiteral(prop)) && TEXT_PROPERTIES.has(prop.text)) out.add(`(a) destructures ${prop.text}${via}`)
+          if (decl.initializer) visit(decl.initializer, textual, next)
           let root: ts.Node = decl
           while (ts.isBindingElement(root) || ts.isObjectBindingPattern(root) || ts.isArrayBindingPattern(root)) root = root.parent
           if (ts.isVariableDeclaration(root) && root.initializer) visit(root.initializer, textual, next)
           if (ts.isParameter(root)) parameter(root, textual, next)
-          for (const rhs of assignments.get(sym) ?? []) visit(rhs, textual, next)
           return
         }
         if (ts.isParameter(decl)) parameter(decl, textual, next)
       }
       const parameter = (param: ts.ParameterDeclaration, textual: boolean, via: string): void => {
+        if (param.initializer) visit(param.initializer, textual, via)
         const fn = param.parent
         if (ts.isConstructorDeclaration(fn)) return // every `new` site of that class is checked on its own
         const index = fn.parameters.indexOf(param)
@@ -524,43 +771,25 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
       return [...out].sort()
     }
 
-    const checkArguments = (args: readonly ts.Expression[], cls: string, label: string, node: ts.Node) => {
-      const exemption = options.argumentsOutsideMessage[cls]
+    /** `exempt`: apply ARGUMENTS_OUTSIDE_MESSAGE — never for a listed class's OWN super(…) (Error's message). */
+    const checkArguments = (args: readonly ts.Expression[], cls: string, label: string, node: ts.Node, exempt: boolean) => {
+      const exemption = exempt ? options.argumentsOutsideMessage[cls] : undefined
       args.forEach((arg, i) => {
         if (exemption && exemption.index === i) return
         for (const finding of argumentFindings(arg)) violations.push(`${at(node)} ${label} argument ${i + 1}: ${finding}`)
       })
     }
 
-    /** (d): the instance's message rewritten after construction. */
-    const checkPostConstruction = (newExpr: ts.NewExpression, cls: string) => {
+    /** (d) for a fresh instance: handed to Object.assign / defineProperty / Reflect.set right away. */
+    const checkFreshInstance = (newExpr: ts.NewExpression, cls: string) => {
       const outer = outermost(newExpr)
-      const isRewriteCall = (call: ts.Node) => {
-        if (!ts.isCallExpression(call)) return false
-        const callee = unwrap(call.expression)
-        return ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
-          && ['Object', 'Reflect'].includes(callee.expression.text)
-          && ['assign', 'defineProperty', 'defineProperties', 'set'].includes(callee.name.text)
-      }
-      if (isRewriteCall(outer.parent) && (outer.parent as ts.CallExpression).arguments[0] === outer) {
-        violations.push(`${at(newExpr)} new ${cls}(…): (d) the instance is handed to ${(outer.parent as ts.CallExpression).expression.getText()} after construction`)
-      }
-      if (ts.isVariableDeclaration(outer.parent) && outer.parent.initializer === outer && ts.isIdentifier(outer.parent.name)) {
-        const sym = checker.getSymbolAtLocation(outer.parent.name)
-        walk(sf, (n) => {
-          if (ts.isBinaryExpression(n) && ASSIGNMENT_OPERATORS.has(n.operatorToken.kind)) {
-            const left = unwrap(n.left)
-            const target = ts.isPropertyAccessExpression(left) ? left.expression : ts.isElementAccessExpression(left) ? left.expression : undefined
-            const prop = ts.isPropertyAccessExpression(left) ? left.name.text
-              : ts.isElementAccessExpression(left) && ts.isStringLiteral(unwrap(left.argumentExpression)) ? (unwrap(left.argumentExpression) as ts.StringLiteral).text : undefined
-            if (target && ts.isIdentifier(unwrap(target)) && checker.getSymbolAtLocation(unwrap(target)) === sym && prop && MESSAGE_PROPERTIES.has(prop)) {
-              violations.push(`${at(n)} new ${cls}(…) at line ${lineOf(newExpr)}: (d) .${prop} rewritten after construction`)
-            }
-          }
-          if (isRewriteCall(n) && ts.isCallExpression(n) && n.arguments[0] && ts.isIdentifier(unwrap(n.arguments[0])) && checker.getSymbolAtLocation(unwrap(n.arguments[0])) === sym) {
-            violations.push(`${at(n)} new ${cls}(…) at line ${lineOf(newExpr)}: (d) the instance is handed to ${n.expression.getText()} after construction`)
-          }
-        })
+      const call = outer.parent
+      if (!ts.isCallExpression(call) || call.arguments[0] !== outer) return
+      const callee = unwrap(call.expression)
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)
+        && ['Object', 'Reflect'].includes(callee.expression.text)
+        && ['assign', 'defineProperty', 'defineProperties', 'set'].includes(callee.name.text)) {
+        violations.push(`${at(newExpr)} new ${cls}(…): (d) the instance is handed to ${callee.getText()} after construction`)
       }
     }
 
@@ -590,25 +819,44 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
       })
       return out
     }
+    /** The class member a node sits in (the constructor, a method, a field initializer, …). */
+    const memberOf = (node: ts.Node, cls: ts.ClassLikeDeclaration): ts.Node | undefined => {
+      for (let p: ts.Node | undefined = node; p && p !== cls; p = p.parent) if (p.parent === cls) return p
+      return undefined
+    }
+
+    const checkListedClassBody = (node: ts.ClassDeclaration, name: string) => {
+      const ctor = constructorOf(node)
+      if (ctor) for (const call of superCallsIn(ctor)) checkArguments(call.arguments, name, `${name}'s own super(…)`, call, false)
+      for (const member of node.members) {
+        const memberName = member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) ? member.name.text : undefined
+        if (memberName && (MESSAGE_PROPERTIES.has(memberName) || memberName === 'toString')) {
+          if (ts.isPropertyDeclaration(member) && member.initializer) {
+            for (const finding of argumentFindings(member.initializer)) violations.push(`${at(member)} ${name}'s own field ${memberName}: ${finding}`)
+          } else if (!ts.isPropertyDeclaration(member)) {
+            violations.push(`${at(member)} ${name} overrides ${memberName} — its text is not a constructor argument the guard can check`)
+          }
+        }
+      }
+      walk(node, (n) => {
+        for (const r of messageRewritesAt(n)) {
+          if (!isThisTarget(r.target)) continue
+          if (memberOf(n, node) === ctor && ctor) {
+            for (const finding of r.value ? argumentFindings(r.value) : []) violations.push(`${at(n)} ${name}'s own this.${r.prop}: ${finding}`)
+          } else {
+            violations.push(`${at(n)} ${name}: (d) this.${r.prop} rewritten outside the constructor`)
+          }
+        }
+      })
+    }
 
     walk(sf, (node) => {
-      // Declarations of the listed classes themselves: their own super(…) and `this.message = …`.
+      // Declarations of the listed classes themselves.
       if (ts.isClassDeclaration(node) && node.name && listed.includes(node.name.text)) {
         const name = node.name.text
         declarations.set(name, [...(declarations.get(name) ?? []), at(node)])
         classDecls.set(`${rel} :: ${name}`, node)
-        const ctor = constructorOf(node)
-        if (ctor) {
-          for (const call of superCallsIn(ctor)) checkArguments(call.arguments, name, `${name}'s own super(…)`, call)
-          walk(ctor, (n) => {
-            if (ts.isBinaryExpression(n) && ASSIGNMENT_OPERATORS.has(n.operatorToken.kind) && ts.isPropertyAccessExpression(unwrap(n.left))) {
-              const left = unwrap(n.left) as ts.PropertyAccessExpression
-              if (left.expression.kind === ts.SyntaxKind.ThisKeyword && MESSAGE_PROPERTIES.has(left.name.text)) {
-                for (const finding of argumentFindings(n.right)) violations.push(`${at(n)} ${name}'s own this.${left.name.text}: ${finding}`)
-              }
-            }
-          })
-        }
+        checkListedClassBody(node, name)
       }
       // Subclasses of a listed (or allowed) class.
       if ((ts.isClassDeclaration(node) || ts.isClassExpression(node))) {
@@ -620,7 +868,7 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
           const ctor = constructorOf(node)
           for (const call of ctor ? superCallsIn(ctor) : []) {
             constructions.push({ file: rel, line: lineOf(call), cls: parent, kind: 'super' })
-            checkArguments(call.arguments, parent, `super(…) of ${subName} extends ${parent}`, call)
+            checkArguments(call.arguments, parent, `super(…) of ${subName} extends ${parent}`, call, true)
           }
         }
       }
@@ -629,8 +877,8 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
         const cls = classNameOf(node.expression, checker, reexports)
         if (cls && family.has(cls)) {
           constructions.push({ file: rel, line: lineOf(node), cls, kind: 'new' })
-          checkArguments(node.arguments ?? [], cls, `new ${cls}(…)`, node)
-          checkPostConstruction(node, cls)
+          checkArguments(node.arguments ?? [], cls, `new ${cls}(…)`, node, true)
+          checkFreshInstance(node, cls)
         }
       }
     })
@@ -785,8 +1033,10 @@ function readTree(): Map<string, string> {
 }
 
 const REAL_OPTIONS: ScanOptions = { allowedSubclasses: ALLOWED_SUBCLASSES, argumentsOutsideMessage: ARGUMENTS_OUTSIDE_MESSAGE }
+let realTree: Map<string, string> | undefined
+const tree = (): Map<string, string> => (realTree ??= readTree())
 let realScan: Scan | undefined
-const real = (): Scan => (realScan ??= scanFixedSentenceConstructors(readTree(), REAL_OPTIONS))
+const real = (): Scan => (realScan ??= scanFixedSentenceConstructors(tree(), REAL_OPTIONS))
 
 describe('R-41 fixed-sentence allow-lists: every construction of a listed class (real tree)', () => {
   it('discovers the allow-lists from source, fails closed on nothing, and finds each listed class declared once', () => {
@@ -797,8 +1047,13 @@ describe('R-41 fixed-sentence allow-lists: every construction of a listed class 
     for (const cls of scan.classes) expect(scan.declarations.get(cls)?.length, cls).toBe(1)
   }, 60_000)
 
-  it('no argument of any construction reads provider / caught text (rules a–d)', () => {
+  it('no argument of any construction reads provider / caught text, and no listed class rewrites its own message (rules a–d)', () => {
     expect(real().violations).toEqual([])
+  }, 60_000)
+
+  it('every message / stack write on a non-`this` target in the scanned tree is a pinned, reasoned site (rule d)', () => {
+    const actual = censusMessageRewrites(tree())
+    expect(actual).toEqual(Object.fromEntries(Object.entries(ALLOWED_MESSAGE_REWRITES).map(([k, v]) => [k, v.count])))
   }, 60_000)
 
   it('no subclass of a listed class exists outside ALLOWED_SUBCLASSES, and no allowance is stale', () => {
@@ -814,7 +1069,7 @@ describe('R-41 fixed-sentence allow-lists: every construction of a listed class 
   it('each argument exemption still holds against its constructor, and each one is load-bearing', () => {
     expect(real().exemptionFailures).toEqual([])
     // Without its exemption, the class's real construction site is red (rule b): the exemption is not dead weight.
-    const unexempt = scanFixedSentenceConstructors(readTree(), { ...REAL_OPTIONS, argumentsOutsideMessage: {} })
+    const unexempt = scanFixedSentenceConstructors(tree(), { ...REAL_OPTIONS, argumentsOutsideMessage: {} })
     for (const cls of Object.keys(ARGUMENTS_OUTSIDE_MESSAGE)) {
       expect(unexempt.violations.filter((v) => v.includes(`new ${cls}(…) argument`)), cls).not.toEqual([])
     }
@@ -849,7 +1104,8 @@ export class CauseOnlyError extends Error {
 const LISTS = `
 import { FooError, CauseOnlyError } from './errors'
 import type { FixedSentenceErrorClass } from './failure-text'
-export const SAMPLE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [FooError, CauseOnlyError]
+const SAMPLE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [FooError, CauseOnlyError]
+export const sample = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: SAMPLE_FIXED_SENTENCES })
 `
 const SYNTHETIC_OPTIONS: ScanOptions = {
   allowedSubclasses: {},
@@ -881,17 +1137,22 @@ export function chosen(error: { constraint?: unknown }) {
   const constraint = error.constraint
   return new FooError(constraint === 'one_per_org' ? 'This organization already has one' : 'A row with this name exists')
 }
+export function listed(ids: string[]) {
+  const missing: string[] = []
+  for (const id of ids) missing.push(id)
+  return new FooError(\`Unknown ids: \${missing.join(', ')}\`)
+}
 `
 
 describe('self-tests: the scanner on in-memory sources', () => {
-  it('baseline: clean constructions, an exempt cause argument and a comparison-only use are not flagged; counts are found', () => {
+  it('baseline: clean constructions, an exempt cause argument, a comparison-only use and a clean accumulator are not flagged', () => {
     const scan = synthetic(CLEAN_USER)
     expect(scan.failures).toEqual([])
     expect([...scan.lists.keys()]).toEqual([`${S}/x/lists.ts SAMPLE_FIXED_SENTENCES`])
     expect(scan.violations).toEqual([])
     expect(scan.unplaced).toEqual([])
     expect(scan.exemptionFailures).toEqual([])
-    expect(countsByClass(scan)).toEqual({ CauseOnlyError: 1, FooError: 3 })
+    expect(countsByClass(scan)).toEqual({ CauseOnlyError: 1, FooError: 4 })
   })
 
   const RULE_CASES: Array<[string, string, string]> = [
@@ -901,22 +1162,35 @@ describe('self-tests: the scanner on in-memory sources', () => {
     ['(a) responseBody read', `export const f = (e: any) => new FooError(JSON.stringify(e.responseBody))`, '(a) reads .responseBody'],
     ['(a) .detail read (bracket)', `export const f = (e: any) => new FooError(e['detail'])`, "(a) reads ['detail']"],
     ['(a) .cause read', `export const f = (e: any) => new FooError(String(e.cause))`, '(a) reads .cause'],
+    ['(a) pg .hint read', `export const f = (e: any) => new FooError(e.hint)`, '(a) reads .hint'],
+    ['(a) pg .where read', `export const f = (e: any) => new FooError(e.where)`, '(a) reads .where'],
+    ['(a) allSettled .reason read', `export const f = (r: any) => new FooError(String(r.reason))`, '(a) reads .reason'],
     ['(a) through a local', `export function f(e: Error) { const text = e.message; return new FooError(text) }`, '(a) reads .message via `text`'],
     ['(a) through destructuring', `export function f(e: Error) { const { message } = e; return new FooError(message) }`, '(a) destructures message'],
     ['(a) through a later assignment', `export function f(e: Error) { let t = 'x'; t = e.message; return new FooError(t) }`, '(a) reads .message via `t`'],
     ['(a) through a same-file helper parameter', `function fail(reason: string): never { throw new FooError(reason) }\nexport function g(e: Error) { fail(e.message) }`, '(a) reads .message via `reason` from'],
+    ['(a) through a parameter default', `export function f(e: Error, text = e.message) { return new FooError(text) }`, '(a) reads .message via `text`'],
+    ['(a) accumulated with push', `export function f(es: Error[]) { const parts: string[] = []; for (const x of es) parts.push(x.message); return new FooError(parts.join(', ')) }`, '(a) reads .message via `parts`'],
+    ['(a) accumulated with unshift', `export function f(x: Error) { const parts: string[] = []; parts.unshift(x.message); return new FooError(\`\${parts}\`) }`, '(a) reads .message via `parts`'],
+    ['(a) accumulated with splice', `export function f(x: Error) { const parts: string[] = ['a']; parts.splice(0, 0, x.message); return new FooError(parts.join()) }`, '(a) reads .message via `parts`'],
+    ['(a) written into a member of a local', `export function f(x: Error) { const out: any = {}; out.detailText = x.message; return new FooError(out.detailText) }`, '(a) reads .message via `out`'],
+    ['(a) Object.assign into a local', `export function f(x: Error) { const out: any = {}; Object.assign(out, { text: x.message }); return new FooError(out.text) }`, '(a) reads .message via `out`'],
     ['(b) catch binding passed', `export function f() { try { g() } catch (error) { throw new FooError(error as string) } }`, '(b) passes caught `error`'],
     ['(b) catch binding with an unusual name', `export function f() { try { g() } catch (oops) { throw new FooError(describe(oops)) } }`, '(b) passes caught `oops`'],
     ['(b) destructured catch binding', `export function f() { try { g() } catch ({ code }) { throw new FooError(code) } }`, '(b) passes caught `code`'],
     ['(b) through a local', `export function f() { try { g() } catch (e) { const t = render(e); throw new FooError(t) } }`, '(b) passes caught `e` via `t`'],
+    ['(b) accumulated with Map.set', `export function f() { const seen = new Map<string, unknown>(); try { g() } catch (e) { seen.set('k', e) } return new FooError([...seen.values()].join()) }`, '(b) passes caught `e` via `seen`'],
+    ['(b) accumulated with Set.add', `export function f() { const seen = new Set<unknown>(); try { g() } catch (e) { seen.add(e) } return new FooError([...seen].join()) }`, '(b) passes caught `e` via `seen`'],
     ['(b) .catch callback', `export const f = (p: Promise<void>) => p.catch((e) => { throw new FooError(e) })`, '(b) passes caught `e`'],
     ['(b) .catch with a named handler', `function handler(problem: unknown) { return new FooError(problem as string) }\nexport const f = (p: Promise<void>) => p.catch(handler)`, '(b) passes caught `problem`'],
     ['(b) .on(\'error\') listener', `export const f = (s: any) => s.on('error', (e: unknown) => { throw new FooError(e as string) })`, '(b) passes caught `e`'],
+    ['(b) .on(<non-literal event>) listener', `export const f = (s: any, ev: string) => s.on(ev, (e: unknown) => { throw new FooError(e as string) })`, '(b) passes caught `e`'],
     ['(c) String(caught)', `export function f() { try { g() } catch (error) { throw new FooError(String(error)) } }`, '(c) interpolates caught `error`'],
     ['(c) template of caught', `export function f() { try { g() } catch (error) { throw new FooError(\`failed: \${error}\`) } }`, '(c) interpolates caught `error`'],
     ['(c) .then(_, cb) template', `export const f = (p: Promise<void>) => p.then(() => 1, (e) => new FooError(\`x \${e}\`))`, '(c) interpolates caught `e`'],
-    ['(d) .message rewritten after construction', `export function f(t: string) { const e = new FooError('x'); e.message = t; throw e }`, '(d) .message rewritten after construction'],
-    ['(d) Object.assign over a fresh instance', `export const f = (t: string) => Object.assign(new FooError('x'), { message: t })`, '(d) the instance is handed to Object.assign'],
+    ['(c) module-level binding written in a catch', `let lastError = ''\nexport function remember() { try { g() } catch (e) { lastError = String(e) } }\nexport const f = () => new FooError(lastError)`, '(c) interpolates caught `e` via `lastError`'],
+    ['(c) accumulated with push of String(caught)', `export function f() { const parts: string[] = []; try { g() } catch (e) { parts.push(String(e)) } return new FooError(\`x \${parts.join(', ')}\`) }`, '(c) interpolates caught `e` via `parts`'],
+    ['(d) a fresh instance handed to Object.assign', `export const f = (t: string) => Object.assign(new FooError('x'), { code: t })`, '(d) the instance is handed to Object.assign'],
   ]
   it.each(RULE_CASES)('%s fires', (_label, body, expected) => {
     const scan = synthetic(`import { FooError } from './errors'\n${body}\n`)
@@ -973,6 +1247,41 @@ export const Expr = class extends FooError {}
     expect(scan.violations.some((v) => v.includes("FooError's own super(…) argument 1: (a) reads .message"))).toBe(true)
   })
 
+  it('an argument exemption never covers the exempt class\'s OWN super(…): a tainted message there is red', () => {
+    const viaModuleState = synthetic(CLEAN_USER, {
+      [`${S}/x/errors.ts`]: ERRORS
+        .replace("super('A fixed sentence.')", 'super(lastFailure)')
+        .replace('export class BarError', "let lastFailure = 'A fixed sentence.'\nexport function remember(op: () => void) { try { op() } catch (e) { lastFailure = String(e) } }\nexport class BarError"),
+    })
+    expect(viaModuleState.violations.some((v) => v.includes("CauseOnlyError's own super(…) argument 1: (c) interpolates caught `e` via `lastFailure`")), viaModuleState.violations.join('\n')).toBe(true)
+    const viaGlobal = synthetic(CLEAN_USER, {
+      [`${S}/x/errors.ts`]: ERRORS.replace("super('A fixed sentence.')", 'super((globalThis as any).lastError.message)'),
+    })
+    expect(viaGlobal.violations.some((v) => v.includes("CauseOnlyError's own super(…) argument 1: (a) reads .message"))).toBe(true)
+    // The `new CauseOnlyError(error)` argument itself stays exempt.
+    expect(viaGlobal.violations.some((v) => v.includes('new CauseOnlyError(…)'))).toBe(false)
+  })
+
+  it('a listed class rewriting its own message: this.message outside the constructor, a message field, a message getter', () => {
+    const scan = synthetic('', {
+      [`${S}/x/errors.ts`]: ERRORS.replace("export class BarError extends Error {}", `export class BarError extends Error {}
+export class EnrichedError extends Error {
+  constructor(m: string) { super(m) }
+  enrich(e: Error) { this.message = e.message }
+}
+export class FieldError extends Error {
+  message = (globalThis as any).last.message
+}
+export class GetterError extends Error {
+  get message() { return 'x' }
+}`),
+      [`${S}/x/lists.ts`]: LISTS.replace('[FooError, CauseOnlyError]', '[FooError, CauseOnlyError, EnrichedError, FieldError, GetterError]'),
+    })
+    expect(scan.violations.some((v) => v.includes('EnrichedError: (d) this.message rewritten outside the constructor')), scan.violations.join('\n')).toBe(true)
+    expect(scan.violations.some((v) => v.includes("FieldError's own field message: (a) reads .message"))).toBe(true)
+    expect(scan.violations.some((v) => v.includes('GetterError overrides message'))).toBe(true)
+  })
+
   it('backstop: a value reference outside the known positions is unplaced', () => {
     const scan = synthetic(`import { FooError } from './errors'
 const C = FooError
@@ -985,31 +1294,80 @@ export const c = { FooError }
     ])
   })
 
-  it('list discovery: spreads and inline lists are followed; a non-array list or an unknown consumer fails closed', () => {
+  it('list discovery: spreads, inline lists and a same-file pass-through call are followed; a non-array list or an unknown consumer fails closed', () => {
     const spread = synthetic('', {
       [`${S}/x/more.ts`]: `import { BarError } from './errors'
-import { SAMPLE_FIXED_SENTENCES } from './lists'
 import type { FixedSentenceErrorClass } from './failure-text'
 const LOCAL: readonly FixedSentenceErrorClass[] = [BarError]
 const WIDER: readonly FixedSentenceErrorClass[] = [...LOCAL]
+function show(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return classify(e, { fallback: 'x', fixedSentenceClasses: classes }) }
 export const t = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: [BarError] })
 export const u = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: WIDER })
+export const v = (e: unknown) => show(e, [BarError])
 `,
     })
     expect(spread.failures).toEqual([])
     expect(spread.lists.get(`${S}/x/more.ts WIDER`)).toEqual(['BarError'])
     expect(spread.lists.get(`${S}/x/more.ts inline#1`)).toEqual(['BarError'])
+    expect(spread.lists.get(`${S}/x/more.ts inline#2`)).toEqual(['BarError'])
     expect(spread.classes).toContain('BarError')
 
     const frozen = synthetic('', {
       [`${S}/x/more.ts`]: `import { BarError } from './errors'
 import type { FixedSentenceErrorClass } from './failure-text'
-export const FROZEN: readonly FixedSentenceErrorClass[] = Object.freeze([BarError])
+const FROZEN: readonly FixedSentenceErrorClass[] = Object.freeze([BarError])
 export const t = (e: unknown, list: unknown[]) => classify(e, { fallback: 'x', fixedSentenceClasses: list as never })
 `,
     })
     expect(frozen.failures.some((f) => f.includes('allow-list FROZEN is not an array literal'))).toBe(true)
     expect(frozen.failures.some((f) => f.includes('neither a discovered list nor a pass-through parameter'))).toBe(true)
+  })
+
+  const PASS_THROUGH = `import type { FixedSentenceErrorClass } from './failure-text'
+function show(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return classify(e, { fallback: 'x', fixedSentenceClasses: classes }) }
+`
+  const LIST_FAIL_CASES: Array<[string, Record<string, string>, string]> = [
+    ['an exported pass-through function (the cross-file attack: another file calls it with an inline list)', {
+      [`${S}/x/wrapper.ts`]: PASS_THROUGH.replace('function show', 'export function show'),
+      [`${S}/x/caller.ts`]: `import { show } from './wrapper'\nimport { BarError } from './errors'\nexport const f = (e: Error) => { show(e, [BarError]); throw new BarError(e.message) }\n`,
+    }, 'show takes a FixedSentenceErrorClass parameter and is exported'],
+    ['an exported arrow pass-through', {
+      [`${S}/x/wrapper.ts`]: `import type { FixedSentenceErrorClass } from './failure-text'\nexport const show = (e: unknown, classes: readonly FixedSentenceErrorClass[]) => classify(e, { fallback: 'x', fixedSentenceClasses: classes })\n`,
+    }, 'show takes a FixedSentenceErrorClass parameter and is exported'],
+    ['a re-exported pass-through function', {
+      [`${S}/x/wrapper.ts`]: `${PASS_THROUGH}export { show }\n`,
+    }, 'show (takes a FixedSentenceErrorClass parameter) is re-exported'],
+    ['a pass-through re-exported under another name', {
+      [`${S}/x/wrapper.ts`]: `${PASS_THROUGH}export { show as display }\n`,
+    }, 'show (takes a FixedSentenceErrorClass parameter) is re-exported'],
+    ['a pass-through referenced as a value (handed to a registry)', {
+      [`${S}/x/wrapper.ts`]: `${PASS_THROUGH}register(show)\n`,
+    }, 'show (takes a FixedSentenceErrorClass parameter) is used as a value'],
+    ['a pass-through called through .call', {
+      [`${S}/x/wrapper.ts`]: `${PASS_THROUGH}export const f = (e: unknown, k: any) => show.call(null, e, k)\n`,
+    }, 'show (takes a FixedSentenceErrorClass parameter) is used as a value'],
+    ['a pass-through on CommonJS exports', {
+      [`${S}/x/wrapper.js`]: `function show(e, /** @type {any} */ classes) { return classify(e, { fallback: 'x', fixedSentenceClasses: classes }) }\nmodule.exports = { show }\n`,
+    }, 'neither a discovered list nor a pass-through parameter'],
+    ['a pass-through method', {
+      [`${S}/x/wrapper.ts`]: `import type { FixedSentenceErrorClass } from './failure-text'\nexport class Shower { show(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return classify(e, { fallback: 'x', fixedSentenceClasses: classes }) } }\n`,
+    }, 'a FixedSentenceErrorClass parameter on a method, callback or anonymous function'],
+    ['an exported list constant', {
+      [`${S}/x/more.ts`]: `import { BarError } from './errors'\nimport type { FixedSentenceErrorClass } from './failure-text'\nexport const OUT: readonly FixedSentenceErrorClass[] = [BarError]\n`,
+    }, 'allow-list OUT is exported'],
+    ['a list constant mutated', {
+      [`${S}/x/more.ts`]: `import { BarError, FooError } from './errors'\nimport type { FixedSentenceErrorClass } from './failure-text'\nconst L: readonly FixedSentenceErrorClass[] = [BarError]\n;(L as any).push(FooError)\nexport const t = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: L })\n`,
+    }, 'allow-list L is referenced outside a consumer position'],
+    ['fixedSentenceClasses assigned as a property', {
+      [`${S}/x/more.ts`]: `import { BarError } from './errors'\nexport function t(e: unknown) { const o: any = { fallback: 'x' }; o.fixedSentenceClasses = [BarError]; return classify(e, o) }\n`,
+    }, 'fixedSentenceClasses assigned as a property'],
+    ['fixedSentenceClasses as a computed key', {
+      [`${S}/x/more.ts`]: `import { BarError } from './errors'\nexport const t = (e: unknown) => classify(e, { fallback: 'x', ['fixedSentenceClasses']: [BarError] })\n`,
+    }, "'fixedSentenceClasses' spelled as a string"],
+  ]
+  it.each(LIST_FAIL_CASES)('list discovery fails closed on %s', (_label, extra, expected) => {
+    const scan = synthetic('', extra)
+    expect(scan.failures.some((f) => f.includes(expected)), scan.failures.join('\n')).toBe(true)
   })
 
   it('an exemption is re-verified: a constructor that lets the exempt argument reach the message breaks it', () => {
@@ -1029,5 +1387,28 @@ export const t = (e: unknown, list: unknown[]) => classify(e, { fallback: 'x', f
     const widened = synthetic(user, { [`${S}/x/lists.ts`]: LISTS.replace('[FooError, CauseOnlyError]', '[FooError, CauseOnlyError, BarError]') })
     expect(countsByClass(widened).BarError).toBe(1)
     expect(widened.violations.some((v) => v.includes('new BarError(…) argument 1: (a) reads .message'))).toBe(true)
+  })
+
+  const REWRITE_CASES: Array<[string, string, string]> = [
+    ['a caught, instanceof-narrowed instance enriched in place', `export function f(op: () => void, p: Error) { try { op() } catch (err) { if (err instanceof FooError) err.message = \`\${err.message} (\${p.message})\`; throw err } }`, 'err.message ='],
+    ['a let-bound instance rewritten later', `export function f(t: string) { let e; e = new FooError('x'); e.message = t; return e }`, 'e.message ='],
+    ['a compound rewrite', `export function f(e: Error, t: string) { e.message += t }`, 'e.message ='],
+    ['a bracket rewrite of stack', `export function f(e: Error, t: string) { e['stack'] = t }`, 'e.stack ='],
+    ['a holder field rewrite', `export function f(holder: { error: Error }, t: string) { holder.error.message = t }`, 'holder.error.message ='],
+    ['a destructuring-assignment rewrite', `export function f(e: Error, o: { t: string }) { ({ t: e.message } = o) }`, 'destructuring e.message ='],
+    ['Object.defineProperty', `export function f(e: Error, t: string) { Object.defineProperty(e, 'message', { value: t }) }`, "Object.defineProperty(e, 'message')"],
+    ['Object.defineProperties', `export function f(e: Error, t: string) { Object.defineProperties(e, { stack: { value: t } }) }`, 'Object.defineProperties(e, { stack })'],
+    ['Object.assign', `export function f(e: Error, message: string) { Object.assign(e, { message }) }`, 'Object.assign(e, { message })'],
+    ['Reflect.set', `export function f(e: Error, t: string) { Reflect.set(e, 'message', t) }`, "Reflect.set(e, 'message')"],
+    ['Reflect.defineProperty', `export function f(e: Error, t: string) { Reflect.defineProperty(e, 'stack', { value: t }) }`, "Reflect.defineProperty(e, 'stack')"],
+  ]
+  it.each(REWRITE_CASES)('(d) the tree-wide census finds %s', (_label, body, form) => {
+    const census = censusMessageRewrites(new Map([[`${S}/x/user.ts`, `import { FooError } from './errors'\n${body}\n`]]))
+    expect(census).toEqual({ [`${S}/x/user.ts :: ${form}`]: 1 })
+  })
+
+  it('(d) the census ignores `this` targets and plain reads, and scans plugin CommonJS too', () => {
+    expect(censusMessageRewrites(new Map([[`${S}/x/user.ts`, `class A extends Error { constructor() { super('x'); this.message = 'y'; Object.assign(this, { stack: '' }) } }\nexport const r = (e: Error) => e.message\n`]]))).toEqual({})
+    expect(censusMessageRewrites(new Map([['plugins/p/lib/x.cjs', `module.exports = (e) => { e.message = 'x' }\n`]]))).toEqual({ 'plugins/p/lib/x.cjs :: e.message =': 1 })
   })
 })
