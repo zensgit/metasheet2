@@ -919,6 +919,7 @@ describeDb('S5b members port (real host wiring, real DB)', () => {
 //   * RF-05 (S1) a custom-shaped role carrying a platform code is locked: shown, not appointable or
 //     editable, every port write 409, nothing changes;
 //   * RF-06 (S5) 98 custom roles + 6 parallel creates → exactly 2 land, the cap holds at 100;
+//     RF-06b the same at 99 with a barrier that holds the first in-lock count open: one lands;
 //   * RF-07 (S5) an out-of-scope member appointed after the fast scan is seen by the scan under the
 //     locks (refused); one appointed DURING the locked transaction waits for its commit;
 //   * RF-08 (S5) the grantor's admission revoked after the fast check is seen under the locks
@@ -1205,6 +1206,33 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
       .then((created) => { createdRoleIds.push((created as { roleId: string }).roleId); return 'created' }, (error: { code?: string }) => error.code ?? 'error')))
     expect(outcomes.filter((outcome) => outcome === 'created')).toHaveLength(2)
     expect(outcomes.filter((outcome) => outcome === 'STOCK_PREP_CUSTOM_ROLE_LIMIT')).toHaveLength(4)
+    expect(await customRoleCount()).toBe(100)
+    await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [fillers])
+  })
+
+  it('RF-06b (S5) at 99 roles, a create that counted waits for no second count: the advisory lock serialises count → insert', async () => {
+    // Deterministic: the first transaction to COUNT (inside its locks) holds there for up to 600 ms,
+    // waiting for a second transaction to count too. Under the per-namespace lock the second cannot
+    // count until the first commits, so it sees 100 and is refused; without the lock both see 99.
+    const before = await customRoleCount()
+    const fillers = Array.from({ length: 99 - before }, () => `stock-prep_c_${randomUUID().replace(/-/g, '').slice(0, 8)}`)
+    createdRoleIds.push(...fillers)
+    if (fillers.length) await pool.query('INSERT INTO roles (id, name) SELECT x, x FROM unnest($1::text[]) x', [fillers])
+    expect(await customRoleCount()).toBe(99)
+    let counted = 0
+    const isCount = (sql: string) => sql.startsWith('SELECT COUNT(*)::int AS c FROM roles WHERE id LIKE')
+    const racer = () => hookedPort({
+      afterTx: async (sql) => {
+        if (!isCount(sql)) return
+        counted += 1
+        if (counted !== 1) return
+        const until = Date.now() + 600
+        while (Date.now() < until && counted < 2) await new Promise((done) => setTimeout(done, 20))
+      },
+    })
+    const outcomes = await Promise.all([0, 1].map((i) => racer().createCustomRole({ actorId: ADMIN, name: `S5bf barrier ${i}`, permissionCodes: [] })
+      .then((created) => { createdRoleIds.push((created as { roleId: string }).roleId); return 'created' }, (error: { code?: string }) => error.code ?? 'error')))
+    expect(outcomes.sort()).toEqual(['STOCK_PREP_CUSTOM_ROLE_LIMIT', 'created'])
     expect(await customRoleCount()).toBe(100)
     await pool.query('DELETE FROM roles WHERE id = ANY($1::text[])', [fillers])
   })
