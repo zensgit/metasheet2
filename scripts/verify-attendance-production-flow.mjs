@@ -5,6 +5,7 @@ import path from 'path'
 import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 import { randomUUID } from 'node:crypto'
+import { scopeAttendanceImportUrl } from './ops/attendance-import-scope.mjs'
 
 const webUrl = process.env.WEB_URL || 'http://localhost:8899/'
 const apiBaseEnv = process.env.API_BASE || ''
@@ -492,20 +493,19 @@ async function run() {
   const workDate = formatDateOnly(today)
   const start = new Date(today)
   start.setHours(9, 0, 0, 0)
-  const end = new Date(today)
-  end.setHours(18, 0, 0, 0)
   await clickAndMaybeContinue(
     (async () => {
-      await page.locator('#attendance-request-work-date').fill(workDate)
-      await page.locator('#attendance-request-type').selectOption('missed_check_in')
-      await page.locator('#attendance-request-in').fill(formatDatetimeLocal(start))
-      await page.locator('#attendance-request-out').fill(formatDatetimeLocal(end))
+      await page.locator('[data-selfservice-action="missing-punch"]').click()
+      const makeupCard = page.locator('[data-attendance-makeup-request-card]')
+      await makeupCard.waitFor({ state: 'visible', timeout: timeoutMs })
+      await makeupCard.locator('[data-makeup-card-time]').fill(formatDatetimeLocal(start))
+      await makeupCard.locator('[data-makeup-card-reason]').fill('Synthetic acceptance')
       const reqResp = waitForJsonResponse(
         page,
         (resp) => resp.request().method() === 'POST' && resp.url().includes('/api/attendance/requests'),
         { label: 'Submit request' }
       )
-      await buttonByNames(page, uiText.submitRequest).click()
+      await makeupCard.locator('[data-makeup-card-submit]').click()
       const { body } = await reqResp
       logInfo(`Request API ok: ${Boolean(body?.ok)} id=${body?.data?.request?.id || ''}`)
     })(),
@@ -686,7 +686,10 @@ async function run() {
   }
   await page.screenshot({ path: path.join(outputDir, '05-import-batches.png'), fullPage: true })
 
-  const batchItems = await apiGetJson(`${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`, token)
+  const batchItems = await apiGetJson(scopeAttendanceImportUrl(
+    `${apiBase}/attendance/import/batches/${batchId}/items?pageSize=200`,
+    process.env.ORG_ID || 'default',
+  ), token)
   if (!batchItems.ok) {
     throw new Error(`GET /attendance/import/batches/:id/items failed: ${batchItems.status}`)
   }

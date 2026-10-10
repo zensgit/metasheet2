@@ -854,6 +854,7 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
@@ -1866,6 +1867,18 @@ jobs:
         run: |
           pnpm --filter @metasheet/web build
 
+      - name: Rehearse attendance QA self-service fixtures in a disposable database
+        env:
+          NODE_ENV: test
+        run: |
+          attendance_qa_database="attendance_qa_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          createdb --host=localhost --username=postgres "$attendance_qa_database"
+          trap 'dropdb --host=localhost --username=postgres --if-exists "$attendance_qa_database"' EXIT
+          export DATABASE_URL="postgresql://postgres@localhost:5432/$attendance_qa_database"
+          export ATTENDANCE_TEST_DATABASE_URL="$DATABASE_URL"
+          pnpm --filter @metasheet/core-backend migrate
+          pnpm --filter @metasheet/core-backend exec tsx ../../scripts/ops/attendance-selfservice-fixture-verify.mts
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -1885,6 +1898,7 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
+            tests/integration/attendance-live-punch-order.db.test.ts \
             tests/integration/attendance-approval-action-authorization.db.test.ts \
             tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \

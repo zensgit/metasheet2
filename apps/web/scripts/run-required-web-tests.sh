@@ -1589,6 +1589,7 @@ exec npx vitest run \
   asyncStateBlock \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
+  attendance-record-timeline \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
@@ -1601,8 +1602,10 @@ exec npx vitest run \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
   attendanceOverviewRequestReveal \
+  attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
   AttendanceScheduledFeatureStatus \
+  attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
   automation-action-summary \
   automation-condition-legacy-person-picker \

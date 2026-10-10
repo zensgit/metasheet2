@@ -11,6 +11,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { assertImportTelemetry, coerceNonNegativeNumber } from './attendance-import-telemetry-utils.mjs'
+import { scopeAttendanceImportUrl } from './attendance-import-scope.mjs'
 
 const apiBase = String(process.env.API_BASE || '').replace(/\/+$/, '')
 let token = String(process.env.AUTH_TOKEN || '')
@@ -316,7 +317,7 @@ async function refreshAuthToken() {
 }
 
 async function apiFetch(pathname, init = {}) {
-  const url = `${apiBase}${pathname}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${pathname}`, orgId)
   const method = String(init.method || 'GET').toUpperCase()
   const attempts = isTokenizedImportEndpoint(pathname, method)
     ? 1
@@ -342,7 +343,7 @@ async function apiFetch(pathname, init = {}) {
 }
 
 async function apiFetchText(pathname, init = {}) {
-  const url = `${apiBase}${pathname}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${pathname}`, orgId)
   const method = String(init.method || 'GET').toUpperCase()
   const attempts = isTokenizedImportEndpoint(pathname, method) ? 1 : apiRetryAttempts
   const res = await fetchWithRetry(url, {

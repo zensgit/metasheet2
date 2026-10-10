@@ -10,6 +10,7 @@ import { resolveMakeupPunchRequestStatusCopy } from '../src/views/attendance/mak
 
 const authMockState = vi.hoisted(() => ({
   currentUserId: 'swap-user-a',
+  sessionOrgId: '',
   identityPending: null as Promise<string> | null,
   pluginsPending: null as Promise<void> | null,
   // Absent (null) by default, like the rest of this file assumes: no getAccessSnapshot on the auth mock.
@@ -35,6 +36,7 @@ vi.mock('../src/composables/usePlugins', () => ({
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({
     getCurrentUserId: vi.fn(() => authMockState.identityPending ?? Promise.resolve(authMockState.currentUserId)),
+    buildAuthHeaders: () => authMockState.sessionOrgId ? { 'x-tenant-id': authMockState.sessionOrgId } : {},
     ...(authMockState.accessSnapshot ? { getAccessSnapshot: () => authMockState.accessSnapshot } : {}),
   }),
 }))
@@ -627,6 +629,39 @@ function installMakeupRejectMock(options: { code: string; status?: number; succe
   return { createBodies }
 }
 
+function latestRequestPostBody(): Record<string, unknown> | undefined {
+  const call = [...vi.mocked(apiFetch).mock.calls].reverse().find(([url, init]) =>
+    String(url).endsWith('/api/attendance/requests')
+    && String((init as RequestInit | undefined)?.method || 'GET').toUpperCase() === 'POST',
+  )
+  if (!call) return undefined
+  return JSON.parse(String((call[1] as RequestInit | undefined)?.body || '{}')) as Record<string, unknown>
+}
+
+function installHistoricalOnlyRecords(
+  record: Record<string, unknown>,
+  anomalyItems?: Array<Record<string, unknown>>,
+): void {
+  const baseImpl = vi.mocked(apiFetch).getMockImplementation()
+  vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+    const url = typeof input === 'string' ? input : input.url
+    if (url.includes('/api/attendance/records?')) {
+      return jsonResponse(200, { ok: true, data: { items: [record], total: 1 } })
+    }
+    if (anomalyItems && url.includes('/api/attendance/anomalies?')) {
+      return jsonResponse(200, { ok: true, data: { items: anomalyItems } })
+    }
+    if (url.includes('/api/attendance/leave-types')) {
+      return jsonResponse(200, {
+        ok: true,
+        data: { items: [{ id: 'leave-annual', name: 'Annual Leave', defaultMinutesPerDay: 480 }] },
+      })
+    }
+    if (!baseImpl) return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+    return baseImpl(input, init)
+  })
+}
+
 function setFormValue(root: HTMLElement, selector: string, value: string): void {
   const el = root.querySelector<HTMLInputElement | HTMLSelectElement>(selector)
   expect(el, `expected ${selector}`).toBeTruthy()
@@ -713,6 +748,7 @@ describe('Attendance self-service dashboard', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
     authMockState.currentUserId = 'swap-user-a'
+    authMockState.sessionOrgId = ''
     authMockState.identityPending = null
     authMockState.pluginsPending = null
     authMockState.accessSnapshot = null
@@ -1402,7 +1438,7 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    // activeWorkbenchRecord — Today status card, unchanged anchor.
+    // Today's attendance row — Today status card, unchanged anchor.
     expect(container!.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('Late + Early')
     // heroTodayTimeline — unchanged data-testid.
     expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeTruthy()
@@ -2969,6 +3005,227 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toContain('2026-04-16')
   })
 
+  it.each([false, true])('#5986: historical filters keep accurate self today status (complete=%s)', async (complete) => {
+    authMockState.sessionOrgId = 'session-org-b'
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/attendance/records') {
+        const dedicated = url.searchParams.get('pageSize') === '1'
+        const date = dedicated ? '2026-04-15' : '2026-04-01'
+        return jsonResponse(200, { ok: true, data: { items: [{
+          id: dedicated ? 'self-today' : 'other-history', work_date: date,
+          first_in_at: `${date}T09:18:00+08:00`,
+          last_out_at: complete || !dedicated ? `${date}T17:42:00+08:00` : null,
+          work_minutes: complete || !dedicated ? 444 : 0, status: 'normal',
+          workday_context: { timezone: 'Asia/Shanghai' },
+        }], total: 1 } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+    vi.mocked(apiFetch).mockClear()
+    setFormValue(container!, '#attendance-from-date', '2026-04-01')
+    setFormValue(container!, '#attendance-to-date', '2026-04-02')
+    setFormValue(container!, '#attendance-org-id', 'history-org-other')
+    setFormValue(container!, 'input[name="targetUserId"]', 'history-user-other')
+    // The existing org filter watcher refreshes immediately; count this explicit refresh only.
+    await flushUi(16)
+    vi.mocked(apiFetch).mockClear()
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    const status = container!.querySelector('.attendance-ew__clock-status')?.textContent
+    expect(status).toContain(complete ? 'Clocked out' : 'Clocked in')
+    expect(status).not.toContain('Not clocked in yet')
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')?.textContent).toContain('09:18')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-from-date')?.value).toBe('2026-04-01')
+    expect(container!.querySelector<HTMLInputElement>('#attendance-to-date')?.value).toBe('2026-04-02')
+    const todayCalls = vi.mocked(apiFetch).mock.calls.map(([input]) => new URL(String(input), 'http://localhost'))
+      .filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')
+    expect(todayCalls).toHaveLength(1)
+    expect(Object.fromEntries(todayCalls[0].searchParams)).toEqual({
+      from: '2026-04-15', to: '2026-04-15', page: '1', pageSize: '1', orgId: 'session-org-b',
+    })
+  })
+
+  it('#5986: failed self today read stays unknown and can be retried', async () => {
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    let failToday = true
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return failToday
+          ? jsonResponse(503, { ok: false, error: { code: 'UNAVAILABLE' } })
+          : jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    setFormValue(container!, '#attendance-from-date', '2026-04-01')
+    setFormValue(container!, '#attendance-to-date', '2026-04-02')
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Unable to load today')
+    expect(container!.querySelector('[data-attendance-hero-next="true"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    expect(container!.querySelector('[data-selfservice-card="status"]')?.textContent).not.toContain('No attendance record for today yet.')
+    expect(findButton(container!, 'Check In').disabled).toBe(false)
+    failToday = false
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
+  })
+
+  it('#5986: focused approval history response cannot replace a fresh midnight self read', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    let holdHistory = false
+    let releaseHistory!: () => void
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return jsonResponse(200, { ok: true, data: { items: [{
+          id: 'fresh-next-day', work_date: '2026-04-16', first_in_at: '2026-04-16T00:00:00+08:00', last_out_at: null,
+          work_minutes: 0, status: 'partial', workday_context: { timezone: 'Asia/Shanghai' },
+        }], total: 1 } })
+      }
+      if (holdHistory && url.pathname === '/api/attendance/records') {
+        const response = await baseMock(input, init)
+        return new Promise<Response>(resolve => { releaseHistory = () => resolve(response) })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, {
+      mode: 'overview', initialSectionId: 'attendance-overview-requests', initialRequestId: 'request-focused',
+    })
+    app.mount(container!)
+    await flushUi(16)
+    setFormValue(container!, '#attendance-to-date', '2026-04-16')
+    holdHistory = true
+    findButton(container!, 'Approve').click()
+    await flushUi(48)
+    expect(releaseHistory).toBeTypeOf('function')
+    expect(vi.mocked(apiFetch).mock.calls.some(([url]) => String(url).endsWith('/api/attendance/requests/request-focused/approve'))).toBe(true)
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    releaseHistory()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+  })
+
+  it('#5986: late refresh completion cannot replace a fresh midnight read with pre-midnight history', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    let holdSummary = false
+    let releaseSummary!: () => void
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (holdSummary && url.pathname === '/api/attendance/summary') {
+        const response = await baseMock(input, init)
+        return new Promise<Response>(resolve => { releaseSummary = () => resolve(response) })
+      }
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return jsonResponse(200, { ok: true, data: { items: [{
+          id: 'fresh-next-day', work_date: '2026-04-16', first_in_at: '2026-04-16T00:00:00+08:00', last_out_at: null,
+          work_minutes: 0, status: 'partial', workday_context: { timezone: 'Asia/Shanghai' },
+        }], total: 1 } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+    setFormValue(container!, '#attendance-to-date', '2026-04-16')
+    holdSummary = true
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    expect(releaseSummary).toBeTypeOf('function')
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    releaseSummary()
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+  })
+
+  it('#5986: midnight invalidates an in-flight yesterday read and drops its late response', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:58Z'))
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    const pending = new Map<string, (response: Response) => void>()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = new URL(String(input), 'http://localhost')
+      if (url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1') {
+        return new Promise<Response>(resolve => pending.set(url.searchParams.get('from')!, resolve))
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
+    setFormValue(container!, '#attendance-from-date', '2026-04-01')
+    setFormValue(container!, '#attendance-to-date', '2026-04-02')
+    findButton(container!, 'Refresh').click()
+    await flushUi(16)
+    expect(pending.has('2026-04-15')).toBe(true)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Loading today')
+    expect(container!.querySelector('[data-attendance-hero-next="true"]')).toBeNull()
+    await vi.advanceTimersByTimeAsync(2000)
+    await flushUi(16)
+    expect(pending.has('2026-04-16')).toBe(true)
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    pending.get('2026-04-16')!(jsonResponse(200, { ok: true, data: { items: [{
+      id: 'next-day', work_date: '2026-04-16', first_in_at: '2026-04-16T00:00:00+08:00', last_out_at: null,
+      work_minutes: 0, status: 'partial', workday_context: { timezone: 'Asia/Shanghai' },
+    }], total: 1 } }))
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    pending.get('2026-04-15')!(jsonResponse(200, { ok: true, data: { items: [], total: 0 } }))
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked in')
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')?.textContent).toContain('00:00')
+    expect(container!.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+  })
+
+  it('#5986: malformed rule timezone leaves today unknown without guessing or querying a day', async () => {
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input).includes('/api/attendance/rules/me')) {
+        return jsonResponse(200, { ok: true, data: { runtimeRule: { timezone: 'Mars/Olympus' } } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('rule timezone unavailable')
+    expect(container!.querySelector('[data-attendance-hero-next="true"]')).toBeNull()
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    expect(vi.mocked(apiFetch).mock.calls.filter(([input]) => String(input).includes('/api/attendance/records?')
+      && new URL(String(input), 'http://localhost').searchParams.get('pageSize') === '1')).toHaveLength(0)
+  })
+
+  it('#5986: an open page stops treating the completed row as today after rule-zone midnight', async () => {
+    vi.setSystemTime(new Date('2026-04-15T15:59:59Z'))
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
+    await vi.advanceTimersByTimeAsync(1000)
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-overview-greeting]')?.textContent).toContain('2026-04-16')
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi()
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBe('2026-04-16')
+  })
+
   it('UI-P0 does not guess a browser timezone when the rule timezone is unavailable', async () => {
     vi.mocked(apiFetch).mockImplementation(async () =>
       jsonResponse(200, { ok: true, data: { items: [], summary: null } }))
@@ -3024,43 +3281,179 @@ describe('Attendance self-service dashboard', () => {
     expect(warning!.textContent).toContain('18m / 18m')
   })
 
-  it('UI-P1: the latest completed record preserves both timeline nodes when today has no row', async () => {
-    const apiFetchMock = vi.mocked(apiFetch)
-    const baseImpl = apiFetchMock.getMockImplementation()!
-    apiFetchMock.mockImplementation(async (input: unknown, init?: unknown) => {
-      const url = String(input)
-      if (url.includes('/api/attendance/records?')) {
-        return jsonResponse(200, {
-          ok: true,
-          data: {
-            items: [{
-              id: 'record-yesterday',
-              work_date: '2026-04-14',
-              first_in_at: '2026-04-14T09:00:00+08:00',
-              last_out_at: '2026-04-14T18:06:00+08:00',
-              work_minutes: 486,
-              late_minutes: 0,
-              early_leave_minutes: 0,
-              status: 'adjusted',
-              meta: {},
-              workday_context: { timezone: 'Asia/Shanghai' },
-            }],
-            total: 1,
-          },
-        })
-      }
-      return baseImpl(input as never, init as never)
+  it('UI-P1 / #5986: no today row does not present yesterday\'s completed pair as today', async () => {
+    installHistoricalOnlyRecords({
+      id: 'record-yesterday',
+      work_date: '2026-04-14',
+      first_in_at: '2026-04-14T09:00:00+08:00',
+      last_out_at: '2026-04-14T18:06:00+08:00',
+      work_minutes: 486,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      status: 'adjusted',
+      meta: {},
+      workday_context: { timezone: 'Asia/Shanghai' },
     })
 
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)
     await flushUi()
 
-    const timeline = container!.querySelector('[data-testid="attendance-hero-timeline"]')
-    expect(timeline).toBeTruthy()
-    expect(timeline!.textContent).toContain('09:00')
-    expect(timeline!.textContent).toContain('18:06')
-    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Clocked out')
+    const hero = container!.querySelector('[data-testid="attendance-hero-punch"]')
+    expect(hero?.textContent).toContain('Not clocked in yet')
+    expect(hero?.textContent).not.toContain('Clocked out')
+    expect(hero?.textContent).not.toContain('09:00')
+    expect(hero?.textContent).not.toContain('18:06')
+    expect(container!.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_in')
+    expect(container!.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+    expect(container!.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container!.querySelector('[data-selfservice-card="status"]')?.textContent).toContain('No attendance record for today yet.')
+  })
+
+  it('#5986: yesterday missing checkout stays off today\'s punch emphasis and in the anomaly todo', async () => {
+    installHistoricalOnlyRecords({
+      id: 'record-yesterday',
+      work_date: '2026-04-14',
+      first_in_at: '2026-04-14T09:00:00+08:00',
+      last_out_at: null,
+      work_minutes: 0,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      status: 'partial',
+      meta: {},
+      workday_context: { timezone: 'Asia/Shanghai' },
+    }, [{
+      ...DEFAULT_OVERVIEW_ANOMALY,
+      recordId: 'record-yesterday',
+      workDate: '2026-04-14',
+      status: 'partial',
+      firstInAt: '2026-04-14T09:00:00+08:00',
+      lastOutAt: null,
+      suggestedRequestType: 'missed_check_out',
+      state: 'open',
+    }])
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
+    expect(container!.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_in')
+    expect(container!.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container!.querySelector('[data-attendance-overview-attention]')?.getAttribute('data-attendance-overview-attention-key')).toBe('anomaly')
+  })
+
+  it('#5990: leave and overtime drafts use today when no today attendance row exists', async () => {
+    installHistoricalOnlyRecords({
+      id: 'record-yesterday',
+      work_date: '2026-04-14',
+      first_in_at: '2026-04-14T09:00:00+08:00',
+      last_out_at: '2026-04-14T18:06:00+08:00',
+      work_minutes: 486,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      status: 'adjusted',
+      meta: {},
+      workday_context: { timezone: 'Asia/Shanghai' },
+    }, [])
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi(3)
+
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBe('2026-04-15')
+    const preset = container!.querySelector<HTMLButtonElement>('[data-leave-card-preset="full_day"]')
+    expect(preset?.disabled).toBe(false)
+    preset!.click()
+    await flushUi(2)
+    expect(container!.querySelector<HTMLInputElement>('[data-leave-card-start]')?.value.startsWith('2026-04-15T')).toBe(true)
+    expect(container!.querySelector<HTMLInputElement>('[data-leave-card-end]')?.value.startsWith('2026-04-15T')).toBe(true)
+
+    container!.querySelector<HTMLButtonElement>('[data-leave-card-submit]')!.click()
+    await flushUi(8)
+    expect(latestRequestPostBody()?.workDate).toBe('2026-04-15')
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="overtime"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBe('2026-04-15')
+    setFormValue(container!, '[data-overtime-card-start]', '2026-04-15T18:00')
+    setFormValue(container!, '[data-overtime-card-end]', '2026-04-15T20:00')
+    container!.querySelector<HTMLButtonElement>('[data-overtime-card-submit]')!.click()
+    await flushUi(8)
+    expect(latestRequestPostBody()?.workDate).toBe('2026-04-15')
+    expect(String(latestRequestPostBody()?.requestedInAt)).toMatch(/^2026-04-15T/)
+  })
+
+  it('#5990: makeup without a qualifying anomaly falls back to today, not the historical work_date', async () => {
+    installHistoricalOnlyRecords({
+      id: 'record-yesterday',
+      work_date: '2026-04-14',
+      first_in_at: '2026-04-14T09:00:00+08:00',
+      last_out_at: '2026-04-14T18:06:00+08:00',
+      work_minutes: 486,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      status: 'adjusted',
+      meta: {},
+      workday_context: { timezone: 'Asia/Shanghai' },
+    }, [{
+      ...DEFAULT_OVERVIEW_ANOMALY,
+      state: 'pending',
+      workDate: '2026-04-14',
+      suggestedRequestType: 'missed_check_out',
+    }])
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBe('2026-04-15')
+  })
+
+  it('#5990: makeup with a qualifying anomaly still uses that anomaly work date', async () => {
+    installHistoricalOnlyRecords({
+      id: 'record-yesterday',
+      work_date: '2026-04-14',
+      first_in_at: '2026-04-14T09:00:00+08:00',
+      last_out_at: null,
+      work_minutes: 0,
+      late_minutes: 0,
+      early_leave_minutes: 0,
+      status: 'partial',
+      meta: {},
+      workday_context: { timezone: 'Asia/Shanghai' },
+    }, [{
+      ...DEFAULT_OVERVIEW_ANOMALY,
+      recordId: 'record-yesterday',
+      workDate: '2026-04-14',
+      state: 'open',
+      suggestedRequestType: 'missed_check_out',
+    }])
+
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelector<HTMLInputElement>('#attendance-request-work-date')?.value).toBe('2026-04-14')
+  })
+
+  it('#5990: default history to-date includes rule-timezone today across a browser-day boundary', async () => {
+    vi.setSystemTime(new Date('2026-04-15T16:30:00.000Z'))
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi(16)
+
+    expect(container!.querySelector<HTMLInputElement>('input[name="toDate"]')?.value).toBe('2026-04-16')
+    const fromValue = container!.querySelector<HTMLInputElement>('input[name="fromDate"]')?.value ?? ''
+    expect(fromValue <= '2026-04-16').toBe(true)
   })
 
   it('UI-P1 768px targets exist: stat-card container class + filter fields (selector-preservation guard)', async () => {
