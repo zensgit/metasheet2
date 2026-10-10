@@ -470,6 +470,16 @@
 # workflow-scoped token; until that lands this always-on lane is the only one running the file.
 # Its sibling tests/multitable/export-sheet-client.test.ts remains unwired here (untouched, out of
 # scope for this change).
+#
+# Role delegation page (2026-10-10, #6310 follow-up): `roleDelegationView` — apps/web/tests/
+# roleDelegationView.spec.ts, RoleDelegationView.vue (the delegated-admin role page; its revoke
+# dropdown now reads the server's revocable `delegableRoles`, its assign dropdown the assignable
+# `roleCatalog`). It ran in NO workflow before: no token in this script, approval-web-guard.yml or
+# multitable-web-guard.yml is a substring of its path, so the file was laptop-only green. Bare
+# basename token, checked BOTH directions: none of the existing tokens is a substring of
+# `tests/roleDelegationView.spec.ts`, it is a substring of none of them (nearest: `myDelegationView`,
+# `roleManagementSave`), and among the vitest-collectable spec/test files under apps/web it matches
+# exactly one, its own (src/views/RoleDelegationView.vue is not collectable and differs in case).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Explicit organization sessions: a separate small process, retaining existing
@@ -1869,6 +1879,7 @@ exec npx vitest run \
   personal-view-client \
   public-multitable-form \
   requesterPreviewFields \
+  roleDelegationView \
   roleManagementSave \
   routePreviewErrors \
   run-required-web-tests-shape \

@@ -447,6 +447,7 @@ platform-app-launcher
 platform-app-shell
 public-multitable-form
 requesterPreviewFields
+roleDelegationView
 roleManagementSave
 routePreviewErrors
 run-required-web-tests-shape
