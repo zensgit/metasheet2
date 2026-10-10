@@ -292,16 +292,23 @@ describe('R1 — only a platform admin assigns or revokes a namespace main-admin
     expect(db.userRoles.get(TARGET)?.has(roleId) ?? false).toBe(false)
   })
 
-  it('a delegate cannot demote a peer main admin either (unassign → 403, the role stays)', async () => {
-    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
-    db.userRoles.set(TARGET, new Set(['attendance_admin']))
+  it.each([
+    ['attendance_admin', 'attendance_admin', 'attendance'],
+    ['adgx_admin', 'adgx_admin', 'adgx'],
+    // Carries no admin-level code (`stock-prep:read` only): refused by its ID alone, so this
+    // leg holds even if the code-based admin-equivalent check were the only thing left.
+    ['stock-prep_admin', 'stock-prep_data_admin', 'stock-prep'],
+  ])('a delegate holding %s cannot demote a peer main admin %s either (unassign → typed 403, revoke_denied, the role stays)', async (actorRole, roleId, namespace) => {
+    seedDelegate('delegate-1', actorRole, namespace)
+    db.userRoles.set(TARGET, new Set([roleId]))
 
-    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_admin' } })
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId } })
 
     expect(res.statusCode).toBe(403)
     expect(res.body.error.code).toBe('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
     expect(userRoleWrites()).toEqual([])
-    expect(db.userRoles.get(TARGET)?.has('attendance_admin')).toBe(true)
+    expect(db.userRoles.get(TARGET)?.has(roleId)).toBe(true)
+    expect(auditCalls().map((entry) => [entry.action, entry.meta?.refusalCode])).toEqual([['revoke_denied', 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN']])
   })
 
   it('POSITIVE CONTROL — a platform admin assigns stock-prep_admin through the same route', async () => {

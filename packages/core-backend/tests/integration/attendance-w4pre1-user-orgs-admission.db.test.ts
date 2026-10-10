@@ -696,6 +696,17 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     } finally {
       await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, 'attendance_admin'])
     }
+    // `<x>_admin` carries no code at all: the peer-demotion refusal must come from its id.
+    await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [ids.target, roles.xAdmin])
+    try {
+      const { status, json } = await delegationRole(tokens.xDelegate, ids.target, 'unassign', { roleId: roles.xAdmin })
+      expect(status).toBe(403)
+      expect(json?.error?.code).toBe('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
+      expect(await holds(ids.target, roles.xAdmin)).toBe(true)
+      expect(await auditCount('user-role', `${ids.target}:${roles.xAdmin}`, 'revoke_denied')).toBeGreaterThanOrEqual(1)
+    } finally {
+      await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, roles.xAdmin])
+    }
   })
 
   it('POSITIVE CONTROL — a platform admin appoints stock-prep_admin through the same route', async () => {
