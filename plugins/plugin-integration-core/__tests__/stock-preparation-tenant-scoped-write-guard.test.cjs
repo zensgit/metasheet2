@@ -374,6 +374,11 @@ const PINNED_VALUE_BEARING_READ_HANDLERS = [
   'stockPreparationProjectFieldsUpdate',
   'stockPreparationProjectOverviewRefresh',
   'stockPreparationProjectOverviewEnsure',
+  // S5b (R-39) 「成员与权限」. Adding project sheets to a custom role is a WRITE (a G1 grant per sheet) and
+  // the sheets it may name are the caller's OWN tenant's registry rows — keyed by the tenant this scope
+  // proves, so a header-fillable tenant here would grant a role on another tenant's project sheet. The
+  // other three members handlers resolve no tenant at all (roles are platform-global) and are not here.
+  'stockPreparationMembersCustomRoleProjectTargets',
   // 对账限本人可见项目 WAS PINNED HERE AND IS NOT ANY MORE — said out loud, because the assertion
   // below asks whoever removes a member to say so. #5516 gave reconcile a project-visibility gate
   // that resolved an operator scope to decide WHOSE project directory answered "is this projectNo one
@@ -459,6 +464,9 @@ const VALUE_BEARING_READS_WITH_INLINE_STAGING = new Set([
   // tenant's staging project. (The list route derives none: it reads registry rows by tenant only.)
   'stockPreparationProjectTargetCreate',
   'stockPreparationProjectTargetGet',
+  // S5b (R-39): the project-sheet add derives the staging project the G1 grant names (the plugin-scope
+  // wrapper then requires the sheet to be the one derived for it) — from the scope, never the request.
+  'stockPreparationMembersCustomRoleProjectTargets',
 ])
 
 /**
