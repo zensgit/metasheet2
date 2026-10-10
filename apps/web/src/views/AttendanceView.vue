@@ -33823,10 +33823,63 @@ defineExpose({
   gap: var(--ms-space-3);
 }
 
-/* Summary-field choices sit under the template meta fields and use the
-   same three-column desktop rhythm. The import template guide stays at two. */
+/* Summary-field choices are a tight 4-across row: checkbox and label share
+   one line. The import template guide stays at two. */
 #attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-options {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: center;
+  gap: var(--ms-space-1) var(--ms-space-2);
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-1);
+  width: 100%;
+  height: var(--ms-control-height);
+  min-height: var(--ms-control-height);
+  max-height: var(--ms-control-height);
+  margin: 0;
+  padding: 0 var(--ms-space-2);
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option input {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option > span {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ms-space-1);
+  min-width: 0;
+  overflow: hidden;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option strong,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option code,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option strong {
+  flex: 0 1 auto;
+  color: var(--ms-text-1);
+  font-weight: 600;
+}
+
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option code,
+#attendance-admin-payroll-templates.attendance__form-sheet .attendance__summary-field-option small {
+  flex: 1 1 auto;
 }
 
 .attendance__form-sheet .attendance__template-guide-card,

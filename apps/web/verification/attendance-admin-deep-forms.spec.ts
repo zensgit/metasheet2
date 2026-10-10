@@ -137,11 +137,29 @@ test.describe('attendance admin deep forms share Holidays and Settings chrome', 
     const summaryColumns = await page.locator('[data-payroll-summary-field-options]').evaluate((node) => (
       getComputedStyle(node).gridTemplateColumns.split(' ').filter(Boolean).length
     ))
-    expect(summaryColumns, 'summary field template uses three columns at desktop').toBe(3)
+    expect(summaryColumns, 'summary field template uses four columns at desktop').toBe(4)
+    const summaryGap = await page.locator('[data-payroll-summary-field-options]').evaluate((node) => getComputedStyle(node).columnGap)
+    expect(summaryGap).toBe('8px')
+    const optionLayout = await page.locator('[data-payroll-summary-field-option]').first().evaluate((node) => {
+      const input = node.querySelector('input')
+      const label = node.querySelector('strong')
+      const span = node.querySelector('span')
+      if (!(input instanceof HTMLElement) || !(label instanceof HTMLElement) || !(span instanceof HTMLElement)) {
+        return { height: 0, sameRow: false, spanDirection: '' }
+      }
+      const inputBox = input.getBoundingClientRect()
+      const labelBox = label.getBoundingClientRect()
+      return {
+        height: Math.round(node.getBoundingClientRect().height),
+        sameRow: Math.abs((inputBox.top + inputBox.height / 2) - (labelBox.top + labelBox.height / 2)) <= 4,
+        spanDirection: getComputedStyle(span).flexDirection,
+      }
+    })
+    expect(optionLayout.spanDirection).toBe('row')
+    expect(optionLayout.sameRow, 'checkbox sits on the same row as its label').toBe(true)
+    expect(optionLayout.height).toBe(32)
     await expectControlHeight(page, '#attendance-payroll-template-name')
     await expectControlHeight(page, 'label[for="attendance-payroll-template-auto"]')
-    const optionMinHeight = await page.locator('[data-payroll-summary-field-option]').first().evaluate((node) => getComputedStyle(node).minHeight)
-    expect(optionMinHeight).toBe('32px')
     await scrollBelowSticky(page, '.attendance__payroll-summary-header')
     const name = 'attendance-admin-payroll-templates-1440.png'
     await page.screenshot({ path: `${OUT}/${name}`, fullPage: false })
