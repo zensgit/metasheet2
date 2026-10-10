@@ -348,7 +348,10 @@ describeIfDatabase('approval-product permission catalogue registration — grant
       const after = await getStatus(baseUrl, target.token, GATE_PATHS.manage)
       // eslint-disable-next-line no-console
       console.log(`[permcat manage-surface evidence] GET ${GATE_PATHS.manage} for a direct approval-templates:manage holder: ${before.status} before the grant -> ${after.status} after it`)
-      expect(typeof after.status).toBe('number')
+      // Pinned to the admission check's CURRENT decision for a direct grant of this code (not a promise
+      // of the migration): a holder is still refused until the resource's admission policy changes.
+      // Edit this line together with any admission-policy change.
+      expect(after.status).toBe(403)
 
       // The row was written through the product endpoint, and only for this user.
       const rows = await pool().query<{ user_id: string }>(
