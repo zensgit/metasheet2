@@ -110,6 +110,15 @@
 # token `StockPreparationProjectTarget` is not a substring of it (the reason for the name), and it
 # neither contains nor is contained by any other token here.
 #
+# 一个项目一张备料表 S3 note (ADR §5, register R-37, 2026-10-09): ONE token added,
+# `StockPreparationProjectOverview` — S3's new spec (the project-fields / overview-refresh client, the
+# cross-language posture mirror, 今天要处理's 「已归档（N）」 and 刷新 / 打开项目总览, the board's fields
+# form, 项目查询's 含已归档, PO-ALIGN), on the same footing as the notes above and in the same position
+# the required lane gives it. It lives under the `/**` roster entries that already fire this lane.
+# 过滤词唯一: it is a substring of exactly one spec path, and it neither contains nor is contained by
+# any other token here (`StockPreparationStageOverview` diverges right after `StockPreparation`;
+# `StockPreparationProjectBoard` / `StockPreparationProjectQuery` right after `StockPreparationProject`).
+#
 # 备料「成员与权限」S5b note (ADR §11.4–11.6, register R-39, 2026-10-10): ONE token added,
 # `StockPreparationMembers` — S5b's new spec (the members client, the members page, the switch-gated rail
 # item, SMW-ALIGN), in the same position the required lane gives it. 过滤词唯一: it is a substring of exactly
@@ -191,6 +200,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationPrepLineView \
   StockPreparationProjectArchive \
   StockPreparationProjectBoard \
+  StockPreparationProjectOverview \
   StockPreparationProjectQuery \
   StockPreparationProjectSync.spec.ts \
   StockPreparationProjectSyncPanel.spec.ts \

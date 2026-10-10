@@ -284,6 +284,44 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/target/restore',
     control: 'stock-prep-project-target-restore',
   }),
+  // S3 (ADR §5, register R-37) — the project overview (Q5) and the O2(a) project-level columns. All
+  // three are OPERATE, as the ADR writes them (project-fields: 「门 OPERATE」; refresh: 「OPERATE 档」):
+  // a floor operator may read / set 负责人 / 备注 / 计划完成 on a project they work and rebuild the
+  // read-only overview; the overview SHEET itself is host-level read-only for every person, admins
+  // included. All three answer 404 DISABLED while the default-OFF switch is off, after the gate. The
+  // fields form lives on 项目备料页's sheet-state line, the refresh button on the home page;
+  // StockPreparationProjectOverview.spec.ts asserts the alignment where they live. The project-level
+  // texts travel ONLY through these two routes' bodies and the overview cells — never an audit row.
+  Object.freeze({
+    capability: 'projectFields.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields',
+  }),
+  Object.freeze({
+    capability: 'projectFields.update',
+    code: STOCK_PREP_OPERATE,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields-save',
+  }),
+  Object.freeze({
+    capability: 'projectOverview.refresh',
+    code: STOCK_PREP_OPERATE,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    control: 'stock-prep-project-overview-refresh',
+  }),
+  // S3 fix round 1 (R6): only the 拉取人员 tier CREATES the read-only overview (the project-target create
+  // route does it too, best-effort); the OPERATE refresh projects into an existing one.
+  Object.freeze({
+    capability: 'projectOverview.ensure',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    control: 'stock-prep-project-overview-ensure',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,

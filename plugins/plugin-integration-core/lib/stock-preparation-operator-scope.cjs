@@ -150,6 +150,21 @@
 //           S4 (R-38): WRITES to the registry row of the proven tenant — 归档 / 恢复, PULL tier. The
 //           tenant keys the row they flip; a header-fillable tenant here would archive another
 //           tenant's project. Neither touches a sheet, so neither derives a staging project.
+//       16. GET  …/projects/:projectNo/target/project-fields  `stockPreparationProjectFieldsGet`
+//       17. PATCH …/projects/:projectNo/target/project-fields `stockPreparationProjectFieldsUpdate`
+//           S3 (R-37, ADR §5 O2(a)): the ONLY surfaces that carry the three free-text project-level
+//           columns (负责人 / 备注 / 计划完成), OPERATE. The proven tenant keys the registry row they
+//           read or write; a header-fillable tenant here would read or overwrite another tenant's
+//           texts. Neither touches a sheet, so neither derives a staging project.
+//       18. POST …/stock-preparation/project-overview/refresh  `stockPreparationProjectOverviewRefresh`
+//           S3 (R-37, ADR §5 Q5): rebuilds the read-only overview sheet of the proven tenant's staging
+//           project from its registry rows and project sheets (OPERATE). The staging project whose
+//           overview it projects into, and every project sheet it counts through, is derived from this
+//           scope with no request projectId. Fix round 1: it never creates the overview.
+//       19. POST …/stock-preparation/project-overview/ensure  `stockPreparationProjectOverviewEnsure`
+//           S3 fix round 1 (R-37, R6): the PULL tier creates the proven tenant's read-only overview in
+//           the staging project derived from this scope with no request projectId, and grants the
+//           configured roles READ on it (the host's overview read port).
 //
 // A NEW surface of either kind must join this list, not invent another way to decide tenancy. The
 // static enumeration guard in __tests__/stock-preparation-tenant-scoped-write-guard.test.cjs pins

@@ -21,6 +21,40 @@ export interface StockPrepHomeCard {
   postureFromMemory: boolean
   /** Only ever real for a `directory` card — F1 means no per-card live read backs a `memory` one. */
   pendingDecisionCount: number | null
+  /**
+   * S3 (ADR §5, register R-37): TRUE only for a directory row the server's project-sheet registry
+   * reports as archived. The home page lists such a card in its 「已归档（N）」 section, never in the
+   * main list; 项目查询 tags it 「已归档」.
+   */
+  archived: boolean
+}
+
+/** A count off a directory row, or null when the row did not carry one (absent, null, or not a count). */
+function registryCountOf(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : null
+}
+
+/**
+ * S3 — a REGISTRY row's posture from its own counts, or null when they cannot decide it.
+ *
+ * A directory row carries `archived` (boolean) only when the server enumerated its project-sheet
+ * registry (switch on). Such a row's counts are real, so it no longer needs `progressUnknown` (ADR §5)
+ * — EXCEPT where the registry has not stamped them yet (`pulledRowCount: null` until the overview
+ * refresh): then nothing here can tell 「还没拉过」 from 「可以导出」, and the caller falls back to the
+ * pre-S3 merge (this browser's memory, else 「看不到进度」) rather than guess. `archived` and a live
+ * pending count decide on their own; a known missing-parts count > 0 does too.
+ */
+function registryPosture(project: StockPreparationOperatorProject, pending: number): StockPrepPosture | null {
+  if (typeof project.archived !== 'boolean') return null
+  const missing = registryCountOf(project.missingComponentsCount)
+  const pulled = registryCountOf(project.pulledRowCount)
+  if (project.archived !== true && pending <= 0 && !(missing !== null && missing > 0) && pulled === null) return null
+  return stockPrepPosture({
+    archived: project.archived === true,
+    pendingDecisionCount: pending,
+    missingComponentsCount: missing ?? 0,
+    pulledRowCount: pulled ?? 0,
+  })
 }
 
 /**
@@ -75,6 +109,9 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
   if (key === 'not_yours') return stockPrepPosture({ notYours: true })
   if (key === 'ready') return stockPrepPosture({ pulledRowCount: 1 })
   if (key === 'unknown') return stockPrepPosture({ progressUnknown: true })
+  // Never stored (operatorHomeMemory.ts admits no `archived` — it is a live registry fact), handled
+  // so a hand-written value cannot reach an undefined branch.
+  if (key === 'archived') return stockPrepPosture({ archived: true })
   return stockPrepPosture({})
 }
 
@@ -93,6 +130,8 @@ function memoryPosture(key: StockPrepPostureKey): StockPrepPosture {
  *   pendingDecisionCount  → always the directory's (live ledger beats a remembered enum)
  *   everything else       → this browser's remembered conclusion when it has one, otherwise
  *                           `unknown` (§4.4's `? 看不到`), NEVER an archive-derived ready/not_pulled.
+ *   S3: a REGISTRY row   → its own counts (`archived`, `pulledRowCount`, `missingComponentsCount`)
+ *                           when they can decide the posture (`registryPosture`); 「已归档」 first.
  *
  * `hidden` (客户反馈 2026-09-24 #1a / A8, optional — every existing caller keeps passing two
  * arguments). A project number this principal asked 从列表移除 for, via `operatorHomeMemory.ts`'s
@@ -125,17 +164,22 @@ export function buildOperatorHomeCards(
     seen.add(no)
     const pending = project.pendingDecisionCount
     const live = pending > 0
+    const archived = project.archived === true
     if (hiddenSet && hiddenSet.has(no) && !live) continue
     const memoryKey = remembered.get(no) ?? null
+    // S3: a registry row speaks for itself when its counts can (see `registryPosture`).
+    const fromRegistry = registryPosture(project, pending)
     cards.push({
       projectNo: no,
       projectName: project.projectName,
       source: 'directory',
-      posture: live
-        ? stockPrepPosture({ pendingDecisionCount: pending })
-        : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true })),
-      postureFromMemory: !live && memoryKey !== null,
+      posture: fromRegistry
+        ?? (live
+          ? stockPrepPosture({ pendingDecisionCount: pending })
+          : (memoryKey ? memoryPosture(memoryKey) : stockPrepPosture({ progressUnknown: true }))),
+      postureFromMemory: !fromRegistry && !live && memoryKey !== null,
       pendingDecisionCount: pending,
+      archived,
     })
   }
 
@@ -150,10 +194,25 @@ export function buildOperatorHomeCards(
       posture: memoryPosture(entry.postureKey),
       postureFromMemory: true,
       pendingDecisionCount: null,
+      archived: false,
     })
   }
 
   return cards
+}
+
+/**
+ * S3 (ADR §5 「首页：卡片主列表排除已归档，下方一个折叠区「已归档（N）」」) — split the cards into the main
+ * list and the archived section. Order within each half is preserved.
+ */
+export function partitionOperatorHomeCards(cards: readonly StockPrepHomeCard[]): {
+  active: StockPrepHomeCard[]
+  archived: StockPrepHomeCard[]
+} {
+  const active: StockPrepHomeCard[] = []
+  const archived: StockPrepHomeCard[] = []
+  for (const card of cards) (card.archived ? archived : active).push(card)
+  return { active, archived }
 }
 
 /** Highest-priority-first: pending_decision, then blocked, then ready, then everything else. */
@@ -165,6 +224,7 @@ const CARD_RANK: Record<StockPrepPostureKey, number> = {
   unknown: 4,
   not_pulled: 5,
   not_yours: 6,
+  archived: 7,
 }
 
 export function sortOperatorHomeCards(cards: readonly StockPrepHomeCard[]): StockPrepHomeCard[] {

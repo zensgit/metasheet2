@@ -14,6 +14,8 @@
  *   - an ordinary sheet stays visible
  *   - an approval_projection sheet is NOT hidden by this predicate (scope is the People kind only)
  *   - on a database without the `system_kind` column every route still answers (no 500 / 42703)
+ *   - S3: a `stock_prep_overview` sheet is NOT hidden either — it stays listed and selectable, and the
+ *     host clamps its capabilities to read + export instead (admins included)
  *   - structural: univer-meta.ts filters lists only through `isHiddenSystemSheet`, never a
  *     description-only check
  *
@@ -87,7 +89,13 @@ function createMockPool(store: Store) {
     const lacking = store.sheetsLackSystemKind ? ['system_kind'] : []
 
     if (store.sheetsLackSystemKind && /\bmeta_sheets\b/i.test(sql)) {
-      const withoutTolerantRead = sql.replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s+AS\s+system_kind/gi, '')
+      // Both column-tolerant forms are safe on a column-less database: the projected read
+      // (`(to_jsonb(x) ->> 'system_kind') AS system_kind`) and, since S3, the tolerant comparison
+      // the stock-preparation overview clamp issues (`(to_jsonb(x) ->> 'system_kind') = $n`).
+      // A BARE `system_kind` anywhere else still raises 42703 here.
+      const withoutTolerantRead = sql
+        .replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s+AS\s+system_kind/gi, '')
+        .replace(/\(\s*to_jsonb\(\w+\)\s*->>\s*'system_kind'\s*\)\s*=\s*\$\d+/gi, '')
       if (/\bsystem_kind\b/i.test(withoutTolerantRead)) {
         throw Object.assign(new Error('column "system_kind" does not exist'), { code: '42703' })
       }
@@ -119,6 +127,14 @@ function createMockPool(store: Store) {
     if (/FROM\s+meta_sheets\b/i.test(sql) && /WHERE\s+id\s*=\s*\$1/i.test(sql)) {
       const row = store.sheets.find((s) => s.id === p(0))
       return { rows: row ? [projectSelected(sql, row as unknown as Record<string, unknown>, lacking)] : [] }
+    }
+    // S3: the stock-preparation overview clamp's kind lookup (stock-preparation-overview-contract.ts) —
+    // answered from the same store, and like PostgreSQL's `to_jsonb(...) ->> 'system_kind'` it sees no
+    // kind at all on a column-less database.
+    if (/FROM\s+meta_sheets\s+WHERE\s+id\s*=\s*ANY\(\$1::text\[\]\)\s+AND\s+\(to_jsonb\(meta_sheets\)\s*->>\s*'system_kind'\)\s*=\s*\$2/i.test(sql)) {
+      const ids = Array.isArray(params[0]) ? (params[0] as string[]) : []
+      if (lacking.includes('system_kind')) return { rows: [] }
+      return { rows: store.sheets.filter((s) => ids.includes(s.id) && s.system_kind === p(1)).map((s) => ({ id: s.id })) }
     }
     return { rows: [] }
   })
@@ -286,6 +302,44 @@ describe('#5825 — list visibility uses system_kind OR the People sentinel', ()
       .send({ baseId: BASE_ID, sheetIds: ['sheet_kind_people'] })
     expect(res.status).toBe(404)
     expect(res.body.error.code).toBe('NOT_FOUND')
+  })
+
+  // S3 (ADR adr-stock-prep-project-sheets-20261008 §5 「只读（Q5）」): the stock-preparation overview is a
+  // recognized system kind, but unlike People it must stay LISTED and SELECTABLE — the host makes it
+  // read-only by clamping capabilities, never by hiding it. ADMIN_USER is a platform admin, so this also
+  // pins that the clamp reaches admins on the real /context route.
+  it('S3: a stock_prep_overview sheet stays listed and selectable, and /context clamps even an admin to read + export (+ access management, fix round 1 R1)', async () => {
+    store.sheets.push(sheet('sheet_s3_overview', '2026-01-06T00:00:00.000Z', { name: 'Overview', description: null, system_kind: 'stock_prep_overview' }))
+    expect(isHiddenSystemSheet({ system_kind: 'stock_prep_overview', description: null })).toBe(false)
+    pinned.setApp(await buildApp(store))
+
+    const list = await request(pinned.url()).get('/api/multitable/sheets')
+    expect(list.status).toBe(200)
+    expect((list.body.data.sheets as Array<{ id: string }>).map((s) => s.id)).toContain('sheet_s3_overview')
+
+    const ctx = await request(pinned.url()).get('/api/multitable/context').query({ sheetId: 'sheet_s3_overview' })
+    expect(ctx.status).toBe(200)
+    expect(ctx.body.data.sheet.id).toBe('sheet_s3_overview')
+    expect(ctx.body.data.capabilities).toMatchObject({
+      canRead: true,
+      canExport: true,
+      canCreateRecord: false,
+      canEditRecord: false,
+      canDeleteRecord: false,
+      canManageFields: false,
+      canManageViews: false,
+      // Fix round 1 (R1): access management is KEPT as resolved (the admin may share the overview for READING;
+      // the grant routes refuse any level above read).
+      canManageSheetAccess: true,
+      canManageAutomation: false,
+      canComment: false,
+      canDeleteSheet: false,
+    })
+
+    // Control: the same admin on an ordinary sheet of the same base keeps every write.
+    const plain = await request(pinned.url()).get('/api/multitable/context').query({ sheetId: 'sheet_orders' })
+    expect(plain.status).toBe(200)
+    expect(plain.body.data.capabilities).toMatchObject({ canRead: true, canEditRecord: true, canCreateRecord: true, canManageFields: true, canDeleteSheet: true })
   })
 
   it('structural: univer-meta.ts filters sheet lists only through isHiddenSystemSheet', () => {

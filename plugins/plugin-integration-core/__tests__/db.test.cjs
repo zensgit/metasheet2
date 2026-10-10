@@ -362,6 +362,9 @@ async function main() {
         // setTransactionIsolationLevel: HANDLE-ONLY (asserted absent from the root surface in 4.),
         // the external-system delete lock protocol's isolation pin (external-system-pointer-lock.cjs).
         'setTransactionIsolationLevel',
+        // tryAdvisoryXactLock: HANDLE-ONLY (asserted absent from the root surface in 7d.), the NON-blocking
+        // per-tenant overview-writer lock (S3 fix round 2, F4; stock-preparation-project-target-store.cjs).
+        'tryAdvisoryXactLock',
         'updateRow', 'upsertOne'],
       'transaction exposes scoped surface only, no rawQuery',
     )
@@ -397,6 +400,43 @@ async function main() {
     )
   }
   assert.ok(!mockDb9lockBad.calls.some((c) => c.sql), 'a refused key issues no statement')
+
+  // --- 7d. tryAdvisoryXactLock (S3 fix round 2, F4): the NON-blocking sibling — ONE fixed literal, the key as
+  // its ONE parameter, on the tx connection; ONLY an explicit boolean true from PostgreSQL counts as acquired.
+  assert.equal(typeof db9.tryAdvisoryXactLock, 'undefined',
+    'tryAdvisoryXactLock is NOT on the root helper (a transaction-scoped lock in autocommit guards nothing)')
+  const mockDb9try = mockDatabase({ nextRows: [[{ locked: true }], [{ locked: false }], [], [{ locked: 't' }], [{ locked: 1 }]] })
+  const db9try = createDb({ database: mockDb9try })
+  const tryAnswers = await db9try.transaction(async (trx) => [
+    await trx.tryAdvisoryXactLock('stock-prep-project-overview:tenant-a'),
+    await trx.tryAdvisoryXactLock('stock-prep-project-overview:tenant-a'),
+    await trx.tryAdvisoryXactLock("x'); DROP TABLE users; --"),
+    await trx.tryAdvisoryXactLock('k'),
+    await trx.tryAdvisoryXactLock('k'),
+  ])
+  assert.deepEqual(tryAnswers, [true, false, false, false, false], 'acquired only on an explicit boolean true; busy / empty / truthy-but-not-true is NOT acquired')
+  assert.deepEqual(
+    mockDb9try.calls.map((c) => ({ sql: c.sql, params: c.params, tx: c.tx })),
+    [
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['stock-prep-project-overview:tenant-a'], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['stock-prep-project-overview:tenant-a'], tx: true },
+      // Caller text NEVER reaches the SQL.
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ["x'); DROP TABLE users; --"], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['k'], tx: true },
+      { sql: 'SELECT pg_try_advisory_xact_lock(hashtext($1)) AS locked', params: ['k'], tx: true },
+    ],
+    'the try-lock statement is a fixed literal; the key is its only parameter; it runs on the transaction connection',
+  )
+  const mockDb9tryBad = mockDatabase()
+  const db9tryBad = createDb({ database: mockDb9tryBad })
+  for (const badKey of ['', '   ', null, undefined, 42, {}, ['k'], { toString: () => 'k' }]) {
+    await assert.rejects(
+      db9tryBad.transaction((trx) => trx.tryAdvisoryXactLock(badKey)),
+      (error) => error instanceof ScopeViolationError,
+      `tryAdvisoryXactLock refuses a non-string / blank key: ${JSON.stringify(badKey)}`,
+    )
+  }
+  assert.ok(!mockDb9tryBad.calls.some((c) => c.sql), 'a refused key issues no statement')
 
   // --- 7b. setTransactionIsolationLevel: whitelist key -> fixed literal, on the tx connection ----
   assert.equal(typeof db9.setTransactionIsolationLevel, 'undefined',

@@ -369,6 +369,14 @@ const REQUEST_BY_CAPABILITY = Object.freeze({
   // switch-off 404 for the same reason the three above do — not on a 400 about the body.
   'projectTarget.archive': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
   'projectTarget.restore': () => ({ params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO } }),
+  // S3 (R-37): the project-fields pair and the overview refresh — OPERATE, and past the gate they land
+  // on the same switch-off 404 (gate first, switch second, body third). The PUT carries one whitelisted
+  // key so a switch-ON mount (M-12) is a real 200 rather than a 422 about an empty patch.
+  'projectFields.read': () => ({ params: { projectNo: PROJECT_NO }, query: {} }),
+  'projectFields.update': () => ({ params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' } }),
+  'projectOverview.refresh': () => ({ body: {} }),
+  // S3 fix round 1 (R6): the PULL-tier overview ensure — an empty body, like the create.
+  'projectOverview.ensure': () => ({ body: {} }),
   // S5b (R-39) 「成员与权限」. The shared mount() leaves STOCK_PREP_MEMBERS_PAGE_ENABLED unset and injects no
   // members port, so a 'pass' actor lands PAST the gate on 404 STOCK_PREP_MEMBERS_PAGE_DISABLED — a refusal
   // by CONFIG after the WORKBENCH_ADMIN gate, exactly the "gate let it through, something else happened"
@@ -419,6 +427,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -441,6 +453,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -463,6 +479,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -485,6 +505,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -507,6 +531,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -529,6 +557,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -551,6 +583,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
     'members.read': 'pass',
     'members.customRoleCreate': 'pass',
     'members.customRoleUpdate': 'pass',
@@ -573,6 +609,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
     'members.read': 'pass',
     'members.customRoleCreate': 'pass',
     'members.customRoleUpdate': 'pass',
@@ -598,6 +638,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'pass',
     'projectTarget.archive': 'pass',
     'projectTarget.restore': 'pass',
+    'projectFields.read': 'pass',
+    'projectFields.update': 'pass',
+    'projectOverview.refresh': 'pass',
+    'projectOverview.ensure': 'pass',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -620,6 +664,10 @@ const MATRIX = Object.freeze({
     'projectTarget.list': 'gate',
     'projectTarget.archive': 'gate',
     'projectTarget.restore': 'gate',
+    'projectFields.read': 'gate',
+    'projectFields.update': 'gate',
+    'projectOverview.refresh': 'gate',
+    'projectOverview.ensure': 'gate',
     'members.read': 'gate',
     'members.customRoleCreate': 'gate',
     'members.customRoleUpdate': 'gate',
@@ -1064,14 +1112,16 @@ async function orphanOperateGrantConfersNothing() {
     grantedStockPrepCapabilities([STOCK_PREP_PULL, STOCK_PREP_OPERATE, STOCK_PREP_READ]).sort(),
     [
       ...grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]),
+      // S3 fix round 1 (R6): creating the read-only overview is provisioning — the PULL tier's.
+      'projectOverview.ensure',
       'projectTarget.archive',
       'projectTarget.create',
       'projectTarget.restore',
     ].sort(),
-    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore to the operator tier',
+    'M-05: on this manifest the pull code adds exactly projectTarget.create / .archive / .restore and projectOverview.ensure to the operator tier',
   )
-  // …and the floor operator holds none of the three (archive / restore are the 拉取人员's, Q2).
-  for (const pullOnly of ['projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
+  // …and the floor operator holds none of the four (archive / restore are the 拉取人员's, Q2).
+  for (const pullOnly of ['projectOverview.ensure', 'projectTarget.archive', 'projectTarget.create', 'projectTarget.restore']) {
     assert.ok(
       !grantedStockPrepCapabilities([STOCK_PREP_OPERATE, STOCK_PREP_READ]).includes(pullOnly),
       `M-05: the floor operator (read + operate) is not granted ${pullOnly}`,
@@ -1100,6 +1150,12 @@ async function orphanOperateGrantConfersNothing() {
       // both appear here and neither appears for the orphan-operate grant above.
       'handoff.advance',
       'handoff.read',
+      // S3 (R-37): the O2(a) project-level columns and the overview refresh are OPERATE (ADR §5) —
+      // the floor sets 负责人 / 备注 / 计划完成 and rebuilds the read-only overview; none of the
+      // three pulls anything or creates a project sheet.
+      'projectFields.read',
+      'projectFields.update',
+      'projectOverview.refresh',
       // 一个项目一张备料表 (S2, R-36): the floor reads its project's sheet state and the tenant's
       // registry list (both OPERATE); creating a sheet is PULL and is NOT here.
       'projectTarget.list',
@@ -1200,13 +1256,15 @@ function vocabularyIsFrozenAndRoutesAreRegistered() {
   // and S4 (R-38) added exactly two more — ARCHIVE and RESTORE, which the owner gave to the 拉取人员
   // (Q2). The pull-bom split itself is NOT a `requireAccess` gate (it is the `requireTableActionAccess`
   // disjunction, pinned by the operator-pull-gate suite), so any further PULL-gated handler must be
-  // argued here the way the ADMIN one is.
+  // argued here the way the ADMIN one is. S3 fix round 1 (R6) argues ONE: the overview ENSURE — creating
+  // the read-only overview is provisioning, which R-35 gives to the PULL tier (the OPERATE refresh no
+  // longer provisions anything).
   assert.deepEqual(
     stockPrepGatedHandlersInSource(HTTP_ROUTES_SOURCE).filter((handler) => (
       /requireAccess\(req,\s*STOCK_PREP_PULL\)/.test(handlerBodyInSource(HTTP_ROUTES_SOURCE, handler))
     )).sort(),
-    ['stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetRestore'],
-    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers',
+    ['stockPreparationProjectOverviewEnsure', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetCreate', 'stockPreparationProjectTargetRestore'],
+    'M-08: STOCK_PREP_PULL gates exactly the project-sheet create, archive and restore handlers and the overview ensure',
   )
   // ...and those identifiers really carry the frozen codes (the names alone prove nothing).
   for (const code of [STOCK_PREP_READ, STOCK_PREP_OPERATE, STOCK_PREP_ADMIN]) {
@@ -1574,6 +1632,12 @@ const TENANT_CLAIM_DOOR_LEAVES_ALONE = Object.freeze([
   // S4 (R-38): archive / restore resolve the same host-vouched scope.
   'projectTarget.archive',
   'projectTarget.restore',
+  // S3 (R-37): the project-level fields (read / update) and the overview refresh — and, fix round 1, the
+  // PULL-tier overview ensure — all derive the tenant through `resolveOperatorValueScope`.
+  'projectFields.read',
+  'projectFields.update',
+  'projectOverview.refresh',
+  'projectOverview.ensure',
   // S5b (R-39): three of the four touch no tenant at all (roles and memberships are platform-global and the
   // host port scopes visibility by the delegation scope); the project-sheet add resolves the host-vouched
   // operator scope like the project-target routes above. None runs a shared tenant helper.
@@ -1921,8 +1985,17 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
     // S4 (R-38): each lifecycle route against the one state it may start from — a registered ACTIVE
     // row for archive, an ARCHIVED one for restore — with its typed confirmation. 200 = the
     // transition happened, which is the only honest meaning of "served" for these two.
-    'projectTarget.archive': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/archive', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'active', okStatuses: [200] },
-    'projectTarget.restore': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/restore', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'archived', okStatuses: [200] },
+    'projectTarget.archive': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/archive', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'active', flips: true, okStatuses: [200] },
+    'projectTarget.restore': { method: 'POST', path: '/api/integration/stock-preparation/projects/:projectNo/target/restore', params: { projectNo: PROJECT_NO }, body: { confirmProjectNo: PROJECT_NO }, seed: 'archived', flips: true, okStatuses: [200] },
+    // S3 (R-37): the project-fields read (absent project → 200 absent), the update against a seeded
+    // ACTIVE row (200, the row stays active — a fields update is not a lifecycle transition), and the
+    // overview refresh over an empty registry (200: the sheet is created, zero rows projected).
+    'projectFields.read': { method: 'GET', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, okStatuses: [200] },
+    'projectFields.update': { method: 'PATCH', path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields', params: { projectNo: PROJECT_NO }, body: { note: 'synthetic note' }, seed: 'active', flips: false, okStatuses: [200] },
+    // Fix round 1 (R6): the refresh projects into an EXISTING overview (ensured first, on a host that
+    // declares the stamp) — 200 over an empty registry; the ensure creates it (PULL), 200.
+    'projectOverview.refresh': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/refresh', params: {}, body: {}, stampingHost: true, overviewFirst: true, okStatuses: [200] },
+    'projectOverview.ensure': { method: 'POST', path: '/api/integration/stock-preparation/project-overview/ensure', params: {}, body: {}, stampingHost: true, okStatuses: [200] },
   }
   let served = 0
   for (const [actorName, expectations] of Object.entries(MATRIX)) {
@@ -1931,9 +2004,14 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       const capability = STOCK_PREP_WORKBENCH_CAPABILITIES.find((entry) => entry.capability === capabilityId)
       assert.ok(capability, `M-12: ${capabilityId} is a manifest member`)
       assert.equal(capability.path, shape.path, `M-12: ${capabilityId} path`)
-      const harness = projectSheetHarness.mountProjectSheetRoutes({ tenantId: TENANT_ID, projectNo: PROJECT_NO, switchOn: true })
+      const harness = projectSheetHarness.mountProjectSheetRoutes({ tenantId: TENANT_ID, projectNo: PROJECT_NO, switchOn: true, stampsSystemKind: shape.stampingHost === true })
       try {
         if (shape.seed) harness.seedRegistryRow(PROJECT_NO, { archived: shape.seed === 'archived' })
+        if (shape.overviewFirst) {
+          const ensured = await projectSheetHarness.call(harness.routes, 'POST', '/api/integration/stock-preparation/project-overview/ensure', { user: ACTORS.platformAdmin || PLATFORM_ADMIN, body: {} })
+          assert.equal(ensured.statusCode, 200, `M-12: the overview is ensured before ${capabilityId} (${JSON.stringify(ensured.body && ensured.body.error)})`)
+          harness.provisioning.calls.length = 0
+        }
         const res = await projectSheetHarness.call(harness.routes, shape.method, shape.path, { user, params: shape.params, body: shape.body || {} })
         if (expectations[capabilityId] === 'gate') {
           assert.ok(refusedByGate(res), `M-12: ${actorName} must be REFUSED at ${capabilityId} with the switch on, got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`)
@@ -1947,8 +2025,8 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
             `M-12: ${actorName} must be SERVED at ${capabilityId} with the switch on (expected ${shape.okStatuses.join('/')}), got ${res.statusCode} ${JSON.stringify(res.body && res.body.error)}`,
           )
           if (shape.seed) {
-            const flipped = shape.seed === 'active' ? 'archived' : 'active'
-            assert.equal(harness.registryRows()[0].status, flipped, `M-12: ${actorName} moved the registry row to ${flipped} at ${capabilityId}`)
+            const expectedStatus = shape.flips ? (shape.seed === 'active' ? 'archived' : 'active') : shape.seed
+            assert.equal(harness.registryRows()[0].status, expectedStatus, `M-12: ${actorName} left the registry row ${expectedStatus} at ${capabilityId}`)
             assert.deepEqual(harness.provisioning.calls, [], `M-12: ${capabilityId} makes no host call — the sheet and its grants are not touched`)
           }
           served += 1
@@ -1958,9 +2036,9 @@ async function projectTargetRoutesServeEveryPermittedActorWithTheSwitchOn() {
       }
     }
   }
-  // Anti-vacuity: puller, workbench admin and platform admin are served all five; the confirming
-  // operator the two reads. 5 + 5 + 5 + 2.
-  assert.equal(served, 17, 'M-12: the served cells are exactly the matrix\'s pass cells for the five routes')
+  // Anti-vacuity: puller, workbench admin and platform admin are served all nine; the confirming
+  // operator the two reads plus the three S3 OPERATE routes. 9 + 9 + 9 + 5.
+  assert.equal(served, 32, 'M-12: the served cells are exactly the matrix\'s pass cells for the nine routes')
 }
 
 async function main() {
