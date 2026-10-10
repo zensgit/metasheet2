@@ -214,6 +214,9 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
   StockPreparationSourceBinding \
+  StockPreparationSourcePlanDraft \
+  StockPreparationSourcePlanValidation \
+  StockPreparationSourcePlanVersions \
   StockPreparationStageOverview \
   StockPreparationStageStepper \
   StockPreparationUnitConfirmView \

@@ -276,6 +276,19 @@ node __tests__/yida-static-plan.test.cjs
 node __tests__/yida-token-client.test.cjs
 node __tests__/yida-token-exchange.test.cjs
 
+node __tests__/stock-preparation-source-membership.test.cjs
+node __tests__/stock-preparation-bom-active-state.test.cjs
+node __tests__/stock-preparation-bom-artifact-version.test.cjs
+node __tests__/stock-preparation-read-plan-bootstrap.test.cjs
+node __tests__/stock-preparation-read-plan-catalog.test.cjs
+node __tests__/stock-preparation-read-plan-execution-identity.test.cjs
+node __tests__/stock-preparation-read-plan-management.test.cjs
+node __tests__/stock-preparation-read-plan-runtime.test.cjs
+node __tests__/stock-preparation-read-plan-store.test.cjs
+node __tests__/stock-preparation-read-plan-validation-ledger.test.cjs
+node __tests__/stock-preparation-read-plan-validation-read.test.cjs
+node __tests__/stock-preparation-read-plan-validation-runtime.test.cjs
+
 # --- sealed-export stage tail: S4 -> S5 -> S6-A, in stage order, must remain LAST ---
 # (pinned by __tests__/sealed-export-s4-generation-migration.test.cjs)
 # --- 以下 24 行为 S4/S5/S6-A 有序尾窗，新测试请插在此行之前 ---

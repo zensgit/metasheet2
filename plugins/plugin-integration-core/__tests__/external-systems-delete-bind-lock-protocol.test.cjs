@@ -138,6 +138,7 @@ const {
 } = require('../lib/external-system-pointer-lock.cjs')
 
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
+const STOCK_PREP_READ_PLAN_TABLE = 'integration_stock_prep_read_plan_versions'
 const READ_SOURCE_AUDIT_TABLE = 'integration_read_source_config_audit'
 const PIPELINES_TABLE = 'integration_pipelines'
 const SEALED_EXPORT_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
@@ -837,7 +838,7 @@ async function testLockOrderAndScopePins() {
   assert.equal(deleteOps[1].op, 'selectOneForUpdate', 'L-10: ...and its first READ is the FOR UPDATE')
   assert.equal(deleteOps[1].table, EXTERNAL_SYSTEMS_TABLE)
   const countOps = deleteOps.filter((call) => call.op === 'countRows')
-  assert.equal(countOps.length, 6, 'L-10: pipelines ×2 + 079 + 073 + 062 ×2 are all counted INSIDE the transaction')
+  assert.equal(countOps.length, 8, 'L-10: pipelines ×2 + 079 + 073 + 062 ×2 + 087 ×2 are all counted INSIDE the transaction')
   assert.deepEqual(
     countOps.filter((call) => call.table === READ_SOURCE_CONFIG_TABLE).map((call) => call.where.status),
     ['draft', 'approved'],
@@ -847,7 +848,7 @@ async function testLockOrderAndScopePins() {
   assert.ok(deleteOps.every((call) => call.op !== 'selectOneForUpdate' || call === deleteOps[1]),
     'L-10: the delete side takes exactly ONE row lock — it never locks a pointer row (no lock cycle is possible)')
   const probeCounts = db.calls.filter((call) => call.tx === null && call.op === 'countRows')
-  assert.equal(probeCounts.length, 4, 'L-10: the 42P01 existence probe runs the 4 dependent counts in autocommit, before the transaction')
+  assert.equal(probeCounts.length, 6, 'L-10: the 42P01 existence probe runs the 6 dependent counts in autocommit, before the transaction')
 
   const bindOps = db.txCalls(bindTx).filter((call) => call.op !== 'BEGIN' && call.op !== 'COMMIT' && call.op !== 'ROLLBACK')
   assert.deepEqual([bindOps[0].op, bindOps[0].level], ['setTransactionIsolationLevel', 'read committed'],
@@ -857,7 +858,7 @@ async function testLockOrderAndScopePins() {
   assert.deepEqual(Object.keys(bindOps[1].where).sort(), ['id', 'tenant_id'],
     'L-10: the 079 writer (via lockExternalSystemForPointerWrite) pins tenant + id ONLY — the delete guard\'s dependent-count scope; no workspace key')
   assert.equal(bindOps.length, 2, 'L-10: the refused bind issued nothing after the lock returned null')
-  console.log('  L-10 lock order pinned: delete = SET READ COMMITTED → FOR UPDATE → 6 counts (062: draft, then approved) → DELETE; 079 writer = SET READ COMMITTED → KEY SHARE(tenant,id)')
+  console.log('  L-10 lock order pinned: delete = SET READ COMMITTED → FOR UPDATE → 8 counts (062/087: draft, then approved) → DELETE; 079 writer = SET READ COMMITTED → KEY SHARE(tenant,id)')
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -897,11 +898,13 @@ async function testPipelineScopePins() {
       [SEALED_EXPORT_BINDING_TABLE, ['external_system_id', 'status', 'tenant_id']],
       [READ_SOURCE_CONFIG_TABLE, ['status', 'system_id', 'tenant_id']],
       [READ_SOURCE_CONFIG_TABLE, ['status', 'system_id', 'tenant_id']],
+      [STOCK_PREP_READ_PLAN_TABLE, ['status', 'system_id', 'tenant_id']],
+      [STOCK_PREP_READ_PLAN_TABLE, ['status', 'system_id', 'tenant_id']],
     ],
-    'L-11: the delete-side pipeline count IS workspace-filtered (the scope the pipeline writer locks with); 079/073/062 are NOT',
+    'L-11: the delete-side pipeline count IS workspace-filtered (the scope the pipeline writer locks with); 079/073/062/087 are NOT',
   )
   assert.deepEqual(
-    deleteCounts.slice(-2).map((call) => [call.table, call.where.status]),
+    deleteCounts.filter((call) => call.table === READ_SOURCE_CONFIG_TABLE).map((call) => [call.table, call.where.status]),
     [[READ_SOURCE_CONFIG_TABLE, 'draft'], [READ_SOURCE_CONFIG_TABLE, 'approved']],
     'L-11: the 062 pair closes the count sequence, draft THEN approved (L-12: an approve between them is still counted)',
   )

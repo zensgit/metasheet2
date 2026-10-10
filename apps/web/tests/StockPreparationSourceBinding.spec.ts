@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, ref, type App as VueApp, type Component } from 'vue'
+import { createApp, nextTick, reactive, ref, type App as VueApp, type Component } from 'vue'
 
 // BOM备料 数据来源 — the DOM half of 工作台里选源.
 //
@@ -51,10 +51,11 @@ vi.mock('../src/utils/api', async () => {
 })
 
 import StockPreparationSourceBindingPanel from '../src/components/integration/stockPreparation/StockPreparationSourceBindingPanel.vue'
+import { compileSourcePlanDraft, createSyntheticSourcePlanDraft } from '../src/services/integration/stockPreparation/sourcePlanDraft'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
+import type { IntegrationScope } from '../src/services/integration/workbench'
 
 const SCOPE = { tenantId: 'tenant-a', workspaceId: 'workspace-default' }
-const BINDING_ROUTE = '/api/integration/stock-preparation/source-binding'
-
 const DEMO_SOURCE = 'sys_synthetic_demo'
 const CUSTOMER_PLM = 'sys_customer_plm'
 
@@ -118,9 +119,34 @@ function bindingPayload(overrides: Record<string, unknown> = {}): Record<string,
   }
 }
 
+/** A post-save readback that really does confirm the source the admin just chose. */
+function persistedCustomerBinding(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    tenantId: SCOPE.tenantId,
+    workspaceId: SCOPE.workspaceId,
+    actionId: 'plm.stock-preparation.pull-bom.v1',
+    externalSystemId: CUSTOMER_PLM,
+    updatedBy: 'u_admin',
+    createdAt: 't0',
+    updatedAt: 't1',
+    ...overrides,
+  }
+}
+
+function confirmedCustomerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return bindingPayload({
+    effectiveExternalSystemId: CUSTOMER_PLM,
+    origin: 'persisted',
+    persistedBinding: persistedCustomerBinding(),
+    effectiveSourceProblem: null,
+    takesEffectWithoutRestart: true,
+    ...overrides,
+  })
+}
+
 interface Behaviour {
-  get?: () => Response
-  post?: () => Response
+  get?: () => Response | Promise<Response>
+  post?: () => Response | Promise<Response>
   /** The payload the SECOND GET (the post-save re-read) returns. */
   afterSave?: Record<string, unknown>
 }
@@ -164,15 +190,24 @@ async function flush(cycles = 8): Promise<void> {
   }
 }
 
+function deferredResponse() {
+  let resolve!: (response: Response) => void
+  const promise = new Promise<Response>((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 describe('BOM备料 数据来源 (工作台里选源)', () => {
   let app: VueApp | null = null
   let container: HTMLDivElement | null = null
+  const onBindingRead = vi.fn()
 
   beforeEach(() => {
+    localStorage.clear()
     h.locale = 'zh-CN'
     // A platform admin by default — the tier both source-binding routes require.
     h.permissions = ['integration:admin', 'stock-prep:admin']
     h.apiFetch.mockReset()
+    onBindingRead.mockReset()
     installRoutes()
     container = document.createElement('div')
     document.body.appendChild(container)
@@ -184,10 +219,11 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     app = null
     container = null
     vi.clearAllMocks()
+    localStorage.clear()
   })
 
-  async function mountPanel(): Promise<HTMLDivElement> {
-    app = createApp(StockPreparationSourceBindingPanel as Component, { scope: SCOPE })
+  async function mountPanel(scope: IntegrationScope = SCOPE): Promise<HTMLDivElement> {
+    app = createApp(StockPreparationSourceBindingPanel as Component, { scope, onBindingRead })
     app.mount(container!)
     await flush()
     return container!
@@ -199,6 +235,58 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
 
   function text(root: HTMLElement, testid: string): string {
     return node(root, testid)?.textContent ?? ''
+  }
+
+  function chooseDraftFile(root: HTMLElement, textContent: string): void {
+    const input = node(root, 'stock-prep-source-plan-draft-import') as HTMLInputElement
+    const file = new File([textContent], 'stock-preparation-plm-role-draft.review.json', { type: 'application/json' })
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] })
+    input.dispatchEvent(new Event('change'))
+  }
+
+  async function fillPrivateDraft(root: HTMLElement, object = 'SYN_PRIVATE_LAYOUT_A'): Promise<void> {
+    ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+    const input = node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement
+    input.value = object
+    input.dispatchEvent(new Event('input'))
+    ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+    await flush(2)
+    expect(text(root, 'stock-prep-source-plan-draft-json')).toContain(object)
+  }
+
+  async function requestBindingConfirmation(root: HTMLElement): Promise<void> {
+    const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
+    select.value = CUSTOMER_PLM
+    select.dispatchEvent(new Event('change'))
+    await flush(2)
+    ;(node(root, 'stock-prep-source-save') as HTMLButtonElement).click()
+    await flush(2)
+    expect(node(root, 'stock-prep-source-confirm-save')).not.toBeNull()
+  }
+
+  async function confirmSave(root: HTMLElement): Promise<void> {
+    await requestBindingConfirmation(root)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush()
+  }
+
+  function switchAccount(): void {
+    // Match useAuth: its reset event precedes the synchronous token storage write.
+    notifyAuthPrincipalChange()
+    localStorage.setItem('auth_token', 'synthetic-user-b-token')
+  }
+
+  function expectCleared(root: HTMLElement): void {
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    expect(node(root, 'stock-prep-source-no-restart')).toBeNull()
+    expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+    expect(node(root, 'stock-prep-source-error')).toBeNull()
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).value).toBe('')
+    expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('')
   }
 
   // -------------------------------------------------------------------------
@@ -271,6 +359,7 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
   // -------------------------------------------------------------------------
 
   it('S-03: Save asks for confirmation first, then POSTs only the chosen external system id', async () => {
+    installRoutes({ afterSave: confirmedCustomerPayload() })
     const root = await mountPanel()
     const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
     const save = node(root, 'stock-prep-source-save') as HTMLButtonElement
@@ -319,6 +408,102 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     expect(node(second, 'stock-prep-source-confirm')).toBeNull()
   })
 
+  it.each([
+    ['another workspace', { workspaceId: 'workspace-other' }],
+    ['a tenant-level fallback', { workspaceId: null }],
+    ['another tenant', { tenantId: 'tenant-other' }],
+  ])('S-31: the same effective source from %s can be explicitly bound here, but cancelling never writes', async (_label, bindingScope) => {
+    installRoutes({ get: () => envelope(confirmedCustomerPayload({
+      persistedBinding: persistedCustomerBinding(bindingScope as Record<string, unknown>),
+    })) })
+    const root = await mountPanel()
+    const save = node(root, 'stock-prep-source-save') as HTMLButtonElement
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).value).toBe(CUSTOMER_PLM)
+    expect(save.disabled).toBe(false)
+    expect(text(root, 'stock-prep-source-origin')).toContain('不是当前范围的精确绑定')
+    expect(text(root, 'stock-prep-source-scope-binding-note')).toContain('在当前范围建立来源绑定，原范围绑定保留')
+    expect(text(root, 'stock-prep-source-scope-binding-note')).toContain('不会自动保存或切换范围')
+    expect(posted).toHaveLength(0)
+
+    save.click()
+    await flush(2)
+    expect(text(root, 'stock-prep-source-confirm-text')).toContain('在当前范围建立')
+    expect(text(root, 'stock-prep-source-confirm-text')).toContain('原范围绑定保留')
+    expect(posted).toHaveLength(0)
+    ;(node(root, 'stock-prep-source-cancel') as HTMLButtonElement).click()
+    await flush(2)
+    expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    expect(posted).toHaveLength(0)
+    expect(getCount).toBe(1)
+  })
+
+  it('S-32: explicitly establishes the same source in tenant scope only after an exact readback, retaining the original scope', async () => {
+    const tenantScope = { tenantId: SCOPE.tenantId, workspaceId: null }
+    const originalBinding = persistedCustomerBinding({ workspaceId: SCOPE.tenantId })
+    installRoutes({
+      get: () => envelope(confirmedCustomerPayload({ persistedBinding: originalBinding })),
+      afterSave: confirmedCustomerPayload({ persistedBinding: persistedCustomerBinding({ workspaceId: null }) }),
+    })
+    const root = await mountPanel(tenantScope)
+    expect((node(root, 'stock-prep-source-save') as HTMLButtonElement).disabled).toBe(false)
+    expect(posted).toHaveLength(0)
+    await confirmSave(root)
+
+    expect(posted).toHaveLength(1)
+    expect(posted[0].body).toEqual({ externalSystemId: CUSTOMER_PLM })
+    const scopeQuery = new URL(posted[0].url, 'http://synthetic.invalid').searchParams
+    expect(scopeQuery.get('tenantId')).toBe(SCOPE.tenantId)
+    expect(scopeQuery.has('workspaceId')).toBe(false)
+    expect(getCount).toBe(2)
+    expect(h.apiFetch).toHaveBeenCalledTimes(3)
+    expect(h.apiFetch.mock.calls.every(([, init]) => !init?.method || init.method === 'POST')).toBe(true)
+    expect(originalBinding.workspaceId).toBe(SCOPE.tenantId)
+    expect(text(root, 'stock-prep-source-saved')).toContain('已保存,并且已经生效')
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+    expect(node(root, 'stock-prep-source-scope-binding-note')).toBeNull()
+    expect((node(root, 'stock-prep-source-save') as HTMLButtonElement).disabled).toBe(true)
+    ;(node(root, 'stock-prep-source-save') as HTMLButtonElement).click()
+    await flush(2)
+    expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    expect(posted).toHaveLength(1)
+  })
+
+  it('S-33: an existing exact-scope binding to the same source remains disabled', async () => {
+    installRoutes({ get: () => envelope(confirmedCustomerPayload()) })
+    const root = await mountPanel()
+    const save = node(root, 'stock-prep-source-save') as HTMLButtonElement
+    expect(save.disabled).toBe(true)
+    save.click()
+    await flush(2)
+    expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    expect(node(root, 'stock-prep-source-scope-binding-note')).toBeNull()
+    expect(posted).toHaveLength(0)
+  })
+
+  it.each([
+    ['another tenant', { persistedBinding: persistedCustomerBinding({ tenantId: 'tenant-other' }) }],
+    ['another workspace', { persistedBinding: persistedCustomerBinding({ workspaceId: 'workspace-other' }) }],
+    ['a tenant-level fallback', { persistedBinding: persistedCustomerBinding({ workspaceId: null }) }],
+    ['another persisted action', { persistedBinding: persistedCustomerBinding({ actionId: 'different-action' }) }],
+    ['another response action', { actionId: 'different-action' }],
+    ['another persisted source', { persistedBinding: persistedCustomerBinding({ externalSystemId: DEMO_SOURCE }) }],
+    ['a deployment-default origin', { origin: 'deploy_default' }],
+    ['no persisted binding', { persistedBinding: null }],
+    ['an omitted persisted workspace', { persistedBinding: persistedCustomerBinding({ workspaceId: undefined }) }],
+  ])('S-34: a readback with %s cannot confirm a successful save even when its effective source matches', async (_label, overrides) => {
+    installRoutes({ afterSave: confirmedCustomerPayload(overrides as Record<string, unknown>) })
+    const root = await mountPanel()
+    await confirmSave(root)
+    expect(posted).toHaveLength(1)
+    expect(posted[0].body).toEqual({ externalSystemId: CUSTOMER_PLM })
+    expect(getCount).toBe(2)
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(text(root, 'stock-prep-source-unconfirmed')).toContain('不会自动再次保存')
+    await flush(2)
+    expect(posted).toHaveLength(1)
+    expect(h.apiFetch).toHaveBeenCalledTimes(3)
+  })
+
   // -------------------------------------------------------------------------
   // S-04 — the affordance, and that the SERVER drives it.
   // -------------------------------------------------------------------------
@@ -350,6 +535,7 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     expect(node(root, 'stock-prep-source-select')).toBeNull()
     expect(node(root, 'stock-prep-source-save')).toBeNull()
     expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    expect(node(root, 'stock-prep-source-plan-draft')).toBeNull()
 
     // Told, in words, who does change it — rather than shown a button that 403s.
     expect(text(root, 'stock-prep-source-readonly')).toContain('只有平台管理员')
@@ -513,10 +699,642 @@ describe('BOM备料 数据来源 (工作台里选源)', () => {
     ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
     await flush()
 
-    // No control on this page says "refresh" — the re-read is automatic, and its OWN answer (not the
-    // POST's echo, not a locally patched field) is what the panel now shows.
-    expect(getCount).toBeGreaterThan(1)
+    // The new explicit refresh is for an invalidated session. This unchanged-session save still
+    // re-reads automatically, without clicking it or trusting the POST's echo.
+    expect(getCount).toBe(2)
     expect(text(root, 'stock-prep-source-current-name')).toContain('客户 PLM 只读库')
-    expect(root.querySelector('[data-testid="stock-prep-source-refresh"]')).toBeNull()
+    expect((node(root, 'stock-prep-source-refresh') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  // -------------------------------------------------------------------------
+  // S-10 — local, structure-only PLM role draft. This is not a second source
+  // binding workflow: it must not read, write, or claim an effective readPlan.
+  // -------------------------------------------------------------------------
+
+  it('S-10: produces and downloads only a valid local review draft, without changing the binding', async () => {
+    const originalCreateObjectURL = URL.createObjectURL
+    const originalRevokeObjectURL = URL.revokeObjectURL
+    const createObjectURL = vi.fn((_blob: Blob) => 'blob:source-plan-draft')
+    const revokeObjectURL = vi.fn()
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    URL.createObjectURL = createObjectURL
+    URL.revokeObjectURL = revokeObjectURL
+    try {
+      const root = await mountPanel()
+      const callsAfterMount = h.apiFetch.mock.calls.length
+      expect(node(root, 'stock-prep-source-plan-draft')).not.toBeNull()
+      expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+      expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('')
+      expect(text(root, 'stock-prep-source-plan-draft-note')).toContain('只检查结构')
+      expect(text(root, 'stock-prep-source-plan-draft-note')).toContain('不是行数')
+      expect(text(root, 'stock-prep-source-plan-draft-note')).toContain('未审批不会生效')
+
+      // The only convenience action uses known synthetic identifiers. It neither observes nor
+      // changes the server-held binding/read plan, and it makes no request beyond mount's GET.
+      ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+      expect(posted).toEqual([])
+      expect(text(root, 'stock-prep-source-current-name')).toContain('内置演示源')
+      expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('stock-preparation-plm-role-draft')
+      expect(text(root, 'stock-prep-source-plan-draft-review')).toContain('未生效')
+
+      ;(node(root, 'stock-prep-source-plan-draft-download') as HTMLButtonElement).click()
+      await flush(2)
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      const downloaded = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.onerror = () => reject(reader.error)
+        reader.readAsText(createObjectURL.mock.calls[0][0])
+      })
+      expect(JSON.parse(downloaded)).toEqual(JSON.parse(text(root, 'stock-prep-source-plan-draft-json')))
+      expect(JSON.parse(downloaded)).toMatchObject({ status: 'confirm-required', validation: 'structure-only' })
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:source-plan-draft')
+      expect(posted).toEqual([])
+
+      // Editing is a new candidate: the preceding JSON immediately disappears. An invalid
+      // candidate must render compiler feedback and never regain a download control.
+      const objectInput = node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement
+      objectInput.value = 'unsafe-name!'
+      objectInput.dispatchEvent(new Event('input'))
+      await flush(2)
+      expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+      expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(node(root, 'stock-prep-source-plan-draft-issues')).not.toBeNull()
+      expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('项目路径关联 / 来源表')
+      expect(objectInput.getAttribute('aria-invalid')).toBe('true')
+      expect(objectInput.getAttribute('aria-describedby')).toBe('stock-prep-source-plan-draft-issues')
+      expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+      expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+      expect(posted).toEqual([])
+      expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    } finally {
+      URL.createObjectURL = originalCreateObjectURL
+      URL.revokeObjectURL = originalRevokeObjectURL
+      anchorClick.mockRestore()
+    }
+  })
+
+  it('S-11: imports only a valid review envelope locally; invalid JSON keeps the form and clears preview', async () => {
+    const root = await mountPanel()
+    const callsAfterMount = h.apiFetch.mock.calls.length
+    const sourceDraft = createSyntheticSourcePlanDraft()
+    sourceDraft.roles.pathExAttr.object = 'IMPORTED_PATH_LINK'
+    const source = compileSourcePlanDraft(sourceDraft)
+    expect(source.ok).toBe(true)
+
+    chooseDraftFile(root, JSON.stringify(source.envelope))
+    await flush()
+    expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('IMPORTED_PATH_LINK')
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+    expect(posted).toEqual([])
+
+    ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+    await flush(2)
+    expect(node(root, 'stock-prep-source-plan-draft-json')).not.toBeNull()
+
+    // No parse exception or file text appears in feedback, and the valid current form remains.
+    chooseDraftFile(root, '{ private_json_marker')
+    await flush()
+    expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+    expect(text(root, 'stock-prep-source-plan-draft-issues')).toContain('无法读取')
+    expect(root.textContent).not.toContain('private_json_marker')
+    expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('IMPORTED_PATH_LINK')
+    expect(h.apiFetch).toHaveBeenCalledTimes(callsAfterMount)
+    expect(posted).toEqual([])
+  })
+
+  it('S-12: ignores an import whose FileReader finishes after a later local edit', async () => {
+    type PendingReader = {
+      result: string | ArrayBuffer | null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null
+    }
+    const pending: PendingReader[] = []
+    class DelayedFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null
+
+      readAsText(_file: Blob): void {
+        pending.push(this)
+      }
+    }
+    vi.stubGlobal('FileReader', DelayedFileReader)
+    try {
+      const root = await mountPanel()
+      const incoming = createSyntheticSourcePlanDraft()
+      incoming.roles.pathExAttr.object = 'LATE_IMPORTED_PATH_LINK'
+      const incomingJson = JSON.stringify(compileSourcePlanDraft(incoming).envelope)
+      chooseDraftFile(root, incomingJson)
+      expect(pending).toHaveLength(1)
+
+      // This is a later local intent, so the old async file result cannot replace it.
+      ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+      pending[0].result = incomingJson
+      pending[0].onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+      await flush(2)
+      expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('SYN_pathExAttr')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('S-13: a completed import invalidates an interim preview, while a stale result cannot clear a newer preview', async () => {
+    type PendingReader = {
+      result: string | ArrayBuffer | null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null
+    }
+    const pending: PendingReader[] = []
+    class DelayedFileReader {
+      result: string | ArrayBuffer | null = null
+      onload: ((event: ProgressEvent<FileReader>) => void) | null = null
+      onerror: ((event: ProgressEvent<FileReader>) => void) | null = null
+
+      readAsText(_file: Blob): void {
+        pending.push(this)
+      }
+    }
+    vi.stubGlobal('FileReader', DelayedFileReader)
+    try {
+      const root = await mountPanel()
+      ;(node(root, 'stock-prep-source-plan-draft-synthetic') as HTMLButtonElement).click()
+      const imported = createSyntheticSourcePlanDraft()
+      imported.roles.pathExAttr.object = 'IMPORTED_PATH_LINK'
+      const importedJson = JSON.stringify(compileSourcePlanDraft(imported).envelope)
+
+      // Starting an import clears the old preview, but the user can still explicitly preview the
+      // old form while readAsText is pending. Completion must clear that interim candidate again.
+      chooseDraftFile(root, importedJson)
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(node(root, 'stock-prep-source-plan-draft-json')).not.toBeNull()
+      pending[0].result = importedJson
+      pending[0].onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+      await flush(2)
+      expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('IMPORTED_PATH_LINK')
+      expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+      expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('IMPORTED_PATH_LINK')
+
+      // A failed import also invalidates an interim preview but preserves the last editable form.
+      chooseDraftFile(root, '{ private_json_marker')
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(node(root, 'stock-prep-source-plan-draft-json')).not.toBeNull()
+      pending[1].result = '{ private_json_marker'
+      pending[1].onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+      await flush(2)
+      expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('IMPORTED_PATH_LINK')
+      expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+      expect(node(root, 'stock-prep-source-plan-draft-download')).toBeNull()
+
+      // After another import begins, a real edit advances the generation. Its own new preview is
+      // authoritative, so a late reader cannot clear it or replace the edited draft.
+      chooseDraftFile(root, importedJson)
+      const objectInput = node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement
+      objectInput.value = 'NEWER_LOCAL_PATH'
+      objectInput.dispatchEvent(new Event('input'))
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('NEWER_LOCAL_PATH')
+      pending[2].result = importedJson
+      pending[2].onload?.(new ProgressEvent('load') as ProgressEvent<FileReader>)
+      await flush(2)
+      expect((node(root, 'stock-prep-source-plan-draft-input-pathExAttr-object') as HTMLInputElement).value).toBe('NEWER_LOCAL_PATH')
+      expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('NEWER_LOCAL_PATH')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it.each(['tenantId', 'workspaceId'] as const)('S-14: changing %s clears private drafts and old binding confirmation on the same mount', async (key) => {
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    await fillPrivateDraft(root)
+    await requestBindingConfirmation(root)
+    const oldConfirm = node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement
+    scope[key] = 'synthetic-other-scope'
+    // Even an already-delivered click cannot submit the old pending choice into the new scope.
+    oldConfirm.click()
+    await flush()
+    expectCleared(root)
+    expect(posted).toEqual([])
+  })
+
+  it('S-15: account switch and permission loss/restoration clear state and recompute the actual access snapshot', async () => {
+    const root = await mountPanel()
+    await fillPrivateDraft(root)
+    await requestBindingConfirmation(root)
+    switchAccount()
+    await flush()
+    expectCleared(root)
+    await fillPrivateDraft(root, 'SYN_PRIVATE_LAYOUT_B')
+    h.permissions = ['stock-prep:admin']
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(node(root, 'stock-prep-source-readonly')).not.toBeNull()
+    expect(node(root, 'stock-prep-source-select')).toBeNull()
+    expect(node(root, 'stock-prep-source-plan-draft')).toBeNull()
+    expect(root.textContent).not.toContain('SYN_PRIVATE_LAYOUT_B')
+    h.permissions = ['integration:admin']
+    notifyAuthPrincipalChange()
+    await flush()
+    expect(node(root, 'stock-prep-source-readonly')).toBeNull()
+    expectCleared(root)
+    expect(posted).toEqual([])
+  })
+
+  it.each(['storage', 'focus'])('S-16: %s detects permission and session changes made outside this tab', async (event) => {
+    const root = await mountPanel()
+    await fillPrivateDraft(root)
+    h.permissions = []
+    localStorage.setItem('user_permissions', '[]')
+    window.dispatchEvent(new Event(event))
+    await flush()
+    expect(node(root, 'stock-prep-source-readonly')).not.toBeNull()
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    h.permissions = ['integration:admin']
+    localStorage.setItem('user_permissions', '["integration:admin"]')
+    window.dispatchEvent(new Event(event))
+    await flush()
+    expectCleared(root)
+  })
+
+  it.each(['scope', 'account', 'silent-token'] as const)('S-17: a late FileReader cannot restore the old %s draft', async (change) => {
+    const readers: Array<{ result: string | null; onload: (() => void) | null }> = []
+    class DelayedReader {
+      result: string | null = null
+      onload: (() => void) | null = null
+      readAsText(): void { readers.push(this) }
+    }
+    vi.stubGlobal('FileReader', DelayedReader)
+    try {
+      const scope = reactive({ ...SCOPE })
+      const root = await mountPanel(scope)
+      const incoming = createSyntheticSourcePlanDraft()
+      incoming.roles.pathExAttr.object = 'SYN_LATE_PREVIOUS_SESSION'
+      const incomingJson = JSON.stringify(compileSourcePlanDraft(incoming).envelope)
+      chooseDraftFile(root, incomingJson)
+      expect(readers).toHaveLength(1)
+      if (change === 'scope') scope.workspaceId = 'synthetic-next-workspace'
+      else if (change === 'account') switchAccount()
+      else localStorage.setItem('auth_token', 'synthetic-silent-next-token')
+      await flush(2)
+      readers[0].result = incomingJson
+      readers[0].onload?.()
+      await flush()
+      expectCleared(root)
+      expect(root.textContent).not.toContain('SYN_LATE_PREVIOUS_SESSION')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it.each(['success', 'failure'] as const)('S-18: a late GET %s is discarded after scope change while its real pending state is retained', async (outcome) => {
+    const response = deferredResponse()
+    installRoutes({ get: () => response.promise })
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    scope.tenantId = 'synthetic-next-tenant'
+    await flush(2)
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(true)
+    response.resolve(outcome === 'success' ? envelope(bindingPayload()) : refusal(403, 'DENIED'))
+    await flush()
+    expectCleared(root)
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(false)
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['success', 'failure'] as const)('S-19: a late POST %s never continues with a GET or updates the next session', async (outcome) => {
+    const response = deferredResponse()
+    installRoutes({ post: () => response.promise })
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    await requestBindingConfirmation(root)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush(2)
+    expect(posted).toHaveLength(1)
+    expect(posted[0].url).toContain('workspaceId=workspace-default')
+    scope.workspaceId = 'synthetic-next-workspace'
+    switchAccount()
+    await flush(2)
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(true)
+    response.resolve(outcome === 'success' ? envelope({ changed: true }) : refusal(403, 'DENIED'))
+    await flush()
+    expectCleared(root)
+    expect(h.apiFetch).toHaveBeenCalledTimes(2)
+    expect(getCount).toBe(1)
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(false)
+  })
+
+  it('S-20: post-save readback keeps its captured scope and cannot publish across a later account switch', async () => {
+    const readback = deferredResponse()
+    installRoutes({ get: () => getCount === 1 ? envelope(bindingPayload()) : readback.promise })
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    await requestBindingConfirmation(root)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush(2)
+    expect(getCount).toBe(2)
+    expect(String(h.apiFetch.mock.calls[2][0])).toContain('workspaceId=workspace-default')
+    scope.workspaceId = 'synthetic-next-workspace'
+    switchAccount()
+    await flush(2)
+    readback.resolve(envelope(bindingPayload({ effectiveExternalSystemId: CUSTOMER_PLM })))
+    await flush()
+    expectCleared(root)
+    expect(h.apiFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('S-21: the next user starts empty and can reuse only an explicitly imported downloaded draft', async () => {
+    const createObjectURL = vi.fn((_blob: Blob) => 'blob:synthetic-review')
+    vi.stubGlobal('URL', class extends URL {
+      static createObjectURL = createObjectURL
+      static revokeObjectURL = vi.fn()
+    })
+    const anchor = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    try {
+      const root = await mountPanel()
+      await fillPrivateDraft(root)
+      ;(node(root, 'stock-prep-source-plan-draft-download') as HTMLButtonElement).click()
+      const downloaded = await new Promise<string>((resolve) => {
+        const reader = new FileReader()
+        reader.onload = () => resolve(String(reader.result))
+        reader.readAsText(createObjectURL.mock.calls[0][0])
+      })
+      switchAccount()
+      await flush()
+      expectCleared(root)
+      const calls = h.apiFetch.mock.calls.length
+      chooseDraftFile(root, downloaded)
+      await flush()
+      expect(node(root, 'stock-prep-source-plan-draft-json')).toBeNull()
+      ;(node(root, 'stock-prep-source-plan-draft-preview') as HTMLButtonElement).click()
+      await flush(2)
+      expect(JSON.parse(text(root, 'stock-prep-source-plan-draft-json'))).toEqual(JSON.parse(downloaded))
+      expect(h.apiFetch).toHaveBeenCalledTimes(calls)
+      expect(posted).toEqual([])
+    } finally {
+      anchor.mockRestore()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('S-22: direct handlers cannot send with lost permission, absent choice, old confirmation or after unmount', async () => {
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    const internal = app!._instance as unknown as {
+      setupState: { askToSave: () => void; save: () => Promise<void> }
+      exposed: { load: () => Promise<void> }
+    }
+    const select = node(root, 'stock-prep-source-select') as HTMLSelectElement
+    select.value = ''
+    select.dispatchEvent(new Event('change'))
+    internal.setupState.askToSave()
+    await internal.setupState.save()
+    expect(posted).toEqual([])
+    await requestBindingConfirmation(root)
+    scope.workspaceId = 'synthetic-new-workspace'
+    await internal.setupState.save()
+    expect(posted).toEqual([])
+    h.permissions = []
+    notifyAuthPrincipalChange()
+    await flush()
+    const calls = h.apiFetch.mock.calls.length
+    internal.setupState.askToSave()
+    await internal.setupState.save()
+    await internal.exposed.load()
+    expect(h.apiFetch).toHaveBeenCalledTimes(calls)
+    app!.unmount()
+    app = null
+    h.permissions = ['integration:admin']
+    notifyAuthPrincipalChange()
+    await internal.exposed.load()
+    internal.setupState.askToSave()
+    await internal.setupState.save()
+    expect(h.apiFetch).toHaveBeenCalledTimes(calls)
+  })
+
+  it('S-23: only explicit refresh loads sources for the new scope, then a fresh choice can be saved', async () => {
+    installRoutes({
+      get: () => envelope(getCount < 3 ? bindingPayload() : confirmedCustomerPayload({
+        persistedBinding: persistedCustomerBinding({ workspaceId: 'synthetic-new-workspace' }),
+      })),
+    })
+    const scope = reactive({ ...SCOPE })
+    const root = await mountPanel(scope)
+    await requestBindingConfirmation(root)
+    scope.workspaceId = 'synthetic-new-workspace'
+    switchAccount()
+    await flush()
+    expectCleared(root)
+    expect(h.apiFetch).toHaveBeenCalledTimes(1)
+    ;(node(root, 'stock-prep-source-refresh') as HTMLButtonElement).click()
+    await flush()
+    expect(getCount).toBe(2)
+    expect(String(h.apiFetch.mock.calls[1][0])).toContain('workspaceId=synthetic-new-workspace')
+    expect(node(root, 'stock-prep-source-current')).not.toBeNull()
+    expect(node(root, 'stock-prep-source-confirm')).toBeNull()
+    await requestBindingConfirmation(root)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush()
+    expect(posted).toHaveLength(1)
+    expect(posted[0].url).toContain('workspaceId=synthetic-new-workspace')
+    expect(node(root, 'stock-prep-source-saved')).not.toBeNull()
+    expect(text(root, 'stock-prep-source-saved')).toContain('不用重启')
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+  })
+
+  // -------------------------------------------------------------------------
+  // S-24..S-27 — a save is "already live / no restart" only after THIS
+  // session's readback confirms that exact source. The confirmation note
+  // uses the same server flag as the status line.
+  // -------------------------------------------------------------------------
+
+  it('S-24: withholds the effective claim until the same-scope readback confirms it', async () => {
+    const readback = deferredResponse()
+    installRoutes({ get: () => (getCount === 1 ? envelope(bindingPayload()) : readback.promise) })
+    const root = await mountPanel()
+    await requestBindingConfirmation(root)
+    ;(node(root, 'stock-prep-source-confirm-save') as HTMLButtonElement).click()
+    await flush(2)
+
+    expect(posted).toHaveLength(1)
+    expect(posted[0].body).toEqual({ externalSystemId: CUSTOMER_PLM })
+    expect(posted[0].url).toContain('tenantId=tenant-a')
+    expect(posted[0].url).toContain('workspaceId=workspace-default')
+    expect(getCount).toBe(2)
+    expect(String(h.apiFetch.mock.calls[2][0])).toContain('tenantId=tenant-a')
+    expect(String(h.apiFetch.mock.calls[2][0])).toContain('workspaceId=workspace-default')
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(true)
+    expect((node(root, 'stock-prep-source-refresh') as HTMLButtonElement).disabled).toBe(true)
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+    expect(root.textContent).not.toContain('不用重启')
+    expect(root.textContent).not.toContain('已经生效')
+
+    // A successful POST has invalidated the old observation, even while its readback is pending.
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    expect(onBindingRead).toHaveBeenLastCalledWith(null)
+
+    readback.resolve(envelope(confirmedCustomerPayload()))
+    await flush()
+
+    expect(text(root, 'stock-prep-source-saved')).toContain('已保存,并且已经生效')
+    expect(text(root, 'stock-prep-source-saved')).toContain('不用重启')
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+    expect(node(root, 'stock-prep-source-error')).toBeNull()
+    expect(text(root, 'stock-prep-source-current-name')).toContain('客户 PLM 只读库')
+    expect(text(root, 'stock-prep-source-current-id')).toContain(CUSTOMER_PLM)
+    expect(node(root, 'stock-prep-source-no-restart')).not.toBeNull()
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(false)
+    expect(posted).toHaveLength(1)
+    expect(getCount).toBe(2)
+  })
+
+  it.each([
+    ['a different source', { effectiveExternalSystemId: DEMO_SOURCE }],
+    ['an unreadable source', {
+      effectiveExternalSystemId: CUSTOMER_PLM,
+      effectiveSourceProblem: 'not_active',
+      takesEffectWithoutRestart: false,
+    }],
+    ['no no-restart capability', { effectiveExternalSystemId: CUSTOMER_PLM, takesEffectWithoutRestart: false }],
+    ['a non-boolean capability', { effectiveExternalSystemId: CUSTOMER_PLM, takesEffectWithoutRestart: 'true' }],
+    ['an object problem', { effectiveExternalSystemId: CUSTOMER_PLM, effectiveSourceProblem: { code: 'not_active' } }],
+    ['a boolean problem', { effectiveExternalSystemId: CUSTOMER_PLM, effectiveSourceProblem: true }],
+  ] as const)('S-25: readback with %s does not claim the save is effective and does not write again', async (label, overrides) => {
+    installRoutes({ afterSave: confirmedCustomerPayload(overrides) })
+    const root = await mountPanel()
+    await confirmSave(root)
+
+    expect(posted).toHaveLength(1)
+    expect(posted[0].body).toEqual({ externalSystemId: CUSTOMER_PLM })
+    expect(getCount).toBe(2)
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(root.textContent).not.toContain('不用重启')
+    expect(root.textContent).not.toContain('已经生效')
+    expect(text(root, 'stock-prep-source-unconfirmed')).toContain('保存请求已经提交')
+    expect(text(root, 'stock-prep-source-unconfirmed')).toContain('不会自动再次保存')
+    expect(node(root, 'stock-prep-source-error')).toBeNull()
+    expect(root.textContent).not.toContain('读取或保存失败')
+    expect(root.textContent).not.toContain(PLANTED_DSN)
+    if (label === 'a different source') {
+      expect(text(root, 'stock-prep-source-current-name')).toContain('内置演示源')
+    } else {
+      expect(text(root, 'stock-prep-source-current-name')).toContain('客户 PLM 只读库')
+    }
+    if (label === 'an unreadable source') {
+      expect(text(root, 'stock-prep-source-problem')).toContain('还没有启用')
+      expect(node(root, 'stock-prep-source-no-restart')).toBeNull()
+    }
+    if (('takesEffectWithoutRestart' in overrides && overrides.takesEffectWithoutRestart === false) || label === 'a non-boolean capability') {
+      expect(root.textContent).not.toContain('不需要重启')
+    }
+    await flush()
+    expect(posted).toHaveLength(1)
+    expect(h.apiFetch).toHaveBeenCalledTimes(3)
+  })
+
+  it('S-26: a failed readback after a successful save shows a fixed unconfirmed line and does not retry', async () => {
+    installRoutes({
+      get: () => (getCount === 1 ? envelope(bindingPayload()) : refusal(500, 'INTERNAL_ERROR')),
+    })
+    const root = await mountPanel()
+    await confirmSave(root)
+
+    expect(posted).toHaveLength(1)
+    expect(posted[0].body).toEqual({ externalSystemId: CUSTOMER_PLM })
+    expect(getCount).toBe(2)
+    expect(h.apiFetch).toHaveBeenCalledTimes(3)
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(node(root, 'stock-prep-source-error')).toBeNull()
+    expect(root.textContent).not.toContain('读取或保存失败')
+    expect(root.textContent).not.toContain('不用重启')
+    expect(root.textContent).not.toContain('已经生效')
+    expect(text(root, 'stock-prep-source-unconfirmed')).toContain('保存请求已经提交')
+    expect(text(root, 'stock-prep-source-unconfirmed')).not.toContain(PLANTED_DSN)
+    expect(root.textContent).not.toContain(PLANTED_DSN)
+    expect(root.textContent).not.toContain('refused for')
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    expect(onBindingRead).toHaveBeenLastCalledWith(null)
+    expect((node(root, 'stock-prep-source-select') as HTMLSelectElement).disabled).toBe(false)
+    await flush()
+    expect(posted).toHaveLength(1)
+    expect(getCount).toBe(2)
+  })
+
+  it('S-27: a refused save stays a refusal and does not show the unconfirmed readback line', async () => {
+    installRoutes({ post: () => refusal(422, 'SOURCE_BINDING_SOURCE_INELIGIBLE', 'not_active') })
+    const root = await mountPanel()
+    await confirmSave(root)
+
+    expect(getCount).toBe(1)
+    expect(posted).toHaveLength(1)
+    expect(text(root, 'stock-prep-source-error')).toContain('还没有启用')
+    expect(text(root, 'stock-prep-source-error')).toContain('HTTP 422')
+    expect(node(root, 'stock-prep-source-unconfirmed')).toBeNull()
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(root.textContent).not.toContain('保存请求已经提交')
+    expect(root.textContent).not.toContain(PLANTED_DSN)
+    expect(root.textContent).not.toContain('refused for')
+  })
+
+  it('S-29: an explicit refresh failure withdraws the previous observation, not the local draft', async () => {
+    installRoutes({ get: () => getCount === 1 ? envelope(bindingPayload()) : refusal(500, 'INTERNAL_ERROR') })
+    const root = await mountPanel()
+    await fillPrivateDraft(root)
+    expect(onBindingRead.mock.lastCall?.[0]?.effectiveExternalSystemId).toBe(DEMO_SOURCE)
+    ;(node(root, 'stock-prep-source-refresh') as HTMLButtonElement).click()
+    await flush()
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    expect(node(root, 'stock-prep-source-no-restart')).toBeNull()
+    expect(node(root, 'stock-prep-source-saved')).toBeNull()
+    expect(onBindingRead).toHaveBeenLastCalledWith(null)
+    expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('SYN_PRIVATE_LAYOUT_A')
+    expect(text(root, 'stock-prep-source-error')).toContain('500')
+    expect(getCount).toBe(2)
+    expect(posted).toHaveLength(0)
+  })
+
+  it('S-30: a transport-ambiguous save withdraws the old binding and never retries automatically', async () => {
+    installRoutes({ post: () => Promise.reject(new TypeError('synthetic connection lost')) })
+    const root = await mountPanel()
+    await fillPrivateDraft(root)
+    await confirmSave(root)
+    expect(node(root, 'stock-prep-source-current')).toBeNull()
+    expect(onBindingRead).toHaveBeenLastCalledWith(null)
+    expect(text(root, 'stock-prep-source-plan-draft-json')).toContain('SYN_PRIVATE_LAYOUT_A')
+    expect(root.textContent).not.toContain('synthetic connection lost')
+    expect(posted).toHaveLength(1)
+    expect(getCount).toBe(1)
+  })
+
+  it('S-28: the confirmation note promises no restart only when the server says so', async () => {
+    installRoutes({ get: () => envelope(bindingPayload({ takesEffectWithoutRestart: false })) })
+    const quiet = await mountPanel()
+    await requestBindingConfirmation(quiet)
+    expect(node(quiet, 'stock-prep-source-no-restart')).toBeNull()
+    expect(text(quiet, 'stock-prep-source-confirm')).not.toContain('不需要重启')
+    expect(text(quiet, 'stock-prep-source-confirm')).not.toContain('立即生效')
+    expect(text(quiet, 'stock-prep-source-confirm')).toContain('客户 PLM 只读库')
+
+    if (app) app.unmount()
+    installRoutes()
+    const allowed = await mountPanel()
+    await requestBindingConfirmation(allowed)
+    expect(text(allowed, 'stock-prep-source-confirm')).toContain('不需要重启')
+    expect(text(allowed, 'stock-prep-source-confirm')).toContain('立即生效')
+    expect(text(allowed, 'stock-prep-source-no-restart')).toContain('不需要重启')
   })
 })

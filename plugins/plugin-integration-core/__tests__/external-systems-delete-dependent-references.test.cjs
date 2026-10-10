@@ -83,6 +83,7 @@ const {
 
 const STOCK_PREP_BINDING_TABLE = 'integration_stock_prep_source_binding'
 const READ_SOURCE_CONFIG_TABLE = 'integration_read_source_configs'
+const STOCK_PREP_READ_PLAN_TABLE = 'integration_stock_prep_read_plan_versions'
 const SEALED_EXPORT_BINDING_TABLE = 'integration_sealed_export_stock_prep_bindings'
 
 // --- in-memory mutation harness -------------------------------------------------
@@ -287,6 +288,28 @@ function readSourceConfig(overrides = {}) {
   }
 }
 
+// 087's stored draft is deliberately NOT an activation pointer, but a live draft/approved version
+// still names the source system and must prevent deleting that identity from under the review trail.
+// CountRows only needs tenant/system/status; the remaining fixed-shape fixture makes clear this is a
+// version record, not a recycled 062 config row.
+function stockPrepReadPlan(overrides = {}) {
+  return {
+    id: 'plan_1',
+    tenant_id: 'tenant_1',
+    workspace_id: null,
+    action_id: 'plm.stock-preparation.pull-bom.v1',
+    system_id: 'sys_bound',
+    schema_version: 1,
+    config: {},
+    content_key: 'a'.repeat(64),
+    version: 1,
+    status: 'draft',
+    created_by: 'admin_1',
+    updated_by: 'admin_1',
+    ...overrides,
+  }
+}
+
 // 073's row shape (`migrations/073_create_sealed_export_stock_prep_runtime_authority.sql:14-36`).
 // Only the four columns the delete guard filters on matter here; the rest are carried so the fixture
 // reads like the real row and so a future widening of the filter fails loudly instead of silently.
@@ -375,6 +398,63 @@ async function testReadSourceConfigLifecycle() {
   assert.equal(retired.db.rowsOf('integration_external_systems').length, 0, 'B-05: the system row is gone')
 }
 
+// --- B-15 / B-16 / B-17: 087 BOM read-plan version lifecycle -------------------
+async function testStockPrepReadPlanLifecycle() {
+  // A plan authored in another workspace is still a tenant-scoped source-system pointer. The
+  // delete hint's workspace must not hide it: the store can retain/review that version regardless
+  // of which workspace initiated the delete.
+  const crossWorkspace = await setupSystem({ workspaceId: 'ws_delete' })
+  crossWorkspace.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ workspace_id: 'ws_plan', status: 'draft' }))
+  const crossWorkspaceBlocked = await deleteAndCatch(crossWorkspace.registry, { workspaceId: 'ws_delete' })
+  assert.ok(crossWorkspaceBlocked.error instanceof ExternalSystemConflictError, 'B-15: a cross-workspace 087 draft refuses the delete')
+  assert.equal(crossWorkspaceBlocked.error.details.stockPrepReadPlanCount, 1, 'B-15: the 087 draft count is reported')
+  assert.equal(crossWorkspaceBlocked.error.details.readSourceConfigCount, 0, 'B-15: 087 is not mixed into the old 062 count')
+  assert.equal(crossWorkspaceBlocked.error.details.referencedBindingCount, 1, 'B-15: the dependent total includes 087')
+  assertSurvives(crossWorkspace.db, 'B-15')
+
+  for (const status of ['draft', 'approved']) {
+    const live = await setupSystem({})
+    live.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ id: `plan_${status}`, status }))
+    const blocked = await deleteAndCatch(live.registry, {})
+    assert.ok(blocked.error instanceof ExternalSystemConflictError, `B-15/16: a ${status} 087 version refuses the delete`)
+    assert.equal(blocked.error.details.stockPrepReadPlanCount, 1, `B-15/16: the ${status} 087 version is counted`)
+    assert.equal(blocked.error.details.readSourceConfigCount, 0, `B-15/16: the ${status} 087 version does not inflate 062`)
+    assertSurvives(live.db, `B-15/16 (${status})`)
+  }
+
+  // The two equality queries must be independently issued, draft then approved; an IN-like fake
+  // would not exercise the real db helper and reversing them reopens the lifecycle transition gap.
+  const lifecycleCounts = crossWorkspace.db.countCalls
+    .filter(([table, , inTransaction]) => table === STOCK_PREP_READ_PLAN_TABLE && inTransaction)
+  assert.deepEqual(
+    lifecycleCounts.map(([, where]) => [Object.keys(where).sort(), where.status]),
+    [
+      [['status', 'system_id', 'tenant_id'], 'draft'],
+      [['status', 'system_id', 'tenant_id'], 'approved'],
+    ],
+    'B-15: 087 is counted as serial draft then approved equality queries without a workspace filter',
+  )
+
+  const retired = await setupSystem({})
+  retired.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ id: 'plan_retired', status: 'retired' }))
+  const allowed = await deleteAndCatch(retired.registry, {})
+  assert.equal(allowed.error, null, 'B-17: a retired-only 087 version does not refuse the delete')
+  assert.equal(allowed.result.deleted, true, 'B-17: the delete completes')
+  assert.equal(retired.db.rowsOf('integration_external_systems').length, 0, 'B-17: the system row is gone')
+
+  // Values-free conflict diagnostics expose fixed handles and integer counts, never a plan id,
+  // workspace name, author, config, or schema value from the stored version.
+  assert.deepEqual(
+    Object.keys(crossWorkspaceBlocked.error.details).sort(),
+    [
+      'id', 'readSourceConfigCount', 'referencedBindingCount', 'referencedPipelineCount',
+      'sealedExportBindingCount', 'sourcePipelineCount', 'stockPrepReadPlanCount',
+      'stockPrepSourceBindingCount', 'targetPipelineCount', 'tenantId', 'workspaceId',
+    ],
+    'B-15: 087 conflict details are a fixed values-free count/scope whitelist',
+  )
+}
+
 // --- B-06: the tables are not there ---------------------------------------------
 async function testAbsentTablesDoNotBlockDelete() {
   const absent = await setupSystem({})
@@ -382,17 +462,18 @@ async function testAbsentTablesDoNotBlockDelete() {
   // guard judges the code and never the message (see the 222 PG locale sweep).
   absent.db.failCountWith(STOCK_PREP_BINDING_TABLE, sqlError('错误: 关系 "integration_stock_prep_source_binding" 不存在', '42P01'))
   absent.db.failCountWith(READ_SOURCE_CONFIG_TABLE, sqlError('错误: 关系 "integration_read_source_configs" 不存在', '42P01'))
+  absent.db.failCountWith(STOCK_PREP_READ_PLAN_TABLE, sqlError('错误: 关系 "integration_stock_prep_read_plan_versions" 不存在', '42P01'))
   // 073 is the likeliest of the three to be missing: its migration only installs the sealed-export
   // runtime authority on deployments that opted in, so a plain deployment has no such table at all.
   absent.db.failCountWith(SEALED_EXPORT_BINDING_TABLE, sqlError('错误: 关系 "integration_sealed_export_stock_prep_bindings" 不存在', '42P01'))
   const allowed = await deleteAndCatch(absent.registry, {})
-  assert.equal(allowed.error, null, 'B-06: a deployment without 079/062/073 keeps deleting as before')
+  assert.equal(allowed.error, null, 'B-06: a deployment without 079/062/087/073 keeps deleting as before')
   assert.equal(allowed.result.deleted, true, 'B-06: the delete completes')
   assert.equal(absent.db.rowsOf('integration_external_systems').length, 0, 'B-06: the system row is gone')
   // WHERE the absence was learned: each missing table was counted exactly once, in AUTOCOMMIT (the
   // probe), and never inside the transaction — a 42P01 in there would abort the transaction and turn
   // this tolerated case into a 25P02 refusal (M-6 executes exactly that).
-  const absentTables = [STOCK_PREP_BINDING_TABLE, READ_SOURCE_CONFIG_TABLE, SEALED_EXPORT_BINDING_TABLE]
+  const absentTables = [STOCK_PREP_BINDING_TABLE, READ_SOURCE_CONFIG_TABLE, STOCK_PREP_READ_PLAN_TABLE, SEALED_EXPORT_BINDING_TABLE]
   for (const table of absentTables) {
     const probes = absent.db.countCalls.filter(([counted, , inTransaction]) => counted === table && !inTransaction)
     const inside = absent.db.countCalls.filter(([counted, , inTransaction]) => counted === table && inTransaction)
@@ -417,6 +498,19 @@ async function testOtherSqlstatesPropagate() {
   assert.ok(configFailure.error, 'B-08: a non-42P01 failure on the 062 count is not swallowed')
   assert.equal(configFailure.error.code, '08006', 'B-08: the original SQLSTATE propagates unchanged')
   assertSurvives(dropped.db, 'B-08')
+
+  for (const [code, message] of [
+    ['42501', '权限不足'],
+    ['08006', 'connection terminated'],
+  ]) {
+    const readPlanFailure = await setupSystem({})
+    readPlanFailure.db.failCountWith(STOCK_PREP_READ_PLAN_TABLE, sqlError(message, code))
+    const failure = await deleteAndCatch(readPlanFailure.registry, {})
+    assert.ok(failure.error, `B-18: 087 ${code} does not get treated as an empty table`)
+    assert.equal(failure.error.code, code, `B-18: 087 ${code} propagates unchanged`)
+    assert.ok(!(failure.error instanceof ExternalSystemConflictError), `B-18: 087 ${code} is not laundered into a conflict`)
+    assertSurvives(readPlanFailure.db, `B-18 (${code})`)
+  }
 }
 
 // --- B-09 / B-10: the count is bounded by tenant AND by system id -----------------
@@ -424,6 +518,7 @@ async function testForeignRowsAreNeverCounted() {
   const isolated = await setupSystem({})
   isolated.db.insertRaw(STOCK_PREP_BINDING_TABLE, stockPrepBinding({ id: 'bind_other_tenant', tenant_id: 'tenant_2' }))
   isolated.db.insertRaw(READ_SOURCE_CONFIG_TABLE, readSourceConfig({ id: 'cfg_other_tenant', tenant_id: 'tenant_2', status: 'approved' }))
+  isolated.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ id: 'plan_other_tenant', tenant_id: 'tenant_2', status: 'approved' }))
   isolated.db.insertRaw(SEALED_EXPORT_BINDING_TABLE, sealedExportBinding({ binding_id: 'sealed_other_tenant', tenant_id: 'tenant_2' }))
   const crossTenant = await deleteAndCatch(isolated.registry, {})
   assert.equal(crossTenant.error, null, 'B-09: another tenant rows never keep this tenant system alive')
@@ -432,6 +527,7 @@ async function testForeignRowsAreNeverCounted() {
   const other = await setupSystem({})
   other.db.insertRaw(STOCK_PREP_BINDING_TABLE, stockPrepBinding({ id: 'bind_other_system', external_system_id: 'sys_elsewhere' }))
   other.db.insertRaw(READ_SOURCE_CONFIG_TABLE, readSourceConfig({ id: 'cfg_other_system', system_id: 'sys_elsewhere', status: 'approved' }))
+  other.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ id: 'plan_other_system', system_id: 'sys_elsewhere', status: 'approved' }))
   other.db.insertRaw(SEALED_EXPORT_BINDING_TABLE, sealedExportBinding({ binding_id: 'sealed_other_system', external_system_id: 'sys_elsewhere' }))
   const otherSystem = await deleteAndCatch(other.registry, {})
   assert.equal(otherSystem.error, null, 'B-10: rows pointing at another system are not counted')
@@ -502,12 +598,13 @@ async function testPipelineConflictWireShapeUnchanged() {
   assert.equal(blocked.error.details.sourcePipelineCount, 1, 'B-11: the source breakdown is unchanged')
   assert.equal(blocked.error.details.referencedBindingCount, 0, 'B-11: the dependent total is present and zero')
   assert.equal(blocked.error.details.sealedExportBindingCount, 0, 'B-11: the 073 count is present and zero')
+  assert.equal(blocked.error.details.stockPrepReadPlanCount, 0, 'B-11: the 087 count is present and zero')
   // values-free: the details carry counts and handles only, never a row id from 079/062.
   assert.deepEqual(
     Object.keys(blocked.error.details).sort(),
     [
       'id', 'readSourceConfigCount', 'referencedBindingCount', 'referencedPipelineCount',
-      'sealedExportBindingCount', 'sourcePipelineCount', 'stockPrepSourceBindingCount', 'targetPipelineCount',
+      'sealedExportBindingCount', 'sourcePipelineCount', 'stockPrepReadPlanCount', 'stockPrepSourceBindingCount', 'targetPipelineCount',
       'tenantId', 'workspaceId',
     ],
     'B-11: the conflict details expose counts and scope handles only',
@@ -549,6 +646,7 @@ async function testMutationsFlipTheNamedCases() {
   const m3 = await setupSystem({ factory: messageJudged })
   m3.db.failCountWith(STOCK_PREP_BINDING_TABLE, sqlError('错误: 关系 "integration_stock_prep_source_binding" 不存在', '42P01'))
   m3.db.failCountWith(READ_SOURCE_CONFIG_TABLE, sqlError('错误: 关系 "integration_read_source_configs" 不存在', '42P01'))
+  m3.db.failCountWith(STOCK_PREP_READ_PLAN_TABLE, sqlError('错误: 关系 "integration_stock_prep_read_plan_versions" 不存在', '42P01'))
   const m3Result = await deleteAndCatch(m3.registry, {})
   assert.ok(m3Result.error, 'M-3: judging by prose makes the zh_CN 42P01 propagate — B-06 is load-bearing')
   assert.equal(m3Result.error.code, '42P01', 'M-3: the tolerated case is exactly what now escapes')
@@ -595,6 +693,7 @@ async function testMutationsFlipTheNamedCases() {
   const m6 = await setupSystem({ factory: absentTablesCountedInTransaction })
   m6.db.failCountWith(STOCK_PREP_BINDING_TABLE, sqlError('错误: 关系 "integration_stock_prep_source_binding" 不存在', '42P01'))
   m6.db.failCountWith(READ_SOURCE_CONFIG_TABLE, sqlError('错误: 关系 "integration_read_source_configs" 不存在', '42P01'))
+  m6.db.failCountWith(STOCK_PREP_READ_PLAN_TABLE, sqlError('错误: 关系 "integration_stock_prep_read_plan_versions" 不存在', '42P01'))
   m6.db.failCountWith(SEALED_EXPORT_BINDING_TABLE, sqlError('错误: 关系 "integration_sealed_export_stock_prep_bindings" 不存在', '42P01'))
   const m6Result = await deleteAndCatch(m6.registry, {})
   assert.ok(m6Result.error, 'M-6: counting a missing table inside the transaction makes the delete fail — B-06 is load-bearing')
@@ -602,6 +701,18 @@ async function testMutationsFlipTheNamedCases() {
   assert.equal(m6.db.rowsOf('integration_external_systems').length, 1, 'M-6: the mutant refuses a delete B-06 allows')
   const m6Inside = m6.db.countCalls.filter(([table, , inTransaction]) => inTransaction && table === STOCK_PREP_BINDING_TABLE)
   assert.equal(m6Inside.length, 1, 'M-6: the mutant really counted the missing table inside the transaction')
+
+  // M-7 — dropping 087 from the returned dependent total lets a live BOM read-plan version point
+  // at a deleted system. This is intentionally a narrow output mutation: the in-memory DB stays
+  // faithful to production countRows, and the delete itself must really go through for the witness.
+  const withoutStockPrepReadPlanCount = mutatedRegistryFactory('M-7', [
+    ['      stockPrepReadPlanCount: stockPrepReadPlanDraftMatches + stockPrepReadPlanApprovedMatches,', '      stockPrepReadPlanCount: 0,'],
+  ])
+  const m7 = await setupSystem({ factory: withoutStockPrepReadPlanCount })
+  m7.db.insertRaw(STOCK_PREP_READ_PLAN_TABLE, stockPrepReadPlan({ status: 'approved' }))
+  const m7Result = await deleteAndCatch(m7.registry, {})
+  assert.equal(m7Result.error, null, 'M-7: zeroing the 087 count lets the delete through — B-15/16 are load-bearing')
+  assert.equal(m7.db.rowsOf('integration_external_systems').length, 0, 'M-7: the mutant really deletes the referenced system')
 
   // The unpatched module is untouched by all of the above.
   const intact = await setupSystem({})
@@ -613,6 +724,7 @@ async function testMutationsFlipTheNamedCases() {
 async function main() {
   await testStockPrepBindingBlocksDelete()
   await testReadSourceConfigLifecycle()
+  await testStockPrepReadPlanLifecycle()
   await testAbsentTablesDoNotBlockDelete()
   await testOtherSqlstatesPropagate()
   await testSealedExportBindingLifecycle()
@@ -620,7 +732,7 @@ async function main() {
   await testPipelineConflictWireShapeUnchanged()
   await testMutationsFlipTheNamedCases()
   completed = true
-  console.log('✓ external-systems delete guard: 079/062/073 second-order references counted')
+  console.log('✓ external-systems delete guard: 079/062/087/073 second-order references counted')
 }
 
 let completed = false

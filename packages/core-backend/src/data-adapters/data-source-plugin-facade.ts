@@ -4,7 +4,7 @@ import {
   isC6WriteTargetConfig,
   isGenericQueryDisabledConfig,
 } from './DataSourceManager'
-import type { DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
+import type { BaseDataAdapter, DataSourceConfig, DbValue, QueryOptions, QueryResult, SchemaInfo, TableInfo } from './BaseAdapter'
 import { parseSqlServerEndpoint } from '@metasheet/mssql-readonly-utils'
 import { SCHEMA_DETAIL_BUDGET_DISABLED } from './schema-detail-budget'
 
@@ -49,6 +49,12 @@ export interface DataSourceConnectionRegistration {
   type: string
   tenantId: string | null
   scopeKind: DataSourceScopeKind
+  validationRevision?: string
+}
+
+/** Opt-in exact installed-adapter fence. Later durable receipt commit must also compare the DB mirror. */
+export interface DataSourceValidationReadOptions {
+  expectedValidationRevision: string
 }
 
 export interface ResolveConnectionRegistrationOptions {
@@ -123,12 +129,16 @@ export interface DataSourceReadOnlyFacade {
    */
   assertReferenceable(dataSourceId: string, principal: string | undefined): Promise<void>
   test(dataSourceId: string, principal: string | undefined): Promise<DataSourceReadOnlyFacadeTestResult>
-  getSchema(dataSourceId: string, principal: string | undefined, schema?: string): Promise<SchemaInfo>
+  getSchema(dataSourceId: string, principal: string | undefined, schema?: string, validation?: DataSourceValidationReadOptions): Promise<SchemaInfo>
   getTableInfo(
     dataSourceId: string,
     object: string,
     principal: string | undefined,
-    schema?: string
+    schema?: string,
+    validation?: DataSourceValidationReadOptions,
+    // Existing operation, narrower projection only. Omitted retains full metadata;
+    // 'columns' does not assert that omitted keys/indexes/foreign keys are empty.
+    detail?: 'columns'
   ): Promise<TableInfo>
   select(
     dataSourceId: string,
@@ -142,7 +152,8 @@ export interface DataSourceReadOnlyFacade {
     // before opening any connection, and force the existing (#5243) strict-offset-ordering check on
     // for this one read. The facade decides nothing about WHO gets to ask for `true` — that policy
     // lives at the integration-core seam that resolves an armed B2a read's source config.
-    strict?: boolean
+    strict?: boolean,
+    validation?: DataSourceValidationReadOptions
   ): Promise<QueryResult<Record<string, DbValue>>>
 }
 
@@ -639,7 +650,16 @@ export function createDataSourcePluginFacade(
     return { adapter, manager, scope }
   }
 
-  async function authorize(dataSourceId: string, principal: string | undefined, strict = false) {
+  function assertValidationPair(manager: DataSourceManager, dataSourceId: string, adapter: BaseDataAdapter, validation?: DataSourceValidationReadOptions): void {
+    if (validation === undefined) return
+    if (typeof validation.expectedValidationRevision !== 'string' || !validation.expectedValidationRevision
+      || typeof manager.getLoadedValidationRevision !== 'function'
+      || manager.getLoadedValidationRevision(dataSourceId, adapter) !== validation.expectedValidationRevision) {
+      throw new DataSourceBridgeConfigError('DATA_SOURCE_VALIDATION_REVISION_MISMATCH', 'Data source validation revision unavailable or changed')
+    }
+  }
+
+  async function authorize(dataSourceId: string, principal: string | undefined, strict = false, validation?: DataSourceValidationReadOptions) {
     const owner = requirePrincipal(principal)
     const manager = getManager()
     // A dangling / not-visible binding (deleted row OR owner mismatch) is a CONFIG error, not a
@@ -647,7 +667,7 @@ export function createDataSourcePluginFacade(
     // "not found" — so wrap just these two and re-raise the message VERBATIM as a named domain
     // error the integration host maps to a clean 4xx (422). Preserving the message keeps the
     // deleted-vs-not-yours cases indistinguishable: no existence leak.
-    let adapter
+    let adapter: BaseDataAdapter
     try {
       // Throws the uniform "not found" on owner mismatch — no existence leak.
       manager.assertAccess(dataSourceId, owner)
@@ -658,6 +678,7 @@ export function createDataSourcePluginFacade(
     // Read-only-source guard at the choke point: EVERY read method routes through authorize, so a
     // writable data source fails closed here — on getSchema/getTableInfo/select/test alike, not only
     // when testConnection happens to run first. Checked before connecting (it is a config flag).
+    assertValidationPair(manager, dataSourceId, adapter, validation)
     if (!adapter.isReadOnly()) {
       throw new DataSourceBridgeConfigError(
         DATA_SOURCE_NOT_READ_ONLY_CODE,
@@ -684,19 +705,23 @@ export function createDataSourcePluginFacade(
       }
     }
     if (!adapter.isConnected()) {
-      await manager.connectDataSource(dataSourceId)
+      if (validation === undefined) await manager.connectDataSource(dataSourceId)
+      else await adapter.connect()
     }
     return { manager, adapter }
   }
 
   return {
     async resolveConnectionRegistration(dataSourceId, options) {
-      const { adapter, scope } = await resolveRegistration(dataSourceId, options)
+      const { adapter, manager, scope } = await resolveRegistration(dataSourceId, options)
+      const validationRevision = typeof manager.getLoadedValidationRevision === 'function'
+        ? manager.getLoadedValidationRevision(dataSourceId, adapter) : undefined
       return {
         id: dataSourceId,
         type: adapter.getType(),
         tenantId: scope.tenantId,
         scopeKind: scope.scopeKind,
+        ...(validationRevision === undefined ? {} : { validationRevision }),
       }
     },
     async describe(dataSourceId, principal) {
@@ -746,8 +771,8 @@ export function createDataSourcePluginFacade(
       // A writable source already failed closed in authorize(); reaching here means read-only.
       return { success: healthy === true }
     },
-    async getSchema(dataSourceId, principal, schema) {
-      const { adapter } = await authorize(dataSourceId, principal)
+    async getSchema(dataSourceId, principal, schema, validation) {
+      const { manager, adapter } = await authorize(dataSourceId, principal, false, validation)
       // 2026-09-10 222 PLM 504: the listing is list-only by default at the adapter, but THIS
       // facade's consumers read columns straight off the listing (plugin-integration-core's
       // read-only source adapter maps every entry's `columns` into the object schema its
@@ -759,15 +784,36 @@ export function createDataSourcePluginFacade(
       // listObjects() path, which was unbounded before and whose proxy allows 300s
       // (docker/nginx.conf:63). Inheriting the 25s default here would turn listings that used to
       // SUCCEED between 25s and the proxy timeout into hard SCHEMA_DETAIL_TIMEOUT failures.
+      assertValidationPair(manager, dataSourceId, adapter, validation)
       return adapter.getSchema(schema, { includeColumns: true, budgetMs: SCHEMA_DETAIL_BUDGET_DISABLED })
     },
-    async getTableInfo(dataSourceId, object, principal, schema) {
-      const { adapter } = await authorize(dataSourceId, principal)
+    async getTableInfo(dataSourceId, object, principal, schema, validation, detail = undefined) {
+      if (detail !== undefined && detail !== 'columns') {
+        throw new DataSourceBridgeConfigError(
+          DATA_SOURCE_QUERY_INVALID_CODE,
+          'table detail must be columns when specified',
+          'DataSourceQueryInvalidError',
+        )
+      }
+      const { manager, adapter } = await authorize(dataSourceId, principal, false, validation)
+      assertValidationPair(manager, dataSourceId, adapter, validation)
+      if (detail === 'columns') {
+        // Native getColumns still runs through the adapter's guarded query path:
+        // Owner/read-only/revision checks remain at this facade seam.
+        // Do not cache authority or invent empty constraints to emulate full detail.
+        return {
+          name: object,
+          ...(schema === undefined ? {} : { schema }),
+          columns: await adapter.getColumns(object, schema),
+          columnsLoaded: true,
+        }
+      }
       return adapter.getTableInfo(object, schema)
     },
-    async select(dataSourceId, table, options, principal, strict) {
-      const { manager } = await authorize(dataSourceId, principal, strict === true)
-      // manager.select enforces the A5 row caps and is read-only; no write path is reachable here.
+    async select(dataSourceId, table, options, principal, strict, validation) {
+      const { manager, adapter } = await authorize(dataSourceId, principal, strict === true, validation)
+      // Preserve the ordinary manager path. Revision-bound reads use the exact
+      // captured adapter; the dialect adapter still enforces its normal row caps.
       const queryOptions: QueryOptions = {
         limit: options.limit,
         offset: options.offset,
@@ -786,7 +832,10 @@ export function createDataSourcePluginFacade(
       if (strict === true) {
         queryOptions.strictOffsetOrdering = true
       }
-      return manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
+      assertValidationPair(manager, dataSourceId, adapter, validation)
+      return validation === undefined
+        ? manager.select<Record<string, DbValue>>(dataSourceId, table, queryOptions)
+        : adapter.select<Record<string, DbValue>>(table, queryOptions)
     },
   }
 }

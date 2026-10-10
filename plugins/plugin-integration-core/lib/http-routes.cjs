@@ -1,6 +1,9 @@
 'use strict'
 
 const crypto = require('node:crypto')
+const { READ_PLAN_MANAGEMENT_ROUTES, createStockPreparationReadPlanManagementHandlers } = require('./stock-preparation-read-plan-management.cjs')
+const { readActiveStockPreparationReadPlan, resolveStockPreparationReadPlanExecution } = require('./stock-preparation-read-plan-runtime.cjs')
+const { createStockPreparationReadPlanValidationReader } = require('./stock-preparation-read-plan-validation-runtime.cjs')
 
 // ---------------------------------------------------------------------------
 // HTTP routes — plugin-integration-core
@@ -11,6 +14,7 @@ const crypto = require('node:crypto')
 // ---------------------------------------------------------------------------
 
 const ROUTES = [
+  ...READ_PLAN_MANAGEMENT_ROUTES,
   ['GET', '/api/integration/status', 'status'],
   ['GET', '/api/integration/internal/k3-wise/call-audit', 'k3WiseCallAudit'],
   ['GET', '/api/integration/adapters', 'adaptersList'],
@@ -471,6 +475,8 @@ const {
   StockPreparationTableActionError,
   __internals: tableActionInternals,
   applyStockPreparationAction,
+  assertDryRunTokenReadPlanCurrent,
+  assertLargeBomActionExecutionContract,
   assertProductionCleanRowsWithinBound,
   assertStockPrepApplyAllowed,
   assertStockPrepApplySandboxAllowed,
@@ -4191,7 +4197,8 @@ function requireStockPreparationAudit() {
   // request, so a source picked in the workbench is read by the very next call. There is no cache to
   // invalidate because nothing is cached — the override is not read until a request asks for it.
   //
-  // Wired ONLY when the store exists, and it hands back the id or null. A throw from the store
+  // The binding row retains its matched scope for execution; metadata projects
+  // only its source id. A throw from the store
   // PROPAGATES (the registry does not catch): "the binding table is unreachable" must not be
   // indistinguishable from "no binding exists", because the second one silently resolves the env
   // default — which on a customer deployment is the synthetic demo source.
@@ -4382,7 +4389,7 @@ function requireStockPreparationAudit() {
     resolveSourceBinding: stockPreparationSourceBinding
       ? async (scope) => {
           const binding = await stockPreparationSourceBinding.get(scope)
-          return binding ? binding.externalSystemId : null
+          return binding
         }
       : null,
     resolveProjectTarget: stockPreparationProjectTargets
@@ -4402,6 +4409,55 @@ function requireStockPreparationAudit() {
         })
       : null,
   })
+  // Keep matched binding scope server-side, outside the serialized action.
+  // In particular, explicit null must not be re-filled from a request selector.
+  const executionSourceScopes = new WeakMap()
+  const executionSourceValidations = new WeakMap()
+  async function resolveTableActionExecution(req, input, snapshotAction, requireTarget = true) {
+    const scope = scopedInput(req, input)
+    if (Object.prototype.hasOwnProperty.call(input, 'workspaceId')) scope.workspaceId = input.workspaceId
+    const resolved = await tableActions.getTableActionForExecution(scope)
+    // Reconcile historically fixed the binding lookup to the tenant while its
+    // legacy adapter still inherited a request workspace hint. Preserve that
+    // no-pointer behavior without letting the hint select an activation scope.
+    if (resolved.legacySourceScope && !resolved.action.source.workspaceId && resolveWorkspaceId(req, {})) {
+      resolved.legacySourceScope.workspaceId = resolveWorkspaceId(req, {})
+    }
+    const execution = await resolveStockPreparationReadPlanExecution({
+      resolved,
+      store: services.stockPreparationReadPlanStore,
+      snapshotAction,
+      verifyTenant: () => resolveVerifiedClaimTenantId(req, input),
+    })
+    const action = requireTarget ? assertStockPreparationTargetReady(execution.action) : execution.action
+    executionSourceScopes.set(action, execution.sourceScope)
+    if (execution.sourceValidation) executionSourceValidations.set(action, execution.sourceValidation)
+    if (snapshotAction) {
+      executionSourceScopes.set(snapshotAction, execution.sourceScope)
+      if (execution.sourceValidation) executionSourceValidations.set(snapshotAction, execution.sourceValidation)
+    }
+    return action
+  }
+  // An absent deployment action must not turn a request workspace hint into
+  // activation authority. Bind once; otherwise resolve the source's actual row
+  // through the credential-free registry before checking its exact scope.
+  async function resolveUnconfiguredPreflightSourceScope({ tenantId, workspaceId, externalSystemId }) {
+    try {
+      const binding = stockPreparationSourceBinding && typeof stockPreparationSourceBinding.get === 'function'
+        ? await stockPreparationSourceBinding.get({ tenantId, workspaceId: workspaceId || null, actionId: PLM_STOCK_PREPARATION_ACTION_ID })
+        : null
+      if (binding && binding.externalSystemId === externalSystemId) {
+        if (binding.matchedWorkspaceId !== null && !firstString(binding.matchedWorkspaceId)) throw new Error('invalid binding scope')
+        return { tenantId, workspaceId: binding.matchedWorkspaceId }
+      }
+      const system = await externalSystems.getExternalSystem({ id: externalSystemId, tenantId, workspaceId: workspaceId || null })
+      if (!system || system.id !== externalSystemId || system.tenantId !== tenantId
+        || (system.workspaceId !== null && !firstString(system.workspaceId))) throw new Error('invalid source scope')
+      return { tenantId, workspaceId: system.workspaceId }
+    } catch (_error) {
+      throw new HttpRouteError(503, 'SOURCE_PREFLIGHT_BINDING_UNAVAILABLE', 'the source scope could not be resolved, so nothing was checked')
+    }
+  }
   // SERVER-HELD pack allowlist, built once at registration so a malformed deploy-time pack fails
   // here (visibly, at activation) rather than on a deployer's first install call. Absent config →
   // empty catalog → every packId is refused. Nothing about this map is request-influenced.
@@ -5275,10 +5331,13 @@ function requireStockPreparationAudit() {
    * can carry one, and refused fail-closed when such a kind's config cannot be resolved.
    */
   async function b2aTableActionSourceObjects(req, action, scope = {}) {
+    const exactSourceScope = executionSourceScopes.get(action)
     return resolveB2aSourceObjects({
       sourceObjects: readPlanSourceObjects(action.source.readPlan),
       sourceSystemType: action.source.kind,
-      loadSourceSystemConfig: b2aSourceSystemConfigLoader(req, action.source.externalSystemId, {
+      loadSourceSystemConfig: exactSourceScope && typeof externalSystems.getExternalSystemAdapterConfig === 'function'
+        ? () => externalSystems.getExternalSystemAdapterConfig({ ...exactSourceScope, id: action.source.externalSystemId })
+        : b2aSourceSystemConfigLoader(req, action.source.externalSystemId, {
         ...scope,
         ...(action.source.workspaceId ? { workspaceId: action.source.workspaceId } : {}),
       }),
@@ -5451,13 +5510,23 @@ function requireStockPreparationAudit() {
    * between the two reads: on a mismatch this simply does nothing extra, which is exactly today's
    * (pre-F3) behaviour — no new failure mode, just the old one, in an already-rare window.
    */
+  function assertValidatedSourceRow(system, validationSource) {
+    if (validationSource && (!system || system.connectionId !== validationSource.connectionId
+      || system.config?.dataSourceId !== validationSource.connectionId
+      || system.bindingValidationRevision !== validationSource.bindingRevision)) {
+      throw new HttpRouteError(409, 'READ_PLAN_VALIDATION_SOURCE_CHANGED', 'READ_PLAN_VALIDATION_SOURCE_CHANGED')
+    }
+  }
+
   async function loadTableActionSourceAdapter(req, action, options = {}) {
     const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
-    const sourceScope = { id: action.source.externalSystemId }
+    const exactSourceScope = executionSourceScopes.get(action)
+    const validationSource = executionSourceValidations.get(action)
+    const sourceScope = { id: action.source.externalSystemId, ...(exactSourceScope || {}) }
     if (options.tenantId) sourceScope.tenantId = options.tenantId
     if (action.source.workspaceId) {
       sourceScope.workspaceId = action.source.workspaceId
-    } else if (stockPreparationSourceBinding && typeof stockPreparationSourceBinding.get === 'function' && !resolveWorkspaceId(req, {})) {
+    } else if (!exactSourceScope && stockPreparationSourceBinding && typeof stockPreparationSourceBinding.get === 'function' && !resolveWorkspaceId(req, {})) {
       const fallbackTenantId = options.tenantId || resolveTenantId(req, {})
       const binding = fallbackTenantId
         ? await stockPreparationSourceBinding.get({ tenantId: fallbackTenantId, workspaceId: null, actionId: action.actionId })
@@ -5479,10 +5548,12 @@ function requireStockPreparationAudit() {
     const principal = await resolveTableActionReadPrincipal(
       req,
       action,
-      scopedInput(req, sourceScope),
+      exactSourceScope ? sourceScope : scopedInput(req, sourceScope),
       Object.prototype.hasOwnProperty.call(options, 'principal') ? options.principal : null,
     )
-    const system = await loadSystem(scopedAdapterInput(req, sourceScope, principal))
+    const system = await loadSystem(exactSourceScope
+      ? { ...sourceScope, principal, runAs: 'user' }
+      : scopedAdapterInput(req, sourceScope, principal))
     if (options.requireActive === true && (!system || system.status !== 'active')) {
       throw new HttpRouteError(409, 'TABLE_ACTION_SOURCE_NOT_ACTIVE', 'configured table action source is not active')
     }
@@ -5493,6 +5564,7 @@ function requireStockPreparationAudit() {
         actualKind: system && system.kind,
       })
     }
+    assertValidatedSourceRow(system, validationSource)
     // The delegation, recorded. VALUES-FREE by construction: a boolean and the frozen action id,
     // never the operator's id and never the owner's — the point of the delegation is that the
     // caller does not learn who the owner is, and a log line that named them would undo it.
@@ -5508,6 +5580,7 @@ function requireStockPreparationAudit() {
     // interprets it (see its factory); every other adapter kind ignores the extra key.
     return adapterRegistry.createAdapter(system, {
       principal,
+      ...(validationSource ? { expectedValidationRevision: validationSource.connectionRevision } : {}),
       ...(options.b2aAuthorization ? { b2aAuthorization: options.b2aAuthorization } : {}),
     })
   }
@@ -5597,6 +5670,12 @@ function requireStockPreparationAudit() {
   }
 
   const handlers = {
+    ...createStockPreparationReadPlanManagementHandlers({
+      management: services.stockPreparationReadPlanManagement,
+      readSample: createStockPreparationReadPlanValidationReader({ configuredTableActions, externalSystems,
+        adapterRegistry, registry: b2aTrialRegistry, operationClaim: b2aOperationClaim, storage: context.storage }),
+      helpers: { requireAccess, resolveVerifiedClaimTenantId, requestPrincipal, requestBody, requestQuery, requestParams, sendOk, HttpRouteError },
+    }),
     async status(req, res) {
       requireAccess(req, 'read')
       return sendOk(res, {
@@ -6752,11 +6831,11 @@ function requireStockPreparationAudit() {
       // S1: the project number rides into the lookup so the registry overlay can resolve THIS
       // project's sheet (switch on) — a pure read of the same body field `normalizeActionParameters`
       // validates a few lines down; with the switch off the registry ignores it.
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+      const action = await resolveTableActionExecution(req, {
         actionId,
         projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
         targetPurpose: 'write',
-      })))
+      })
       // ON THE VALUE PATH THE TENANT IS THE PROVEN ONE. `resolveTenantId` is right for the
       // values-free trial and stays exactly where it was for it — but it accepts `user.tenantId`,
       // which is header-fillable, and lets a tenantless platform admin steer `?tenantId=`. Since the
@@ -6932,12 +7011,13 @@ function requireStockPreparationAudit() {
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       // S1: the project number rides into the lookup (the overlay keys on it); `reconcileProjectNo`
       // above is the same body field, already shape-checked.
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+      const action = await resolveTableActionExecution(req, {
         tenantId,
+        workspaceId: null,
         actionId,
         projectNo: reconcileProjectNo,
         targetPurpose: 'write',
-      }))
+      })
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, tenantId)
       // B2a entry point (1), RECONCILE half — the gap W-2 closes at this layer.
@@ -7059,12 +7139,13 @@ function requireStockPreparationAudit() {
       const parameters = normalizeActionParameters(body.parameters)
       const actionId = firstString(requestParams(req).actionId) || PLM_STOCK_PREPARATION_ACTION_ID
       // S1: the validated project number rides into the lookup (the overlay keys on it).
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction({
+      const action = await resolveTableActionExecution(req, {
         tenantId,
+        workspaceId: null,
         actionId,
         projectNo: parameters.projectNo,
         targetPurpose: 'write',
-      }))
+      })
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, tenantId)
       const mvpPersistB2aRunId = b2aRunId('table-action-mvp-persist')
@@ -7181,11 +7262,13 @@ function requireStockPreparationAudit() {
       const user = await requireTableActionAccess(req, actionId, 'write', tenantPrincipalDirectory)
       const body = normalizeTableActionBody(requestBody(req), VALID_TABLE_ACTION_APPLY_BODY_KEYS)
       // S1: same project-number ride-along as the dry run (the registry overlay keys on it).
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+      const action = await resolveTableActionExecution(req, {
         actionId,
         projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
         targetPurpose: 'write',
-      })))
+      })
+      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
+      await assertDryRunTokenReadPlanCurrent({ tokenStore: context.storage, dryRunToken: confirm.dryRunToken, action, parameters: body.parameters })
       const applyTenantId = resolveTenantId(req, {})
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, applyTenantId)
@@ -7203,7 +7286,6 @@ function requireStockPreparationAudit() {
       })
       // W-5: same stanza, forwarded — see the dry-run route above for why.
       const sourceAdapter = await loadTableActionSourceAdapter(req, action, { b2aAuthorization: applyB2aAuthorization })
-      const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       // S3 (ADR §5: apply 结束): the registry row the overlay resolved gets `last_pull_*` stamped —
       // `applied` with the run's distinct missing-component count, or `refused` with the typed code.
       let applyResult
@@ -7275,11 +7357,11 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       // S1: the project number rides into the lookup; the resolved target then enters the job's
       // `actionSnapshot`, which plan / apply-start / apply-run reuse byte for byte (ADR §3).
-      const action = assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, {
+      const action = await resolveTableActionExecution(req, {
         actionId,
         projectNo: firstString(isPlainObject(body.parameters) ? body.parameters.projectNo : undefined),
         targetPurpose: 'write',
-      })))
+      })
       // S1 (ADR §3 「租户墙」): a resolved project sheet must be the caller's own — no-op otherwise.
       await assertResolvedProjectTargetTenancy(action, routeScope.tenantId)
       const parameters = normalizeActionParameters(body.parameters)
@@ -7336,6 +7418,11 @@ function requireStockPreparationAudit() {
       // neither an operation claim nor a credential lookup.
       assertLargeBomJobActor(queuedJob, requestPrincipal(req))
       const action = assertStockPreparationTargetReady(queuedJob.actionSnapshot)
+      await resolveTableActionExecution(req, {
+        actionId,
+        projectNo: queuedJob.parameters && queuedJob.parameters.projectNo,
+        targetPurpose: 'read',
+      }, action)
       // B2a — the FOURTH and last call site of `loadTableActionSourceAdapter`, and the only one
       // gated at the route rather than inside a table-action wrapper. It has to be: this path does
       // not go through `dryRunStockPreparationAction`, it drives `runLargeBomBackgroundExpansionJob`
@@ -7432,6 +7519,11 @@ function requireStockPreparationAudit() {
         }),
         'expansion',
       )
+      await resolveTableActionExecution(req, {
+        actionId,
+        projectNo: job.parameters && job.parameters.projectNo,
+        targetPurpose: 'write',
+      }, action)
       // 目标表字段存在性探针, before the existing-row read below: a deleted column would otherwise
       // come back `undefined` and plan as lineage_mismatch (or not at all on the ADD branch).
       await tableActionInternals.assertTargetFieldsExist(action, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -7504,7 +7596,7 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
       // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
+      await resolveTableActionExecution(req, { actionId, targetPurpose: 'readiness' })
       const confirm = isPlainObject(body.confirm) ? body.confirm : {}
       // THE BAND IS RESOLVED ONCE PER APPLY JOB, HERE — at the moment a human approves it — and is
       // then FROZEN INTO the stored job (same family as planRevision / targetRevision). A checkpoint
@@ -7537,6 +7629,12 @@ function requireStockPreparationAudit() {
         }),
         'expansion',
       )
+      const currentAction = await resolveTableActionExecution(req, {
+        actionId,
+        projectNo: expansionJob.parameters && expansionJob.parameters.projectNo,
+        targetPurpose: 'write',
+      }, snapshotAction)
+      assertLargeBomActionExecutionContract(currentAction, snapshotAction)
       // 目标表字段存在性探针 at approval: a column deleted after the plan is refused here, before a
       // checkpoint job that would write to it exists.
       await tableActionInternals.assertTargetFieldsExist(snapshotAction, targetFieldExistenceForTenant(routeScope.tenantId))
@@ -7586,7 +7684,7 @@ function requireStockPreparationAudit() {
       const routeScope = largeBomJobScope(req, { actionId })
       // S1: a READINESS probe only — the job's stored actionSnapshot is the target this route works
       // on, so the overlay is deliberately NOT applied here (ADR §3: plan / apply use the snapshot).
-      assertStockPreparationTargetReady(await tableActions.getTableAction(scopedInput(req, { actionId, targetPurpose: 'readiness' })))
+      await resolveTableActionExecution(req, { actionId, targetPurpose: 'readiness' })
       const pendingJob = await loadLargeBomCheckpointApplyJob({
         storage: context.storage,
         ...routeScope,
@@ -7618,6 +7716,12 @@ function requireStockPreparationAudit() {
       // own `target` the chunk writer uses — must name the registered sheet, before any IO on them.
       assertLargeBomJobTargetMatchesProjectTarget(runSnapshotAction.target, runProjectAction, 'expansion')
       assertLargeBomJobTargetMatchesProjectTarget(pendingJob.target, runProjectAction, 'apply')
+      const currentAction = await resolveTableActionExecution(req, {
+        actionId,
+        projectNo: runExpansionJob.parameters && runExpansionJob.parameters.projectNo,
+        targetPurpose: 'write',
+      }, runSnapshotAction)
+      assertLargeBomActionExecutionContract(currentAction, runSnapshotAction)
       await tableActionInternals.assertTargetFieldsExist(
         runSnapshotAction,
         targetFieldExistenceForTenant(routeScope.tenantId),
@@ -7886,7 +7990,9 @@ function requireStockPreparationAudit() {
       let action = null
       try {
         // S1: SOURCE-only lookup — the overlay never applies (ADR §3 call-site guard).
-        action = await tableActions.getTableAction({ tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source' })
+        action = await resolveTableActionExecution(req, {
+          tenantId, workspaceId, actionId: PLM_STOCK_PREPARATION_ACTION_ID, targetPurpose: 'source',
+        }, undefined, false)
       } catch (error) {
         const notConfigured = error instanceof StockPreparationTableActionError
           && error.code === 'TABLE_ACTION_NOT_CONFIGURED'
@@ -7915,6 +8021,9 @@ function requireStockPreparationAudit() {
       }
       const configuredSystemId = action && action.source ? firstString(action.source.externalSystemId) : undefined
       const externalSystemId = firstString(input.externalSystemId) || configuredSystemId
+      if (action && action.readPlanExecutionIdentity && externalSystemId !== configuredSystemId) {
+        throw new HttpRouteError(409, 'READ_PLAN_ACTIVATION_SOURCE_MISMATCH', 'approved read plan does not match the requested source')
+      }
       if (!externalSystemId) {
         throw new HttpRouteError(
           409,
@@ -7945,8 +8054,23 @@ function requireStockPreparationAudit() {
       const loadSystem = externalSystems.getExternalSystemForAdapter.bind(externalSystems)
       // The REQUESTER's identity, as before: this route borrows nobody's. Whether a non-owner may
       // read through the binding owner is an open owner decision and is not taken here.
-      const system = await loadSystem(scopedAdapterInput(req, { id: externalSystemId, tenantId }))
-      const adapter = adapterRegistry.createAdapter(system, { principal: requestPrincipal(req) })
+      let exactSourceScope = action && action.readPlanExecutionIdentity && externalSystemId === configuredSystemId
+        ? executionSourceScopes.get(action) : null
+      if (!action) {
+        exactSourceScope = await resolveUnconfiguredPreflightSourceScope({ tenantId, workspaceId, externalSystemId })
+        const active = await readActiveStockPreparationReadPlan(services.stockPreparationReadPlanStore, { ...exactSourceScope, actionId: PLM_STOCK_PREPARATION_ACTION_ID, systemId: externalSystemId })
+        if (active !== null) throw new HttpRouteError(409, 'READ_PLAN_ACTION_REQUIRED', 'approved read plan requires a configured action')
+      }
+      const adapterScope = exactSourceScope
+        ? { ...exactSourceScope, id: externalSystemId, principal: requestPrincipal(req), runAs: 'user' }
+        : scopedAdapterInput(req, { id: externalSystemId, tenantId })
+      const system = await loadSystem(adapterScope)
+      const validationSource = action ? executionSourceValidations.get(action) : null
+      assertValidatedSourceRow(system, validationSource)
+      const adapter = adapterRegistry.createAdapter(system, {
+        principal: requestPrincipal(req),
+        ...(validationSource ? { expectedValidationRevision: validationSource.connectionRevision } : {}),
+      })
       if (!adapter || typeof adapter.read !== 'function') {
         throw new HttpRouteError(422, 'SOURCE_PREFLIGHT_KIND_UNSUPPORTED', 'this data source kind cannot be read', {
           externalSystemId,
@@ -7957,7 +8081,7 @@ function requireStockPreparationAudit() {
       // the guard accessor that decrypts nothing, and reduced to a boolean plus two closed
       // vocabulary words before it goes anywhere near the report.
       const pullDelegation = describeTableActionReadDelegation(
-        await peekTableActionSourceBinding(scopedInput(req, { id: externalSystemId, tenantId })),
+        await peekTableActionSourceBinding(adapterScope),
       )
 
       try {
