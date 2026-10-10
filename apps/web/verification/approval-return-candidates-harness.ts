@@ -2,16 +2,19 @@
 // with the production Router, Pinia stores and Element Plus (dialog + select dropdown), the same way
 // approval-member-action-dialog-harness.ts does, and changes ONLY deterministic fixture state once
 // the dev-mode API has populated the stores. Which targets the 退回 dialog offers, and whether the
-// 退回 button renders at all, stay production code: `returnableNodes` in ApprovalDetailView.vue.
+// 退回 button renders at all, stay production code: `returnableNodes` in ApprovalDetailView.vue —
+// the DTO's `returnableNodeKeys` when it carries the field, else the legacy list (every visited key
+// but the cursor / start / end, first occurrence in `/history` order).
 //
 // WHY THE TEMPLATE IS REPLACED. The dev-mode template (start → approval_1 → approval_2 → end, named
-// 部门主管审批 / 财务审批) is too small to exercise the return gate: under it every non-approval key
-// of the history below is simply "not a node", so a client-mirror pass would prove nothing about the
-// type / parallel-region / upstream rules. Once the view's own template loads have SETTLED (it issues
-// `loadTemplate` and `loadVersion` after the detail read; overriding earlier races them), BOTH store
-// slots are replaced with the one graph below, identity-consistent with the instance: template
-// `tpl_1` with `latestVersionId` `ver_1_1`, and the pinned version `ver_1_1` of `tpl_1`. None of its
-// node names occurs in the dev mock, so a label in the dialog proves the view judged by THIS graph.
+// 部门主管审批 / 财务审批) has no cc / handler / parallel node, so it cannot show that the view
+// applies no graph filter of its own: under the graph below the server's walker yields only
+// approval_1 at the main cursor, while the `legacy` scenario still offers every visited key. Once
+// the view's own template loads have SETTLED (it issues `loadTemplate` and `loadVersion` after the
+// detail read; overriding earlier races them), BOTH store slots are replaced with the one graph
+// below, identity-consistent with the instance: template `tpl_1` with `latestVersionId` `ver_1_1`,
+// and the pinned version `ver_1_1` of `tpl_1`. None of its node names occurs in the dev mock, so a
+// label in the dialog proves the view named its options from THIS graph.
 //
 //   start → approval_1 → cc_1 → handler_1 → parallel_1 ⇉ {approval_p1, approval_p2} ⇉ join_1 → approval_2 → approval_3 → end
 //
@@ -25,11 +28,11 @@
 //
 // EVERY FIXTURE IS A STATE A SERVER CAN BE IN, and which server is part of the fixture. The ones
 // that carry `returnableNodeKeys` (server-list, server-empty, server-list-wins, submit) are what the
-// #6293 server sends (`computeReturnableNodeKeys`, approval-return-targets.ts). The field-less ones
-// (client-mirror, handler-cursor, parallel-state) are what a server BEFORE #6293 sends: for every
-// cursor of this pending, graph-pinned instance the #6293 server fills the field (`[]` at a handler
-// cursor or in a parallel state, the trail before the cursor otherwise), and the view's mirror is
-// the fallback for exactly that older server and for bridged instances with no frozen graph.
+// #6293 server sends (`computeReturnableNodeKeys`, approval-return-targets.ts). The field-less one
+// (legacy) is what a server BEFORE #6293 sends: for every cursor of this pending, graph-pinned
+// instance the #6293 server fills the field (`[]` at a handler cursor or in a parallel state, the
+// trail before the cursor otherwise), and the view's legacy list is the fallback for exactly that
+// older server and for bridged instances with no frozen graph.
 // What the return path and its positive controls read is in the shape the wire carries.
 // Display-only values are simplified, and nothing here reads
 // them: `currentStep` / `totalSteps` / `sourceStep` are fixed, `assignments` lists only the active
@@ -53,9 +56,11 @@
 // THE MAIN HISTORY (cursor approval_2), newest first: a 退回 @approval_3 back to approval_2; approve
 // @approval_2; the region's any-mode join in one transaction — cc @join_1, the system `sign`
 // @approval_p1 that cancelled the viewer's approval_p2 seat, approve @approval_p1; handle
-// @handler_1; cc @cc_1 and approve @approval_1 in one transaction; created @start. The client mirror
-// must drop cc_1 / join_1 / handler_1 (not approval nodes), approval_p1 (inside the parallel region),
-// approval_3 (not upstream of the cursor) and approval_2 (the cursor) and keep only approval_1.
+// @handler_1; cc @cc_1 and approve @approval_1 in one transaction; created @start. The server's
+// walker yields only approval_1 here (cc_1 / join_1 / handler_1 are not approval nodes, approval_p1
+// is inside the parallel region, approval_3 is past the cursor). The legacy list drops only the
+// cursor approval_2 and start, and keeps approval_3, join_1, approval_p1, handler_1, cc_1 and
+// approval_1, in that order.
 //
 // `?scenario=` (required; an unknown or missing value throws instead of falling back):
 //   server-list      — detail read: cursor approval_2, the viewer's seat there, the main history,
@@ -67,34 +72,26 @@
 //                      `returnableNodeKeys: []` — rule (b) of `computeReturnableNodeKeys`, a handler
 //                      cursor has no legal target. History is the first pass up to cc @cc_1 plus the
 //                      评论 row @handler_1 (`submitComment` reloads `/history` after it publishes the
-//                      response). Run it with `&template=drifted`: with no graph and no DTO type the
-//                      legacy list would offer cc_1 and approval_1, so only `[]` hides 退回. With
-//                      the graph in place the mirror reads handler_1's type from it and hides 退回
-//                      as well, so that pairing cannot tell `[]` from an absent field.
+//                      response). The legacy list for this history is cc_1 and approval_1, with or
+//                      without a graph, so only `[]` hides 退回. It runs with `&template=drifted`,
+//                      the pairing it needed while the client mirror (removed in G-4) still hid 退回
+//                      at a handler cursor whenever the graph was in place.
 //   server-list-wins — server-list, but the instance reached approval_2 by an ADMIN FORWARD JUMP from
 //                      approval_1 (`adminJump`): history is created @start plus the jump row, which
-//                      has no `nodeKey`. The mirror (history ∩ graph) has nothing to offer; the
-//                      server's walker reads the graph only and still lists approval_1. This is the
-//                      graph-present case where the server list and the mirror disagree.
-//   client-mirror    — server-list with the field DELETED (a server before #6293): the mirror decides.
-//   handler-cursor   — older-server detail read with the cursor AT handler_1 (so `currentNodeType:
-//                      'handler'` and this graph agree) and the viewer's seat there; history is the
-//                      first pass up to cc @cc_1, which already holds approval_1 — upstream, visited,
-//                      so the mirror would offer it if the handler gate did not hide 退回.
-//   parallel-state   — older-server ACTION RESPONSE right after the viewer handled handler_1: cursor
-//                      at the fork `parallel_1`, `currentNodeKeys: ['approval_p1', 'approval_p2']`,
-//                      no `currentNodeType`, seats for 法务专员 on approval_p1 and the viewer on
-//                      approval_p2; history is the first pass up to handle @handler_1.
+//                      has no `nodeKey`. The legacy list (history only) has nothing to offer; the
+//                      server's walker reads the graph only and still lists approval_1.
+//   legacy           — server-list with the field DELETED (a server before #6293), the own graph and
+//                      the pinned version loaded: the legacy list decides — the six keys above. A
+//                      client-side filter put back over it would show only approval_1.
 //   submit           — server-list, with ONLY the store's `executeAction` wrapped: every request is
 //                      recorded on `window.__RC_ACTION_REQUESTS__` and resolved with the displayed
 //                      instance. No HTTP, and the original action is never called.
-// `&template=drifted` (with server-list, server-empty, client-mirror or handler-cursor): the
-// template has moved on to a LATER version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned
-// version is loaded — what an ordinary member has once the template is edited (the version endpoint
-// is admin-gated). The view then has no graph of its own: the server's list still decides (a list
-// verbatim, and `[]` by hiding 退回 where the legacy list would offer cc_1 / approval_1); without it
-// the legacy unfiltered list comes back; and at a handler cursor the DTO's own `currentNodeType` is
-// the only thing left that says "handler".
+// `&template=drifted` (with server-list or server-empty): the template has moved on to a LATER
+// version (`latestVersionId: 'ver_1_2'`, same graph) and no pinned version is loaded — what an
+// ordinary member has once the template is edited (the version endpoint is admin-gated). The view
+// judges candidates by no graph at all, so drift changes nothing for 退回; the two drifted runs pin
+// that the server's list decides with no own graph in the store (a list verbatim, and `[]` by hiding
+// 退回 where the legacy list would offer cc_1 / approval_1).
 //
 // `window.__RC_READY__` turns true once the fixture is in place; a harness failure sets
 // `window.__RC_ERROR__` instead, so the paired spec (approval-return-candidates.spec.ts) fails with
@@ -132,13 +129,11 @@ const SCENARIOS = [
   'server-list',
   'server-empty',
   'server-list-wins',
-  'client-mirror',
-  'handler-cursor',
-  'parallel-state',
+  'legacy',
   'submit',
 ] as const
 type Scenario = (typeof SCENARIOS)[number]
-const DRIFTABLE: readonly Scenario[] = ['server-list', 'server-empty', 'client-mirror', 'handler-cursor']
+const DRIFTABLE: readonly Scenario[] = ['server-list', 'server-empty']
 
 const INSTANCE_ID = 'apv_5'
 const TEMPLATE_ID = 'tpl_1'
@@ -264,8 +259,6 @@ const HANDLER_COMMENTED: UnifiedApprovalHistoryDTO[] = [
   historyRow('rc_hist_comment_h1', 'comment', VIEWER, '补正材料今天下班前上传', 8, 'handler_1'),
   ...HANDLER_FIRST_PASS,
 ]
-/** Cursor at the fork: the viewer's handle at handler_1 opened both branches. */
-const PARALLEL_FIRST_PASS: UnifiedApprovalHistoryDTO[] = [HANDLE_1, CC_1, APPROVE_1, CREATED]
 /** An admin moved the instance from approval_1 straight to approval_2 (no `nodeKey` on that row). */
 const ADMIN_JUMP_HISTORY: UnifiedApprovalHistoryDTO[] = [
   historyRow('rc_hist_jump', 'jump', FLOW_ADMIN, '部门经理长期休假，流程管理员跳过初审', 6, null),
@@ -342,28 +335,8 @@ function fixtureFor(scenario: Scenario, loaded: UnifiedApprovalDTO): Fixture {
     }
     case 'server-list-wins':
       return { approval: detailRead, history: ADMIN_JUMP_HISTORY }
-    case 'client-mirror':
+    case 'legacy':
       return { approval: olderServer, history: MAIN_HISTORY }
-    case 'handler-cursor':
-      return {
-        approval: {
-          ...olderServer,
-          currentNodeKey: 'handler_1',
-          currentNodeType: 'handler',
-          assignments: [seat(VIEWER, 'handler_1')],
-        },
-        history: HANDLER_FIRST_PASS,
-      }
-    case 'parallel-state': {
-      const actionResponse: UnifiedApprovalDTO = {
-        ...olderServer,
-        currentNodeKey: 'parallel_1',
-        currentNodeKeys: ['approval_p1', 'approval_p2'],
-        assignments: [seat(LEGAL, 'approval_p1'), seat(VIEWER, 'approval_p2')],
-      }
-      delete actionResponse.currentNodeType
-      return { approval: actionResponse, history: PARALLEL_FIRST_PASS }
-    }
   }
 }
 
