@@ -4,7 +4,13 @@ import http from 'node:http'
 import express from 'express'
 import { authRouter } from '../../src/routes/auth'
 import { adminUsersRouter } from '../../src/routes/admin-users'
-import { query } from '../../src/db/pg'
+import { query, transaction } from '../../src/db/pg'
+import { authenticate } from '../../src/middleware/auth'
+import {
+  assignUserRoles,
+  RoleAssignmentForbiddenError,
+  type RoleAssignmentScope,
+} from '../../src/rbac/role-assignment'
 import { Pool } from 'pg'
 
 /**
@@ -464,6 +470,12 @@ describeIfDatabase('W4-PRE-1 — user_orgs admission write site: POST /api/admin
  *    member-group audience; re-appointing starts with none; audience orphaned before this fix is
  *    dropped on the next appointment; every revoke path tested clears it;
  *  - gate order: an empty body still answers 400 for a delegated attendance_admin.
+ *  - fix round 1: admin power via CODES (`<ns>:admin` / `<ns>:*`) is refused like the `_admin`
+ *    id; a delegate may REVOKE a role carrying ordinary platform codes but not an admin-level
+ *    one; the write boundary refuses by itself under the delegated scope (and serializes its own
+ *    code read against an editor); a revocation clears only the revoked namespace's audience; the
+ *    attendance admin router's four role writes audit their cleanup and a batch appointment
+ *    leaves a sitting admin's audience alone.
  */
 describeIfDatabase('role delegation — only a platform admin appoints *_admin; the audience follows the role (real DB)', () => {
   const RUN_ID = crypto.randomBytes(4).toString('hex')
@@ -477,6 +489,12 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     target: `${P}-t1`,
     reappointed: `${P}-t2`,
     orphan: `${P}-t3`,
+    multiNamespace: `${P}-t4`,
+    boundaryTarget: `${P}-t5`,
+    // The attendance admin router's batch routes accept UUIDs only.
+    attendanceSingle: crypto.randomUUID(),
+    attendanceSitting: crypto.randomUUID(),
+    attendanceFresh: crypto.randomUUID(),
   }
   const allUserIds = Object.values(ids)
   const roles = {
@@ -485,9 +503,14 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     attendancePlain: `attendance_adg${RUN_ID}_plain`,
     attendancePlatformish: `attendance_adg${RUN_ID}_platformish`,
     attendanceRace: `attendance_adg${RUN_ID}_race`,
+    attendanceLead: `attendance_adg${RUN_ID}_lead`,
+    attendanceWild: `attendance_adg${RUN_ID}_wild`,
+    attendanceSuperish: `attendance_adg${RUN_ID}_superish`,
+    attendanceBoundaryRace: `attendance_adg${RUN_ID}_brace`,
     xAdmin: `${X_NS}_admin`,
   }
   const createdRoleIds: string[] = []
+  const createdPermissionCodes: string[] = []
   const tokens: Record<string, string> = {}
   let httpServer: http.Server
   let baseUrl = ''
@@ -533,6 +556,13 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     if (inserted.rows.length === 0) return // pre-existing (e.g. a seeded role): leave it exactly as found
     createdRoleIds.push(roleId)
     for (const code of codes) {
+      // `role_permissions.permission_code` references `permissions(code)`; a code this file had to
+      // create (e.g. a wildcard) is removed again in afterAll.
+      const createdCode = await query<{ code: string }>(
+        'INSERT INTO permissions (code, name, description) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING RETURNING code',
+        [code, code, code],
+      )
+      if (createdCode.rows.length) createdPermissionCodes.push(code)
       await query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2) ON CONFLICT DO NOTHING', [roleId, code])
     }
   }
@@ -550,6 +580,10 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     await ensureRole(roles.attendancePlain, ['attendance:read'])
     await ensureRole(roles.attendancePlatformish, ['attendance:read', 'multitable:write'])
     await ensureRole(roles.attendanceRace, ['attendance:read'])
+    await ensureRole(roles.attendanceLead, ['attendance:read', 'attendance:admin'])
+    await ensureRole(roles.attendanceWild, ['attendance:*'])
+    await ensureRole(roles.attendanceSuperish, ['attendance:read', '*:*'])
+    await ensureRole(roles.attendanceBoundaryRace, ['attendance:read'])
     await ensureRole(roles.xAdmin, [])
 
     await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $4), ($5, $6)', [
@@ -582,10 +616,14 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
       [integrationId, `${P}-dept`, `${P}-dept`],
     )).rows[0].id
 
+    // Loaded lazily, as the other attendance-admin real-DB files do.
+    const { attendanceAdminRouter } = await import('../../src/routes/attendance-admin')
     const app = express()
     app.use(express.json())
     app.use('/api/auth', authRouter)
     app.use(adminUsersRouter())
+    app.use('/api/attendance-admin', authenticate)
+    app.use(attendanceAdminRouter())
     httpServer = http.createServer(app)
     const port = await new Promise<number>((resolve, reject) => {
       httpServer.once('error', reject)
@@ -626,6 +664,9 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     if (createdRoleIds.length) {
       await query('DELETE FROM role_permissions WHERE role_id = ANY($1::text[])', [createdRoleIds])
       await query('DELETE FROM roles WHERE id = ANY($1::text[])', [createdRoleIds])
+    }
+    if (createdPermissionCodes.length) {
+      await query('DELETE FROM permissions WHERE code = ANY($1::text[])', [createdPermissionCodes])
     }
     await query('DELETE FROM users WHERE id = ANY($1::text[])', [allUserIds])
   })
@@ -774,6 +815,188 @@ describeIfDatabase('role delegation — only a platform admin appoints *_admin; 
     expect(revoke.status).toBe(200)
     expect(await holds(ids.orphan, 'attendance_admin')).toBe(false)
     expect(await audience(ids.orphan, 'attendance')).toEqual({ departments: 0, groups: 0 })
+  })
+
+  it('admin power via codes: a delegate cannot assign or revoke a role carrying attendance:admin or attendance:* (403 ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN), nor is it offered one', async () => {
+    for (const roleId of [roles.attendanceLead, roles.attendanceWild]) {
+      const assign = await delegationRole(tokens.attendanceDelegate, ids.target, 'assign', { roleId })
+      expect({ roleId, status: assign.status, code: assign.json?.error?.code }).toEqual({ roleId, status: 403, code: 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN' })
+      expect(await holds(ids.target, roleId)).toBe(false)
+      expect(await auditCount('user-role', `${ids.target}:${roleId}`, 'grant_denied')).toBeGreaterThanOrEqual(1)
+
+      await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [ids.target, roleId])
+      try {
+        const revoke = await delegationRole(tokens.attendanceDelegate, ids.target, 'unassign', { roleId })
+        expect({ roleId, status: revoke.status, code: revoke.json?.error?.code }).toEqual({ roleId, status: 403, code: 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN' })
+        expect(await holds(ids.target, roleId)).toBe(true)
+        const access = await api('GET', `/api/admin/role-delegation/users/${ids.target}/access`, tokens.attendanceDelegate)
+        expect(access.status).toBe(200)
+        expect((access.json?.data?.roleCatalog ?? []).map((role: { id: string }) => role.id)).not.toContain(roleId)
+        expect(access.json?.data?.delegableRoles ?? []).not.toContain(roleId)
+        // POSITIVE CONTROL — the same catalog does offer an ordinary in-namespace role.
+        expect((access.json?.data?.roleCatalog ?? []).map((role: { id: string }) => role.id)).toContain(roles.attendancePlain)
+      } finally {
+        await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, roleId])
+      }
+    }
+    // POSITIVE CONTROL — a platform admin appoints the admin-equivalent role on the same route.
+    const platform = await delegationRole(tokens.platformAdmin, ids.target, 'assign', { roleId: roles.attendanceLead })
+    expect(platform.status).toBe(200)
+    await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [ids.target, roles.attendanceLead])
+  })
+
+  it('a delegate may REVOKE a role carrying ordinary platform codes (only lowers privilege), but not one carrying *:*', async () => {
+    await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($1, $3) ON CONFLICT DO NOTHING', [
+      ids.target, roles.attendancePlatformish, roles.attendanceSuperish,
+    ])
+    try {
+      const access = await api('GET', `/api/admin/role-delegation/users/${ids.target}/access`, tokens.attendanceDelegate)
+      expect(access.json?.data?.delegableRoles ?? []).toContain(roles.attendancePlatformish)
+      expect(access.json?.data?.delegableRoles ?? []).not.toContain(roles.attendanceSuperish)
+      expect((access.json?.data?.roleCatalog ?? []).map((role: { id: string }) => role.id)).not.toContain(roles.attendancePlatformish)
+
+      const revoke = await delegationRole(tokens.attendanceDelegate, ids.target, 'unassign', { roleId: roles.attendancePlatformish })
+      expect(revoke.status).toBe(200)
+      expect(await holds(ids.target, roles.attendancePlatformish)).toBe(false)
+
+      const refused = await delegationRole(tokens.attendanceDelegate, ids.target, 'unassign', { roleId: roles.attendanceSuperish })
+      expect(refused.status).toBe(403)
+      expect(refused.json?.error?.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+      expect(JSON.stringify(refused.json)).not.toContain('*:*')
+      expect(await holds(ids.target, roles.attendanceSuperish)).toBe(true)
+      expect(await auditCount('user-role', `${ids.target}:${roles.attendanceSuperish}`, 'revoke_denied')).toBeGreaterThanOrEqual(1)
+    } finally {
+      await query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = ANY($2::text[])', [
+        ids.target, [roles.attendancePlatformish, roles.attendanceSuperish],
+      ])
+    }
+  })
+
+  it('the write boundary refuses by itself under the delegated scope: main-admin id, admin-equivalent codes, platform codes (real transaction)', async () => {
+    const delegated: RoleAssignmentScope = { kind: 'namespaces', namespaces: ['attendance'] }
+    for (const [roleId, reason] of [
+      ['attendance_admin', 'main_admin_role'],
+      [roles.attendanceLead, 'admin_equivalent_role'],
+      [roles.attendanceWild, 'admin_equivalent_role'],
+      [roles.attendancePlatformish, 'platform_permission'],
+    ] as const) {
+      const error = await transaction((client) => assignUserRoles({ userIds: [ids.boundaryTarget], roleId, scope: delegated, executor: client }))
+        .then(() => null, (thrown: unknown) => thrown)
+      expect(error, roleId).toBeInstanceOf(RoleAssignmentForbiddenError)
+      expect({ roleId, reason: (error as RoleAssignmentForbiddenError).reason }).toEqual({ roleId, reason })
+      expect(await holds(ids.boundaryTarget, roleId)).toBe(false)
+    }
+    // POSITIVE CONTROL — an ordinary in-namespace role is written under the same scope.
+    const ok = await transaction((client) => assignUserRoles({ userIds: [ids.boundaryTarget], roleId: roles.attendancePlain, scope: delegated, executor: client }))
+    expect(ok.affectedUserIds).toEqual([ids.boundaryTarget])
+    expect(await holds(ids.boundaryTarget, roles.attendancePlain)).toBe(true)
+  })
+
+  it('the boundary\'s own code read waits for a concurrent role editor (FOR SHARE) and sees the admin code it committed', async () => {
+    const delegated: RoleAssignmentScope = { kind: 'namespaces', namespaces: ['attendance'] }
+    const editor = await lockPool.connect()
+    let committed = false
+    try {
+      await editor.query('BEGIN')
+      await editor.query('SELECT id FROM roles WHERE id = $1 FOR UPDATE', [roles.attendanceBoundaryRace])
+      const pending = transaction((client) => assignUserRoles({
+        userIds: [ids.boundaryTarget], roleId: roles.attendanceBoundaryRace, scope: delegated, executor: client,
+      })).then(() => null, (thrown: unknown) => thrown)
+
+      let blocked = false
+      for (let attempt = 0; attempt < 200 && !blocked; attempt += 1) {
+        const waiting = await lockPool.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FROM roles WHERE id = $1 FOR SHARE%'`,
+        )
+        blocked = (waiting.rows[0]?.n ?? 0) > 0
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(blocked).toBe(true)
+
+      await editor.query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [roles.attendanceBoundaryRace, 'attendance:admin'])
+      await editor.query('COMMIT')
+      committed = true
+
+      const error = await pending
+      expect(error).toBeInstanceOf(RoleAssignmentForbiddenError)
+      expect((error as RoleAssignmentForbiddenError).reason).toBe('admin_equivalent_role')
+      expect(await holds(ids.boundaryTarget, roles.attendanceBoundaryRace)).toBe(false)
+    } finally {
+      if (!committed) await editor.query('ROLLBACK').catch(() => undefined)
+      editor.release()
+    }
+  })
+
+  it('V12 — revoking one namespace\'s main-admin role clears only that namespace\'s audience; another namespace\'s stays', async () => {
+    await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($1, $3)', [ids.multiNamespace, 'attendance_admin', roles.xAdmin])
+    for (const namespace of ['attendance', X_NS]) {
+      await query(
+        'INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id, created_by) VALUES ($1, $2, $3, $4)',
+        [ids.multiNamespace, namespace, groupId, ids.platformAdmin],
+      )
+      await query(
+        'INSERT INTO delegated_role_admin_scopes (admin_user_id, namespace, directory_department_id, created_by) VALUES ($1, $2, $3, $4)',
+        [ids.multiNamespace, namespace, departmentId, ids.platformAdmin],
+      )
+    }
+
+    const revoke = await api('POST', `/api/admin/users/${ids.multiNamespace}/roles/unassign`, tokens.platformAdmin, { roleId: 'attendance_admin' })
+
+    expect(revoke.status).toBe(200)
+    expect(await audience(ids.multiNamespace, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await audience(ids.multiNamespace, X_NS)).toEqual({ departments: 1, groups: 1 })
+  })
+
+  it('attendance admin router: all four role writes clear and audit the audience post-commit; a batch appointment leaves a sitting admin\'s audience alone (V5/V10)', async () => {
+    const giveAudience = async (userId: string) => {
+      await query(
+        'INSERT INTO delegated_role_admin_member_groups (admin_user_id, namespace, group_id, created_by) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [userId, 'attendance', groupId, ids.platformAdmin],
+      )
+    }
+    const cleanupAudits = (userId: string) => auditCount('delegated-admin-scope', `${userId}:attendance`, 'revoke')
+    const single = (action: 'assign' | 'unassign') =>
+      api('POST', `/api/attendance-admin/users/${ids.attendanceSingle}/roles/${action}?scope=global`, tokens.platformAdmin, { template: 'admin' })
+    const batch = (action: 'assign' | 'unassign') =>
+      api('POST', `/api/attendance-admin/users/batch/roles/${action}?scope=global`, tokens.platformAdmin, {
+        template: 'admin', userIds: [ids.attendanceSitting, ids.attendanceFresh],
+      })
+
+    // Single assign: a fresh appointment drops audience orphaned by an earlier tenure.
+    await giveAudience(ids.attendanceSingle)
+    const singleAssign = await single('assign')
+    expect(singleAssign.status).toBe(200)
+    expect(await holds(ids.attendanceSingle, 'attendance_admin')).toBe(true)
+    expect(await audience(ids.attendanceSingle, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await cleanupAudits(ids.attendanceSingle)).toBe(1)
+    // Single unassign: the audience configured during the tenure goes with the role.
+    await giveAudience(ids.attendanceSingle)
+    const singleUnassign = await single('unassign')
+    expect(singleUnassign.status).toBe(200)
+    expect(await holds(ids.attendanceSingle, 'attendance_admin')).toBe(false)
+    expect(await audience(ids.attendanceSingle, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await cleanupAudits(ids.attendanceSingle)).toBe(2)
+
+    // Batch assign: SITTING already holds the role and has a configured audience; FRESH holds an orphan.
+    await query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [ids.attendanceSitting, 'attendance_admin'])
+    await giveAudience(ids.attendanceSitting)
+    await giveAudience(ids.attendanceFresh)
+    const batchAssign = await batch('assign')
+    expect(batchAssign.status).toBe(200)
+    expect(batchAssign.json?.data?.affectedUserIds).toEqual([ids.attendanceFresh])
+    expect(await audience(ids.attendanceSitting, 'attendance')).toEqual({ departments: 0, groups: 1 })
+    expect(await audience(ids.attendanceFresh, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await cleanupAudits(ids.attendanceSitting)).toBe(0)
+    expect(await cleanupAudits(ids.attendanceFresh)).toBe(1)
+    // Batch unassign: both lose the role and the audience.
+    await giveAudience(ids.attendanceFresh)
+    const batchUnassign = await batch('unassign')
+    expect(batchUnassign.status).toBe(200)
+    expect(await audience(ids.attendanceSitting, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await audience(ids.attendanceFresh, 'attendance')).toEqual({ departments: 0, groups: 0 })
+    expect(await cleanupAudits(ids.attendanceSitting)).toBe(1)
+    expect(await cleanupAudits(ids.attendanceFresh)).toBe(2)
   })
 
   it('gate order: an empty body answers 400 (not 401/403) for a delegated attendance_admin on both routes', async () => {

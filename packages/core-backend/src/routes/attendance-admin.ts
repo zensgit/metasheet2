@@ -243,9 +243,17 @@ export const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
  * is bounded to the one namespace the mount itself admits, whatever shape the caller's grant
  * takes. Deriving the list from the router keeps the bound identical for every caller the
  * mount lets through. A router mounted behind `rbacGuard('foo', 'admin')` would pass `['foo']`.
+ *
+ * `platform-admin-in-namespaces`, not the delegated `namespaces` arm: every role write here runs
+ * only after `assertGlobalAttendanceRoleWriteScope` has accepted a `global` scope, which
+ * `resolveAttendanceAdminUserScope` grants to a platform administrator alone — and a platform
+ * administrator may appoint `attendance_admin` (owner ruling 「只有平台管理员能任命 *_admin」). The
+ * role-id bound is the same as before. If an org-scoped (delegated) role write is ever admitted,
+ * it must use `{ kind: 'namespaces' }` so the boundary refuses main-admin and admin-equivalent
+ * roles for it.
  */
 const ATTENDANCE_ROLE_ASSIGNMENT_SCOPE: RoleAssignmentScope = {
-  kind: 'namespaces',
+  kind: 'platform-admin-in-namespaces',
   namespaces: ['attendance'],
 }
 

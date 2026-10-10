@@ -1610,6 +1610,9 @@ describe('admin-users routes', () => {
       // in-transaction role lock + the role's codes (delegated platform-code check)
       .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
       .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -1708,6 +1711,9 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
       // in-transaction role lock + the role's codes (delegated platform-code check)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
       .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
       .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
       .mockResolvedValueOnce({ rows: [] })

@@ -5,9 +5,17 @@
  *      delegated-admin namespace (`deriveDelegatedAdminNamespace`, the predicate that GRANTS
  *      delegated-admin identity) — `attendance_admin`, `stock-prep_admin`, any `x_admin`, and a
  *      nested `stock-prep_data_admin`. Platform admins are unaffected.
- *  R2. A delegated admin may neither assign nor revoke a role that carries a permission code
- *      outside the namespace it reaches the role through (platform codes). The codes are read
- *      INSIDE the write transaction, after the role row is held FOR SHARE.
+ *  R2. A delegated admin may not assign a role that carries a permission code outside the
+ *      namespace it reaches the role through (platform codes). It MAY revoke one (removing a role
+ *      only lowers privilege) unless an out-of-namespace code is admin-level (`*:*`, `admin:*`,
+ *      `<other>:admin`). The codes are read INSIDE the write transaction, after the role row is
+ *      held FOR SHARE.
+ *  R7. Admin power via CODES: a role carrying an admin-level code of its own namespace
+ *      (`<ns>:admin`, `<ns>:*`) is admin-equivalent — refused to delegates both ways, and absent
+ *      from the delegate's catalogs.
+ *  R8. The write boundary (`rbac/role-assignment.ts`, delegated `namespaces` scope) refuses all
+ *      of the above by itself, so a route that reuses the scope inherits the ruling.
+ *  R9. The post-commit cleanup audit is best-effort: its failure never changes the response.
  *  R3. Revoking a main-admin role removes that user's delegated audience for the namespace (both
  *      the department table and the member-group table) in the same transaction, unless another
  *      held role still derives the namespace; a fresh appointment starts with no audience.
@@ -94,7 +102,11 @@ const pgMocks = vi.hoisted(() => {
     if (/^DELETE FROM delegated_role_admin_(scopes|member_groups)/i.test(s)) {
       const table = /member_groups/i.test(s) ? 'group' : 'dept'
       const [userIds, namespace] = params as [string[], string]
-      const removed = db.scopes.filter((scope) => scope.table === table && userIds.includes(scope.adminUserId) && scope.namespace === namespace)
+      // The namespace predicate is honoured only when the statement carries it, so a cleanup
+      // that dropped `AND namespace = $2` would clear every namespace here as it would in PG.
+      const filtersNamespace = /\bAND namespace = \$2\b/i.test(s)
+      const removed = db.scopes.filter((scope) => scope.table === table && userIds.includes(scope.adminUserId)
+        && (!filtersNamespace || scope.namespace === namespace))
       db.scopes = db.scopes.filter((scope) => !removed.includes(scope))
       return { rows: removed.map((scope) => ({ admin_user_id: scope.adminUserId })), rowCount: removed.length }
     }
@@ -155,7 +167,15 @@ vi.mock('../../src/db/pg', () => ({
 
 import { adminUsersRouter } from '../../src/routes/admin-users'
 import { deriveDelegatedAdminNamespace } from '../../src/rbac/namespace-admission'
-import { assignUserRoles, unassignUserRoles } from '../../src/rbac/role-assignment'
+import {
+  assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
+  isAdminLevelPermissionCode,
+  RoleAssignmentForbiddenError,
+  unassignUserRoles,
+  type RoleAssignmentScope,
+} from '../../src/rbac/role-assignment'
+import { Logger } from '../../src/core/logger'
 
 const ROLE_ROUTE = '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)'
 const ADMISSION_ROUTE = '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission'
@@ -344,30 +364,86 @@ describe('R2 — a delegate cannot assign a role carrying codes outside its name
     expect(db.userRoles.get(TARGET)?.has('stock-prep_frontline')).toBe(true)
   })
 
-  it('revoking a platform-coded role is refused too (a platform-managed grant, either direction); the row stays', async () => {
+  it('revoking a role that carries only ordinary platform codes is ALLOWED (removing a role only lowers privilege); the row goes', async () => {
     seedDelegate('delegate-1', 'attendance_admin', 'attendance')
     db.userRoles.set(TARGET, new Set(['attendance_platformish']))
 
     const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_platformish' } })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
-    expect(db.userRoles.get(TARGET)?.has('attendance_platformish')).toBe(true)
+    expect(res.statusCode).toBe(200)
+    expect(db.userRoles.get(TARGET)?.has('attendance_platformish')).toBe(false)
+    expect(auditCalls().filter((entry) => /_denied$/.test(entry.action))).toEqual([])
+    expect(auditCalls()).toContainEqual(expect.objectContaining({ action: 'revoke', resourceType: 'user-role', resourceId: `${TARGET}:attendance_platformish` }))
   })
 
-  it('KNOWN CONSEQUENCE (e-learning): role ids `plugin_elearning_*` carry `elearning:*` codes, a different namespace, so its delegate is refused', async () => {
+  it.each([
+    ['*:*'],
+    ['admin:all'],
+    ['integration:admin'],
+    ['multitable:*'],
+  ])('revoking a role carrying the ADMIN-LEVEL platform code %s stays refused (it would demote an administrator); the row stays', async (adminLevelCode) => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.roles.set('attendance_superish', ['attendance:read', adminLevelCode])
+    db.userRoles.set(TARGET, new Set(['attendance_superish']))
+
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_superish' } })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+    expect(JSON.stringify(res.body)).not.toContain(adminLevelCode)
+    expect(userRoleWrites()).toEqual([])
+    expect(db.userRoles.get(TARGET)?.has('attendance_superish')).toBe(true)
+    expect(auditCalls().filter((entry) => entry.action === 'revoke_denied').map((entry) => entry.meta))
+      .toEqual([expect.objectContaining({ refusalCode: 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN', offendingCount: 1 })])
+  })
+
+  it('V4 — codes are judged against the namespace the role id matched, not every namespace the delegate holds', async () => {
+    // A delegate of BOTH attendance and stock-prep: an `attendance_*` role carrying a
+    // `stock-prep:*` code is still a cross-namespace grant for that role.
+    db.users.set('delegate-2ns', profile('delegate-2ns'))
+    db.userRoles.set('delegate-2ns', new Set(['attendance_admin', 'stock-prep_admin']))
+    db.scopes.push(
+      { adminUserId: 'delegate-2ns', namespace: 'attendance', table: 'group' },
+      { adminUserId: 'delegate-2ns', namespace: 'stock-prep', table: 'group' },
+    )
+    db.roles.set('attendance_crossns', ['attendance:read', 'stock-prep:read'])
+
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-2ns', params: { userId: TARGET, action: 'assign' }, body: { roleId: 'attendance_crossns' } })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+    expect(userRoleWrites()).toEqual([])
+    // ...and it is not offered in that delegate's assignable catalog either.
+    const access = await call('get', ACCESS_ROUTE, { actor: 'delegate-2ns', params: { userId: TARGET } })
+    expect(access.body.data.roleCatalog.map((role: { id: string }) => role.id)).not.toContain('attendance_crossns')
+    // POSITIVE CONTROL — the same delegate assigns each namespace's own role.
+    for (const roleId of ['attendance_employee', 'stock-prep_frontline']) {
+      const ok = await call('post', ROLE_ROUTE, { actor: 'delegate-2ns', params: { userId: TARGET, action: 'assign' }, body: { roleId } })
+      expect({ roleId, status: ok.statusCode }).toEqual({ roleId, status: 200 })
+    }
+  })
+
+  it('KNOWN CONSEQUENCE (e-learning): role ids `plugin_elearning_*` carry `elearning:*` codes, a different namespace, so its delegate cannot ASSIGN them but CAN revoke them', async () => {
     // The e-learning templates deliberately use role namespace `plugin_elearning` and code
     // namespace `elearning` (zzzz20260826140000_add_elearning_role_templates.ts; ADR §11.2-2).
     // Under the strict rule those codes are outside the delegate's namespace. Pinned so the
     // outcome is visible; an alias between the two would be a separate owner decision.
-    db.roles.set('plugin_elearning_admin', ['elearning:admin'])
+    db.roles.set('plugin_elearning_admin', ['elearning:admin', 'elearning:read'])
+    db.roles.set('plugin_elearning_operator', ['elearning:grade', 'elearning:read', 'elearning:stats', 'elearning:write'])
     db.roles.set('plugin_elearning_viewer', ['elearning:read'])
     seedDelegate('delegate-el', 'plugin_elearning_admin', 'plugin_elearning')
 
-    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-el', params: { userId: TARGET, action: 'assign' }, body: { roleId: 'plugin_elearning_viewer' } })
+    for (const roleId of ['plugin_elearning_viewer', 'plugin_elearning_operator']) {
+      const assign = await call('post', ROLE_ROUTE, { actor: 'delegate-el', params: { userId: TARGET, action: 'assign' }, body: { roleId } })
+      expect({ roleId, status: assign.statusCode, code: assign.body?.error?.code })
+        .toEqual({ roleId, status: 403, code: 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN' })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body.error.code).toBe('ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN')
+      // A grant made earlier (by a platform admin, or before this ruling) can be revoked.
+      db.userRoles.set(TARGET, new Set([roleId]))
+      const revoke = await call('post', ROLE_ROUTE, { actor: 'delegate-el', params: { userId: TARGET, action: 'unassign' }, body: { roleId } })
+      expect({ roleId, status: revoke.statusCode }).toEqual({ roleId, status: 200 })
+      expect(db.userRoles.get(TARGET)?.has(roleId)).toBe(false)
+    }
   })
 
   it('the codes are read INSIDE the write transaction, after the role row is held FOR SHARE', async () => {
@@ -450,9 +526,15 @@ describe('R4 — every refusal is audited in the delegation audit shape', () => 
 })
 
 describe('R5 — the delegate is never offered what the route refuses', () => {
-  it('access: roleCatalog and delegableRoles drop main-admin and platform-coded roles, keep the rest', async () => {
+  it('access: roleCatalog (assignable) drops main-admin, admin-equivalent and platform-coded roles; delegableRoles (revocable) keeps ordinary platform-coded ones', async () => {
     seedDelegate('delegate-1', 'attendance_admin', 'attendance')
-    db.userRoles.set(TARGET, new Set(['attendance_admin', 'attendance_employee', 'attendance_platformish']))
+    db.roles.set('attendance_lead', ['attendance:read', 'attendance:admin'])
+    db.roles.set('attendance_wild', ['attendance:*'])
+    db.roles.set('attendance_superish', ['attendance:read', '*:*'])
+    db.userRoles.set(TARGET, new Set([
+      'attendance_admin', 'attendance_employee', 'attendance_platformish',
+      'attendance_lead', 'attendance_wild', 'attendance_superish',
+    ]))
 
     const res = await call('get', ACCESS_ROUTE, { actor: 'delegate-1', params: { userId: TARGET } })
 
@@ -462,7 +544,27 @@ describe('R5 — the delegate is never offered what the route refuses', () => {
       'attendance_employee',
       'attendance_sysadmin',
     ])
-    expect(res.body.data.delegableRoles).toEqual(['attendance_employee'])
+    expect(res.body.data.delegableRoles).toEqual(['attendance_employee', 'attendance_platformish'])
+  })
+
+  it('the assign route\'s answer agrees with the access response, role by role and direction by direction', async () => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.roles.set('attendance_lead', ['attendance:read', 'attendance:admin'])
+    db.roles.set('attendance_superish', ['attendance:read', '*:*'])
+    const candidates = ['attendance_admin', 'attendance_employee', 'attendance_platformish', 'attendance_lead', 'attendance_superish', 'attendance_ADMIN']
+    db.userRoles.set(TARGET, new Set(candidates))
+    const access = await call('get', ACCESS_ROUTE, { actor: 'delegate-1', params: { userId: TARGET } })
+    const assignable = new Set(access.body.data.roleCatalog.map((role: { id: string }) => role.id))
+    const revocable = new Set(access.body.data.delegableRoles)
+
+    for (const roleId of candidates) {
+      db.userRoles.set(TARGET, new Set())
+      const assign = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'assign' }, body: { roleId } })
+      expect({ roleId, assignOk: assign.statusCode === 200 }).toEqual({ roleId, assignOk: assignable.has(roleId) })
+      db.userRoles.set(TARGET, new Set([roleId]))
+      const revoke = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId } })
+      expect({ roleId, revokeOk: revoke.statusCode === 200 }).toEqual({ roleId, revokeOk: revocable.has(roleId) })
+    }
   })
 
   it('POSITIVE CONTROL — a platform admin still sees the whole catalog, main-admin roles included', async () => {
@@ -593,6 +695,48 @@ describe('R3 at the writer — role-assignment.ts', () => {
     expect(db.scopes).toHaveLength(1)
   })
 
+  it('V5 — a batch appointment clears audience only for users it NEWLY appointed; a sitting admin keeps the audience it was given', async () => {
+    const SITTING = 'sitting-admin'
+    const FRESH = 'fresh-admin'
+    db.userRoles.set(SITTING, new Set(['attendance_admin']))
+    db.scopes.push(
+      { adminUserId: SITTING, namespace: 'attendance', table: 'dept' },
+      { adminUserId: SITTING, namespace: 'attendance', table: 'group' },
+      // FRESH has no main-admin role: these rows are an orphan from an earlier tenure.
+      { adminUserId: FRESH, namespace: 'attendance', table: 'group' },
+    )
+    const exec = executor()
+
+    const result = await assignUserRoles({ userIds: [SITTING, FRESH], roleId: 'attendance_admin', scope: { kind: 'platform-admin' }, executor: exec })
+
+    expect(result.affectedUserIds).toEqual([FRESH])
+    expect(result.delegatedAdminScopeCleanup).toEqual([{ userId: FRESH, namespace: 'attendance', scopeRows: 0, groupScopeRows: 1 }])
+    expect(db.scopes).toEqual([
+      { adminUserId: SITTING, namespace: 'attendance', table: 'dept' },
+      { adminUserId: SITTING, namespace: 'attendance', table: 'group' },
+    ])
+  })
+
+  it('V12 — the cleanup removes only the revoked namespace\'s audience; the user\'s audience in another namespace stays', async () => {
+    // The user stays a delegated admin of stock-prep: that audience is not this revocation's.
+    db.userRoles.set(TARGET, new Set(['attendance_admin', 'stock-prep_admin']))
+    db.scopes.push(
+      { adminUserId: TARGET, namespace: 'attendance', table: 'dept' },
+      { adminUserId: TARGET, namespace: 'attendance', table: 'group' },
+      { adminUserId: TARGET, namespace: 'stock-prep', table: 'dept' },
+      { adminUserId: TARGET, namespace: 'stock-prep', table: 'group' },
+    )
+    const exec = executor()
+
+    const result = await unassignUserRoles({ userIds: [TARGET], roleId: 'attendance_admin', scope: { kind: 'platform-admin' }, executor: exec })
+
+    expect(result.delegatedAdminScopeCleanup).toEqual([{ userId: TARGET, namespace: 'attendance', scopeRows: 1, groupScopeRows: 1 }])
+    expect(db.scopes).toEqual([
+      { adminUserId: TARGET, namespace: 'stock-prep', table: 'dept' },
+      { adminUserId: TARGET, namespace: 'stock-prep', table: 'group' },
+    ])
+  })
+
   it('all statements run on the executor the caller passed', async () => {
     db.userRoles.set(TARGET, new Set(['adgx_admin']))
     db.scopes.push({ adminUserId: TARGET, namespace: 'adgx', table: 'dept' }, { adminUserId: TARGET, namespace: 'adgx', table: 'group' })
@@ -604,6 +748,216 @@ describe('R3 at the writer — role-assignment.ts', () => {
     expect(result.delegatedAdminScopeCleanup).toEqual([{ userId: TARGET, namespace: 'adgx', scopeRows: 1, groupScopeRows: 1 }])
     expect(db.seen.every((entry) => entry.via === 'tx')).toBe(true)
     expect(pgMocks.query).not.toHaveBeenCalledWith(expect.stringMatching(/delegated_role_admin_/), expect.anything())
+  })
+})
+
+describe('R7 — admin power via codes: a role carrying an admin-level code of its namespace is admin-equivalent', () => {
+  it('the admin-level predicate follows the access matchers (`<r>:admin`, `<r>:*`, `*:*`, `admin:*`), and nothing else', () => {
+    for (const code of ['attendance:admin', 'attendance:*', 'stock-prep:admin', ' elearning:admin ', '*:*', '*:read', 'admin:all', 'admin:read', 'multitable:*']) {
+      expect({ code, adminLevel: isAdminLevelPermissionCode(code) }).toEqual({ code, adminLevel: true })
+    }
+    // Domain actions are not wildcards in any access matcher (`manage` is approval-templates',
+    // `all` is a wildcard only in the demo metrics middleware).
+    for (const code of ['attendance:read', 'attendance:approve', 'attendance:manage', 'attendance:all', 'stock-prep:pull', 'attendance', 'attendance:', ':admin', '', 'attendance:administer', 'attendance:Admin']) {
+      expect({ code, adminLevel: isAdminLevelPermissionCode(code) }).toEqual({ code, adminLevel: false })
+    }
+  })
+
+  it.each([
+    ['attendance_admin', 'attendance', 'attendance_lead', ['attendance:read', 'attendance:admin']],
+    ['attendance_admin', 'attendance', 'attendance_wild', ['attendance:*']],
+    ['stock-prep_admin', 'stock-prep', 'stock-prep_lead', ['stock-prep:read', 'stock-prep:admin']],
+  ])('a delegate holding %s cannot assign or revoke %s-admin-equivalent %s → 403 ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN, audited, nothing written', async (actorRole, namespace, roleId, codes) => {
+    seedDelegate('delegate-1', actorRole, namespace)
+    db.roles.set(roleId, codes)
+    expect(deriveDelegatedAdminNamespace(roleId)).toBeNull() // not a main-admin id: refused by its codes alone
+
+    const assign = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'assign' }, body: { roleId } })
+    expect(assign.statusCode).toBe(403)
+    expect(assign.body).toEqual({
+      ok: false,
+      error: { code: 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN', message: 'Only a platform administrator can assign or revoke a namespace admin role' },
+    })
+    expect(db.userRoles.get(TARGET)?.has(roleId) ?? false).toBe(false)
+
+    db.userRoles.set(TARGET, new Set([roleId]))
+    const revoke = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId } })
+    expect(revoke.statusCode).toBe(403)
+    expect(revoke.body.error.code).toBe('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
+    expect(db.userRoles.get(TARGET)?.has(roleId)).toBe(true)
+
+    expect(userRoleWrites()).toEqual([])
+    expect(auditCalls().filter((entry) => /_denied$/.test(entry.action)).map((entry) => [entry.action, entry.meta.refusalCode, entry.meta.offendingCount]))
+      .toEqual([
+        ['grant_denied', 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN', 1],
+        ['revoke_denied', 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN', 1],
+      ])
+  })
+
+  it('the admin-equivalent check reads the codes inside the write transaction under the role-row lock (an editor adding `<ns>:admin` is seen)', async () => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.roles.set('attendance_promoted', ['attendance:read'])
+    // The editor's commit lands after the route's pre-transaction reads and before the lock.
+    const original = pgMocks.transaction.getMockImplementation()
+    pgMocks.transaction.mockImplementationOnce(async (handler) => {
+      db.roles.set('attendance_promoted', ['attendance:read', 'attendance:admin'])
+      return original!(handler)
+    })
+
+    const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'assign' }, body: { roleId: 'attendance_promoted' } })
+
+    expect(res.statusCode).toBe(403)
+    expect(res.body.error.code).toBe('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
+    expect(userRoleWrites()).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — domain actions are not admin-level: a role with approve/import/manage is delegable both ways', async () => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.roles.set('attendance_domain', ['attendance:approve', 'attendance:import', 'attendance:manage'])
+
+    const assign = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'assign' }, body: { roleId: 'attendance_domain' } })
+    const revoke = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_domain' } })
+
+    expect([assign.statusCode, revoke.statusCode]).toEqual([200, 200])
+  })
+
+  it('a platform admin still assigns and revokes an admin-equivalent role', async () => {
+    db.roles.set('attendance_lead', ['attendance:read', 'attendance:admin'])
+    const assign = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'assign' }, body: { roleId: 'attendance_lead' } })
+    const revoke = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_lead' } })
+    expect([assign.statusCode, revoke.statusCode]).toEqual([200, 200])
+  })
+})
+
+describe('R8 — the write boundary refuses by itself under the delegated `namespaces` scope', () => {
+  const delegated: RoleAssignmentScope = { kind: 'namespaces', namespaces: ['attendance'] }
+  function executor() {
+    const seen: string[] = []
+    return {
+      seen,
+      query: async (sql: string, params?: unknown[]) => {
+        seen.push(sql.replace(/\s+/g, ' ').trim())
+        return pgMocks.route(sql, params ?? [], 'tx') as Promise<{ rows: unknown[]; rowCount: number }>
+      },
+    }
+  }
+  async function refusalOf(write: Promise<unknown>): Promise<string | null> {
+    try {
+      await write
+      return null
+    } catch (error) {
+      expect(error).toBeInstanceOf(RoleAssignmentForbiddenError)
+      return (error as RoleAssignmentForbiddenError).reason
+    }
+  }
+  const writes = (seen: string[]) => seen.filter((sql) => /^(INSERT INTO|DELETE FROM) user_roles/i.test(sql))
+
+  it('a main-admin role id is refused in both directions before any statement', async () => {
+    for (const roleId of ['attendance_admin', 'attendance_data_admin']) {
+      const exec = executor()
+      expect(await refusalOf(assignUserRoles({ userIds: [TARGET], roleId, scope: delegated, executor: exec }))).toBe('main_admin_role')
+      expect(await refusalOf(unassignUserRoles({ userIds: [TARGET], roleId, scope: delegated, executor: exec }))).toBe('main_admin_role')
+      expect(exec.seen).toEqual([])
+    }
+  })
+
+  it('an admin-equivalent role is refused in both directions, after the lock and code read, with no membership write', async () => {
+    db.roles.set('attendance_lead', ['attendance:read', 'attendance:admin'])
+    db.roles.set('attendance_wild', ['attendance:*'])
+    for (const roleId of ['attendance_lead', 'attendance_wild']) {
+      db.userRoles.set(TARGET, new Set([roleId]))
+      const exec = executor()
+      expect(await refusalOf(assignUserRoles({ userIds: ['someone-else'], roleId, scope: delegated, executor: exec }))).toBe('admin_equivalent_role')
+      expect(await refusalOf(unassignUserRoles({ userIds: [TARGET], roleId, scope: delegated, executor: exec }))).toBe('admin_equivalent_role')
+      expect(writes(exec.seen)).toEqual([])
+      expect(exec.seen.slice(0, 2)).toEqual([
+        'SELECT id FROM roles WHERE id = $1 FOR SHARE',
+        'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+      ])
+      expect(db.userRoles.get(TARGET)?.has(roleId)).toBe(true)
+    }
+  })
+
+  it('a role carrying codes outside the namespace: assign refused; unassign allowed unless a code is admin-level', async () => {
+    const exec = executor()
+    expect(await refusalOf(assignUserRoles({ userIds: [TARGET], roleId: 'attendance_platformish', scope: delegated, executor: exec }))).toBe('platform_permission')
+    expect(writes(exec.seen)).toEqual([])
+
+    db.userRoles.set(TARGET, new Set(['attendance_platformish']))
+    expect(await refusalOf(unassignUserRoles({ userIds: [TARGET], roleId: 'attendance_platformish', scope: delegated, executor: exec }))).toBeNull()
+    expect(db.userRoles.get(TARGET)?.has('attendance_platformish')).toBe(false)
+
+    db.roles.set('attendance_superish', ['attendance:read', '*:*'])
+    db.userRoles.set(TARGET, new Set(['attendance_superish']))
+    expect(await refusalOf(unassignUserRoles({ userIds: [TARGET], roleId: 'attendance_superish', scope: delegated, executor: exec }))).toBe('platform_permission')
+    expect(db.userRoles.get(TARGET)?.has('attendance_superish')).toBe(true)
+  })
+
+  it('a role with no row to lock is refused (fail-closed), no membership write', async () => {
+    const exec = executor()
+    expect(await refusalOf(assignUserRoles({ userIds: [TARGET], roleId: 'attendance_ghost', scope: delegated, executor: exec }))).toBe('role_missing')
+    expect(writes(exec.seen)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — an in-namespace ordinary role is written under the delegated scope, after the lock and code read', async () => {
+    const exec = executor()
+    const result = await assignUserRoles({ userIds: [TARGET], roleId: 'attendance_employee', scope: delegated, executor: exec })
+    expect(result.affectedUserIds).toEqual([TARGET])
+    expect(exec.seen.map((sql) => sql.split(' ').slice(0, 3).join(' '))).toEqual(['SELECT id FROM', 'SELECT permission_code FROM', 'INSERT INTO user_roles'])
+  })
+
+  it('POSITIVE CONTROL — the platform arms skip the code review: a platform admin through the attendance router appoints attendance_admin', async () => {
+    const exec = executor()
+    const result = await assignUserRoles({ userIds: [TARGET], roleId: 'attendance_admin', scope: { kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] }, executor: exec })
+    expect(result.affectedUserIds).toEqual([TARGET])
+    expect(exec.seen.filter((sql) => /role_permissions|FOR SHARE/i.test(sql))).toEqual([])
+  })
+
+  it('the delegation route\'s own typed refusals stay in front of the boundary (it is the backstop, not the answer)', async () => {
+    seedDelegate('delegate-1', 'attendance_admin', 'attendance')
+    db.roles.set('attendance_lead', ['attendance:read', 'attendance:admin'])
+    for (const [roleId, code] of [
+      ['attendance_admin', 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'],
+      ['attendance_lead', 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'],
+      ['attendance_platformish', 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN'],
+    ]) {
+      const res = await call('post', ROLE_ROUTE, { actor: 'delegate-1', params: { userId: TARGET, action: 'assign' }, body: { roleId } })
+      expect({ roleId, status: res.statusCode, code: res.body?.error?.code }).toEqual({ roleId, status: 403, code })
+    }
+  })
+})
+
+describe('R9 — the post-commit cleanup audit is best-effort', () => {
+  it('an audit failure after commit leaves the committed 200 response intact and logs a code only', async () => {
+    const warn = vi.spyOn(Logger.prototype, 'warn')
+    auditMocks.auditLog.mockImplementation(async (entry: Record<string, any>) => {
+      if (entry?.resourceType === 'delegated-admin-scope') throw Object.assign(new Error('audit sentinel adgf-leak'), { code: 'EAUDITDOWN' })
+    })
+    try {
+      db.userRoles.set(TARGET, new Set(['attendance_admin']))
+      db.scopes.push({ adminUserId: TARGET, namespace: 'attendance', table: 'dept' })
+
+      const res = await call('post', PLATFORM_UNASSIGN_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET }, body: { roleId: 'attendance_admin' } })
+
+      expect(res.statusCode).toBe(200)
+      expect(JSON.stringify(res.body)).not.toContain('adgf-leak')
+      expect(db.userRoles.get(TARGET)?.has('attendance_admin')).toBe(false)
+      expect(db.scopes).toEqual([])
+      const logged = warn.mock.calls.map((args) => JSON.stringify(args))
+      expect(logged.some((line) => line.includes('error_code=EAUDITDOWN'))).toBe(true)
+      expect(logged.some((line) => line.includes('adgf-leak'))).toBe(false)
+
+      // The helper itself never rejects, whatever the failure carries.
+      await expect(auditDelegatedAdminScopeCleanup({
+        actorId: PLATFORM_ADMIN,
+        roleId: 'attendance_admin',
+        trigger: 'role_unassigned',
+        cleanup: [{ userId: TARGET, namespace: 'attendance', scopeRows: 1, groupScopeRows: 0 }],
+      })).resolves.toBeUndefined()
+    } finally {
+      warn.mockRestore()
+      auditMocks.auditLog.mockImplementation(async () => undefined)
+    }
   })
 })
 
