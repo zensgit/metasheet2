@@ -11,25 +11,32 @@
  * DingTalk alert, with every R-41 test still green.
  *
  * HOW. TypeScript compiler API, one program per scan (noResolve / noLib, so identifiers resolve to their LOCAL
- * declarations: a catch binding is told apart from a same-named parameter by symbol, not by name).
- *  1. LISTS are read FROM SOURCE, never hard-coded here: every variable typed `…FixedSentenceErrorClass…`, every
- *     array literal in a `fixedSentenceClasses:` position, and every array literal passed where a same-file
- *     function declares a `FixedSentenceErrorClass` parameter. Elements may be classes (imported names are traced
- *     to their exported name) or spreads of another list. It FAILS CLOSED on: a list that is not an array literal;
- *     an element that is neither a class name nor a spread of a list; a consumer position fed by something that is
- *     neither a list nor a pass-through parameter; a list constant that is exported or referenced anywhere but a
- *     consumer position or a spread into another list (`(LIST as any).push(X)`, handing it elsewhere); a function
- *     with a `FixedSentenceErrorClass` parameter that is exported, re-exported, referenced as a value, or is a
- *     method / callback / anonymous function — only direct same-file calls are followed, so a cross-file caller
- *     could hand it an inline list unseen; and `fixedSentenceClasses` written as a property (`o.fixedSentenceClasses
- *     = …`) or spelled as a string (computed keys, element access, Reflect / defineProperty writes). Adding a class
+ * declarations: a catch binding is told apart from a same-named parameter by symbol, not by name). A key spelled
+ * statically — a string literal, a `+` concatenation of them, a template of static parts (`'mess' + 'age'`) — counts
+ * as that key everywhere below.
+ *  1. LISTS are read FROM SOURCE, never hard-coded here, scanning EVERY file (no word pre-filter): every variable
+ *     typed `…FixedSentenceErrorClass…`, every array literal in a `fixedSentenceClasses:` position, and every array
+ *     literal passed where a same-file function declares a `FixedSentenceErrorClass` parameter. Elements may be
+ *     classes (imported names are traced to their exported name) or spreads of another list. It FAILS CLOSED on: a
+ *     list that is not an array literal; an element that is neither a class name nor a spread of a list; a consumer
+ *     position fed by something that is neither a list nor the list parameter of a followed pass-through; a list
+ *     constant that is exported or referenced anywhere but a consumer position or a spread into another list
+ *     (`(LIST as any).push(X)`, handing it elsewhere); a function with a `FixedSentenceErrorClass` parameter that is
+ *     exported, re-exported, referenced as a value, or is a method / callback / anonymous function — only direct
+ *     same-file calls are followed, so a cross-file caller could hand it an inline list unseen; such a pass-through's
+ *     list PARAMETER used other than as a consumer value (a `fixedSentenceClasses` value, or the list argument of a
+ *     direct same-file pass-through call) — reassigned, `.push`ed, spread, aliased; `fixedSentenceClasses` written as
+ *     a property or spelled as a string, whole or concatenated (computed keys, element access, reflective writes);
+ *     and at the SINK: a classifyDirectoryFailureText call whose options are not an inline object or carry a spread
+ *     or computed key, the classifier used as a value or re-exported, or `export *` from its module. Adding a class
  *     to a list therefore extends this guard by itself.
  *  2. CONSTRUCTIONS. Every `new <Listed>(…)` (aliases, `ns.Listed`, `require` destructuring and `export { X as Y }`
  *     re-exports included), every `super(…)` inside a subclass of a listed class, and every listed class's OWN
  *     `super(…)` — across packages/core-backend/src and plugins/<name>/lib, plugins/<name>/index.cjs — has each
- *     argument checked. It is RED when the value of an argument
+ *     argument checked; and `arguments` read anywhere in a listed class's constructor is red (it reaches the message
+ *     without a parameter name). It is RED when the value of an argument
  *       (a) reads `.message` / `.stack` / `.errmsg` / `.responseBody` / `.detail` / `.cause` / `.hint` / `.where` /
- *           `.reason` (dot, string-literal bracket, or destructuring);
+ *           `.reason` (dot, static-string bracket, or destructuring);
  *       (b) references a binding introduced by `catch (x)`, by the first parameter of a `.catch(cb)` /
  *           `.then(_, cb)` callback, or of an `.on('error' | <non-literal event>, cb)` listener (resolved by symbol);
  *       (c) — the same, through `String(x)` or a template interpolation (reported separately).
@@ -42,14 +49,15 @@
  *     the callee's body). Positions that cannot carry text are not followed: the condition of `?:`, comparisons,
  *     `!`, `typeof`.
  *  3. MESSAGE REWRITES. (d) Every write of `message` / `stack` on any target other than `this` anywhere in the
- *     scanned tree — `x.message = …` (and compound / bracket / destructuring-assignment forms),
+ *     scanned tree (every file parsed) — `x.message = …` (and compound / bracket / destructuring-assignment forms),
  *     `Object.defineProperty(x, 'message', …)`, `Object.defineProperties(x, { message })`,
  *     `Object.assign(x, { message })`, `Reflect.set` / `Reflect.defineProperty(x, 'message', …)` — is pinned in
  *     ALLOWED_MESSAGE_REWRITES with a reason; a new one is red whatever the target (a caught, instanceof-narrowed
- *     listed instance enriched in place is the realistic case). A fresh listed instance handed to
- *     Object.assign / defineProperty / Reflect.set is red outright. Inside a listed class, a `this.message` /
- *     `this.stack` write in the constructor has its value held to rules (a)–(c); anywhere else in the class, and a
- *     `message` / `stack` / `toString` member, is red.
+ *     listed instance enriched in place is the realistic case). Every `this.message` / `this.stack` write outside a
+ *     listed class is pinned the same way in ALLOWED_THIS_MESSAGE_REWRITES (none today). A fresh listed instance
+ *     handed to Object.assign / defineProperty / Reflect.set is red outright. Inside a listed class, a
+ *     `this.message` / `this.stack` write in the constructor has its value held to rules (a)–(c); anywhere else in
+ *     the class, and a `message` / `stack` / `toString` member, is red.
  *  4. SUBCLASSES of a listed class anywhere are red unless in ALLOWED_SUBCLASSES (empty — a subclass can carry any
  *     message and inherits the `instanceof`).
  *  5. BACKSTOP: every VALUE reference to a listed class must be a `new` callee, an `extends` target, the right side
@@ -57,13 +65,26 @@
  *     new C(m)`, `Reflect.construct(Listed, …)` or handing the class to a factory is red.
  *  6. ARGUMENTS_OUTSIDE_MESSAGE exempts one `new <Listed>(…)` argument position (and the same position of a
  *     subclass's `super(…)`, which calls that constructor) that, by the class's own constructor, never reaches the
- *     message — re-verified against that constructor on every run (RecoveryConflictError keeps its argument only
- *     as `cause`). It never applies to the class's OWN `super(…)`, which is Error's message.
- *  7. Non-vacuity: the discovered list keys and the per-class construction counts are pinned, every listed class
- *     must be declared exactly once, and each exemption is shown load-bearing on the real tree.
+ *     message. It is re-verified on every run against the WHOLE constructor — body AND parameter list, so another
+ *     parameter's default (`text = String(cause)`) counts: the exempt parameter may appear only as
+ *     `Object.assign(this, { cause })` or in a comparison with `undefined` (RecoveryConflictError keeps its argument
+ *     only as `cause`). It never applies to the class's OWN `super(…)`, which is Error's message, and `arguments`
+ *     (rule 2) cannot route around it.
+ *  7. Non-vacuity: the discovered list keys are pinned exactly; the per-class construction counts are LOWER bounds
+ *     over an EXACT set of classes (concurrent additions merge cleanly, a lost site or a newly listed class is
+ *     red); every listed class must be declared exactly once; each exemption is shown load-bearing on the real
+ *     tree. The two rewrite censuses (rule 3) are exact.
  *
  * NOT COVERED, deliberately (each is a value the guard cannot see into today; the named sites are values-free by
  * inspection):
+ *  - classes whose message a route echoes through its own `instanceof` branch and NOT through the classifier: this
+ *    guard's family is the classes on the lists only. Today eight — LocalDirectoryValidationError /
+ *    LocalDirectoryNotFoundError / LocalDirectoryConflictError (routes/admin-directory-local.ts:74-83),
+ *    OrgTransferValidationError / OrgTransferNotFoundError / OrgTransferConflictError
+ *    (routes/admin-directory-org-transfers.ts:98-107), DirectorySyncInProgressError and
+ *    DirectorySyncFrozenByTransferError (routes/admin-directory.ts:729-781) — answer `error.message` as it is;
+ *  - values parked on a global or shared object and read back (`globalThis.lastError`, `process.x`, a module
+ *    namespace): only rule (a)'s property names on the read path catch them;
  *  - function RETURN values, same-file or not: a call is walked into its arguments, not into the callee's body.
  *    Following bodies would make the walk property-insensitive in the wrong direction — `new
  *    LoginAliasClaimError(result.code, result.kind)` (auth/login-alias-service.ts:177, :248) would reach
@@ -74,9 +95,10 @@
  *    (validatePassword in auth/password-policy.ts: fixed policy sentences);
  *  - values from other FILES: an exported helper's parameter, imported constants or module state, `this.x` fields;
  *  - aliasing through calls: a local mutated by a function it was handed to (`collect(parts)`);
- *  - non-literal property names: `e[key]` reads, `Object.defineProperty(e, key, …)`, `Object.assign(e, source)`
- *    with a non-literal source, aliased `Object` / `Reflect` (`const { assign } = Object`), and a
- *    `fixedSentenceClasses` key computed from non-literal parts;
+ *  - property names that are not static strings: a key held in a variable (`const k = 'message'; e[k] = t`,
+ *    `Object.defineProperty(e, k, …)`), `Object.assign(e, source)` with a non-literal source, aliased `Object` /
+ *    `Reflect` (`const { assign } = Object`), and the classifier's module reached through a path built at runtime
+ *    (`await import(dir + name)`);
  *  - error values that arrive other than through `catch` / `.catch` / `.then(_, cb)` / `.on(…)`: node-style
  *    callbacks `(err, result) => …`, custom rejection hooks (Promise.allSettled results are covered only through
  *    their `.reason` reads, rule a).
@@ -111,7 +133,10 @@ const EXPECTED_LISTS: readonly string[] = [
 
 /**
  * Constructions per listed class (`new` + `super(…)` from an allowed subclass), pinned so the guard cannot go
- * vacuous: a class whose sites stop being found, or one added to a list, shows up here first.
+ * vacuous. Each count is a LOWER BOUND (found >= pinned): a class whose sites stop being found is red, while two
+ * concurrent changes that each add a site merge cleanly (an exact pin bumped 41→42 in both would leave main at 43
+ * and red — main merges with strict=false and no queue). The SET of classes is exact: a class added to or dropped
+ * from a list is red until pinned or unpinned here. Lower a count in the same change that removes sites.
  */
 const EXPECTED_CONSTRUCTION_COUNTS: Readonly<Record<string, number>> = {
   DingTalkConfigValidationError: 9,
@@ -151,6 +176,23 @@ const ALLOWED_MESSAGE_REWRITES: Readonly<Record<string, RewriteAllowance>> = {
     count: 1,
     reason: 'toLoggableError wraps a non-Error thrown value in a plain `new Error(…)` for the LOG only and restores that value\'s own stack; a plain Error is on no allow-list.',
   },
+}
+
+/**
+ * `this.message` / `this.stack` writes OUTSIDE the listed classes (whose own writes the construction rules hold):
+ * `<file> :: this.<prop> in <class>` → count + why. Empty today — exact, so a new one is red.
+ */
+const ALLOWED_THIS_MESSAGE_REWRITES: Readonly<Record<string, RewriteAllowance>> = {}
+
+/** Problems of found construction counts against the pins: an exact class set, each count a lower bound. */
+function constructionPinProblems(found: Readonly<Record<string, number>>, pinned: Readonly<Record<string, number>>): string[] {
+  const problems: string[] = []
+  for (const cls of Object.keys(found).sort()) {
+    if (!(cls in pinned)) problems.push(`${cls}: on a list but not pinned (${found[cls]} constructions found) — pin it`)
+    else if (found[cls] < pinned[cls]) problems.push(`${cls}: ${found[cls]} constructions found, pinned at least ${pinned[cls]} — sites stopped being found (or lower the pin in the change that removed them)`)
+  }
+  for (const cls of Object.keys(pinned).sort()) if (!(cls in found)) problems.push(`${cls}: pinned but on no list — remove the pin`)
+  return problems
 }
 
 // ── scanner: pure functions of (repo-relative path → text), shared by the real tree and the self-tests ─────
@@ -242,11 +284,33 @@ const isRequireCall = (e: ts.Expression) => {
   return ts.isCallExpression(u) && ts.isIdentifier(u.expression) && u.expression.text === 'require'
 }
 const isExported = (decl: ts.Declaration) => (ts.getCombinedModifierFlags(decl) & (ts.ModifierFlags.Export | ts.ModifierFlags.Default)) !== 0
+/**
+ * The string an expression spells statically: a string literal, a `+` concatenation of such strings, or a template
+ * whose substitutions are themselves static (`'mess' + 'age'`, `\`fixed${'Sentence'}Classes\``) — so a key cannot
+ * dodge a rule by being cut in two. Undefined for anything else (an identifier holding a string is not followed).
+ */
 const literalText = (e: ts.Node | undefined): string | undefined => {
   if (!e) return undefined
   const u = ts.isExpression(e as ts.Expression) ? unwrap(e as ts.Expression) : e
-  return ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u) ? u.text : undefined
+  if (ts.isStringLiteral(u) || ts.isNoSubstitutionTemplateLiteral(u)) return u.text
+  if (ts.isBinaryExpression(u) && u.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = literalText(u.left)
+    const right = literalText(u.right)
+    return left !== undefined && right !== undefined ? left + right : undefined
+  }
+  if (ts.isTemplateExpression(u)) {
+    let out = u.head.text
+    for (const span of u.templateSpans) {
+      const part = literalText(span.expression)
+      if (part === undefined) return undefined
+      out += part + span.literal.text
+    }
+    return out
+  }
+  return undefined
 }
+const isStaticStringExpression = (n: ts.Node) => ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isTemplateExpression(n)
+  || (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.PlusToken)
 function inTypePosition(node: ts.Node): boolean {
   for (let p = node.parent; p && !ts.isSourceFile(p); p = p.parent) {
     if (ts.isTypeNode(p)) return true
@@ -370,11 +434,13 @@ function messageRewritesAt(node: ts.Node): MessageRewrite[] {
 }
 const isThisTarget = (e: ts.Expression) => unwrap(e).kind === ts.SyntaxKind.ThisKeyword
 
-/** (d) tree-wide: every `message` / `stack` write on a non-`this` target, `<file> :: <form>` → count. */
+/**
+ * (d) tree-wide, every file parsed (no word pre-filter: `e['mess' + 'age'] = …` spells neither word): every
+ * `message` / `stack` write on a non-`this` target, `<file> :: <form>` → count.
+ */
 function censusMessageRewrites(files: SourceMap): Record<string, number> {
   const out: Record<string, number> = {}
   for (const [rel, text] of files) {
-    if (!/\b(message|stack)\b/.test(text)) continue
     const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true, scriptKindOf(rel))
     walk(sf, (node) => {
       for (const r of messageRewritesAt(node)) {
@@ -387,13 +453,44 @@ function censusMessageRewrites(files: SourceMap): Record<string, number> {
   return out
 }
 
+/**
+ * (d) tree-wide, `this` targets: every `this.message` / `this.stack` write with the class it sits in (`<no class>`
+ * outside one), `<file> :: this.<prop> in <class>` → class + count. A listed class's own writes are held to the
+ * construction rules instead; the real-tree test pins the rest (none today) so a new one is red.
+ */
+function censusThisMessageRewrites(files: SourceMap): Map<string, { cls: string; count: number }> {
+  const out = new Map<string, { cls: string; count: number }>()
+  for (const [rel, text] of files) {
+    const sf = ts.createSourceFile(rel, text, ts.ScriptTarget.ES2022, true, scriptKindOf(rel))
+    walk(sf, (node) => {
+      for (const r of messageRewritesAt(node)) {
+        if (!isThisTarget(r.target)) continue
+        let cls = '<no class>'
+        for (let p = node.parent; p; p = p.parent) {
+          if (ts.isClassDeclaration(p) || ts.isClassExpression(p)) {
+            cls = p.name?.text ?? (ts.isVariableDeclaration(p.parent) && ts.isIdentifier(p.parent.name) ? p.parent.name.text : '<anonymous class>')
+            break
+          }
+        }
+        const key = `${rel} :: this.${r.prop} in ${cls}`
+        out.set(key, { cls, count: (out.get(key)?.count ?? 0) + 1 })
+      }
+    })
+  }
+  return out
+}
+
 // ── phase 1: the allow-lists ────────────────────────────────────────────────────────────────────────────────
 
 interface ListDiscovery { lists: Map<string, string[]>; listArrays: Set<ts.ArrayLiteralExpression>; failures: string[] }
 
+/** The classifier the lists feed; its call sites are the sink every list must reach through (rule 1). */
+const CLASSIFIER = 'classifyDirectoryFailureText'
+const CLASSIFIER_MODULE = 'directory-failure-text'
+
 function discoverLists(files: SourceMap): ListDiscovery {
-  const roots = [...files.keys()].filter((f) => /FixedSentenceErrorClass|fixedSentenceClasses/.test(files.get(f) ?? ''))
-  const program = buildProgram(files, roots)
+  // Every file: a word pre-filter would let `{ ['fixed' + 'SentenceClasses']: … }` skip the scan.
+  const program = buildProgram(files, [...files.keys()])
   const checker = program.getTypeChecker()
   const failures: string[] = []
   const listArrays = new Set<ts.ArrayLiteralExpression>()
@@ -409,7 +506,7 @@ function discoverLists(files: SourceMap): ListDiscovery {
     const rel = relOf(sf)
     let inlineCount = 0
     const fixedParams = new Map<ts.Symbol, number[]>()
-    const passThroughs: Array<{ sym: ts.Symbol; name: ts.Identifier }> = []
+    const passThroughs: Array<{ sym: ts.Symbol; name: ts.Identifier; fn: ts.SignatureDeclaration; params: ts.ParameterDeclaration[] }> = []
     const consumers: ts.Expression[] = []
     const fileLists: Array<{ decl: ts.VariableDeclaration; name: ts.Identifier }> = []
     walk(sf, (node) => {
@@ -437,14 +534,16 @@ function discoverLists(files: SourceMap): ListDiscovery {
             failures.push(`${at(node)} ${nameNode.text} takes a FixedSentenceErrorClass parameter and is exported — a caller in another file could hand it a list unseen`)
           } else {
             fixedParams.set(sym, indexes)
-            passThroughs.push({ sym, name: nameNode })
+            passThroughs.push({ sym, name: nameNode, fn: node, params: indexes.map((i) => node.parameters[i]) })
           }
         }
       }
       if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && node.name.getText() === 'fixedSentenceClasses') {
         consumers.push(ts.isPropertyAssignment(node) ? node.initializer : node.name)
       }
-      if (literalText(node) === 'fixedSentenceClasses' && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))) {
+      // Spelled as a string — also cut in pieces ('fixed' + 'SentenceClasses') — it is a computed key, an element
+      // access or a reflective write; none is followed.
+      if (isStaticStringExpression(node) && literalText(node) === 'fixedSentenceClasses') {
         failures.push(`${at(node)} 'fixedSentenceClasses' spelled as a string (computed key, element access or reflective write) — not followed`)
       }
       if (ts.isBinaryExpression(node) && ASSIGNMENT_OPERATORS.has(node.operatorToken.kind)) {
@@ -487,12 +586,74 @@ function discoverLists(files: SourceMap): ListDiscovery {
           ? checker.getShorthandAssignmentValueSymbol(consumer.parent)
           : checker.getSymbolAtLocation(value))?.declarations?.[0]
         if (decl && ts.isVariableDeclaration(decl) && typeMentionsFixedSentence(decl.type)) continue
-        if (decl && ts.isParameter(decl) && typeMentionsFixedSentence(decl.type)) continue
+        // A parameter only when it is a list parameter of a FOLLOWED pass-through (named, same-file, not exported).
+        if (decl && ts.isParameter(decl) && passThroughs.some((p) => p.params.includes(decl))) continue
       }
       failures.push(`${at(consumer)} a fixed-sentence consumer is fed by \`${consumer.getText()}\`, neither a discovered list nor a pass-through parameter`)
     }
-    // A list constant is referenced only as a consumer value or spread into another list.
     const consumerNodes = new Set<ts.Node>(consumers.map((c) => outermost(c)))
+    // A pass-through's list PARAMETER is used only as a consumer value: a `fixedSentenceClasses` value or the list
+    // argument of a direct same-file pass-through call. A reassignment, a member access (`.push`), a spread, an
+    // alias or any other use fails closed — its contents would no longer be the caller's list.
+    for (const { fn, name: fnName, params } of passThroughs) {
+      for (const param of params) {
+        if (!ts.isIdentifier(param.name)) {
+          failures.push(`${at(param)} ${fnName.text}: a destructured FixedSentenceErrorClass parameter is not followed`)
+          continue
+        }
+        const paramName = param.name
+        const paramSym = checker.getSymbolAtLocation(paramName)
+        walk(fn, (n) => {
+          if (!ts.isIdentifier(n) || n === paramName || n.text !== paramName.text || inTypePosition(n)) return
+          if (symbolOfReference(n) !== paramSym) return
+          const ref = outermost(n)
+          if (consumerNodes.has(ref) || consumerNodes.has(n)) return
+          failures.push(`${at(n)} ${fnName.text}'s list parameter ${paramName.text} is used other than as a consumer value (\`${snippet(ref.parent)}\`) — a reassignment, mutation or alias is not followed`)
+        })
+      }
+    }
+    // The sink: every call of the classifier passes an inline options object (no spread, no computed key), and the
+    // classifier is referenced only by direct calls — so no list reaches it through a value the guard cannot read.
+    if (/classifyDirectoryFailureText|directory-failure-text/.test(sf.text)) {
+      const classifierNames = new Set([CLASSIFIER])
+      walk(sf, (n) => {
+        if (ts.isImportSpecifier(n) && (n.propertyName ?? n.name).text === CLASSIFIER) classifierNames.add(n.name.text)
+        if (ts.isBindingElement(n) && ts.isIdentifier(n.name) && ((n.propertyName ?? n.name) as ts.Identifier).text === CLASSIFIER) classifierNames.add(n.name.text)
+        if (ts.isExportDeclaration(n) && !n.exportClause && n.moduleSpecifier && literalText(n.moduleSpecifier)?.includes(CLASSIFIER_MODULE)) {
+          failures.push(`${at(n)} \`export *\` from the classifier module — a re-exported classifier is not followed`)
+        }
+      })
+      walk(sf, (n) => {
+        if (!ts.isIdentifier(n) || !classifierNames.has(n.text) || inTypePosition(n)) return
+        const parent = n.parent
+        if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)) return
+        if (ts.isBindingElement(parent) && (parent.name === n || parent.propertyName === n)) return
+        if (ts.isFunctionDeclaration(parent) && parent.name === n) return
+        if (ts.isExportSpecifier(parent)) {
+          failures.push(`${at(n)} ${CLASSIFIER} is re-exported — calls under another name are not followed`)
+          return
+        }
+        const ref = outermost(ts.isPropertyAccessExpression(parent) && parent.name === n ? parent : n)
+        const call = ref.parent
+        if (!ts.isCallExpression(call) || call.expression !== ref) {
+          failures.push(`${at(n)} ${CLASSIFIER} is used as a value (\`${snippet(ref.parent)}\`) — only direct calls are followed`)
+          return
+        }
+        const options = call.arguments[1]
+        if (!options) return
+        const literal = unwrap(options)
+        if (!ts.isObjectLiteralExpression(literal)) {
+          failures.push(`${at(call)} ${CLASSIFIER} options are \`${snippet(options)}\`, not an inline object — its fixedSentenceClasses is not read`)
+          return
+        }
+        for (const p of literal.properties) {
+          if (ts.isSpreadAssignment(p) || (p.name && ts.isComputedPropertyName(p.name))) {
+            failures.push(`${at(p)} ${CLASSIFIER} options carry \`${snippet(p)}\` (a spread or computed key) — not followed`)
+          }
+        }
+      })
+    }
+    // A list constant is referenced only as a consumer value or spread into another list.
     const fileListArrays = new Set<ts.Node>([...named.values(), ...inline].map((l) => l.array))
     for (const { decl, name } of fileLists) {
       const sym = checker.getSymbolAtLocation(name)
@@ -579,7 +740,8 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
     names = new Set(names)
   }
 
-  const listFiles = [...files.keys()].filter((f) => /FixedSentenceErrorClass|fixedSentenceClasses/.test(files.get(f) ?? ''))
+  // The files holding a discovered list, so the list arrays exist in this program too.
+  const listFiles = [...new Set([...discovery.listArrays].map((a) => relOf(a.getSourceFile())))]
   const program = buildProgram(files, [...new Set([...candidates, ...listFiles])])
   const checker = program.getTypeChecker()
   // Re-locate the list arrays in THIS program (phase 1 used its own) by position.
@@ -828,6 +990,14 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
     const checkListedClassBody = (node: ts.ClassDeclaration, name: string) => {
       const ctor = constructorOf(node)
       if (ctor) for (const call of superCallsIn(ctor)) checkArguments(call.arguments, name, `${name}'s own super(…)`, call, false)
+      // `arguments` reaches the message without a parameter name, around every per-parameter rule and exemption.
+      if (ctor) {
+        walk(ctor, (n) => {
+          if (!ts.isIdentifier(n) || n.text !== 'arguments' || inTypePosition(n)) return
+          if (ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) return
+          violations.push(`${at(n)} ${name}'s constructor reads \`arguments\` — constructor arguments must reach the message by parameter name`)
+        })
+      }
       for (const member of node.members) {
         const memberName = member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) ? member.name.text : undefined
         if (memberName && (MESSAGE_PROPERTIES.has(memberName) || memberName === 'toString')) {
@@ -944,8 +1114,10 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
     if (found.length !== 1) failures.push(`${name}: expected exactly one class declaration, found ${found.length} (${found.join(', ') || 'none'})`)
   }
 
-  // Exemptions still hold against the constructor: the exempt parameter appears only as `Object.assign(this, { cause })`
-  // or in a comparison with `undefined`.
+  // Exemptions still hold against the WHOLE constructor (parameter list included — another parameter's default
+  // `text = String(cause)` reaches the message as surely as the body does): the exempt parameter appears only as
+  // `Object.assign(this, { cause })` or in a comparison with `undefined`. (`arguments` in a listed class's
+  // constructor is red on its own — see checkListedClassBody.)
   for (const [cls, exemption] of Object.entries(options.argumentsOutsideMessage)) {
     if (!listed.includes(cls)) {
       exemptionFailures.push(`${cls}: exempted but no longer on any list — remove the stale exemption`)
@@ -959,8 +1131,9 @@ function scanFixedSentenceConstructors(files: SourceMap, options: ScanOptions): 
       continue
     }
     const sym = checker.getSymbolAtLocation(param.name)
-    walk(ctor.body as ts.Block, (n) => {
-      if (!ts.isIdentifier(n)) return
+    const paramName = param.name
+    walk(ctor, (n) => {
+      if (!ts.isIdentifier(n) || n === paramName) return
       const isShorthand = ts.isShorthandPropertyAssignment(n.parent) && n.parent.name === n
       const refSym = isShorthand ? checker.getShorthandAssignmentValueSymbol(n.parent as ts.ShorthandPropertyAssignment) : checker.getSymbolAtLocation(n)
       if (refSym !== sym) return
@@ -1056,6 +1229,12 @@ describe('R-41 fixed-sentence allow-lists: every construction of a listed class 
     expect(actual).toEqual(Object.fromEntries(Object.entries(ALLOWED_MESSAGE_REWRITES).map(([k, v]) => [k, v.count])))
   }, 60_000)
 
+  it('every this.message / this.stack write outside the listed classes is a pinned, reasoned site (rule d; none today)', () => {
+    const listed = new Set(real().classes)
+    const outside = [...censusThisMessageRewrites(tree())].filter(([, v]) => !listed.has(v.cls)).map(([k, v]) => [k, v.count])
+    expect(Object.fromEntries(outside)).toEqual(Object.fromEntries(Object.entries(ALLOWED_THIS_MESSAGE_REWRITES).map(([k, v]) => [k, v.count])))
+  }, 60_000)
+
   it('no subclass of a listed class exists outside ALLOWED_SUBCLASSES, and no allowance is stale', () => {
     const scan = real()
     expect(scan.subclasses.filter((s) => !(s.key in ALLOWED_SUBCLASSES)).map((s) => `${s.where} ${s.key} extends ${s.parent}`)).toEqual([])
@@ -1075,8 +1254,8 @@ describe('R-41 fixed-sentence allow-lists: every construction of a listed class 
     }
   }, 60_000)
 
-  it('non-vacuity: the construction count of every listed class is pinned (a newly listed class shows up here with its count)', () => {
-    expect(countsByClass(real())).toEqual(EXPECTED_CONSTRUCTION_COUNTS)
+  it('non-vacuity: every listed class keeps at least its pinned construction count, and the listed classes are exactly the pinned set', () => {
+    expect(constructionPinProblems(countsByClass(real()), EXPECTED_CONSTRUCTION_COUNTS)).toEqual([])
     expect(real().constructions.filter((c) => c.kind === 'new').length).toBeGreaterThanOrEqual(80)
   }, 60_000)
 })
@@ -1301,15 +1480,19 @@ import type { FixedSentenceErrorClass } from './failure-text'
 const LOCAL: readonly FixedSentenceErrorClass[] = [BarError]
 const WIDER: readonly FixedSentenceErrorClass[] = [...LOCAL]
 function show(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return classify(e, { fallback: 'x', fixedSentenceClasses: classes }) }
+function forward(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return show(e, classes) }
 export const t = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: [BarError] })
 export const u = (e: unknown) => classify(e, { fallback: 'x', fixedSentenceClasses: WIDER })
 export const v = (e: unknown) => show(e, [BarError])
+export const w = (e: unknown) => forward(e, [BarError])
 `,
     })
     expect(spread.failures).toEqual([])
     expect(spread.lists.get(`${S}/x/more.ts WIDER`)).toEqual(['BarError'])
     expect(spread.lists.get(`${S}/x/more.ts inline#1`)).toEqual(['BarError'])
     expect(spread.lists.get(`${S}/x/more.ts inline#2`)).toEqual(['BarError'])
+    // A list parameter forwarded as the list argument of another same-file pass-through stays followed.
+    expect(spread.lists.get(`${S}/x/more.ts inline#3`)).toEqual(['BarError'])
     expect(spread.classes).toContain('BarError')
 
     const frozen = synthetic('', {
@@ -1410,5 +1593,95 @@ function show(e: unknown, classes: readonly FixedSentenceErrorClass[]) { return 
   it('(d) the census ignores `this` targets and plain reads, and scans plugin CommonJS too', () => {
     expect(censusMessageRewrites(new Map([[`${S}/x/user.ts`, `class A extends Error { constructor() { super('x'); this.message = 'y'; Object.assign(this, { stack: '' }) } }\nexport const r = (e: Error) => e.message\n`]]))).toEqual({})
     expect(censusMessageRewrites(new Map([['plugins/p/lib/x.cjs', `module.exports = (e) => { e.message = 'x' }\n`]]))).toEqual({ 'plugins/p/lib/x.cjs :: e.message =': 1 })
+  })
+})
+
+describe('self-tests: round-3 holes (each was green against the guard at 5ada6dc8d)', () => {
+  it('B1: an exempt parameter used in ANOTHER parameter\'s default value breaks the exemption', () => {
+    const scan = synthetic(CLEAN_USER, {
+      [`${S}/x/errors.ts`]: ERRORS.replace("constructor(cause: unknown) {\n    super('A fixed sentence.')", 'constructor(cause: unknown, text: string = String(cause)) {\n    super(text)'),
+    })
+    expect(scan.exemptionFailures.some((f) => f.includes('CauseOnlyError: exempt parameter `cause`')), scan.exemptionFailures.join('\n')).toBe(true)
+  })
+
+  it('B1: `arguments` in a listed class\'s constructor is red (exempt class or not)', () => {
+    const scan = synthetic(CLEAN_USER, {
+      [`${S}/x/errors.ts`]: ERRORS
+        .replace('super(message)', 'super(String(arguments[0]))')
+        .replace("super('A fixed sentence.')", 'super(String(arguments[0]))'),
+    })
+    expect(scan.violations.some((v) => v.includes("FooError's constructor reads `arguments`")), scan.violations.join('\n')).toBe(true)
+    expect(scan.violations.some((v) => v.includes("CauseOnlyError's constructor reads `arguments`"))).toBe(true)
+  })
+
+  const PASS_THROUGH_MISUSE: Array<[string, string]> = [
+    ['reassigned', 'classes = [...classes, BarError]'],
+    ['pushed into', '(classes as unknown[]).push(BarError)'],
+    ['aliased, then the alias pushed into', 'const alias = classes\n  ;(alias as unknown[]).push(BarError)'],
+  ]
+  it.each(PASS_THROUGH_MISUSE)('B2: a pass-through whose list parameter is %s fails closed', (_label, misuse) => {
+    const scan = synthetic('', {
+      [`${S}/x/more.ts`]: `import { BarError, FooError } from './errors'
+import type { FixedSentenceErrorClass } from './failure-text'
+function show(e: unknown, classes: readonly FixedSentenceErrorClass[]) {
+  ${misuse}
+  return classify(e, { fallback: 'x', fixedSentenceClasses: classes })
+}
+export const t = (e: unknown) => show(e, [FooError])
+`,
+    })
+    expect(scan.failures.some((f) => f.includes("show's list parameter classes is used other than as a consumer value")), scan.failures.join('\n')).toBe(true)
+  })
+
+  const CONCATENATED_KEYS: Array<[string, string]> = [
+    ['a + concatenation', "['fixed' + 'SentenceClasses']"],
+    ['a static template', "[`fixed${'Sentence'}Classes`]"],
+  ]
+  it.each(CONCATENATED_KEYS)('B3: a fixedSentenceClasses key built by %s, in a file that spells neither word, fails closed', (_label, key) => {
+    const scan = synthetic('', {
+      [`${S}/x/concat.ts`]: `import { classifyDirectoryFailureText } from './failure-text'
+import { BarError } from './errors'
+export const t = (e: unknown) => classifyDirectoryFailureText(e, { fallback: 'x', ${key}: [BarError] })
+`,
+    })
+    expect(scan.failures.some((f) => f.includes("'fixedSentenceClasses' spelled as a string")), scan.failures.join('\n')).toBe(true)
+  })
+
+  it('B3: a message key built by concatenation is a rewrite (census) and a read (rule a), even where neither word is spelled', () => {
+    expect(censusMessageRewrites(new Map([[`${S}/x/user.ts`, "export function f(e: Error, t: string) { e['st' + 'ack'] = t }\n"]])))
+      .toEqual({ [`${S}/x/user.ts :: e.stack =`]: 1 })
+    const scan = synthetic("import { FooError } from './errors'\nexport const f = (err: Error) => new FooError(err['mess' + 'age'])\n")
+    expect(scan.violations.some((v) => v.includes("(a) reads ['message']")), scan.violations.join('\n')).toBe(true)
+  })
+
+  const SINK_MISUSE: Array<[string, string, string]> = [
+    ['options held in a variable', "const opts = { fallback: 'x' }\nexport const t = (e: unknown) => classifyDirectoryFailureText(e, opts)", 'options are `opts`, not an inline object'],
+    ['options with a spread', "const base = { fallback: 'x' }\nexport const t = (e: unknown) => classifyDirectoryFailureText(e, { ...base })", 'a spread or computed key'],
+    ['the classifier used as a value', 'export const c = classifyDirectoryFailureText', 'is used as a value'],
+    ['the classifier re-exported', 'export { classifyDirectoryFailureText as classify2 }', 'is re-exported'],
+  ]
+  it.each(SINK_MISUSE)('B3: the classifier sink fails closed on %s', (_label, body, expected) => {
+    const scan = synthetic('', { [`${S}/x/sink.ts`]: `import { classifyDirectoryFailureText } from './failure-text'\n${body}\n` })
+    expect(scan.failures.some((f) => f.includes(expected)), scan.failures.join('\n')).toBe(true)
+  })
+
+  it('B3: `export *` from the classifier module fails closed', () => {
+    const scan = synthetic('', { [`${S}/x/barrel.ts`]: "export * from '../directory/directory-failure-text'\n" })
+    expect(scan.failures.some((f) => f.includes('`export *` from the classifier module')), scan.failures.join('\n')).toBe(true)
+  })
+
+  it('B3: a this.message / this.stack write in a NON-listed class is counted by the census (pinned: none today)', () => {
+    const census = censusThisMessageRewrites(new Map([[`${S}/x/user.ts`, "export class Other extends Error {\n  constructor() { super('x'); this.message = 'y' }\n  later() { this['stack'] = '' }\n}\n"]]))
+    expect(Object.fromEntries([...census].map(([k, v]) => [k, v.count]))).toEqual({
+      [`${S}/x/user.ts :: this.message in Other`]: 1,
+      [`${S}/x/user.ts :: this.stack in Other`]: 1,
+    })
+  })
+
+  it('pin semantics: a construction count ABOVE its pin passes, below fails, and the class set is exact', () => {
+    expect(constructionPinProblems({ A: 42, B: 2 }, { A: 41, B: 2 })).toEqual([])
+    expect(constructionPinProblems({ A: 40, B: 2 }, { A: 41, B: 2 })).toHaveLength(1)
+    expect(constructionPinProblems({ A: 41, B: 2, C: 1 }, { A: 41, B: 2 })).toHaveLength(1)
+    expect(constructionPinProblems({ A: 41 }, { A: 41, B: 2 })).toHaveLength(1)
   })
 })
