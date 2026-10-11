@@ -6,6 +6,11 @@
  *
  * `USE_MOCK` is a module-load-time const, so each case sets (or deletes) the override, resets the
  * module registry and imports a FRESH copy of the client before calling it.
+ *
+ * vitest runs with `import.meta.env.DEV === true`, which only exercises the DEV half of the protocol.
+ * The production half (unset -> network; explicit `true` -> mock) is pinned by stubbing `DEV` to `false`
+ * with `vi.stubEnv` before the fresh import, so dropping the DEV gate (`o !== false`) or the forced-mock
+ * arm (`DEV && o !== false`) fails a case here.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -91,5 +96,34 @@ describe('delegations client honours the __APPROVAL_MOCK__ override like approva
     await delegations.disableDelegation('dlg-1')
 
     expect(networkCallCount()).toBe(0)
+  })
+
+  describe('production branch (DEV stubbed to false)', () => {
+    beforeEach(() => {
+      vi.stubEnv('DEV', false)
+    })
+
+    afterEach(() => {
+      vi.unstubAllEnvs()
+    })
+
+    it('no override takes the real network path outside DEV', async () => {
+      const delegations = await loadDelegationsWith(undefined)
+      expect(import.meta.env.DEV).toBe(false)
+
+      await delegations.listOwnDelegations()
+      expect(apiGetMock).toHaveBeenCalledWith('/api/approval-delegations/mine')
+    })
+
+    it('override === true still forces mock mode outside DEV (zero network calls)', async () => {
+      const delegations = await loadDelegationsWith(true)
+      expect(import.meta.env.DEV).toBe(false)
+
+      await delegations.listDelegations({ includeInactive: true })
+      await delegations.listOwnDelegations()
+      await delegations.disableDelegation('dlg-1')
+
+      expect(networkCallCount()).toBe(0)
+    })
   })
 })
