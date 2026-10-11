@@ -2237,3 +2237,9 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 新观察器只接纳限定阶段的精确同源 GET，无 query/body、使用同一会话与 tenant hint，无外来权限/workspace 头。响应必须关联原 Request 对象并携带精确 OFF 状态与错误码；console 必须对应已登记请求，最终三方计数一致，拒绝重复及无穷请求。不伪造响应，不普遍忽略 404，不改变产品权限或开关。接入 PLM 主浏览器和宜搭初始化浏览器；宜搭发送/本地预演等其它窗口不会因此扩大白名单。
 - 新独立副本完整 201/201 契约和 full-app no-emit 类型检查通过；8 个观察器守卫去除及 6 个实际 dispatch 提前返回去除均致红。dispatch 测试执行源文件真实注册回调，但网络协作者仍为受限替身，不冒称真实浏览器或独立反驳。TAP SHA `6f5241188bd81704e8518116e141d8bb9bf0361168b1e413e7b0698689e06413`，四个 Git LF blob 与受测字节逐项一致。
 - 提交 `af9f33d67cae0a5e96ec5f99908f611cf6249196` 先保存本地，随后核实 workflow concurrency 按 workflow/ref 分组、该 feature 分支 push 不触发 branch-ref 全链，才普通推送 #6337。推送后再次确认旧诊断 run `38163935288` 仍在 `a4e0591ed5eea387e08890057ed6c511d96de75a` 运行；未取消或另 dispatch 覆盖它。新 head 先跑普通 PR 检查，完整手动/定时验收仍待闭合，PR 保持 draft。没有合并、部署、真实客户读取、token 交换或发送。
+
+## 198. 完整 CI 确认成员预读根因并启动修复版验收（2026-10-12）
+
+- 诊断 run `38163935288` 于固定 head `a4e0591ed5eea387e08890057ed6c511d96de75a` 终态失败，未被取消。受限公开帧明确报告 GET / OTHER_STOCK_PREPARATION、TOPBAR / `UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS`。至此该项从代码推断变为真实运行确认：旧验收守卫确实漏掉成员预读。日志 7565 字节、SHA `cdeae8d47a3b6de73fd5b82381c99d9529c939628c786667650d03f58bc158ce`，仅内存解析固定枚举和哈希，不保存/打印原文，不读私有产物。
+- 修复候选 `af9f33d67cae0a5e96ec5f99908f611cf6249196` 的普通检查 47/47 成功。旧诊断结束后才启动[完整 run 38166500938](https://github.com/zensgit/metasheet2/actions/runs/38166500938)，已核 head 精确一致，等待 manual/interval 完整结果。不能用普通检查或已确认根因替代修复后实跑；#6337 仍 draft，独立终审与全目标未完成。
+- 当前 main 仍为 `906840c74cab5120aac73132644372e678f6b334`，无需因本轮等待重做基线。没有合并、部署、真实客户读取、真实 token 交换或发送。
