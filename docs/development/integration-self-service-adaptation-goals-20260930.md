@@ -2221,3 +2221,12 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 与候选实际public parser、typed parent/worker、私有交接文件所有权及停止路径逐项对照；实际`node scripts/ops/run-stock-preparation-yida-synthetic-trial.mjs --help` exit0，未加载实际host、未启动PG、未进行试用或网络请求。文档核验不冒称最终候选人工生命周期重新通过。
 - 只读Git名称核查：main906840c74有441个迁移文件，最终候选9a9ca90e0有470个，新增29个的编号/时间戳与同目录存量无新增重号，名称roster SHA `c73f318e2c193488402d8096ef3f8299c780a732eb3a46f5b814275fe02e3dd3`。仓库原有16组同前缀保留，未机械改名历史迁移；此检查不读取payload、不证明执行顺序或迁移实跑。
 - 完整CI原run仍保持运行，未因观察超时重启；本节只补交付缺件，不改代码head、不触发新完整CI。独立终审及全目标仍待闭合；没有合并、部署、客户读取、token交换或宜搭发送。
+
+## 196. 宜搭完整 CI 成功；Automation 完整应用失败保留并补诊断（2026-10-12）
+
+- 宜搭 #6315 精确 head `dcfb0903b52d1b583c4d742630bddb9e436357c9` 的完整 [run 38159199818](https://github.com/zensgit/metasheet2/actions/runs/38159199818) 已 completed/success；该 head 的检查为 61 success、1 skipped、0 pending/failure。owner JWT HTTP/browser 真实临时数据库步骤成功。本项依据 GitHub head/run/step 元数据，未另下载原始产物；不等于真实宜搭发送、交付部署或最终候选人工试用已完成。
+- Automation #6337 的 `9a9ca90e05c99eff2bb142d4c16fbbc3e534a05d` 完整 run `38160924399` 终态 failure：第 98 步契约成功，第 99 步第一轮 manual 的 configured-app 子进程 code 1、非超时。实际已过构建、全迁移、登录和 K3 页面流程，最后阶段 TOPBAR；没有 manual/interval 全链成功证据。日志仅内存分类，7120 字节、SHA `35ed535451662ed0681cd93ebf4858fbce81c4afcf03296d7d59e5aac80e3e2e`；停止并移除自建数据库已回报成功。没有下载其它产物或读取私有凭据文件。
+- 代码追踪发现新工作台 setup 会调用 `readMembersPosture()`，旧浏览器请求白名单未收录该 GET；这是待实跑确认的候选根因，不提前记作已修。现有外层 stage runner 只公开 browser-phase，故真实失败分类仍被保留在私有捕获中。新增 `publicBrowserFailure` 仅映射固定阶段、方法及错误枚举，未知字符串归 OTHER，禁止透传额外字段和原始错误；实际子进程契约证明接线，3 个内存去守卫变异证明泄漏断言会红。未改变业务、请求白名单、外部开关或成功判定。
+- 新独立 Linux 副本验证 198/198 契约，零跳过/失败；stdout SHA `2e7081fe719ce9fa385b110c0a65e3268f7b3d6a9d2fc982b800d3d4ac9fcff9`。首次本地副本 197/198（私有 loopback 未启用）、第二次启动器在测试前因权限退出，均保留；第三次启动器验证非 root、私有 loopback、caps0/NNP 后通过，不将启动器问题混记为产品修复。不声称文件系统隔离或独立审查。
+- 两个受测文件原始 LF 字节与提交精确一致：`a4e0591ed5eea387e08890057ed6c511d96de75a` 已正常推送 #6337，仍 draft。新完整 [run 38163935288](https://github.com/zensgit/metasheet2/actions/runs/38163935288) 锁定此 head，仅为带受限诊断的新版本验收；旧失败保留，不能据本地契约绿宣告完整应用修复。没有取消慢任务、合并、部署、客户读取、真实 token 交换或发送。
+- 文档 PR #6313 的原 head `b672e5c3d9990084df739d2518094a47e61dbd70` 另有已分类测试失败：`useSessionOrg.spec.ts` 在异步操作前后各生成一次带当前秒数的假 JWT，唯一差异为到期秒数相差 1；该测试 Git blob 与 main 相同。本轮不混入认证代码或测试修复，不重跑凑绿；另开 test-only PR 的授权尚待答复。
