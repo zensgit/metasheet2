@@ -19,7 +19,7 @@ import { afterAll, describe, expect, test } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { enqueueOutboxEvent, type TransactionalQueryable } from '../../src/multitable/automation-outbox-enqueue'
 import { ConsumerAdapterRegistry, runDispatchTick, type AdapterOutcome } from '../../src/multitable/automation-durable-dispatch-loop'
-import { APPROVAL_COMPLETION_CONSUMERS_V3, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
+import { APPROVAL_COMPLETION_CONSUMERS_V3, ROUTING_MANIFEST_V3, type RoutingManifest } from '../../src/multitable/automation-routing-manifest'
 import type { PoolClient } from 'pg'
 
 const describeIfDatabase = process.env.DATABASE_URL ? describe : describe.skip
@@ -66,15 +66,15 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
       outboxId = res.outboxId
       enqueued.push(outboxId)
       await client.query('COMMIT')
-      // CURRENT manifest = v3 (v2's four completion consumers + dingtalk-todo-mirror). Pinned
+      // CURRENT manifest = v4 (read preview added; v3's five approval consumers retained). Pinned
       // explicitly, not via CURRENT_ROUTING_MANIFEST, so a silent manifest downgrade reds here.
       expect(res.consumerKeys).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3])
-      expect(res.manifestVersion).toBe(3)
+      expect(res.manifestVersion).toBe(4)
     } finally {
       client.release()
     }
     const { outbox, consumers } = await rowsFor(outboxId)
-    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 3, automation_depth: 2 })
+    expect(outbox[0]).toMatchObject({ event_type: 'approval.approved', event_id: `evt_${RUN}_commit`, manifest_version: 4, automation_depth: 2 })
     expect(consumers.map((c) => c.consumer_key).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3].sort())
     expect(consumers.every((c) => c.status === 'pending')).toBe(true)
   })
@@ -148,9 +148,32 @@ describeIfDatabase('P2 durable-delivery S4-a — producer atomic enqueue (real D
   test('an unrouted event type is a HARD error and aborts the enclosing work (no half-enqueue)', async () => {
     await expect(
       enqueueOutboxEvent(txnStub(), { eventType: 'not.a.real.family', eventId: `evt_${RUN}_x`, payload: {} }),
-    // Pinned to the CURRENT manifest version (v3 since the dingtalk-todo-mirror consumer landed) —
+    // Pinned to the CURRENT manifest version (v4 since controlled read preview landed) —
     // explicit, not loosened to /v\d/, so a future bump is a deliberate edit here too.
-    ).rejects.toThrow(/not routed by manifest v3/)
+    ).rejects.toThrow(/not routed by manifest v4/)
+  })
+
+  test('explicit legacy v3 retains its version and exact approval fan-out', async () => {
+    const client = await db().getInternalPool().connect()
+    let outboxId = ''
+    try {
+      await client.query('BEGIN')
+      const res = await enqueueOutboxEvent(txn(client), {
+        eventType: 'approval.approved', eventId: `evt_${RUN}_legacy_v3`, payload: {},
+      }, ROUTING_MANIFEST_V3)
+      outboxId = res.outboxId
+      enqueued.push(outboxId)
+      expect(res.manifestVersion).toBe(3)
+      expect(res.consumerKeys).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3])
+      await client.query('COMMIT')
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+    const { outbox, consumers } = await rowsFor(outboxId)
+    expect(outbox[0]).toMatchObject({ manifest_version: 3, event_id: `evt_${RUN}_legacy_v3` })
+    expect(consumers.map(c => c.consumer_key).sort()).toEqual([...APPROVAL_COMPLETION_CONSUMERS_V3].sort())
+    expect(consumers.every(c => c.status === 'pending')).toBe(true)
   })
 
   test('identity/depth validation is a boundary error: blank eventId and bad depth throw before any SQL', async () => {

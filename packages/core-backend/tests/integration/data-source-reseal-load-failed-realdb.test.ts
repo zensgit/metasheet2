@@ -6,7 +6,7 @@
  * real server:
  *   - the re-seal runs `SELECT … WHERE id AND is_active AND deleted_at IS NULL FOR UPDATE` and a
  *     guarded `UPDATE … SET config, updated_at WHERE id AND is_active AND deleted_at IS NULL`, inside
- *     ONE transaction, and changes no other column;
+ *     ONE transaction; only the DB trigger also rotates validation_revision, retaining the incarnation;
  *   - it really WAITS on a row lock held by another session, and a change that session commits
  *     meanwhile (soft delete, owner change, a first re-seal) is what it then sees;
  *   - a second re-seal of the same id: refused in-process while one is running; serialized across
@@ -26,6 +26,7 @@
  *
  * Values-free: every secret below is a synthetic marker; hosts are reserved `.test` names.
  */
+import { readFileSync } from 'node:fs'
 import express from 'express'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
@@ -59,6 +60,7 @@ import {
 import { up as createDataSourcesTable } from '../../src/db/migrations/20251206000001_create_data_sources_table'
 import { up as addConnectionBinding } from '../../src/db/migrations/zzzz20260902120000_add_integration_connection_binding'
 import { up as addLiveIdBindingLock } from '../../src/db/migrations/zzzz20260920120000_data_source_live_id_binding_lock'
+import { up as addValidationSourceRevisions } from '../../src/db/migrations/zzzz20261001120001_stock_prep_validation_source_revisions'
 import { up as createDingTalkGroupDestinations } from '../../src/db/migrations/zzzz20260419183000_create_dingtalk_group_destinations'
 import { dataSourcesRouter, getDataSourceManager, initializeDataSourceManager } from '../../src/routes/data-sources'
 import { decryptStoredSecretValue, encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
@@ -131,7 +133,7 @@ const PROCESS_B = `reseal-realdb-b-${process.pid}`
 const GUARDED_SELECT_FOR_UPDATE =
   /^select \* from "data_sources" where "id" = \$1 and "is_active" = \$2 and "deleted_at" is null for update$/i
 const GUARDED_UPDATE =
-  /^update "data_sources" set "config" = \$1, "updated_at" = \$2 where "id" = \$3 and "is_active" = \$4 and "deleted_at" is null$/i
+  /^update "data_sources" set "config" = \$1, "updated_at" = \$2 where "id" = \$3 and "is_active" = \$4 and "deleted_at" is null returning "validation_revision"$/i
 
 describeIfDatabase.sequential('data-source re-seal of a load-failed row — real PostgreSQL', () => {
   let admin: Pool
@@ -244,8 +246,11 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
       },
     })
     await createDataSourcesTable(db)
+    // The revision trigger depends on the real Binding schema, not a test-made subset.
+    await pool.query(readFileSync(new URL('../../migrations/057_create_integration_core_tables.sql', import.meta.url), 'utf8'))
     await addConnectionBinding(db)
     await addLiveIdBindingLock(db)
+    await addValidationSourceRevisions(db)
   })
 
   afterAll(async () => {
@@ -261,7 +266,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
     else process.env.ENCRYPTION_SALT = savedMaterial.salt
   })
 
-  it('owner re-seal: FOR UPDATE + guarded UPDATE of config/updated_at in ONE transaction; every other column unchanged; the source goes live', async () => {
+  it('owner re-seal: guarded transaction rotates the DB validation revision, retains incarnation and scope; the source goes live', async () => {
     await insertRow('rdb-ok')
     const manager = await freshManager()
     expect(manager.listLoadFailedDataSources({ actor: OWNER }).map((f) => [f.id, f.loadState]))
@@ -280,10 +285,15 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
 
     const after = (await pool.query(`SELECT * FROM data_sources WHERE id = 'rdb-ok'`)).rows[0]
     for (const column of Object.keys(before)) {
-      if (column === 'config' || column === 'updated_at') continue
+      if (column === 'config' || column === 'updated_at' || column === 'validation_revision') continue
       expect(after[column], `column ${column} must be untouched`).toEqual(before[column])
     }
     expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime())
+    expect(after.validation_revision).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
+    expect(after.validation_revision).not.toBe(before.validation_revision)
+    expect(manager.getLoadedValidationRevision('rdb-ok', manager.getDataSource('rdb-ok'))).toBe(after.validation_revision)
+    const mirror = (await pool.query('SELECT validation_revision, connection_incarnation FROM integration_data_source_validation_revisions WHERE data_source_id = $1', ['rdb-ok'])).rows[0]
+    expect(mirror).toEqual({ validation_revision: after.validation_revision, connection_incarnation: before.connection_incarnation })
     const { credentials: _beforeCredentials, ...beforeRest } = before.config
     const { credentials, ...afterRest } = after.config
     expect(afterRest).toEqual(beforeRest)
@@ -309,6 +319,7 @@ describeIfDatabase.sequential('data-source re-seal of a load-failed row — real
     // A restart loads it normally with the re-sealed credential.
     const restarted = await freshManager()
     expect(restarted.getDataSource('rdb-ok').getConfig().credentials?.password).toBe(SECRET.newPassword)
+    expect(restarted.getLoadedValidationRevision('rdb-ok')).toBe(after.validation_revision)
   })
 
   it('CREDENTIALS_REQUIRED names the missing key only, rolls back, and the row is byte-identical', async () => {
