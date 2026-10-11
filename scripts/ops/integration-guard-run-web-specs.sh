@@ -119,6 +119,11 @@
 # any other token here (`StockPreparationStageOverview` diverges right after `StockPreparation`;
 # `StockPreparationProjectBoard` / `StockPreparationProjectQuery` right after `StockPreparationProject`).
 #
+# 备料 values-free 500 note (integration-layer audit, 2026-10-10): ONE token added,
+# `StockPreparationRouteFailedPlain` — the fixed STOCK_PREPARATION_ROUTE_FAILED 500's plain-language entry and
+# the admin workbench's message mapping, in the same position the required lane gives it. 过滤词唯一: it is a
+# substring of exactly one spec path, and it neither contains nor is contained by any other token here.
+#
 # 备料「成员与权限」S5b note (ADR §11.4–11.6, register R-39, 2026-10-10): ONE token added,
 # `StockPreparationMembers` — S5b's new spec (the members client, the members page, the switch-gated rail
 # item, SMW-ALIGN), in the same position the required lane gives it. 过滤词唯一: it is a substring of exactly
@@ -211,6 +216,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationProjectSyncPanel.spec.ts \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
+  StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
   StockPreparationSourceBinding \

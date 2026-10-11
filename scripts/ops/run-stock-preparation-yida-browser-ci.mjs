@@ -100,11 +100,14 @@ function observeStderr(raw) {
   if (lines.at(-1) === '') lines.pop()
   const toolPrefix = text.startsWith('unshare: ') ? 'UNSHARE'
     : text.startsWith('setpriv: ') ? 'SETPRIV' : text.startsWith('ip: ') ? 'IP' : 'UNKNOWN'
+  const unsharePermissionObservation = text === 'unshare: unshare failed: Operation not permitted\n' ? 'CREATE_DENIED'
+    : text === 'unshare: write failed /proc/self/uid_map: Operation not permitted\n' ? 'UID_MAP_WRITE_DENIED'
+      : text === 'unshare: write failed /proc/self/gid_map: Operation not permitted\n' ? 'GID_MAP_WRITE_DENIED' : 'NONE'
   return Object.freeze({ byteCount: raw.length, lineCount: lines.length,
     pythonTracebackHeader: text.startsWith('Traceback (most recent call last):\n'),
     terminalAssertionError: /(?:^|\n)AssertionError\n?(?![\s\S])/u.test(text),
     unshareExecutableMissing: text === 'unshare: failed to execute /usr/bin/python3: No such file or directory\n',
-    toolPrefix })
+    toolPrefix, unsharePermissionObservation })
 }
 
 export function parseWorkerFailureReceipt(raw, expectedSha, ownerSha, sourceSha) {

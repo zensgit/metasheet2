@@ -117,6 +117,8 @@ export const STOCK_PREP_PROJECT_TARGET_ERROR_CODES: readonly string[] = Object.f
   // S3 follow-up C (R-37): the refresh wrote what it could but some projects failed; they stay marked for the
   // next update and the overview is NOT current.
   'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE',
+  // 2026-10-10 audit: the project-target routes' (list / get / create / archive / restore) one values-free 500.
+  'STOCK_PREPARATION_ROUTE_FAILED',
 ])
 
 /**

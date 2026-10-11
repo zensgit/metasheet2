@@ -69,28 +69,6 @@ const dingtalkOauthMocks = vi.hoisted(() => ({
   },
 }))
 
-const dingtalkClientMocks = vi.hoisted(() => ({
-  DingTalkBusinessError: class DingTalkBusinessError extends Error {
-    errcode: number
-    constructor(message: string, errcode = 40078) {
-      super(message)
-      this.name = 'DingTalkBusinessError'
-      this.errcode = errcode
-    }
-  },
-  DingTalkRequestError: class DingTalkRequestError extends Error {
-    statusCode: number
-    responseBody: Record<string, unknown> | null
-
-    constructor(message: string, statusCode = 502, responseBody: Record<string, unknown> | null = null) {
-      super(message)
-      this.name = 'DingTalkRequestError'
-      this.statusCode = statusCode
-      this.responseBody = responseBody
-    }
-  },
-}))
-
 const rbacMocks = vi.hoisted(() => ({
   listUserPermissions: vi.fn(),
   isAdmin: vi.fn(),
@@ -149,11 +127,19 @@ vi.mock('../../src/rbac/service', () => ({
   isAdmin: rbacMocks.isAdmin,
 }))
 
-vi.mock('../../src/integrations/dingtalk/client', () => ({
-  DingTalkBusinessError: dingtalkClientMocks.DingTalkBusinessError,
-  DingTalkRequestError: dingtalkClientMocks.DingTalkRequestError,
-}))
+// The REAL transport error classes: auth.ts classifies them with instanceof (R-41), so a hand-rolled
+// look-alike class would silently take the fallback arm and prove nothing.
+vi.mock('../../src/integrations/dingtalk/client', async () => {
+  const transport = await vi.importActual<typeof import('../../src/integrations/dingtalk/transport')>(
+    '../../src/integrations/dingtalk/transport',
+  )
+  return {
+    DingTalkBusinessError: transport.DingTalkBusinessError,
+    DingTalkRequestError: transport.DingTalkRequestError,
+  }
+})
 
+import { DingTalkBusinessError, DingTalkRequestError } from '../../src/integrations/dingtalk/transport'
 import { authRouter } from '../../src/routes/auth'
 import express from 'express'
 import request from 'supertest'
@@ -1937,7 +1923,7 @@ describe('auth login routes', () => {
     })
     dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
     dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
-      new dingtalkClientMocks.DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
+      new DingTalkRequestError('Failed to obtain access token from DingTalk', 401, {
         error: 'invalid_client',
       }),
     )
@@ -1950,7 +1936,33 @@ describe('auth login routes', () => {
     })
 
     expect(response.statusCode).toBe(502)
-    expect((response.body as Record<string, any>).error).toBe('Failed to obtain access token from DingTalk')
+    expect((response.body as Record<string, any>).error).toBe(
+      'DingTalk authentication failed: DingTalk answered with an error status (HTTP 401)',
+    )
+  })
+
+  it('R-41: the callback 502 body never carries provider text (message or response body), only the HTTP status', async () => {
+    dingtalkOauthMocks.validateState.mockResolvedValue({ valid: true, redirectPath: '/attendance' })
+    dingtalkOauthMocks.isDingTalkConfigured.mockReturnValue(true)
+    dingtalkOauthMocks.exchangeCodeForUser.mockRejectedValue(
+      new DingTalkRequestError('MARKER_MSG connect ETIMEDOUT 203.0.113.9:443', 503, {
+        errmsg: 'MARKER_BODY from 192.0.2.7',
+      }),
+    )
+
+    const response = await invokeRoute('post', '/dingtalk/callback', {
+      body: { code: 'auth-code', state: 'state-1' },
+    })
+
+    expect(response.statusCode).toBe(502)
+    const serialized = JSON.stringify(response.body)
+    expect(serialized).not.toContain('MARKER_')
+    expect(serialized).not.toContain('203.0.113.9')
+    expect(serialized).not.toContain('192.0.2.7')
+    expect(serialized).not.toContain('ETIMEDOUT')
+    expect((response.body as Record<string, any>).error).toBe(
+      'DingTalk authentication failed: DingTalk answered with an error status (HTTP 503)',
+    )
   })
 
   it('maps unexpected local callback failures to 500', async () => {
@@ -2048,6 +2060,28 @@ describe('auth login routes', () => {
       })
     })
 
+    it('R-41: a DingTalkRequestError maps to 502 with a fixed sentence and the HTTP status, never provider text', async () => {
+      vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
+      dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
+        new DingTalkRequestError('MARKER_MSG getaddrinfo 203.0.113.9', 502, {
+          errmsg: 'MARKER_BODY 192.0.2.7',
+        }),
+      )
+
+      const response = await invokeRoute('post', '/login/dingtalk/container', {
+        body: { authCode: 'auth-code-11' },
+      })
+
+      expect(response.statusCode).toBe(502)
+      const serialized = JSON.stringify(response.body)
+      expect(serialized).not.toContain('MARKER_')
+      expect(serialized).not.toContain('203.0.113.9')
+      expect(serialized).not.toContain('192.0.2.7')
+      expect((response.body as Record<string, any>).error).toBe(
+        'DingTalk authentication failed: DingTalk answered with an error status (HTTP 502)',
+      )
+    })
+
     it('passes policy errors through with status + code', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
@@ -2100,7 +2134,7 @@ describe('auth login routes', () => {
     it('maps a DingTalk business rejection (invalid authCode) to 401 invalid_auth_code', async () => {
       vi.stubEnv('DINGTALK_CONTAINER_LOGIN_ENABLED', 'true')
       dingtalkOauthMocks.exchangeEnterpriseAuthCodeForUser.mockRejectedValue(
-        new dingtalkClientMocks.DingTalkBusinessError('invalid code', 40078),
+        new DingTalkBusinessError('invalid code', { errcode: 40078 }),
       )
       const response = await invokeRoute('post', '/login/dingtalk/container', {
         headers: { 'x-forwarded-for': '10.9.9.10' },
