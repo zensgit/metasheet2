@@ -688,11 +688,6 @@ function onReadSourceAccessStorage(event: StorageEvent) {
   }
 }
 const unsubscribeReadSourceSession = onAuthSessionSwitch(refreshReadSourceAdminHint)
-onMounted(() => {
-  refreshReadSourceAdminHint()
-  window.addEventListener('storage', onReadSourceAccessStorage)
-  window.addEventListener('focus', refreshReadSourceAdminHint)
-})
 onBeforeUnmount(() => {
   unsubscribeReadSourceSession()
   window.removeEventListener('storage', onReadSourceAccessStorage)
@@ -790,6 +785,9 @@ function openConnectionFromOverview(systemId: string): void {
 }
 
 onMounted(() => {
+  refreshReadSourceAdminHint()
+  window.addEventListener('storage', onReadSourceAccessStorage)
+  window.addEventListener('focus', refreshReadSourceAdminHint)
   // After nextTick so the target section element exists in the DOM to scroll to. Ordered
   // BEFORE the observer setup below only for readability — the observer's own callback can
   // still overwrite the highlight later, which is correct: once the operator scrolls, scroll
