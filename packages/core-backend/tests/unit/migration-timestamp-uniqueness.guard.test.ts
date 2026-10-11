@@ -134,6 +134,12 @@ export const ALLOWLIST: MigrationPrefixAllowlist = {
     'zzzz20260826120000_create_meta_recovery_archive_catalog.ts',
     'zzzz20260826120000_harden_elearning_v01_ledger.ts',
   ],
+  // Main #6205 approval drafts and this integration's existing TM abandoned bindings
+  // own independent tables/functions. Preserve both historical files and their lexical order.
+  zzzz20261001120000: [
+    'zzzz20261001120000_add_archive_abandoned_object_bindings.ts',
+    'zzzz20261001120000_create_approval_form_drafts.ts',
+  ],
 }
 
 /** Prefixes that two independently-authored, already-approved PRs raced on, where this guard must
@@ -347,6 +353,28 @@ describe('migration timestamp prefix uniqueness guard (#5912)', () => {
         expect(extractMigrationPrefix(file)).toBe(prefix)
       }
     }
+  })
+})
+
+describe('integrated approval drafts / TM abandoned bindings exact pair', () => {
+  const prefix = 'zzzz20261001120000'
+  const pair = [
+    'zzzz20261001120000_add_archive_abandoned_object_bindings.ts',
+    'zzzz20261001120000_create_approval_form_drafts.ts',
+  ]
+  it('pins exactly the historical pair in lexical order', () => {
+    expect(ALLOWLIST[prefix]).toEqual(pair)
+    expect(validateMigrationPrefixAllowlist(pair, { [prefix]: ALLOWLIST[prefix] })).toEqual([])
+  })
+  it.each([
+    { files: [...pair, 'zzzz20261001120000_third.ts'], registered: true, code: 'MISMATCH' },
+    { files: [pair[0]], registered: true, code: 'ORPHAN' },
+    { files: [pair[1]], registered: true, code: 'ORPHAN' },
+    { files: pair, registered: false, code: 'UNALLOWLISTED' },
+  ])('refuses $code when the exact pair is changed or omitted', ({ files, registered, code }) => {
+    const violations = validateMigrationPrefixAllowlist(files, registered ? { [prefix]: ALLOWLIST[prefix] } : {})
+    expect(violations).toHaveLength(1)
+    expect(violations[0]).toContain(code)
   })
 })
 

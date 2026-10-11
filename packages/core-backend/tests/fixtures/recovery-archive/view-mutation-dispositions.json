@@ -1,0 +1,200 @@
+[
+  {
+    "key": "db/migrations/zzzz20260321124000_add_meta_view_config.ts#up#mutation#KYSELY updateTable#0c62a8fbb93f771b7d507501ea55c222071c0feb147ddc7aa90e255f057840a9",
+    "count": 1,
+    "disposition": "migration",
+    "reason": "Kysely updateTable meta_views backfills newly added config in historical migration up; offline/schema migration disposition, not live writer admission."
+  },
+  {
+    "key": "index.ts#ensureObjectDefaultView#caller#multitable/provisioning.ts#ensureObjectDefaultView#53d8b2bf288a186c4c2f64197182d25be27d1a57440b0d9481cee1debff68b61",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Host ensureObjectDefaultView wraps the provisioning helper in a transaction with txQuery; createView performs admission on that query."
+  },
+  {
+    "key": "index.ts#ensureView#caller#multitable/provisioning.ts#ensureView#797de04e3b13585b9f463dbb75425a8447369ff2268d2d31c0e9b592b7f48ef0",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Host ensureView wraps imported ensureMultitableView in a transaction with txQuery; ensureView performs admission."
+  },
+  {
+    "key": "multitable/config-restore.ts#applyConfigRevert#mutation#UPDATE#672edd874b92fff2b77617d642d41ef6edcb47cbb0d96eb0cea4f95dd09370e3",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Finite view arm of applyConfigRevert; no fence in this helper. Both exact generic-config and derived-revert caller sites are separately inventoried in univer-meta."
+  },
+  {
+    "key": "multitable/copy-sheet-service.ts#copyInsideTransaction#mutation#INSERT INTO#ee3a4c1e75b52c1a31aceb4e2f9fc9bc7aafe9f6440f613f64fae8e5e19e20ed",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "copyInsideTransaction inserts views for the newly inserted destination sheet after source/participating-sheet fencing and source recheck; not an existing-sheet writer-block exemption."
+  },
+  {
+    "key": "multitable/copy-sheet-service.ts#executeCopySheet#caller#callback:multitable/copy-sheet-service.ts#install#75d12b7399c234c8277656a85169524ffd2700477cc5542679e964b810fb1bd5",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact dedupe install callback handoff inside executeCopySheet transaction; syntactic callback identity is not a general callback verifier."
+  },
+  {
+    "key": "multitable/copy-sheet-service.ts#install#caller#multitable/copy-sheet-service.ts#copyInsideTransaction#c8770fbc775323b3880d03b50dd7921af39c0f324a3a041073e7d83e0327b33f",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact install callback invokes copyInsideTransaction on the transaction query; callback handoff and public execute caller are separate sites."
+  },
+  {
+    "key": "multitable/plugin-scope.ts#ensureObjectDefaultView#caller#multitable/provisioning.ts#ensureObjectDefaultView#ac397143cac7a7123978aac22f18f285e79680e15e305e9c39e75ef38fc8fb19",
+    "count": 1,
+    "disposition": "ambiguous",
+    "reason": "Property-call candidate forwards the captured projectId/objectId with copied remaining values after namespace, overview-structure and object-scope checks. Same-name receiver identity is syntactic; host implementation is separately inventoried, not inferred as runtime proof."
+  },
+  {
+    "key": "multitable/plugin-scope.ts#ensureView#caller#multitable/provisioning.ts#ensureView#1b3d1f5be0b67f85109bcb5ddbd746bbccbac0a5e5ecabbe755bfdf592caa526",
+    "count": 1,
+    "disposition": "ambiguous",
+    "reason": "Property-call candidate forwards captured projectId/sheetId/descriptor after namespace, overview-marker, sheet-scope and unmarked-overview checks; systemKind is not forwarded. Receiver identity is not type-proven; host implementation is separately inventoried."
+  },
+  {
+    "key": "multitable/provisioning.ts#createView#mutation#INSERT INTO#4db6b3ec3224c4edc4ae5f09442055f034f5d40587c5d272326e89da19328cbf",
+    "count": 1,
+    "disposition": "direct-admission",
+    "reason": "createView calls fenceWriterEntry(input.query,input.sheetId) before this INSERT; default-view/template caller sites are separately listed."
+  },
+  {
+    "key": "multitable/provisioning.ts#ensureObjectDefaultView#caller#multitable/provisioning.ts#createView#1fb482d4f945dcd6a42523ae92ab3fe7e6fa9ddafcf21a082bcb931008d03646",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "ensureObjectDefaultView passes its supplied query and resolved sheet id to createView, whose entry performs writer-block admission."
+  },
+  {
+    "key": "multitable/provisioning.ts#ensureView#mutation#INSERT INTO#6112f74699bfda94bc1254d483ef359f941f858d91d08faef26a7562de87152c",
+    "count": 1,
+    "disposition": "direct-admission",
+    "reason": "ensureView calls fenceWriterEntry(input.query,input.sheetId) immediately before this INSERT/ON CONFLICT UPDATE; plugin/host callers are separately listed."
+  },
+  {
+    "key": "multitable/template-library.ts#installMultitableTemplate#caller#multitable/provisioning.ts#createView#a1aa343bee3617999eb0cba4a9651703f0f8f166d2de46097708f73ea6fea6f0",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Template installation creates a fresh sheet then invokes createView with the install query; createView also admits its supplied sheet."
+  },
+  {
+    "key": "routes/multitable-copy-sheet.ts#createMultitableCopySheetRoutes#caller#multitable/copy-sheet-service.ts#executeCopySheet#39aca702af5ac594db3e183049f39dbc864f50f61aaa2338473f2a0d0eab44f9",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact execute branch calls executeCopySheet after authorization/source planning; new destination sheet creation disposition, not general fenced mutation admission."
+  },
+  {
+    "key": "routes/univer-meta.ts#dropFieldCascade#mutation#UPDATE#49e242f856999e61fe7b349071aae14a66166bb790bdeb6fb2dbb53824f3891f",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "dropFieldCascade updates references in existing views on the caller query; un-create and ordinary field-delete callers are separately enumerated and fenced."
+  },
+  {
+    "key": "routes/univer-meta.ts#dropViewCascade#mutation#DELETE FROM#51cd36fcb0a76ffd409687d3cf1fcea380faa528c5d9620a655ba8531b65d869",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "dropViewCascade deletes on caller query; view un-create and ordinary DELETE callers are separately enumerated and fenced."
+  },
+  {
+    "key": "routes/univer-meta.ts#install#caller#routes/univer-meta.ts#runInstall#d5da918f20f5b6e5c3f1fb18e65ade5e91fc5876c874ac85eaf22117960ea48b",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact dedupe install callback calls runInstall(query); callback handoff is separately inventoried."
+  },
+  {
+    "key": "routes/univer-meta.ts#recreateViewFromConfig#mutation#INSERT INTO#dff65e8264a93bdc593df3df28e665cfb85c0b5727f9d79e031cc5461a32525f",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "recreateViewFromConfig inserts on caller query; exact undelete execute caller is separately enumerated and fenced."
+  },
+  {
+    "key": "routes/univer-meta.ts#runInstall#caller#multitable/template-library.ts#installMultitableTemplate#63494232a4b2e14101de753473e5e90771bb8866cb015d8018fc64df5f6191e7",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact runInstall wrapper invokes installMultitableTemplate with its supplied transaction query; template creates fresh destination sheets."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#callback:routes/univer-meta.ts#install#cb10809943147382a9bc9458fdc36e1eecf9c34cd678f2e0423de5076f5df5a2",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact template dedupe callback handoff, with anonymous route handler treated as leaf rather than router registration as writer."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#multitable/config-restore.ts#applyConfigRevert#0d8ab2c353154ab404bb227a8b0623dc24366ccc58fd7288bc106c46dc5235a9",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Generic config-revert exact transaction calls fenceWriterEntry before applyConfigRevert(query,rev)."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#multitable/config-restore.ts#applyConfigRevert#f90e7fd3783a058593fa058b76abad4f8d459f6c3280467ece340399384d7a70",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Derived config-revert exact transaction calls fenceWriterEntry before applyConfigRevert(query,derived)."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#dropFieldCascade#54cd95cd59f7682f18b1dde752d394342b9d269f5d5b108c35bfd87c0d1ca1a2",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Ordinary field DELETE exact transaction calls fenceWriterEntry before dropFieldCascade."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#dropFieldCascade#ca82774ee1880a8b99b827fc0f9e363e5e884d4b52b20856e847c9c6a4bf261c",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Un-create field execute caller passes its already fenced transaction query to dropFieldCascade; no claim that every call in univerMetaRouter shares this admission."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#dropViewCascade#605b56023f6bf48be471c40b9a67ba9c5bcd95380723d85720b59876390c6718",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Ordinary view DELETE exact transaction calls fenceWriterEntry before dropViewCascade."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#dropViewCascade#7e5d3fc15b711e7ec2ff5ac0175addc8d7d35338fece62c0bce86726680eb55d",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "Un-create view execute exact transaction calls fenceWriterEntry before dropViewCascade."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#recreateViewFromConfig#8986fc2fcc3875c9034d85a1866471c194f3d2e6bbfe996b586558301563729c",
+    "count": 1,
+    "disposition": "inherited-admission",
+    "reason": "View undelete execute branch invokes recreateViewFromConfig after the existing-sheet fence branch."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#caller#routes/univer-meta.ts#runInstall#d5da918f20f5b6e5c3f1fb18e65ade5e91fc5876c874ac85eaf22117960ea48b",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Exact ledger-unavailable fallback transaction calls runInstall(query); disposition remains fresh-sheet template creation, not blanket fail-open writer admission."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#mutation#INSERT INTO#657a14b0112f71ca0e9893c6fd2d63f6d646adf532d6d790717287ca4daca648",
+    "count": 1,
+    "disposition": "new-sheet",
+    "reason": "Sheet provisioning transaction inserts the new sheet then default view, with its existing fenceWriterEntry call. Fresh-sheet creation is distinct from existing view mutation."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#mutation#INSERT INTO#d6239fab26d915558ff4f9496bc77aad1a3ae44f0cf849e1d56693d0e967152e",
+    "count": 1,
+    "disposition": "direct-admission",
+    "reason": "Existing-sheet default-view seed transaction calls fenceWriterEntry(query,sheetId) before this INSERT."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#mutation#INSERT INTO#4fdf9d532b187b9a691bf28764d965049ba9436832dfab99f44aa72e4985acc4",
+    "count": 1,
+    "disposition": "direct-admission",
+    "reason": "Ordinary view-create transaction calls fenceWriterEntry(query,sheetId) before this INSERT."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#mutation#UPDATE#cb93899cf1d1032f10141e50e622949520fc55fdf648cd17823ac6f5b82fac94",
+    "count": 2,
+    "disposition": "direct-admission",
+    "reason": "Two distinct exact form-share and token-regeneration transactions (occurrences 15706 and 15803) each call fenceWriterEntry(query,sheetId) before identical UPDATE SQL. Count must remain two."
+  },
+  {
+    "key": "routes/univer-meta.ts#univerMetaRouter#mutation#UPDATE#899f3293166e4cf04226fd2f31e246a9d26535e5e7ee29cce897aa9cd31b9125",
+    "count": 1,
+    "disposition": "direct-admission",
+    "reason": "Ordinary view PATCH transaction calls fenceWriterEntry(query,String(row.sheet_id)) before UPDATE."
+  }
+]

@@ -113,34 +113,42 @@ describe('locked local archive startup', () => {
     }
     f.secret.fill(0)
   })
-  it.each(['off', 'wrong-secret', 'cancel'] as const)('actual launcher refuses %s without listening', async mode => {
+  it.each(['off', 'wrong-secret', 'cancel', 'disconnect', 'disconnect-early'] as const)('actual launcher refuses %s without listening', async mode => {
     const f = await fixture()
+    const disconnecting = mode === 'disconnect' || mode === 'disconnect-early'
     const launcher = fileURLToPath(new URL('../../scripts/start-recovery-local.mts', import.meta.url))
     const child = spawn(process.execPath, ['--import', require.resolve('tsx'), launcher, f.configPath], {
       cwd: fileURLToPath(new URL('../..', import.meta.url)),
       env: { PATH: process.env.PATH, NODE_ENV: 'test', VITEST: 'true',
         DATABASE_URL: 'postgresql://synthetic@127.0.0.1:9/synthetic',
         MULTITABLE_RECOVERY_ARCHIVE_ENABLED: mode === 'off' ? '' : 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' },
-      stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
+      stdio: disconnecting ? ['ignore', 'pipe', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe', 'pipe'],
     })
     const pipe = child.stdio[3] as Duplex
     pipe.on('error', () => undefined)
+    if (disconnecting) child.once('exit', () => pipe.destroy())
     let stdout = ''
     let stderr = ''
     child.stdout!.on('data', bytes => {
       stdout += String(bytes)
       if (mode === 'cancel' && stdout.includes('RECOVERY_LOCAL_CUSTODY_LOCKED')) child.kill('SIGTERM')
+      if (mode === 'disconnect' && stdout.includes('RECOVERY_LOCAL_CUSTODY_LOCKED') && child.connected) child.disconnect()
     })
     child.stderr!.on('data', bytes => { stderr += String(bytes) })
     const timeout = setTimeout(() => child.kill('SIGKILL'), 15_000)
+    if (mode === 'disconnect-early') child.disconnect()
     try {
-      if (mode !== 'cancel') pipe.end(randomBytes(32))
-      const code = await new Promise<number | null>((resolve, reject) => { child.once('close', resolve); child.once('error', reject) })
+      if (mode !== 'cancel' && !disconnecting) pipe.end(randomBytes(32))
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.once(disconnecting ? 'exit' : 'close', resolve)
+        child.once('error', reject)
+      })
       expect(code).toBe(1)
+      if (disconnecting) await vi.waitFor(() => expect(stderr).toContain(refusal))
       expect(stderr).toContain(refusal)
       expect(stderr).not.toContain(f.configPath)
       expect(stdout).not.toContain('core listening on')
-      if (mode === 'off') expect(stdout).not.toContain('RECOVERY_LOCAL_CUSTODY_LOCKED')
+      if (mode === 'off' || mode === 'disconnect-early') expect(stdout).not.toContain('RECOVERY_LOCAL_CUSTODY_LOCKED')
       else expect(stdout).toContain('RECOVERY_LOCAL_CUSTODY_LOCKED')
     } finally {
       clearTimeout(timeout)

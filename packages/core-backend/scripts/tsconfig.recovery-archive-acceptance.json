@@ -9,6 +9,7 @@
     "../src/**/*",
     "../core/**/*",
     "../types/**/*",
+    "../tests/fixtures/recovery-finalize-process-fault.mts",
     "./verify-recovery-archive-server.mts",
     "./verify-recovery-local-backup.mts",
     "./verify-recovery-local-startup.mts",
@@ -16,6 +17,12 @@
     "./private-db-backend-drain.d.ts",
     "./verify-recovery-manual-checkpoint.mts",
     "./verify-recovery-attachment-stage.mts",
-    "./start-recovery-local.mts"
+    "./start-recovery-local.mts",
+    "./verify-recovery-local-manual-http.ts",
+    "./verify-recovery-local-manual-target.mts",
+    "./verify-recovery-local-rollback.mts",
+    "./verify-recovery-local-scenarios.ts",
+    "./verify-recovery-local-stale-worker.ts",
+    "./verify-recovery-local-seeded-control.ts"
   ]
 }

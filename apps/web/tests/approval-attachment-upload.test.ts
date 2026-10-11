@@ -42,7 +42,7 @@ describe('approval attachment upload client', () => {
   })
 
   test('prototype-pollution guard (server parity): an Object.prototype-name MIME rejects as unknown, never throws', () => {
-    // Without the Object.hasOwn guard, ALLOW['constructor'] / ALLOW['__proto__'] resolves an INHERITED
+    // Without the own-property guard, ALLOW['constructor'] / ALLOW['__proto__'] resolves an INHERITED
     // member and allowed.includes(ext) throws an uncaught TypeError — even though '.pdf' is allowlisted.
     for (const type of ['constructor', '__proto__']) {
       let out: ReturnType<typeof preValidateAttachments> | undefined

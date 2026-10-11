@@ -1,5 +1,9 @@
+import { bindRecoveryArchiveOwnedCleanup } from '../multitable/recovery-archive-owned-cleanup'
+import type { Pool } from 'pg'
+import type { RecoveryArchiveCaptureLimits } from '../multitable/recovery-archive-bounded-source'
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
+import { bindAttachmentMetadataAdmission, AttachmentMetadataAdmissionError } from '../multitable/attachment-metadata-admission'
 import * as path from 'path'
 import { Router } from 'express'
 import { z } from 'zod'
@@ -7833,10 +7837,19 @@ export function createRecoveryArchiveManualFinalization(transaction: RecoveryArc
 export function createRecoveryArchiveManualCommand(
   transaction: RecoveryArchivePreparedUploadInput['transaction'], runtime: RecoveryArchivePreviewRuntime,
   policy?: RecoveryArchiveManualAdmissionPolicy,
+  owned?: { pool: Pick<Pool, 'connect' | 'options'>; limits: RecoveryArchiveCaptureLimits },
 ) {
   return bindRecoveryArchiveManualCommand(transaction, bindRecoveryArchiveScopeAuthorization(
     (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
-  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey))
+  ), runtime, policy, (storageKey) => getAttachmentStorageService().readContentAddressed(storageKey),
+  owned ? { ...owned, readContentAddressedBounded: (storageKey, maxBytes) => getAttachmentStorageService().readContentAddressedBounded(storageKey, maxBytes) } : undefined)
+}
+
+/** Internal operator command: canonical fresh full-read and management, no caller authority adapter. */
+export function createRecoveryArchiveOwnedCleanup(options: Parameters<typeof bindRecoveryArchiveOwnedCleanup>[0]) {
+  return bindRecoveryArchiveOwnedCleanup(options, bindRecoveryArchiveScopeAuthorization(
+    (query, sheetId, authority) => hasFullTableReadAccess(undefined, query, sheetId, authority.access, authority.capabilities),
+  ))
 }
 
 /** Production worker authorization uses the same conservative read policy as HTTP recovery. */
@@ -8260,9 +8273,11 @@ export interface UniverMetaRouterOptions {
   readonly recoveryArchiveAuditedReplayHorizonMs?: number
   readonly recoveryArchiveAsyncResumeHorizonMs?: number
   readonly recoveryArchiveManualPolicy?: RecoveryArchiveManualAdmissionPolicy
+  readonly recoveryArchiveManualCaptureLimits?: RecoveryArchiveCaptureLimits
 }
 
 export interface RecoveryArchiveRouterDatabaseRuntime {
+  readonly nativePool?: Pick<Pool, 'connect' | 'options'>
   readonly transaction: RecoveryArchiveRestoreJobTransaction
   readonly query: RecoveryArchiveRestoreJobQuery
   readonly transactionDepthProbe: RecoveryArchivePreviewRuntime['transactionDepth']
@@ -13442,7 +13457,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
 
   const manualCapture = options.recoveryArchiveRuntime
     ? createRecoveryArchiveManualCommand(recoveryArchiveRestoreTransaction, options.recoveryArchiveRuntime,
-        options.recoveryArchiveManualPolicy)
+        options.recoveryArchiveManualPolicy,
+        options.recoveryArchiveDatabaseRuntime?.nativePool && options.recoveryArchiveManualCaptureLimits
+          ? { pool: options.recoveryArchiveDatabaseRuntime.nativePool, limits: options.recoveryArchiveManualCaptureLimits } : undefined)
     : undefined
   registerRecoveryArchiveRestoreOwnerRoutes(router, {
     resolveContext: resolveRecoveryArchiveRestoreOwnerContext,
@@ -19856,7 +19873,15 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
           const userIdRaw = req.user?.sub || req.user?.userId || req.user?.id || 'anonymous'
           const userId = typeof userIdRaw === 'number' ? String(userIdRaw) : userIdRaw
           const { row: attachmentRow } = await storeAttachmentShared({
-            query: pool.query.bind(pool),
+            query: bindAttachmentMetadataAdmission({
+              query: pool.query.bind(pool),
+              transaction: (work) => pool.transaction(work),
+              request: req,
+              sheetId,
+              recordId,
+              fieldId,
+              mapFieldType,
+            }),
             storage,
             sheetId,
             recordId,
@@ -19872,6 +19897,9 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
             },
           })
         } catch (err) {
+          if (err instanceof AttachmentMetadataAdmissionError) {
+            return res.status(err.status).json({ ok: false, error: err.error })
+          }
           if (err instanceof ValidationError) {
             return res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: err.message } })
           }
@@ -20121,6 +20149,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
     } catch (err) {
       // D-1c slice ⑤: maps the transaction's zero-row RETURNING fail-closed NotFoundError to 404,
       // mirroring the /views/:viewId/submit route's identical NotFoundError -> 404 handling (:14748-14750).
+      if (
+        process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED === 'true'
+        && process.env.MULTITABLE_ENABLE_WRITER_FENCE === 'true'
+        && err instanceof SheetWriterBlockedError
+        && sendWriterFenceConflict(res, err)
+      ) return
       if (err instanceof NotFoundError) {
         return res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: err.message } })
       }

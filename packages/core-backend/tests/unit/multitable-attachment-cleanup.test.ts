@@ -128,6 +128,8 @@ describe('cleanupOrphanMultitableAttachments', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_file_id')) {
@@ -164,6 +166,8 @@ describe('cleanupOrphanMultitableAttachments', () => {
     }))
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_file_id')) {
@@ -210,6 +214,8 @@ describe('cleanupOrphanMultitableAttachments', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_file_id')) {
@@ -243,6 +249,8 @@ describe('cleanupOrphanMultitableAttachments', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_file_id')) {
@@ -311,6 +319,8 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_path')) {
@@ -344,6 +354,8 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_path')) {
@@ -391,6 +403,8 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_path')) {
@@ -425,6 +439,8 @@ describe('sweepMultitableAttachmentBlobPurge', () => {
     })
     const transactionQuery = vi.fn(async (text: string) => {
       if (text.startsWith('SELECT pg_advisory_xact_lock')) return { rows: [] }
+      if (text === 'SHOW transaction_isolation') return { rows: [{ transaction_isolation: 'read committed' }] }
+      if (text === 'SELECT pg_current_xact_id()::text AS xid') return { rows: [{ xid: '42' }] }
       if (text.includes('information_schema.columns')) return { rows: [{ present: true }] }
       if (text.startsWith('SELECT recovery_writer_state')) return { rows: [{ recovery_writer_state: null }] }
       if (text.startsWith('SELECT id, sheet_id, storage_path')) {

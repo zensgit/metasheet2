@@ -183,6 +183,8 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimAttachmentBlobPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-orphan-retention.ts :: claimOrphanAttachmentForPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
   NONWRITER('multitable/attachment-purge-claim.ts :: claimDirectAttachmentPurge :: fenceWriterEntry', '25', 'writes multitable_attachments only.'),
+  NONWRITER('multitable/attachment-metadata-admission.ts :: bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence', '25', 'attachment POST metadata admission: storeAttachment forwards its multitable_attachments INSERT; current field type and row policy are read after the fence, with no meta_records.data write.'),
+  NONWRITER('multitable/meta-tombstone-retention-admission.ts :: sweepProtectedTombstoneRetention :: acquireCanonicalSheetFence', 'new (G3)', 'archive source retention admission: fresh fenced DELETEs target tombstone tables only; no meta_records.data write.'),
   NONWRITER('routes/univer-meta.ts :: POST /sheets/:sheetId/trust-checkpoint-activate :: acquireCanonicalSheetFence', '24', 'writes checkpoint / baseline tables.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/row-level-read-deny :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
   NONWRITER('routes/univer-meta.ts :: PUT /sheets/:sheetId/conditional-rules :: fenceWriterEntry', '27', 'sheet_config access-control write.'),
@@ -210,6 +212,10 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('routes/univer-meta.ts :: createRecoveryArchiveManualAdmission :: <no in-tree call>', '23', 'manual admission factory (passed by value); writes meta_recovery_archive_* only.'),
   NONWRITER('multitable/recovery-archive-manual-command.ts :: read :: acquireCanonicalSheetFence', '23', 'manual command read.'),
   NONWRITER('multitable/recovery-archive-manual-finalization.ts :: bindRecoveryArchiveManualFinalization :: readAdmitted', '23', 'manual finalization.'),
+  NONWRITER('multitable/recovery-archive-expired-builder.ts :: abandonExpiredRecoveryArchiveBuilder :: admitExpiredBuilder', 'new (23-like)', 'D-L scope/key/writer-block admission and generation CAS recheck exact authority, owner/fence and actual lease expiry; changes only archive build_status, never meta_records.data.'),
+  NONWRITER('multitable/recovery-archive-abandoned-object-cleanup.ts :: claimRecoveryArchiveAbandonedObjectCleanup :: admit', 'new (23-like)', 'D-L fence/key/writer-block admission rechecks scope, expired owner/fence and complete staging bindings; claim changes only meta_recovery_archives cleanup ownership.'),
+  NONWRITER('multitable/recovery-archive-abandoned-object-cleanup.ts :: cleanupRecoveryArchiveAbandonedObjects :: admit', 'new (23-like)', 'Five short fenced admission checks surround outside-transaction provider IO; writes only staging terminal receipts and exact-owner source-pin references, never meta_records.data.', 5),
+  NONWRITER('multitable/recovery-archive-manual-continuation.ts :: bindManualObjectUpload :: authorizedPayload', 'new (23-like)', 'Three fenced transactions recheck authority, live owner/key and durable prepared payload before registration/PUT and after IO; writes only archive staging/bindings/upload receipts.', 3),
   NONWRITER('routes/univer-meta.ts :: univerMetaRouter :: createRecoveryArchiveManualCommand', '23', 'construction-time factory call at router level, not a transaction body; the transactions it runs later are its own (row 23).', 1, false),
   NONWRITER('routes/univer-meta.ts :: univerMetaRouter :: acceptFrozenRecoveryArchiveRestoreJob', '23', 'restore job accept (route adapter).'),
   NONWRITER('routes/univer-meta.ts :: univerMetaRouter :: cancelRecoveryArchiveRestoreJob', '23', 'restore job cancel (seam, non-literal handler).'),
@@ -226,6 +232,12 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/recovery-archive-writer-block.ts :: claimArchiveWriterBlock :: prepareArchiveWriterBlockTransaction', '30', 'writes meta_sheets.recovery_writer_* only.'),
   NONWRITER('multitable/recovery-archive-writer-block.ts :: heartbeatArchiveWriterBlock :: <no in-tree call>', '30', 'no in-tree caller; writes meta_sheets.recovery_writer_* only.'),
   NONWRITER('multitable/recovery-archive-writer-block.ts :: releaseArchiveWriterBlock :: <no in-tree call>', '30', 'no in-tree caller; writes meta_sheets.recovery_writer_* only.'),
+  NONWRITER('multitable/recovery-archive-owned-cleanup.ts :: run :: transaction', '30', 'Two bounded RC transaction sites own expiry/claim and early all-terminal/all-pin release; writes raw sheet block CAS and archive/staging/source-pin rows only, never meta_records.data.', 2),
+  NONWRITER('multitable/recovery-archive-owned-claim.ts :: bindRecoveryArchiveOwnedClaim :: claimInTransaction', '30', 'owned archive claim writes writer ownership, catalog, future reservations, source pin intents and request identity; no meta_records.data write.'),
+  NONWRITER('multitable/recovery-archive-owned-composer.ts :: bindRecoveryArchiveOwnedComposer :: recheck', '23', 'owned capture phases write source-pin availability, prepared ciphertext and object receipts only; no meta_records.data write.', 4),
+  NONWRITER('multitable/recovery-archive-owned-composer.ts :: reserveNonces :: recheck', '23', 'owned capture permanently reserves nonce identities only; no meta_records.data write.'),
+  NONWRITER('multitable/recovery-archive-owned-composer.ts :: bindRecoveryArchiveOwnedComposer :: finalizeRecoveryArchiveOwnedAttempt', '23', 'owned finalization writes section/history snapshots, coverage, archive references and publication, then releases recovery_writer_*; no meta_records.data write.'),
+  NONWRITER('multitable/recovery-archive-owned-composer.ts :: cleanupOnce :: abandonRecoveryArchiveOwnedClaim', '30', 'failure cleanup terminalizes the exact archive owner and releases only its recovery_writer_* tuple; no meta_records.data write.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: placeRecoveryArchiveLegalHold :: <no in-tree call>', '31', 'no in-tree caller; writes legal-hold tables only.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: releaseRecoveryArchiveLegalHold :: <no in-tree call>', '31', 'no in-tree caller; writes legal-hold tables only.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: expireRecoveryArchiveAfterLegalHoldCheck :: <no in-tree call>', '31', 'no in-tree caller; writes meta_recovery_archives only.'),
@@ -424,6 +436,34 @@ describe('field retype slice 3a — §3.11 fence-holder census (real tree)', () 
 
   it('C1-F5. the attachment stage ledger\'s private lockSource (a FOR SHARE row lock, no fence) is not a holder', () => {
     expect(REAL.holders.filter((h) => h.rel === 'multitable/recovery-archive-attachment-stage-ledger.ts')).toEqual([])
+  })
+
+  it('G1 attachment metadata admission is a metadata-only holder; a new record-data write reds guard C', () => {
+    const key = 'multitable/attachment-metadata-admission.ts :: bindAttachmentMetadataAdmission :: acquireCanonicalSheetFence'
+    const holder = REAL.holders.find((h) => h.key === key)!
+    expect(REAL.holders.filter((h) => h.key === key)).toHaveLength(1)
+    expect(directRecordDataWritesAfterFence(holder)).toEqual([])
+    const source = REAL_SOURCES.find((s) => s.rel === 'multitable/attachment-metadata-admission.ts')!
+    const anchor = '        const result = await query(sql, params)'
+    expect(source.text.split(anchor)).toHaveLength(2)
+    const text = source.text.replace(anchor,
+      `        await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'synthetic'])\n${anchor}`)
+    const changed = runFenceHolderCensus(REAL_SOURCES.map((s) => s.rel === source.rel ? { ...s, text } : s))
+    expect(nonWriterViolations(changed, FENCE_HOLDER_LEDGER).some((violation) => violation.startsWith(key))).toBe(true)
+  })
+
+  it('G3 tombstone retention admission is a metadata-only holder; a new record-data write reds guard C', () => {
+    const key = 'multitable/meta-tombstone-retention-admission.ts :: sweepProtectedTombstoneRetention :: acquireCanonicalSheetFence'
+    const holder = REAL.holders.find((h) => h.key === key)!
+    expect(REAL.holders.filter((h) => h.key === key)).toHaveLength(1)
+    expect(directRecordDataWritesAfterFence(holder)).toEqual([])
+    const source = REAL_SOURCES.find((s) => s.rel === 'multitable/meta-tombstone-retention-admission.ts')!
+    const anchor = "        const stateResult = await query('SELECT recovery_writer_state FROM meta_sheets WHERE id = $1', [sheetId])"
+    expect(source.text.split(anchor)).toHaveLength(2)
+    const text = source.text.replace(anchor,
+      `        await query('UPDATE meta_records SET data = data || $1::jsonb WHERE id = $2', [{}, 'synthetic'])\n${anchor}`)
+    const changed = runFenceHolderCensus(REAL_SOURCES.map((s) => s.rel === source.rel ? { ...s, text } : s))
+    expect(nonWriterViolations(changed, FENCE_HOLDER_LEDGER).some((violation) => violation.startsWith(key))).toBe(true)
   })
 
   it('E. slice 3b: the conversion and its undo are 免检 because they read the field row under a lock after the fence — and they do', () => {

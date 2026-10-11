@@ -77,6 +77,9 @@
  * already wired. No workflow step was added or modified for it.
  */
 
+import { closeSync, mkdtempSync, openSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PYTHON_CANDIDATE_LABEL, spawnPythonSync } from './python-interpreter.mjs'
 
 /**
@@ -164,12 +167,25 @@ export function parseYamlDocument(wf) {
   // ./python-interpreter.mjs). On CI (`ubuntu-latest`, system `python3` on PATH) the first
   // candidate answers, so this is behaviorally identical to the previous bare
   // `spawnSync('python3', …)`; a non-zero status such as 3/4 below is never retried elsewhere.
-  const res = spawnPythonSync(['-c', PY_YAML_TO_JSON], {
-    input: wf,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 120_000,
-  })
+  // Large synchronous input pipes can stall on macOS before Python receives EOF. A private
+  // file descriptor preserves the same UTF-8 stdin bytes without that pipe dependency.
+  const inputDir = mkdtempSync(join(tmpdir(), 'metasheet-ci-yaml-'))
+  let inputFd
+  let res
+  try {
+    const inputPath = join(inputDir, 'workflow.yml')
+    writeFileSync(inputPath, wf, { encoding: 'utf8', mode: 0o600 })
+    inputFd = openSync(inputPath, 'r')
+    res = spawnPythonSync(['-c', PY_YAML_TO_JSON], {
+      stdio: [inputFd, 'pipe', 'pipe'],
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      timeout: 120_000,
+    })
+  } finally {
+    if (inputFd !== undefined) closeSync(inputFd)
+    rmSync(inputDir, { recursive: true, force: true })
+  }
   if (res.error) {
     throw new Error(
       `real-DB step contract: failing CLOSED — no Python interpreter could be spawned for the ` +

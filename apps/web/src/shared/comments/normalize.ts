@@ -79,7 +79,7 @@ export function normalizeMultitableCommentMentionLabels(
   // which must neither read an inherited member nor write the map's prototype.
   const labels = Object.create(null) as Record<string, string>
   for (const id of mentions) {
-    if (!Object.hasOwn(raw, id)) continue
+    if (!Object.prototype.hasOwnProperty.call(raw, id)) continue
     const label = (raw as Record<string, unknown>)[id]
     if (typeof label === 'string' && label.trim().length > 0) labels[id] = label.trim()
   }

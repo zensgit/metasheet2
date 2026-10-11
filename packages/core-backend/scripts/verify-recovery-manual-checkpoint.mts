@@ -14,6 +14,7 @@ import { assertPrivateDatabaseBackendsExited } from './private-db-backend-drain'
 import type { RecoveryArchiveSnapshotReservationPlan } from '../src/multitable/recovery-archive-section-bootstrap'
 
 const require = createRequire(import.meta.url)
+const { verifyLateManualFinalizer } = require('../tests/utils/recovery-late-manual-finalizer.ts') as typeof import('../tests/utils/recovery-late-manual-finalizer')
 const manualAdmission = require('../src/multitable/recovery-archive-manual-admission.ts') as typeof import('../src/multitable/recovery-archive-manual-admission')
 const manualRequests = require('../src/multitable/recovery-archive-manual-request.ts') as typeof import('../src/multitable/recovery-archive-manual-request')
 const manualRequestMigration = require('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests.ts') as typeof import('../src/db/migrations/zzzz20260918140000_create_recovery_archive_manual_requests')
@@ -77,6 +78,7 @@ try {
     PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: root,
     NODE_ENV: 'test', METASHEET_ENV_DIR: root, CONFIG_FILE: `${root}/config.json`,
     DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
+    TEST_DATABASE_URL: `postgresql://tm_manual@127.0.0.1:${connection.port}/${database}`,
     SECRET_PROVIDER: 'env', JWT_SECRET: randomUUID(),
   }
   for (const phase of ['fresh', 'replay']) {
@@ -625,7 +627,7 @@ try {
     assert.equal(binaryDelivered.length, 2)
     const continuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
     const binaryStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const binaryProvider = binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') })
+    const binaryProvider = { storeId: randomUUID(), ...binaryStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'binary-objects') }) }
     let binaryAllowed = true
     let revokeAfterHead = false
     let binaryPuts = 0
@@ -778,6 +780,13 @@ try {
   await db.transaction().execute(manualRequestMigration.up)
   console.log('PASS: immutable manual request binding; new-connection lookup; two-connection retry; actor isolation and scope/generation conflict; transaction and nonempty-down guards')
   const admissionPolicy = { keyId: 'synthetic-key', keyRowVersion: '1', leaseSeconds: 3600, expiresAfterSeconds: 7200 }
+  // Explicit synthetic acceptance policy, never production fallback values.
+  const manualCaptureLimits = { maxBytes: 64 * 1024 * 1024, timeoutMs: 60000 }
+  const manualOwned = { pool: downloadPool.getInternalPool(), limits: manualCaptureLimits }
+  const readWriterBlock = async (sheetId: string) => (await query(`SELECT recovery_writer_state AS state,
+    recovery_writer_owner_kind AS kind,recovery_writer_owner_id AS id,recovery_writer_owner_fence::text AS fence,
+    recovery_writer_lease_until::text AS lease,recovery_writer_updated_at::text AS updated
+    FROM meta_sheets WHERE id=$1`, [sheetId])).rows[0]
   const admit = createRecoveryArchiveManualAdmission(uploadInput.transaction, admissionPolicy)
   const admissionRequest = { ...request, requestId: randomUUID(), sheetId: 'no-genesis' }
   const generationCount = async () => (await query('SELECT count(*)::int AS n FROM meta_recovery_archives')).rows[0].n as number
@@ -1098,7 +1107,7 @@ try {
     assert.equal(repeatedUploads, 10)
     assert.deepEqual(await sealedMembers(repeated.binding.anchorOperationId), expectedMembers(repeated, 'section_checkpoint'))
     const stores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-    const provider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') })
+    const provider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'sealed-objects') }) }
     const objectUpload = createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...repeated, provider })
     const objectExpiry = (await query('SELECT expires_at FROM meta_recovery_archives WHERE generation_id=$1::uuid',
       [repeated.owner.generationId])).rows[0].expires_at.toISOString()
@@ -1189,6 +1198,15 @@ try {
     assert.equal((await query(`SELECT count(*)::int AS n FROM meta_recovery_archive_objects
       WHERE generation_id=$1::uuid AND state='verified'`, [repeated.owner.generationId])).rows[0].n, 11)
     console.log('PASS: atomic manual archive publication with authentic 28-row coverage and eleven verified receipts')
+    await verifyLateManualFinalizer({ query, transaction: uploadInput.transaction,
+      createFinalize: createRecoveryArchiveManualFinalization, custody, createFixture: async () => {
+        const late = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
+          { ...admissionPolicy, leaseSeconds: 10 }))
+        await manual({ ...late, capture: async snapshot => ({ ...await capture(snapshot), binding: late.binding }),
+          upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...late, provider }) })
+        await createRecoveryArchiveManualManifestUpload(uploadInput.transaction, { ...late, provider })()
+        return { ...finalInput, identity: late.identity, owner: late.owner }
+      } })
     const revokedUpload = await continuation()
     const revoker = new Client({ ...connection, database })
     await revoker.connect()
@@ -1238,7 +1256,7 @@ try {
       await query('INSERT INTO meta_recovery_archive_keys(key_id) VALUES ($1)', [capability.keyId])
       const localInput = await continuation(createRecoveryArchiveManualAdmission(uploadInput.transaction,
         { ...admissionPolicy, keyId: capability.keyId }))
-      const localProvider = stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath })
+      const localProvider = { storeId: randomUUID(), ...stores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: archivePath }) }
       await manual({ ...localInput, capture: async (snapshot) => ({ ...await capture(snapshot),
         binding: localInput.binding, keyCustody: capability }),
       upload: createRecoveryArchiveManualObjectUpload(uploadInput.transaction, { ...localInput, provider: localProvider }) })
@@ -1319,7 +1337,7 @@ try {
           return { ...stored, bytes }
         } }, transactionDepth: first.transactionDepth }
       const command = createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
-        { ...admissionPolicy, keyId: capability.keyId })
+        { ...admissionPolicy, keyId: capability.keyId }, manualOwned)
       const commandIdentity = { ...localInput.identity, requestId: randomUUID() }
       const archiveFlag = process.env.MULTITABLE_RECOVERY_ARCHIVE_ENABLED
       const fenceFlag = process.env.MULTITABLE_ENABLE_WRITER_FENCE
@@ -1329,6 +1347,20 @@ try {
         process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
         await assert.rejects(createRecoveryArchiveManualCommand(uploadInput.transaction, runtime).capture(commandIdentity),
           { message: 'RECOVERY_ARCHIVE_MANUAL_POLICY_UNAVAILABLE' })
+        const unownedEffectsSql = `SELECT
+          (SELECT count(*) FROM meta_recovery_archives)::int AS generations,
+          (SELECT count(*) FROM meta_recovery_archive_manual_requests)::int AS requests,
+          (SELECT count(*) FROM meta_recovery_archive_attachment_refs)::int AS pins,
+          (SELECT count(*) FROM meta_recovery_archive_nonce_reservations)::int AS nonces,
+          (SELECT count(*) FROM meta_recovery_archive_prepared_captures)::int AS prepared,
+          (SELECT count(*) FROM meta_recovery_archive_objects)::int AS objects`
+        const beforeUnowned = (await query(unownedEffectsSql)).rows
+        const blockBeforeUnowned = await readWriterBlock(commandIdentity.sheetId)
+        await assert.rejects(createRecoveryArchiveManualCommand(uploadInput.transaction, runtime,
+          { ...admissionPolicy, keyId: capability.keyId }).capture(commandIdentity),
+        { message: 'RECOVERY_ARCHIVE_CAPTURE_POLICY_INVALID' })
+        assert.deepEqual((await query(unownedEffectsSql)).rows, beforeUnowned)
+        assert.deepEqual(await readWriterBlock(commandIdentity.sheetId), blockBeforeUnowned)
         await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_NOT_FOUND' })
         const completed = await command.capture(commandIdentity)
         assert.deepEqual(completed, { requestId: commandIdentity.requestId, generationId: completed.generationId, state: 'recoverable' })
@@ -1337,18 +1369,44 @@ try {
         assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
           [completed.generationId])).rows[0].n, 11)
         const interruptedIdentity = { ...commandIdentity, requestId: randomUUID() }
+        let interruptedPuts = 0
+        let interruptedBlock: Awaited<ReturnType<typeof readWriterBlock>>
         const interruptedCommand = createRecoveryArchiveManualCommand(uploadInput.transaction,
-          { ...runtime, objectStore: { ...localProvider, async put() { throw new Error('SYNTHETIC_COMMAND_UPLOAD_INTERRUPTION') } } },
-          { ...admissionPolicy, keyId: capability.keyId })
-        await assert.rejects(interruptedCommand.capture(interruptedIdentity))
+          { ...runtime, objectStore: { ...localProvider, async put() {
+            interruptedPuts++
+            interruptedBlock = await readWriterBlock(interruptedIdentity.sheetId)
+            throw new Error('SYNTHETIC_COMMAND_UPLOAD_INTERRUPTION')
+          } } }, { ...admissionPolicy, keyId: capability.keyId }, manualOwned)
+        await assert.rejects(interruptedCommand.capture(interruptedIdentity),
+          { message: 'RECOVERY_ARCHIVE_OWNED_GENERATION_REFUSED' })
         const interruptedStatus = await command.read(interruptedIdentity)
-        assert.equal(interruptedStatus.state, 'pending')
-        const payloadBefore = (await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
-          [interruptedStatus.generationId])).rows[0].payload_sha256
-        assert.deepEqual(await command.capture(interruptedIdentity), { ...interruptedStatus, state: 'recoverable' })
-        assert.equal((await query('SELECT payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid',
-          [interruptedStatus.generationId])).rows[0].payload_sha256, payloadBefore)
+        assert.equal(interruptedStatus.state, 'incomplete')
+        assert.equal(interruptedPuts, 1)
+        assert.equal(interruptedBlock.state, 'archiving')
+        assert.equal(interruptedBlock.kind, 'archive_generation')
+        assert.equal(interruptedBlock.id, interruptedStatus.generationId)
+        const releasedBlock = { state: null, kind: null, id: null, fence: interruptedBlock.fence, lease: null, updated: null }
+        assert.deepEqual(await readWriterBlock(interruptedIdentity.sheetId), releasedBlock)
+        const failedStateSql = `SELECT state,build_status,coverage_status,root_hash,manifest_mac
+          FROM meta_recovery_archives WHERE generation_id=$1::uuid`
+        const failedState = { state: 'building', build_status: 'abandoned', coverage_status: 'incomplete', root_hash: null, manifest_mac: null }
+        assert.deepEqual((await query(failedStateSql, [interruptedStatus.generationId])).rows, [failedState])
+        const payloadSql = 'SELECT payload,payload_sha256 FROM meta_recovery_archive_prepared_captures WHERE generation_id=$1::uuid'
+        const payloadBefore = (await query(payloadSql, [interruptedStatus.generationId])).rows
+        assert.equal(payloadBefore.length, 1)
+        const nonceSql = `SELECT * FROM meta_recovery_archive_nonce_reservations WHERE generation_id=$1::uuid ORDER BY section_name`
+        const noncesBefore = (await query(nonceSql, [interruptedStatus.generationId])).rows
+        assert.deepEqual(await interruptedCommand.capture(interruptedIdentity), interruptedStatus)
+        assert.deepEqual(await command.capture(interruptedIdentity), interruptedStatus)
+        assert.equal(interruptedPuts, 1, 'duplicate owned requests are status-only after handled failure')
+        assert.deepEqual((await query(payloadSql, [interruptedStatus.generationId])).rows, payloadBefore)
+        assert.deepEqual((await query(nonceSql, [interruptedStatus.generationId])).rows, noncesBefore)
         assert.equal(await nonceCount(interruptedStatus.generationId), 10)
+        assert.deepEqual((await query(failedStateSql, [interruptedStatus.generationId])).rows, [failedState])
+        assert.deepEqual(await readWriterBlock(interruptedIdentity.sheetId), releasedBlock)
+        assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1::uuid',
+          [interruptedStatus.generationId])).rows[0].n, 0)
+        console.log('PASS: handled owned PUT failure abandons only its generation, releases its block, retains prepared ciphertext/nonces, and duplicate requests remain status-only')
         await assert.rejects(command.read({ ...commandIdentity, sheetId: 's' }), { message: 'RECOVERY_ARCHIVE_MANUAL_REQUEST_CONFLICT' })
         await query('UPDATE users SET is_active=false WHERE id=$1', [actorId])
         await assert.rejects(command.read(commandIdentity), { message: 'RECOVERY_ARCHIVE_MANUAL_AUTHORITY_UNAVAILABLE' })
@@ -1376,11 +1434,12 @@ try {
           next()
         })
         // Browser status/catalog requests overlap: each transaction owns its connection.
-        const httpPool = new Pool({ ...connection, database, max: 4 })
+        const httpPool = new Pool({ ...connection, database, max: 4, connectionTimeoutMillis: 5000 })
         const httpDepth = new AsyncLocalStorage<number>()
         const httpProbe = { currentTransactionDepth: () => httpDepth.getStore() ?? 0 }
         const httpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
           query: (text, params) => httpPool.query(text, params),
+          nativePool: httpPool,
           transactionDepthProbe: httpProbe,
           async transaction(work) {
             const owned = await httpPool.connect()
@@ -1398,7 +1457,8 @@ try {
         httpApp.use('/api/multitable', univerMetaRouter({ recoveryArchiveRuntime: { ...runtime, transactionDepth: httpProbe },
           recoveryArchiveDatabaseRuntime: httpDatabase,
           recoveryArchiveAuditedReplayHorizonMs: 60000, // Synthetic fixture policy, never a runtime default.
-          recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId } }))
+          recoveryArchiveManualPolicy: { ...admissionPolicy, keyId: capability.keyId },
+          recoveryArchiveManualCaptureLimits: manualCaptureLimits }))
         const httpServer = httpApp.listen(0, '127.0.0.1')
         try {
           await new Promise<void>((resolve, reject) => { httpServer.once('listening', resolve); httpServer.once('error', reject) })
@@ -1839,7 +1899,7 @@ try {
   }
   const attachmentContinuationBindings = require('../src/multitable/recovery-archive-manual-continuation.ts') as typeof import('../src/multitable/recovery-archive-manual-continuation')
   const attachmentStores = require('../src/multitable/recovery-archive-object-store.ts') as typeof import('../src/multitable/recovery-archive-object-store')
-  const attachmentProvider = attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') })
+  const attachmentProvider = { storeId: randomUUID(), ...attachmentStores.createLocalRecoveryArchiveObjectStoreProvider({ environment: 'test', basePath: join(root, 'full-attachment-capture') }) }
   const attachmentShared = { ...attachmentCapture, provider: attachmentProvider }
   let captureSourceReads = 0
   const withAttachments = attachmentContinuationBindings.bindRecoveryArchiveManualContinuation(uploadInput.transaction,
@@ -1912,6 +1972,21 @@ try {
     assert.equal(finalObjects.length, 11 + syntheticAttachments.length)
     assert.ok(finalObjects.every((row) => row.state === 'verified'))
     for (const ref of archiveReferences) assert.equal(ref.immutable_version, finalObjects.find((row) => row.attachment_id === ref.attachment_id).provider_version)
+    const stagingProvenance = (await query(`SELECT s.object_state,s.terminal_receipt_sha256,b.operation_id,
+      o.state AS receipt_state FROM meta_recovery_archive_staging_objects s
+      JOIN meta_recovery_archive_abandoned_bindings b USING(generation_id,staging_object_id)
+      JOIN meta_recovery_archive_objects o ON o.generation_id=b.generation_id AND o.object_id=b.object_id
+      WHERE s.generation_id=$1::uuid`, [attachmentCapture.owner.generationId])).rows
+    assert.equal(stagingProvenance.length, finalObjects.length)
+    assert.equal(new Set(stagingProvenance.map(row => row.operation_id)).size, finalObjects.length)
+    assert.ok(stagingProvenance.every(row => row.object_state === 'sealed' && row.terminal_receipt_sha256 === null && row.receipt_state === 'verified'))
+    const abandonedCleanup = require('../src/multitable/recovery-archive-abandoned-object-cleanup.ts') as typeof import('../src/multitable/recovery-archive-abandoned-object-cleanup')
+    await assert.rejects(abandonedCleanup.claimRecoveryArchiveAbandonedObjectCleanup(uploadInput.transaction, async () => true,
+      { identity: attachmentCapture.identity, owner: attachmentCapture.owner, cleanupOwnerId: 'synthetic-refused-cleaner',
+        leaseExpiresAt: new Date(Date.now() + 60000).toISOString() }), { message: 'RECOVERY_ARCHIVE_ABANDONED_OBJECT_REFUSED' })
+    assert.deepEqual(await pins(attachmentCapture.owner.generationId), archiveReferences)
+    console.log('PASS: complete sealed staging provenance preserves normal finalization/source-pin handoff; verified generation refuses abandoned cleanup claim')
+
     const attachmentReader = require('../src/multitable/recovery-archive-reader.ts') as typeof import('../src/multitable/recovery-archive-reader')
     const attachmentPreview = require('../src/multitable/recovery-archive-preview.ts') as typeof import('../src/multitable/recovery-archive-preview')
     const readAuthority = await attachmentPreview.loadRecoveryArchiveAuthorityInternal(uploadInput.transaction, {
@@ -1949,7 +2024,10 @@ try {
       let commandSourceReads = 0
       const attachmentCommand = commandModule.bindRecoveryArchiveManualCommand(uploadInput.transaction, async () => true,
         { keyCustody: attachmentCustody, transactionDepth: attachmentCapture.transactionDepth, objectStore: attachmentProvider },
-        admissionPolicy, async (key) => { commandSourceReads++; return sourceStorage.readContentAddressed(key) })
+        admissionPolicy, undefined, { ...manualOwned, readContentAddressedBounded: async (key, maxBytes) => {
+          commandSourceReads++
+          return sourceStorage.readContentAddressedBounded(key, maxBytes)
+        } })
       const commandRequest = { ...admissionRequest, requestId: randomUUID() }
       const commandStatus = await attachmentCommand.capture(commandRequest)
       assert.equal(commandStatus.state, 'recoverable')
@@ -1994,11 +2072,12 @@ try {
         const injector = new Injector([[ICommentService, { useValue: comments }]])
         attachmentApp.use(commentsRouter(injector))
       }
-      const attachmentHttpPool = new Pool({ ...connection, database, max: 4 })
+      const attachmentHttpPool = new Pool({ ...connection, database, max: 4, connectionTimeoutMillis: 5000 })
       const attachmentHttpDepth = new AsyncLocalStorage<number>()
       const attachmentHttpProbe = { currentTransactionDepth: () => attachmentHttpDepth.getStore() ?? 0 }
       const attachmentHttpDatabase: import('../src/routes/univer-meta').RecoveryArchiveRouterDatabaseRuntime = {
         query: (text, params) => attachmentHttpPool.query(text, params),
+        nativePool: attachmentHttpPool,
         transactionDepthProbe: attachmentHttpProbe,
         async transaction(work) {
           const owned = await attachmentHttpPool.connect()
@@ -2018,6 +2097,7 @@ try {
         recoveryArchiveDatabaseRuntime: attachmentHttpDatabase,
         recoveryArchiveAuditedReplayHorizonMs: 60000,
         recoveryArchiveManualPolicy: admissionPolicy,
+        recoveryArchiveManualCaptureLimits: manualCaptureLimits,
       }))
       attachmentApp.use('/api/multitable', createMultitableAiRoutes())
       const attachmentServer = attachmentApp.listen(0, '127.0.0.1')
@@ -2489,7 +2569,7 @@ try {
                 createRecoveryArchiveComposition: () => ({
                   keyCustody: attachmentCustody, objectStore: attachmentProvider, attachmentStorage: sourceStorage,
                   auditedReplayHorizonMs: 60000, asyncResumeHorizonMs: 60000, workerIntervalMs: 60000,
-                  manualCapture: admissionPolicy,
+                  manualCapture: admissionPolicy, manualCaptureLimits,
                   worker: { ...createRecoveryArchiveWorkerCallbacks(resolveRecoveryArchiveMainPoolRuntime()),
                     leaseMs: 30000, replayHorizonMs: 60000, sweepLimit: 1, maxChunksPerRun: 1,
                     workerOwnerId: 'synthetic-full-app-worker' },
@@ -2540,13 +2620,18 @@ try {
         await rename(sourcePath, parkedPath)
         try {
           const unavailableRequest = randomUUID()
+          const blockBeforeUnavailable = await readWriterBlock(commandRequest.sheetId)
+          assert.equal(blockBeforeUnavailable.state, null)
           const unavailable = await fetch(url, { method: 'POST', headers, body: JSON.stringify({ requestId: unavailableRequest }) })
           assert.equal(unavailable.status, 503)
           const failedGeneration = await transaction(() => manualRequests.readRecoveryArchiveManualRequest(query,
             { ...commandRequest, requestId: unavailableRequest }))
           assert.ok(failedGeneration)
-          const failed = (await query('SELECT state,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [failedGeneration])).rows[0]
-          assert.deepEqual(failed, { state: 'building', coverage_status: 'incomplete' })
+          const failed = (await query('SELECT state,build_status,coverage_status FROM meta_recovery_archives WHERE generation_id=$1', [failedGeneration])).rows[0]
+          assert.deepEqual(failed, { state: 'building', build_status: 'abandoned', coverage_status: 'incomplete' })
+          assert.deepEqual(await readWriterBlock(commandRequest.sheetId), {
+            state: null, kind: null, id: null, fence: String(BigInt(blockBeforeUnavailable.fence) + 1n), lease: null, updated: null,
+          })
           assert.equal((await query('SELECT count(*)::int AS n FROM meta_recovery_archive_objects WHERE generation_id=$1', [failedGeneration])).rows[0].n, 0)
           const retained = await pins(failedGeneration)
           assert.equal(retained.length, syntheticAttachments.length)

@@ -4,6 +4,14 @@ import { applyArchiveAttachmentBatch, type RecoveryArchiveAttachmentBatch } from
 
 import type { QueryFn } from './permission-service'
 import { assertInTransaction } from './pg-transaction-guard'
+import { archiveSourceProtectionEnabled } from './attachment-purge-claim'
+import {
+  prepareRecoveryForeignAdmission,
+  assertRecoveryParticipantSet,
+  assertRecoveryParticipantStates,
+  assertRecoveryAuthorityScopeCovered,
+  RecoveryForeignAdmissionError,
+} from './recovery-foreign-admission'
 import {
   acquireCanonicalSheetFencesInOrder,
   assertNoActiveWriterBlock,
@@ -569,10 +577,10 @@ const recoveryRecordKey = (sheetId: string, recordId: string): string => `${shee
  * This is the sheet-id half of {@link lockExactAnchorRecoveryAuthorityScope} (its `authoritySheetIds`
  * set — the `requestedRecordKeys`/`foreignSheetByField` record-level detail is deliberately NOT
  * reproduced) and MUST stay in sync with it: the fences taken from this list are exactly the sheets
- * whose `meta_sheets` row + `meta_records` rows that function later NOWAIT-locks. Any drift (a link
- * added/removed between this read and that function's re-read) is SAFE — an extra fence is harmless, and
- * a newly-appeared foreign sheet simply keeps the pre-existing NOWAIT behaviour for that one edge; no
- * deadlock can result because every post-fence lock is NOWAIT.
+ * whose `meta_sheets` row + `meta_records` rows that function later NOWAIT-locks. NOWAIT prevents a
+ * post-fence row-lock deadlock, but does not protect a newly-appeared foreign participant's archive
+ * block. Selected archive protection therefore re-discovers and refuses any changed set after fences,
+ * then requires the later actual authority scope to be covered by the admitted set.
  */
 export async function discoverRecoveryAuthoritySheetIds(
   query: QueryFn,
@@ -864,7 +872,7 @@ const materializedArchiveAsyncFenceLeaseBrand: unique symbol = Symbol(
 )
 const materializedArchiveAsyncFenceLeases = new WeakMap<
   object,
-  { readonly query: QueryFn; readonly sheetId: string }
+  { readonly query: QueryFn; readonly sheetId: string; readonly admittedSheetIds?: readonly string[] }
 >()
 const materializedArchiveAsyncChunkReceiptBrand: unique symbol = Symbol(
   'MaterializedArchiveAsyncChunkReceipt',
@@ -894,12 +902,21 @@ export async function acquireMaterializedArchiveAsyncFencesInternal(
   query: QueryFn,
   sheetId: string,
 ): Promise<MaterializedArchiveAsyncFenceLease> {
+  const selected = archiveSourceProtectionEnabled()
+  if (selected) await prepareRecoveryForeignAdmission(query)
   const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, sheetId)
   await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
+  if (selected) {
+    assertRecoveryParticipantSet(fenceSheetIds, await discoverRecoveryAuthoritySheetIds(query, sheetId))
+    // Only the source is exempt here; the later restore-job owner tuple must still prove its holder.
+    await assertRecoveryParticipantStates(query, fenceSheetIds.filter((id) => id !== sheetId))
+  }
   const lease = Object.freeze({
     [materializedArchiveAsyncFenceLeaseBrand]: materializedArchiveAsyncFenceLeaseBrand,
   }) as MaterializedArchiveAsyncFenceLease
-  materializedArchiveAsyncFenceLeases.set(lease, { query, sheetId })
+  materializedArchiveAsyncFenceLeases.set(lease, { query, sheetId,
+    ...(selected ? { admittedSheetIds: Object.freeze([...fenceSheetIds]) } : {}),
+  })
   return lease
 }
 
@@ -1223,11 +1240,13 @@ function requireMaterializedArchiveAsyncFenceLease(
   lease: MaterializedArchiveAsyncFenceLease,
   query: QueryFn,
   sheetId: string,
-): void {
+): readonly string[] | undefined {
   const binding = materializedArchiveAsyncFenceLeases.get(lease)
-  if (!binding || binding.query !== query || binding.sheetId !== sheetId) {
+  if (!binding || binding.query !== query || binding.sheetId !== sheetId ||
+    (archiveSourceProtectionEnabled() && !binding.admittedSheetIds)) {
     throw new ApplyRefusalError('recovery-trust-required')
   }
+  return binding.admittedSheetIds
 }
 
 /** Shared by file preparation reservations and final canonical apply; requires a live transaction. */
@@ -1828,6 +1847,10 @@ async function applyExactAnchorRecoveryAttempt(
 
   try {
     const success = await transaction(async (query) => {
+      const selected = archiveSourceProtectionEnabled()
+      let admittedSheetIds: readonly string[] | undefined
+      // Async prelock already configured its transaction before discovery and job/key/block locks.
+      if (selected && execution.kind !== 'archive_async_chunk') await prepareRecoveryForeignAdmission(query)
       // 0. PROVE a real ongoing transaction (pg_current_xact_id probe) before any fence/burn/write. A
       //    forged wrapper over a pool/autocommit client is caught by Postgres itself, not a marker; the
       //    refusal is the same values-free substrate refusal as every other trust failure (non-oracular).
@@ -1857,14 +1880,21 @@ async function applyExactAnchorRecoveryAttempt(
       //    lock, so a participant blocked on a fence holds no row lock another participant could wait on.
       //    Flag-gated ⇒ byte-identical to the prior single-sheet `fenceWriterEntry`
       //    when the flag is OFF (recovery refuses at the ENV-trust gate below regardless). The durable
-      //    writer-block check is kept SOURCE-only (fence-before-check), exactly as `fenceWriterEntry` did.
+      //    unselected writer-block check stays SOURCE-only. Selected archive protection checks the
+      //    complete fresh participant set; async retains only its independently verified source owner.
       if (isWriterFenceEnabled()) {
         if (execution.kind === 'archive_async_chunk') {
-          requireMaterializedArchiveAsyncFenceLease(execution.fenceLease, query, input.sheetId)
+          admittedSheetIds = requireMaterializedArchiveAsyncFenceLease(execution.fenceLease, query, input.sheetId)
         } else {
           const fenceSheetIds = await discoverRecoveryAuthoritySheetIds(query, input.sheetId)
           await acquireCanonicalSheetFencesInOrder(query, fenceSheetIds)
-          await assertNoActiveWriterBlock(query, input.sheetId)
+          if (selected) {
+            assertRecoveryParticipantSet(fenceSheetIds, await discoverRecoveryAuthoritySheetIds(query, input.sheetId))
+            await assertRecoveryParticipantStates(query, fenceSheetIds)
+            admittedSheetIds = Object.freeze([...fenceSheetIds])
+          } else {
+            await assertNoActiveWriterBlock(query, input.sheetId)
+          }
         }
       }
 
@@ -1972,6 +2002,7 @@ async function applyExactAnchorRecoveryAttempt(
         composed,
         archiveLockLinks,
       )
+      if (admittedSheetIds) assertRecoveryAuthorityScopeCovered(admittedSheetIds, lockedScope.authoritySheetIds)
       for (const r of lockedScope.liveRows) {
         liveById.set(String(r.id), {
           data: requireLiveData(r.data),
@@ -2671,6 +2702,11 @@ async function applyExactAnchorRecoveryAttempt(
     })
     return { result: success, leaseBusy: false, ...(asyncReceipt ? { asyncReceipt } : {}) }
   } catch (e) {
+    if (e instanceof RecoveryForeignAdmissionError) {
+      // Do not turn async admission drift into permanent CHUNK_APPLY_INVALID in the facade.
+      if (execution.kind === 'archive_async_chunk') throw e
+      return { result: { ok: false, reason: e.reason }, leaseBusy: false }
+    }
     if (e instanceof ApplyRefusalError) {
       return { result: { ok: false, reason: e.reason }, leaseBusy: e.leaseBusy }
     }

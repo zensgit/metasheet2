@@ -102,7 +102,7 @@ export function suggestOffDutyTime(summary: string | null | undefined): string |
   const short = workWindowShortLabel(summary)
   if (!short) return null
   const times = short.match(/\d{1,2}:\d{2}/g)
-  return times?.at(-1) ?? null
+  return times ? times[times.length - 1] ?? null : null
 }
 
 export function isClockedIn(

@@ -934,6 +934,7 @@ describe('UserManagementView', () => {
 
   it('exports the current missing-openid screening list as CSV', async () => {
     const state = createApiState()
+    state[1].name = 'Bra"vo,\n"quoted"'
     state[1].hasOpenId = false
     state[1].directoryLinked = true
     state[1].lastDirectorySyncAt = '2026-04-10T00:00:00.000Z'
@@ -953,7 +954,7 @@ describe('UserManagementView', () => {
     expect(exportedBlob).toBeInstanceOf(Blob)
     const exportedText = createdBlobParts.join('')
     expect(exportedText).toContain('userId,name,account,role,dingtalkCorpId,directoryLinked,lastDirectorySyncAt')
-    expect(exportedText).toContain('user-2,Bravo,bravo@example.com,user,dingcorp,linked,2026-04-10T00:00:00.000Z')
+    expect(exportedText).toContain('user-2,"Bra""vo,\n""quoted""",bravo@example.com,user,dingcorp,linked,2026-04-10T00:00:00.000Z')
     expect(clickedAnchors[0]?.download).toContain('dingtalk-missing-openid-users-')
     expect(container?.textContent).toContain('已导出 1 个缺 OpenID 用户的治理清单')
     expect(revokeObjectURLMock).toHaveBeenCalledWith('blob:user-management-export')

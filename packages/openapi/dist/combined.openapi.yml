@@ -26588,6 +26588,26 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            RECOVERY_IN_PROGRESS. With archive source protection selected, the
+            sheet is blocked for writes or protected metadata admission cannot
+            safely proceed. No attachment row was inserted; cleanup of the newly
+            uploaded object is best effort.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            DB_NOT_READY. Attachment metadata could not be confirmed. A failure
+            after COMMIT may leave a committed row and retained object; this
+            response does not prove that nothing was written and must not alone
+            trigger an automatic retry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/multitable/attachments/{attachmentId}:
     get:
       summary: Download or preview a multitable attachment

@@ -53,6 +53,58 @@ const files = [
     sentinel: 'recovery_archive_writer_block_realdb_harness_missing_database_url',
   },
   {
+    file: 'tests/integration/multitable-recovery-archive-bounded-source-realdb.test.ts',
+    sentinel: 'recovery_archive_bounded_source_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-owned-claim-realdb.test.ts',
+    sentinel: 'recovery_archive_owned_claim_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-owned-capture-realdb.test.ts',
+    sentinel: 'recovery_archive_owned_capture_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-attachment-admission-realdb.test.ts',
+    sentinel: 'recovery_archive_attachment_admission_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-source-deletion-realdb.test.ts',
+    sentinel: 'SOURCE_DELETION_DATABASE_URL_REQUIRED',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-records-entry-realdb.test.ts',
+    sentinel: 'RECORDS_ENTRY_DATABASE_URL_REQUIRED',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-sheet-config-entry-realdb.test.ts',
+    sentinel: 'SHEET_CONFIG_ENTRY_DATABASE_URL_REQUIRED',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-view-share-entry-realdb.test.ts',
+    sentinel: 'VIEW_SHARE_ENTRY_DATABASE_URL_REQUIRED',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-foreign-reset-admission-realdb.test.ts',
+    sentinel: 'recovery_archive_foreign_reset_admission_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-retention-admission-realdb.test.ts',
+    sentinel: 'recovery_archive_retention_admission_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-fresh-writer-admission-realdb.test.ts',
+    sentinel: 'recovery_archive_fresh_writer_admission_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-owned-composer-realdb.test.ts',
+    sentinel: 'recovery_archive_owned_composer_realdb_harness_missing_database_url',
+  },
+  {
+    file: 'tests/integration/multitable-recovery-archive-owned-cleanup-realdb.test.ts',
+    sentinel: 'recovery_archive_owned_cleanup_realdb_harness_missing_database_url',
+  },
+  {
     file: 'tests/integration/multitable-recovery-archive-legal-hold-authority-realdb.test.ts',
     sentinel: 'recovery_archive_legal_hold_realdb_harness_missing_database_url',
   },

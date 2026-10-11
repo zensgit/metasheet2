@@ -1380,7 +1380,7 @@ function readMissingOpenIdGovernanceHint(user: ManagedUser): string {
 function escapeCsvValue(value: unknown): string {
   const text = String(value ?? '')
   if (!/[",\n]/.test(text)) return text
-  return `"${text.replaceAll('"', '""')}"`
+  return `"${text.replace(/"/g, '""')}"`
 }
 
 function downloadText(filename: string, text: string, mimeType: string): void {

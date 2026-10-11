@@ -98,6 +98,7 @@ describe('local backup-set acceptance driver safety', () => {
     expect(names).toEqual({
       source: 'tm_local_backup_0123456789abcdef_source',
       target: 'tm_local_backup_0123456789abcdef_target',
+      staleTarget: 'tm_local_backup_0123456789abcdef_stale_target',
     })
     const target = recoveryLocalBackupDatabaseUrl(
       new URL('postgresql://tm_backup_owner:secret@127.0.0.1:55469/postgres'),
