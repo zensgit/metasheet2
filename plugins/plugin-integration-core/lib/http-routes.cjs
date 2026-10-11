@@ -571,6 +571,8 @@ const {
   PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS,
   // S3 follow-up C: the typed 503 of a refresh that could not write every project (audited `incomplete`).
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE,
+  // S3 follow-ups 2, fix round 1: 409 BUSY for a click while this process's refresh of the tenant is still running.
+  projectOverviewBusyError,
 } = require('./stock-preparation-project-overview.cjs')
 // 备料「成员与权限」(S5b, register R-39): the page's switch and its routes' pure request checks. The
 // decisions themselves (who may, which codes, which sheets) are the host's narrow members port.
@@ -4250,6 +4252,10 @@ function requireStockPreparationAudit() {
   // REFRESH_INCOMPLETE is not cleared: it is re-stamped with PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS from
   // when it ended (`incomplete: true`, which the cooled answer carries so the page never calls that overview
   // current). Every other failure still clears the stamp (409 BUSY included — nothing ran).
+  // Follow-ups 2, fix round 1: while the refresh that set it is still RUNNING the stamp carries `running: true`, and a
+  // click inside its window answers 409 BUSY (nothing done, the stamp kept) — never 200 `fresh: false`, which the page
+  // reads as "the numbers are current" although that run may still end 503 INCOMPLETE. A run that ends fresh re-stamps
+  // the same window (from its start) without `running`.
   const projectOverviewRefreshStartedAt = new Map()
   /**
    * S3 fix round 1 (R5): ONE project's overview row after an event — best-effort BY CONTRACT. Only with
@@ -9793,8 +9799,9 @@ function requireStockPreparationAudit() {
     // lock in another) answers 409 STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY at once, nothing done, and the
     // cooldown stamp is cleared like any refresh that did not complete — except (follow-ups 2, item 1) a refresh that
     // RAN and answered 503 REFRESH_INCOMPLETE: it keeps the SHORTER PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS from
-    // when it ended, and a click inside it answers `fresh: false` with `incomplete: true`. Audited `project_overview_refresh`
-    // with counts only.
+    // when it ended, and a click inside it answers `fresh: false` with `incomplete: true`. Follow-ups 2, fix round 1: a
+    // click while THIS process's refresh of the tenant is still running answers 409 BUSY (nothing done, its stamp kept) —
+    // never `fresh: false`, since that run's outcome is not known yet. Audited `project_overview_refresh` with counts only.
     async stockPreparationProjectOverviewRefresh(req, res) {
       const user = requireAccess(req, STOCK_PREP_OPERATE)
       requireProjectSheetsEnabled()
@@ -9810,6 +9817,9 @@ function requireStockPreparationAudit() {
       const stamp = projectOverviewRefreshStartedAt.get(tenantId)
       const nowMs = Date.now()
       if (stamp && nowMs - stamp.atMs < stamp.cooldownMs) {
+        // Follow-ups 2, fix round 1: this process's refresh of the tenant is still running — its outcome is not known
+        // yet, so this click is BUSY (nothing done, that run's stamp left as it is), never "fresh: false" (current).
+        if (stamp.running === true) throw projectOverviewBusyError()
         return sendOk(res, {
           fresh: false,
           cooldownSeconds: Math.round(stamp.cooldownMs / 1000),
@@ -9818,7 +9828,7 @@ function requireStockPreparationAudit() {
           ...(stamp.incomplete === true ? { incomplete: true } : {}),
         })
       }
-      projectOverviewRefreshStartedAt.set(tenantId, { atMs: nowMs, cooldownMs: PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, incomplete: false })
+      projectOverviewRefreshStartedAt.set(tenantId, { atMs: nowMs, cooldownMs: PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, incomplete: false, running: true })
       const actor = user.id || user.email
       try {
         const store = requireStockPreparationProjectOverview()
@@ -9840,6 +9850,8 @@ function requireStockPreparationAudit() {
           actor,
           detail: projectOverviewRefreshAuditDetail(result),
         })
+        // Follow-ups 2, fix round 1: the run is over and fresh — the cooldown from its start stays, no longer running.
+        projectOverviewRefreshStartedAt.set(tenantId, { atMs: nowMs, cooldownMs: PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, incomplete: false })
         return sendOk(res, { fresh: true, ...result })
       } catch (error) {
         if (error && error.code === STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE) {

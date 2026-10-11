@@ -1192,6 +1192,8 @@ module.exports = {
   PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS,
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE_CODE: REFRESH_INCOMPLETE_CODE,
   StockPreparationProjectOverviewError,
+  // S3 follow-ups 2, fix round 1: the refresh route's answer to a click while this process's refresh is still running.
+  projectOverviewBusyError: overviewBusyError,
   projectOverviewPosture,
   buildProjectOverviewDeepLink,
   buildProjectOverviewDescriptor,

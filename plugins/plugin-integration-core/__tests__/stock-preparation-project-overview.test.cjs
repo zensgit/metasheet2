@@ -2525,6 +2525,75 @@ test('O-31d (follow-ups 2, fix round 1) two failures that both stand: the warn n
   } finally { h.restore() }
 })
 
+// ── O-32 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2, fix round 1: a click while this process's refresh is still RUNNING is never told "current".
+test('O-32 (follow-ups 2, fix round 1) a click while this process\'s refresh of the tenant is still RUNNING answers 409 BUSY with no refresh IO — never 200 fresh:false ("current") ahead of a run that ends 503 INCOMPLETE; after that run a click is the INCOMPLETE cooldown; a run that ends fresh leaves the 60 s cooldown', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let hostDown = true
+    let signalEntered
+    let entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    let gate = new Promise((resolve) => { releaseGate = resolve })
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        // Held IN the run, so the clicks below land while it is still going.
+        signalEntered()
+        await gate
+        if (hostDown) throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const running = refresh(h, FLOOR)
+    await entered
+    const counts = () => [h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length]
+    const before = counts()
+    for (let click = 0; click < 2; click += 1) {
+      const during = await refresh(h, FLOOR)
+      assert.equal(during.statusCode, 409, `a click during the running refresh is BUSY, never "current": ${JSON.stringify(during.body)}`)
+      assert.equal(during.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
+    }
+    assert.deepEqual(counts(), before, 'the BUSY clicks did no registry, host, records or audit work')
+    releaseGate()
+    const first = await running
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    // After the 503 the INCOMPLETE cooldown answers — flagged, never "current".
+    const cooled = await refresh(h, FLOOR)
+    assert.equal(cooled.statusCode, 200, JSON.stringify(cooled.body))
+    assert.equal(cooled.body.data.fresh, false)
+    assert.equal(cooled.body.data.incomplete, true)
+
+    // Control: a run that ends FRESH — BUSY while it runs, then the 60 s cooldown WITHOUT `incomplete`.
+    hostDown = false
+    entered = new Promise((resolve) => { signalEntered = resolve })
+    gate = new Promise((resolve) => { releaseGate = resolve })
+    passIncompleteCooldown()
+    // PROJECT_B's row does not exist yet (its create failed), so this run creates it — held at the gate again.
+    const second = refresh(h, FLOOR)
+    await entered
+    const during = await refresh(h, FLOOR)
+    assert.equal(during.statusCode, 409, JSON.stringify(during.body))
+    releaseGate()
+    const ok = await second
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.fresh, true)
+    const cooledOk = await refresh(h, FLOOR)
+    assert.equal(cooledOk.statusCode, 200, `the run is over: a click is the success cooldown, not BUSY: ${JSON.stringify(cooledOk.body)}`)
+    assert.deepEqual(Object.keys(cooledOk.body.data).sort(), ['cooldownSeconds', 'fresh', 'retryAfterSeconds'])
+    assert.equal(cooledOk.body.data.cooldownSeconds, 60)
+    // Past the cooldown a refresh runs again (nothing is left marked running).
+    passCooldown()
+    const again = await refresh(h, FLOOR)
+    assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+    assert.equal(again.body.data.fresh, true)
+  } finally { h.restore() }
+})
+
 // S3 follow-ups 2, fix round 1 (R5): the runner's own self-tests, OUTSIDE it — synchronous, at top level, before it. A
 // failure here is an uncaught throw: this suite exits 1 even when the runner's own failure exit is broken.
 for (const [name, fn] of runnerSelfTests) {
