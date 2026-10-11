@@ -173,6 +173,26 @@ export async function recoverUnobservedProcessLogs({ repoRoot, scratchDir, name,
 // classification only: even an uppercase-looking error may contain a secret.
 export function publicBrowserFailure(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  if (record.stage === 'browser-request-failure') {
+    // Re-project even already classified child frames. Never forward request
+    // URLs, private identities, headers, payloads or arbitrary error strings.
+    const apiKeys = ['login', 'me', 'dingTalkProbe', 'plugins', 'todoCount', 'approvalCapability', 'methodProbe',
+      'adapters', 'externalSystems', 'stagingDescriptors', 'tableActions', 'hubOverview',
+      'readSourceConfigs', 'readSourceCompositions', 'manifest', 'preflight', 'sourceBinding',
+      'roleCatalog', 'dataSources', 'plans', 'projects', 'operatorProjects', 'handoff', 'preview',
+      'automationOptions', 'automationGrants', 'automationRequests', 'automationScheduleActivation',
+      'editorContext', 'editorFields', 'editorView', 'editorBases', 'editorAiAvailability', 'editorMentionSummary',
+      'editorUnreadCount', 'editorSubscriptionCount', 'editorDingtalkGroups', 'editorApprovalTemplates',
+      'editorSheets', 'editorRules', 'conflictPolicies', 'validate', 'confirmSample', 'approve', 'activate',
+      'k3Approve', 'k3Read', 'yidaBoard', 'automationGrantDetail', 'automationRequestDetail', 'automationRevoke']
+    const failures = ['ABORTED', 'FAILED', 'BLOCKED_BY_CLIENT', 'CONNECTION_RESET', 'CONNECTION_CLOSED',
+      'CONNECTION_REFUSED', 'EMPTY_RESPONSE', 'TIMED_OUT', 'NETWORK_CHANGED', 'NAME_NOT_RESOLVED', 'INTERNET_DISCONNECTED']
+    return { stage: 'browser-request-failure',
+      method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(record.method) ? record.method : 'OTHER',
+      apiKey: apiKeys.includes(record.apiKey) ? record.apiKey : 'unknown',
+      surface: ['API', 'SOCKET', 'DOCUMENT', 'ASSET'].includes(record.surface) ? record.surface : 'OTHER',
+      failure: failures.includes(record.failure) ? record.failure : 'OTHER' }
+  }
   if (record.stage === 'browser-api-denied') {
     const categories = ['OTHER_STOCK_PREPARATION', 'OTHER_MULTITABLE', 'OTHER_API',
       'EDITOR_RULE_STATS', 'EDITOR_RULE_LOGS']

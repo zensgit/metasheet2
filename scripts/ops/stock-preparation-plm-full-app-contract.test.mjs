@@ -636,6 +636,9 @@ test('actual stage runner publishes closed browser failure diagnostics without p
   const f = await ownedLogFixture()
   const secret = 'SYNTHETIC_PRIVATE_VALUE'
   const records = [
+    { stage: 'browser-request-failure', method: 'GET', apiKey: 'automationOptions', surface: 'API', failure: 'ABORTED',
+      url: secret, headers: { authorization: secret }, body: secret, requestSequence: secret, errorCode: secret },
+    { stage: 'browser-request-failure', method: secret, apiKey: secret, surface: secret, failure: secret },
     { stage: 'browser-api-denied', routeCategory: 'OTHER_STOCK_PREPARATION', method: 'GET', path: secret },
     { stage: 'isolated-browser-failed', diagnostic: 'APP_BROWSER_TOPBAR_UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS', payload: secret },
     { stage: 'isolated-browser-failed', diagnostic: 'APP_BROWSER_TOPBAR_' + secret },
@@ -645,10 +648,12 @@ test('actual stage runner publishes closed browser failure diagnostics without p
     `for (const record of ${JSON.stringify(records)}) console.log('PLM_FULL_APP_PROBE ' + JSON.stringify(record)); process.exitCode = 1`],
   cleanEnvironment(process.env))
   assert.equal(result.code, 1)
-  assert.equal(result.markers.length, 4)
+  assert.equal(result.markers.length, 6)
   const frames = f.emitted.filter(line => line.startsWith('PLM_FULL_APP_PROBE '))
     .map(line => JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)))
   assert.deepEqual(frames, [
+    { stage: 'browser-request-failure', method: 'GET', apiKey: 'automationOptions', surface: 'API', failure: 'ABORTED' },
+    { stage: 'browser-request-failure', method: 'OTHER', apiKey: 'unknown', surface: 'OTHER', failure: 'OTHER' },
     { stage: 'browser-api-denied', routeCategory: 'OTHER_STOCK_PREPARATION', method: 'GET' },
     { stage: 'isolated-browser-failed', phase: 'TOPBAR', reason: 'UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS' },
     { stage: 'isolated-browser-failed', phase: 'TOPBAR', reason: 'OTHER' },
@@ -2158,6 +2163,39 @@ const diagnosticStages = ['REQUEST_FAILED', 'API_ROUTE', 'API_BODY', 'API_DETAIL
   'BUNDLE_SHAPE', 'BUNDLE_BODY', 'BUNDLE_HASH', 'EXPLICIT_STATUS', 'OTHER']
 const diagnosticFailures = ['ABORTED', 'FAILED', 'BLOCKED_BY_CLIENT', 'CONNECTION_RESET', 'CONNECTION_CLOSED',
   'CONNECTION_REFUSED', 'EMPTY_RESPONSE', 'TIMED_OUT', 'NETWORK_CHANGED', 'NAME_NOT_RESOLVED', 'INTERNET_DISCONNECTED']
+
+function assertPublicRequestFailureProjection(project) {
+  const defaults = { stage: 'browser-request-failure', method: 'OTHER', apiKey: 'unknown', surface: 'OTHER', failure: 'OTHER' }
+  const fields = { method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+    apiKey: diagnosticApiKeys, surface: ['API', 'SOCKET', 'DOCUMENT', 'ASSET'], failure: diagnosticFailures }
+  for (const [field, values] of Object.entries(fields)) {
+    for (const value of values) assert.deepEqual(project({ stage: defaults.stage, [field]: value }), { ...defaults, [field]: value })
+    for (const value of [undefined, null, 1, {}, [], 'PRIVATE_SENTINEL', 'GET_PRIVATE_SENTINEL', ' ABORTED', 'ABORTED_PRIVATE_SENTINEL']) {
+      assert.deepEqual(project({ stage: defaults.stage, [field]: value }), defaults)
+    }
+  }
+  assert.deepEqual(project({ ...defaults, url: 'PRIVATE_SENTINEL', headers: { authorization: 'PRIVATE_SENTINEL' },
+    body: 'PRIVATE_SENTINEL', errorCode: 'PRIVATE_SENTINEL', requestSequence: 'PRIVATE_SENTINEL' }), defaults)
+}
+
+test('public request failure projection preserves only finite classifications from the real browser producer', () => {
+  assertPublicRequestFailureProjection(publicBrowserFailure)
+})
+
+test('removing each public request classification guard makes its real projection contract fail', () => {
+  const source = publicBrowserFailure.toString()
+  for (const field of ['method', 'apiKey', 'surface', 'failure']) {
+    const expression = new RegExp(`[^\\n]+\\.includes\\(record\\.${field}\\) \\? record\\.${field} : '[^']+'`)
+    const line = source.split('\n').find(value => expression.test(value))
+    assert(line, 'each classification must have its own guard')
+    const changed = line.replace(/: .*\.includes\(record\.(\w+)\) \? record\.\1 : '[^']+'/, ': record.$1')
+    assert.notEqual(changed, line)
+    const mutant = runInNewContext('(' + source.replace(line, changed) + ')', Object.create(null),
+      { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } })
+    const project = input => JSON.parse(JSON.stringify(mutant(input)))
+    assert.throws(() => assertPublicRequestFailureProjection(project), assert.AssertionError)
+  }
+})
 const diagnosticStaticCodes = ['UNEXPECTED_API_RESPONSE', 'AUTOMATION_DETAIL_NOT_CORRELATED',
   'AUTOMATION_DETAIL_REFUSAL_INVALID', 'AUTOMATION_EMPTY_PROJECT_REFUSAL_REQUIRED', 'AUTOMATION_DUPLICATE_BOARD_REFUSAL',
   'EXACT_PLUGIN_LIST_REQUIRED', 'EXACT_INTEGRATION_PLUGIN_ACTIVE_REQUIRED', 'TODO_COUNT_DEGRADED',
