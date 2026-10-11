@@ -218,14 +218,21 @@ export type TaskStatusFilter = (typeof TASK_STATUS_FILTERS)[number]
 // RULED(2026-10-09): G2-core — the status filter is orthogonal to the five views, and the list and
 // its total share one condition. ASSUMPTION(task-g2): an absent status is `all` (the rows before
 // G2-core; gate 19 and gate 4 row sets unchanged); whether the server default becomes `open` is an
-// owner question (design task-g2-core-design-20261011.md §5). The status text is a literal taken from
-// the closed set after validation, so the bind slots stay `$1`/`$2` and `pageClause` numbers on.
+// owner question (design task-g2-core-design-20261011.md §5). Each clause is a fixed string chosen
+// by the closed-set value after validation: no request text reaches the SQL, the bind slots stay
+// `$1`/`$2` and `pageClause` numbers on.
 // The clause is added here, after the view condition, and not in `buildTaskScopeCondition`: that
 // builder is the org single-emission point and `/pending` derives from it.
+const TASK_STATUS_CLAUSE: Readonly<Record<TaskStatusFilter, string>> = {
+  open: " AND tasks.status = 'open'",
+  done: " AND tasks.status = 'done'",
+  all: '',
+}
+
 function taskStatusClause(status: string | undefined): string {
   const value = status === undefined ? 'all' : status
   if (!TASK_STATUS_FILTERS.includes(value as TaskStatusFilter)) fail(422, 'INVALID_STATUS')
-  return value === 'all' ? '' : ` AND tasks.status = '${value}'`
+  return TASK_STATUS_CLAUSE[value as TaskStatusFilter]
 }
 
 function taskViewCondition(input: { orgId: string; actorId: string; view: string; status?: string }) {

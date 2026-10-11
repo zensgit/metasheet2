@@ -228,7 +228,7 @@ describe('G2-core negative controls (source mutants)', () => {
 
   it('g2core|nc1|deleting the status clause: the done list carries open rows and the total is wrong', () => {
     const want = expected(view, 'done')
-    runSourceMutant(RECORDS_FILE, "return value === 'all' ? '' : ` AND tasks.status = '${value}'`", "return ''", `
+    runSourceMutant(RECORDS_FILE, 'return TASK_STATUS_CLAUSE[value as TaskStatusFilter]', "return ''", `
       const { listTasks, countTasks } = await import(${JSON.stringify(RECORDS_FILE)})
       const rows = await listTasks({ orgId: ${JSON.stringify(orgId)}, actorId: ${JSON.stringify(me.userId)}, view: ${JSON.stringify(view)}, status: 'done' })
       const total = await countTasks({ orgId: ${JSON.stringify(orgId)}, actorId: ${JSON.stringify(me.userId)}, view: ${JSON.stringify(view)}, status: 'done' })
