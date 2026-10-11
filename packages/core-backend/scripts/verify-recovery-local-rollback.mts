@@ -23,28 +23,36 @@ export interface ManualRollbackResult {
 }
 
 async function snapshot(pool: Pool, sheetId: string) {
+  const scopedTables = ['meta_sheets', 'meta_records', 'meta_record_revisions', 'multitable_attachments',
+    'meta_record_history_operations', 'meta_record_history_operation_members']
   const tables = await pool.query<{ tablename: string }>(
-    `SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public'
-       AND left(tablename, length('meta_recovery_'))='meta_recovery_' ORDER BY tablename`,
+    `SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname='public' ORDER BY tablename`,
   )
   const names = tables.rows.map(row => row.tablename)
   for (const required of ['meta_recovery_archives', 'meta_recovery_archive_jobs',
-    'meta_recovery_archive_job_chunks', 'meta_recovery_archive_nonce_reservations']) {
+    'meta_recovery_archive_job_chunks', 'meta_recovery_archive_nonce_reservations', ...scopedTables]) {
     assert.ok(names.includes(required), 'RECOVERY_LOCAL_ROLLBACK_TABLE_MISSING')
   }
   const result: Array<{ table: string; count: number; digest: string }> = []
-  for (const table of [...names, 'meta_records', 'meta_record_revisions', 'multitable_attachments']) {
+  for (const table of [...names.filter(name => name.startsWith('meta_recovery_')), ...scopedTables]) {
     assert.match(table, /^(?:meta|multitable)_[a-z0-9_]+$/)
-    const scoped = table === 'meta_records' || table === 'meta_record_revisions' || table === 'multitable_attachments'
+    const scoped = scopedTables.includes(table)
     const rows = await pool.query(
-      `SELECT to_jsonb(entry) AS value FROM public."${table}" entry
-        ${scoped ? 'WHERE sheet_id=$1' : ''} ORDER BY to_jsonb(entry)::text`,
+      `SELECT to_jsonb(entry)::text AS value FROM public."${table}" entry
+        ${scoped ? `WHERE ${table === 'meta_sheets' ? 'id' : 'sheet_id'}=$1` : ''} ORDER BY to_jsonb(entry)::text`,
       scoped ? [sheetId] : [],
     )
+    if (table === 'meta_sheets') assert.equal(rows.rows.length, 1, 'RECOVERY_LOCAL_ROLLBACK_STATE_MISSING')
     result.push({ table, count: rows.rows.length,
       digest: createHash('sha256').update(JSON.stringify(rows.rows)).digest('hex') })
   }
-  return result
+  const sequence = await pool.query<{ last_value: string; is_called: boolean }>(
+    'SELECT last_value::text, is_called FROM public.meta_record_chain_seq',
+  )
+  assert.equal(sequence.rows.length, 1, 'RECOVERY_LOCAL_ROLLBACK_STATE_MISSING')
+  assert.equal(typeof sequence.rows[0].last_value, 'string', 'RECOVERY_LOCAL_ROLLBACK_STATE_MISSING')
+  assert.equal(typeof sequence.rows[0].is_called, 'boolean', 'RECOVERY_LOCAL_ROLLBACK_STATE_MISSING')
+  return { state: result, sequence: sequence.rows }
 }
 
 async function snapshotAttachmentFiles(root: string) {
@@ -140,7 +148,7 @@ async function run(input: ManualRollbackInput): Promise<ManualRollbackResult> {
       'RECOVERY_LOCAL_ROLLBACK_UNEXPECTED_WRITE')
     assert.deepEqual(await snapshotAttachmentFiles(process.env.ATTACHMENT_PATH!), beforeAttachmentFiles,
       'RECOVERY_LOCAL_ROLLBACK_ATTACHMENT_FILES_CHANGED')
-    return { responses, tableCount: before.length }
+    return { responses, tableCount: before.state.length }
   } finally {
     try { await server?.stop('RECOVERY_LOCAL_ROLLBACK_CLEANUP') }
     finally { await pool.end() }
