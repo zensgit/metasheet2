@@ -228,7 +228,9 @@ test('finite removals of actual OFF request/response/console guards make indepen
     'packages/core-backend/tests/utils/stock-preparation-yida-initialization-full-app.ts']) {
     const browser = read(relative)
     for (const call of ['projectSheetsOff.accept(request)', 'projectSheetsOff.response(response.request(), response.status(), await response.json())',
-      'projectSheetsOff.consoleRefusal(', 'projectSheetsOff.verify()']) assert(browser.includes(call))
+      'projectSheetsOff.consoleRefusal(', 'projectSheetsOff.verify()', 'membersOff.accept(request)',
+      'membersOff.response(response.request(), response.status(), await response.json())',
+      'membersOff.consoleRefusal(', 'membersOff.verify()']) assert(browser.includes(call))
     assert(browser.includes('await route.continue()'))
     assert(!/route\.fulfill\(/u.test(browser))
   }
@@ -518,6 +520,92 @@ test('in-memory removal of initialization request and receipt guards makes their
     assert.throws(() => validateBrowserProcessEvidence(mutation.bad()))
     assert.throws(() => assert.throws(() => mutated(mutation.bad())), assert.AssertionError)
     console.log('YIDA_INIT_MUTATION ' + mutation.name + ': original rejects; removed guard rejection contract RED')
+  }
+})
+
+function membersOffFixture(module, inputOverrides = {}) {
+  const input = { origin: 'http://127.0.0.1:43210', tenantId: 'synthetic-tenant', token: () => 'synthetic-token',
+    phase: () => 'TOPBAR', allowedPhases: ['TOPBAR'], ...inputOverrides }
+  const request = (overrides = {}) => ({
+    url: () => overrides.url ?? input.origin + '/api/integration/stock-preparation/members',
+    method: () => overrides.method ?? 'GET', postData: () => overrides.body ?? null,
+    headers: () => overrides.headers ?? { authorization: 'Bearer synthetic-token', 'x-tenant-id': input.tenantId },
+  })
+  return { window: module.createMembersOffWindow(input), request }
+}
+const membersOffPayload = { ok: false, error: { code: 'STOCK_PREP_MEMBERS_PAGE_DISABLED' } }
+const membersOffConsole = 'Failed to load resource: the server responded with a status of 404 (Not Found)'
+
+test('members OFF observer requires the real correlated request, refusal and console event', () => {
+  const module = loadMainMigrationContract(), f = membersOffFixture(module), request = f.request()
+  assert(f.window.isCandidate(request))
+  assert.throws(() => f.window.verify())
+  f.window.accept(request)
+  assert.throws(() => f.window.accept(request))
+  assert.throws(() => f.window.response(f.request(), 404, membersOffPayload))
+  assert.throws(() => f.window.verify())
+  // Chromium's console event may arrive before JSON parsing. Final verification
+  // must still require the exact original request's validated response.
+  assert.equal(f.window.consoleRefusal(request.url(), membersOffConsole), true)
+  assert.throws(() => f.window.verify())
+  f.window.response(request, 404, membersOffPayload)
+  f.window.verify()
+  assert.deepEqual(f.window.counts, { requests: 1, responses: 1, consoleErrors: 1 })
+  assert.throws(() => f.window.response(request, 404, membersOffPayload))
+  assert.throws(() => f.window.consoleRefusal(request.url(), membersOffConsole))
+  assert.equal(f.window.consoleRefusal(request.url() + '/other', membersOffConsole), false)
+  const bounded = membersOffFixture(module)
+  for (let i = 0; i < 64; i++) bounded.window.accept(bounded.request())
+  assert.throws(() => bounded.window.accept(bounded.request()))
+})
+
+test('members OFF observer rejects writes, foreign scope and any non-OFF refusal', () => {
+  const module = loadMainMigrationContract()
+  for (const options of [{ method: 'POST' }, { body: '{}' },
+    { url: 'http://foreign.invalid/api/integration/stock-preparation/members' },
+    { url: 'http://127.0.0.1:43210/api/integration/stock-preparation/members?tenantId=foreign' },
+    { url: 'http://127.0.0.1:43210/api/integration/stock-preparation/members#fragment' },
+    { url: 'http://127.0.0.1:43210/api/integration/stock-preparation/members/custom-roles' },
+    { headers: {} }, { headers: { authorization: 'Bearer other', 'x-tenant-id': 'synthetic-tenant' } },
+    ...['x-tenant-id', 'x-workspace-id', 'x-user-role', 'x-permissions'].map(key => ({ headers: {
+      authorization: 'Bearer synthetic-token', 'x-tenant-id': 'synthetic-tenant', [key]: 'foreign',
+    } }))]) {
+    const f = membersOffFixture(module)
+    assert.throws(() => f.window.accept(f.request(options)))
+  }
+  const wrongPhase = membersOffFixture(module, { phase: () => 'YIDA_OWNER_DEFAULT_OFF' })
+  assert.throws(() => wrongPhase.window.accept(wrongPhase.request()))
+  for (const [status, payload] of [[200, membersOffPayload], [403, membersOffPayload], [500, membersOffPayload],
+    [404, null], [404, []], [404, { ok: true, error: membersOffPayload.error }],
+    [404, { ok: false, error: { code: 'OTHER_DISABLED' } }]]) {
+    const f = membersOffFixture(module), request = f.request(); f.window.accept(request)
+    assert.throws(() => f.window.response(request, status, payload))
+  }
+  const f = membersOffFixture(module), request = f.request(); f.window.accept(request)
+  assert.throws(() => f.window.consoleRefusal(request.url(), membersOffConsole + ' extra'))
+})
+
+test('members OFF finite guard removals are killed by independent matching negative controls', () => {
+  const cases = [
+    ["assert(input.allowedPhases.includes(input.phase()), 'APP_BROWSER_MEMBERS_OFF_PHASE_DENIED')", { phase: () => 'SEND' }, {}, 'accept'],
+    ["assert(url.origin === input.origin && !url.username && !url.password && !url.hash,\n      'APP_BROWSER_MEMBERS_OFF_ORIGIN_DENIED')", {}, { url: 'http://foreign.invalid/api/integration/stock-preparation/members' }, 'accept'],
+    ["assert(url.pathname === endpoint && !url.search, 'APP_BROWSER_MEMBERS_OFF_PATH_DENIED')", {}, { url: 'http://127.0.0.1:43210/other' }, 'accept'],
+    ["assert(request.method() === 'GET' && request.postData() === null, 'APP_BROWSER_MEMBERS_OFF_READ_ONLY')", {}, { method: 'POST' }, 'accept'],
+    ["assert(input.token() && headers.authorization === 'Bearer ' + input.token(), 'APP_BROWSER_MEMBERS_OFF_SESSION_REQUIRED')", {}, { headers: { authorization: 'Bearer foreign', 'x-tenant-id': 'synthetic-tenant' } }, 'accept'],
+    ["assert(headers['x-tenant-id'] === input.tenantId && !('x-workspace-id' in headers)\n      && !('x-user-role' in headers) && !('x-permissions' in headers), 'APP_BROWSER_MEMBERS_OFF_SCOPE_DENIED')", {}, { headers: { authorization: 'Bearer synthetic-token', 'x-tenant-id': 'foreign' } }, 'accept'],
+    ["assert.equal(status, 404, 'APP_BROWSER_MEMBERS_OFF_STATUS_REQUIRED')", {}, {}, 'status'],
+    ["assert(envelope.ok === false && envelope.error?.code === 'STOCK_PREP_MEMBERS_PAGE_DISABLED',\n      'APP_BROWSER_MEMBERS_OFF_CODE_REQUIRED')", {}, {}, 'code'],
+  ]
+  for (const [guard, input, options, operation] of cases) {
+    const attempt = module => {
+      const f = membersOffFixture(module, input), request = f.request(options)
+      if (operation === 'accept') return f.window.accept(request)
+      f.window.accept(request)
+      return f.window.response(request, operation === 'status' ? 200 : 404,
+        operation === 'code' ? { ok: false, error: { code: 'OTHER_DISABLED' } } : membersOffPayload)
+    }
+    assert.throws(() => attempt(loadMainMigrationContract()))
+    assert.throws(() => assert.throws(() => attempt(removeMainContractGuard(guard))), { code: 'ERR_ASSERTION' })
   }
 })
 
@@ -2264,26 +2352,30 @@ function browserDispatchWindows(source) {
     const branch = condition => unique(statements,
       node => ts.isIfStatement(node) && text(node.expression) === condition, kind + ' branch must be unique: ' + condition)
     const precise = branch(candidate), owner = branch(ownerCondition)
+    const members = branch(kind === 'request' ? 'membersOff.isCandidate(request)' : 'membersOff.isCandidate(response.request())')
     const business = kind === 'request'
       ? unique(statements, node => ts.isIfStatement(node) && text(node.expression) === "target.pathname.startsWith('/api/')"
         && node.thenStatement.statements?.[0] && text(node.thenStatement.statements[0]) === counter,
       'the original business request counter must be anchored to its actual API branch')
       : unique(statements, node => ts.isExpressionStatement(node) && text(node) === counter,
         'the original business response counter must be a unique listener-level statement')
-    for (const [label, node] of [['precise', precise], ['owner', owner]]) {
+    for (const [label, node] of [['precise', precise], ['members', members], ['owner', owner]]) {
       assert(ts.isBlock(node.thenStatement) && !node.elseStatement, kind + ' ' + label + ' must be a separate closed branch')
       assert(ts.isReturnStatement(node.thenStatement.statements.at(-1)), kind + ' ' + label + ' must return before business dispatch')
       assert(node.end < business.pos, kind + ' ' + label + ' must precede the original business counter')
     }
     assert.doesNotMatch(text(owner), /counts\.api(?:Requests|Responses)\s*\+=/u)
     assert.equal((text(precise).match(new RegExp(counter.replaceAll('.', '\\.').replaceAll('+', '\\+'), 'gu')) ?? []).length, 1)
-    windows[kind] = { precise, owner, business, statements }
+    assert.equal((text(members).match(new RegExp(counter.replaceAll('.', '\\.').replaceAll('+', '\\+'), 'gu')) ?? []).length, 1)
+    windows[kind] = { precise, members, owner, business, statements }
   }
   const responseStatements = windows.response.statements
   const beforeBusiness = responseStatements.slice(0, responseStatements.indexOf(windows.response.business))
-    .filter(node => node !== windows.response.precise).map(text).join('\n')
+    .filter(node => node !== windows.response.precise && node !== windows.response.members).map(text).join('\n')
   assert.equal((text(windows.response.precise).match(/response\.json\(\)/gu) ?? []).length, 1,
     'only the precise project-sheets OFF branch may read its correlated refusal body')
+  assert.equal((text(windows.response.members).match(/response\.json\(\)/gu) ?? []).length, 1,
+    'only the precise members OFF branch may read its correlated refusal body')
   assert.doesNotMatch(beforeBusiness, /response\.json\(\)/u, 'other pre-business branches must not reread API JSON')
   return { ...nodes, ...windows, responses: text(nodes.response),
     apiResponses: responseStatements.slice(responseStatements.indexOf(windows.response.business)).map(text).join('\n') }
@@ -2329,13 +2421,16 @@ async function assertActualBrowserOffDispatch(source) {
   assert.equal(catalogs.length, 1)
   const apiPaths = Function('return ' + compileText(catalogs[0].initializer.getText(file)))()
   const ownerHelper = loadOwnerOffHelper()
-  for (const owner of [false, true]) {
-    const phase = owner ? 'YIDA_OWNER_DEFAULT_OFF' : 'YIDA_BOARD_NAVIGATION'
+  for (const mode of ['project', 'owner', 'members']) {
+    const owner = mode === 'owner', members = mode === 'members'
+    const phase = owner ? 'YIDA_OWNER_DEFAULT_OFF' : members ? 'TOPBAR' : 'YIDA_BOARD_NAVIGATION'
     const fixture = mainOffWindow(loadMainMigrationContract(), { origin: 'http://127.0.0.1:8910',
       phase: () => phase, allowedPhases: ['YIDA_BOARD_NAVIGATION'] })
     const counts = { apiRequests: 0, apiResponses: 0, forbiddenRequests: 0 }, notes = [], pendingChecks = new Set()
     const ownerWindow = freshOwnerOffWindow(ownerHelper), successes = { operatorProjects: 0 }
+    const memberFixture = membersOffFixture(loadMainMigrationContract(), { origin: fixture.input.origin })
     const bindings = { URL, phase, counts, pendingChecks, successes, apiPaths, projectSheetsOff: fixture.window,
+      membersOff: memberFixture.window,
       ownerOffPrefix: ownerHelper.ownerOffPrefix, yidaOwnerOffWindow: ownerWindow, uiOrigin: fixture.input.origin,
       yidaLocalWindow: false, classify: () => 'operatorProjects', allowedApi: () => true,
       note: code => notes.push(code), check: (ok, code) => assert(ok, code), monitorTransport: () => {},
@@ -2361,7 +2456,13 @@ async function assertActualBrowserOffDispatch(source) {
       assert.equal(reads, 1, 'the actual dispatched response must have exactly one body reader')
       assert.deepEqual(notes, [], 'an admitted closed window must not fall into ordinary business diagnostics')
     }
-    if (owner) {
+    if (members) {
+      const request = memberFixture.request()
+      await observe(request, 404, membersOffPayload)
+      assert(memberFixture.window.consoleRefusal(request.url(), membersOffConsole))
+      memberFixture.window.verify()
+      assert.deepEqual(counts, { apiRequests: 1, apiResponses: 1, forbiddenRequests: 0 })
+    } else if (owner) {
       ownerWindow.arm()
       const request = ownerOffRequest(ownerHelper)
       await observe(request, 403)
@@ -2387,7 +2488,8 @@ test('actual browser callbacks keep precise 404 and owner OFF windows separate f
   const source = read('packages/core-backend/tests/utils/stock-preparation-plm-full-app-browser.ts')
   await assertActualBrowserOffDispatch(source)
   const nodes = browserDispatchWindows(source)
-  for (const branch of [nodes.request.precise, nodes.response.precise, nodes.request.owner, nodes.response.owner]) {
+  for (const branch of [nodes.request.precise, nodes.response.precise, nodes.request.members, nodes.response.members,
+    nodes.request.owner, nodes.response.owner]) {
     const terminal = branch.thenStatement.statements.at(-1)
     const mutant = source.slice(0, terminal.getStart(nodes.file)) + source.slice(terminal.end)
     await assert.rejects(assertActualBrowserOffDispatch(mutant), { code: 'ERR_ASSERTION' },

@@ -10,7 +10,7 @@ import type { Browser, Request, Response } from '@playwright/test'
 import type { Logger, PreviewServer } from '../../../../apps/web/node_modules/vite'
 import type { YidaInitializationState } from '../../../../apps/web/src/services/integration/yidaInitialization'
 import { ownerOffDraftBody } from './stock-preparation-yida-owner-off-full-app'
-import { createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
+import { createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
 
 export interface YidaInitializationBrowserInput {
   apiOrigin: string
@@ -209,6 +209,8 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     const projectSheetsOff = createProjectSheetsOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
       token: () => token, phase: () => projectProbePhase, projectNo: () => input.projectNo,
       allowedPhases: ['LOGIN', 'BOARD', 'RELOAD'] })
+    const membersOff = createMembersOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
+      token: () => token, phase: () => projectProbePhase, allowedPhases: ['LOGIN', 'BOARD', 'RELOAD'] })
     const native = createRequire(import.meta.url)(path.join(root, 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs')) as
       { assertBrowserNetworkIsolation(): unknown }
     native.assertBrowserNetworkIsolation()
@@ -228,7 +230,10 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
         const request = route.request(), url = new URL(request.url()), method = request.method(), headers = request.headers()
         if (url.origin !== uiOrigin) counts.externalRequests += 1
         assert(url.origin === uiOrigin && !url.username && !url.password, 'APP_BROWSER_YIDA_INIT_ORIGIN_DENIED')
-        if (projectSheetsOff.isCandidate(request)) {
+        if (membersOff.isCandidate(request)) {
+          await verifiedLogin
+          membersOff.accept(request)
+        } else if (projectSheetsOff.isCandidate(request)) {
           await verifiedLogin
           projectSheetsOff.accept(request)
         } else if (url.pathname === initializationEndpoint) {
@@ -286,6 +291,10 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     context.on('response', response => {
       const task = (async () => {
         const url = new URL(response.url())
+        if (membersOff.isCandidate(response.request())) {
+          membersOff.response(response.request(), response.status(), await response.json())
+          return
+        }
         if (projectSheetsOff.isCandidate(response.request())) {
           projectSheetsOff.response(response.request(), response.status(), await response.json())
           return
@@ -307,6 +316,8 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     const page = await context.newPage()
     page.on('pageerror', () => note('PAGE_ERROR')); page.on('console', event => {
       if (event.type() !== 'error') return
+      try { if (membersOff.consoleRefusal(event.location().url, event.text())) return }
+      catch { note('MEMBERS_OFF_CONSOLE_INVALID'); return }
       try { if (projectSheetsOff.consoleRefusal(event.location().url, event.text())) return }
       catch { note('PROJECT_SHEETS_OFF_CONSOLE_INVALID'); return }
       note('CONSOLE_ERROR')
@@ -395,6 +406,7 @@ export async function runYidaInitializationFullApp(input: YidaInitializationBrow
     assert.deepEqual(afterReload, recovered, 'APP_BROWSER_YIDA_INIT_RELOAD_CHANGED_DRAFT'); await assertCleared()
     failureScope.enter('FINISH'); window.verify(); await settled()
     projectSheetsOff.verify()
+    membersOff.verify()
     assert(counts.loginSubmissions === 1 && counts.loginResponses === 1 && counts.initializationResponses === 4
       && counts.boardResponses >= 2 && counts.bundleDocuments === 2 && [...served].filter(key => key.endsWith('.js')).length >= 2
       && [...served].some(key => key.endsWith('.css')), 'APP_BROWSER_YIDA_INIT_FULL_JOURNEY_REQUIRED')

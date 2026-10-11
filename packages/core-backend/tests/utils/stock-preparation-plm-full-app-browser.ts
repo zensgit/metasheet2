@@ -20,7 +20,7 @@ import { runConfiguredAutomationBrowser } from './stock-preparation-automation-f
 import { authorConfiguredIntervalRule, runConfiguredIntervalBrowser } from './stock-preparation-automation-interval-full-app-browser'
 import type { AutomationApiKey, AutomationCheckpoint, AutomationCheckpointReply, AutomationScenario, ConfiguredAutomationBrowserResult } from './stock-preparation-automation-full-app-browser'
 import { automationTransportKey, browserSdkDiagnosticScript, observeAutomationProxy, transportDiagnostic, transportError } from './stock-preparation-plm-full-app-transport-diagnostics'
-import { createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
+import { createMembersOffWindow, createProjectSheetsOffWindow } from './stock-preparation-main-migration-contract'
 
 export interface ConfiguredAppBrowserInput {
   apiOrigin: string
@@ -339,6 +339,9 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
       token: () => loginToken, phase: () => phase, projectNo: () => boardProject,
       allowedPhases: ['YIDA_BOARD_NAVIGATION', 'AUTOMATION_INTERVAL_EDITOR', 'AUTOMATION_MANUAL', 'AUTOMATION_INTERVAL'] })
     const wsOrigin = uiOrigin.replace(/^http:/, 'ws:')
+    const membersOff = createMembersOffWindow({ origin: uiOrigin, tenantId: input.tenantId,
+      token: () => loginToken, phase: () => phase,
+      allowedPhases: ['TOPBAR', 'EXPLICIT_TENANT_SCOPE', 'RELOAD', 'AUTOMATION_INTERVAL_EDITOR'] })
 
     phase = 'BROWSER'
     progress(phase)
@@ -451,6 +454,12 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     await context.route('**/*', async route => {
       const request = route.request()
       const target = new URL(request.url())
+      if (membersOff.isCandidate(request)) {
+        try { membersOff.accept(request) }
+        catch { counts.forbiddenRequests += 1; note('MEMBERS_OFF_REQUEST_DENIED'); await route.abort('blockedbyclient'); return }
+        counts.apiRequests += 1
+        await route.continue(); return
+      }
       if (projectSheetsOff.isCandidate(request)) {
         try { projectSheetsOff.accept(request) }
         catch { counts.forbiddenRequests += 1; note('PROJECT_SHEETS_OFF_REQUEST_DENIED'); await route.abort('blockedbyclient'); return }
@@ -645,6 +654,14 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     context.on('response', response => {
       monitorTransport(response.request(), 'HEADERS', response.status())
       const target = new URL(response.url())
+      if (membersOff.isCandidate(response.request())) {
+        counts.apiResponses += 1
+        const task = (async () => {
+          membersOff.response(response.request(), response.status(), await response.json())
+        })().catch(() => note('MEMBERS_OFF_RESPONSE_INVALID'))
+        pendingChecks.add(task); void task.finally(() => pendingChecks.delete(task))
+        return
+      }
       if (projectSheetsOff.isCandidate(response.request())) {
         counts.apiResponses += 1
         const task = (async () => {
@@ -779,6 +796,8 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
     page.on('pageerror', () => { counts.pageErrors += 1; note('PAGE_ERROR') })
     page.on('console', message => {
       if (message.type() !== 'error') return
+      try { if (membersOff.consoleRefusal(message.location().url, message.text())) return }
+      catch { counts.consoleErrors += 1; note('MEMBERS_OFF_CONSOLE_INVALID'); return }
       try { if (projectSheetsOff.consoleRefusal(message.location().url, message.text())) return }
       catch { counts.consoleErrors += 1; note('PROJECT_SHEETS_OFF_CONSOLE_INVALID'); return }
       if (phase === 'YIDA_OWNER_DEFAULT_OFF' && yidaOwnerOffWindow) {
@@ -1318,6 +1337,7 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
       && expectedWrites.size === 0 && canceledActions === 5, 'EXACT_WRITE_COUNTS_REQUIRED')
     check(counts.apiRequests === counts.apiResponses && counts.viteErrors === 0 && faults.length === 0, 'FINAL_NETWORK_FAILURE')
     projectSheetsOff.verify()
+    membersOff.verify()
     check(bundleDocumentResponses >= 3 && counts.viteHmrConnections === 0
       && [...bundleServedFiles].filter(file => file.endsWith('.js')).length >= 2
       && [...bundleServedFiles].some(file => file.endsWith('.css')), 'REAL_PRODUCTION_BUNDLE_NOT_EXERCISED')
@@ -1336,6 +1356,7 @@ export async function runConfiguredAppBrowser(input: ConfiguredAppBrowserInput,
         managementScopeHeadersAbsent: true, reloadPersisted: true, responseStubs: 0, storageInjections: 0,
         sourceIoPostCount: 2, forbiddenBusinessWriteRequests: 0 },
       counts: { ...counts, apiSuccesses: successes, writes: writeCounts, canceledActions,
+        membersOff: membersOff.counts,
         bundleDocumentResponses, bundleServedFileCount: bundleServedFiles.size,
         scopeObservations: observedScopes.length,
         shellWorkspaceNull: observedScopes.every(scope => scope.workspaceNull),
