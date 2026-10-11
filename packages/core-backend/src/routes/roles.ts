@@ -67,6 +67,16 @@ function sendRolePermissionRequestError(res: Response, error: RolePermissionRequ
   })
 }
 
+/**
+ * A NEW role id (POST) must be visibly what it is: non-empty, equal to its own `trim()`
+ * (which covers U+FEFF, U+3000, NBSP and every other Unicode space), and free of control
+ * (Cc) and format (Cf — zero-width, bidi) characters anywhere inside.
+ */
+function isWellFormedNewRoleId(id: string): boolean {
+  if (!id || id !== id.trim()) return false
+  return !/[\p{Cc}\p{Cf}]/u.test(id)
+}
+
 /** Keep log tokens to a conservative charset — a role id is caller-controlled text. */
 function logToken(value: unknown): string {
   const normalized = String(value ?? '').replace(/[^A-Za-z0-9_.:*-]/g, '_').slice(0, 64)
@@ -576,6 +586,21 @@ export function rolesRouter(): Router {
     const id = String(req.body?.id || `role_${Date.now()}`)
     const name = req.body?.name || 'unnamed'
     const actorId = req.user?.id?.toString()
+    // A role id is born exactly as sent and `roles.id` carries no CHECK, so an id that only
+    // differs from an existing one by invisible padding (`'attendance_admin '`, a leading
+    // U+FEFF) or an embedded format/control character renders as a duplicate of the real
+    // role. Any client that trims before addressing a role then hits the REAL one — and
+    // deleting a namespace main-admin role takes its memberships and audience with it. Refuse
+    // such ids at birth; ids already stored are left for an exact-id cleanup.
+    if (!isWellFormedNewRoleId(id)) {
+      const error = new RolePermissionRequestError(
+        400,
+        'ROLE_ID_INVALID',
+        'role id must be non-empty, without leading/trailing whitespace or invisible format/control characters',
+      )
+      await recordRoleWriteRefusal({ action: 'create', actorId, roleId: id, error })
+      return sendRolePermissionRequestError(res, error)
+    }
     const perms: string[] = Array.isArray(req.body?.permissions)
       ? normalizePermissionCodes(req.body.permissions as unknown[], { strict: false })
       : []

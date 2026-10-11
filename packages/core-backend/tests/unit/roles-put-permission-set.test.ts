@@ -1137,6 +1137,36 @@ describe('POST /api/roles — the same authority boundary as PUT', () => {
       .toEqual(['user-a', 'user-b'])
   })
 
+  it('LOOK-ALIKE IDS: an id with invisible padding or a format character is refused 400 before any row is written — even with NO codes', async () => {
+    const db = seed()
+    wire(db)
+    // Each of these renders as `attendance_admin` in the role list; a client that trims
+    // before addressing it would hit the real namespace main-admin role.
+    const lookAlikes = [
+      'attendance_admin ',
+      '﻿attendance_admin',
+      '　attendance_admin',
+      'attendance_admin ',
+      'attendance​_admin',
+      '   ',
+    ]
+    for (const id of lookAlikes) {
+      const res = mockResponse()
+      await postRole({ id, name: '考勤管理员' }, res)
+      expect(res.statusCode, JSON.stringify(id)).toBe(400)
+      expect((res.body as { error: { code: string } }).error.code).toBe('ROLE_ID_INVALID')
+      expect(db.nameOf(id)).toBeUndefined()
+    }
+    expect(writeAuditEntries()).toEqual([])
+    expect(deniedAuditEntries().map((entry) => entry.action)).toEqual(lookAlikes.map(() => 'create_denied'))
+
+    // POSITIVE CONTROL: a plain id with no codes is still created.
+    const ok = mockResponse()
+    await postRole({ id: 'attendance_viewer', name: '考勤查看' }, ok)
+    expect(ok.statusCode).toBe(200)
+    expect(db.nameOf('attendance_viewer')).toBe('考勤查看')
+  })
+
   it('POST-COMMIT: POST answers when its fan-out AND its read-back fail (both are past the commit)', async () => {
     const db = seed({
       failOn: (sql) => /^SELECT user_id FROM user_roles/i.test(sql.trim())
