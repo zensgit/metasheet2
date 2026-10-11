@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§201）**：Automation `130a9341c` 普通检查 47/47，但完整 run `38175124419` 已失败：manual 成功，interval 的宜搭默认 OFF 阶段出现 POST / ABORTED。独立合成复现已发现“完整 no-store 分段响应、流读取到 EOF、未取消，Chromium 仍报失败”的现象，原生流读取也复现，上游有同类问题；尚未证明本次 CI 的全部内部因果链或得到安全修复。未改成无界正文读取、未忽略失败，#6337 保持草稿。宜搭 #6315 的历史完整 CI 成功不能替代当前 head 验收；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§202）**：Automation 当前提交为 `0216e45b4`，仅新增真实 SDK 的累计响应字节边界测试，本地整文件 25/25，当前 head 的 Integration Guard 成功；完整应用仍未通过。上一提交 `130a9341c` 的完整 run `38175124419` 失败：manual 成功，interval 的宜搭默认 OFF 阶段出现 POST / ABORTED。独立合成复现已发现“完整 no-store 分段响应、流读取到 EOF、未取消，Chromium 仍报失败”的现象，但尚未证明本次 CI 的全部内部因果链或得到安全修复。未改成无界正文读取、未忽略失败，#6337 保持草稿。历史完整 CI 或本次普通检查不能替代当前 head 完整验收；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2271,3 +2271,11 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 上游 [Playwright #42742](https://github.com/microsoft/playwright/issues/42742) 记录了同类 no-store、分段正文、流读取 EOF 与 Chromium 原生失败不一致的问题，并有浏览器对照；这是关联证据，不代替本仓当前版本复现，也不证明升级依赖即可修复。保留 no-store、实际流式字节限制、取消和身份失效拒绝；不采用无界 text/json、clone 双路缓存、忽略 ABORTED、重跑碰绿或放宽成功门。
 - 第三组新副本控制服务端响应头：SDK + no-store 的分段延迟响应仍报失败；SDK + no-cache 四项以及原生 text + no-store 四项均原请求完成。共 12 个正常正文均完整，另一个主动取消正控制仍失败。stdout SHA `7f36292fddc636b39b911f340398f0980355f0e88334dc73e09b65f541b837cc`，stderr 空。该诊断脚本 exit 0 的含义是“复现了预先明确断言的差异并通过对照”，不是 12 项产品验收通过；变更仅在合成服务器，生产缓存策略、SDK 和 CI 未改。
 - 后续建议：增加另一浏览器的完整合成交叉验证，但保留 Chromium 未通过状态与历史证据，不将替代浏览器单独通过包装成所有验收绿；该选择已异步询问 owner。独立终审仍未闭合。当前仅收敛诊断和证据，不进行 GitHub 合并、部署、真实 token 交换或发送；K3 永久禁写，goal active。
+
+## 202. 累计字节上限的真实 SDK 回归与 CI 接线（2026-10-12）
+
+- `0216e45b44cc1cf738f67fc06b9218d2f78c62a2` 的父提交为 `130a9341c099eb2e67942139054587af767617aa`，唯一改动是 `apps/web/tests/StockPreparationYidaOwnerSend.spec.ts` 新增两条测试。使用真实 SDK、真实 Response/ReadableStream 和替身 fetch，正文是合法关闭状态 JSON 加合法空白，无 Content-Length，两个分块各自低于上限。总长恰好 1 MiB 时返回 `YIDA_OWNER_RUNTIME_DISABLED` 且不取消；多 1 字节时返回 `YIDA_OWNER_RESPONSE_INVALID` 且取消。该单元测试不冒充真实 HTTP 或浏览器验收。
+- 新独立 Linux 副本按原 Vitest 配置执行整文件 25/25，零失败或 pending。受测 Git LF blob SHA `f3f40d78b0e186bc8ab1599e08a297d713b7692b63e8677d4084866f6a8efcac`；stdout SHA `40fd5226594417cc81a88d86a1f4e72a0a4bb018a8f2aceb2892e1c2b344e8cd`。另一个真实 SDK、Chromium、Vite 代理与合成 HTTP 的独立诊断拒绝了截断、声明超限、流式超限、非法 UTF-8、非法 JSON 五类响应；截断由取消超时拒绝，不声称即时检测。超限正文同样是合法 JSON，单独去掉累计字节守卫的内存 bundle 变体接受了该流式响应，被对照捕获。HTTP 诊断 stdout SHA `6381189c078e9c35d9147fb93fa36ec872be32be84ea97ebe4a8ed6004ff3ba5`；其 exit 0 仅证明预设诊断与负控制，不等于产品完整验收通过。
+- 该测试名已存在于 required web token 清单、实际 web runner 及 Integration Guard targeted runner；没有另加工作流。当前 head 的 Integration Guard run `38179268386`、job `114588160506` 及第 16 步 targeted web specs 均为 success。首次记录时普通检查为 46 success、0 failure、1 pending；该时点不称全部检查通过。生产 SDK、运行时、权限、缓存策略和 provenance 输入均未改变。
+- 没有为这个 test-only 提交重跑完整工作流碰绿。§201 的 Chromium 失败继续作为未闭合项，Firefox 交叉验证选择及独立终审仍待处理。没有 GitHub 合并、部署、真实客户读取、真实 token 交换或宜搭发送，K3 永久禁写；本节 root 复核不是独立终审。
+- 后续终态复核：同一精确 head `0216e45b44cc1cf738f67fc06b9218d2f78c62a2` 的 multitable-web-guard job `114588160480` 已 success，PR 检查汇总为 47 success、0 failure、0 pending，仍 draft。该结果只关闭普通 PR 检查等待，不关闭 Chromium 完整应用验收或独立终审。
