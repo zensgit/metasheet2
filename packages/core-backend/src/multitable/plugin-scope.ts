@@ -500,9 +500,11 @@ export function createPluginScopedMultitableApi(
       // counts), so a plugin can fail closed BEFORE any write on a host that would create an ordinary,
       // writable sheet where a read-only one was meant.
       ...(multitable.provisioning?.supportsSystemKindStamp === true ? { supportsSystemKindStamp: true } : {}),
+      // S3 follow-ups 2, fix round 1 (read-once): projectId is read ONCE; the checked value is the forwarded value.
       findObjectSheet: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-        return multitable.provisioning.findObjectSheet(input)
+        const projectId = input.projectId
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        return multitable.provisioning.findObjectSheet({ ...copyInputValuesExcept(input, ['projectId']), projectId } as typeof input)
       },
       // Asks the registry whether a sheet belongs to a project. The namespace guard runs on the
       // ARGUMENT, before any query, exactly as it does for getObjectSheetId/getObjectViewId — the
@@ -517,9 +519,11 @@ export function createPluginScopedMultitableApi(
         }
         return multitable.provisioning.isSheetOwnedByProject(sheetId, projectId)
       },
+      // Fix round 1 (read-once): the checked projectId is the forwarded projectId.
       resolveFieldIds: async (input) => {
-        assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-        return multitable.provisioning.resolveFieldIds(input)
+        const projectId = input.projectId
+        assertProjectIdAllowedForPlugin(pluginName, projectId)
+        return multitable.provisioning.resolveFieldIds({ ...copyInputValuesExcept(input, ['projectId']), projectId } as typeof input)
       },
       // W2: DB-backed existence read, scoped to the plugin's own object.
       // S3 follow-ups 2 (item 3, read-once): like the writes below, projectId / objectId are read ONCE and THAT
@@ -599,9 +603,11 @@ export function createPluginScopedMultitableApi(
       runObjectFieldsRepairTransaction: async (fn) => {
         return multitable.provisioning.runObjectFieldsRepairTransaction(async (surface) => {
           const scoped: MultitableRepairTransactionSurface = {
+            // Fix round 1 (read-once): the checked projectId is the forwarded projectId, inside the tx too.
             findObjectSheet: async (input) => {
-              assertProjectIdAllowedForPlugin(pluginName, input.projectId)
-              return surface.findObjectSheet(input)
+              const projectId = input.projectId
+              assertProjectIdAllowedForPlugin(pluginName, projectId)
+              return surface.findObjectSheet({ ...copyInputValuesExcept(input, ['projectId']), projectId } as typeof input)
             },
             // Follow-ups 2 (item 3, read-once): the checked values are the forwarded values, inside the tx too.
             resolveExistingObjectFieldIds: async (input) => {
@@ -967,13 +973,18 @@ export function createPluginScopedMultitableApi(
       ...(multitable.records?.supportsFilterValueLists === true
         ? { supportsFilterValueLists: true }
         : {}),
+      // S3 follow-ups 2, fix round 1 (read-once): the generic READS read `sheetId` ONCE, like the writes below — the
+      // sheet whose scope was asserted is the sheet the host reads (a getter cannot pass the check with an own sheet
+      // and have the host read another).
       listRecords: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.listRecords(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        return multitable.records.listRecords({ ...copyInputValuesExcept(input, ['sheetId']), sheetId } as typeof input)
       },
       queryRecords: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.queryRecords(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        return multitable.records.queryRecords({ ...copyInputValuesExcept(input, ['sheetId']), sheetId } as typeof input)
       },
       // S3 fix round 2 (F3): the three generic WRITES read `sheetId` ONCE, assert scope on it, refuse the
       // stock-preparation overview on it, and forward exactly that value (a getter cannot show the checks one
@@ -985,8 +996,9 @@ export function createPluginScopedMultitableApi(
         return multitable.records.createRecord({ ...input, sheetId })
       },
       getRecord: async (input) => {
-        await assertSheetScopeOnce(input.sheetId)
-        return multitable.records.getRecord(input)
+        const sheetId = input.sheetId
+        await assertSheetScopeOnce(sheetId)
+        return multitable.records.getRecord({ ...copyInputValuesExcept(input, ['sheetId']), sheetId } as typeof input)
       },
       patchRecord: async (input) => {
         const sheetId = input.sheetId
@@ -1059,18 +1071,23 @@ export function createPluginScopedMultitableApi(
             const assertAllowed = (sheetId: string) => {
               if (!allowedSheetIds.has(sheetId)) throw new MultitableUnitOfWorkScopeError()
             }
+            // S3 follow-ups 2, fix round 1 (read-once): each call reads `sheetId` ONCE — the sheet checked against the
+            // locked, ownership-checked set (and refused as the overview above) is the sheet the host writes.
             const scopedRecords: MultitableRecordsWriteUnitOfWorkAPI = {
               queryRecords: async (recordInput) => {
-                assertAllowed(recordInput.sheetId)
-                return records.queryRecords(recordInput)
+                const sheetId = recordInput.sheetId
+                assertAllowed(sheetId)
+                return records.queryRecords({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
               createRecord: async (recordInput) => {
-                assertAllowed(recordInput.sheetId)
-                return records.createRecord(recordInput)
+                const sheetId = recordInput.sheetId
+                assertAllowed(sheetId)
+                return records.createRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
               patchRecord: async (recordInput) => {
-                assertAllowed(recordInput.sheetId)
-                return records.patchRecord(recordInput)
+                const sheetId = recordInput.sheetId
+                assertAllowed(sheetId)
+                return records.patchRecord({ ...copyInputValuesExcept(recordInput, ['sheetId']), sheetId } as typeof recordInput)
               },
             }
             return operation(scopedRecords)
