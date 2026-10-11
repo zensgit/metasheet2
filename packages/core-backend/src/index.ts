@@ -252,6 +252,7 @@ import {
 import { approvalsRouter, publishApprovalCountsForUsers } from './routes/approvals'
 import { todoRouter } from './routes/todo'
 import { tasksRouter } from './routes/tasks'
+import { setTaskCountsBroadcaster } from './services/task-counts-realtime'
 import { pendingSourceRegistry } from './services/pending-source-registry'
 import { approvalPendingSource } from './services/approval-pending-source'
 import { authRouter } from './routes/auth'
@@ -681,6 +682,10 @@ export class MetaSheetServer {
     
     // Bind CoreAPI to container (needed by PluginLoader)
     this.injector.add([ICoreAPI, { useValue: coreAPI }])
+    // RULED(2026-10-07): [R16] task writes send tasks:counts-updated through the server's websocket
+    // API, which looks the collaboration service up when a message is sent. ASSUMPTION(task-m4):
+    // [own-3c-06].
+    setTaskCountsBroadcaster((room, event, payload) => coreAPI.websocket.broadcastTo(room, event, payload))
     this.afterSalesApprovalBridgeService = new AfterSalesApprovalBridgeService(
       undefined,
       undefined,
