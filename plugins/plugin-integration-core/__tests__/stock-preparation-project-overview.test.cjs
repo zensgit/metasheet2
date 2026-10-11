@@ -98,7 +98,7 @@
 //         sets process.exitCode exits 1 and is never "all assertions passed", a live hang is bounded, a pass exits 0.
 //   O-24c (item 5) adoption guard: every stock-prep suite with `async function main()` / a `tests` array runs on the
 //         fail-closed runner under its own file name; no bare main() call or hand-rolled async loop is left (the suites
-//         of the parallel S5b members work, `stock-preparation-members*`, are skipped while they are not on the runner).
+//         of the parallel S5b members work are skipped while they are not on the runner — fix round 2: a pinned list).
 //
 // S3 FOLLOW-UPS 2, FIX ROUND 1:
 //   O-24 / O-24b / O-24d (R5) the runner's OWN self-tests run at TOP LEVEL, before the runner — never on it: with its exit
@@ -112,6 +112,13 @@
 //         stand, the later one is named.
 //   O-32  a click while this process's refresh of the tenant is still RUNNING answers 409 BUSY (nothing done, the running
 //         refresh's stamp kept) — never 200 fresh:false ("current") ahead of a run that may end 503 INCOMPLETE.
+//
+// S3 FOLLOW-UPS 2, FIX ROUND 2:
+//   O-24c a suite ON the runner is still scanned: the runner statement must be the last top-level statement, and no
+//         other top-level statement may run async code or call an async function the suite declares (G10: an async
+//         IIFE after the runner line hung drained and exited 0). The S5b exemption is the pinned file list, not a prefix.
+//   O-33  the INCOMPLETE cooldown is keyed by the verified tenant: a second user of the tenant is cooled with no IO; a
+//         user of another tenant is not cooled, sees no `incomplete`, and does not clear this tenant's stamp.
 //
 // Synthetic values only.
 
@@ -1717,12 +1724,79 @@ function suiteCodeOnly(src) {
 const escapeSuiteRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 // The one option a converted tail may pass: the pass line its old tail printed (a single-quoted literal).
 const SUITE_PASS_LINE_OPTION = "(?:, \\{ passLine: '[^'\\n]+' \\})?"
-function unrunAsyncSuiteProblem(file, text) {
+/**
+ * Follow-ups 2, fix round 2 (G10): the TOP-LEVEL code of a suite — `suiteCodeOnly` with the contents of every `{…}`
+ * block blanked (function bodies, object literals), one statement per line in practice. What is left is what the
+ * module runs when it loads, plus its declarations.
+ */
+function suiteTopLevelLines(text) {
+  const code = suiteCodeOnly(text)
+  let out = ''
+  let depth = 0
+  for (const c of code) {
+    if (c === '{') { if (depth === 0) out += c; depth += 1; continue }
+    if (c === '}') { depth -= 1; if (depth === 0) out += c; continue }
+    if (depth === 0) out += c
+  }
+  return out.split('\n').map((line) => line.trim()).filter(Boolean)
+}
+// The top-level shapes that only DECLARE async code (nothing runs at load): an `async function NAME(…) {}` and a
+// `const NAME = async (…) => {}`; a sync arrow declaration `const NAME = (…) => …` (its body runs only when called;
+// a parenthesised head, so `(() => …)()` is not one); and a `test('…', async () => {})` registration.
+const TOP_LEVEL_ASYNC_DECLARATION_RES = [
+  /^async function (\w+)\([^\n]*\) \{\}$/,
+  /^(?:const|let|var) (\w+) = async (?:\([^()\n]*\)|\w+) => \{\}$/,
+]
+const TOP_LEVEL_SYNC_ARROW_DECLARATION_RE = /^(?:const|let|var) \w+ = (?:\([^()\n]*\)|\w+) => /
+const TOP_LEVEL_TEST_REGISTRATION_RE = /^test\("", async (?:\([^()\n]*\)|\w+) => \{\}\)$/
+// The runner statement as it reads in the top-level code (strings blanked to "", the passLine option's block to {}).
+const TOP_LEVEL_RUNNER_RE = /^(?:require\(""\)\.)?runFailClosed(?:Main\("", main|Suite\("", tests)(?:, \{\})?\);?$/
+/**
+ * Fix round 2 (G10): a suite ON the runner is not cleared as a whole by its runner line — the runner's exit sentinel
+ * stops looking once the runner completed, so async code the module starts OUTSIDE the runner (an async IIFE before
+ * or after the runner line, a `.then(` statement, a top-level call of an async function) can still hang drained and
+ * exit 0. The runner statement must be the LAST top-level statement, and every other top-level line holding async
+ * code must be a declaration or a test registration; no top-level line may call an async function the suite
+ * declares. (Residual, by construction of a source scan: a top-level call of a SYNC function whose body starts async
+ * work is not seen — none of the suites does that.)
+ */
+function runnerSuiteTopLevelProblems(file, text) {
+  const lines = suiteTopLevelLines(text)
+  const problems = []
+  if (!TOP_LEVEL_RUNNER_RE.test(lines[lines.length - 1] || '')) {
+    problems.push(`${file}: the fail-closed runner statement is not the last top-level statement (code after it runs outside the runner)`)
+  }
+  const asyncNames = new Set()
+  for (const line of lines) {
+    for (const re of TOP_LEVEL_ASYNC_DECLARATION_RES) {
+      const match = re.exec(line)
+      if (match) asyncNames.add(match[1])
+    }
+  }
+  lines.forEach((line, index) => {
+    if (index === lines.length - 1 && TOP_LEVEL_RUNNER_RE.test(line)) return
+    if (TOP_LEVEL_ASYNC_DECLARATION_RES.some((re) => re.test(line))) return
+    if (TOP_LEVEL_SYNC_ARROW_DECLARATION_RE.test(line)) return
+    if (TOP_LEVEL_TEST_REGISTRATION_RE.test(line)) return
+    if (ASYNC_CODE_RE.test(line)) {
+      problems.push(`${file}: top-level statement ${index + 1} runs async code outside the fail-closed runner (a drained hang after the runner completed would exit 0)`)
+      return
+    }
+    for (const name of asyncNames) {
+      if (new RegExp(`(?:^|[^.\\w])${escapeSuiteRe(name)}\\(`).test(line)) {
+        problems.push(`${file}: top-level statement ${index + 1} calls the async ${name}() outside the fail-closed runner`)
+        return
+      }
+    }
+  })
+  return problems
+}
+function unrunAsyncSuiteProblems(file, text) {
   const onRunner = new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosed(?:Main\\('${escapeSuiteRe(file)}', main|Suite\\('${escapeSuiteRe(file)}', tests)${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)
-  if (onRunner) return null
-  if (/require\('node:test'\)/.test(text)) return null
-  if (!ASYNC_CODE_RE.test(suiteCodeOnly(text))) return null
-  return `${file}: async code outside the fail-closed runner and node:test (a drained hang would exit 0)`
+  if (onRunner) return runnerSuiteTopLevelProblems(file, text)
+  if (/require\('node:test'\)/.test(text)) return []
+  if (!ASYNC_CODE_RE.test(suiteCodeOnly(text))) return []
+  return [`${file}: async code outside the fail-closed runner and node:test (a drained hang would exit 0)`]
 }
 
 /**
@@ -1736,8 +1810,7 @@ function suiteRunnerVerdict(file, text) {
   const hasAsyncMain = /^async function main\(\) \{$/m.test(text)
   const hasTestsArray = /^const tests = \[\]$/m.test(text)
   // Fix round 1: ANY async code off the runner, whatever its spelling (the exact forms below are the common case).
-  const unrun = unrunAsyncSuiteProblem(file, text)
-  if (unrun) problems.push(unrun)
+  problems.push(...unrunAsyncSuiteProblems(file, text))
   // A SYNCHRONOUS `function main()` cannot await anything, so it cannot hang on a promise: only the async one counts.
   if (hasAsyncMain && /^main\(/m.test(text)) problems.push(`${file}: a bare top-level call of the async main() (exits 0 past a hang)`)
   if (/^;?\(async \(\) => \{$/m.test(text) && /for \(const \[name, fn\] of tests\)/.test(text)) problems.push(`${file}: a hand-rolled async test loop (exits 0 past a hang)`)
@@ -1757,18 +1830,20 @@ function suiteRunnerVerdict(file, text) {
 test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `async function main()` ends in runFailClosedMain(<its file>, main), every `tests` array suite in runFailClosedSuite(<its file>, tests); no bare main() / async-IIFE loop is left', () => {
   const dir = __dirname
   const files = fs.readdirSync(dir).filter((name) => /^stock-preparation-.*\.test\.cjs$/.test(name)).sort()
-  // Left to its owners ON PURPOSE: the suites of the S5b members work (`stock-preparation-members*`), which another
-  // line of work is rewriting right now. A file there that is NOT on the runner is skipped (that line adopts it when
-  // it lands — and may add, split or rename suites meanwhile without turning this guard red); a file there that IS on
-  // the runner is held to the same exact form as every other suite. Nothing outside that prefix is exempt.
-  const PENDING_ADOPTION_PREFIX = 'stock-preparation-members'
+  // Left to its owners ON PURPOSE: the suite of the S5b members work, which another line of work is rewriting right
+  // now. Fix round 2: the exemption is the PINNED file list, never an open prefix — a pinned file that is NOT on the
+  // runner is skipped (that line adopts it when it lands); a pinned file that IS on the runner is held to the same
+  // exact form as every other suite; any OTHER `stock-preparation-members*` suite (added, split or renamed) is checked
+  // like every suite. Nothing outside this list is exempt.
+  const PENDING_ADOPTION_FILES = Object.freeze(['stock-preparation-members-routes.test.cjs'])
+  const isPendingAdoption = (file, text) => PENDING_ADOPTION_FILES.includes(file) && !text.includes('fail-closed-suite-runner')
   const pendingSkipped = []
   const viaMain = []
   const viaTests = []
   const problems = []
   for (const file of files) {
     const text = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n')
-    if (file.startsWith(PENDING_ADOPTION_PREFIX) && !text.includes('fail-closed-suite-runner')) {
+    if (isPendingAdoption(file, text)) {
       pendingSkipped.push(file)
       continue
     }
@@ -1798,8 +1873,29 @@ test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `
   assert.equal(flags("const test = require('node:test')\ntest('x', async () => {})\n"), false, 'a node:test suite')
   assert.equal(flags(`async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('${F}', main)\n`), false, 'on the runner')
   assert.ok(flags("async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('another.test.cjs', main)\n"), 'on the runner under ANOTHER file name is not this suite on the runner')
-  // Only the S5b area is ever skipped (today: the one members suite this PR leaves untouched).
-  assert.ok(pendingSkipped.every((file) => file.startsWith(PENDING_ADOPTION_PREFIX)), pendingSkipped.join(', '))
+  // Fix round 2 (G10): a suite ON the runner is still scanned — async code it starts outside the runner is flagged
+  // (an async IIFE after or before the runner line, a top-level `.then(`, a top-level call of an async helper, code
+  // after the runner line); declarations, `test('…', async () => {})` registrations and a sync arrow returning a
+  // promise are not.
+  const RUNNER_TAIL = `require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('${F}', main)\n`
+  for (const [label, text] of [
+    ['async IIFE after the runner line', `async function main() {}\n${RUNNER_TAIL};(async () => { await new Promise(() => {}); console.log('never') })()\n`],
+    ['async IIFE before the runner line', `async function main() {}\n;(async () => { await new Promise(() => {}) })()\n${RUNNER_TAIL}`],
+    ['a top-level .then( statement', `async function main() {}\nload().then(() => {})\n${RUNNER_TAIL}`],
+    ['a top-level call of an async helper', `async function main() {}\nasync function warm() { await new Promise(() => {}) }\nwarm()\n${RUNNER_TAIL}`],
+    ['a top-level call of an async arrow helper', `const warm = async () => { await new Promise(() => {}) }\nasync function main() {}\nconst p = warm()\n${RUNNER_TAIL}`],
+    ['a sync statement after the runner line', `async function main() {}\n${RUNNER_TAIL}console.log('after')\n`],
+  ]) assert.ok(flags(text), `O-24c must flag, on the runner: ${label}`)
+  assert.equal(flags(`const tests = []\nconst test = (name, fn) => tests.push([name, fn])\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms))\nasync function call(routes, req = {}) { return routes.x(req) }\ntest('a', async () => { await call({}) })\ntest('b', () => {})\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('${F}', tests, { passLine: 'ok' })\n`), false, 'a runner suite of declarations and registrations')
+  // Fix round 2: only the PINNED files are ever skipped — today the one members suite this PR leaves untouched; a new
+  // or renamed members suite off the runner is checked like every suite (and flagged), and a pinned one that adopts
+  // the runner is no longer skipped.
+  const BARE_MAIN = 'async function main() { await new Promise(() => {}) }\nmain().catch(() => process.exit(1))\n'
+  assert.deepEqual(PENDING_ADOPTION_FILES, ['stock-preparation-members-routes.test.cjs'])
+  assert.equal(isPendingAdoption('stock-preparation-members-routes.test.cjs', BARE_MAIN), true)
+  assert.equal(isPendingAdoption('stock-preparation-members-roster.test.cjs', BARE_MAIN), false, 'a new members suite is not exempt')
+  assert.equal(isPendingAdoption('stock-preparation-members-routes.test.cjs', `async function main() {}\n${RUNNER_TAIL}`), false, 'a pinned suite on the runner is checked')
+  assert.ok(pendingSkipped.length <= PENDING_ADOPTION_FILES.length, pendingSkipped.join(', '))
   // Not vacuous: the 65 main() suites and the 6 tests-array suites (5 converted here + this one) this PR stands on.
   assert.ok(viaMain.length >= 65, `runFailClosedMain adopters: ${viaMain.length}`)
   assert.ok(viaTests.length >= 6, `runFailClosedSuite adopters: ${viaTests.length}`)
@@ -2591,6 +2687,57 @@ test('O-32 (follow-ups 2, fix round 1) a click while this process\'s refresh of 
     const again = await refresh(h, FLOOR)
     assert.equal(again.statusCode, 200, JSON.stringify(again.body))
     assert.equal(again.body.data.fresh, true)
+  } finally { h.restore() }
+})
+
+// ── O-33 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2, fix round 2: the cooldown is keyed by the VERIFIED TENANT — shared by every user of the tenant
+// (never per user), never by another tenant.
+test('O-33 (follow-ups 2, fix round 2) the INCOMPLETE cooldown is per TENANT: a second user of the same tenant is cooled with no refresh IO; a user of another tenant is not cooled, sees no `incomplete` bit, and does not clear this tenant\'s cooldown', async () => {
+  const OTHER_TENANT_OPERATOR = Object.freeze({ id: 'u_s3_other_floor', tenantId: `${TENANT}-other`, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let failedAttempts = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        failedAttempts += 1
+        throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const first = await refresh(h, FLOOR)
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    const attempts = failedAttempts
+    const counts = () => [h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length]
+
+    // ANOTHER USER of the SAME tenant: cooled — never a second full rebuild just because the user differs.
+    const before = counts()
+    const sameTenant = await refresh(h, PULLER)
+    assert.equal(sameTenant.statusCode, 200, `the cooldown is the tenant's, not the user's: ${JSON.stringify(sameTenant.body)}`)
+    assert.equal(sameTenant.body.data.fresh, false)
+    assert.equal(sameTenant.body.data.incomplete, true)
+    assert.deepEqual(counts(), before, 'the same-tenant click did no registry, host, records or audit work')
+    assert.equal(failedAttempts, attempts)
+
+    // A user of ANOTHER tenant: not cooled by this tenant's run — its own refresh runs (its overview does not exist:
+    // 409 ABSENT), never this tenant's `fresh: false` / `incomplete` answer.
+    const otherTenant = await refresh(h, OTHER_TENANT_OPERATOR)
+    assert.equal(otherTenant.statusCode, 409, `another tenant is never cooled by this tenant's run: ${JSON.stringify(otherTenant.body)}`)
+    assert.equal(otherTenant.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT')
+    assert.equal(JSON.stringify(otherTenant.body).includes('incomplete'), false)
+
+    // …and that tenant's failure (which clears ITS stamp) leaves this tenant's cooldown standing.
+    const after = counts()
+    const stillCooled = await refresh(h, FLOOR)
+    assert.equal(stillCooled.statusCode, 200, JSON.stringify(stillCooled.body))
+    assert.equal(stillCooled.body.data.incomplete, true)
+    assert.deepEqual(counts(), after)
+    assert.equal(failedAttempts, attempts)
   } finally { h.restore() }
 })
 
