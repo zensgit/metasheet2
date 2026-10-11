@@ -96,7 +96,7 @@
 
 ### 2.4 与 PR-4a 冻结值对不上的地方
 
-只有一处：S19 的评论绑定列集与 `task_attachments_bound_has_task_chk`（PR-4a §7.2 已登记，本文 §9.2 Q-b1）。其余各条——四种行形状、四个 intent 写入者、原因闭集、`last_error` 的码形、索引——都按冻结值使用，PR-4b 不需要 PR-4a 改动任何 DDL。
+只有一处：S19 的评论绑定列集与 `task_attachments_bound_has_task_chk`（PR-4a §7.2 已登记，本文 §9.2 Q-b1）。其余各条——四种行形状、四个 intent 写入者、原因闭集、`last_error` 的码形、索引——都按冻结值使用，PR-4b 不需要 PR-4a 改动任何 DDL。S33 加通知词也不需要 DDL：两个附件词早在 `task_events` 的闭集里，outbox 不在库里钉事件名（§6.4 列了核过的位置）。
 
 ---
 
@@ -235,7 +235,7 @@ S21 的七条规则落在这条路由上：
 | 请求 | `{ ids: string[], taskId?: string }`；请求体 ≤ 64 KiB（`[b-15]`）；`ids` 的原始数组 ≤ 200 个（在去重与逐个校验之前计数，任务 E `parseAttachmentRefIds`） |
 | 任务模式（带 `taskId`） | `{ items: Array<{ id, tombstone: false } & TaskAttachmentItem \| { id, tombstone: true }> }` |
 | 暂存模式（不带 `taskId`） | `{ items: Array<{ id, stale: false } & StagedAttachment \| { id, stale: true }> }` |
-| 错误 | 任务模式：404；422 `INVALID_TASK_ID`、`INVALID_IDS`、`LIMIT`。两种模式：413 `PAYLOAD_TOO_LARGE`、400 `INVALID_JSON`（请求体解析器） |
+| 错误 | 只在任务模式：404；422 `INVALID_TASK_ID`。两种模式：422 `INVALID_IDS`、`LIMIT`；413 `PAYLOAD_TOO_LARGE`、400 `INVALID_JSON`（请求体解析器） |
 
 - 模式按请求体里有没有 `taskId` 键区分。项按去重后的 `ids` 首次出现的顺序排列。
 - **任务模式**顺序：缺 org ⇒ 404 → `taskId` 过四合取，否则 422 `INVALID_TASK_ID` → 任务取行与 `can(roles, 'view')`，否则 404 → `parseAttachmentRefIds` ⇒ 422 `INVALID_IDS` / `LIMIT` → 从该任务出发按 `task_id` 读 `id = ANY(ids)` 的行。行已绑定在这个任务上、未删除、不是 `infected` ⇒ 完整项；其余一律 tombstone，不区分原因。
@@ -442,6 +442,7 @@ S21 的七条规则落在这条路由上：
 - `TASK_NOTIFIABLE_EVENTS`（`src/tasks/task-notifications.ts:39`）加 `'attachment_added'`；`attachment_removed` 不加。收件人沿用 D13 已落地的规则：创建人 ∪ 负责人 ∪ 关注人 ∪ 装着该任务的每张清单的成员（含已归档），排除 actor，一人只出一行、取最高优先级角色。任务级与评论级都发（S33）。
 - 渲染：`task-notification-text.ts` 的 `EVENT_SENTENCES`（`:145`）是按闭集的穷尽映射，必须加一句；句子只含任务标题、不含文件名（`[b-27]`），标题照既有的卫生规则处理。
 - 钉住旧闭集的三处 M4 期望在同一 PR 里改，只改这三处：`tests/unit/task-notifications.test.ts:37-38`（闭集逐项相等，标题里写着附件推迟到 P2）、`tests/unit/task-notification-producer.test.ts:156`（`attachment_added` 列在不通知的词里，换成 `attachment_removed`，这一格仍证明附件移除不通知）、`tests/unit/task-notification-text.test.ts:98-104`（期望句子表加一项）。同文件 `:486` 的 `{ kind: 'attachment_added' }` 答 `unknown_kind` 不受影响（那是 payload 的 kind，不是事件）。这三处改动就是 S33 裁定的取值，不是放宽门 24；负控：把字面量里的 `'attachment_added'` 删掉 ⇒ 闭集逐项相等那一格与 §8.1 的 b28-notify 同时变红（句子表那一格按闭集循环，删掉的词它不再访问，不能单独作负控）。
+- 不需要 DDL（按 `906840c74c` 核过）：`task_events_type_chk` 已含两个附件词（P0-A 迁移 `zzzz20260926120000_create_task_p0a_tables.ts:38-39`、`:136`）；outbox 没有库级的事件闭集，`task_notification_deliveries` 的 CHECK 只管 org、收件人、角色、状态与计数（M4 迁移 `zzzz20261009130000_create_task_m4_tables.ts:266-279`），`source_type` 与 `payload` 不设 CHECK，这张表建好之后再没有迁移动过它；`buildTaskEventSourceKey`（`task-reminders.ts:232`）只由任务 id、事件 id、用户与通道组成，不含事件名。
 - 一条带 k 个附件的评论对每个收件人产生 k + 1 条通知（1 条 `commented`、k 条 `attachment_added`）。这是 S19（一个附件对应一条事件）与 S33（评论级也发）合起来的结果，本文照做，并把它作为问题登记（§9.3 Q-b5）。
 
 ### 6.5 红点信号与 PR-3c 普查
@@ -594,7 +595,7 @@ S31 已定 M5-b 落到整数门 28（PR-4a §6.2、§7.3）；在锁修订把它
 | b-18 | 引用解析的模式 | 带 `taskId` 为任务模式、不带为暂存模式；过期未清扫的暂存行仍报可用 | 只做任务模式：撰写中的评论无法复核暂存项 |
 | b-19 | 暂存上限 | 每上传者每 org 至多 20 个未绑定行，软上限 | 不设：只靠 168 小时清扫 |
 | b-20 | 开关关时的 `attachmentIds` | 缺键或空数组照 M3；其余 422 `ATTACHMENTS_DISABLED`，先于形状校验 | 一律忽略：调用方以为附件已加上 |
-| b-21 | 绑定行数不符的码 | 一个码 `ATTACHMENT_NOT_BINDABLE`，不区分原因 | 分原因：可借此探知别人的暂存行 |
+| b-21 | 绑定行数不符的码 | 一个码 `ATTACHMENT_NOT_BINDABLE`，不区分原因 | 分原因：违背实例面失败不说明原因的约定（锁 §5.1） |
 | b-22 | 时刻 | 任务级上传与移除锁后读一次 `clock_timestamp()`，任务级行 `created_at = bound_at`；评论路径用评论的 `created_at` | 事务时刻 `now()`：与 PR-4a §4.4 的新写入点规则不一致 |
 | b-23 | 调度器的提交后作业 | 加 `afterCommitJobs` 列表选项；PR-4c 追加 | 把投递与 GC 合成一个组合作业：失败隔离要另写 |
 | b-24 | GC 的数值 | 清扫 200、排空 50 / 5 次 / 5 分钟、对账 250 / 1 小时；常量 | 做成环境旋钮：每个都要进 manifest |
