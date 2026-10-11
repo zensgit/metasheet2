@@ -89,3 +89,31 @@ The successor remains Draft + CI approved as directed. That label does not mean 
 - Quality and CI wiring: `artifacts/attendance-server-clock-20261010/root-quality-final.json`, `root-ci-wiring-attempt3.receipt.json`
 - Frontend and visual evidence: `artifacts/attendance-server-clock-20261010/frontend-completion-receipt.json`, `root-visual-review.json`
 - Future timezone requirement: `artifacts/attendance-server-clock-20261010/requirements-followup.md`
+
+## Main alignment to a65 — 2026-10-11 local evidence
+
+Main advanced by two commits to `a65c1c50a203517798a1bd6691cee8ea4a36e968` after the historical `33dfab1` / `e450de6` CI qualification. A normal merge produced validated source tree `7e27e9cbbb855a9aed03a1af679df0c17b3f527d` before this verification-only append. The 20 incoming paths include two overlaps, `plugin-tests.yml` and `vitest.config.ts`; both retain the union of the two test chains. Independent review verified 18 incoming-exclusive and 64 owned-exclusive blobs. No migrations were added, and the clock/punch production sources remain unchanged.
+
+The recorded source manifest has 88 entries: 86 files and two expected-absent configuration paths. Provenance recomputation matched all 66 leaves: 63 source hashes and three metadata leaves, with zero differences. Evidence is under `artifacts/attendance-server-clock-20261010/main-align-a65/`.
+
+| Focused local scope | Actual result |
+|---|---|
+| Five web whole files: user management, stock overview, attendance dashboard and two clock specs | 234/234; zero failures/skips/todo (57 + 37 + 102 + 18 + 20) |
+| Standalone stock overview / read plugin checks | 38 passed titles / 5 passed summary checks; no per-title read claim |
+| W1 source-wiring whole file | 3/3, zero skips, after the task Python YAML dependency repair |
+| Bootstrap whole file | 29 passed, 26 PowerShell cases skipped because `pwsh` was unavailable; zero failures |
+| `pnpm validate:all` | Attempt 2 exited 0; plugin validation, lint and type checks completed |
+| Seven directory DB whole files | 150/150 (anchor 20, source-freeze 19, CRUD 15, CRUD-route 50, archive 29, cycle 10, reactivation 7) |
+| Attendance admission, replay and server-time DB whole files | 61/61 (23 + 18 + 20) |
+
+The ten database whole files passed 211/211 with zero failures/skips/todo on Node 20.20.2, pnpm 10.33.0 and an isolated PostgreSQL 15.17 through a private Unix socket. Fresh migration applied 438 unique names; replay applied 0; pending was 0. Both sorted ledgers were identical. The owned database had zero client sessions before drop; catalogue absence, PostgreSQL stop, PID/listener/TCP/directory absence and test-process absence were checked. The 505-source manifest and index tree remained unchanged. Local `.env` bytes and original permissions were restored, and its private backup was absent. No log was truncated; observed free disk space stayed above 3.84 GiB.
+
+Full DB receipt: `main-align-a65/local-db/reports/db-a65/20261011T042227Z-cab3e949/receipt.json`, SHA-256 `c632ce13fc3be0da9b2ac4ba4787f8e26ded51eb82089df04148f9d7c581989a`. Its summary lists every original JSON path/hash: `db-a65-local-pass-actual-summary.json`. The independent local review is `independent-main-local-validation-astra.json`; the non-DB summary is `macmini-non-db-final-summary-sol61.json`.
+
+Mac mini external storage holds the owned source, dependencies, cache and evidence backup; no local files were deleted. Non-DB validation ran there. Its PostgreSQL startup-locale failure, TCP timeout, and partial third attempt remain recorded separately. That third attempt migrated 438 with zero replay and passed anchor 20 and CRUD 15, but source-freeze had 13 passes and six HTTP timeouts; the route run was stopped and the remaining files were NOT_RUN. Three minimal remote HTTP controls also timed out. Controlled cleanup and remote `.env` restoration passed. This partial result is not qualified as a passing database lane and does not establish the transport failure's underlying cause.
+
+The first local retry failed before applying migrations because a 165-byte `tsx` IPC path exceeded Darwin's socket-path limit; its owned cleanup and environment restoration passed. The final run used a private shorter temporary directory and passed all ten unchanged test files. The standalone local Supertest positive control returned HTTP 200. Earlier dependency/TLS, missing-YAML and missing-`npx` failures remain in their attempt records. The successful DB report was backed up to Mac mini with all 65 file hashes matching.
+
+The directory source-freeze result of 19 is distinct from the earlier real-PG teardown result of 19. Incoming user-management and stock-overview web results are local whole-file evidence; current CI does not contain executable whole-file invocations for those two specs. New exact-head CI must still establish all 13 required contexts and the three affected jobs, including directory 7/150, attendance DB 21/502, strict fixture, drain and checkpoint. None is inferred from local results or historical CI.
+
+This remains Draft + CI scope. Future multi-timezone/travel linkage, original 20-item QA/business acceptance, and physical clearing of existing attendance data remain pending or NOT_RUN as stated above. Ready, merge and deployment are not authorized. Final head/tree/base and remote CI are recorded in the separate final supplement after the push.
