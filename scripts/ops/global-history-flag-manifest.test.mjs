@@ -768,4 +768,16 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/stock-preparation-members.ts'), 'utf8')
   assert.match(host, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
   assert.match(host, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
+  // Fix round 1 (S5b lock redesign): the switch-on record states what other sessions wait for, exactly,
+  // and keeps the explicit owner-acceptance line — the overclaims it replaced may not come back.
+  assert.doesNotMatch(spec.purpose, /user_roles writes for any other role are unaffected/)
+  assert.doesNotMatch(spec.purpose, /every wait is bounded by a 5 s lock_timeout/)
+  assert.match(spec.purpose, /a write that touches neither the role being written nor the grantor's own authority rows is unaffected/)
+  assert.match(spec.purpose, /revoking ANY of the grantor's own authority \(.*\) waits for the in-flight write with no bound from this port/)
+  assert.match(spec.purpose, /the 5 s lock_timeout bounds only THIS port's own waits/)
+  assert.match(spec.purpose, /uses more pool connections while its locks are held/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision/)
+  assert.doesNotMatch(host, /every other `user_roles` write/)
+  assert.doesNotMatch(host, /no second pool connection (?:is taken )?while (?:the locks|they) are held/)
+  assert.match(host, /WHAT OTHER SESSIONS SEE/)
 })

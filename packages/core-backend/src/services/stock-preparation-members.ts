@@ -46,18 +46,34 @@
  *   * DECIDED UNDER A LOCK ON THE ROLE BEING WRITTEN — AND ONLY THAT ROLE (owner ruling 2026-10-10,
  *     「(a) 只锁被写的那个角色」; it replaced fix round 1's platform-wide `LOCK TABLE user_roles IN SHARE
  *     MODE`). Every write re-runs its decisive checks INSIDE its transaction, ON THAT TRANSACTION'S OWN
- *     CONNECTION (no second pool connection while the locks are held), after taking — each wait
- *     bounded by `lock_timeout` (409 STOCK_PREP_MEMBERS_BUSY on expiry) — the locks of
+ *     CONNECTION (the decision issues no statement on a second pool connection; a SHEET GRANT does use
+ *     more pool connections while its locks are held — each G1 call's own transaction, the plugin's
+ *     ownership hooks and its audit row — see PROJECT SHEETS below), after taking — each of THIS
+ *     PORT'S OWN waits bounded by `lock_timeout` (409 STOCK_PREP_MEMBERS_BUSY on expiry) — the locks of
  *     STOCK_PREP_MEMBERS_* lock SQL below, in the SAME order as the delegation route and
  *     rbac/role-assignment.ts (the role row first, then everything else): an update or a sheet grant
  *     takes the custom role's row `FOR UPDATE` (an appointment to that role through the delegated arm
- *     takes it `FOR SHARE` and so waits, then reads the committed codes; every other `user_roles` write
- *     is untouched); a create takes the per-namespace advisory lock instead (the role does not exist
- *     yet, and the 100 cap is a count no row lock can serialise). Then FOR SHARE on the grantor's own
- *     authority rows — role memberships, role codes, direct codes, member groups, admission,
- *     delegation scope, and (for a sheet grant) their existing grants on the named sheets — so none of
- *     them can be revoked between the decision and the commit. The checks that ran before the
- *     transaction stay as fast refusals.
+ *     takes it `FOR SHARE` and so waits, then reads the committed codes); a create takes the
+ *     per-namespace advisory lock instead (the role does not exist yet, and the 100 cap is a count no
+ *     row lock can serialise). Then FOR SHARE on the grantor's own authority rows — role memberships,
+ *     role codes, direct codes, member groups, admission, delegation scope, and (for a sheet grant)
+ *     their existing grants on the named sheets — so none of them can be revoked between the decision
+ *     and the commit. The checks that ran before the transaction stay as fast refusals.
+ *     WHAT OTHER SESSIONS SEE (stated exactly, because switching the page ON is the owner's acceptance
+ *     of it): a write that touches NEITHER the role being written NOR the grantor's own authority rows
+ *     is unaffected. A write that touches the grantor's own authority — revoking any role they hold
+ *     (`stock-prep_admin` included, by a platform admin, a batch unassign or a protected-role delete),
+ *     removing a code from any role they hold, a direct code, a member-group membership, their
+ *     admission or delegation scope, or (sheet grant) their grant on a named sheet — WAITS for the
+ *     in-flight write, and that wait is NOT bounded by this port's `lock_timeout` (only the other
+ *     session's own settings bound it): for a sheet grant it is the in-lock reads, up to the 15 s
+ *     budget, and one more G1 call; a grantor who keeps overlapping writes can hold such a revoke off
+ *     until the revoker's own statement timeout. A revoke through the sheet-permission routes (which
+ *     lock the sheet row FIRST) on a named sheet the grant has not reached yet is a wait PostgreSQL
+ *     cannot see as a cycle — the route holds the sheet row and waits on this port's grant row lock,
+ *     the G1 call waits on the sheet row — and only the G1 call's own `lock_timeout` breaks it: the
+ *     grant answers 409 BUSY after ≈ 5 s, the sheets granted before it stay granted, then the revoke
+ *     lands (nothing is granted after it).
  *   * PROJECT SHEETS: ADD-ONLY, WRITE LEVEL, THROUGH G1. This port never writes a sheet grant
  *     itself; the plugin hands it the G1 port call (`grantSheetRoleWrite` via the plugin-scope
  *     wrapper: plugin-owned project sheets only, role subjects only, `spreadsheet:write` literal,
@@ -156,6 +172,7 @@ const AUDIT_SOURCE = 'stock-prep-members'
 const SHEET_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,128}$/
 /** SQLSTATE lock_not_available (lock_timeout expired) and deadlock_detected: both retryable here. */
 const LOCK_WAIT_SQLSTATES = new Set(['55P03', '40P01'])
+const DEADLOCK_SQLSTATE = '40P01'
 
 /**
  * THE LOCKS every write takes, in this order, at the start of its transaction (pinned by SM-22). No
@@ -167,7 +184,13 @@ const LOCK_WAIT_SQLSTATES = new Set(['55P03', '40P01'])
  *      they take the same row `FOR SHARE` before they write `user_roles`, and the role editor
  *      (routes/roles.ts) takes it `FOR UPDATE` before it touches `role_permissions`, so the paths queue
  *      on one row instead of each holding what the other waits for (the 40P01 of the table-lock
- *      design). A delegated appointment to this role therefore waits for this commit and then reads
+ *      design). ONE 40P01 REMAINS, between two updates of THIS port on DIFFERENT roles whose grantors
+ *      each hold the other's role (A, a member of Z, edits X while B, a member of X, edits Z): each
+ *      holds lock 3's FOR SHARE on the other role's codes and then removes a code of its own role.
+ *      PostgreSQL breaks it after `deadlock_timeout`; the victim rolled back entirely, and an update
+ *      re-runs its whole transaction ONCE (every lock and every check again) before it answers 409
+ *      BUSY. Leaving those codes unlocked instead would let the grantor's codes change under the
+ *      decision. A delegated appointment to this role therefore waits for this commit and then reads
  *      the codes this transaction wrote. The role's state is read in a SEPARATE statement after the
  *      lock is granted, so it is the committed state, not the snapshot the locking statement began
  *      with;
@@ -181,7 +204,10 @@ const LOCK_WAIT_SQLSTATES = new Set(['55P03', '40P01'])
  *      member-group and role subjects, the rows the grid's write decision reads — so the grantor's own
  *      write on a sheet cannot be revoked between the in-lock check and the G1 call (N3). The sheet
  *      row (`meta_sheets`) is deliberately NOT locked: the G1 call takes it `FOR UPDATE` on its own
- *      connection while these locks are held, and would wait on this transaction.
+ *      connection while these locks are held, and would wait on this transaction. A sheet-permission
+ *      route that DOES hold that sheet row and then edits the grantor's grant on it waits here while
+ *      the G1 call waits on it — broken only by the G1 call's `lock_timeout` (409 BUSY; see the header,
+ *      WHAT OTHER SESSIONS SEE; real-DB LR-04 (c)).
  */
 export const STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL = "SELECT set_config('lock_timeout', $1, true)"
 export const STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL = 'SELECT pg_advisory_xact_lock(hashtext($1::text), hashtext($2::text))'
@@ -365,7 +391,8 @@ export type StockPrepMembersQueryFn = (sql: string, params?: unknown[]) => Promi
  * The four decision reads take an optional `query`: absent, they read through the pool (the fast
  * refusals before a write's transaction, and `describe`); present — always, inside a write's
  * transaction — they run every statement on THAT transaction's connection, so the decision is made
- * on what the transaction's locks protect and no second pool connection is taken while they are held.
+ * on what the transaction's locks protect and the DECISION takes no second pool connection while they
+ * are held (a sheet grant's G1 calls, the plugin's ownership hooks and its audit row do; see the header).
  */
 export interface StockPrepMembersDeps {
   query: StockPrepMembersQueryFn
@@ -703,11 +730,17 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
     }
   }
 
-  async function runWrite<T>(fn: (query: StockPrepMembersQueryFn) => Promise<T>): Promise<T> {
+  async function runWrite<T>(fn: (query: StockPrepMembersQueryFn) => Promise<T>, options: { retryDeadlockOnce?: boolean } = {}): Promise<T> {
     try {
       return await deps.transaction(fn)
     } catch (error) {
       if (error instanceof StockPrepMembersError) throw error
+      // A deadlock the server broke rolled THIS transaction back entirely (nothing written, every
+      // lock released); a caller that opts in re-runs the whole transaction — every lock and every
+      // check — exactly once. A second deadlock, and every other error, is answered below.
+      if (options.retryDeadlockOnce && sqlStateOf(error) === DEADLOCK_SQLSTATE) {
+        return runWrite(fn)
+      }
       // A lock this write waited for longer than STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS (or a deadlock the
       // server broke): nothing was written; the caller may retry.
       if (LOCK_WAIT_SQLSTATES.has(sqlStateOf(error))) {
@@ -728,7 +761,12 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
    * grants on the named sheets), then re-resolves the caller FRESH under them on the transaction's
    * own connection, and only then runs `fn` with that caller. `fn` must decide on `query` only.
    */
-  async function runLockedWrite<T>(actorId: string, target: LockedWriteTarget, fn: (query: StockPrepMembersQueryFn, caller: StockPrepMembersCaller) => Promise<T>): Promise<T> {
+  async function runLockedWrite<T>(
+    actorId: string,
+    target: LockedWriteTarget,
+    fn: (query: StockPrepMembersQueryFn, caller: StockPrepMembersCaller) => Promise<T>,
+    options: { retryDeadlockOnce?: boolean } = {},
+  ): Promise<T> {
     return runWrite(async (query) => {
       await query(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL, [String(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_MS)])
       if (target.kind === 'create') {
@@ -745,7 +783,7 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
       }
       const caller = await resolveCaller(actorId, query)
       return fn(query, caller)
-    })
+    }, options)
   }
 
   async function invalidateRoleMembers(roleId: string): Promise<void> {
@@ -1042,7 +1080,9 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
         const finalName = nextName ?? current.name
         await query('UPDATE roles SET name = $1, updated_at = now() WHERE id = $2', [finalName, id])
         return { caller, name: finalName, added, removed, after }
-      })
+        // The one 40P01 left (two updates on different roles whose grantors hold each other's role; see
+        // lock 2): re-run once. Nothing else runs in this transaction, so a re-run is the whole write.
+      }, { retryDeadlockOnce: true })
       if (outcome.added.length > 0 || outcome.removed.length > 0) await invalidateRoleMembers(id)
       await deps.auditLog({
         actorId: outcome.caller.actorId,

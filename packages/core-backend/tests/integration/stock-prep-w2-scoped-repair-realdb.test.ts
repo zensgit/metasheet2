@@ -1486,6 +1486,7 @@ import { createStockPrepMembersPort, type StockPrepMembersQueryFn } from '../../
 import { listUserPermissions as rbacListUserPermissions } from '../../src/rbac/service'
 import { assignUserRoles, unassignUserRoles, type RoleAssignmentExecutor } from '../../src/rbac/role-assignment'
 import { pool as appPool, query as appQuery, transaction as appTransaction } from '../../src/db/pg'
+import { assertSheetLiveForUpdate } from '../../src/multitable/sheet-liveness'
 
 /**
  * A membership change through the DELEGATED arm, in the delegation route's transaction shape
@@ -1934,8 +1935,13 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
 //     delegated admin, and the revoke of the grantor's own membership of that role — both finish, the
 //     PATCH waits;
 //   * LR-04 (iv) N3: the grantor's sheet write revoked before the locks → refused under them, no G1
-//     call; revoked during the G1 call → the revoke waits for the commit (the grant landed while the
-//     grantor could write);
+//     call; revoked during the G1 call by a BARE `DELETE` (no sheet-row lock) → the revoke waits for
+//     the commit (the grant landed while the grantor could write). LR-04c: the shape the
+//     sheet-permission routes actually issue (univer-meta.ts and spreadsheet-permissions.ts lock the
+//     sheet row FIRST, then DELETE) on a named sheet the grant has not reached yet is a wait PG cannot
+//     see as a cycle — the route holds the sheet row and waits on N3, the G1 call waits on the sheet
+//     row — so only G1's lock_timeout breaks it: the grant answers 409 BUSY at ≈ 5 s, the sheet granted
+//     before stays granted, then the revoke lands and nothing is granted after it;
 //   * LR-05 (v) pool-size concurrent members writes (updates, then sheet grants whose G1 runs on the
 //     app pool like the host binding) never stall an unrelated `SELECT 1` on the app pool beyond a
 //     small bound;
@@ -1943,7 +1949,10 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
 //     PATCH reads the committed codes after the lock and refuses (409 HAS_PLATFORM_CODES);
 //   * LR-07 (2) while a members write's transaction is open, the APP pool sees no statement and no
 //     connection other than the transaction's own — create, update, rename and a sheet grant (whose
-//     G1 here runs on the test pool), for the delegated admin and for the platform admin.
+//     G1 here runs on the test pool), for the delegated admin and for the platform admin;
+//   * LR-08 (fix round 1) two members PATCHes on DIFFERENT roles whose grantors each hold the other's
+//     role, both removing a code: PG breaks the deadlock, the losing PATCH re-runs once and lands —
+//     both answer ok, both writes are in the database.
 // Synthetic ids, random per run; everything this block creates is removed afterwards.
 // ---------------------------------------------------------------------------------------------
 describeDb('S5b members port — role-row lock redesign (real host wiring, real DB)', () => {
@@ -1954,12 +1963,15 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
   const IN_SCOPE = `s5bl_in_${sfx}`
   const OTHER = `s5bl_other_${sfx}`
   const NEWBIE = `s5bl_new_${sfx}`
-  const USERS = [ADMIN, DELEGATED, IN_SCOPE, OTHER, NEWBIE]
+  const ADMIN_2 = `s5bl_admin2_${sfx}`
+  const USERS = [ADMIN, DELEGATED, IN_SCOPE, OTHER, NEWBIE, ADMIN_2]
   const MAIN = 'stock-prep_admin'
   const OTHER_ROLE = `s5bl_otherrole_${sfx}`
   const BASE = `s5bl_base_${sfx}`
   const SHEET = `s5bl_sheet_${sfx}`
   const SHEET_2 = `s5bl_sheet2_${sfx}`
+  const SHEET_3 = `s5bl_sheet3_${sfx}`
+  const SHEET_4 = `s5bl_sheet4_${sfx}`
   let pool: Pool
   let previousEnv: string | undefined
   let createdAdminRole = false
@@ -1967,7 +1979,7 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
   let createdMainCode = false
   let groupId = ''
   const createdRoleIds: string[] = [OTHER_ROLE]
-  const createdSheets: string[] = [SHEET, SHEET_2]
+  const createdSheets: string[] = [SHEET, SHEET_2, SHEET_3, SHEET_4]
   const port = () => createStockPrepMembersPort(createStockPrepMembersHostDeps())
   const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
@@ -2046,6 +2058,39 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     while (Date.now() < until && !probe.settled()) await sleep(20)
     return probe.settled() ? 'settled' : 'pending'
   }
+  /**
+   * The sheet-permission routes' revoke shape (routes/univer-meta.ts sheet-permission PUT,
+   * routes/spreadsheet-permissions.ts legacy revoke): ONE transaction that takes the sheet row through
+   * the PRODUCTION assertSheetLiveForUpdate FIRST, then deletes the subject's grant. `sheetRowHeld`
+   * resolves once the row lock is held; `promise` resolves to { outcome, ms } when the transaction ends.
+   */
+  const routeShapedRevoke = (sheetId: string, userId: string) => {
+    let settled = false
+    let rowHeld: () => void = () => {}
+    const sheetRowHeld = new Promise<void>((done) => { rowHeld = done })
+    const started = Date.now()
+    const promise = (async () => {
+      const client = await pool.connect()
+      try {
+        await client.query("SET lock_timeout = '15s'")
+        await client.query('BEGIN')
+        await assertSheetLiveForUpdate((async (sql: string, params: unknown[]) => client.query(sql, params)) as never, sheetId)
+        rowHeld()
+        await client.query("DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [sheetId, userId])
+        await client.query('COMMIT')
+        return { outcome: 'ok', ms: Date.now() - started }
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {})
+        rowHeld()
+        return { outcome: String((error as { code?: unknown }).code ?? 'error'), ms: Date.now() - started }
+      } finally {
+        await client.query('RESET lock_timeout').catch(() => {})
+        client.release()
+        settled = true
+      }
+    })()
+    return { promise, sheetRowHeld, settled: () => settled }
+  }
   const setDelegatedSheetWrite = async (sheetId: string, on: boolean) => {
     await pool.query("DELETE FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [sheetId, DELEGATED])
     if (on) await pool.query("INSERT INTO spreadsheet_permissions (sheet_id, user_id, perm_code, subject_type, subject_id) VALUES ($1, $2, 'spreadsheet:write', 'user', $2)", [sheetId, DELEGATED])
@@ -2067,6 +2112,7 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ADMIN])
     await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [DELEGATED, MAIN])
     await pool.query("INSERT INTO user_namespace_admissions (user_id, namespace, enabled, source) VALUES ($1, 'stock-prep', true, 'platform_admin')", [DELEGATED])
+    await pool.query("INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin')", [ADMIN_2])
     groupId = (await pool.query('INSERT INTO platform_member_groups (name) VALUES ($1) RETURNING id', [`s5bl group ${sfx}`])).rows[0].id
     for (const userId of [IN_SCOPE, DELEGATED, NEWBIE]) {
       await pool.query('INSERT INTO platform_member_group_members (group_id, user_id) VALUES ($1, $2)', [groupId, userId])
@@ -2196,7 +2242,7 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     }
   }, 30_000)
 
-  it('LR-04 (iv) N3: the grantor\'s sheet write revoked before the locks is refused under them; one revoked during the G1 call waits for the commit', async () => {
+  it('LR-04 (iv) N3: the grantor\'s sheet write revoked before the locks is refused under them; a BARE-DELETE revoke during the G1 call waits for the commit', async () => {
     const roleId = await createRole('S5bl 丁', ['stock-prep:read'])
     // (a) revoked between the fast check and the transaction → the in-lock check refuses, no G1 call.
     await setDelegatedSheetWrite(SHEET_2, true)
@@ -2214,7 +2260,8 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     expect(refused).toBe('403/STOCK_PREP_CUSTOM_ROLE_SHEET_NOT_WRITABLE')
     expect(calls).toEqual([])
     expect(await roleRowsOn(SHEET_2, roleId)).toBe(0)
-    // (b) revoked DURING the G1 call → the revoke waits for the members commit.
+    // (b) revoked DURING the G1 call by a BARE DELETE (no sheet-row lock — not the routes' shape; see
+    // LR-04c) → the revoke waits for the members commit.
     await setDelegatedSheetWrite(SHEET_2, true)
     let revoke: ReturnType<typeof timedStatement> | null = null
     let observed = ''
@@ -2232,9 +2279,51 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     expect(result).toEqual({ roleId, sheets: [{ sheetId: SHEET_2, granted: true }] })
     expect(observed, 'the revoke of the grantor\'s write waited for the members transaction').toBe('pending')
     expect((await revoke!.promise).outcome).toBe('ok')
-    console.log(`[S5bl LR-04] (a) revoke before the locks → ${refused}; (b) revoke during the G1 call was ${observed} until the grant committed`)
+    console.log(`[S5bl LR-04] (a) revoke before the locks → ${refused}; (b) bare-DELETE revoke during the G1 call was ${observed} until the grant committed`)
     expect(await roleRowsOn(SHEET_2, roleId)).toBe(1)
   }, 30_000)
+
+  it('LR-04c (iv) N3 against the routes\' revoke shape (sheet row FIRST, then DELETE) on a sheet the grant has not reached: no cycle PG can see — G1\'s lock_timeout breaks it (409 BUSY at ≈ 5 s), the earlier sheet stays granted, then the revoke lands and nothing is granted after it', async () => {
+    const roleId = await createRole('S5bl 戊', ['stock-prep:read'])
+    await setDelegatedSheetWrite(SHEET_3, true)
+    await setDelegatedSheetWrite(SHEET_4, true)
+    let route: ReturnType<typeof routeShapedRevoke> | null = null
+    let observed = ''
+    const started = Date.now()
+    const result = await outcome(port().grantCustomRoleProjectSheets({
+      actorId: DELEGATED,
+      roleId,
+      resolveTargets: async () => [
+        {
+          sheetId: SHEET_3,
+          // While SHEET_3's G1 call runs (the members locks, N3 included, are held), an operator edits
+          // the grantor's permission on SHEET_4 the way the routes do: sheet row first, then the DELETE,
+          // which waits on N3.
+          grant: g1(roleId, SHEET_3, async () => {
+            route = routeShapedRevoke(SHEET_4, DELEGATED)
+            await route.sheetRowHeld
+            observed = await waitSettled(route, 400)
+          }),
+        },
+        // Then SHEET_4's G1 call waits on the sheet row the route holds — until its own lock_timeout.
+        { sheetId: SHEET_4, grant: g1(roleId, SHEET_4) },
+      ],
+    }))
+    const held = Date.now() - started
+    const revoke = await route!.promise
+    const grantorRowsOn4 = Number((await pool.query(
+      "SELECT COUNT(*)::int AS n FROM spreadsheet_permissions WHERE sheet_id = $1 AND subject_type = 'user' AND subject_id = $2", [SHEET_4, DELEGATED],
+    )).rows[0].n)
+    console.log(`[S5bl LR-04c] route-shaped revoke on a not-yet-granted sheet: ${observed} behind N3; members grant → ${result} after ${held} ms; revoke → ${revoke.outcome} after ${revoke.ms} ms; role rows sheet3=${await roleRowsOn(SHEET_3, roleId)} sheet4=${await roleRowsOn(SHEET_4, roleId)}`)
+    expect(observed, 'the route held the sheet row and its DELETE waited on N3').toBe('pending')
+    expect(result, 'only G1\'s lock_timeout breaks the wait').toBe('409/STOCK_PREP_MEMBERS_BUSY')
+    expect(held, 'bounded by G1\'s lock_timeout, not by the route').toBeLessThan(7500)
+    expect(held).toBeGreaterThanOrEqual(4000)
+    expect(revoke.outcome, 'the revoke lands once the grant has let go').toBe('ok')
+    expect(await roleRowsOn(SHEET_3, roleId), 'the sheet granted before stays granted').toBe(1)
+    expect(await roleRowsOn(SHEET_4, roleId), 'nothing is granted after the revoke').toBe(0)
+    expect(grantorRowsOn4).toBe(0)
+  }, 40_000)
 
   it('LR-05 (v) pool-size concurrent members writes never stall an unrelated SELECT 1 on the app pool', async () => {
     const max = Number((appPool as unknown as { options?: { max?: number } })?.options?.max ?? 20)
@@ -2355,4 +2444,44 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     }
     console.log(`[S5bl LR-07] app-pool use inside the open members transaction — ${report.join('; ')}`)
   })
+
+  it('LR-08 (fix round 1) two PATCHes on DIFFERENT roles whose grantors hold each other\'s role, both removing a code: PG breaks the deadlock, the loser re-runs once — both ok', async () => {
+    const roleX = await createRole('S5bl 庚 X', ['stock-prep:operate', 'stock-prep:read'])
+    const roleZ = await createRole('S5bl 庚 Z', ['stock-prep:operate', 'stock-prep:read'])
+    // ADMIN (a member of Z) edits X while ADMIN_2 (a member of X) edits Z: each grantor lock takes FOR
+    // SHARE on the codes of the OTHER role, then each removes a code of its own role.
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [ADMIN, roleZ])
+    await pool.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [ADMIN_2, roleX])
+    try {
+      // A barrier in front of each PATCH's DELETE: both hold their role row and their grantor locks
+      // before either removes a code (only the first two arrivals wait; a re-run passes straight on).
+      let arrived = 0
+      let transactions = 0
+      let open: () => void = () => {}
+      const barrier = new Promise<void>((done) => { open = done })
+      const barriered = () => hookedPort({
+        beforeTx: async (sql) => {
+          if (sql.startsWith("SELECT set_config('lock_timeout'")) transactions += 1
+          if (!sql.startsWith('DELETE FROM role_permissions')) return
+          arrived += 1
+          if (arrived === 2) open()
+          if (arrived <= 2) await Promise.race([barrier, sleep(3000)])
+        },
+      })
+      const started = Date.now()
+      const [onX, onZ] = await Promise.all([
+        outcome(barriered().updateCustomRole({ actorId: ADMIN, roleId: roleX, permissionCodes: ['stock-prep:read'] })),
+        outcome(barriered().updateCustomRole({ actorId: ADMIN_2, roleId: roleZ, permissionCodes: ['stock-prep:read'] })),
+      ])
+      const ms = Date.now() - started
+      console.log(`[S5bl LR-08] cross-role PATCHes: X → ${onX}, Z → ${onZ} in ${ms} ms; transactions opened ${transactions} (2 + one re-run)`)
+      expect(arrived, 'both PATCHes reached their DELETE holding their locks').toBeGreaterThanOrEqual(2)
+      expect([onX, onZ], 'the deadlock loser re-ran and landed').toEqual(['ok', 'ok'])
+      expect(transactions, 'exactly one re-run').toBe(3)
+      expect(await roleCodes(roleX)).toEqual(['stock-prep:read'])
+      expect(await roleCodes(roleZ)).toEqual(['stock-prep:read'])
+    } finally {
+      await pool.query('DELETE FROM user_roles WHERE (user_id = $1 AND role_id = $2) OR (user_id = $3 AND role_id = $4)', [ADMIN, roleZ, ADMIN_2, roleX])
+    }
+  }, 30_000)
 })

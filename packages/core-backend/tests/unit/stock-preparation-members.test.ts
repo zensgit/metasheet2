@@ -45,6 +45,10 @@
  *         calls are audited.
  *   SM-30 one sheet-grant transaction at a time per process: a second waits without a transaction
  *         and, past the lock timeout, is 409 BUSY with no transaction opened.
+ *   Fix round 1:
+ *   SM-31 an update that loses a deadlock (40P01) re-runs its whole transaction once — locks first
+ *         again — and lands; a second deadlock, a lock timeout (55P03), a create and a sheet grant are
+ *         not re-run (409 BUSY). Real-DB witness: LR-08.
  */
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -223,6 +227,8 @@ interface HarnessOptions {
   world?: World
   randomSuffix?: () => string
   transactionThrows?: unknown
+  /** With transactionThrows: throw on the first N transactions only (default: every one). */
+  transactionThrowsTimes?: number
   /** Runs before a TRANSACTION statement is answered — the "someone else committed meanwhile" seam. */
   onTxStatement?: (text: string, world: World) => void
   grantBudgetMs?: number
@@ -347,7 +353,7 @@ function harness(options: HarnessOptions = {}): Harness {
     query,
     transaction: async (fn) => {
       calls.transaction += 1
-      if (options.transactionThrows) throw options.transactionThrows
+      if (options.transactionThrows && (options.transactionThrowsTimes === undefined || calls.transaction <= options.transactionThrowsTimes)) throw options.transactionThrows
       const snapshot = { roles: new Map(Array.from(world.roles.entries()).map(([k, v]) => [k, { ...v }])), rolePermissions: world.rolePermissions.map((row) => ({ ...row })) }
       const window = { start: Date.now(), end: 0 }
       txWindows.push(window)
@@ -1184,6 +1190,43 @@ describe('stock-prep members port (S5b, R-39)', () => {
       await expect(after.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => targets([SHEET_B]).list })).resolves.toMatchObject({ roleId: CUSTOM })
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('SM-31 (fix round 1): an update that loses a deadlock re-runs its whole transaction ONCE; a lock timeout, a second deadlock and a sheet grant are not re-run', async () => {
+    const deadlock = () => Object.assign(new Error('deadlock detected'), { code: '40P01' })
+    // (a) one deadlock, then the re-run lands: every lock and every check ran again, one audit row.
+    {
+      const h = harness({ transactionThrows: deadlock(), transactionThrowsTimes: 1 })
+      await expect(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] })).resolves.toMatchObject({ added: ['stock-prep:operate'] })
+      expect(h.calls.transaction, 'the update re-ran its transaction once').toBe(2)
+      expect(h.txStatements[0], 'the re-run took its locks again first').toBe(norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL))
+      expect(h.txStatements[1]).toBe(norm(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL))
+      expect(h.audits).toHaveLength(1)
+    }
+    // (b) a second deadlock is the retryable 409, nothing written, no audit.
+    {
+      const h = harness({ transactionThrows: deadlock(), transactionThrowsTimes: 2 })
+      const error = await refusal(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, permissionCodes: ['stock-prep:read', 'stock-prep:operate'] }))
+      expect([error.status, error.code, h.calls.transaction]).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', 2])
+      expect(h.audits).toEqual([])
+    }
+    // (c) a lock timeout is NOT re-run (the bound is the bound).
+    {
+      const h = harness({ transactionThrows: Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' }), transactionThrowsTimes: 1 })
+      const error = await refusal(h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '丁' }))
+      expect([error.status, error.code, h.calls.transaction]).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', 1])
+    }
+    // (d) a create and a sheet grant are not re-run (a grant's G1 calls are not part of its transaction).
+    {
+      const h = harness({ transactionThrows: deadlock(), transactionThrowsTimes: 1 })
+      const t = targets([SHEET_A])
+      const grant = await refusal(h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => t.list }))
+      expect([grant.status, grant.code, h.calls.transaction]).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', 1])
+      const c = harness({ transactionThrows: deadlock(), transactionThrowsTimes: 1 })
+      const create = await refusal(c.port.createCustomRole({ actorId: DELEGATED, name: '己', permissionCodes: ['stock-prep:read'] }))
+      expect([create.status, create.code, c.calls.transaction]).toEqual([409, 'STOCK_PREP_MEMBERS_BUSY', 1])
+      expect(t.granted).toEqual([])
     }
   })
 })
