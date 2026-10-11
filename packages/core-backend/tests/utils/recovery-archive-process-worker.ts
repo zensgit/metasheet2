@@ -291,7 +291,8 @@ if (process.env.METASHEET_ARCHIVE_PROCESS_FIXTURE === '1' && process.send) {
     void run(input).catch(async (error: unknown) => {
       const code = typeof error === 'object' && error !== null && 'code' in error
         && typeof error.code === 'string' && /^RECOVERY_ARCHIVE_[A-Z_]+$/.test(error.code)
-        ? error.code : 'archive_process_worker_failed'
+        ? error.code : error instanceof Error && /^archive_process_[a-z_]+$/.test(error.message)
+          ? error.message : 'archive_process_worker_failed'
       await send({ kind: 'error', code })
       process.exitCode = 1
     }).finally(() => {
