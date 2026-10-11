@@ -1,5 +1,7 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
+> **当前状态（2026-10-12，§199）**：Automation 的原 manual/interval 整站、宜搭 owner JWT/HTTP/browser 和受控读取真库步骤在 `af9f33d67` 上成功；整条 CI 后续因两个旧测试契约不兼容而失败，不记全绿。仅修两测试文件，新独立真库验证 20/20、零跳过，已推送 `45791e1c4`，新完整 run `38172366770` 已核 head。等待新 head 的完整结果及独立终审，#6337 保持草稿。宜搭 #6315 完整 CI 已成功；无合并、部署、真实客户读取或发送。下方“最新”均为历史观察。
+
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
 > **最新续记（2026-10-12，§194）**：K3/PLM已携带宜搭main对齐，精确head普通检查分别14/14和43/43。Automation已推送`9a9ca90e0`，修复完整CI的三处前置契约问题并携带PLM；最终受检树通过196条契约、试用脚本类型检查、66个后端文件3226/3226、52个插件文件、13个前端文件787/787及8个守卫变异。新完整run `38160924399`已核head一致、排队中，不称manual/interval或全目标通过。宜搭仍59成功/1跳过/1运行。独立终审未闭合，无GitHub合并、部署、客户读取或外发。以下续记保留历史时点。
@@ -2243,3 +2245,11 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 诊断 run `38163935288` 于固定 head `a4e0591ed5eea387e08890057ed6c511d96de75a` 终态失败，未被取消。受限公开帧明确报告 GET / OTHER_STOCK_PREPARATION、TOPBAR / `UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS`。至此该项从代码推断变为真实运行确认：旧验收守卫确实漏掉成员预读。日志 7565 字节、SHA `cdeae8d47a3b6de73fd5b82381c99d9529c939628c786667650d03f58bc158ce`，仅内存解析固定枚举和哈希，不保存/打印原文，不读私有产物。
 - 修复候选 `af9f33d67cae0a5e96ec5f99908f611cf6249196` 的普通检查 47/47 成功。旧诊断结束后才启动[完整 run 38166500938](https://github.com/zensgit/metasheet2/actions/runs/38166500938)，已核 head 精确一致，等待 manual/interval 完整结果。不能用普通检查或已确认根因替代修复后实跑；#6337 仍 draft，独立终审与全目标未完成。
 - 当前 main 仍为 `906840c74cab5120aac73132644372e678f6b334`，无需因本轮等待重做基线。没有合并、部署、真实客户读取、真实 token 交换或发送。
+
+## 199. 完整应用通过，修复后续两处真实数据库测试契约（2026-10-12）
+
+- 固定 `af9f33d67cae0a5e96ec5f99908f611cf6249196` 的 run `38166500938` 已终态 failure，未取消。第 99 步原 manual 和 interval 两条完整应用命令成功；第 100 步删除/指针事务及受控读取真实数据库集合、第 101 步宜搭 owner JWT/HTTP/browser、第 102–103 步 source revision/Automation 单元契约成功。本项依据实际 workflow 接线与 GitHub step 元数据，未下载原生私有产物，不外推为真实客户或真实宜搭验收。
+- 第 109 步多维表真库回归为 264 文件通过、2 文件失败，5 条失败标题。限定失败日志仅内存解析，15046978 字节，SHA `99476004150fba353d1883c9510cd61163a8014a264c0cb5afaa3597d128ad24`。三条 reseal 失败来自 fixture 未执行新增 validation revision 迁移；两条 outbox 失败来自仍断言当前 manifest v3、实际已为 v4。不是把所有后续 skipped 当作通过，也未对原失败直接重跑。
+- 最小修复仅两个测试文件：reseal fixture 使用真实 057 Binding schema 和真实 source revision migration，精确断言 UPDATE RETURNING、DB nonce 轮换、incarnation/owner/scope 不变、镜像和已加载 adapter revision 一致以及重启保留；outbox 保留显式版本断言改为 v4、五个 approval consumer fan-out 不变，并补显式 v3 兼容正控制。生产实现、权限、迁移、路由 manifest、CI workflow 均未改；两文件不在 provenance 模块实际 pin 集。
+- 新独立 Linux 副本、自建 PostgreSQL、私有 loopback、caps0/NNP，原 Vitest integration 配置执行两个完整文件 20/20、零失败/跳过；只预置真实 outbox migration，reseal 自行建隔离 schema，不冒称全量迁移或整个多维表测试集。原 helper 成功停删自建 PG，旧副本保留；不声称文件系统或 Unix IPC 隔离。receipt SHA `5e04eeec3732c22287ef8b48518be4da132f1bb243b5ab587ba99dbbcdc8daa1`，真实 JSON SHA `7cf8c5bf833dd5ef35e6cea1979c2565570626504f68e94ff82d741a02837bcf`；私有诊断未上传。候选与父源的七个显式覆盖输入前后未变，不扩称完整依赖图前后验收。
+- 提交 `45791e1c4e30904eddb86b496d46933ce1e524c2` 已普通推送 #6337；旧 run 终态后才 dispatch [新完整 run 38172366770](https://github.com/zensgit/metasheet2/actions/runs/38172366770)，已核 head 精确一致。新 head 全链结果仍待出，不沿用旧 head 的成功；独立终审未完成，草稿保留。main 仍 `906840c74cab5120aac73132644372e678f6b334`。文档此前 head `9a535f930` 的 21/21 检查通过，不宣称修复了旧 session JWT 时钟偶发测试。无合并、部署、客户 SQL/API、真实 token 交换或宜搭发送，K3 永久禁写，goal active。
