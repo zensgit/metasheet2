@@ -256,7 +256,7 @@ describe('RoleManagementView — an existing role is addressed by the id it was 
   // turns "clean up the empty duplicate" into "demote every attendance admin".
   const REAL = 'attendance_admin'
   const PADDED = 'attendance_admin '
-  const BOM_LED = '﻿attendance_admin'
+  const BOM_LED = '\uFEFFattendance_admin'
 
   function lookAlikeCatalog() {
     return {

@@ -1144,10 +1144,10 @@ describe('POST /api/roles — the same authority boundary as PUT', () => {
     // before addressing it would hit the real namespace main-admin role.
     const lookAlikes = [
       'attendance_admin ',
-      '﻿attendance_admin',
-      '　attendance_admin',
-      'attendance_admin ',
-      'attendance​_admin',
+      '\uFEFFattendance_admin',
+      '\u3000attendance_admin',
+      'attendance_admin\u00A0',
+      'attendance\u200B_admin',
       '   ',
     ]
     for (const id of lookAlikes) {
