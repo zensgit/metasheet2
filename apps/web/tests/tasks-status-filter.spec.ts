@@ -222,8 +222,9 @@ describe('G2-core status switch — default and labels', () => {
     expect(h.listTasks).toHaveBeenCalledTimes(1)
     expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
     expect(pressed(el)).toEqual(['open'])
-    expect(statusButton(el, 'open').disabled).toBe(true)
-    expect(statusButton(el, 'done').disabled).toBe(false)
+    // The pressed option stays enabled: keyboard focus stays on it after activation and
+    // screen-reader focus mode can reach it. Only `aria-pressed` marks it.
+    expect((['open', 'done', 'all'] as const).map((value) => statusButton(el, value).disabled)).toEqual([false, false, false])
   })
 
   it('g2core|fe|labels: the three buttons read 未完成 / 已完成 / 全部 in a nav named 任务状态', async () => {
@@ -261,11 +262,16 @@ describe('G2-core status switch — switching', () => {
     expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, 'open')
   })
 
-  it('g2core|fe|same: pressing the current status does not read again', async () => {
+  it('g2core|fe|same: pressing the current status (an enabled button) does not read again', async () => {
     const el = await mountReady()
-    statusButton(el, 'open').click()
+    const current = statusButton(el, 'open')
+    expect(current.disabled).toBe(false)
+    current.focus()
+    current.click()
     await flush()
     expect(h.listTasks).toHaveBeenCalledTimes(1)
+    expect(pressed(el)).toEqual(['open'])
+    expect(document.activeElement).toBe(current)
   })
 
   it('g2core|fe|late: a slow answer for the previous status cannot paint over the new one', async () => {
@@ -372,5 +378,133 @@ describe('G2-core status switch — remembered per browser', () => {
     } finally {
       if (descriptor) Object.defineProperty(window, 'localStorage', descriptor)
     }
+  })
+})
+
+// The status analogues of the view switch's page-token cells (tasks-list-view.spec.ts, "late action
+// result after switching list view"): `switchStatus` moves the page on like `switchView`, so a row
+// action or create started under the previous status must not act on the new status's rows.
+describe('G2-core status switch — late action result after switching status (list-page-token guard)', () => {
+  function submitCreate(el: HTMLElement): void {
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = 'New task'
+    titleInput.dispatchEvent(new Event('input'))
+  }
+
+  it('g2core|fe|token|a pending error from complete settling after a status switch shows no banner and does not reload', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
+    const pendingComplete = deferred<{ kind: 'error'; status: number }>()
+    h.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountReady()
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    statusButton(el, 'done').click()
+    await flush()
+    expect(el.textContent).toContain('Done Item')
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingComplete.resolve({ kind: 'error', status: 500 })
+    await flush()
+    expect(shown(el, 'tasks-action-error')).toBeNull()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(el.textContent).toContain('Done Item')
+    expect(h.notifyTasksChanged).not.toHaveBeenCalled()
+  })
+
+  it('g2core|fe|token|a pending org_missing from complete settling after a status switch shows no guidance block', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
+    const pendingComplete = deferred<{ kind: 'org_missing' }>()
+    h.completeTask.mockReturnValue(pendingComplete.promise)
+    const el = await mountReady()
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    statusButton(el, 'done').click()
+    await flush()
+
+    pendingComplete.resolve({ kind: 'org_missing' })
+    await flush()
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(el.textContent).toContain('Done Item')
+  })
+
+  it('g2core|fe|token|a pending ok from reopen settling after a status switch notifies the badge bus without a needless reload', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'All Item', status: 'open' })] })
+    const pendingReopen = deferred<{ kind: 'ok' }>()
+    h.reopenTask.mockReturnValue(pendingReopen.promise)
+    const el = await mountReady()
+    ;(shown(el, 'tasks-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    statusButton(el, 'all').click()
+    await flush()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingReopen.resolve({ kind: 'ok' })
+    await flush()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(el.textContent).toContain('All Item')
+  })
+
+  it('g2core|fe|token|a pending org_missing from create settling after a status switch shows no guidance block', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
+    const pendingCreate = deferred<{ kind: 'org_missing' }>()
+    h.createTask.mockReturnValue(pendingCreate.promise)
+    const el = await mountReady()
+    submitCreate(el)
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+    statusButton(el, 'done').click()
+    await flush()
+
+    pendingCreate.resolve({ kind: 'org_missing' })
+    await flush()
+    expect(shown(el, 'tasks-view-org-missing')).toBeNull()
+    expect(el.textContent).toContain('Done Item')
+  })
+
+  it('g2core|fe|token|a pending ok from create settling after a status switch clears the title and notifies, without a needless reload', async () => {
+    h.listTasks
+      .mockResolvedValueOnce({ kind: 'ok', items: [] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
+    const pendingCreate = deferred<{ kind: 'ok'; id: string }>()
+    h.createTask.mockReturnValue(pendingCreate.promise)
+    const el = await mountReady()
+    submitCreate(el)
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+    statusButton(el, 'done').click()
+    await flush()
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+
+    pendingCreate.resolve({ kind: 'ok', id: 't10' })
+    await flush()
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('')
+    expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenCalledTimes(2)
+    expect(el.textContent).toContain('Done Item')
+  })
+})
+
+// The empty line names the status it was read under (NIT from the G2-core gate).
+describe('G2-core status switch — the empty line', () => {
+  it('g2core|fe|empty: 未完成 / 已完成 / 全部 each name their own empty set', async () => {
+    const el = await mountReady()
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无未完成任务')
+    statusButton(el, 'done').click()
+    await flush()
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无已完成任务')
+    statusButton(el, 'all').click()
+    await flush()
+    expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无任务')
   })
 })

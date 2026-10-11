@@ -7,6 +7,7 @@
     :placements="placementsResult.kind === 'ok' ? placementsResult.placements : null"
     :unavailable="groupsResult.kind === 'unavailable' || placementsResult.kind === 'unavailable'"
     :truncated="truncated"
+    :rows-filtered="rowsFiltered === true && rowsTruncated !== true"
     :can-manage="true"
     :reload="reload"
     flat-testid="tasks-list"
@@ -43,6 +44,13 @@ const props = defineProps<{
   items: TaskListItem[]
   /** TasksView's quiet re-read of the assigned view's rows. */
   reloadItems: () => Promise<void>
+  /** G2-core: the rows are filtered by status (未完成 / 已完成); the placements read is not, so the
+   *  board keeps the placements of the hidden tasks in its index space (design §4.1). */
+  rowsFiltered?: boolean
+  /** G2-core: the rows' read stopped short of its `total`. A placement whose task is not a row may
+   *  then be one the page cut off rather than one the filter left out, so the board is not told the
+   *  rows are filtered and the existing rule (`[fe-35]`: such a placement holds moves off) applies. */
+  rowsTruncated?: boolean
 }>()
 
 const emit = defineEmits<{ 'org-missing': [] }>()

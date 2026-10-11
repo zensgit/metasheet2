@@ -520,6 +520,7 @@ const FMT_ARGS: Record<keyof typeof TASKS_FMT_ZH, unknown[]> = {
   groupsRenameNamed: ['Group A'],
   groupsDeleteNamed: ['Group A'],
   groupsDeletePrompt: ['Group A'],
+  groupsHiddenByFilter: [2],
 }
 
 describe('labels — every value is in its own language', () => {
@@ -691,7 +692,7 @@ describe('EN locale — TasksView list page renders no CJK', () => {
   it('empty state', async () => {
     h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountViewAt('/tasks')
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No tasks yet')
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No incomplete tasks')
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
@@ -1127,13 +1128,14 @@ describe('locale flip after mount — TasksView', () => {
   it('list: the view buttons, the empty state and the action banner re-render', async () => {
     h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountViewAt('/tasks')
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('暂无任务')
+    // G2-core: the default status is 未完成, and the empty line names it.
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('暂无未完成任务')
     expect(must(el, 'tasks-view-switch-following').textContent).toBe('关注中')
     expect(must(el, 'tasks-create-submit').textContent).toBe('创建')
 
     setLocale('en')
     await flush()
-    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No tasks yet')
+    expect(must(el, 'tasks-list-empty').textContent?.trim()).toBe('No incomplete tasks')
     expect(must(el, 'tasks-view-switch-following').textContent).toBe('Following')
     expect(must(el, 'tasks-create-submit').textContent).toBe('Create')
     expect(must(el, 'tasks-create-title').getAttribute('placeholder')).toBe('New task title')
