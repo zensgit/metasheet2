@@ -152,6 +152,11 @@ node __tests__/http-routes.test.cjs
 node __tests__/integration-hub-overview.test.cjs
 node __tests__/http-routes-plm-k3wise-poc.test.cjs
 node __tests__/k3-wise-adapters.test.cjs
+node __tests__/k3-wise-redirect-fence.test.cjs
+node __tests__/k3-read-operation-profiles.test.cjs
+node __tests__/k3-b4-response-contract.test.cjs
+node __tests__/k3-b4-source-run.test.cjs
+node __tests__/k3-b4-http-source-run.test.cjs
 node __tests__/k3-write-approval-posture.test.cjs
 node __tests__/k3-external-write-permanent-fence.test.cjs
 node __tests__/k3-wise-apply-row-limit.test.cjs

@@ -1421,6 +1421,10 @@ test('classify(): a web-only exact-file change is relevant', () => {
   assert.strictEqual(classify(['apps/web/src/services/integration/readSourceConfigs.ts']), true)
 })
 
+test('classify(): a required web-test runner-only change is relevant', () => {
+  assert.strictEqual(classify(['apps/web/scripts/run-required-web-tests.sh']), true)
+})
+
 test('classify(): a web-only nested stock-preparation change (prefix entry) is relevant', () => {
   assert.strictEqual(
     classify(['apps/web/src/components/integration/stockPreparation/deep/nested/Widget.vue']),

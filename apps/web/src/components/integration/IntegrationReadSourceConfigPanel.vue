@@ -2,12 +2,84 @@
   <div class="integration-read-source" data-testid="read-source-panel">
     <p class="integration-read-source__hint">
       顾问/管理员在这里配置第三方 API 的只读读取源：填写 S1 结构 → 定位容器探测(values-free)→ 保存版本(内容寻址,幂等)→ 审批后运行时才可选用。
-      终端用户只能选择已审批的读取源并提供业务 key,永远不能提交原始端点 / 过滤器 / 响应路径。本面板不含任何写入 / 删除能力。
+      终端用户只能选择已审批的读取源并提供业务 key,永远不能提交原始端点 / 过滤器 / 响应路径。已审批 K3 B4 可单页只读预览；管理员可另行确认内部缓存同步，不写 K3。
     </p>
 
     <div class="integration-read-source__columns">
       <div class="integration-read-source__form" data-testid="read-source-form">
         <h3>新建 / 试配读取源</h3>
+
+        <button v-if="!b4Mode" type="button" class="integration-workbench__button" data-testid="rsc-b4-enter" @click="enterB4Mode">
+          K3 物料列表 B4（受审操作模板）
+        </button>
+        <button v-if="!bl2Mode" type="button" class="integration-workbench__button" data-testid="rsc-bl2-enter" @click="enterBl2Mode">K3 按物料 ID 查唯一 BOM（BL2 模板）</button>
+
+        <div v-if="bl2Mode" class="integration-read-source__b4" data-testid="rsc-bl2-panel">
+          <p>K3 内部数字物料 ID（FItemID）→唯一 BOM 编号；不是物料编号、PLM 图号或递归 BOM 展开。模板不表示连接或版本已审批。</p>
+          <label class="integration-read-source__field"><span>已注册的 active K3 WISE WebAPI 系统</span>
+            <select v-model="draft.systemId" data-testid="rsc-bl2-system"><option value="">请选择 K3 系统</option><option v-for="system in b4Systems" :key="system.id" :value="system.id">{{ system.name }} ({{ system.id }})</option></select>
+          </label>
+          <label class="integration-read-source__field"><span>部署相对路径（固定以 /BOM/GetList 结尾）</span><input v-model="draft.readPath" data-testid="rsc-bl2-read-path" /></label>
+          <dl class="integration-read-source__b4-fixed" data-testid="rsc-bl2-fixed">
+            <dt>object / mode</dt><dd>{{ draft.object }} / {{ draft.mode }}</dd>
+            <dt>method / operations</dt><dd>{{ draft.readMethod }} / read</dd>
+            <dt>keyField / encoding</dt><dd>{{ draft.keyField }} / {{ draft.keyEncoding }}</dd>
+            <dt>container / resolver</dt><dd>{{ draft.containerPaths }} / {{ draft.resolverRule }}</dd>
+            <dt>fieldMap</dt><dd>{{ draft.fieldMap[0]?.source }} → {{ draft.fieldMap[0]?.target }}</dd>
+          </dl>
+          <label class="integration-read-source__field"><span>仅本次探测的 K3 内部物料 ID（不保存）</span><input v-model="probeKey" type="text" inputmode="numeric" autocomplete="off" data-testid="rsc-bl2-probe-key" /></label>
+          <label class="integration-read-source__inline"><input v-model="boundedSmoke" type="checkbox" data-testid="rsc-bl2-bounded-smoke" /><span>同时执行受限试读（默认关闭）</span></label>
+          <p>定位容器探测将真实读取 K3；仅在已获准的只读窗口操作。空集合或多个候选也可能探测成功，探测不证明唯一 BOM；审批后在右侧单独读取。</p>
+          <p v-if="!bl2ConfigValid && draft.systemId" class="integration-read-source__error" data-testid="rsc-bl2-invalid">模板结构或系统已变化，请修正路径或重新选择 BL2 模板。</p>
+          <div class="integration-read-source__actions">
+            <button type="button" class="integration-workbench__button" data-testid="rsc-bl2-probe" :disabled="probing || !bl2ConfigValid || !normalizeK3Bl2Key(probeKey)" @click="runProbe">{{ probing ? '探测中…' : '定位容器探测（非唯一性验证）' }}</button>
+            <button type="button" class="integration-workbench__button" data-testid="rsc-bl2-save" :disabled="saving || !bl2ConfigValid" @click="saveVersion">{{ saving ? '保存中…' : '保存结构版本' }}</button>
+            <button v-if="saveResult?.status === 'draft' && bl2ConfigValid" type="button" class="integration-workbench__button" data-testid="rsc-bl2-approve" @click="approveSavedResult">提交审批</button>
+            <button type="button" class="integration-workbench__button" data-testid="rsc-bl2-exit" @click="exitBl2Mode">退出 BL2，返回普通配置</button>
+          </div>
+          <p v-if="actionError" class="integration-read-source__error" data-testid="rsc-bl2-error">{{ actionError }}</p>
+          <div v-if="probeEvidence" data-testid="rsc-bl2-evidence"><p>容器探测证据（非唯一 BOM 结果）：ok={{ String(probeEvidence.ok) }}；containerLocated={{ probeEvidence.containerLocated === undefined ? 'unknown' : String(probeEvidence.containerLocated) }}</p><p v-for="entry in evidenceContainers" :key="entry.alias">{{ entry.alias }}: {{ entry.shape.type }}</p><p v-if="probeEvidence.errorCode">{{ probeEvidenceErrorLabel }} ({{ probeEvidence.errorCode }})</p></div>
+          <p v-if="saveResult" data-testid="rsc-bl2-save-result">{{ saveResult.reused ? '已复用' : '已保存' }}版本 v{{ saveResult.version }}（{{ saveResult.status }}；保存不等于审批）</p>
+        </div>
+
+        <div v-if="b4Mode" class="integration-read-source__b4" data-testid="rsc-b4-panel">
+          <p>受审操作模板 {{ K3_WISE_MATERIAL_LIST_B4_PROFILE_VERSION }}；它不表示此连接或配置版本已审批。只读探测和保存仍需由顾问操作，保存后须单独审批。</p>
+          <label class="integration-read-source__field">
+            <span>已注册 K3 WISE WebAPI 系统</span>
+            <select v-model="draft.systemId" data-testid="rsc-b4-system">
+              <option value="">请选择 K3 系统</option>
+              <option v-for="system in b4Systems" :key="system.id" :value="system.id">{{ system.name }} ({{ system.id }})</option>
+            </select>
+          </label>
+          <dl class="integration-read-source__b4-fixed" data-testid="rsc-b4-fixed">
+            <dt>object / mode</dt><dd>{{ draft.object }} / {{ draft.mode }}</dd>
+            <dt>readPath / method</dt><dd>{{ draft.readPath }} / {{ draft.readMethod }}</dd>
+            <dt>containerPaths</dt><dd>{{ draft.containerPaths }}</dd>
+            <dt>fieldMap</dt><dd>{{ draft.fieldMap[0]?.source }} → {{ draft.fieldMap[0]?.target }}</dd>
+            <dt>operations</dt><dd>read</dd>
+          </dl>
+          <label class="integration-read-source__inline">
+            <input v-model="boundedSmoke" type="checkbox" data-testid="rsc-b4-bounded-smoke" />
+            <span>同时执行受限试读（最多 10 行；需真实读取授权）</span>
+          </label>
+          <p>定位探测也是对所选 K3 的受控读取；仅在获准的只读窗口操作。本面板不会自动发起探测。</p>
+          <p v-if="!b4ConfigValid && draft.systemId" class="integration-read-source__error" data-testid="rsc-b4-invalid">受审配置或系统已变化，请重新选择 K3 模板。</p>
+          <div class="integration-read-source__actions">
+            <button type="button" class="integration-workbench__button" data-testid="rsc-b4-probe" :disabled="probing || !b4ConfigValid" @click="runProbe">{{ probing ? '探测中…' : '定位容器探测' }}</button>
+            <button type="button" class="integration-workbench__button" data-testid="rsc-b4-save" :disabled="saving || !b4ConfigValid" @click="saveVersion">{{ saving ? '保存中…' : '保存版本' }}</button>
+            <button v-if="saveResult?.status === 'draft' && b4ConfigValid" type="button" class="integration-workbench__button" data-testid="rsc-b4-approve" @click="approveSavedResult">提交审批</button>
+            <button type="button" class="integration-workbench__button" data-testid="rsc-b4-exit" @click="exitB4Mode">退出 B4，返回普通配置</button>
+          </div>
+          <p v-if="actionError" class="integration-read-source__error" data-testid="rsc-b4-error">{{ actionError }}</p>
+          <div v-if="probeEvidence" data-testid="rsc-b4-evidence">
+            <p>探测证据（values-free）：ok={{ probeEvidence.ok ? 'true' : 'false' }}；containerLocated={{ probeEvidence.containerLocated === undefined ? 'unknown' : String(probeEvidence.containerLocated) }}；boundedSmokeExecuted={{ probeEvidence.boundedSmokeExecuted === undefined ? 'unknown' : String(probeEvidence.boundedSmokeExecuted) }}</p>
+            <p v-for="entry in evidenceContainers" :key="entry.alias">{{ entry.alias }}: {{ entry.shape.type }}</p>
+            <p v-if="probeEvidence.errorCode">{{ probeEvidenceErrorLabel }}<template v-if="probeEvidenceErrorHint"> — {{ probeEvidenceErrorHint }}</template> ({{ probeEvidence.errorCode }})</p>
+          </div>
+          <p v-if="saveResult" class="integration-read-source__save-result" data-testid="rsc-b4-save-result">
+            {{ saveResult.reused ? `已复用现有版本 v${saveResult.version}` : `已保存新版本 v${saveResult.version}` }}（{{ saveResult.status }}；{{ saveResult.status === 'approved' ? '已审批' : '未审批前不能运行' }}）
+          </p>
+        </div>
 
         <!-- TC-1 (design-lock docs/development/integration-connector-template-catalog-design-lock-20260708.md,
              #3879): an ADD-ONLY alternative entry point — collapsed by default, so the pre-existing
@@ -16,6 +88,7 @@
              `selectMode()` sets) and forces the view back to the wizard, then falls through to the
              SAME step-1/2/3/4 flow — no new state, no new path. -->
         <IntegrationTemplateCatalogPicker
+          v-if="!b4Mode && !bl2Mode"
           seeds-wizard="read-source"
           testid-prefix="rsc"
           @select="applyReadSourceTemplate"
@@ -27,7 +100,7 @@
              el-switch/el-radio-group: those Element Plus controls only toggle via their OWN internal
              JS, which is a no-op when EP isn't globally registered (e.g. this file's existing spec's
              bare `createApp()`) — a native button works identically everywhere. -->
-        <div class="integration-read-source__mode-toggle">
+        <div v-if="!b4Mode && !bl2Mode" class="integration-read-source__mode-toggle">
           <button
             type="button"
             class="integration-read-source__mode-toggle-button"
@@ -40,7 +113,7 @@
         </div>
 
         <IntegrationReadSourceWizard
-          v-if="viewMode === 'wizard'"
+          v-if="!b4Mode && !bl2Mode && viewMode === 'wizard'"
           :draft="draft"
           :systems="systems"
           :probing="probing"
@@ -55,7 +128,7 @@
           @approve-saved="approveSavedResult"
         />
 
-        <template v-else>
+        <template v-else-if="!b4Mode && !bl2Mode">
         <label class="integration-read-source__field">
           <span>外部系统(systemId)</span>
           <select v-model="draft.systemId" data-testid="rsc-system" @change="onSystemChange">
@@ -347,6 +420,7 @@
                     type="button"
                     class="integration-workbench__button"
                     :data-testid="`rsc-retire-${row.id}`"
+                    :disabled="retiringRequests.has(row.id)"
                     @click="retire(row)"
                   >停用</button>
                   <button
@@ -356,6 +430,21 @@
                     @click="toggleAudit(row)"
                   >{{ auditConfigId === row.id ? '收起审计' : '审计' }}</button>
                 </td>
+              </tr>
+              <tr v-if="row.k3B4Eligible && row.status === 'approved'">
+                <td colspan="6">
+                  <IntegrationK3B4RunPanel
+                    :row="row"
+                    :scope="scope"
+                    :system="systems.find((system) => system.id === row.systemId)"
+                    :has-integration-admin="hasIntegrationAdmin"
+                    :available="!loading && !listError && !retiringRequests.has(row.id)"
+                    :generation="runGeneration"
+                  />
+                </td>
+              </tr>
+              <tr v-if="row.k3Bl2Eligible && row.status === 'approved'">
+                <td colspan="6"><IntegrationK3Bl2RunPanel :row="row" :scope="scope" :system="systems.find((system) => system.id === row.systemId)" :has-integration-admin="hasIntegrationAdmin" :available="!loading && !listError && !retiringRequests.has(row.id)" :generation="runGeneration" /></td>
               </tr>
               <tr v-if="auditConfigId === row.id" :data-testid="`rsc-audit-${row.id}`">
                 <td colspan="6">
@@ -380,9 +469,10 @@
 // Consultant/config tier only; probe + save + approve/retire + values-free audit.
 // The probe evidence path is allowlist-normalized in the service layer, so row values or
 // field keys can never reach this template even from a malformed response.
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { MagicStick, Setting } from '@element-plus/icons-vue'
 import { useLocale } from '../../composables/useLocale'
+import { onAuthPrincipalChange, onAuthSessionSwitch, readAuthSessionSignature } from '../../composables/authPrincipal'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint } from '../../services/integration/errorCodeLabels'
 import { integrationFieldHint, type IntegrationFieldHintKey } from '../../services/integration/fieldHints'
 import type { IntegrationScope, WorkbenchExternalSystem } from '../../services/integration/workbench'
@@ -393,9 +483,14 @@ import {
   approveReadSourceConfig,
   buildReadSourceConfigPayload,
   createReadSourceConfigDraft,
+  createK3WiseMaterialListB4Draft,
+  createK3WiseBomListByMaterialDraft,
   deriveReadSourceProbeEvidenceContainers,
   listReadSourceConfigAudit,
   listReadSourceConfigs,
+  isK3WiseMaterialListB4Draft,
+  isK3WiseBomListByMaterialDraft,
+  K3_WISE_MATERIAL_LIST_B4_PROFILE_VERSION,
   probeReadSourceConfig,
   retireReadSourceConfig,
   saveReadSourceConfigVersion,
@@ -413,16 +508,20 @@ import {
 } from '../../services/integration/readSourceTemplateCatalog'
 import IntegrationReadSourceWizard from './IntegrationReadSourceWizard.vue'
 import IntegrationTemplateCatalogPicker from './IntegrationTemplateCatalogPicker.vue'
+import IntegrationK3B4RunPanel from './IntegrationK3B4RunPanel.vue'
+import IntegrationK3Bl2RunPanel from './IntegrationK3Bl2RunPanel.vue'
+import { normalizeK3Bl2Key } from '../../services/integration/k3Bl2Runs'
 
 // IU-3 (design-lock docs/development/integration-iu3-read-source-wizard-design-lock-20260707.md):
 // the wizard is the DEFAULT new-config surface; `initialViewMode` lets a caller (incl. this file's
 // own spec, which targets the pre-existing flat-form testids) pin the panel to 'expert' so it renders
 // today's full field-flat form with ZERO wizard indirection — no existing assertion had to change.
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   scope: IntegrationScope
   systems: WorkbenchExternalSystem[]
   initialViewMode?: 'wizard' | 'expert'
-}>()
+  hasIntegrationAdmin?: boolean
+}>(), { hasIntegrationAdmin: false, initialViewMode: 'wizard' })
 
 const viewMode = ref<'wizard' | 'expert'>(props.initialViewMode ?? 'wizard')
 function toggleViewMode(): void {
@@ -432,6 +531,46 @@ function toggleViewMode(): void {
 const { locale } = useLocale()
 
 const draft = reactive(createReadSourceConfigDraft())
+const b4Mode = ref(false)
+const bl2Mode = ref(false)
+const b4Systems = computed(() => props.systems.filter((system) => system.kind === 'erp:k3-wise-webapi' && system.status === 'active'))
+const b4ConfigValid = computed(() => b4Mode.value
+  && b4Systems.value.some((system) => system.id === draft.systemId)
+  && isK3WiseMaterialListB4Draft(draft)
+  && validateReadSourceDraft(draft).length === 0)
+const bl2ConfigValid = computed(() => bl2Mode.value
+  && b4Systems.value.some((system) => system.id === draft.systemId)
+  && isK3WiseBomListByMaterialDraft(draft)
+  && validateReadSourceDraft(draft).length === 0)
+
+function enterBl2Mode(): void {
+  Object.assign(draft, createK3WiseBomListByMaterialDraft())
+  boundedSmoke.value = false
+  probeKey.value = ''
+  b4Mode.value = false
+  bl2Mode.value = true
+}
+function exitBl2Mode(): void {
+  Object.assign(draft, createReadSourceConfigDraft())
+  boundedSmoke.value = false
+  probeKey.value = ''
+  bl2Mode.value = false
+}
+
+function enterB4Mode(): void {
+  Object.assign(draft, createK3WiseMaterialListB4Draft())
+  boundedSmoke.value = false
+  probeKey.value = ''
+  b4Mode.value = true
+  bl2Mode.value = false
+}
+
+function exitB4Mode(): void {
+  Object.assign(draft, createReadSourceConfigDraft())
+  boundedSmoke.value = false
+  probeKey.value = ''
+  b4Mode.value = false
+}
 const boundedSmoke = ref(false)
 const probeKey = ref('')
 const probing = ref(false)
@@ -442,8 +581,63 @@ const listError = ref('')
 const probeEvidence = ref<ReadSourceProbeEvidence | null>(null)
 const saveResult = ref<ReadSourceSaveResult | null>(null)
 const configs = ref<ReadSourceConfigRow[]>([])
+const runGeneration = ref(0)
+const retiringRequests = reactive(new Map<string, symbol>())
 const auditConfigId = ref('')
 const auditRows = ref<ReadSourceAuditRow[]>([])
+let active = true
+let draftRevision = 0
+let probeRequest = 0
+let saveRequest = 0
+let listRequest = 0
+let auditRequest = 0
+let actionRequest = 0
+
+function invalidateSession(): void {
+  runGeneration.value += 1
+  probeRequest += 1
+  saveRequest += 1
+  listRequest += 1
+  auditRequest += 1
+  actionRequest += 1
+  Object.assign(draft, createReadSourceConfigDraft())
+  b4Mode.value = false
+  bl2Mode.value = false
+  probeKey.value = ''
+  boundedSmoke.value = false
+  probing.value = false
+  saving.value = false
+  configs.value = []
+  loading.value = false
+  actionError.value = ''
+  listError.value = ''
+  probeEvidence.value = null
+  saveResult.value = null
+  auditConfigId.value = ''
+  auditRows.value = []
+  retiringRequests.clear()
+}
+const unsubscribePrincipal = onAuthPrincipalChange(invalidateSession)
+const unsubscribeSession = onAuthSessionSwitch(invalidateSession)
+function sessionSignature(): string {
+  try { return JSON.stringify([readAuthSessionSignature(), localStorage.getItem('user_permissions'), localStorage.getItem('user_roles')]) }
+  catch { return 'invalid' }
+}
+let displayedSession = sessionSignature()
+function checkSession(): void {
+  const session = sessionSignature()
+  if (session !== displayedSession) {
+    displayedSession = session
+    invalidateSession()
+  }
+}
+window.addEventListener('storage', checkSession)
+window.addEventListener('focus', checkSession)
+watch(() => props.hasIntegrationAdmin, invalidateSession, { flush: 'sync' })
+
+function scopeSnapshot(): IntegrationScope {
+  return { tenantId: props.scope.tenantId, workspaceId: props.scope.workspaceId }
+}
 
 const validationProblems = computed(() => validateReadSourceDraft(draft))
 const evidenceContainers = computed(() => deriveReadSourceProbeEvidenceContainers(probeEvidence.value?.containers))
@@ -479,8 +673,65 @@ const probeNeedsKey = computed(() => showKeyField.value && draft.keyField.trim()
 // (system switch, mode, path, containers, fieldMap, …) makes them stale, so clear both. watch on a
 // reactive object is implicitly deep.
 watch(draft, () => {
+  draftRevision += 1
+  probeRequest += 1
+  saveRequest += 1
   probeEvidence.value = null
   saveResult.value = null
+  actionError.value = ''
+  probing.value = false
+  saving.value = false
+}, { flush: 'sync' })
+
+watch([probeKey, boundedSmoke], () => {
+  probeRequest += 1
+  probeEvidence.value = null
+  actionError.value = ''
+  probing.value = false
+}, { flush: 'sync' })
+
+watch([() => props.scope.tenantId, () => props.scope.workspaceId], () => {
+  if (b4Mode.value) {
+    Object.assign(draft, createK3WiseMaterialListB4Draft())
+    boundedSmoke.value = false
+    probeKey.value = ''
+  }
+  if (bl2Mode.value) {
+    Object.assign(draft, createK3WiseBomListByMaterialDraft())
+    boundedSmoke.value = false
+    probeKey.value = ''
+  }
+  runGeneration.value += 1
+  probeRequest += 1
+  saveRequest += 1
+  listRequest += 1
+  auditRequest += 1
+  actionRequest += 1
+  probing.value = false
+  saving.value = false
+  loading.value = false
+  actionError.value = ''
+  listError.value = ''
+  probeEvidence.value = null
+  saveResult.value = null
+  configs.value = []
+  auditConfigId.value = ''
+  auditRows.value = []
+  retiringRequests.clear()
+  void refresh()
+}, { flush: 'sync' })
+
+onBeforeUnmount(() => {
+  active = false
+  unsubscribePrincipal()
+  unsubscribeSession()
+  window.removeEventListener('storage', checkSession)
+  window.removeEventListener('focus', checkSession)
+  probeRequest += 1
+  saveRequest += 1
+  listRequest += 1
+  auditRequest += 1
+  actionRequest += 1
 })
 
 function onSystemChange(): void {
@@ -527,60 +778,101 @@ function coarseErrorMessage(error: unknown): string {
 }
 
 async function refresh(): Promise<void> {
+  checkSession()
+  runGeneration.value += 1
+  const request = ++listRequest
+  const session = sessionSignature()
+  const scope = scopeSnapshot()
   loading.value = true
   listError.value = ''
   try {
-    configs.value = await listReadSourceConfigs(props.scope)
+    const rows = await listReadSourceConfigs(scope)
+    if (active && request === listRequest && session === sessionSignature()) configs.value = rows
   } catch (error) {
-    listError.value = coarseErrorMessage(error)
+    if (active && request === listRequest && session === sessionSignature()) listError.value = coarseErrorMessage(error)
   } finally {
-    loading.value = false
+    checkSession()
+    if (active && request === listRequest) loading.value = false
   }
 }
 
 async function runProbe(): Promise<void> {
+  checkSession()
+  if (b4Mode.value && !b4ConfigValid.value) return
+  if (bl2Mode.value && (!bl2ConfigValid.value || !normalizeK3Bl2Key(probeKey.value))) return
+  const request = ++probeRequest
+  const session = sessionSignature()
+  const current = () => active && request === probeRequest && session === sessionSignature()
   actionError.value = ''
   probeEvidence.value = null
   if (probeNeedsKey.value && !probeKey.value.trim()) {
     actionError.value = '该配置声明了 keyField,探测需要提供业务 key'
     return
   }
+  const scope = scopeSnapshot()
+  const systemId = draft.systemId.trim()
+  const input = {
+    config: buildReadSourceConfigPayload(draft),
+    boundedSmoke: boundedSmoke.value,
+    key: probeNeedsKey.value ? (bl2Mode.value ? normalizeK3Bl2Key(probeKey.value)! : probeKey.value) : undefined,
+  }
   probing.value = true
   try {
-    probeEvidence.value = await probeReadSourceConfig(draft.systemId.trim(), {
-      config: buildReadSourceConfigPayload(draft),
-      boundedSmoke: boundedSmoke.value,
-      key: probeNeedsKey.value ? probeKey.value : undefined,
-    }, props.scope)
+    if (bl2Mode.value && (!window.confirm('定位容器探测将真实读取所选 K3；空集合或多个候选也可能探测成功，不证明唯一 BOM。请确认已获准本次只读访问。继续？') || !current() || !bl2ConfigValid.value)) return
+    const evidence = await probeReadSourceConfig(systemId, input, scope)
+    if (current()) probeEvidence.value = evidence
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    if (current()) actionError.value = coarseErrorMessage(error)
   } finally {
-    probing.value = false
+    checkSession()
+    if (active && request === probeRequest) probing.value = false
   }
 }
 
 async function saveVersion(): Promise<void> {
+  checkSession()
+  if (b4Mode.value && !b4ConfigValid.value) return
+  if (bl2Mode.value && !bl2ConfigValid.value) return
+  const request = ++saveRequest
+  const session = sessionSignature()
+  const current = () => active && request === saveRequest && session === sessionSignature()
+  const scope = scopeSnapshot()
+  const config = buildReadSourceConfigPayload(draft)
   actionError.value = ''
   saveResult.value = null
   saving.value = true
   try {
-    saveResult.value = await saveReadSourceConfigVersion(buildReadSourceConfigPayload(draft), props.scope)
+    const result = await saveReadSourceConfigVersion(config, scope)
+    if (!current()) return
+    saveResult.value = result
     await refresh()
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    if (current()) actionError.value = coarseErrorMessage(error)
   } finally {
-    saving.value = false
+    checkSession()
+    if (active && request === saveRequest) saving.value = false
   }
 }
 
 async function approve(row: ReadSourceConfigRow): Promise<void> {
-  if (!window.confirm(`审批后运行时即可选用该读取源(${row.object} v${row.version})。确认审批?`)) return
+  checkSession()
+  const request = ++actionRequest
+  const session = sessionSignature()
+  const identity = JSON.stringify(row)
+  const current = () => active && request === actionRequest && session === sessionSignature()
+    && JSON.stringify(configs.value.find((item) => item.id === row.id)) === identity
+  if (!current() || row.status !== 'draft') return
+  const scope = scopeSnapshot()
   actionError.value = ''
   try {
-    await approveReadSourceConfig(row.id, props.scope)
+    if (!window.confirm(`审批后运行时即可选用该读取源(${row.object} v${row.version})。确认审批?`) || !current()) return
+    await approveReadSourceConfig(row.id, scope)
+    if (!current()) return
     await refresh()
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    if (current()) actionError.value = coarseErrorMessage(error)
+  } finally {
+    checkSession()
   }
 }
 
@@ -589,40 +881,82 @@ async function approve(row: ReadSourceConfigRow): Promise<void> {
 // `refresh()` service path the list-row `approve()` button already uses below — existing service
 // paths only, no new route/call shape (design-lock §2 hard lock).
 async function approveSavedResult(): Promise<void> {
+  checkSession()
+  if (b4Mode.value && !b4ConfigValid.value) return
+  if (bl2Mode.value && !bl2ConfigValid.value) return
   const result = saveResult.value
-  if (!result) return
-  if (!window.confirm(`审批后运行时即可选用该读取源(${draft.object} v${result.version})。确认审批?`)) return
+  if (!result || result.status !== 'draft') return
+  const request = ++actionRequest
+  const revision = draftRevision
+  const session = sessionSignature()
+  const current = () => active && request === actionRequest && revision === draftRevision
+    && session === sessionSignature() && saveResult.value === result
+  const scope = scopeSnapshot()
   actionError.value = ''
   try {
-    await approveReadSourceConfig(result.id, props.scope)
+    if (!window.confirm(`审批后运行时即可选用该读取源(${draft.object} v${result.version})。确认审批?`) || !current()) return
+    const approved = await approveReadSourceConfig(result.id, scope)
+    if (!current()) return
+    if ((b4Mode.value || bl2Mode.value) && approved?.status === 'approved') saveResult.value = { ...result, status: 'approved' }
     await refresh()
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    if (current()) actionError.value = coarseErrorMessage(error)
+  } finally {
+    checkSession()
   }
 }
 
 async function retire(row: ReadSourceConfigRow): Promise<void> {
+  checkSession()
+  if (!active || retiringRequests.has(row.id) || row.status !== 'approved'
+    || JSON.stringify(configs.value.find((item) => item.id === row.id)) !== JSON.stringify(row)) return
+  runGeneration.value += 1
+  const owner = Symbol()
+  retiringRequests.set(row.id, owner)
+  const request = ++actionRequest
+  const session = sessionSignature()
+  // A row owns its pending retirement independently of later row actions or list refreshes.
+  // Scope/session invalidation clears these tokens; an old completion cannot clear a new owner.
+  const current = () => active && retiringRequests.get(row.id) === owner && session === sessionSignature()
+  const scope = scopeSnapshot()
   actionError.value = ''
   try {
-    await retireReadSourceConfig(row.id, props.scope)
+    await retireReadSourceConfig(row.id, scope)
+    if (!current()) return
     await refresh()
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    // Shared feedback follows the latest action; list reconciliation and slot release do not.
+    if (current() && request === actionRequest) actionError.value = coarseErrorMessage(error)
+  } finally {
+    checkSession()
+    if (current()) retiringRequests.delete(row.id)
   }
 }
 
 async function toggleAudit(row: ReadSourceConfigRow): Promise<void> {
+  checkSession()
   if (auditConfigId.value === row.id) {
+    auditRequest += 1
     auditConfigId.value = ''
     auditRows.value = []
     return
   }
+  const request = ++auditRequest
+  const session = sessionSignature()
+  const scope = scopeSnapshot()
   actionError.value = ''
+  auditConfigId.value = row.id
+  auditRows.value = []
   try {
-    auditRows.value = await listReadSourceConfigAudit(row.id, props.scope)
-    auditConfigId.value = row.id
+    const rows = await listReadSourceConfigAudit(row.id, scope)
+    if (active && request === auditRequest && session === sessionSignature()) auditRows.value = rows
   } catch (error) {
-    actionError.value = coarseErrorMessage(error)
+    if (active && request === auditRequest && session === sessionSignature()) {
+      auditConfigId.value = ''
+      actionError.value = coarseErrorMessage(error)
+    }
+  } finally {
+    checkSession()
   }
 }
 
@@ -630,6 +964,25 @@ void refresh()
 </script>
 
 <style scoped>
+.integration-read-source__b4 {
+  display: grid;
+  gap: var(--ms-space-3);
+  min-width: 0;
+}
+.integration-read-source__b4-fixed {
+  display: grid;
+  grid-template-columns: minmax(120px, auto) minmax(0, 1fr);
+  gap: var(--ms-space-2);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.integration-read-source__b4-fixed dt {
+  font-weight: 600;
+}
+.integration-read-source__b4-fixed dd {
+  margin: 0;
+  min-width: 0;
+}
 .integration-read-source__hint {
   color: #666;
   font-size: 13px;
