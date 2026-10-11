@@ -4,8 +4,9 @@
  * 20260709.md`).
  *
  * CRUD for `directory_departments` / `directory_accounts` / `directory_account_departments` rows
- * under the ONE `provider='local'` integration a B1 `getOrCreateLocalIntegration(orgId)` call
- * anchors (imported, not reimplemented — `directory-sync.ts` is edited nowhere by this file).
+ * under the ONE `provider='local'` integration the B1 anchor get-or-create anchors (imported, not
+ * reimplemented — `directory-sync.ts` is edited nowhere by this file). Since W1-6 every writer here
+ * runs that get-or-create INSIDE its own transaction (`withLocalAnchorTransaction`).
  *
  * Owner design fixes this module honors (do NOT reintroduce what they ruled out):
  *   - a local department's manager/head is NEVER written into `raw` here — `raw` on a local
@@ -26,12 +27,17 @@
  */
 
 import * as crypto from 'crypto'
-import { query, transaction } from '../db/pg'
+import { transaction } from '../db/pg'
 import {
-  getOrCreateLocalIntegration,
+  // W1-6: the anchor get-or-create runs INSIDE each writer's own transaction (see
+  // `withLocalAnchorTransaction` below); its audit is emitted only after that transaction commits.
+  getOrCreateLocalIntegrationInTransaction,
+  emitLocalIntegrationAnchorAudit,
+  type DirectoryIntegrationSummary,
+  type LocalIntegrationAnchorResult,
   // W4-PRE-1b: shared membership-write internals, imported (not reimplemented — see this
-  // file's own header comment) from directory-sync.ts — same convention
-  // `getOrCreateLocalIntegration` above already follows.
+  // file's own header comment) from directory-sync.ts — same convention the anchor helpers
+  // above already follow.
   upsertActiveUserOrgMembership,
   deactivateUserOrgMembershipIfNoOtherActiveBinding,
 } from './directory-sync'
@@ -70,6 +76,57 @@ export class LocalDirectoryConflictError extends Error {
 }
 
 const MAX_NAME_LENGTH = 200
+
+type LocalDirectoryTransactionClient = Parameters<Parameters<typeof transaction>[0]>[0]
+
+// Private sentinel: a writer that finds nothing to act on (→ the route's 404) throws this inside the
+// transaction so the anchor that transaction may have just created or revived rolls back with it.
+const NOTHING_FOUND_ROLLBACK: unique symbol = Symbol('local-directory:nothing-found-rollback')
+
+/**
+ * W1-6 (owner ruling 2026-10-10, "锚点进事务"): every local-directory writer runs here. The org's
+ * `provider='local'` anchor is got-or-created as the FIRST work of the SAME transaction that writes
+ * the department / account / link / membership rows, so:
+ *   - any failure inside `work` (a 404/409/400 thrown by the writer, a constraint violation, a DB
+ *     fault) rolls the anchor back too — no bare anchor is ever left behind;
+ *   - a writer that finds nothing (`work` returns null → the route's 404) also rolls back, through
+ *     the private sentinel, so a PATCH/archive of a missing id leaves no anchor either;
+ *   - the bootstrap / reactivation audit is written only after COMMIT (`emitLocalIntegrationAnchorAudit`),
+ *     never for an anchor that was rolled back.
+ *
+ * `SET TRANSACTION ISOLATION LEVEL READ COMMITTED` is the transaction's first statement (Postgres
+ * rejects it after any query). Two things here rely on READ COMMITTED: the anchor's own race
+ * recovery (a second first-caller's `INSERT … ON CONFLICT DO NOTHING` waits on the first caller's
+ * row, then re-selects the committed winner in a fresh snapshot — under REPEATABLE READ that INSERT
+ * would instead raise a serialization failure), and PB4-3's reparent cycle walk in
+ * `updateLocalDepartment`. Production's default is already RC; this pins it against a changed
+ * `default_transaction_isolation`.
+ *
+ * Lock order: the anchor work comes before every other lock any writer takes (users, accounts,
+ * departments), so two writers for the same org that both need to create the anchor queue on the
+ * anchor's unique index before either holds anything else — they cannot deadlock on it.
+ */
+async function withLocalAnchorTransaction<T>(
+  orgId: string,
+  work: (client: LocalDirectoryTransactionClient, integration: DirectoryIntegrationSummary) => Promise<T>,
+): Promise<T> {
+  let anchor: LocalIntegrationAnchorResult | null = null
+  let value: T
+  try {
+    value = await transaction(async (client) => {
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      anchor = await getOrCreateLocalIntegrationInTransaction(client, orgId)
+      const result = await work(client, anchor.integration)
+      if (result === null) throw NOTHING_FOUND_ROLLBACK
+      return result
+    })
+  } catch (error) {
+    if (error === NOTHING_FOUND_ROLLBACK) return null as T
+    throw error
+  }
+  if (anchor) await emitLocalIntegrationAnchorAudit(anchor)
+  return value
+}
 
 // ---------------------------------------------------------------------------------------------
 // Departments
@@ -113,13 +170,16 @@ const LOCAL_DEPARTMENT_SELECT = `
       ON p.integration_id = d.integration_id AND p.external_department_id = d.external_parent_department_id
 `
 
-async function loadLocalDepartmentForOrg(orgId: string, departmentId: string): Promise<LocalDepartmentRow | null> {
-  const integration = await getOrCreateLocalIntegration(orgId)
-  const result = await query<LocalDepartmentRow>(
+async function loadLocalDepartment(
+  client: LocalDirectoryTransactionClient,
+  integrationId: string,
+  departmentId: string,
+): Promise<LocalDepartmentRow | null> {
+  const result = await client.query(
     `${LOCAL_DEPARTMENT_SELECT} WHERE d.id = $1 AND d.integration_id = $2 AND d.provider = 'local'`,
-    [departmentId, integration.id],
+    [departmentId, integrationId],
   )
-  return result.rows[0] ?? null
+  return (result.rows[0] as LocalDepartmentRow | undefined) ?? null
 }
 
 function summarizeLocalDepartment(row: LocalDepartmentRow): LocalDepartmentSummary {
@@ -148,8 +208,6 @@ export async function createLocalDepartment(input: CreateLocalDepartmentInput): 
   if (!name) throw new LocalDirectoryValidationError('name is required')
   if (name.length > MAX_NAME_LENGTH) throw new LocalDirectoryValidationError(`name must be at most ${MAX_NAME_LENGTH} characters`)
 
-  const integration = await getOrCreateLocalIntegration(input.orgId)
-
   const orderIndex = Number.isFinite(input.orderIndex) ? Math.trunc(input.orderIndex as number) : 0
   // App-generated, immutable key — design lock §5.2: "the value should be immutable and
   // generated by the app, for example local:<uuid>".
@@ -159,7 +217,8 @@ export async function createLocalDepartment(input: CreateLocalDepartmentInput): 
   // classified inside the SAME transaction as the INSERT, under a `SELECT ... FOR UPDATE` row lock
   // on the parent — so a parent that is archived concurrently between check and insert cannot
   // slip a child under a read-only parent. A plain check-then-insert would be TOCTOU-vulnerable.
-  return await transaction(async (client) => {
+  // W1-6: the anchor is created in this same transaction, so a missing/archived parent leaves none.
+  return await withLocalAnchorTransaction(input.orgId, async (client, integration) => {
     let parentExternalDepartmentId: string | null = null
     if (input.parentDepartmentId) {
       const parentRes = await client.query(
@@ -225,7 +284,6 @@ export async function updateLocalDepartment(
     throw new LocalDirectoryValidationError('a department cannot be its own parent')
   }
 
-  const integration = await getOrCreateLocalIntegration(orgId)
   const reparenting = input.parentDepartmentId !== undefined && input.parentDepartmentId !== null
 
   // PB4-2 (owner design lock, WRITE-POINT enforcement): the target department is locked
@@ -243,7 +301,9 @@ export async function updateLocalDepartment(
   >
   const LOCKED_DEPARTMENT_COLUMNS = 'id, external_department_id, external_parent_department_id, name, order_index, is_active'
 
-  return await transaction(async (client) => {
+  // W1-6: anchor + classification + write share one transaction; a missing department (null → 404)
+  // rolls back through `withLocalAnchorTransaction`'s sentinel, so it leaves no anchor.
+  return await withLocalAnchorTransaction(orgId, async (client, integration) => {
     const parentId = reparenting ? (input.parentDepartmentId as string) : null
     let childRow: LockedDepartmentRow | undefined
     let parentRow: LockedDepartmentRow | undefined
@@ -256,11 +316,11 @@ export async function updateLocalDepartment(
       // ALL reparents within an integration on a single advisory xact lock, so each reparent's
       // ancestor walk observes every prior reparent already committed. READ COMMITTED is required
       // for that observation (a frozen REPEATABLE READ snapshot would miss the just-committed
-      // concurrent reparent, defeating the guard); it is the server default here, but we pin it so
-      // the guard cannot be silently defeated by a `default_transaction_isolation` change. (This SET
-      // is defense-in-depth — under the production RC default it is a no-op; its mechanism is proven
-      // in local-directory-org-cycle-detection.db.test.ts's "SET ... READ COMMITTED is effective".)
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      // concurrent reparent, defeating the guard); it is the server default here, and
+      // `withLocalAnchorTransaction` pins it as this transaction's first statement so the guard
+      // cannot be silently defeated by a `default_transaction_isolation` change. (That SET is
+      // defense-in-depth — under the production RC default it is a no-op; its mechanism is proven in
+      // local-directory-org-cycle-detection.db.test.ts's "SET ... READ COMMITTED is effective".)
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`directory:reparent:${integration.id}`])
 
       const locked = await client.query(
@@ -362,16 +422,19 @@ export async function updateLocalDepartment(
  * failure mode to guard against).
  */
 export async function archiveLocalDepartment(orgId: string, departmentId: string): Promise<LocalDepartmentSummary | null> {
-  const current = await loadLocalDepartmentForOrg(orgId, departmentId)
-  if (!current) return null
+  // W1-6: read, flip and reload in the anchor's transaction; a missing department rolls back (404).
+  return await withLocalAnchorTransaction(orgId, async (client, integration) => {
+    const current = await loadLocalDepartment(client, integration.id, departmentId)
+    if (!current) return null
 
-  if (current.is_active) {
-    await query(`UPDATE directory_departments SET is_active = false, updated_at = NOW() WHERE id = $1`, [departmentId])
-  }
+    if (current.is_active) {
+      await client.query(`UPDATE directory_departments SET is_active = false, updated_at = NOW() WHERE id = $1`, [departmentId])
+    }
 
-  const updated = await loadLocalDepartmentForOrg(orgId, departmentId)
-  if (!updated) throw new Error('local department archived but reload failed')
-  return summarizeLocalDepartment(updated)
+    const updated = await loadLocalDepartment(client, integration.id, departmentId)
+    if (!updated) throw new Error('local department archived but reload failed')
+    return summarizeLocalDepartment(updated)
+  })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -415,13 +478,16 @@ const LOCAL_ACCOUNT_SELECT = `
     LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
 `
 
-async function loadLocalAccountForOrg(orgId: string, accountId: string): Promise<LocalAccountRow | null> {
-  const integration = await getOrCreateLocalIntegration(orgId)
-  const result = await query<LocalAccountRow>(
+async function loadLocalAccount(
+  client: LocalDirectoryTransactionClient,
+  integrationId: string,
+  accountId: string,
+): Promise<LocalAccountRow | null> {
+  const result = await client.query(
     `${LOCAL_ACCOUNT_SELECT} WHERE a.id = $1 AND a.integration_id = $2 AND a.provider = 'local'`,
-    [accountId, integration.id],
+    [accountId, integrationId],
   )
-  return result.rows[0] ?? null
+  return (result.rows[0] as LocalAccountRow | undefined) ?? null
 }
 
 function summarizeLocalAccount(row: LocalAccountRow): LocalAccountSummary {
@@ -465,15 +531,15 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
   const localUserId = normalizeText(input.localUserId)
   if (!localUserId) throw new LocalDirectoryValidationError('localUserId is required')
 
-  const integration = await getOrCreateLocalIntegration(input.orgId)
-
   const externalUserId = localUserId
   const externalKey = `${input.orgId}:${localUserId}`
   const actorId = normalizeText(input.actorId) || 'system:local-directory'
 
-  let accountId = ''
   try {
-    await transaction(async (client) => {
+    // W1-6: the anchor, the account, its link and the user's org membership commit together or not at
+    // all — a missing/inactive user, an over-long name, a duplicate account or any DB fault in here
+    // rolls the anchor back too.
+    return await withLocalAnchorTransaction(input.orgId, async (client, integration) => {
       const lockedUsers = await lockUsersForAccessGraphWrite(client, [localUserId])
       const user = lockedUsers.get(localUserId)
       if (!user) throw new LocalDirectoryNotFoundError('local user not found')
@@ -506,7 +572,7 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
           JSON.stringify({ source: 'local', localUserId }),
         ],
       )
-      accountId = (inserted.rows[0] as { id: string }).id
+      const accountId = (inserted.rows[0] as { id: string }).id
 
       // Same ON CONFLICT (directory_account_id) DO UPDATE shape directory-sync.ts's own
       // admission/link paths use (see e.g. syncDirectoryIntegration's link upsert).
@@ -525,13 +591,17 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
       // above) to `input.orgId` via a local directory account — maintain their ACTIVE
       // membership in the SAME transaction. Imported from directory-sync.ts rather than
       // reimplemented (this file's own header: "directory-sync.ts is edited nowhere by this
-      // file" — same convention `getOrCreateLocalIntegration` already follows).
+      // file" — same convention the anchor helpers already follow).
       await upsertActiveUserOrgMembership(client, { userId: localUserId, orgId: input.orgId })
       await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
         userIds: [localUserId],
         actorId,
         reason: 'local directory account created by an administrator',
       })
+
+      const created = await loadLocalAccount(client, integration.id, accountId)
+      if (!created) throw new Error('local account created but reload failed')
+      return summarizeLocalAccount(created)
     })
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -539,10 +609,6 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
     }
     throw error
   }
-
-  const created = await loadLocalAccountForOrg(input.orgId, accountId)
-  if (!created) throw new Error('local account created but reload failed')
-  return summarizeLocalAccount(created)
 }
 
 export interface UpdateLocalAccountInput {
@@ -565,12 +631,11 @@ export async function updateLocalAccount(
     if (candidate.length > MAX_NAME_LENGTH) throw new LocalDirectoryValidationError(`name must be at most ${MAX_NAME_LENGTH} characters`)
   }
 
-  const integration = await getOrCreateLocalIntegration(orgId)
-
   // PB4-2 (owner design lock, WRITE-POINT enforcement): lock the account row `FOR UPDATE` and
   // classify active/archived/missing in the SAME transaction as the UPDATE, so a concurrent
-  // archive cannot land between check and write (TOCTOU-safe).
-  return await transaction(async (client) => {
+  // archive cannot land between check and write (TOCTOU-safe). W1-6: the anchor shares it too; a
+  // missing account (null → 404) rolls back and leaves no anchor.
+  return await withLocalAnchorTransaction(orgId, async (client, integration) => {
     const locked = await client.query(
       `SELECT id, name, email, mobile, title, is_active FROM directory_accounts
         WHERE id = $1 AND integration_id = $2 AND provider = 'local'
@@ -625,64 +690,72 @@ export async function archiveLocalAccount(
   accountId: string,
   actorIdInput?: string,
 ): Promise<LocalAccountSummary | null> {
-  const current = await loadLocalAccountForOrg(orgId, accountId)
-  if (!current) return null
+  // W1-6: the read, the archive and the reload share the anchor's transaction; a missing account
+  // (null → 404) rolls back and leaves no anchor. The first read takes no lock, so the lock order
+  // below (users, then account, then link) is unchanged from before.
+  return await withLocalAnchorTransaction(orgId, async (client, integration) => {
+    const current = await loadLocalAccount(client, integration.id, accountId)
+    if (!current) return null
 
-  if (current.is_active) {
-    await transaction(async (client) => {
-      const expectedLocalUserId = current.local_user_id
-      if (expectedLocalUserId) {
-        const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
-        if (!lockedUsers.has(expectedLocalUserId)) {
+    if (current.is_active) {
+      // Previously its own inner transaction; its early `return` (account already archived by a
+      // concurrent caller) is now this helper's return, so the reload below still runs.
+      const archiveIfStillActive = async (): Promise<void> => {
+        const expectedLocalUserId = current.local_user_id
+        if (expectedLocalUserId) {
+          const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
+          if (!lockedUsers.has(expectedLocalUserId)) {
+            throw new LocalDirectoryConflictError('local account binding changed; retry')
+          }
+        }
+
+        const accountResult = await client.query(
+          `SELECT id, is_active
+             FROM directory_accounts
+            WHERE id = $1 AND integration_id = $2 AND provider = 'local'
+            FOR UPDATE`,
+          [accountId, current.integration_id],
+        )
+        const lockedAccount = accountResult.rows[0] as { id: string; is_active: boolean } | undefined
+        if (!lockedAccount) throw new LocalDirectoryNotFoundError('local account not found')
+        if (!lockedAccount.is_active) return
+
+        const linkResult = await client.query(
+          `SELECT local_user_id
+             FROM directory_account_links
+            WHERE directory_account_id = $1
+            FOR UPDATE`,
+          [accountId],
+        )
+        const actualLocalUserId =
+          (linkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id
+          ?? null
+        if (actualLocalUserId !== expectedLocalUserId) {
           throw new LocalDirectoryConflictError('local account binding changed; retry')
         }
+
+        await client.query(
+          `UPDATE directory_accounts
+              SET is_active = false, updated_at = NOW()
+            WHERE id = $1 AND is_active = TRUE`,
+          [accountId],
+        )
+        if (expectedLocalUserId) {
+          await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: expectedLocalUserId, orgId })
+          await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
+            userIds: [expectedLocalUserId],
+            actorId: normalizeText(actorIdInput) || 'system:local-directory',
+            reason: 'local directory account archived by an administrator',
+          })
+        }
       }
+      await archiveIfStillActive()
+    }
 
-      const accountResult = await client.query(
-        `SELECT id, is_active
-           FROM directory_accounts
-          WHERE id = $1 AND integration_id = $2 AND provider = 'local'
-          FOR UPDATE`,
-        [accountId, current.integration_id],
-      )
-      const lockedAccount = accountResult.rows[0] as { id: string; is_active: boolean } | undefined
-      if (!lockedAccount) throw new LocalDirectoryNotFoundError('local account not found')
-      if (!lockedAccount.is_active) return
-
-      const linkResult = await client.query(
-        `SELECT local_user_id
-           FROM directory_account_links
-          WHERE directory_account_id = $1
-          FOR UPDATE`,
-        [accountId],
-      )
-      const actualLocalUserId =
-        (linkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id
-        ?? null
-      if (actualLocalUserId !== expectedLocalUserId) {
-        throw new LocalDirectoryConflictError('local account binding changed; retry')
-      }
-
-      await client.query(
-        `UPDATE directory_accounts
-            SET is_active = false, updated_at = NOW()
-          WHERE id = $1 AND is_active = TRUE`,
-        [accountId],
-      )
-      if (expectedLocalUserId) {
-        await deactivateUserOrgMembershipIfNoOtherActiveBinding(client, { userId: expectedLocalUserId, orgId })
-        await supersedeDeprovisionEvidenceForAccessGraphWrite(client, {
-          userIds: [expectedLocalUserId],
-          actorId: normalizeText(actorIdInput) || 'system:local-directory',
-          reason: 'local directory account archived by an administrator',
-        })
-      }
-    })
-  }
-
-  const updated = await loadLocalAccountForOrg(orgId, accountId)
-  if (!updated) throw new Error('local account archived but reload failed')
-  return summarizeLocalAccount(updated)
+    const updated = await loadLocalAccount(client, integration.id, accountId)
+    if (!updated) throw new Error('local account archived but reload failed')
+    return summarizeLocalAccount(updated)
+  })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -726,15 +799,14 @@ export interface AddLocalMembershipInput {
  * operation on purpose (design lock §5.4: "primary department must be explicit, not inferred").
  */
 export async function addLocalMembership(input: AddLocalMembershipInput): Promise<LocalMembershipSummary> {
-  const integration = await getOrCreateLocalIntegration(input.orgId)
-
   // PB4-2 (owner design lock, WRITE-POINT enforcement): lock the account row THEN the department
   // row `FOR UPDATE` (fixed order — account before department, design lock §2 — so no two
   // membership-writing transactions ever grab the same account/department pair in opposite orders
   // and deadlock), classify missing/archived, and add the membership all in ONE transaction. An
   // archive of either target concurrent with this add is serialized by these row locks: it either
   // commits first (we see is_active=false → 409) or waits behind us (the add wins, archive after).
-  return await transaction(async (client) => {
+  // W1-6: the anchor is got-or-created first in this same transaction; a 404/409 leaves none.
+  return await withLocalAnchorTransaction(input.orgId, async (client, integration) => {
     const accountRes = await client.query(
       `SELECT id, is_active FROM directory_accounts
         WHERE id = $1 AND integration_id = $2 AND provider = 'local'
@@ -792,8 +864,6 @@ export async function switchLocalPrimaryDepartment(
   accountId: string,
   departmentId: string,
 ): Promise<LocalMembershipSummary> {
-  const integration = await getOrCreateLocalIntegration(orgId)
-
   // PB4-2 (owner design lock, WRITE-POINT enforcement + FULL read-only): inside ONE transaction we
   // lock the account row, then EVERY department the account is a member of `FOR UPDATE` ordered by
   // department id (the fixed §2 lock order — account first, then departments ascending — so this
@@ -804,7 +874,8 @@ export async function switchLocalPrimaryDepartment(
   //     out of an archived primary; that path goes through PB4-4 reactivation first).
   // Only then the existing single atomic demote-others+promote-this UPDATE runs, still holding the
   // locks so no archive can slip in between the classification and the write.
-  return await transaction(async (client) => {
+  // W1-6: the anchor is got-or-created first in this same transaction; a 404/409 leaves none.
+  return await withLocalAnchorTransaction(orgId, async (client, integration) => {
     const accountRes = await client.query(
       `SELECT id, is_active FROM directory_accounts
         WHERE id = $1 AND integration_id = $2 AND provider = 'local'

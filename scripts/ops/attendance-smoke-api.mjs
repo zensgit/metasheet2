@@ -5,6 +5,7 @@ import {
 } from './attendance-smoke-workdate.mjs'
 import { pathToFileURL } from 'node:url'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './attendance-acceptance-preflight.mjs'
+import { scopeAttendanceImportUrl } from './attendance-import-scope.mjs'
 
 const apiBase = (process.env.API_BASE || '').replace(/\/+$/, '')
 let token = process.env.AUTH_TOKEN || ''
@@ -105,7 +106,7 @@ async function refreshAuthToken() {
 }
 
 async function apiFetch(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -125,7 +126,7 @@ async function apiFetch(path, init = {}) {
 }
 
 async function apiFetchRaw(path, init = {}) {
-  const url = `${apiBase}${path}`
+  const url = scopeAttendanceImportUrl(`${apiBase}${path}`, orgId)
   const res = await fetchWithRetry(url, {
     ...init,
     headers: {
@@ -725,7 +726,7 @@ async function run() {
   }
 
   // 6.2) export endpoint should return CSV (items or anomalies).
-  const exportUrl = `${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`
+  const exportUrl = scopeAttendanceImportUrl(`${apiBase}/attendance/import/batches/${batchId}/export.csv?type=anomalies`, orgId)
   const exportRes = await fetchWithRetry(exportUrl, {
     method: 'GET',
     headers: { Authorization: `Bearer ${token}`, Accept: 'text/csv' },

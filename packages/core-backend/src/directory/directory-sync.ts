@@ -2499,130 +2499,186 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
 // creatable by raw ops, never by this service, and are out of scope for reactivation).
 const LOCAL_INTEGRATION_NAME = 'Local organization'
 
-export async function getOrCreateLocalIntegration(
+/**
+ * The minimal query surface the anchor get-or-create needs. A `transaction()` client satisfies it
+ * (every statement then runs on that one connection, inside that transaction), and so does
+ * `{ query }` from `../db/pg` (every statement then auto-commits on its own).
+ */
+export type LocalIntegrationAnchorClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+/** What a get-or-create did to the anchor: created it, revived it, or found it already active. */
+export type LocalIntegrationAnchorEvent = 'bootstrap' | 'reactivate' | null
+
+export interface LocalIntegrationAnchorResult {
+  integration: DirectoryIntegrationSummary
+  event: LocalIntegrationAnchorEvent
+}
+
+const LOCAL_INTEGRATION_RETURNING = `id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`
+
+/**
+ * W1-6 (owner ruling 2026-10-10, "锚点进事务"): the get-or-create body, run on whatever `client`
+ * the caller hands in. Every statement goes through `client.query` — a stray pool `query()` here
+ * would run on a different connection and auto-commit, which is exactly the bare-anchor leak this
+ * split exists to close. Pass a `transaction()` client so the anchor commits or rolls back WITH the
+ * caller's own writes (`local-directory-org.ts` does this for every one of its writers).
+ *
+ * Writes NO audit: an audit row goes through its own connection, so emitting it here would record a
+ * bootstrap/reactivation even when the caller's transaction later rolls the anchor back. Hand the
+ * returned result to `emitLocalIntegrationAnchorAudit` AFTER the transaction has committed.
+ *
+ * Concurrency (unchanged guarantee, new mechanism): the INSERT is `ON CONFLICT DO NOTHING` with no
+ * conflict target, so a collision on `one_active_local_integration_per_org` (or on the unique
+ * (org_id, provider, name) index) yields zero rows instead of raising 23505 — a raised 23505 would
+ * abort the caller's whole transaction. Under READ COMMITTED a second first-caller's INSERT waits on
+ * the first caller's uncommitted row: if the first commits, the INSERT does nothing and the re-select
+ * below reads the winner; if the first rolls back, the INSERT proceeds and this caller becomes the
+ * winner. Either way at most one active anchor exists and exactly one caller reports 'bootstrap'.
+ */
+export async function getOrCreateLocalIntegrationInTransaction(
+  client: LocalIntegrationAnchorClient,
   orgId: string = DEFAULT_ORG_ID,
-): Promise<DirectoryIntegrationSummary> {
+): Promise<LocalIntegrationAnchorResult> {
   const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
 
-  const existing = await selectActiveLocalIntegration(normalizedOrgId)
-  if (existing) return summarizeIntegration(existing)
+  const existing = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (existing) return { integration: summarizeIntegration(existing), event: null }
 
   // PB4-4 (reactivation, owner design lock): before bootstrapping a NEW integration, revive a
   // previously-deactivated local integration IN PLACE — same id, so its departments, accounts, and
   // future B4 department-binding refs (all FK'd to integration_id) survive. A blind INSERT here
   // collides on idx_directory_integrations_org_provider_name (the fixed 'Local organization' name),
-  // and the old B1 catch below — which only re-selects ACTIVE rows — cannot recover from that, so
-  // the org's local directory would be bricked (every getOrCreate throws) after a single deactivate.
+  // so without this the org's local directory would be bricked after a single deactivate.
   //
   // The conditional UPDATE is a race-safe latch: `WHERE status <> 'active'` is re-evaluated under
   // READ COMMITTED after the row lock, so among N concurrent callers exactly ONE flips the row
-  // (RETURNING it) and writes the reactivation audit; every other caller's UPDATE matches zero rows
-  // (the row is already active by the time its lock is granted) and falls through to re-select the
-  // now-active winner below — same id, and exactly ONE `directory.local_integration.reactivate`
-  // audit no matter how many callers raced. (`idx_directory_integrations_org_provider_name` keeps at
-  // most one such (org, 'local', name) row, so this flips exactly the one deactivated anchor, never
-  // two — even if raw ops left extra differently-named inactive local rows around.)
-  const reactivated = await query<DirectoryIntegrationRow>(
+  // (RETURNING it) and reports 'reactivate'; every other caller's UPDATE matches zero rows (the row is
+  // already active by the time its lock is granted) and falls through to re-select the now-active
+  // winner below — same id, and exactly ONE reactivation reported no matter how many callers raced.
+  // (`idx_directory_integrations_org_provider_name` keeps at most one such (org, 'local', name) row,
+  // so this flips exactly the one deactivated anchor, never two — even if raw ops left extra
+  // differently-named inactive local rows around.)
+  const reactivated = await client.query(
     `UPDATE directory_integrations
         SET status = 'active', updated_at = NOW()
       WHERE org_id = $1 AND provider = 'local' AND name = $2 AND status <> 'active'
-      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+      RETURNING ${LOCAL_INTEGRATION_RETURNING}`,
     [normalizedOrgId, LOCAL_INTEGRATION_NAME],
   )
   if (reactivated.rows.length === 1) {
-    const revived = summarizeIntegration(reactivated.rows[0])
-    try {
-      const { auditLog } = await import('../audit/audit')
+    return { integration: summarizeIntegration(reactivated.rows[0] as unknown as DirectoryIntegrationRow), event: 'reactivate' }
+  }
+
+  // Zero rows flipped: either a concurrent caller just reactivated/bootstrapped the active row, or
+  // there is genuinely no local integration yet. Re-check for an active winner before creating one —
+  // this is the losing side of a reactivation race (return the winner, nothing to report).
+  const reactivationWinner = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (reactivationWinner) return { integration: summarizeIntegration(reactivationWinner), event: null }
+
+  const localCorpId = `local:${normalizedOrgId}`
+  const inserted = await client.query(
+    `INSERT INTO directory_integrations (
+       org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+       default_deprovision_policy, created_at, updated_at
+     )
+     VALUES ($1, 'local', $2, 'active', $3, $4::jsonb, false, NULL, NULL, 'mark_inactive', NOW(), NOW())
+     ON CONFLICT DO NOTHING
+     RETURNING ${LOCAL_INTEGRATION_RETURNING}`,
+    [
+      normalizedOrgId,
+      LOCAL_INTEGRATION_NAME,
+      localCorpId,
+      JSON.stringify({ mode: 'editable', source: 'local' }),
+    ],
+  )
+  if (inserted.rows.length === 1) {
+    return { integration: summarizeIntegration(inserted.rows[0] as unknown as DirectoryIntegrationRow), event: 'bootstrap' }
+  }
+
+  // Concurrency: another caller won the race and committed the one active local integration while our
+  // INSERT waited on it (the conflict did nothing). Re-read the winner.
+  const winner = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (winner) return { integration: summarizeIntegration(winner), event: null }
+  // A conflict with no active winner: the (org_id, provider, name) row exists but is not active and
+  // was not revived above (only reachable through raw ops racing this call). Same outcome as before
+  // this split, where the caught unique violation was rethrown — a fixed sentence, no values.
+  throw new Error('Local directory integration could not be created or found')
+}
+
+/**
+ * Writes the audit row for a get-or-create that created or revived the anchor (nothing for a plain
+ * read). Call it only AFTER the transaction that ran `getOrCreateLocalIntegrationInTransaction` has
+ * committed, so a rolled-back anchor is never audited.
+ */
+export async function emitLocalIntegrationAnchorAudit(result: LocalIntegrationAnchorResult): Promise<void> {
+  if (!result.event) return
+  const { integration } = result
+  const orgId = integration.orgId
+  try {
+    const { auditLog } = await import('../audit/audit')
+    if (result.event === 'reactivate') {
       await auditLog({
         actorId: 'system',
         actorType: 'system',
         action: 'directory.local_integration.reactivate',
         resourceType: 'directory-integration',
-        resourceId: revived.id,
+        resourceId: integration.id,
         // Values-free: integrationId (resourceId) + orgId + provider only. corp_id is immutable and
         // already `local:<orgId>` by the CHECK — no need to echo it.
-        meta: { orgId: normalizedOrgId, provider: 'local' },
+        meta: { orgId, provider: 'local' },
       })
-    } catch (error) {
-      // Same best-effort contract as bootstrap below: only the dynamic import can fail here, and the
-      // status flip is already committed, so we log values-free and still return the revived anchor.
-      logger.warn(`Failed to import audit module after local integration reactivation: ${readErrorMessage(error, 'unknown error')}`, {
-        integrationId: revived.id,
-        orgId: normalizedOrgId,
-      })
-    }
-    return revived
-  }
-
-  // Zero rows flipped: either a concurrent caller just reactivated/bootstrapped the active row, or
-  // there is genuinely no local integration yet. Re-check for an active winner before creating one —
-  // this is the losing side of a reactivation race (return the winner, no second audit).
-  const reactivationWinner = await selectActiveLocalIntegration(normalizedOrgId)
-  if (reactivationWinner) return summarizeIntegration(reactivationWinner)
-
-  const localCorpId = `local:${normalizedOrgId}`
-  try {
-    const result = await query<DirectoryIntegrationRow>(
-      `INSERT INTO directory_integrations (
-         org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-         default_deprovision_policy, created_at, updated_at
-       )
-       VALUES ($1, 'local', $2, 'active', $3, $4::jsonb, false, NULL, NULL, 'mark_inactive', NOW(), NOW())
-       RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-                 default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-      [
-        normalizedOrgId,
-        LOCAL_INTEGRATION_NAME,
-        localCorpId,
-        JSON.stringify({ mode: 'editable', source: 'local' }),
-      ],
-    )
-    const created = summarizeIntegration(result.rows[0])
-    try {
-      const { auditLog } = await import('../audit/audit')
+    } else {
       await auditLog({
         actorId: 'system',
         actorType: 'system',
         action: 'directory.local_integration.bootstrap',
         resourceType: 'directory-integration',
-        resourceId: created.id,
-        meta: { orgId: normalizedOrgId, provider: 'local', corpId: localCorpId },
-      })
-    } catch (error) {
-      // Owner round P3: `auditLog` itself never rejects (by contract) — the only failure this
-      // catch can see is the dynamic `import('../audit/audit')` itself (e.g. a broken module
-      // graph). That must not be silently swallowed, but it also must not fail row creation:
-      // the row is already committed, so this stays best-effort and the function still returns
-      // normally below. Values-free: integrationId + orgId + an error summary only — no config,
-      // no corp values beyond the already-derived id fields.
-      logger.warn(`Failed to import audit module after local integration bootstrap: ${readErrorMessage(error, 'unknown error')}`, {
-        integrationId: created.id,
-        orgId: normalizedOrgId,
+        resourceId: integration.id,
+        meta: { orgId, provider: 'local', corpId: `local:${orgId}` },
       })
     }
-    return created
   } catch (error) {
-    // Concurrency: another caller won the race and created the one active local integration
-    // (Postgres unique_violation on `one_active_local_integration_per_org`). Re-read the winner.
-    if (isUniqueViolation(error)) {
-      const winner = await selectActiveLocalIntegration(normalizedOrgId)
-      if (winner) return summarizeIntegration(winner)
-    }
-    throw error
+    // Owner round P3: `auditLog` itself never rejects (by contract) — the only failure this catch
+    // can see is the dynamic `import('../audit/audit')` itself (e.g. a broken module graph). That
+    // must not be silently swallowed, but it also must not fail the caller: the anchor is already
+    // committed, so this stays best-effort. Values-free: integrationId + orgId + an error summary.
+    const verb = result.event === 'reactivate' ? 'reactivation' : 'bootstrap'
+    logger.warn(`Failed to import audit module after local integration ${verb}: ${readErrorMessage(error, 'unknown error')}`, {
+      integrationId: integration.id,
+      orgId,
+    })
   }
 }
 
-async function selectActiveLocalIntegration(orgId: string): Promise<DirectoryIntegrationRow | null> {
-  const result = await query<DirectoryIntegrationRow>(
-    `SELECT id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-            default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at
+/**
+ * Get-or-create the org's local anchor on its own (each statement auto-commits), then audit it.
+ * Kept for callers that write nothing else alongside the anchor. A caller that writes rows under the
+ * anchor must use `getOrCreateLocalIntegrationInTransaction` inside its own transaction instead, so a
+ * failure leaves no bare anchor behind (W1-6).
+ */
+export async function getOrCreateLocalIntegration(
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<DirectoryIntegrationSummary> {
+  const result = await getOrCreateLocalIntegrationInTransaction({ query }, orgId)
+  await emitLocalIntegrationAnchorAudit(result)
+  return result.integration
+}
+
+async function selectActiveLocalIntegration(
+  client: LocalIntegrationAnchorClient,
+  orgId: string,
+): Promise<DirectoryIntegrationRow | null> {
+  const result = await client.query(
+    `SELECT ${LOCAL_INTEGRATION_RETURNING}
      FROM directory_integrations
      WHERE org_id = $1 AND provider = 'local' AND status = 'active'
      LIMIT 1`,
     [orgId],
   )
-  return result.rows[0] ?? null
+  return (result.rows[0] as unknown as DirectoryIntegrationRow | undefined) ?? null
 }
 
 /**

@@ -51,9 +51,11 @@ export type ApprovalType = (typeof APPROVAL_TYPE_VALUES)[number]
 /**
  * Lock-4 §3 F4-B — byte-mirrors backend `EmptyAssigneeFallback`. The ONLY carrier for
  * `emptyAssigneePolicy: 'designated'` targets (one key, not two). Filled through typed pickers
- * only (D0 §10.2) — no picker ships in this fix round, so this type exists purely so the FE
- * hydrate/rebuild paths preserve a persisted value verbatim instead of silently dropping it
- * (gate X-2: the template must stay EDITABLE, not merely round-trip-safe).
+ * only (D0 §10.2): W1-1a ships them in BOTH editors (linear step editor + canvas node config
+ * editor), reusing the existing directory user/role pickers. Authoring prunes empty arrays and
+ * drops the key when both are empty (the backend `normalizeEmptyAssigneeFallback` normalizes the
+ * same way), and the key rides ONLY with `emptyAssigneePolicy: 'designated'` (gate X-2: the
+ * template stays EDITABLE, not merely round-trip-safe).
  */
 export interface EmptyAssigneeFallback {
   userIds?: string[]
@@ -301,15 +303,36 @@ export interface EffectiveNodeOperations {
   commentRequired: 'never' | 'reject_only' | 'always'
 }
 
-// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
-// The authoring UI only owns `mergeWithRequester` (self-approver / merge-with-requester);
-// the other three fields are carried for round-trip preservation (no silent flatten).
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts `AutoApprovalPolicy`.
+// The node-level authoring UI owns `mergeWithRequester` + `samePersonPolicy` TOGETHER through the
+// four-value 审批人与发起人相同时 control (W1-1a, Lock-4 §2 F4-C); `mergeAdjacentApprover` /
+// `dedupeHistoricalApprover` / `actorMode` are carried for round-trip preservation (no silent
+// flatten) — the template-level dedup tier owns the two booleans on `policy.autoApproval` only.
 export interface AutoApprovalPolicy {
   mergeWithRequester?: boolean
   mergeAdjacentApprover?: boolean
   dedupeHistoricalApprover?: boolean
   actorMode?: AutoApprovalActorMode
+  /**
+   * Lock-4 §2 F4-C (OD-L4-4(a)) — 审批人=提交人, a NODE-level enum INSIDE this object. Absent ≡
+   * `'self_approve'` ≡ today's behavior when `mergeWithRequester` is off (lock text). The shipped
+   * `mergeWithRequester:true` IS `'auto_skip'` and "stays the persisted carrier for that value"
+   * (the backend `normalizeAutoApprovalPolicy` synthesizes `mergeWithRequester:true` whenever
+   * `'auto_skip'` is normalized). NOTE (code, not lock): an EXPLICIT `'self_approve'` still creates
+   * a node-level policy object, which overrides any template-level `policy.autoApproval` at that
+   * node (the shipped whole-object precedence) — so explicit and absent are NOT interchangeable in
+   * the editor; see `samePersonControlState` (approvalNodeEdit.ts).
+   */
+  samePersonPolicy?: SamePersonPolicy
 }
+
+// Lock-4 §2 F4-C — byte-mirrors backend `SamePersonPolicy` / `SAME_PERSON_POLICIES`
+// (ApprovalProductService.ts). The FULL ratified set; all four are server-enforced on main
+// (tests/unit/approval-lock4-f4c-same-person.test.ts + the approval-realdb-lock4-p3a lane), which is
+// what admits rendering them (Lock-4 §2.1). A persisted value OUTSIDE this list must stay read-only
+// (gate X-3), never be flattened to a default.
+export const SAME_PERSON_POLICIES = ['self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'] as const
+export type SamePersonPolicy = typeof SAME_PERSON_POLICIES[number]
 
 export type AutoApprovalActorMode = 'system' | 'original_approver'
 

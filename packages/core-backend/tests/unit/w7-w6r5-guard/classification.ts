@@ -160,6 +160,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+  'plugins/plugin-attendance/lib/attendance-live-punch-order.cjs',
   // Shadow audit of the punch route's org resolution (env
   // ATTENDANCE_SELF_SERVICE_ORG_RESOLUTION_V1=shadow). Classified `calculation_path` — the
   // HONEST bucket, not a carve-out: it is `require`d directly from

@@ -20,6 +20,7 @@ import type {
   CcNodeEdit,
   ParallelNodeEdit,
   ApprovalNodeSourceEdit,
+  AutoApproveHiddenBlockId,
   HiddenBlockLiveErrors,
 } from './templateAuthoring'
 import type { FormulaInsertOption } from './conditionEdit'
@@ -124,10 +125,31 @@ export interface ApprovalNodeConfigEditorApi {
    * save can hit — the shipped app's api always provides it.
    */
   approvalNodeHiddenBlockErrors?: (nodeKey: string) => HiddenBlockLiveErrors
+  /**
+   * W1-1a (merge-train r3 F9) — canvas STICKY REVEAL: true while hidden block `blockId` of `nodeKey`
+   * must stay rendered, because it has a live error now OR had one since the node's 审批类型 last
+   * changed and the draft was last re-baselined (load / save). The shipped view keeps this per node
+   * key and scopes it to the policy grid; the notice stays keyed on `approvalNodeHiddenBlockErrors`
+   * alone. OPTIONAL: absent ⇒ a block is rendered exactly while it has a live error (no sticky), so
+   * harnesses that do not wire it are unaffected; the shipped app's api always provides it.
+   */
+  approvalNodeHiddenBlockRevealed?: (nodeKey: string, blockId: AutoApproveHiddenBlockId) => boolean
   approvalNodeEmptyPolicy: (nodeKey: string) => EmptyAssigneePolicy
   setApprovalNodeEmptyPolicy: (nodeKey: string, policy: EmptyAssigneePolicy) => void
-  approvalNodeMergeWithRequester: (nodeKey: string) => boolean
-  setApprovalNodeMergeWithRequester: (nodeKey: string, enabled: boolean) => void
+  /**
+   * W1-1a (Lock-4 §2 F4-C) — the four-value 审批人与发起人为同一人时 control's writer. Takes the RAW
+   * select value ('default' | one of the four ratified values; anything else — incl. the X-3 unknown
+   * sentinel — is ignored). Owns `mergeWithRequester` + `samePersonPolicy` together; replaces the
+   * shipped approvalNodeMergeWithRequester / setApprovalNodeMergeWithRequester checkbox pair. The
+   * editor DERIVES the displayed value from `approvalNodeEditFor(nodeKey).autoApprovalPolicy` through
+   * the shared pure helpers (approvalNodeEdit.ts), so no separate getter is needed.
+   */
+  setApprovalNodeSamePersonPolicy: (nodeKey: string, value: string) => void
+  /**
+   * W1-1a (Lock-4 §3 F4-B) — replaces ONE side (users / roles) of the node's `'designated'` targets
+   * from a typed directory picker (D0 §10.2). Read side: `approvalNodeEditFor(nodeKey).emptyAssigneeFallback`.
+   */
+  setApprovalNodeEmptyAssigneeFallbackIds: (nodeKey: string, side: 'user' | 'role', ids: string[]) => void
   // P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids `timeout`,
   // §1.2). `undefined` when the node has none configured (the section renders collapsed/disabled).
   approvalNodeTimeout: (nodeKey: string) => NodeTimeoutConfig | undefined

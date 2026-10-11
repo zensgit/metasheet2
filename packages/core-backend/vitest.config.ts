@@ -252,6 +252,13 @@ export default defineConfig({
       // a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-4-reactivation-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/directory-local-integration-reactivation.db.test.ts',
+      // W1-6 (owner ruling 2026-10-10): every local-directory writer creates the org's local anchor
+      // INSIDE its own transaction — eight per-writer rollback proofs (incl. injected faults), a
+      // deterministic two-connection barrier on the anchor's unique index, and mixed first-call
+      // bursts — meaningless without a real DB. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml (both points asserted by w1-6-anchor-in-transaction-ci-wiring.test.mjs).
+      'tests/integration/local-directory-anchor-in-transaction.db.test.ts',
       // Canonical Org MVP B4 (#4215 §5.5): directory_department_bindings buildable FK chain — a
       // cross-org binding is FK-IMPOSSIBLE to insert (both integrations pinned to one org_id column;
       // NOT NULL closes the MATCH SIMPLE hole). Proves rejection BY the org-chain FK by name + the
@@ -1155,6 +1162,8 @@ export default defineConfig({
       'tests/integration/attendance-notification-deliveries.test.ts',
       'tests/integration/attendance-outdoor-punch.test.ts',
       'tests/integration/attendance-plugin.test.ts',
+      // Real HTTP/PG rollback and raw-event immutability; runs in the required attendance DB lane.
+      'tests/integration/attendance-live-punch-order.db.test.ts',
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
@@ -1879,6 +1888,7 @@ export default defineConfig({
       'tests/integration/task-m4-delivery.db.test.ts',
       'tests/integration/task-m4-scheduler.db.test.ts',
       'tests/integration/task-m4-dingtalk.db.test.ts',
+      'tests/integration/task-m4-realtime.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml
