@@ -388,11 +388,23 @@ describe('RoleDelegationView', () => {
     // Picking a role to revoke does not arm the assign button with it.
     expect(assignButton.disabled).toBe(true)
 
+    // BOTH dropdowns hold a pick: the revoke button must still send the REVOKE pick, never the
+    // assign one (a single shared selection is the defect this split exists to remove).
+    const assignSelect = container!.querySelector('select[data-testid="delegation-assign-role"]') as HTMLSelectElement
+    assignSelect.value = 'attendance_employee'
+    assignSelect.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(assignButton.disabled).toBe(false)
+    expect(revokeSelect.value).toBe('plugin_elearning_viewer')
+
     revokeButton.click()
     await waitForCondition(() => posts.length === 1)
     expect(posts[0]).toEqual({ path: '/api/admin/role-delegation/users/user-1/roles/unassign', body: { roleId: 'plugin_elearning_viewer' } })
     await waitForCondition(() => !optionValues('delegation-revoke-role').includes('plugin_elearning_viewer'))
+    await flushUi()
     expect(revokeSelect.value).toBe('')
+    // The revoked pick is cleared, not merely hidden: the button cannot re-send it.
+    expect(revokeButton.disabled).toBe(true)
     expect(container?.textContent).toContain('角色已撤销')
   })
 

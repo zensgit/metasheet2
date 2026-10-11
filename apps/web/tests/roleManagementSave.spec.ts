@@ -249,3 +249,83 @@ describe('RoleManagementView — save reconciliation', () => {
     expect(statusText()).toBe('角色已更新')
   })
 })
+
+describe('RoleManagementView — an existing role is addressed by the id it was LOADED with', () => {
+  // Two stored ids that render identically to the real namespace main-admin role. Deleting
+  // the REAL one takes every membership and delegated audience with it, so a trimmed id here
+  // turns "clean up the empty duplicate" into "demote every attendance admin".
+  const REAL = 'attendance_admin'
+  const PADDED = 'attendance_admin '
+  const BOM_LED = '﻿attendance_admin'
+
+  function lookAlikeCatalog() {
+    return {
+      ok: true,
+      data: {
+        items: [
+          { id: REAL, name: '考勤管理员', permissions: ['stock-prep:read'], memberCount: 3, updatedAt: '2026-09-16T01:02:03.000Z' },
+          { id: PADDED, name: '考勤管理员', permissions: [], memberCount: 0, updatedAt: '2026-09-16T01:02:03.000Z' },
+          { id: BOM_LED, name: '考勤管理员', permissions: [], memberCount: 0, updatedAt: '2026-09-16T01:02:03.000Z' },
+        ],
+        total: 3,
+      },
+    }
+  }
+
+  function clickRoleAt(index: number): void {
+    const items = Array.from(container?.querySelectorAll('.admin-page__item') || []) as HTMLButtonElement[]
+    const item = items[index]
+    if (!item) throw new Error(`role list item ${index} not found`)
+    item.click()
+  }
+
+  function clickDelete(): void {
+    const button = container?.querySelector('.admin-page__button--danger') as HTMLButtonElement | null
+    if (!button) throw new Error('delete button not found')
+    button.click()
+  }
+
+  it('PUT and DELETE on a padded look-alike go to that exact id, never to the real `<ns>_admin`', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
+      if (url === '/api/admin/roles') return jsonResponse(lookAlikeCatalog())
+      if (init?.method === 'PUT' || init?.method === 'DELETE') return jsonResponse({ ok: true, data: {} })
+      throw new Error(`unexpected call ${url}`)
+    })
+
+    try {
+      await mountView()
+
+      clickRoleAt(1)
+      await flushUi()
+      togglePermission('stock-prep:write')
+      await flushUi()
+      clickSave()
+      await flushUi()
+
+      clickRoleAt(1)
+      await flushUi()
+      clickDelete()
+      await flushUi()
+
+      clickRoleAt(2)
+      await flushUi()
+      clickDelete()
+      await flushUi()
+    } finally {
+      confirmSpy.mockRestore()
+    }
+
+    const writes = recordedCalls()
+      .filter((call) => call.init?.method === 'PUT' || call.init?.method === 'DELETE')
+      .map((call) => `${call.init?.method} ${call.url}`)
+    expect(writes).toEqual([
+      `PUT /api/roles/${encodeURIComponent(PADDED)}`,
+      `DELETE /api/roles/${encodeURIComponent(PADDED)}`,
+      `DELETE /api/roles/${encodeURIComponent(BOM_LED)}`,
+    ])
+    expect(writes.some((write) => write.endsWith(`/api/roles/${REAL}`))).toBe(false)
+    expect(savedBody().id).toBe(PADDED)
+  })
+})
