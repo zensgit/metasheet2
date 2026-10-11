@@ -139,11 +139,14 @@
 # args): `tasks-status-filter.spec.ts` added — the /tasks status switch 未完成 / 已完成 / 全部:
 # default `open`, every list read carries the status (`all` included), switching keeps the view and
 # the view switch keeps the status, a late answer for the previous status cannot paint, the choice
-# remembered per browser, and stored garbage or a storage that throws falls back to `open`.
-# `tasks-list-view.spec.ts` and `tasks-groups.spec.ts` now expect the status on the list read;
-# `tasks-groups.spec.ts` also gains the board under the filter (a placed completed task hidden by
-# 未完成 holds moves off with the notice; 全部 restores them); `tasks-api-m4.spec.ts` gains the
-# request string with a status.
+# remembered per browser, stored garbage or a storage that throws falls back to `open`, the current
+# option stays enabled, a row action or create settling after a status switch does not act on the new
+# rows, and the empty line names the status. `tasks-list-view.spec.ts` and `tasks-groups.spec.ts` now
+# expect the status on the list read; `tasks-groups.spec.ts` also gains the board under the filter (a
+# placed task the filter hides is a hidden entry: moves stay on and count it, a status line names it;
+# without a filter, or with a row read cut short, the [fe-35] rule still holds moves off);
+# `tasks-labels.spec.ts` reads the status-aware empty line; `tasks-api-m4.spec.ts` gains the request
+# string with a status.
 #
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE

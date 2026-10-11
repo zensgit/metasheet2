@@ -5,7 +5,7 @@ flag change, or any staging or production step.
 
 ## 1. Source and scope
 
-- Owner ruling of 2026-10-09 (item 3): G2-core ships as a standalone small PR after M4 (M4 is fully
+- Owner ruling of 2026-10-09: G2-core ships as a standalone small PR after M4 (M4 is fully
   merged on main) and before FE-e. The status filter is **orthogonal** to the role views, and the
   list and its total **share the same condition**. Sorting and field visibility are **not** in
   scope; they are listed separately.
@@ -39,9 +39,10 @@ Implementation:
 
 - `services/task-records.ts`: `TASK_STATUS_FILTERS = ['open', 'done', 'all']`. The private
   `taskViewCondition` (used by both `listTasks` and `countTasks`) appends the status clause after the
-  view condition. The clause is a literal taken from the closed set after validation, so the bind
-  slots stay `$1`/`$2` and the page binds keep their numbers. An invalid value throws
-  `422 INVALID_STATUS` before any statement.
+  view condition. After the closed-set check, the clause is picked from a fixed map
+  (`open` → ` AND tasks.status = 'open'`, `done` → ` AND tasks.status = 'done'`, `all` → nothing), so
+  no request text is rendered into the SQL, the bind slots stay `$1`/`$2`, and the page binds keep
+  their numbers. An invalid value throws `422 INVALID_STATUS` before any statement.
 - `buildTaskScopeCondition` and `buildTaskPendingCondition` (`tasks/task-access.ts`) are **not**
   changed. The scope builder is the org single-emission point, and `/pending` derives from it.
 - `routes/tasks.ts`: reads `status` and passes the same value to `listTasks` and `countTasks`;
@@ -54,8 +55,11 @@ Implementation:
 - `tasks/tasksApi.ts`: `listTasks(view, page?, status?)`. With a status, `&status=<value>` follows the
   view and precedes the page. Without one, the request string is unchanged.
 - `views/tasks/TasksView.vue`: a second switcher (`nav`, `aria-label` 任务状态 / Task status) with
-  three buttons 未完成 / 已完成 / 全部 (`aria-pressed`, the current one disabled, test ids
-  `tasks-status-switch-open|done|all`). The default is `open`. Every list read (`loadList`,
+  three buttons 未完成 / 已完成 / 全部 (test ids `tasks-status-switch-open|done|all`). Only
+  `aria-pressed` marks the current one. It is **not** disabled, so keyboard focus stays on it after
+  activation and screen-reader focus mode can reach it; pressing it again is a no-op in
+  `switchStatus`. (The view switcher above still disables its current button, as since M2; aligning
+  it is a named follow-up, §9.) The default is `open`. Every list read (`loadList`,
   `reloadListQuietly`) sends the current status. `all` is sent explicitly, so the page never depends
   on the server default. A status switch bumps the same page token as a view switch, and the
   existing generation guard drops a late answer.
@@ -63,29 +67,53 @@ Implementation:
   `metasheet.tasks.statusFilter`. Reads and writes are each in their own try/catch, the storage
   accessor itself is guarded, and a stored value outside the closed set reads as `open`.
 - `tasks/labels.ts`: `statusFilterLabel`, `statusFilterOpen` (未完成 / Not completed),
-  `statusFilterDone` (已完成 / Completed), `statusFilterAll` (全部 / All).
+  `statusFilterDone` (已完成 / Completed), `statusFilterAll` (全部 / All); the empty line names the
+  filter it was read under (`listEmptyOpen` 暂无未完成任务 / No incomplete tasks, `listEmptyDone`
+  暂无已完成任务 / No completed tasks, and the existing `listEmpty` under 全部); the board's status line
+  `groupsHiddenByFilter`. The row label stays 进行中 / In progress: 未完成 is the lock's wording for
+  the filter, and the row label is unchanged since M2.
 
-### 4.1 The assigned view's grouping board under a status filter (visible consequence)
+### 4.1 The assigned view's grouping board under a status filter
 
 The assigned view renders its rows through the personal grouping board (M4 FE-7). The board joins
 the rows from `GET /api/tasks` with the placements from `GET /api/task-groups/items`. The placements
-read is **not** filtered by status: its visible set is the assigned view, open and done, and a move's
-`position` counts that set (M4 PR-3a design §3.5). The board's existing rule (`[fe-35]`,
-`tasks/tasksGroupBoard.ts`) offers moves only while every placement names a shown row. Otherwise it
-shows the order without the missing tasks, disables every move control, and shows the notice
-「部分任务未显示，排序已停用」.
+read is **not** filtered by status: its visible set is the assigned view, open and done, numbered
+densely, and a move's `position` counts that set (M4 PR-3a design §3.5). The board's existing rule
+(`[fe-35]` in `views/tasks/TaskGroupBoard.vue`, over the `consistent` flag from
+`tasks/tasksGroupBoard.ts`) offers moves only while every placement names a shown row and a known
+group.
 
-The consequence under the default 未完成: once a task placed in a personal group is completed, it is
-no longer a row. The board then holds every move off, with the notice, for as long as any completed
-task stays placed. 全部 shows the completed tasks again, and moves come back in the server's index
-space. Groups can still be created, renamed and deleted. No request goes out in the wrong index
-space, so no placement is written wrong. `tasks-groups.spec.ts` pins three cells:
-- moves are off under 未完成 with a placed completed task, and a forced control sends nothing;
-- 全部 restores moves, and the PUT counts the completed task;
-- with no completed task placed, moves stay on under 未完成.
+Left alone, that rule would make the default 未完成 hold every move off, on every group, as soon as
+one placed task is completed, and for as long as it stays placed (and 已完成 the same for any placed
+open task). The first gate round confirmed this as a defect. The fix is frontend only. It changes
+no API, no DDL and no lock text:
 
-G2-core does not change the board rules. That would be FE-7 scope and outside the owner's G2-core
-ruling. The choice is listed as Q-G2-2.
+- TasksView passes `rowsFiltered` (the switch is not 全部) through `TaskPersonalGroups` to the board.
+- With `rowsFiltered`, `buildBoardModel` keeps a placement whose task is not a row in its group's
+  order as a **hidden entry** (`hidden`) and does not clear `consistent`. The placements read is the
+  server's whole visible set, so the order with the hidden entries in it is the server's index
+  space. A placement in an unknown group still clears `consistent`.
+- The board renders each group's order without the hidden entries. Up and down are disabled by the
+  shown index. A step passes over hidden entries to the next shown row, and its `position` is that
+  row's index in the full order: up lands before it, down after it. Join, move to a group and drop
+  already count full orders. The live region names the shown place.
+- A status line names the count:「另有 N 项已分组任务不在当前状态筛选中，未显示」/ "N grouped tasks are
+  outside the status filter and not shown".
+- Without a filter (全部), and in the list page's board, nothing changes: a placement whose task is
+  not a row still holds moves off. The same holds when the row read itself stopped short of its
+  `total`. A row cut off by the page cannot be told from one the filter left out, so TasksView then
+  does not pass `rowsFiltered`.
+
+`tasks-groups.spec.ts` pins this:
+- the hidden-entry rules: order, `consistent`, steps, joins, drops and `applyMove`;
+- under 未完成, moves stay on and the status line shows;
+- a step up or down past the hidden task, a move from another group, and a drag each send the
+  position that counts it;
+- the in-flight order renders no row for the hidden task;
+- under 已完成, the mirror case;
+- 全部 has no hidden entries;
+- under 全部, a placement whose task is not a row still holds moves off;
+- a row read cut short under 未完成 still holds moves off.
 
 ## 5. Owner question (not ruled)
 
@@ -96,12 +124,13 @@ parameter (including any external client) see only unfinished tasks. That would 
 gate 19 and gate 4 row sets, and would need those gates re-cut. Changing the default later is a
 one-line change in `taskStatusClause` plus the cells that pin `absent = all`.
 
-**Q-G2-2: reordering on the assigned view's board under 未完成 (§4.1).** Implemented: the existing
-board rule holds moves off while a completed task is placed, and 全部 restores them. This is
-data-safe but visible: a user of personal groups loses reordering under the default as soon as they
-complete a placed task. Alternatives, each outside G2-core's scope as ruled:
-- (a) a follow-up FE slice: the board keeps the server's index space by counting placements of tasks
-  hidden by the status filter, while still not showing them;
+**Q-G2-2: reordering on the assigned view's board under a status filter (§4.1).** Implemented (a)
+after the first gate round. This is the implementer's choice of the least contract-changing fix, not
+an owner ruling. The board keeps the server's index space by counting placements of tasks the filter
+hides, while not showing them. It is frontend only, with no API, DDL or lock change. Under the
+filter, a move then lands relative to tasks the user cannot see: a step up past a hidden completed
+task puts the moved task before it in the server's order. The other options stay open for the
+owner:
 - (b) the placements read takes the same status filter, and the move position counts only that set.
   This changes the PR-3a contract;
 - (c) the assigned view's board reads its rows with `all` whatever the switch says. The filter would
@@ -144,15 +173,20 @@ Backend real DB (`tests/integration/task-g2-status-filter.db.test.ts`, lane `tas
 Test names start with `g2core|` and never with the gate-19 prefix, so the gate 19 extractor is
 unaffected.
 
-Frontend (`apps/web/tests/tasks-status-filter.spec.ts`): default `open` and pressed state; labels;
-switch to done / all with `all` sent explicitly; view and status orthogonal; pressing the current
-one is a no-op; a late answer for the previous status cannot paint; a reload after complete keeps
-the status; persistence across a remount; stored `open`/`done`/`all` honoured; stored garbage reads
-as `open`; `getItem` throws; `setItem` throws; the `localStorage` accessor throws. Changed:
-`tasks-list-view.spec.ts` and `tasks-groups.spec.ts` (the list read now carries `status=open`), and
-`tasks-api-m4.spec.ts` (the request string with a status). `tasks-groups.spec.ts` also gains the
-three board cells of §4.1. Their fake backend filters rows by `status` as the server does, and passes
-the status to the reply as a second argument; the existing cells keep the fake that ignores it.
+Frontend (`apps/web/tests/tasks-status-filter.spec.ts`): default `open` and pressed state, with no
+option disabled; labels; switch to done / all with `all` sent explicitly; view and status
+orthogonal; pressing the current (enabled) option is a no-op and keeps focus on it; a late answer
+for the previous status cannot paint; a reload after complete keeps the status; persistence across
+a remount; stored `open`/`done`/`all` honoured; stored garbage reads as `open`; `getItem` throws;
+`setItem` throws; the `localStorage` accessor throws. The status analogues of the view switch's five
+page-token cells: a pending complete, reopen or create settling after a status switch shows no
+banner or guidance and causes no extra reload, while the badge bus is still notified and the title
+still cleared. The empty line per status. Changed: `tasks-list-view.spec.ts` and
+`tasks-groups.spec.ts` (the list read now carries `status=open`), `tasks-api-m4.spec.ts` (the request
+string with a status), and `tasks-labels.spec.ts` (the empty line under the default 未完成, and the
+new format function). `tasks-groups.spec.ts` also gains the hidden-entry rule cells and the board
+cells of §4.1. Their fake backend filters rows by `status` as the server does, and passes the status
+to the reply as a second argument; the existing cells keep the fake that ignores it.
 
 ## 7. Registration
 
@@ -173,3 +207,13 @@ the status to the reply as a second argument; the existing cells keep the fake t
 - Lock §12 gate 4 and gate 19 call `GET /api/tasks?view=…` without `status`. With the server default
   `all` (Q-G2-1), their row sets are unchanged. If the owner picks `open`, those gates need re-cutting
   as part of that ruling.
+
+## 9. Follow-ups (not in this change)
+
+- The view switcher disables its current button (since M2), unlike the status switch. Aligning it
+  is a follow-up, so that the M2 cells that pin `disabled` change in their own slice.
+- Both switchers are `nav` landmarks, and the remembered status is per browser, not per user or
+  org. This is noted and left as is, consistent with the page's other per-browser conveniences.
+- `?status[a]=open` is refused only because Express 4 parses nested queries (the `nested` unit cell
+  is the tripwire). A move to Express 5 must keep the extended query parser or refuse unknown
+  `status*` keys.
