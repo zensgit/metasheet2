@@ -254,12 +254,19 @@ ON CONFLICT (user_id, permission_code) DO NOTHING;
 SQL
 
 login_response_file=""
+local_org_response_file=""
 admin_session_token=""
+# Both HTTP response files (login, and the local org route below) are removed on ANY exit,
+# including a signal that stops the script mid-request.
+function remove_response_files() {
+  if [[ -n "$login_response_file" ]]; then rm -f "$login_response_file"; fi
+  if [[ -n "$local_org_response_file" ]]; then rm -f "$local_org_response_file"; fi
+}
+trap remove_response_files EXIT
 if [[ "$VERIFY_LOGIN" == "1" ]]; then
   [[ -n "$API_BASE" ]] || die "VERIFY_LOGIN=1 requires API_BASE (example: http://127.0.0.1/api)"
   api="${API_BASE%/}"
   login_response_file="$(mktemp)"
-  trap 'rm -f "$login_response_file"' EXIT
   info "Verifying admin login via ${api}/auth/login"
   login_code="$(
     curl -sS -o "$login_response_file" -w '%{http_code}' \
@@ -375,6 +382,7 @@ else
           --data "$local_org_body" || true
     )"
     rm -f "$local_org_response_file"
+    local_org_response_file=""
     # No HTTP response at all (connection refused / timeout) is reported as HTTP 000 by both twins.
     [[ "$local_org_code" =~ ^[1-9][0-9][0-9]$ ]] || local_org_code="000"
 
