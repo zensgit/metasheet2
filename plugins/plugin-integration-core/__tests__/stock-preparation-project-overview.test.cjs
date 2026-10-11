@@ -100,6 +100,19 @@
 //         fail-closed runner under its own file name; no bare main() call or hand-rolled async loop is left (the suites
 //         of the parallel S5b members work, `stock-preparation-members*`, are skipped while they are not on the runner).
 //
+// S3 FOLLOW-UPS 2, FIX ROUND 1:
+//   O-24 / O-24b / O-24d (R5) the runner's OWN self-tests run at TOP LEVEL, before the runner — never on it: with its exit
+//         path broken (the `process.exit(1)` lost, the failure branch gone) every suite on it could print FAIL and end 0,
+//         this one included; run outside it, the self-tests throw uncaught and this suite exits 1 on its own. O-24d: with
+//         `process.exit` stubbed out, a failed run still ends 1 and never prints a pass line.
+//   O-24c the adoption guard also flags ANY stock-prep suite (outside the S5b prefix) with async code that is neither on
+//         the runner nor a node:test file — not only the exact `async function main()` / `const tests = []` spellings.
+//   O-29a the INCOMPLETE warn names the project-less failure's code when it is the only failure that stands.
+//   O-31c a failure that still stands is named over a LATER one the same run healed; O-31d of two failures that both
+//         stand, the later one is named.
+//   O-32  a click while this process's refresh of the tenant is still RUNNING answers 409 BUSY (nothing done, the running
+//         refresh's stamp kept) — never 200 fresh:false ("current") ahead of a run that may end 503 INCOMPLETE.
+//
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -310,6 +323,12 @@ function registryRow(h, projectNo = PROJECT) {
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+// S3 follow-ups 2, fix round 1 (R5): the fail-closed runner's OWN self-tests. They must not run ON the runner they test
+// (a runner whose failure exit is broken would report them as passed and end 0): each is synchronous (spawnSync probes)
+// and runs at TOP LEVEL right before `runFailClosedSuite(…)` below — a failure is an uncaught throw, exit 1, whatever the
+// runner does.
+const runnerSelfTests = []
+const runnerSelfTest = (name, fn) => runnerSelfTests.push([name, fn])
 
 // ── O-01 ───────────────────────────────────────────────────────────────────────────────────────────
 test('O-01 the template: pinned aggregate columns only, no select/detail, key projectNo, two status views, host kind literal, own-base partner', () => {
@@ -1525,7 +1544,7 @@ test('O-23 (F4) an event that lands after the writer drained but before it stopp
 
 // ── O-24 ───────────────────────────────────────────────────────────────────────────────────────────
 // S3 follow-up A: this suite (and any that adopts support/fail-closed-suite-runner.cjs) cannot exit 0 past a hang.
-test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with nothing alive exits 1 (sentinel); a hang that keeps the loop alive times out, the run continues, and exits 1', () => {
+runnerSelfTest('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with nothing alive exits 1 (sentinel); a hang that keeps the loop alive times out, the run continues, and exits 1', () => {
   const { spawnSync } = require('node:child_process')
   const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
   const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedSuite } = require(${JSON.stringify(runnerPath)});\n${body}`], { encoding: 'utf8', timeout: 20000 })
@@ -1557,7 +1576,7 @@ test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with no
 })
 
 // S3 follow-ups 2 (item 5): the runner's MAIN adoption form and its reported-exit-code rule.
-test('O-24b (follow-ups 2, item 5) runFailClosedMain: a main that hangs with nothing alive exits 1 (sentinel); a main that reports failure through process.exitCode exits 1 and is never "all assertions passed"; a passing main exits 0', () => {
+runnerSelfTest('O-24b (follow-ups 2, item 5) runFailClosedMain: a main that hangs with nothing alive exits 1 (sentinel); a main that reports failure through process.exitCode exits 1 and is never "all assertions passed"; a passing main exits 0', () => {
   const { spawnSync } = require('node:child_process')
   const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
   const runner = require(runnerPath)
@@ -1598,6 +1617,142 @@ test('O-24b (follow-ups 2, item 5) runFailClosedMain: a main that hangs with not
   assert.throws(() => runner.runFailClosedSuite('x', [], { passLine: '' }), TypeError)
 })
 
+// S3 follow-ups 2, fix round 1 (R5): a failed run ends 1 even where `process.exit` does not end the process.
+runnerSelfTest('O-24d (follow-ups 2, fix round 1) with process.exit stubbed out, a failed run still ends with exit code 1 and prints neither its pass line nor "all assertions passed"; a passing run under the same stub ends 0', () => {
+  const { spawnSync } = require('node:child_process')
+  const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
+  const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedSuite, runFailClosedMain } = require(${JSON.stringify(runnerPath)});\nprocess.exit = () => {};\n${body}`], { encoding: 'utf8', timeout: 20000 })
+  const failed = probe(`runFailClosedSuite('probe-stub-fail', [['fails', () => { throw new Error('synthetic failure') }], ['passes', () => {}]], { passLine: 'probe-stub-fail.test.cjs OK' })`)
+  assert.equal(failed.status, 1, `a counted failure must end 1 without process.exit (status ${failed.status}); stderr: ${failed.stderr}`)
+  assert.match(failed.stderr, /probe-stub-fail FAILED \(1\)/)
+  assert.ok(!/was set by the suite/.test(failed.stderr), 'a counted failure ends there — it never falls through to the reported-exit-code branch')
+  assert.ok(!failed.stdout.includes('all assertions passed'), 'never "all assertions passed" over a failure')
+  assert.ok(!failed.stdout.includes('probe-stub-fail.test.cjs OK'), 'never the pass line over a failure')
+  const reported = probe(`runFailClosedMain('probe-stub-exitcode', async function main() { process.exitCode = 1 }, { passLine: 'probe-stub-exitcode.test.cjs OK' })`)
+  assert.equal(reported.status, 1, `a reported failure must end 1 without process.exit (status ${reported.status})`)
+  assert.ok(!reported.stdout.includes('all assertions passed'), 'never "all assertions passed" over a reported failure')
+  assert.ok(!reported.stdout.includes('probe-stub-exitcode.test.cjs OK'))
+  const passing = probe(`runFailClosedSuite('probe-stub-ok', [['passes', () => {}]])`)
+  assert.equal(passing.status, 0, passing.stderr)
+  assert.match(passing.stdout, /probe-stub-ok: all assertions passed/)
+})
+
+/**
+ * O-24c (fix round 1): a stock-prep suite with ASYNC code that is neither on the fail-closed runner (its tail is the
+ * exact runFailClosedMain / runFailClosedSuite statement under its own file name) nor a node:test file — whatever its
+ * spelling (`async function run()`, `const main = async () =>`, `async function main ()`, a renamed loop variable, an
+ * async check a sync main() never awaits), a drained hang in it ends the process 0. Returns the problem line, or null.
+ */
+const ASYNC_CODE_RE = /\basync\b|\bawait\b|\.then\(|\bPromise\b/
+/**
+ * The CODE of a CommonJS suite: comments, string / template text and regex literals blanked (a `${…}` inside a
+ * template stays code). Source-text guards name `async NAME(req, res)` in strings and regexes all the time; only what
+ * would run counts. A `/` starts a regex literal after an operator, an opening bracket, a comma / colon / semicolon,
+ * `return` / `typeof` / `case`, or at the start — otherwise it is a division (the usual tokenizer rule).
+ */
+function suiteCodeOnly(src) {
+  let i = 0
+  const scan = (untilBrace) => {
+    let out = ''
+    let depth = 0
+    // The last few characters of the code so far, trailing whitespace skipped ('' at the start).
+    const lastSignificant = () => {
+      let j = out.length - 1
+      while (j >= 0 && /\s/.test(out[j])) j -= 1
+      return out.slice(Math.max(0, j - 9), j + 1)
+    }
+    while (i < src.length) {
+      const c = src[i]
+      const next = src[i + 1]
+      if (untilBrace && c === '}' && depth === 0) { i += 1; return out }
+      if (c === '{') depth += 1
+      if (c === '}') depth -= 1
+      if (c === '/' && next === '/') { while (i < src.length && src[i] !== '\n') i += 1; continue }
+      if (c === '/' && next === '*') { const end = src.indexOf('*/', i + 2); i = end < 0 ? src.length : end + 2; out += ' '; continue }
+      if (c === '\'' || c === '"') {
+        i += 1
+        while (i < src.length && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1
+        i += 1
+        out += '""'
+        continue
+      }
+      if (c === '`') {
+        i += 1
+        out += '`'
+        while (i < src.length && src[i] !== '`') {
+          if (src[i] === '\\') { i += 2; continue }
+          if (src[i] === '$' && src[i + 1] === '{') { i += 2; out += '${' + scan(true) + '}'; continue }
+          i += 1
+        }
+        i += 1
+        out += '`'
+        continue
+      }
+      if (c === '/') {
+        const before = lastSignificant()
+        const prev = before.slice(-1)
+        if (before === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || /\b(?:return|typeof|case)$/.test(before)) {
+          i += 1
+          let inClass = false
+          while (i < src.length && src[i] !== '\n') {
+            if (src[i] === '\\') { i += 2; continue }
+            if (src[i] === '[') inClass = true
+            else if (src[i] === ']') inClass = false
+            else if (src[i] === '/' && !inClass) break
+            i += 1
+          }
+          i += 1
+          while (i < src.length && /[a-z]/.test(src[i])) i += 1
+          out += '/r/'
+          continue
+        }
+      }
+      out += c
+      i += 1
+    }
+    return out
+  }
+  return scan(false)
+}
+const escapeSuiteRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// The one option a converted tail may pass: the pass line its old tail printed (a single-quoted literal).
+const SUITE_PASS_LINE_OPTION = "(?:, \\{ passLine: '[^'\\n]+' \\})?"
+function unrunAsyncSuiteProblem(file, text) {
+  const onRunner = new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosed(?:Main\\('${escapeSuiteRe(file)}', main|Suite\\('${escapeSuiteRe(file)}', tests)${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)
+  if (onRunner) return null
+  if (/require\('node:test'\)/.test(text)) return null
+  if (!ASYNC_CODE_RE.test(suiteCodeOnly(text))) return null
+  return `${file}: async code outside the fail-closed runner and node:test (a drained hang would exit 0)`
+}
+
+/**
+ * O-24c's per-suite verdict (fix round 1: ONE function, so the checks the loop applies to the real suites are the very
+ * checks the synthetic cases below exercise). `viaMain` / `viaTests`: the suite is on the runner in the exact form.
+ */
+function suiteRunnerVerdict(file, text) {
+  const problems = []
+  let viaMain = false
+  let viaTests = false
+  const hasAsyncMain = /^async function main\(\) \{$/m.test(text)
+  const hasTestsArray = /^const tests = \[\]$/m.test(text)
+  // Fix round 1: ANY async code off the runner, whatever its spelling (the exact forms below are the common case).
+  const unrun = unrunAsyncSuiteProblem(file, text)
+  if (unrun) problems.push(unrun)
+  // A SYNCHRONOUS `function main()` cannot await anything, so it cannot hang on a promise: only the async one counts.
+  if (hasAsyncMain && /^main\(/m.test(text)) problems.push(`${file}: a bare top-level call of the async main() (exits 0 past a hang)`)
+  if (/^;?\(async \(\) => \{$/m.test(text) && /for \(const \[name, fn\] of tests\)/.test(text)) problems.push(`${file}: a hand-rolled async test loop (exits 0 past a hang)`)
+  if (hasAsyncMain) {
+    // A top-level STATEMENT (anchored to its own line), never a mention in a comment.
+    if (new RegExp(`^require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.runFailClosedMain\\('${escapeSuiteRe(file)}', main${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaMain = true
+    else problems.push(`${file}: async main() is not run by runFailClosedMain('${file}', main)`)
+  }
+  if (hasTestsArray) {
+    if (new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosedSuite\\('${escapeSuiteRe(file)}', tests${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaTests = true
+    else problems.push(`${file}: its tests array is not run by runFailClosedSuite('${file}', tests)`)
+  }
+  return { problems, viaMain, viaTests }
+}
+
 // S3 follow-ups 2 (item 5): every stock-prep suite with a hand-rolled ASYNC runner is on the fail-closed runner.
 test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `async function main()` ends in runFailClosedMain(<its file>, main), every `tests` array suite in runFailClosedSuite(<its file>, tests); no bare main() / async-IIFE loop is left', () => {
   const dir = __dirname
@@ -1611,31 +1766,38 @@ test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `
   const viaMain = []
   const viaTests = []
   const problems = []
-  const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  // The one option a converted tail may pass: the pass line its old tail printed (a single-quoted literal).
-  const PASS_LINE_OPTION = "(?:, \\{ passLine: '[^'\\n]+' \\})?"
   for (const file of files) {
     const text = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n')
-    const hasAsyncMain = /^async function main\(\) \{$/m.test(text)
-    const hasTestsArray = /^const tests = \[\]$/m.test(text)
     if (file.startsWith(PENDING_ADOPTION_PREFIX) && !text.includes('fail-closed-suite-runner')) {
       pendingSkipped.push(file)
       continue
     }
-    // A SYNCHRONOUS `function main()` cannot await anything, so it cannot hang on a promise: only the async one counts.
-    if (hasAsyncMain && /^main\(/m.test(text)) problems.push(`${file}: a bare top-level call of the async main() (exits 0 past a hang)`)
-    if (/^;?\(async \(\) => \{$/m.test(text) && /for \(const \[name, fn\] of tests\)/.test(text)) problems.push(`${file}: a hand-rolled async test loop (exits 0 past a hang)`)
-    if (hasAsyncMain) {
-      // A top-level STATEMENT (anchored to its own line), never a mention in a comment.
-      if (new RegExp(`^require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.runFailClosedMain\\('${escapeRe(file)}', main${PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaMain.push(file)
-      else problems.push(`${file}: async main() is not run by runFailClosedMain('${file}', main)`)
-    }
-    if (hasTestsArray) {
-      if (new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosedSuite\\('${escapeRe(file)}', tests${PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaTests.push(file)
-      else problems.push(`${file}: its tests array is not run by runFailClosedSuite('${file}', tests)`)
-    }
+    const verdict = suiteRunnerVerdict(file, text)
+    problems.push(...verdict.problems)
+    if (verdict.viaMain) viaMain.push(file)
+    if (verdict.viaTests) viaTests.push(file)
   }
   assert.deepEqual(problems, [], problems.join('\n'))
+  // Fix round 1: the general check is not vacuous — every spelling the review found passing the exact-form checks is
+  // flagged; a sync suite, a node:test suite and a suite on the runner are not.
+  const F = 'stock-preparation-synthetic.test.cjs'
+  const flags = (text) => suiteRunnerVerdict(F, text).problems.length > 0
+  for (const [label, text] of [
+    ['async function run', 'async function run() { await new Promise(() => {}) }\nrun().catch(() => process.exit(1))\n'],
+    ['async arrow main', 'const main = async () => { await new Promise(() => {}) }\nmain().catch(() => process.exit(1))\n'],
+    ['spaced async main', 'async function main () { await new Promise(() => {}) }\nmain()\n'],
+    ['renamed loop variable', 'const tests = [];\n(async () => { for (const [label, fn] of tests) await fn() })()\n'],
+    ['unawaited async check', 'function main() { checkAsync() }\nfunction checkAsync() { return new Promise(() => {}).then(() => {}) }\nmain()\n'],
+  ]) assert.ok(flags(text), `O-24c must flag: ${label}`)
+  assert.equal(flags("const assert = require('node:assert/strict')\nassert.equal(1, 1)\n"), false, 'a sync suite')
+  // A sync SOURCE-TEXT guard naming async code only in comments, strings, templates and regexes is still sync…
+  assert.equal(flags("// every await is checked\nconst a = '    async x(req, res) {'\nconst b = `${a} await y`\nconst re = /\\n {4}async ([a-z]+)\\(/g\nassert.match(a, /async/)\nconst n = 4 / 2 / 1\n"), false, 'async named only in comments / strings / regexes')
+  // …while async CODE next to such text is not hidden by it (a template's `${…}` is code).
+  assert.ok(flags("const re = /async/\nconst t = `${await load()}`\n"), 'await inside a template expression is code')
+  assert.ok(flags("const a = 'x' // async\nconst p = 6 / 2; load().then(() => {})\n"), 'a .then( after a division and a comment is code')
+  assert.equal(flags("const test = require('node:test')\ntest('x', async () => {})\n"), false, 'a node:test suite')
+  assert.equal(flags(`async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('${F}', main)\n`), false, 'on the runner')
+  assert.ok(flags("async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('another.test.cjs', main)\n"), 'on the runner under ANOTHER file name is not this suite on the runner')
   // Only the S5b area is ever skipped (today: the one members suite this PR leaves untouched).
   assert.ok(pendingSkipped.every((file) => file.startsWith(PENDING_ADOPTION_PREFIX)), pendingSkipped.join(', '))
   // Not vacuous: the 65 main() suites and the 6 tests-array suites (5 converted here + this one) this PR stands on.
@@ -2282,6 +2444,14 @@ test('O-31b (follow-ups 2, item 4) the PER-EVENT path: the logged code is the la
     assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
   } finally { h.restore() }
 })
+
+// S3 follow-ups 2, fix round 1 (R5): the runner's own self-tests, OUTSIDE it — synchronous, at top level, before it. A
+// failure here is an uncaught throw: this suite exits 1 even when the runner's own failure exit is broken.
+for (const [name, fn] of runnerSelfTests) {
+  const result = fn()
+  assert.ok(!(result && typeof result.then === 'function'), `${name}: a runner self-test must be synchronous (it runs outside the runner)`)
+  console.log(`  ${name} OK`)
+}
 
 // S3 follow-up A: the fail-closed runner (support/fail-closed-suite-runner.cjs) — exit sentinel + per-test timeout.
 runFailClosedSuite('stock-preparation-project-overview.test.cjs', tests)

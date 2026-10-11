@@ -89,14 +89,23 @@ function runFailClosedSuite(label, tests, { testTimeoutMs = DEFAULT_TEST_TIMEOUT
       }
     }
     completed = true
+    // S3 follow-ups 2, fix round 1 (R5): a counted failure sets `process.exitCode = 1` FIRST, and both failing exits
+    // return after `process.exit(1)` — so a failed run can never end 0 nor print `all assertions passed`, even where
+    // `process.exit` does not end the process (stubbed, or the line lost; the second exit already has a non-zero
+    // `process.exitCode` by definition). The runner's own self-tests do NOT run on
+    // this runner (stock-preparation-project-overview.test.cjs runs them at top level, before it), so breaking this
+    // exit path turns that suite red on its own.
     if (failed) {
       console.error(`${label} FAILED (${failed})`)
+      process.exitCode = 1
       process.exit(1)
+      return
     }
     // S3 follow-ups 2 (item 5): a body that reported its own failures through `process.exitCode` failed.
     if (exitCodeReported()) {
       console.error(`${label} FAILED (process.exitCode ${String(process.exitCode)} was set by the suite)`)
       process.exit(1)
+      return
     }
     // S3 follow-ups 2 (item 5): the pass line the suite's own tail used to print (`<file> OK`, `✓ <name>`) — kept, so
     // adopting the runner drops no line a reader greps for; printed only on a pass, right before the runner's own.
