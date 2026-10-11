@@ -31,3 +31,33 @@ export function countsUpdateRecipients(beforeAssignees: string[], afterAssignees
   for (const id of afterAssignees) recipients.add(id)
   return [...recipients].sort()
 }
+
+// ---------------------------------------------------------------------------------------------
+// M4 PR-3c (design task-m4-pr3c-backend-design-20261008.md §3): appended; the function above is
+// unchanged.
+// ---------------------------------------------------------------------------------------------
+
+/** The stored task fields of a `PATCH` that the pending predicate reads. */
+export interface TaskPendingDueFields {
+  dueDate: string | null
+  dueTime: string | null
+  timeZone: string | null
+  dueAt: Date | null
+}
+
+function sameDueInstant(left: Date | null, right: Date | null): boolean {
+  if (left === null || right === null) return left === right
+  return left.getTime() === right.getTime()
+}
+
+// RULED(2026-10-07): [R16] a `PATCH` is a touchpoint when it changes a due field or the time zone.
+// ASSUMPTION(task-m4): [own-3c-03] any change of the stored `due_date`, `due_time`, `time_zone` or
+// `due_at`, a time-zone change on a task without a due date included; title, description, start
+// and reminder fields are not inputs of the pending predicate.
+/** Whether `after` differs from `before` in a field the pending predicate reads. */
+export function patchChangesPendingInputs(before: TaskPendingDueFields, after: TaskPendingDueFields): boolean {
+  return before.dueDate !== after.dueDate
+    || before.dueTime !== after.dueTime
+    || before.timeZone !== after.timeZone
+    || !sameDueInstant(before.dueAt, after.dueAt)
+}
