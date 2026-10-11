@@ -44,13 +44,23 @@ function extractStep(source) {
 
 const step = extractStep(workflow)
 
-function extractCheckoutPatterns(source) {
+function extractTestJob(source) {
   const lines = source.split('\n')
   const jobs = lines.flatMap((line, index) => line === '  test:' ? [index] : [])
   assert.equal(jobs.length, 1, 'required integration job must occur exactly once')
   let end = jobs[0] + 1
   while (end < lines.length && !/^  \S/u.test(lines[end])) end++
-  const job = lines.slice(jobs[0], end)
+  return lines.slice(jobs[0], end)
+}
+
+function assertTestJobRunner(source) {
+  const job = extractTestJob(source)
+  assert.deepEqual(job.filter(line => /^    runs-on:/u.test(line)), ['    runs-on: ubuntu-22.04'],
+    'required test job must have one literal ubuntu-22.04 runner pin')
+}
+
+function extractCheckoutPatterns(source) {
+  const job = extractTestJob(source)
   const checkout = job.indexOf('      - name: Checkout repository')
   assert.ok(checkout >= 0)
   let next = checkout + 1
@@ -72,6 +82,21 @@ function extractCheckoutPatterns(source) {
 }
 
 const checkoutPatterns = extractCheckoutPatterns(workflow)
+
+test('required test job pins one literal ubuntu-22.04 runner for the compatibility probe', () => {
+  assertTestJobRunner(workflow)
+  const pin = '    runs-on: ubuntu-22.04\n'
+  for (const mutation of [
+    workflow.replace(pin, '    runs-on: ubuntu-latest\n'),
+    workflow.replace(pin, '    runs-on: ubuntu-24.04\n'),
+    workflow.replace(pin, '    runs-on: ${{ matrix.runner }}\n'),
+    workflow.replace(pin, pin + pin),
+    workflow.replace(pin, ''),
+  ]) {
+    assert.notEqual(mutation, workflow, 'mutation must change the actual workflow runner pin')
+    assert.throws(() => assertTestJobRunner(mutation))
+  }
+})
 
 test('required job excludes only the exact tracked runtime env in its fresh checkout', () => {
   assert.deepEqual(checkoutPatterns, ['/*', '!/packages/core-backend/.env'])
