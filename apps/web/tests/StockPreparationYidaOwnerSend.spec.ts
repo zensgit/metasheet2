@@ -318,6 +318,31 @@ describe('Yida owner client cancellation and disposal', () => {
   beforeEach(() => { localStorage.setItem('auth_token', token); fetchSpy.mockReset(); vi.stubGlobal('fetch', fetchSpy) })
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+  it.each([1024 * 1024, 1024 * 1024 + 1])('enforces the streamed byte cap for valid padded error JSON (%i bytes)', async bytes => {
+    const envelope = JSON.stringify({ ok: false, error: { code: 'YIDA_OWNER_RUNTIME_DISABLED' } })
+    const payload = envelope + ' '.repeat(bytes - new TextEncoder().encode(envelope).length)
+    // No Content-Length: this exercises the cumulative stream guard, not the
+    // header guard. The JSON remains valid so parsing cannot mask its removal.
+    const encoded = new TextEncoder().encode(payload)
+    const stream = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(encoded.subarray(0, 512 * 1024))
+      controller.enqueue(encoded.subarray(512 * 1024))
+      controller.close()
+    } })
+    const response = new Response(stream, { status: 403, headers: { 'Content-Type': 'application/json' } })
+    expect(response.headers.get('content-length')).toBeNull()
+    fetchSpy.mockResolvedValueOnce(response)
+    const client = createYidaOwnerClient()
+    try {
+      const oversized = bytes > 1024 * 1024
+      await expect(client.prepareDraft(input())).rejects.toMatchObject({
+        code: oversized ? 'YIDA_OWNER_RESPONSE_INVALID' : 'YIDA_OWNER_RUNTIME_DISABLED',
+      })
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(fetchSpy.mock.calls[0][1].signal.aborted).toBe(oversized)
+    } finally { client.dispose() }
+  })
+
   it('aborts and discards a transport response after caller cancellation without a retry', async () => {
     const pending = deferred<Response>(), controller = new AbortController()
     fetchSpy.mockReturnValueOnce(pending.promise)
