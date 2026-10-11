@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§200）**：Automation `45791e1c4` 普通检查 47/47、独立副本 `pnpm validate:all` 通过，但完整 run `38172366770` 在 manual 阶段以 `REQUEST_FAILED` 失败，不能记全链成功。已推送仅补诊断的 `130a9341c`，203/203 契约及类型检查通过，新完整 run `38175124419` 已核 head、运行中。失败根因与独立终审仍待闭合，#6337 保持草稿。宜搭 #6315 完整 CI 已成功；无合并、部署、真实客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§201）**：Automation `130a9341c` 普通检查 47/47，但完整 run `38175124419` 已失败：manual 成功，interval 的宜搭默认 OFF 阶段出现 POST / ABORTED。独立合成复现已发现“完整 no-store 分段响应、流读取到 EOF、未取消，Chromium 仍报失败”的现象，原生流读取也复现，上游有同类问题；尚未证明本次 CI 的全部内部因果链或得到安全修复。未改成无界正文读取、未忽略失败，#6337 保持草稿。宜搭 #6315 的历史完整 CI 成功不能替代当前 head 验收；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2261,3 +2261,13 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - `130a9341c099eb2e67942139054587af767617aa` 仅改外层 stage runner 与其测试，将现有 `browser-request-failure` 重新投影为固定 method/apiKey/surface/failure 枚举。未知值归 OTHER/unknown，不公开 URL、头、请求体、错误文本或请求身份；不改浏览器拒绝规则、失败计数、业务权限和发送开关。真实子进程转发测试保留 exit 1，四个分类白名单移除变异均使断言失败。
 - 新独立 Linux 副本原三套命令 203/203、零失败/跳过，full-app 类型检查 exit 0，Git 两个 LF blob 与受测字节一致。TAP SHA `f716053db52d805133344f2d7f099878fb6d7fdd74108cec3be937faf9013783`。仅私有 loopback/caps0/NNP，不声称文件系统或 Unix IPC 隔离；私有诊断未上传。这是诊断能力验证，不是产品根因修复或独立终审。
 - 已普通推送 #6337，旧失败终态后启动 [run 38175124419](https://github.com/zensgit/metasheet2/actions/runs/38175124419)，确认 head 为 `130a9341c`、运行中。[PR 续记](https://github.com/zensgit/metasheet2/pull/6337#issuecomment-6113776694)。草稿保留，未合并、部署、读取客户数据、交换真实 token 或宜搭发送；K3 永久禁写，goal active。
+
+## 201. 将完整响应后的 ABORTED 缩到浏览器流读取对照（2026-10-12）
+
+- 固定 head `130a9341c099eb2e67942139054587af767617aa` 的完整 [run 38175124419](https://github.com/zensgit/metasheet2/actions/runs/38175124419) 已 completed/failure，job `114575796548` 的第 99 步失败。第一轮 configured-app exit 0；第二轮 exit 1、非超时，阶段 `YIDA_OWNER_DEFAULT_OFF / REQUEST_FAILED`，唯一请求失败分类 POST / API / ABORTED。进入该阶段约 180 ms 即出现失败，不能用 SDK 的 15 秒超时解释。公开帧不含精确 URL，故不得把推断的端点当作该次 CI 已捕获路径。公开失败日志 18060 字节，SHA `5d6512c77c4413b42e980783555e285562666318574f4c88dfc7171c4abc58ef`；只在内存分类，未上传原文。后续 skipped 不记 PASS。
+- 本地独立 Linux 副本以当前真实宜搭 SDK、真实 Chromium、真实 Vite 代理和合成 HTTP 服务定位；未启动生产 API、数据库，未连接客户或宜搭。三个 SDK 输入文件前后哈希不变。首次两次工具在请求前因模块入口问题退出，保留原副本，不计产品失败。初版网络空闲等待不足以给事件准确归属，改为关联原 Request 对象并等它自己的终态，再运行新副本。
+- 该逐请求复现的 8 个正常响应均被 SDK 解析为精确关闭状态；其中 3 个分段响应在服务端 finish、客户端完整正文、AbortSignal 未触发后仍被 Chromium 报为 ABORTED。主动取消正控制则同时出现 CANCELLED、signal aborted、request failed 和服务端提前关闭。stdout SHA `2d2293741bf34ec621a5748c0f9deaeb683202b1329b6e55c24d1d7c101a3fdd`。这不是放宽断言后通过：原严格完成断言仍 exit 1。
+- 第二组 20 个相同响应对照：真实 SDK、仅在独立内存 bundle 中去掉 releaseLock 的 SDK 变体、原生流读取释放锁、原生流读取保留锁均出现相同现象；原生 response.text 的四个对照全部 requestfinished。全部 20 个正文均完整，取消信号均未触发。说明在此合成环境中不依赖 Vue、认证更新、owner API 或释放流锁；不据此宣称已抓到 CI 的底层调用栈。stdout SHA `4dc68fa76e0633ef1bb8b49fe33ad8f7283cb6737b0600eb24be58cb52bbc02c`，仍 exit 1，原产品源码未改。
+- 上游 [Playwright #42742](https://github.com/microsoft/playwright/issues/42742) 记录了同类 no-store、分段正文、流读取 EOF 与 Chromium 原生失败不一致的问题，并有浏览器对照；这是关联证据，不代替本仓当前版本复现，也不证明升级依赖即可修复。保留 no-store、实际流式字节限制、取消和身份失效拒绝；不采用无界 text/json、clone 双路缓存、忽略 ABORTED、重跑碰绿或放宽成功门。
+- 第三组新副本控制服务端响应头：SDK + no-store 的分段延迟响应仍报失败；SDK + no-cache 四项以及原生 text + no-store 四项均原请求完成。共 12 个正常正文均完整，另一个主动取消正控制仍失败。stdout SHA `7f36292fddc636b39b911f340398f0980355f0e88334dc73e09b65f541b837cc`，stderr 空。该诊断脚本 exit 0 的含义是“复现了预先明确断言的差异并通过对照”，不是 12 项产品验收通过；变更仅在合成服务器，生产缓存策略、SDK 和 CI 未改。
+- 后续建议：增加另一浏览器的完整合成交叉验证，但保留 Chromium 未通过状态与历史证据，不将替代浏览器单独通过包装成所有验收绿；该选择已异步询问 owner。独立终审仍未闭合。当前仅收敛诊断和证据，不进行 GitHub 合并、部署、真实 token 交换或发送；K3 永久禁写，goal active。
