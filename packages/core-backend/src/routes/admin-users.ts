@@ -3217,9 +3217,10 @@ export function adminUsersRouter(): Router {
         roles: snapshot.roles,
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot.roles
-          : filterRoleIdsToCatalog(snapshot.roles, revocable),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot.roles, revocable),
       })
     } catch (error) {
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACCESS_FAILED', 'Failed to load delegated user access', error)
@@ -3471,9 +3472,10 @@ export function adminUsersRouter(): Router {
         roles: snapshot?.roles ?? [],
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot?.roles ?? []
-          : filterRoleIdsToCatalog(snapshot?.roles ?? [], revocable),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot?.roles ?? [], revocable),
       })
     } catch (error) {
       // A boundary refusal is a permission outcome, so it answers with its own status and code

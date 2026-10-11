@@ -1031,6 +1031,9 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
     xAdminBoth: `${P}-m2`,
     xAdminOnly: `${P}-m3`,
     leadMember: `${P}-m4`,
+    raceMember: `${P}-m5`,
+    resurrectMember: `${P}-m6`,
+    orphanMember: `${P}-m7`,
   }
   const allUserIds = Object.values(ids)
   const roles = {
@@ -1039,6 +1042,9 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
     lead: `attendance_rolef${RUN_ID}_lead`,
     xAdmin: `${X_NS}_admin`,
     ordinary: `${P}_ordinary`,
+    race: `${P}_race`,
+    resurrect: `${P}_resurrect`,
+    orphan: `${P}_orphan`,
   }
   const createdRoleIds: string[] = []
   const createdPermissionCodes: string[] = []
@@ -1048,6 +1054,8 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
   let groupId = ''
   let integrationId = ''
   let departmentId = ''
+  // A second connection that plays the concurrent role editor holding the row lock.
+  const lockPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 2 })
 
   async function api(method: string, path: string, token: string, body?: Record<string, unknown>) {
     const res = await fetch(`${baseUrl}${path}`, {
@@ -1122,6 +1130,13 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
     await ensureRole(roles.lead, ['attendance:read', 'attendance:admin'])
     await ensureRole(roles.xAdmin, [])
     await ensureRole(roles.ordinary, ['attendance:read'])
+    await ensureRole(roles.race, ['attendance:read'])
+    await ensureRole(roles.resurrect, ['attendance:read', 'attendance:admin'])
+    await ensureRole(roles.orphan, ['attendance:read'])
+    await query(
+      'INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2), ($3, $4), ($5, $6)',
+      [ids.raceMember, roles.race, ids.resurrectMember, roles.resurrect, ids.orphanMember, roles.orphan],
+    )
     // A catalogued mixed-case variant, so the catalog probe cannot be what refuses it.
     await ensureCode('Attendance:Admin')
 
@@ -1184,6 +1199,7 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
 
   afterAll(async () => {
     if (httpServer) await new Promise<void>((resolve) => httpServer.close(() => resolve()))
+    await lockPool.end()
     await query('DELETE FROM user_roles WHERE user_id = ANY($1::text[])', [allUserIds])
     await query('DELETE FROM delegated_role_admin_scopes WHERE admin_user_id = ANY($1::text[])', [allUserIds])
     await query('DELETE FROM delegated_role_admin_member_groups WHERE admin_user_id = ANY($1::text[])', [allUserIds])
@@ -1290,5 +1306,78 @@ describeIfDatabase('role editor — admin-level codes and namespace-admin role d
     expect(deleted.status).toBe(200)
     const roleRow = await query('SELECT 1 FROM roles WHERE id = $1', [roles.ordinary])
     expect(roleRow.rows).toHaveLength(0)
+  })
+
+  it('RACE — a roles:write holder\'s DELETE waits for a platform edit that is adding `attendance:admin` under the row lock, then sees it and is refused', async () => {
+    // The in-flight platform PUT: it holds the role row FOR UPDATE and has written the admin code,
+    // not yet committed. The route's classification read takes the same row lock, so it can only
+    // classify AFTER the commit — and then it sees an admin-equivalent role.
+    const editorTx = await lockPool.connect()
+    let committed = false
+    try {
+      await editorTx.query('BEGIN')
+      await editorTx.query('SELECT id FROM roles WHERE id = $1 FOR UPDATE', [roles.race])
+      await editorTx.query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [roles.race, 'attendance:admin'])
+      const pending = api('DELETE', `/api/roles/${encodeURIComponent(roles.race)}`, tokens.editor)
+
+      // The DELETE is parked on a lock on this role row (whichever of its statements reached it).
+      let blocked = false
+      for (let attempt = 0; attempt < 200 && !blocked; attempt += 1) {
+        const waiting = await lockPool.query(
+          `SELECT count(*)::int AS n FROM pg_stat_activity
+           WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FROM roles WHERE id=$1%'`,
+        )
+        blocked = (waiting.rows[0]?.n ?? 0) > 0
+        if (!blocked) await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+      expect(blocked).toBe(true)
+
+      await editorTx.query('COMMIT')
+      committed = true
+
+      const res = await pending
+      expect({ status: res.status, code: res.json?.error?.code }).toEqual({ status: 403, code: 'PROTECTED_ROLE_FORBIDDEN' })
+      const roleRow = await query('SELECT 1 FROM roles WHERE id = $1', [roles.race])
+      expect(roleRow.rows).toHaveLength(1)
+      expect(await membersOf(roles.race)).toEqual([ids.raceMember])
+      expect(await codesOf(roles.race)).toEqual(['attendance:admin', 'attendance:read'])
+    } finally {
+      if (!committed) await editorTx.query('ROLLBACK').catch(() => undefined)
+      editorTx.release()
+    }
+  })
+
+  it('GRANTS GO TOO — after a platform DELETE of an admin-equivalent role no role_permissions remain, so a roles:write holder\'s POST of the same id comes back empty', async () => {
+    const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.resurrect)}`, tokens.platformAdmin)
+    expect(deleted.status).toBe(200)
+    expect(await membersOf(roles.resurrect)).toEqual([])
+    // No role_id FK on the migrated schema: only the route can have removed these.
+    expect(await codesOf(roles.resurrect)).toEqual([])
+
+    // The resurrection shape: POST with no codes returns before the gate.
+    const recreated = await api('POST', '/api/roles', tokens.editor, { id: roles.resurrect, name: 'Viewer' })
+    expect(recreated.status).toBe(200)
+    expect(await codesOf(roles.resurrect)).toEqual([])
+    // …and re-adding the admin code still has to pass the gate.
+    const regrant = await api('POST', '/api/roles', tokens.editor, { id: roles.resurrect, name: 'Viewer', permissions: ['attendance:admin'] })
+    expect({ status: regrant.status, code: regrant.json?.error?.code }).toEqual({ status: 403, code: 'PERMISSION_ESCALATION_FORBIDDEN' })
+    expect(await codesOf(roles.resurrect)).toEqual([])
+  })
+
+  it('a platform admin is not offered a revoke for a membership whose role row is gone (the unassign route answers it 404)', async () => {
+    // An ORDINARY delete keeps its memberships (a roles-only write), so the member is left holding
+    // a role id that no longer exists.
+    const deleted = await api('DELETE', `/api/roles/${encodeURIComponent(roles.orphan)}`, tokens.editor)
+    expect(deleted.status).toBe(200)
+    expect(await membersOf(roles.orphan)).toEqual([ids.orphanMember])
+
+    const access = await api('GET', `/api/admin/role-delegation/users/${encodeURIComponent(ids.orphanMember)}/access`, tokens.platformAdmin)
+    expect(access.status).toBe(200)
+    expect(access.json?.data?.isPlatformAdmin).toBe(true)
+    expect(access.json?.data?.roles).toContain(roles.orphan)
+    expect(access.json?.data?.delegableRoles ?? []).not.toContain(roles.orphan)
+
+    const revoke = await api('POST', `/api/admin/role-delegation/users/${encodeURIComponent(ids.orphanMember)}/roles/unassign`, tokens.platformAdmin, { roleId: roles.orphan })
+    expect({ status: revoke.status, code: revoke.json?.error?.code }).toEqual({ status: 404, code: 'ROLE_NOT_FOUND' })
   })
 })

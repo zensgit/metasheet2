@@ -1485,5 +1485,87 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(res.statusCode).toBe(200)
     expect(db.nameOf('role-1')).toBeUndefined()
     expect(membershipWrites(db)).toEqual([])
+    // …and no grant statement either: an ordinary delete stays a `roles`-only write (the
+    // `roles:delete` recovery-census premise in the L1 battery ledger).
+    expect(db.statements.some((s) => /^\s*DELETE FROM role_permissions/i.test(s.sql))).toBe(false)
+  })
+
+  it('LOCK: the classification read takes the role row FOR UPDATE as the FIRST statement inside the transaction', async () => {
+    // Without the lock a concurrent platform PUT that has already written `attendance:admin` under
+    // its own FOR UPDATE (uncommitted) is invisible to the classification below, and a roles:write
+    // holder deletes a role that just became admin-equivalent — the members keep the code through
+    // the orphan membership. The real-DB race leg shows the outcome; this pins the statement.
+    for (const roleId of ['role-1', 'crm_admin', 'crm_lead']) {
+      const db = seedAdminRoles({ cascade: false })
+      wire(db)
+      const res = mockResponse()
+
+      await deleteRole(res, roleId)
+
+      expect({ roleId, status: res.statusCode }).toEqual({ roleId, status: roleId === 'role-1' ? 200 : 403 })
+      expect(db.statements[0].sql.replace(/\s+/g, ' ').trim()).toBe('SELECT id, name FROM roles WHERE id=$1 FOR UPDATE')
+      // …and no read of the role or its codes happens before it.
+      expect(db.statements.findIndex((s) => /\b(roles|role_permissions)\b/i.test(s.sql))).toBe(0)
+    }
+  })
+
+  it('GRANTS GO TOO: a platform admin\'s delete of an admin-equivalent role leaves no role_permissions behind, so a roles:write holder cannot resurrect it through POST', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    const deleted = mockResponse()
+
+    await deleteRole(deleted, 'crm_lead')
+
+    expect(deleted.statusCode).toBe(200)
+    expect(db.permissionsOf('crm_lead')).toEqual([])
+    // The resurrection shape: an ordinary editor re-creates the id with NO codes (POST returns
+    // before the gate when no codes are sent). It must come back empty, not carrying crm:admin.
+    rbacServiceMocks.isAdmin.mockResolvedValue(false)
+    const resurrected = mockResponse()
+    await postRole({ id: 'crm_lead', name: 'Viewer' }, resurrected)
+    expect(resurrected.statusCode).toBe(200)
+    expect(db.nameOf('crm_lead')).toBe('Viewer')
+    expect(db.permissionsOf('crm_lead')).toEqual([])
+    // Other roles' grants are untouched — the DELETE is scoped to the id.
+    expect(db.permissionsOf('attendance_lead')).toEqual(['attendance:admin', 'attendance:read'])
+  })
+
+  it('GRANTS GO TOO for a namespace main-admin role with NO members (the grant removal does not hang off the membership removal)', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({ cascade: false })
+    wire(db)
+    // Empty the role's membership first, and give it a code to lose.
+    await db.run('DELETE FROM user_roles WHERE role_id = $2 AND user_id = ANY($1::text[]) RETURNING user_id', [['user-a', 'user-b'], 'crm_admin'])
+    await db.run('INSERT INTO role_permissions(role_id, permission_code) VALUES ($1,$2)', ['crm_admin', 'crm:read'])
+    expect(db.membersOf('crm_admin')).toEqual([])
+    expect(db.permissionsOf('crm_admin')).toEqual(['crm:read'])
+    db.statements.length = 0
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_admin')
+
+    expect(res.statusCode).toBe(200)
+    expect(db.permissionsOf('crm_admin')).toEqual([])
+    expect(membershipWrites(db)).toEqual([])
+  })
+
+  it('ATOMIC: a failure in the grant removal rolls back the membership removal and keeps the role and its codes', async () => {
+    rbacServiceMocks.isAdmin.mockResolvedValue(true)
+    const db = seedAdminRoles({
+      cascade: false,
+      failOn: (sql) => (/^\s*DELETE FROM role_permissions/i.test(sql)
+        ? Object.assign(new Error('could not serialize access'), { code: '40P01' })
+        : null),
+    })
+    wire(db)
+    const res = mockResponse()
+
+    await deleteRole(res, 'crm_lead')
+
+    expect(res.statusCode).toBe(500)
+    expect(db.nameOf('crm_lead')).toBe('CRM 组长')
+    expect(db.membersOf('crm_lead')).toEqual(['user-c'])
+    expect(db.permissionsOf('crm_lead')).toEqual(['crm:admin', 'crm:read'])
   })
 })

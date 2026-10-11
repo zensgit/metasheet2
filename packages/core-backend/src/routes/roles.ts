@@ -835,6 +835,11 @@ export function rolesRouter(): Router {
    * no other held role derives it. Membership, audience and the role row commit or roll back
    * together. Deliberately NOT for the seeded `admin` role: removing every platform administrator's
    * membership is a lock-out, not a cleanup, and stays a separate, explicit decision.
+   *
+   * GRANTS GO WITH IT TOO (same roles, same transaction): `role_permissions` rows for the id are
+   * deleted, so a later POST of the same id by a roles:write holder starts from an EMPTY set and any
+   * admin code has to pass the gate again. An ordinary role's delete stays a `roles`-only write (the
+   * `roles:delete` census premise).
    */
   r.delete('/api/roles/:id', rbacGuard('roles', 'write'), async (req: Request, res: Response) => {
     const id = req.params.id
@@ -843,8 +848,9 @@ export function rolesRouter(): Router {
       let before: unknown = null
       let memberIds: string[] = []
       let membershipRemoval: RoleAssignmentResult | undefined
-      // Set immediately before the first membership statement: a failure after it belongs to the
-      // `roles:delete-admin-role` recovery-census site (that write set reaches `user_roles`).
+      // Set immediately before the first membership / grant statement: a failure after it belongs to
+      // the `roles:delete-admin-role` recovery-census site (that write set reaches `user_roles` and
+      // `role_permissions`).
       let removesMemberships = false
       try {
         await transaction(async (client) => {
@@ -866,14 +872,22 @@ export function rolesRouter(): Router {
           // (migrations/033_create_rbac_core.sql:36) and the rows are gone afterwards. Inside,
           // because it is PRE-commit: a failed read answers the 500 below with nothing deleted.
           memberIds = await readRoleMemberIds(id, client)
-          if (protection && protection.kind !== 'platform_admin_role' && memberIds.length > 0) {
+          if (protection && protection.kind !== 'platform_admin_role') {
             removesMemberships = true
-            membershipRemoval = await unassignUserRoles({
-              userIds: memberIds,
-              roleId: id,
-              scope: { kind: 'platform-admin' },
-              executor: client,
-            })
+            if (memberIds.length > 0) {
+              membershipRemoval = await unassignUserRoles({
+                userIds: memberIds,
+                roleId: id,
+                scope: { kind: 'platform-admin' },
+                executor: client,
+              })
+            }
+            // The grants go too. With no role_id FK, `role_permissions` outlives the row, and POST
+            // (`INSERT … ON CONFLICT DO NOTHING`, then an early return when no codes are sent)
+            // re-creates the id WITH those leftover admin codes and without reaching the gate —
+            // and permission resolution joins user_roles to role_permissions without `roles`, so
+            // any surviving membership keeps them. Same transaction, so it commits with the rest.
+            await client.query('DELETE FROM role_permissions WHERE role_id=$1', [id])
           }
           await client.query('DELETE FROM roles WHERE id=$1', [id])
         })
@@ -884,8 +898,9 @@ export function rolesRouter(): Router {
         }
         if (removesMemberships) {
           // O2-S2, census site `roles:delete-admin-role`: the membership removal DELETEs from
-          // `user_roles`, which carries trg_user_roles_recovery_authority_lock, so a marker 40001
-          // under a held user lease is constructible here → retryable 409.
+          // `user_roles` (trg_user_roles_recovery_authority_lock, user lease) and the grant removal
+          // from `role_permissions` (trg_role_permissions_recovery_authority_lock, role lease), so a
+          // marker 40001 under a held lease is constructible here → retryable 409.
           if (sendIfRecoveryConflict(res, error)) return
           return sendRoleWriteFailure(res, error, 'delete', id)
         }

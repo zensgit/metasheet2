@@ -575,6 +575,27 @@ describe('R5 — the delegate is never offered what the route refuses', () => {
     }
   })
 
+  it('platform admin: a membership whose role row is gone is not offered for revoke (the route answers it 404), on both the access read and the write response', async () => {
+    // No user_roles -> roles FK on the migrated schema, so such memberships are a normal state.
+    db.userRoles.set(TARGET, new Set(['attendance_employee', 'stock-prep_admin', 'ghost_role']))
+    expect(db.roles.has('ghost_role')).toBe(false)
+
+    const access = await call('get', ACCESS_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET } })
+    expect(access.statusCode).toBe(200)
+    expect(access.body.data.roles).toContain('ghost_role')
+    expect(access.body.data.delegableRoles).toEqual(['attendance_employee', 'stock-prep_admin'])
+
+    // The route really refuses that revoke — the list agrees with it.
+    const revoke = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'ghost_role' } })
+    expect({ status: revoke.statusCode, code: revoke.body?.error?.code }).toEqual({ status: 404, code: 'ROLE_NOT_FOUND' })
+
+    // The write response carries the same cut.
+    const write = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_employee' } })
+    expect(write.statusCode).toBe(200)
+    expect(write.body.data.roles).toContain('ghost_role')
+    expect(write.body.data.delegableRoles).toEqual(['stock-prep_admin'])
+  })
+
   it('POSITIVE CONTROL — a platform admin still sees the whole catalog, main-admin roles included', async () => {
     const res = await call('get', ACCESS_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET } })
 
