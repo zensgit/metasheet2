@@ -1,5 +1,7 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
+> **最新续记（2026-10-12，§193）**：#6337精确`4e9f665f5`普通PR检查47/47 success；完整run `38158303603`通过类型检查、仍在core全套，不代表数据库/manual/interval通过。宜搭#6315已完成局部对齐回归并普通推送`dcfb0903b`，恢复MERGEABLE，新CI待出；提交树与受检暂存树一致。下游stack尚未携带本次main增量，独立终审及全目标未闭合。无GitHub合并、部署、客户读取或外发；以下续记保留历史时点。
+
 > **最新续记（2026-10-12，§192）**：#6337已推送 `4e9f665f5`。完整CI原19条失败用例均已纳入本地通过的50整文件2635/2635回归；这不是完整CI或全目标通过。新完整run `38158303603`已核head=4e9f665，等待数据库及manual/interval合成验收。宜搭底层main对齐仅本地暂存，provenance通过但尚未完成整体验收。独立终审、最终base对齐仍未闭合；无合并、部署或真实系统操作。以下“最新”保留历史时点。
 
 > **最新续记（2026-10-12，§191）**：#6337已普通推送 `c7d905b24`，仅补18行旧重跑测试断言，生产权限逻辑不变；12个完整前端文件1423/1423通过。d066的multitable-web-guard原4259通过/2失败保留，根因是旧测试期待切换账号后保留旧按钮。完整run `38155201515`仍固定d066继续，不取消重启、不转借为新head通过。草稿、独立终审及最终base对齐未闭合；无合并、部署或真实系统操作。
@@ -2190,3 +2192,11 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 新完整run `38158303603`已通过既有workflow_dispatch启动并核对head=4e9f665；旧run终态failure保留，没有盲目重跑。待其实际数据库、原manual/interval及最新head其它检查结果，不预判通过。
 - 宜搭#6315的main对齐停在本地no-commit merge：HEAD `0b62562c9`、MERGE_HEAD `906840c74`、暂存tree `3add4fb352973b20a30227090891e63daeb06c90`，冲突数0。63项pin按Git原始LF字节零差异，完整provenance测试通过；尚未提交或推送，不称整个对齐已验收。
 - 独立终审、最终stack/base对齐和全目标仍未完成。未合并、部署、客户读取、真实token交换或外发，K3永久禁写。
+
+## 193. 宜搭main对齐提交与Automation普通检查收敛（2026-10-12）
+
+- #6337精确head `4e9f665f5ee1ca55817cf6e963ee3d6227d51d7c`的47项普通检查全部SUCCESS，仍DRAFT。完整run `38158303603`的K3离线、售后集成、钉钉回归已success，test20通过类型检查后进入core全套；原19失败是否在整链闭合及数据库/manual/interval结果仍待出。没有取消或重启此run。
+- 宜搭待合流tree `3add4fb352973b20a30227090891e63daeb06c90`从Git对象导出：13530项、89项排除、原始字节保留，manifest SHA `65bf8d9d41951a7b51bbef57e89bcf9029f2d9e0a15a53c4e1e6cb8c074326f0`。一个已跟踪的旧baseline软链接先做目标准入再在Linux重建，未当普通文本或跟随宿主路径；读取的不是未筛选工作副本，前后索引不变。
+- 新独立Linux副本离线frozen-lockfile安装后，原配置12个完整unit文件448/448、零skip/retry/unhandled；native结果SHA `521cef800041fc8c13df23ea32745a331b7836733e3915fc553cfd782f336db5`。另跑备料权限矩阵、路由values-free、provenance三个完整插件文件，均exit0。receipt SHA `bbb2f3ad724d52861890246413fa33b65886879dc86b49bf5353292da68511cf`。受检源码前后原字节一致；private loopback/caps0/NNP，不冒称文件系统隔离、真实数据库或完整应用验收。
+- 本地main对齐提交 `dcfb0903b52d1b583c4d742630bddb9e436357c9`的tree精确等于受检tree，parents为`0b62562c9`与`906840c74`；已普通FF推送至#6315。GitHub核head一致、MERGEABLE，59项新检查当时尚在排队/运行。#6315实际isDraft=false，本轮没有改变该状态；不能沿用口头“宜搭草稿”称谓作为真实状态证据。
+- 尚未把此main增量携带到K3/PLM/Automation叠层，也未执行GitHub合并、部署、客户读取、token交换或宜搭发送。目标active；本轮为root检查，不称独立终审。
