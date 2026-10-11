@@ -45,6 +45,12 @@ const fail = code => {
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
 const captureDiagnostics = new WeakMap()
+const diagnosticFailures = new WeakMap()
+const diagnosticFailure = outcome => {
+  const error = new Error('YIDA_BROWSER_CI_DIAGNOSTIC_REJECTED')
+  diagnosticFailures.set(error, outcome)
+  return error
+}
 const bootstrapStages = new Set(['BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_OWNER', 'BOOTSTRAP_PATHS',
   'BOOTSTRAP_SOURCE_INTEGRITY', 'BOOTSTRAP_NAMESPACE', 'BOOTSTRAP_LINKS', 'BOOTSTRAP_LO_UP', 'BOOTSTRAP_EXEC'])
 const workerStages = new Set(['PG_START', 'PG_READY', 'VITEST_SPAWN', 'EXIT', 'VALIDATE', 'CLEANUP'])
@@ -71,11 +77,18 @@ export function parseChildFailureFrame(raw) {
 }
 
 function diagnosticBytes(file, expectedSha, limit) {
-  assert.match(expectedSha, /^[a-f0-9]{64}$/u)
-  assert(plain(file, false, 0o600).size <= limit)
-  const raw = fs.readFileSync(file)
-  assert(raw.length <= limit)
-  assert.equal(hash(raw), expectedSha)
+  if (typeof expectedSha !== 'string' || !/^[a-f0-9]{64}$/u.test(expectedSha)) throw diagnosticFailure('HASH_REJECTED')
+  if (!fs.existsSync(file)) throw diagnosticFailure('PATH_REJECTED')
+  let stat
+  try { stat = plain(file, false, 0o600) } catch (error) {
+    if (failureReasons.get(error) === 'PATH_INVALID') throw diagnosticFailure('PATH_REJECTED')
+    throw error
+  }
+  if (stat.size > limit) throw diagnosticFailure('SIZE_REJECTED')
+  let raw
+  try { raw = fs.readFileSync(file) } catch { throw diagnosticFailure('READ_REJECTED') }
+  if (raw.length > limit) throw diagnosticFailure('SIZE_REJECTED')
+  if (hash(raw) !== expectedSha) throw diagnosticFailure('HASH_REJECTED')
   return raw
 }
 
@@ -397,19 +410,29 @@ export function childFailureDiagnostic(terminal, evidence, ownerSha, sourceSha, 
     outputExceeded: observed.outputExceeded, error: observed.error }
     : { childExit: null, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false }
   let frame = { stage: 'UNKNOWN', reason: 'INVALID' }
+  let diagnosticSource = 'CAPTURE', diagnosticOutcome = 'UNAVAILABLE'
   if (observed && postHashesVerified === true) {
     try {
+      diagnosticSource = 'STDOUT'
       const stdout = diagnosticBytes(path.join(evidence, 'namespace.stdout.log'), observed.stdoutSha, DIAGNOSTIC_BYTES)
       const receiptFrame = /^YIDA_BROWSER_CI_RECEIPT_SHA256 ([a-f0-9]{64})\n(?![\s\S])/u.exec(stdout.toString('utf8'))
       if (receiptFrame) {
+        diagnosticSource = 'RECEIPT'
         const raw = diagnosticBytes(path.join(evidence, 'receipt.json'), receiptFrame[1], 16383)
         frame = parseWorkerFailureReceipt(raw, receiptFrame[1], ownerSha, sourceSha)
+        diagnosticOutcome = frame.reason === 'WORKER_REJECTED' ? 'FRAME_ACCEPTED' : 'RECEIPT_INVALID'
       } else if (stdout.length === 0) {
-        frame = parseChildFailureFrame(diagnosticBytes(path.join(evidence, 'namespace.stderr.log'), observed.stderrSha, DIAGNOSTIC_BYTES))
-      }
-    } catch { /* An unavailable/untrusted diagnostic view conveys no detail. */ }
-  } else if (observed && postHashesVerified === false) frame = { stage: 'SOURCE_INTEGRITY', reason: 'POST_HASH_REJECTED' }
-  return Object.freeze({ protocol: 'YIDA_BROWSER_CI_FAILURE_V1', ...frame, ...status })
+        diagnosticSource = 'STDERR'
+        const stderr = diagnosticBytes(path.join(evidence, 'namespace.stderr.log'), observed.stderrSha, DIAGNOSTIC_BYTES)
+        frame = parseChildFailureFrame(stderr)
+        diagnosticOutcome = stderr.length === 0 ? 'EMPTY' : frame.reason === 'INVALID' ? 'UNRECOGNIZED_FRAME' : 'FRAME_ACCEPTED'
+      } else diagnosticOutcome = 'UNRECOGNIZED_FRAME'
+    } catch (error) { diagnosticOutcome = diagnosticFailures.get(error) ?? 'UNAVAILABLE' }
+  } else if (observed && postHashesVerified === false) {
+    frame = { stage: 'SOURCE_INTEGRITY', reason: 'POST_HASH_REJECTED' }
+    diagnosticSource = 'SOURCE'; diagnosticOutcome = 'POST_HASH_REJECTED'
+  }
+  return Object.freeze({ protocol: 'YIDA_BROWSER_CI_FAILURE_V1', ...frame, diagnosticSource, diagnosticOutcome, ...status })
 }
 
 // Keep the original pass checks together with their production reporting
