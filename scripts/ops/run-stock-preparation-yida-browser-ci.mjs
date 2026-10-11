@@ -92,6 +92,21 @@ function diagnosticBytes(file, expectedSha, limit) {
   return raw
 }
 
+// Shape observations of already verified private bytes, never failure causes
+// or accepted protocol frames. Only counts and fixed public labels can escape.
+function observeStderr(raw) {
+  const text = raw.toString('utf8')
+  const lines = text.length === 0 ? [] : text.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  const toolPrefix = text.startsWith('unshare: ') ? 'UNSHARE'
+    : text.startsWith('setpriv: ') ? 'SETPRIV' : text.startsWith('ip: ') ? 'IP' : 'UNKNOWN'
+  return Object.freeze({ byteCount: raw.length, lineCount: lines.length,
+    pythonTracebackHeader: text.startsWith('Traceback (most recent call last):\n'),
+    terminalAssertionError: /(?:^|\n)AssertionError\n?(?![\s\S])/u.test(text),
+    unshareExecutableMissing: text === 'unshare: failed to execute /usr/bin/python3: No such file or directory\n',
+    toolPrefix })
+}
+
 export function parseWorkerFailureReceipt(raw, expectedSha, ownerSha, sourceSha) {
   try {
     assert(Buffer.isBuffer(raw) && raw.length < 16384)
@@ -411,6 +426,7 @@ export function childFailureDiagnostic(terminal, evidence, ownerSha, sourceSha, 
     : { childExit: null, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false }
   let frame = { stage: 'UNKNOWN', reason: 'INVALID' }
   let diagnosticSource = 'CAPTURE', diagnosticOutcome = 'UNAVAILABLE'
+  let stderrObservation
   if (observed && postHashesVerified === true) {
     try {
       diagnosticSource = 'STDOUT'
@@ -426,13 +442,15 @@ export function childFailureDiagnostic(terminal, evidence, ownerSha, sourceSha, 
         const stderr = diagnosticBytes(path.join(evidence, 'namespace.stderr.log'), observed.stderrSha, DIAGNOSTIC_BYTES)
         frame = parseChildFailureFrame(stderr)
         diagnosticOutcome = stderr.length === 0 ? 'EMPTY' : frame.reason === 'INVALID' ? 'UNRECOGNIZED_FRAME' : 'FRAME_ACCEPTED'
+        stderrObservation = observeStderr(stderr)
       } else diagnosticOutcome = 'UNRECOGNIZED_FRAME'
     } catch (error) { diagnosticOutcome = diagnosticFailures.get(error) ?? 'UNAVAILABLE' }
   } else if (observed && postHashesVerified === false) {
     frame = { stage: 'SOURCE_INTEGRITY', reason: 'POST_HASH_REJECTED' }
     diagnosticSource = 'SOURCE'; diagnosticOutcome = 'POST_HASH_REJECTED'
   }
-  return Object.freeze({ protocol: 'YIDA_BROWSER_CI_FAILURE_V1', ...frame, diagnosticSource, diagnosticOutcome, ...status })
+  return Object.freeze({ protocol: 'YIDA_BROWSER_CI_FAILURE_V1', ...frame, diagnosticSource, diagnosticOutcome, ...status,
+    ...(stderrObservation ? { stderrObservation } : {}) })
 }
 
 // Keep the original pass checks together with their production reporting
