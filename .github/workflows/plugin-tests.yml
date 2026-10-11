@@ -126,7 +126,9 @@ jobs:
 
   test:
     # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
-    runs-on: ubuntu-latest
+    # Temporary compatibility probe for observed UID_MAP_WRITE_DENIED on the ubuntu-24.04 image.
+    # This does not establish a host fix; runner-images #14254 retires ubuntu-22.04 on 2027-04-17.
+    runs-on: ubuntu-22.04
     # Leave headroom for the full integration suite without using the six-hour default timeout.
     timeout-minutes: 150
 
