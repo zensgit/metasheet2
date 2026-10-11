@@ -34,25 +34,45 @@ const logger = new Logger('DingTalkTransport')
  * (per app/corp, Redis or equivalent) is explicitly out of scope — follow-up work.
  */
 
+/**
+ * R-41 follow-up (log hygiene): the provider body a DingTalk error carries is attached NON-enumerable and
+ * read-only. Callers keep reading it as `error.responseBody` (retry / ledger classification, the admin-surface
+ * errcode, the person-delivery ledger's explicit `stringifyResponseBody(error.responseBody)`), but
+ * JSON.stringify(error), a `{ ...error }` copy and a logger serialising `{ error }` object meta no longer write
+ * it: an oapi / v1.0 body can carry request ids, user profile fields and other provider text. The same
+ * technique DingTalkIncompleteResponseError introduced; tests/unit/dingtalk-incomplete-response-error.test.ts
+ * pins all three classes.
+ */
+function attachHiddenResponseBody(error: Error, responseBody: Record<string, unknown> | null): void {
+  Object.defineProperty(error, 'responseBody', {
+    value: responseBody,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  })
+}
+
 export class DingTalkRequestError extends Error {
   statusCode: number
-  responseBody: Record<string, unknown> | null
+  /** Non-enumerable, read-only — see attachHiddenResponseBody. */
+  declare readonly responseBody: Record<string, unknown> | null
 
   constructor(message: string, statusCode: number, responseBody: Record<string, unknown> | null) {
     super(message)
     this.name = 'DingTalkRequestError'
     this.statusCode = statusCode
-    this.responseBody = responseBody
+    attachHiddenResponseBody(this, responseBody)
   }
 }
 
 export class DingTalkBusinessError extends Error {
-  responseBody: Record<string, unknown> | null
+  /** Non-enumerable, read-only — see attachHiddenResponseBody. */
+  declare readonly responseBody: Record<string, unknown> | null
 
   constructor(message: string, responseBody: Record<string, unknown> | null) {
     super(message)
     this.name = 'DingTalkBusinessError'
-    this.responseBody = responseBody
+    attachHiddenResponseBody(this, responseBody)
   }
 }
 
