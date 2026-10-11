@@ -890,6 +890,16 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '如果一直这样,请把这条报错代码给平台管理员。',
     enNext: 'If it keeps happening, give a platform administrator this error code.',
   }),
+  // 2026-10-10 audit: the ONE values-free 500 every other stock-prep / table-action route answers when something
+  // untyped went wrong on the server. Deliberately does NOT say "nothing changed": a write route can fail part
+  // way, so the reader is told to look before retrying. The server sentence behind it is fixed English and is
+  // never shown; this is.
+  STOCK_PREPARATION_ROUTE_FAILED: Object.freeze({
+    zh: '这一步没能完成,服务器那边出了问题。',
+    en: 'This step could not be completed — something went wrong on the server.',
+    zhNext: '先刷新看一下结果再决定要不要重试;如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'Refresh and check the result before trying again; if it keeps happening, give a platform administrator this error code.',
+  }),
   STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE: Object.freeze({
     zh: '这套系统还建不了项目总览表,这次没有刷新,什么都没有改动。',
     en: 'This system cannot create the project overview sheet yet, so nothing was refreshed and nothing changed.',
