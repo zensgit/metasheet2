@@ -10,6 +10,8 @@ import { AsyncLocalStorage } from 'async_hooks'
 
 export interface RequestContext {
   correlationId: string
+  /** Server-selected log privacy only; never an authority or capability. */
+  readonly privateObservationSurface?: 'yida-owner-http'
   userId?: string
   tenantId?: string
 }
@@ -24,7 +26,7 @@ export function getRequestContext(): RequestContext | undefined {
   return storage.getStore()
 }
 
-export function enrichRequestContext(patch: Partial<Omit<RequestContext, 'correlationId'>>): RequestContext | undefined {
+export function enrichRequestContext(patch: Partial<Pick<RequestContext, 'userId' | 'tenantId'>>): RequestContext | undefined {
   const current = storage.getStore()
   if (!current) return undefined
   if (typeof patch.userId === 'string' && patch.userId.trim().length > 0) {

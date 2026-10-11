@@ -9,13 +9,15 @@
  *                              `enc:`-prefixed shape DatabaseConfigSource decrypts
  *   - integration credentials  plugin-integration-core credential store: host security service (`enc:`)
  *                              and the legacy `v1:` cipher under the plugin's own key
+ *   - YiDa's five durable fields: actual credential/draft/approved-target/send-approval writers,
+ *                              real PluginRuntimeSecurityService encryption, memory persistence ports
  * Every secret below is an obvious fake marker; material A / B are fixture strings. The database is a
  * memory-level fake keyed by the catalog's own SQL; it records every statement it receives.
  */
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { encryptStoredSecretValue } from '../../src/security/encrypted-secrets'
@@ -33,12 +35,16 @@ import {
   type EncryptedStoreProbeReport,
 } from '../../src/security/encrypted-store-probe'
 import { PluginRuntimeSecurityService } from '../../src/security/plugin-runtime-security-service'
+import { createYidaSendApprovalService, type YidaSendAuthoritySelection } from '../../src/integration/yida-send-approval-service'
+import type { Queryable } from '../../src/multitable/automation-durable-dispatcher'
 import { SecretManager } from '../../src/services/ConfigService'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const credentialStoreModule = require('../../../../plugins/plugin-integration-core/lib/credential-store.cjs')
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const yidaCredentialModule = require('../../../../plugins/plugin-integration-core/lib/yida-credential-material-store.cjs')
 
 const MATERIAL_A = { key: 'probe-fixture-material-A-key-0123456789abcdef', salt: 'probe-fixture-material-A-salt-0123456789ab' }
 const MATERIAL_B = { key: 'probe-fixture-material-B-key-fedcba9876543210', salt: 'probe-fixture-material-B-salt-ba9876543210' }
@@ -131,6 +137,14 @@ function table(report: EncryptedStoreProbeReport) {
   ])
 }
 
+const YIDA_FIELDS = [
+  ['integration_yida_credential_materials', 'material_encrypted'],
+  ['integration_yida_draft_targets', 'target_encrypted'],
+  ['integration_yida_draft_operations', 'snapshot_encrypted'],
+  ['integration_yida_approved_target', 'evidence_encrypted'],
+  ['integration_yida_send_approvals', 'snapshot_encrypted'],
+] as const
+
 const EXPECTED_STORE_FIELDS = [
   'data_sources.config.credentials.password',
   'data_sources.config.credentials.apiKey',
@@ -143,9 +157,124 @@ const EXPECTED_STORE_FIELDS = [
   'integration_external_systems.credentials_encrypted',
   'attendance_integrations.config.appSecret|appsecret|app_secret',
   'system_configs.value (is_encrypted)',
+  ...YIDA_FIELDS.map(([store, field]) => `${store}.${field}`),
 ]
 
 const fixture: { rows: FixtureRows; sealed: string[]; plaintexts: string[] } = { rows: {}, sealed: [], plaintexts: [] }
+
+
+type YidaFixtureModule = {
+  createYidaDraftPlanStore(options: unknown): { createDraft(input: unknown): Promise<{ operationId: string; rows: Array<{ rowKey: string }> }> }
+  createYidaApprovedTargetStore(options: unknown): { register(input: unknown): Promise<{ targetRef: string }> }
+  createYidaProtocolExample(): { config: unknown; text: string }
+  compileYidaDraft(input: unknown): { planDigest: string; rowSpecs: Array<{ businessKeyDigest: string; payloadDigest: string }>; source: unknown; plan: unknown }
+}
+const importYidaFixture = (specifier: string): Promise<YidaFixtureModule> => import(/* @vite-ignore */ specifier)
+
+/**
+ * Actual YiDa writers and real host encryption; only their database/selection ports are synthetic.
+ * This captures their five persisted fields in memory, not PostgreSQL transaction or ACL evidence.
+ * No runtime owner binding, token client or sender is constructed or invoked.
+ */
+async function yidaWriterFixtures(): Promise<Record<string, string>> {
+  return under(MATERIAL_A, async () => {
+    const lib = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../../plugins/plugin-integration-core/lib')
+    const [draftModule, targetModule, planner, compiler] = await Promise.all(
+      ['yida-draft-plan-store.mjs', 'yida-approved-target-store.mjs', 'yida-static-plan.mjs', 'yida-draft-plan.mjs']
+        .map((name) => importYidaFixture(pathToFileURL(path.join(lib, name)).href)),
+    )
+    type Row = Record<string, unknown>
+    const state = new Map<string, Row[]>()
+    const rows = (table: string) => state.get(table) ?? []
+    const matches = (row: Row, where: Row) => Object.entries(where).every(([key, value]) => row[key] === value)
+    const find = async (table: string, where: Row) => structuredClone(rows(table).find((row) => matches(row, where)) ?? null)
+    const crud = {
+      async setTransactionIsolationLevel(level: string) { expect(level).toBe('read committed') },
+      selectOne: find,
+      selectOneForUpdate: find,
+      async select(table: string, { where, orderBy, limit = 1000 }: { where: Row; orderBy?: [string, string]; limit?: number }) {
+        const selected = rows(table).filter((row) => matches(row, where))
+        if (orderBy) selected.sort((a, b) => Number(a[orderBy[0]]) - Number(b[orderBy[0]]))
+        return { rows: structuredClone(selected.slice(0, limit)) }
+      },
+      async insertOne(table: string, row: Row) {
+        state.set(table, [...rows(table), structuredClone(row)])
+        return [structuredClone(row)]
+      },
+      async updateRow(table: string, set: Row, where: Row) {
+        const row = rows(table).find((entry) => matches(entry, where))
+        if (!row) return []
+        Object.assign(row, set)
+        return [structuredClone(row)]
+      },
+    }
+    const db = { async transaction<T>(callback: (trx: typeof crud) => Promise<T>) { return callback(crud) } }
+    const host = new PluginRuntimeSecurityService()
+    const security = {
+      async encrypt(text: string) { fixture.plaintexts.push(text); return host.encrypt(text) },
+      async decrypt(value: string) { return host.decrypt(value) },
+    }
+    const context = { tenantId: 'synthetic-probe-tenant', workspaceId: null, ownerId: 'synthetic-probe-owner' }
+    const options = { db, security, context }
+    const credential = await yidaCredentialModule.createYidaCredentialMaterialStore(options).create({
+      material: { appKey: M('yida-app-key'), appSecret: M('yida-app-secret'), systemToken: M('yida-system-token'), userId: M('yida-executor') },
+    })
+    const example = planner.createYidaProtocolExample()
+    const input = { config: example.config, rowsText: example.text, allocation: { mode: 'original' } }
+    const draft = await draftModule.createYidaDraftPlanStore(options).createDraft(input)
+    const target = await targetModule.createYidaApprovedTargetStore(options).register({
+      operationId: draft.operationId, credentialRef: credential.credentialRef, credentialGeneration: credential.credentialGeneration,
+      attestation: { kind: 'owner-reviewed-target', reviewRef: M('yida-review'), organizationId: M('yida-organization'), executionIdentity: M('yida-executor') },
+    })
+    const compiled = compiler.compileYidaDraft(input)
+    const selection: YidaSendAuthoritySelection = Object.freeze({
+      ...context, operationId: draft.operationId, rowKey: draft.rows[0].rowKey, targetRef: target.targetRef,
+      targetRevision: 'evidence-1', planRevision: compiled.planDigest, planDigest: compiled.planDigest,
+      credentialRef: credential.credentialRef, credentialGeneration: credential.credentialGeneration,
+      businessKeyDigest: compiled.rowSpecs[0].businessKeyDigest, rowPayloadDigest: compiled.rowSpecs[0].payloadDigest,
+      config: example.config, selectedRow: JSON.parse(example.text)[0], source: compiled.source, plan: compiled.plan,
+    })
+    const instant = 1_700_000_000_000
+    // Memory answers to the actual service's SQL shapes; they do not establish live host authority.
+    const query: Queryable['query'] = async (sql, params = []) => {
+      if (sql.startsWith('SET TRANSACTION')) return { rows: [] }
+      if (sql.includes("current_setting('transaction_isolation')")) return { rows: [{ isolation: 'read committed' }] }
+      if (sql.includes('pg_current_xact_id')) return { rows: [{ xid: 'synthetic-probe-xid' }] }
+      if (sql.includes('FROM user_roles')) return { rows: [{ role_id: 'admin' }] }
+      if (sql.includes('FROM users')) return { rows: [{ id: context.ownerId, role: 'admin', is_active: true, activation_status: 'activated', permissions: [] }] }
+      if (sql.includes('FROM user_orgs')) return { rows: [{ user_id: context.ownerId, org_id: context.tenantId, is_active: true }] }
+      if (/FROM (role_permissions|user_permissions|user_namespace_admissions)\b/.test(sql)) return { rows: [] }
+      if (sql.startsWith('SELECT slot, target_ref')) return { rows: structuredClone(rows('integration_yida_approved_target')) }
+      if (sql.includes('FROM integration_yida_send_')) return { rows: [] }
+      if (sql.startsWith('WITH instant')) return { rows: [{ approved_at_ms: String(instant), expires_at_ms: String(instant + Number(params[0])) }] }
+      if (sql.includes('clock_timestamp()')) return { rows: [{ now_ms: String(instant) }] }
+      const insert = /^INSERT INTO (integration_yida_send_approvals|integration_yida_send_approval_audit)\s*\(([^)]+)\)/.exec(sql)
+      if (insert) {
+        const row = Object.fromEntries(insert[2].split(',').map((column, index) => [column.trim(), params[index]]))
+        return { rows: await crud.insertOne(insert[1], row) }
+      }
+      throw new Error('YiDa fixture: unexpected SQL shape')
+    }
+    const service = createYidaSendApprovalService({
+      database: { async transaction<T>(callback: (trx: Queryable) => Promise<T>) { return callback({ query }) } },
+      security, context: { actorId: context.ownerId, tenantId: context.tenantId, workspaceId: null },
+      primitives: {
+        async resolveSelectionInTransaction() { return selection },
+        executionPayloadDigest(value, grant) { return crypto.createHash('sha256').update(JSON.stringify({ value, grant })).digest('hex') },
+        async prepareInTransaction() { throw new Error('YiDa fixture: no admission or sending') },
+      },
+    })
+    await service.approve({ operationId: draft.operationId, rowKey: draft.rows[0].rowKey, confirmationId: 'synthetic-probe-confirmation' })
+    return Object.fromEntries(YIDA_FIELDS.map(([store, field]) => {
+      expect(rows(store)).toHaveLength(1)
+      const value = rows(store)[0][field]
+      expect(typeof value).toBe('string')
+      expect(String(value).startsWith('enc:')).toBe(true)
+      fixture.sealed.push(value as string)
+      return [`${store}.${field}`, value as string]
+    }))
+  })
+}
 
 beforeAll(async () => {
   const p = async (name: string) => {
@@ -179,6 +308,12 @@ beforeAll(async () => {
     // jsonb or text column: an `enc:` reader shape, a bare SecretManager payload, JSON, an object, short text
     'system_configs.value (is_encrypted)': [sysPrefixed, sysBare, '"plain-config-value"', { nested: true }, 'short'],
   }
+  const yida = await yidaWriterFixtures()
+  for (const [field, value] of Object.entries(yida)) {
+    const plain = M(field)
+    fixture.plaintexts.push(plain)
+    fixture.rows[field] = [value, plain]
+  }
   fixture.plaintexts.push(M('ds-pw-plain'), M('robot-secret-plain'), M('ies-plain'))
 }, 60_000)
 
@@ -198,16 +333,58 @@ const EXPECTED_UNDER_A = [
   ['integration_external_systems.credentials_encrypted', 'ok', 3, 1, 0, 1, 1],
   ['attendance_integrations.config.appSecret|appsecret|app_secret', 'ok', 1, 1, 0, 0, null],
   ['system_configs.value (is_encrypted)', 'ok', 5, 2, 0, 3, null],
+  ...YIDA_FIELDS.map(([store, field]) => [`${store}.${field}`, 'ok', 2, 1, 0, 1, null]),
 ]
 
 describe('probeEncryptedStores: trial decrypt with the current material', () => {
+
+  function assertYidaCatalog(catalog: readonly EncryptedStoreCatalogEntry[]) {
+    for (const [store, field] of YIDA_FIELDS) {
+      expect(catalog.find((entry) => entry.store === store && entry.field === field)).toMatchObject({
+        store, field, scheme: 'platform-enc', prefixOn: 'raw', columns: [field],
+        sql: `SELECT ${field} AS value FROM ${store} WHERE ${field} <> '' LIMIT $1`,
+      })
+    }
+  }
+
+  it('the five YiDa durable fields have exact raw host-envelope catalog entries and bounded single-column SQL', () => {
+    assertYidaCatalog(ENCRYPTED_STORE_CATALOG)
+  })
+
+  it('in-memory mutation: removing or retargeting any YiDa catalog entry makes its declaration assertion red', () => {
+    for (const [store, field] of YIDA_FIELDS) {
+      const removed = ENCRYPTED_STORE_CATALOG.filter((entry) => entry.store !== store)
+      expect(() => assertYidaCatalog(removed)).toThrow()
+      console.log(`MUTATION YiDa catalog ${store}.${field} removal: RED`)
+      for (const override of [
+        { scheme: 'integration-credential' as const }, { prefixOn: 'trimmed' as const },
+        { columns: ['other_column'] }, { sql: `SELECT ${field} AS value FROM ${store}` },
+      ]) {
+        const mutated = ENCRYPTED_STORE_CATALOG.map((entry) => entry.store === store ? { ...entry, ...override } : entry)
+        expect(() => assertYidaCatalog(mutated)).toThrow()
+        console.log(`MUTATION YiDa catalog ${store}.${field} ${Object.keys(override)[0]}: RED`)
+      }
+    }
+  })
+
+  it.each(YIDA_FIELDS)('YiDa %s.%s: raw space and v1 are plaintext buckets, malformed enc is undecryptable, empty values are skipped', async (store, field) => {
+    const label = `${store}.${field}`
+    const sealed = (fixture.rows[label] as string[])[0]
+    const db = fakeDatabase({ [label]: [sealed, ` ${sealed}`, sealIntegrationV1(M('yida-v1')), 'enc:AAAA', null, '', ' \t\n'] })
+    const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
+    const result = report.stores.find((entry) => entry.store === store && entry.field === field)
+    expect(result).toMatchObject({ scheme: 'platform-enc', status: 'ok', rows: 4, encrypted: 2, undecryptable: 1, plaintext: 2 })
+    expect(result).not.toHaveProperty('legacyNotChecked')
+    // This counts persisted non-enc values; strict YiDa readers reject them, without a plaintext fallback.
+    expect(report.totals.legacyNotChecked).toBe(0)
+  })
   it('material A opens every value sealed under A: undecryptable 0 in every store, exact counts', async () => {
     const db = fakeDatabase(fixture.rows)
     const report = await probeEncryptedStores({ query: db.query, env: ENV_A })
     expect(report.material).toEqual({ status: 'ok', issues: [] })
     expect(report.decryptChecked).toBe(true)
     expect(table(report)).toEqual(EXPECTED_UNDER_A)
-    expect(report.totals).toEqual({ encrypted: 12, undecryptable: 0, plaintext: 7, legacyNotChecked: 1, unreadable: 0, missing: 0 })
+    expect(report.totals).toEqual({ encrypted: 17, undecryptable: 0, plaintext: 12, legacyNotChecked: 1, unreadable: 0, missing: 0 })
   })
 
   it('material B (the key changed): every encrypted value is undecryptable; plaintext and legacy counts unchanged', async () => {
@@ -218,7 +395,7 @@ describe('probeEncryptedStores: trial decrypt with the current material', () => 
       copy[4] = row[3] // undecryptable = encrypted
       return copy
     }))
-    expect(report.totals).toMatchObject({ encrypted: 12, undecryptable: 12, plaintext: 7, legacyNotChecked: 1 })
+    expect(report.totals).toMatchObject({ encrypted: 17, undecryptable: 17, plaintext: 12, legacyNotChecked: 1 })
   })
 
   it('mixed material: only the values sealed under the OTHER material count as undecryptable', async () => {
@@ -397,6 +574,25 @@ describe('probeEncryptedStores: an absent table / column is decided by the prech
     return { query, rejected }
   }
 
+
+  it('each YiDa field missing table/column is prechecked without issuing or rejecting its SELECT', async () => {
+    for (const [store, field] of YIDA_FIELDS) {
+      for (const [columns, status] of [[null, 'table_missing'], [['id'], 'column_missing']] as const) {
+        const db = fakeDatabase(fixture.rows, fixtureSchema({ [store]: columns === null ? null : [...columns] }))
+        const spy = recordingRejections(db)
+        const report = await probeEncryptedStores({ query: spy.query, env: ENV_A })
+        expect(report.stores.find((entry) => entry.store === store && entry.field === field)).toMatchObject({
+          status, rows: 0, encrypted: 0, undecryptable: 0, plaintext: 0,
+        })
+        const catalogEntry = ENCRYPTED_STORE_CATALOG.find((entry) => entry.store === store && entry.field === field)!
+        expect(db.catalogStatements().map((statement) => statement.sql)).not.toContain(catalogEntry.sql)
+        expect(db.prechecks().filter((statement) => statement.params?.[0] === store)).toHaveLength(1)
+        expect(spy.rejected).toEqual([])
+        expect(report.totals).toMatchObject({ missing: 1, unreadable: 0 })
+      }
+    }
+  })
+
   it('missing table: table_missing for all its fields, NO catalog SELECT issued for it, nothing rejected', async () => {
     const db = fakeDatabase(fixture.rows, fixtureSchema({ directory_integrations: null, system_configs: null }))
     const spy = recordingRejections(db)
@@ -569,7 +765,7 @@ describe('probeEncryptedStores: unreadable stores are classified by SQLSTATE, an
     expect(report.stores.filter((s) => s.status === 'read_failed').map((s) => s.store)).toEqual([
       'data_sources', 'data_sources', 'data_sources', 'directory_integrations', 'directory_integrations', 'directory_integrations',
     ])
-    expect(report.stores.filter((s) => s.status === 'ok')).toHaveLength(5)
+    expect(report.stores.filter((s) => s.status === 'ok')).toHaveLength(EXPECTED_STORE_FIELDS.length - 6)
     expect(typeof report.checkedAt).toBe('string')
 
     // ...and garbage from the precheck itself: no rows array -> read_failed; rows without a column
@@ -604,7 +800,7 @@ describe('probeEncryptedStores: material and key derivation', () => {
       expect(pbkdf2).not.toHaveBeenCalled()
       expect(pbkdf2Sync).not.toHaveBeenCalled()
       expect(decipher).not.toHaveBeenCalled()
-      expect(report.totals).toMatchObject({ encrypted: 12, undecryptable: 0, plaintext: 7 })
+      expect(report.totals).toMatchObject({ encrypted: 17, undecryptable: 0, plaintext: 12 })
       vi.restoreAllMocks()
     }
   })
@@ -625,7 +821,7 @@ describe('probeEncryptedStores: material and key derivation', () => {
     expect(pbkdf2).toHaveBeenCalledTimes(1)
     expect(pbkdf2Sync).not.toHaveBeenCalled()
     expect(decipher).toHaveBeenCalledTimes(report.totals.encrypted)
-    expect(report.totals.encrypted).toBe(12)
+    expect(report.totals.encrypted).toBe(17)
   })
 
   it('the async derivation yields the byte-identical key the writers derive synchronously', async () => {
@@ -693,9 +889,9 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
   it('key changed: one info summary + one warn per store field with undecryptable values, each with the fixed re-enter hint', async () => {
     const logger = captureLogger()
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => fakeDatabase(fixture.rows), env: ENV_B, logger })
-    expect(report?.totals.undecryptable).toBe(12)
+    expect(report?.totals.undecryptable).toBe(17)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 12 encrypted value\(s\) across 11 store field\(s\); 12 undecryptable/)
+    expect(logger.info.mock.calls[0][0]).toMatch(/^Encrypted store probe: 17 encrypted value\(s\) across 16 store field\(s\); 17 undecryptable/)
     const broken = EXPECTED_UNDER_A.filter((row) => (row[3] as number) > 0).map((row) => row[0])
     expect(logger.warn).toHaveBeenCalledTimes(broken.length)
     expect(logger.warn.mock.calls.map((call) => `${call[1].store}.${call[1].field}`)).toEqual(broken)
@@ -751,14 +947,14 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
     const logger = captureLogger()
     const pool = { query: vi.fn(async () => { throw Object.assign(new Error('MARKER-down 203.0.113.9:5432'), { code: 'ECONNREFUSED' }) }) }
     const report = await runEncryptedStoreProbeAtStartup({ resolvePool: () => pool, env: ENV_A, logger })
-    expect(report?.totals.unreadable).toBe(11)
+    expect(report?.totals.unreadable).toBe(EXPECTED_STORE_FIELDS.length)
     expect(logger.info).toHaveBeenCalledTimes(1)
-    expect(logger.info.mock.calls[0][0]).toContain('11 store field(s) unreadable')
+    expect(logger.info.mock.calls[0][0]).toContain(`${EXPECTED_STORE_FIELDS.length} store field(s) unreadable`)
     expect(logger.warn).toHaveBeenCalledTimes(1)
     const [message, meta] = logger.warn.mock.calls[0]
-    expect(message).toBe(`Encrypted store probe: 11 store field(s) could not be read, so their values were not checked: ${EXPECTED_STORE_FIELDS.join(', ')}.`)
+    expect(message).toBe(`Encrypted store probe: ${EXPECTED_STORE_FIELDS.length} store field(s) could not be read, so their values were not checked: ${EXPECTED_STORE_FIELDS.join(', ')}.`)
     expect(meta).toEqual({
-      unreadable: 11,
+      unreadable: EXPECTED_STORE_FIELDS.length,
       stores: ENCRYPTED_STORE_CATALOG.map((e) => ({ store: e.store, field: e.field, sqlState: null })),
     })
     const serialized = JSON.stringify(logger.warn.mock.calls) + JSON.stringify(logger.info.mock.calls)
@@ -779,8 +975,8 @@ describe('runEncryptedStoreProbeAtStartup: one summary, one warning per broken s
       { unreadable: 1, stores: [{ store: 'dingtalk_group_destinations', field: 'secret', sqlState: '42501' }] },
     ]])
     const undecryptableWarns = logger.warn.mock.calls.filter(([message]) => String(message).includes(ENCRYPTED_STORE_REENTER_HINT))
-    expect(undecryptableWarns).toHaveLength(8) // 10 broken fields minus dingtalk secret (unreadable) and system_configs (missing)
-    expect(logger.warn).toHaveBeenCalledTimes(9)
+    expect(undecryptableWarns).toHaveLength(EXPECTED_UNDER_A.filter((row) => Number(row[3]) > 0).length - 2)
+    expect(logger.warn).toHaveBeenCalledTimes(undecryptableWarns.length + 1)
     expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('MARKER')
   })
 })

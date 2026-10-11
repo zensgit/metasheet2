@@ -145,6 +145,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Do not materialize the legacy tracked runtime env in this disposable test checkout.
+          # The owner proof still refuses every other non-example env file; no local file is removed.
+          sparse-checkout: |
+            /*
+            !/packages/core-backend/.env
+          sparse-checkout-cone-mode: false
 
       - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -1287,6 +1294,11 @@ jobs:
             tests/integration/sealed-export-s4-generation-kernel-realdb.test.ts \
             --reporter=verbose
 
+      - name: Install Chromium for owner YiDa real-DB acceptance
+        id: stock-preparation-yida-owner-browser-install
+        if: matrix.node-version == '20.x'
+        run: pnpm exec playwright install --with-deps chromium
+
       # #6076 lock protocol (#5923 residual): delete-side FOR UPDATE + serial dependent counts,
       # writer-side FOR KEY SHARE, READ COMMITTED pinned as the first statement of every
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
@@ -1302,7 +1314,55 @@ jobs:
           : "${DATABASE_URL:?DATABASE_URL is required for the lock-protocol real-DB proof}"
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
+            tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts \
+            tests/integration/stock-preparation-yida-create-fence-realdb.test.ts \
+            tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts \
+            tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts \
+            tests/integration/stock-preparation-yida-approved-target-realdb.test.ts \
+            tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts \
+            tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts \
+            tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \
+            tests/integration/automation-live-authority-realdb.test.ts \
             --reporter=verbose
+
+      # These files each import the real native AuthService/JWT and scoped pool.
+      # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.
+      # Chromium comes from the required owner-browser install step above; only YiDa responses
+      # are synthetic, never a customer request or an API response stub.
+      - name: Run owner YiDa JWT HTTP and browser real-DB proof
+        id: stock-preparation-yida-owner-real-db
+        if: matrix.node-version == '20.x'
+        run: |
+          # Clean before the FIRST Node exec, not only before its children.
+          # The launcher owns a fresh local PG and a loopback-only USER/NET/PID tree;
+          # All five whole files still exercise actual JWT/HTTP/Chromium.
+          if ! yida_node_command="$(command -v node 2>/dev/null)" || test -z "$yida_node_command"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-resolution' >&2
+            exit 1
+          fi
+          if ! yida_node="$(/usr/bin/readlink -f "$yida_node_command" 2>/dev/null)" || test -z "$yida_node"; then
+            echo 'YIDA_CALLER_PREFLIGHT: node-canonical' >&2
+            exit 1
+          fi
+          # Match the PostgreSQL 14 installation above, independent of system pg_config.
+          if ! yida_pg_bin="$(/usr/bin/readlink -f /usr/lib/postgresql/14/bin 2>/dev/null)" || test -z "$yida_pg_bin"; then
+            echo 'YIDA_CALLER_PREFLIGHT: pg-bin-canonical' >&2
+            exit 1
+          fi
+          for yida_role_tool in "node:$yida_node" "initdb:$yida_pg_bin/initdb" "pg_ctl:$yida_pg_bin/pg_ctl" \
+            "postgres:$yida_pg_bin/postgres" unshare:/usr/bin/unshare setpriv:/usr/bin/setpriv python3:/usr/bin/python3 ip:/usr/sbin/ip; do
+            yida_role="${yida_role_tool%%:*}"
+            yida_tool="${yida_role_tool#*:}"
+            if ! test -x "$yida_tool"; then
+              echo "YIDA_CALLER_PREFLIGHT: $yida_role" >&2
+              exit 1
+            fi
+          done
+          /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" --test scripts/ops/stock-preparation-yida-browser-ci.test.mjs \
+            scripts/ops/stock-preparation-yida-browser-ci-workflow.test.mjs
+          /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+            "$yida_node" scripts/ops/run-stock-preparation-yida-browser-ci.mjs --pg-bin "$yida_pg_bin"
 
       - name: Run required after-sales install integration
         if: matrix.node-version == '20.x'

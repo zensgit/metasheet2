@@ -213,4 +213,7 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationStageStepper \
   StockPreparationUnitConfirmView \
   StockPreparationWorkspace \
+  StockPreparationYidaInitialization \
+  StockPreparationYidaOwnerSend \
+  StockPreparationYidaPreview \
   --reporter=dot

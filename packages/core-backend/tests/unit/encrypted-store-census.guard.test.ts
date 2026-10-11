@@ -83,6 +83,12 @@ const CENSUS: Readonly<Record<string, CensusEntry>> = {
   ['plugins/plugin-integration-core/lib/credential-store.cjs :: encrypt']: { count: 2, stores: ['integration_external_systems'] },
   ['plugins/plugin-integration-core/lib/credential-store.cjs :: createCipheriv']: { count: 1, stores: ['integration_external_systems'] },
   ['plugins/plugin-integration-core/lib/external-systems.cjs :: encrypt']: { count: 2, stores: ['integration_external_systems'] },
+  // YiDa strict host-encrypted persistence; owner runtime forwards the captured host encrypt port.
+  ['packages/core-backend/src/integration/yida-owner-runtime.ts :: encrypt']: { count: 1, stores: ['integration_yida_send_approvals'] },
+  ['packages/core-backend/src/integration/yida-send-approval-service.ts :: encrypt']: { count: 1, stores: ['integration_yida_send_approvals'] },
+  ['plugins/plugin-integration-core/lib/yida-credential-material-store.cjs :: encrypt']: { count: 1, stores: ['integration_yida_credential_materials'] },
+  ['plugins/plugin-integration-core/lib/yida-draft-plan-store.mjs :: encrypt']: { count: 1, stores: ['integration_yida_draft_targets', 'integration_yida_draft_operations'] },
+  ['plugins/plugin-integration-core/lib/yida-approved-target-store.mjs :: encrypt']: { count: 1, stores: ['integration_yida_approved_target'] },
   // attendance_integrations.config.appSecret — the plugin's own copy of the `enc:` format
   // (normalizeStoredIntegrationSecretValue -> encryptIntegrationSecretValue -> createCipheriv; the second
   // encryptIntegrationSecretValue reference is the __attendanceIntegrationSecretForTests export)
@@ -202,6 +208,11 @@ describe('encrypted-store census: every sealing site is pinned to a probed store
       'plugins/plugin-attendance/index.cjs',
       'plugins/plugin-integration-core/lib/credential-store.cjs',
       'plugins/plugin-integration-core/lib/external-systems.cjs',
+      'packages/core-backend/src/integration/yida-owner-runtime.ts',
+      'packages/core-backend/src/integration/yida-send-approval-service.ts',
+      'plugins/plugin-integration-core/lib/yida-credential-material-store.cjs',
+      'plugins/plugin-integration-core/lib/yida-draft-plan-store.mjs',
+      'plugins/plugin-integration-core/lib/yida-approved-target-store.mjs',
       // .mts / .cts are scanned too (a createCipheriv in a .mts script was invisible before)
       'packages/core-backend/scripts/verify-recovery-manual-checkpoint.mts',
     ]) {
@@ -217,6 +228,23 @@ describe('encrypted-store census: every sealing site is pinned to a probed store
 })
 
 describe('scanner self-check (synthetic sources, memory only)', () => {
+
+  it('in-memory mutation: removing each YiDa encrypt site turns the unchanged pinned comparison red', () => {
+    for (const victim of [
+      'packages/core-backend/src/integration/yida-owner-runtime.ts',
+      'packages/core-backend/src/integration/yida-send-approval-service.ts',
+      'plugins/plugin-integration-core/lib/yida-credential-material-store.cjs',
+      'plugins/plugin-integration-core/lib/yida-draft-plan-store.mjs',
+      'plugins/plugin-integration-core/lib/yida-approved-target-store.mjs',
+    ]) {
+      const source = readRepoFile(victim)
+      const mutated = source.replace(/\bencrypt\b/g, 'removedEncrypt')
+      const drift = censusDrift(countSealingSites(scanTree((rel) => rel === victim ? mutated : readRepoFile(rel))))
+      expect(drift).toEqual([`${victim} :: encrypt: pinned 1, found 0 — ${GONE_SITE_HELP}`])
+      expect(() => expect(drift).toEqual([])).toThrow()
+      console.log(`MUTATION YiDa writer ${victim}: RED (pinned 1, found 0)`)
+    }
+  })
   const count = (source: string, file = 'probe.ts') => scanSealingSites(file, source).map((site) => site.name)
 
   it('finds a writer in every shape a new store would use', () => {

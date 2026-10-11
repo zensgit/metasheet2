@@ -93,15 +93,44 @@ export class Logger {
     })
   }
 
+  /** Owner HTTP logs retain server correlation only. Branch before touching any
+   * caller message/meta/error or consulting identity/trace/request-id bridges. */
+  private writePrivateObservation(level: 'debug' | 'info' | 'warn' | 'error'): boolean {
+    const requestContext = getRequestContext()
+    if (requestContext?.privateObservationSurface !== 'yida-owner-http') return false
+    const meta = {
+      correlation_id: requestContext.correlationId,
+      requestId: requestContext.correlationId,
+    }
+    switch (level) {
+      case 'debug':
+        this.winston.debug('YIDA_OWNER_HTTP_DEBUG', meta)
+        break
+      case 'info':
+        this.winston.info('YIDA_OWNER_HTTP_INFO', meta)
+        break
+      case 'warn':
+        this.winston.warn('YIDA_OWNER_HTTP_WARN', meta)
+        break
+      case 'error':
+        this.winston.error('YIDA_OWNER_HTTP_ERROR', meta)
+        break
+    }
+    return true
+  }
+
   debug(message: string, meta?: Record<string, unknown>): void {
+    if (this.writePrivateObservation('debug')) return
     this.winston.debug(message, mergeMeta(meta))
   }
 
   info(message: string, meta?: Record<string, unknown>): void {
+    if (this.writePrivateObservation('info')) return
     this.winston.info(message, mergeMeta(meta))
   }
 
   warn(message: string, meta?: Record<string, unknown> | Error): void {
+    if (this.writePrivateObservation('warn')) return
     if (meta instanceof Error) {
       this.winston.warn(message, mergeMeta({ error: meta.message, stack: meta.stack }))
     } else {
@@ -110,6 +139,7 @@ export class Logger {
   }
 
   error(message: string, error?: Error): void {
+    if (this.writePrivateObservation('error')) return
     this.winston.error(message, mergeMeta({ error: error?.message, stack: error?.stack }))
   }
 }

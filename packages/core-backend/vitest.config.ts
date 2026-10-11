@@ -61,6 +61,20 @@ export default defineConfig({
       // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
       'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
+      'tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-draft-plans-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-approved-target-realdb.test.ts',
+      'tests/integration/yida-initialization-runtime-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-send-approvals-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-send-port-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-http-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-initialization-http-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-owner-browser-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-initialization-browser-realdb.test.ts',
+      'tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts',
+      'tests/integration/automation-live-authority-realdb.test.ts',
       // Template authoring + version-restore real HTTP/DB acceptance. Excluded from the no-DB
       // default job so describeIfDatabase cannot skip-green it; wired as a whole file in the
       // approval real-DB workflow step.
