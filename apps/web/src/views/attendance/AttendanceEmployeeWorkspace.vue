@@ -575,6 +575,7 @@ const props = defineProps<{
   // (refreshAll() / loadRequests()) runs in the background.
   refreshingAfterPunch: boolean
   heroTimeline: { checkIn: string | null; checkOut: string | null } | null
+  todayStateHint?: string
   punchOutdoorNoteRequired: boolean
   punchOutdoorNoteDraft: string
   workbenchStatusDescription: string
@@ -715,7 +716,7 @@ const clockedIn = computed(() => isClockedIn(props.heroTimeline))
 
 const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
-const punchEmphasis = computed(() => resolveHeroPunchEmphasis(props.heroTimeline))
+const punchEmphasis = computed(() => props.todayStateHint ? 'unknown' : resolveHeroPunchEmphasis(props.heroTimeline))
 
 const todoMark = computed(() => resolveTodoMark(props.attentionItem.key))
 
@@ -732,6 +733,7 @@ const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
   : props.tr('Hours', '工时'))
 
 const clockStatusLine = computed(() => {
+  if (props.todayStateHint) return props.todayStateHint
   if (clockedOut.value) return props.tr('Clocked out', '已下班')
   if (!clockedIn.value) return props.tr('Not clocked in yet', '尚未上班')
   const suggestAt = offDutySuggest.value
@@ -744,7 +746,7 @@ const clockStatusLine = computed(() => {
   return props.tr('Clocked in', '已上班')
 })
 
-const workDurationLabel = computed(() => formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
+const workDurationLabel = computed(() => props.todayStateHint ? '—' : formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
 
 const remainingBalanceLabel = computed(() =>
   formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.remainingMinutes, props.tr),

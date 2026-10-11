@@ -1,0 +1,34 @@
+{
+  "sourceFiles": {
+    "apps/web/src/views/AttendanceView.vue": "6553150941d6f7e9527b5b27dfd44f722a8445dfe71931b944e5cdf80da8376e",
+    "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "21970f1c00a40edf608426d891c8bc24c1f7a51d57a440001c7d5306466d2b8d"
+  },
+  "results": [
+    {
+      "name": "red baseline with new regression and two existing midnight cases",
+      "log": "red-baseline.log",
+      "exitCode": 1,
+      "failed": 1,
+      "passed": 2,
+      "selected": 3
+    },
+    {
+      "name": "green midnight regression and neighbors",
+      "log": "green-midnight-three.log",
+      "exitCode": 0,
+      "passed": 3,
+      "selected": 3
+    },
+    {
+      "name": "dashboard whole file + today helper",
+      "log": "green-dashboard-today-helper.log",
+      "exitCode": 0,
+      "files": 2,
+      "dashboardTests": 101,
+      "helperTests": 9,
+      "passed": 110,
+      "skipped": 0
+    }
+  ],
+  "scope": "Only refreshAll logic and one dashboard regression changed; not staged or committed."
+}

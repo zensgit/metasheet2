@@ -186,12 +186,21 @@ const TASK_ID_PLACEHOLDER = '$1'
 const LIST_ID_PLACEHOLDER = '$1'
 
 /**
- * The org + liveness clause shared by every builder in this module. It is the ONLY place the
- * org clause text is written (lock §4.3 single-point emission); every exported builder calls this.
+ * The org clause shared by every builder in this module, followed by the row-state condition the
+ * builder selects on. It is the ONLY place the org clause text is written (lock §4.3 single-point
+ * emission); every exported builder goes through it, almost all of them through `taskOrgLiveClause`.
  */
-function taskOrgLiveClause(): string {
-  return `(tasks.org_id = ${ORG_PLACEHOLDER}) AND tasks.deleted_at IS NULL`
+function taskOrgClauseWith(rowState: string): string {
+  return `(tasks.org_id = ${ORG_PLACEHOLDER}) AND ${rowState}`
 }
+
+/** The org + liveness clause: live (not soft-deleted) tasks of the org. */
+function taskOrgLiveClause(): string {
+  return taskOrgClauseWith('tasks.deleted_at IS NULL')
+}
+
+/** Row-state condition that admits live and soft-deleted rows alike. */
+const TASK_ANY_ROW_STATE = 'TRUE'
 
 function scopeArm(view: Exclude<TaskView, 'any_role'>): string {
   switch (view) {
@@ -310,6 +319,21 @@ export function buildTaskPendingCondition(input: TaskPendingConditionInput): Tas
 export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
   return {
     sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgLiveClause()}`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) the one
+// reader of a task that may be soft-deleted is the notification delivery worker, for a `deleted`
+// event: by then the task row is soft-deleted. Every other read selects live rows through the
+// builder above. The org clause is the same single emission, so its org guarantee is the same.
+/**
+ * `{ sql, params }` TEXT selecting one task of one org by id, live or soft-deleted. `$1` = task id,
+ * `$2` = org. A caller that appends its own parameters numbers them from `params.length + 1`.
+ */
+export function buildTaskByIdAnyStateCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
     params: [input.taskIdParam, input.orgParam],
   }
 }

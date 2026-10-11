@@ -32,13 +32,16 @@ export type TaskAssigneeEventType =
   | 'assignee_removed'
   | 'completion_mode_changed'
   | 'completed_by_any'
+  // RULED(2026-10-07): [N1] the status flip an assignee change causes in `all` mode.
+  | 'completed'
+  | 'reopened'
 export interface TaskAssigneeEvent {
   type: TaskAssigneeEventType
   /** The actor, same meaning as `userId` on `task-completion.ts` events. */
   userId: string
   /** The assignee the change is about (add/remove only). */
   targetUserId?: string
-  /** Present on `completed_by_any` (an explicit `now` stamps the rows). */
+  /** Present on `completed_by_any` and `completed` (an explicit `now` stamps them). */
   occurredAt?: Date
 }
 
@@ -63,8 +66,9 @@ export type ApplyAddAssigneeResult =
 
 /**
  * §5-4 / §13-9. Already an assignee ⇒ noop. New row starts `completedAt: null`. `all` mode: adding
- * a (necessarily incomplete) row to an already-done task reopens it. `any` mode: task status is
- * untouched.
+ * a (necessarily incomplete) row to an already-done task reopens it, and `reopened` is recorded
+ * after `assignee_added` (RULED(2026-10-07): [N1], the actor is the operator). `any` mode: task
+ * status is untouched and nothing else is recorded.
  */
 export function applyAddAssignee(input: TaskMembershipInput & { userId: string }): ApplyAddAssigneeResult {
   const { mode, status, rows, userId } = input
@@ -84,16 +88,16 @@ export function applyAddAssignee(input: TaskMembershipInput & { userId: string }
   // done (no branch above touches `newStatus` for `any` mode). §5-4 only wrote the reopen rule for
   // `all` mode; the §6.2 invariant only constrains `open` status, so a done `any`-mode task growing
   // a new incomplete row is not itself an invariant violation.
-  return { ok: true, rows: newRows, status: newStatus, events: [{ type: 'assignee_added', userId: input.actorId, targetUserId: input.userId }] }
+  const events: TaskAssigneeEvent[] = [{ type: 'assignee_added', userId: input.actorId, targetUserId: input.userId }]
+  // RULED(2026-10-07): [N1] a status flip records `reopened` in the same batch, by the operator.
+  if (newStatus !== status) events.push({ type: 'reopened', userId: input.actorId })
+  return { ok: true, rows: newRows, status: newStatus, events }
 }
 
-// NOTE(task-c, design-gap — flag for owner ratification alongside §13-9, not one of design §6's
-// five numbered assumptions): removing the LAST incomplete `all`-mode assignee can PROMOTE `status`
-// from `open` to `done` (see A2 below), but this function only ever emits `assignee_removed` — the
-// design doc's function table lists exactly one event name here. A real "task completed via
-// unassign" notification/`completed` event is a separate, undecided question (would a `task_events`
-// consumer want a `completed` row with no acting `userId` to stamp?) — left unemitted rather than
-// invented.
+// RULED(2026-10-07): [N1] removing the LAST incomplete `all`-mode assignee PROMOTES `status` from
+// `open` to `done` (A2 below); that flip records `completed` after `assignee_removed`, by the
+// operator, stamped with `now`. No flip (the task was already done, or rows remain incomplete, or
+// none remain) records `assignee_removed` only.
 export function applyRemoveAssignee(input: TaskMembershipInput & { userId: string }): TaskMembershipRowsResult {
   const { mode, status, rows, userId } = input
   if (!rows.some((r) => r.userId === userId)) {
@@ -115,7 +119,9 @@ export function applyRemoveAssignee(input: TaskMembershipInput & { userId: strin
   if (mode === 'all' && newRows.length > 0 && computeTaskDone({ mode: 'all', assigneeRows: newRows })) {
     newStatus = 'done'
   }
-  return { rows: newRows, status: newStatus, events: [{ type: 'assignee_removed', userId: input.actorId, targetUserId: input.userId }] }
+  const events: TaskAssigneeEvent[] = [{ type: 'assignee_removed', userId: input.actorId, targetUserId: input.userId }]
+  if (newStatus !== status) events.push({ type: 'completed', userId: input.actorId, occurredAt: input.now })
+  return { rows: newRows, status: newStatus, events }
 }
 
 /**

@@ -1,0 +1,161 @@
+{
+  "status": "PASS_TARGETED_LOCAL_CHECKPOINT_PLATFORM_REFUSED_REMOTE_PENDING",
+  "recorded_at": "2026-10-10T05:21:39.133352+00:00",
+  "tested_main": "d6638148a528a7451fc9d4e8da8b7c13836c6941",
+  "source_merge_tree": "e10d52fc2b39ed55f399c2de60c596e65d75e762",
+  "runtime": {
+    "node": "20.20.2",
+    "pnpm": "10.33.0",
+    "postgres": "15.17"
+  },
+  "web": {
+    "passed": 304,
+    "failed": 0,
+    "skipped": 0,
+    "files": 6,
+    "whole_files": true
+  },
+  "backend": {
+    "passed": 370,
+    "failed": 0,
+    "skipped": 0,
+    "files": 7,
+    "whole_files": true
+  },
+  "ops": {
+    "passed": 238,
+    "failed": 0,
+    "skipped": 0,
+    "files": 4
+  },
+  "validate_all": {
+    "exit_code": 0,
+    "plugins_valid": 13,
+    "existing_warnings": 9,
+    "lint": "PASS",
+    "types": "PASS"
+  },
+  "web_build": {
+    "exit_code": 0,
+    "large_chunk_warning": true
+  },
+  "fixture": {
+    "code": "ATTENDANCE_SELFSERVICE_FIXTURE_PASS",
+    "rbacBypass": false,
+    "tokenClaimsTrusted": false,
+    "adminReadDenied": true,
+    "counts": {
+      "seedPasses": 2,
+      "activeLeaveTypes": 1,
+      "activeOvertimeRules": 1,
+      "publishedManualSwapAssignments": 2,
+      "submittedLeave": 1,
+      "submittedOvertime": 1,
+      "submittedSwap": 1,
+      "cancelledRequests": 3
+    }
+  },
+  "db_cleanup": {
+    "synthetic_database_absent": true,
+    "server_stopped": true,
+    "data_directory_absent": true,
+    "tcp_listener_absent": true
+  },
+  "provenance": {
+    "node": "v20.20.2",
+    "verified": true,
+    "candidateTreeVerified": true,
+    "packageProvenanceVersion": "sealed-export/package-provenance/v2",
+    "frozenManifestDigest": "5bf747d038042e1a4a6f39a15c499f9f03c74e4a6be6b5bff547830d9046cee3",
+    "counts": {
+      "migrations": 6,
+      "modules": {
+        "s1": 6,
+        "s2": 1,
+        "s3": 4,
+        "s4": 2,
+        "s5": 9,
+        "s6": 9
+      },
+      "externalModules": 7,
+      "runtimeFiles": 9,
+      "evidenceFiles": 10
+    },
+    "pinnedFileDigests": 63
+  },
+  "checkpoint": {
+    "status": "FAILED",
+    "exit_code": 1,
+    "neighbor_passed": 46,
+    "neighbor_failed": 1,
+    "code": "RECOVERY_ARCHIVE_OBJECT_STORE_PROVIDER_FAILED",
+    "log": "manual-checkpoint.log",
+    "cleanup_database_and_cluster_confirmed": true,
+    "platform": {
+      "name": "APFS",
+      "statfs_type": 26,
+      "darwin_allowed_types": [
+        25
+      ],
+      "source_matches_tested_main": true,
+      "canonical_tmpdir_does_not_change_type": true,
+      "storage_guards_unchanged": true
+    },
+    "required_remote_result": {
+      "exit_code": 0,
+      "clean_markers": 4,
+      "values_free_scan_hits": 0,
+      "supported_native_linux_filesystem": true
+    }
+  },
+  "fresh_head_ci": "NOT_STARTED",
+  "original_qa_acceptance": "NOT_RUN",
+  "all_twenty_items_fixed": false,
+  "ready_merge_deploy_real_data": "HOLD_OWNER_APPROVAL",
+  "environment_repair": {
+    "initial_node24_results_excluded": true,
+    "pnpm12_shim_attempt_aborted": true,
+    "frozen_lock_restore_exit_code": 0,
+    "lockfiles_unchanged": true,
+    "initial_checkpoint_aborted_cleanup_cluster": true,
+    "aborted_checkpoint_run_directory_absent": true
+  },
+  "migration": {
+    "initial_success_count": 436,
+    "applied_ledger_count": 436,
+    "replay_new_count": 0,
+    "ledger_unchanged": true,
+    "ledger_sha256": "3630775fce52fb639b8e99aa470af723331f696a0f538cd2ad07ad578eb0c362",
+    "m4_present": true,
+    "pending_initial": 0,
+    "pending_replay": 0
+  },
+  "real_db_tests": {
+    "attendance_order": 7,
+    "attendance_swap_neighbor": 12,
+    "task_m4_schema": 59,
+    "failed": 0,
+    "skipped": 0,
+    "m4_down_up_and_original_oid_sentinel_verified": true
+  },
+  "drain": {
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0,
+    "timings_ms": [
+      1575,
+      500,
+      10060
+    ],
+    "independent_cleanup_confirmed": true
+  },
+  "source_review": {
+    "model": "gpt-6-astra",
+    "verdict": "NO_NEW_ACTIONABLE_FINDINGS",
+    "workflow_test_union_preserved": true,
+    "main_only_blobs_preserved": 73,
+    "slice_files_unchanged": 30
+  },
+  "interpretation": "Technical Draft closeout only; real QA acceptance, Ready, merge, deployment and real-data operations need separate owner decisions.",
+  "snapshot_phase": "before final branch publication and fresh CI"
+}

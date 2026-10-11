@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-10",
+  "authorizationSource": "Direct human user message in this chat",
+  "userMessage": "恢复目标并批准 Draft PR 和 CI",
+  "approvedScope": [
+    "resume_goal",
+    "push_branch",
+    "create_public_draft_pr",
+    "run_ci"
+  ],
+  "branch": "codex/attendance-qa-completion-20261009",
+  "prePublicationHead": "b12355a4685814bae74d63b1c696e37baead4851",
+  "fixedMain": "00caf5f639050700cb4590448d9261f0fef2b101",
+  "separateApprovalRequired": [
+    "pr_merge",
+    "deployment",
+    "real_customer_data_access",
+    "historical_data_write"
+  ],
+  "releaseState": "DRAFT_HOLD",
+  "originalQaAcceptance": "NOT_RUN",
+  "allTwentyItemsFixed": false
+}

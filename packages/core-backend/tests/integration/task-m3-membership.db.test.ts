@@ -127,6 +127,19 @@ async function followerRows(taskId: string): Promise<string[]> {
   return result.rows.map((row) => row.user_id)
 }
 
+/** The task's assignee and status events in written order, for the RULED(2026-10-07): [N1] cells:
+ * type, actor, payload, and whether the row shares the batch instant of the first row. */
+async function membershipEvents(taskId: string): Promise<Array<{ type: string; actor: string; payload: unknown; sameInstant: boolean }>> {
+  const result = await poolManager.get().query<{ event_type: string; actor_id: string; payload: unknown; occurred_at: string }>(
+    `SELECT event_type, actor_id, payload, occurred_at::text AS occurred_at FROM task_events
+      WHERE task_id = $1 AND event_type IN ('assignee_added', 'assignee_removed', 'completed', 'reopened')
+      ORDER BY occurred_at, (event_type IN ('completed', 'reopened'))`,
+    [taskId],
+  )
+  const last = result.rows[result.rows.length - 1]?.occurred_at
+  return result.rows.map((row) => ({ type: row.event_type, actor: row.actor_id, payload: row.payload, sameInstant: row.occurred_at === last }))
+}
+
 /** Full membership+version+mode snapshot, used by the row-level 404 cells
  * (M3-AUTHZ-2/M3G-1) to assert a rejected write left the task untouched. */
 /** Every column of the task row, as JSON, for before/after equality. */
@@ -179,6 +192,12 @@ describe('tasks M3 membership real db', () => {
       expect(await assigneeRows(created.id)).toEqual(add.body.assignees)
       await assertAnyModeInvariant(orgId)
       await assertDoneCompletedAtInvariant(orgId)
+      // RULED(2026-10-07): [N1] the reopen is recorded with the add, by the operator, at one instant.
+      const events = await membershipEvents(created.id)
+      expect(events.slice(-2)).toEqual([
+        { type: 'assignee_added', actor: userA, payload: { targetUserId: userB }, sameInstant: true },
+        { type: 'reopened', actor: userA, payload: {}, sameInstant: true },
+      ])
     })
 
     it('all mode: adding an assignee to an open task with an incomplete row stays open (no version bump)', async () => {
@@ -218,6 +237,11 @@ describe('tasks M3 membership real db', () => {
       expect(getAsB.status).toBe(404)
       await assertAnyModeInvariant(orgId)
       await assertDoneCompletedAtInvariant(orgId)
+      // RULED(2026-10-07): [N1] the completion is recorded with the removal, by the operator, at one instant.
+      expect(await membershipEvents(created.id)).toEqual([
+        { type: 'assignee_removed', actor: userA, payload: { targetUserId: userB }, sameInstant: true },
+        { type: 'completed', actor: userA, payload: {}, sameInstant: true },
+      ])
     })
 
     it('all mode: removing one of two incomplete assignees stays open', async () => {
@@ -307,6 +331,11 @@ describe('tasks M3 membership real db', () => {
       expect(await assigneeRows(created.id)).toEqual([{ userId: userA, completedAt: expect.any(String) }])
       await assertAnyModeInvariant(orgId)
       await assertDoneCompletedAtInvariant(orgId)
+      // RULED(2026-10-07): [N1] no status flip, so the removal is the only event it writes.
+      const events = await membershipEvents(created.id)
+      expect(events.filter((event) => event.type !== 'completed' || event.sameInstant)).toEqual([
+        { type: 'assignee_removed', actor: userA, payload: { targetUserId: userB }, sameInstant: true },
+      ])
     })
 
     it('any mode: removing the only (incomplete) assignee from an open task stays open', async () => {

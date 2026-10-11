@@ -4,6 +4,7 @@ import {
   buildTaskListByIdCondition,
   buildTaskListGroupScopeCondition,
   buildTaskListScopeCondition,
+  buildTaskListsOfTaskCondition,
   buildTaskUserGroupScopeCondition,
   TASK_GROUP_ITEM_ORDER_KEY,
   TASK_GROUP_PAGE_SORT_KEY,
@@ -133,5 +134,35 @@ describe('task-list-access', () => {
     expect(TASK_GROUP_PAGE_SORT_KEY).toBe('task_groups.position, task_groups.id COLLATE "C"')
     expect(TASK_GROUP_ITEM_ORDER_KEY).toBe('task_group_items.position, task_group_items.task_id COLLATE "C"')
     expect(TASK_GROUP_PLACEMENT_PAGE_SORT_KEY).toBe('placement.group_id COLLATE "C", placement.position')
+  })
+
+  // M4 PR-3b S2 (design task-m4-pr3b-backend-design-20261001.md §5.3): the producer's list-member
+  // fan-out. The org clause is the module's one list org clause; archived lists are not filtered.
+  it('buildTaskListsOfTaskCondition: the lists of the org that hold the task, archived included', () => {
+    const cond = buildTaskListsOfTaskCondition({ taskIdParam: 'tsk_x', orgParam: 'org_a' })
+    expect(cond).toEqual({
+      sql:
+        '(task_lists.org_id = $2) AND EXISTS (SELECT 1 FROM task_list_items tli_task WHERE tli_task.list_id = task_lists.id ' +
+        'AND tli_task.task_id = $1)',
+      params: ['tsk_x', 'org_a'],
+    })
+    expect(orgClauseCount(cond.sql)).toBe(1)
+    expect(cond.sql.includes('archived_at')).toBe(false)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+  })
+
+  it('buildTaskListsOfTaskCondition starts with the same list org clause text as the by-id builder', () => {
+    const lists = buildTaskListsOfTaskCondition({ taskIdParam: 'tsk_x', orgParam: 'org_a' })
+    const byId = buildTaskListByIdCondition({ listIdParam: 'tlst_x', orgParam: 'org_a' })
+    const clause = '(task_lists.org_id = $2) AND '
+    expect(lists.sql.startsWith(clause)).toBe(true)
+    expect(byId.sql.startsWith(clause)).toBe(true)
+  })
+
+  it('buildTaskListsOfTaskCondition passes its bind values through, never inlined', () => {
+    const hostile = "x') OR TRUE --"
+    const cond = buildTaskListsOfTaskCondition({ taskIdParam: hostile, orgParam: hostile })
+    expect(cond.sql.includes(hostile)).toBe(false)
+    expect(cond.params).toEqual([hostile, hostile])
   })
 })
