@@ -1502,6 +1502,16 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # them. Each token matches exactly one file under apps/web/tests (checked by listing the directory),
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
+# W1-4 F5a (2026-10-11): ONE token added at its case-insensitive alphabetical position,
+# `approvalDelegationsMockFlag` — apps/web/tests/approvalDelegationsMockFlag.spec.ts, which pins that
+# approvals/delegations.ts honours the same `__APPROVAL_MOCK__` override protocol as approvals/api.ts
+# (explicit false -> real network path under DEV; explicit true / unset under DEV -> mock). Paired with
+# the same token on approval-web-guard.yml's targeted run line. It matches exactly one spec file; a
+# bidirectional, case-insensitive substring scan against all 586 distinct pre-existing tokens of this
+# file's gating vitest lines (and the 124 of that guard's run line, 121 distinct) finds no token that contains it or is
+# contained by it, and no pre-existing token selects that file — in particular the neighbouring
+# `approvalDelegationRoute` / `approvalDelegationStatus` diverge right after `approvalDelegation`.
+# The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
   amountAutoSum \
   approval-amount-in-words \
@@ -1573,6 +1583,7 @@ exec npx vitest run \
   approvalCountsRealtime \
   approvalDelegationForm \
   approvalDelegationRoute \
+  approvalDelegationsMockFlag \
   approvalDelegationStatus \
   approvalDelegationView \
   approvalDetailPolish \

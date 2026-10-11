@@ -3,7 +3,13 @@
 // user, so the create payload carries the chosen delegatorUserId.
 import { apiGet, apiPost, apiFetch } from '../utils/api'
 
-const USE_MOCK = import.meta.env.DEV || (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__ === true
+// Same `__APPROVAL_MOCK__` override protocol as approvals/api.ts ("Mock-mode flag"): an explicit
+// `true` forces mock mode, an explicit `false` forces the real network path even under DEV (the
+// escape hatch a mounted harness / spec sets before dynamically importing this module), and an
+// unset override keeps DEV's mock-by-default behavior. Production has no override.
+const APPROVAL_MOCK_OVERRIDE = (globalThis as { __APPROVAL_MOCK__?: boolean }).__APPROVAL_MOCK__
+const USE_MOCK = APPROVAL_MOCK_OVERRIDE === true
+  || (import.meta.env.DEV && APPROVAL_MOCK_OVERRIDE !== false)
 
 export interface DelegationRecord {
   id: string
