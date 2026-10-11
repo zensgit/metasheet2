@@ -2230,3 +2230,10 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 新独立 Linux 副本验证 198/198 契约，零跳过/失败；stdout SHA `2e7081fe719ce9fa385b110c0a65e3268f7b3d6a9d2fc982b800d3d4ac9fcff9`。首次本地副本 197/198（私有 loopback 未启用）、第二次启动器在测试前因权限退出，均保留；第三次启动器验证非 root、私有 loopback、caps0/NNP 后通过，不将启动器问题混记为产品修复。不声称文件系统隔离或独立审查。
 - 两个受测文件原始 LF 字节与提交精确一致：`a4e0591ed5eea387e08890057ed6c511d96de75a` 已正常推送 #6337，仍 draft。新完整 [run 38163935288](https://github.com/zensgit/metasheet2/actions/runs/38163935288) 锁定此 head，仅为带受限诊断的新版本验收；旧失败保留，不能据本地契约绿宣告完整应用修复。没有取消慢任务、合并、部署、客户读取、真实 token 交换或发送。
 - 文档 PR #6313 的原 head `b672e5c3d9990084df739d2518094a47e61dbd70` 另有已分类测试失败：`useSessionOrg.spec.ts` 在异步操作前后各生成一次带当前秒数的假 JWT，唯一差异为到期秒数相差 1；该测试 Git blob 与 main 相同。本轮不混入认证代码或测试修复，不重跑凑绿；另开 test-only PR 的授权尚待答复。
+
+## 197. 成员默认关闭预读的精确验收接线（2026-10-12）
+
+- 代码证据：当前工作台 setup 必调成员页可用性预读；实际共享 `apiFetch` 使用当前 JWT 和会话 tenant hint；后端开关默认 OFF 时在业务 IO 前拒绝为 `404 STOCK_PREP_MEMBERS_PAGE_DISABLED`。原两个完整浏览器验收入口均未登记该路径。先修这一确定的验收兼容缺口；尚未将它等同于待完成 CI 的实测根因。
+- 新观察器只接纳限定阶段的精确同源 GET，无 query/body、使用同一会话与 tenant hint，无外来权限/workspace 头。响应必须关联原 Request 对象并携带精确 OFF 状态与错误码；console 必须对应已登记请求，最终三方计数一致，拒绝重复及无穷请求。不伪造响应，不普遍忽略 404，不改变产品权限或开关。接入 PLM 主浏览器和宜搭初始化浏览器；宜搭发送/本地预演等其它窗口不会因此扩大白名单。
+- 新独立副本完整 201/201 契约和 full-app no-emit 类型检查通过；8 个观察器守卫去除及 6 个实际 dispatch 提前返回去除均致红。dispatch 测试执行源文件真实注册回调，但网络协作者仍为受限替身，不冒称真实浏览器或独立反驳。TAP SHA `6f5241188bd81704e8518116e141d8bb9bf0361168b1e413e7b0698689e06413`，四个 Git LF blob 与受测字节逐项一致。
+- 提交 `af9f33d67cae0a5e96ec5f99908f611cf6249196` 先保存本地，随后核实 workflow concurrency 按 workflow/ref 分组、该 feature 分支 push 不触发 branch-ref 全链，才普通推送 #6337。推送后再次确认旧诊断 run `38163935288` 仍在 `a4e0591ed5eea387e08890057ed6c511d96de75a` 运行；未取消或另 dispatch 覆盖它。新 head 先跑普通 PR 检查，完整手动/定时验收仍待闭合，PR 保持 draft。没有合并、部署、真实客户读取、token 交换或发送。
