@@ -731,6 +731,13 @@ class MessageBus {
   }
 
   /**
+   * Stop periodic maintenance while preserving subscriptions, queued work and RPCs.
+   */
+  stopMaintenance(): void {
+    this.patternManager?.stopMaintenance()
+  }
+
+  /**
    * Shutdown the message bus
    */
   async shutdown(): Promise<void> {

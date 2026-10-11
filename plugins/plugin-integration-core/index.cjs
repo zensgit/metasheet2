@@ -25,6 +25,13 @@ const { createStockPreparationAuditStore } = require('./lib/stock-preparation-au
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
 const { createStockPreparationReadPlanStore } = require('./lib/stock-preparation-read-plan-store.cjs')
 const { createStockPreparationReadPlanManagement } = require('./lib/stock-preparation-read-plan-management.cjs')
+const {
+  prepareStockPreparationAutomationProfiles,
+  restoreStockPreparationAutomationProfileMaterial,
+  composeStockPreparationAutomationExecution,
+} = require('./lib/stock-preparation-automation-profile.cjs')
+const { deriveAutomationReadTargetContract } = require('./lib/stock-preparation-automation-target-contract.cjs')
+const { createStockPreparationAutomationPreview } = require('./lib/stock-preparation-automation-preview.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
@@ -110,6 +117,7 @@ let stockPreparationSqlServerRuntime = null
 let stockPreparationRuntimeDatabase = null
 let stopYidaOwnerRuntime = null
 let stopYidaInitializationRuntime = null
+let stopAutomationReadRuntime = null
 
 function buildCapabilityStatus() {
   return {
@@ -608,6 +616,43 @@ module.exports = {
         stopYidaInitializationRuntime = handle.stop.bind(handle)
       } catch { throw new Error('YIDA_INITIALIZATION_RUNTIME_UNAVAILABLE') }
     }
+    // Last activation step: only the trusted host may prepare the captured
+    // deployment config, acquire/renew the producer, and assemble its authority.
+    // Neither this private handle nor its dependencies enter communication APIs.
+    try {
+      if (context.config && Object.hasOwn(context.config, 'stockPreparationAutomationProfiles')) {
+        const runtime = context.services && context.services.automationReadRuntime
+        if (!runtime || typeof runtime.activate !== 'function') {
+          throw new Error('AUTOMATION_READ_RUNTIME_UNAVAILABLE')
+        }
+        const handle = await runtime.activate({
+          prepareProfiles: prepareStockPreparationAutomationProfiles,
+          codec: {
+            restoreStockPreparationAutomationProfileMaterial,
+            deriveAutomationReadTargetContract,
+            composeStockPreparationAutomationExecution,
+          },
+          sourceStore: {
+            lockActiveForAutomation: stockPreparationReadPlanStore.lockActiveForAutomation.bind(stockPreparationReadPlanStore),
+          },
+          preview: createStockPreparationAutomationPreview({
+            externalSystems: externalSystemRegistry,
+            adapterRegistry,
+            b2aTrialRegistry,
+            b2aClaimStore: context.storage,
+            b2aOperationClaim,
+          }),
+        })
+        if (!handle || typeof handle.stop !== 'function') throw new Error('AUTOMATION_READ_RUNTIME_UNAVAILABLE')
+        stopAutomationReadRuntime = handle.stop.bind(handle)
+      }
+    } catch (error) {
+      // A later activation failure must withdraw the new private capability too.
+      const stop = stopYidaInitializationRuntime
+      stopYidaInitializationRuntime = null
+      if (stop) { try { await stop() } catch { /* Host also owns the terminal latch. */ } }
+      throw error
+    }
   },
 
   async deactivate() {
@@ -634,6 +679,17 @@ module.exports = {
         void yidaOwnerDrain.catch(() => {})
       } catch {
         throw new Error('YIDA_OWNER_RUNTIME_STOP_UNAVAILABLE')
+      }
+    }
+    // Invoke stop before the first await: loader.unload() does not await this
+    // hook, so the host's synchronous admission/abort latch must run immediately.
+    if (stopAutomationReadRuntime) {
+      const stop = stopAutomationReadRuntime
+      stopAutomationReadRuntime = null
+      try {
+        await stop()
+      } catch {
+        if (typeof logger.warn === 'function') logger.warn(`[${PLUGIN_ID}] automation read runtime stop failed`)
       }
     }
     if (yidaOwnerDrain) await yidaOwnerDrain

@@ -464,7 +464,6 @@ import { useLocale } from '../composables/useLocale'
 import PageShell from '../components/layout/PageShell.vue'
 import PageHeader from '../components/layout/PageHeader.vue'
 import { integrationErrorCodeDisplayLabel, integrationErrorCodeHint, integrationErrorCodeMessageOr } from '../services/integration/errorCodeLabels'
-import { isK3ExternalWriteTargetKind } from '../services/integration/writeFence'
 import { buildXlsxBuffer } from '../multitable/import/xlsx-mapping'
 import { getDataSourceSchema, listDataSources } from '../data-sources/api'
 import { resolveWorkbenchLandingGroupId, WORKBENCH_SECTION_GROUP_IDS } from './integrationWorkbenchLanding'
@@ -543,6 +542,7 @@ import {
   type IntegrationTemplatePreviewRequest,
   type WorkbenchExternalSystem,
 } from '../services/integration/workbench'
+import { isK3ExternalWriteTargetKind } from '../services/integration/writeFence'
 import MetaIntegrationFieldRuleAuthoring from '../components/integration/MetaIntegrationFieldRuleAuthoring.vue'
 import IntegrationReadSourceConfigPanel from '../components/integration/IntegrationReadSourceConfigPanel.vue'
 import IntegrationReadSourceCompositionPanel from '../components/integration/IntegrationReadSourceCompositionPanel.vue'
@@ -688,6 +688,11 @@ function onReadSourceAccessStorage(event: StorageEvent) {
   }
 }
 const unsubscribeReadSourceSession = onAuthSessionSwitch(refreshReadSourceAdminHint)
+onMounted(() => {
+  refreshReadSourceAdminHint()
+  window.addEventListener('storage', onReadSourceAccessStorage)
+  window.addEventListener('focus', refreshReadSourceAdminHint)
+})
 onBeforeUnmount(() => {
   unsubscribeReadSourceSession()
   window.removeEventListener('storage', onReadSourceAccessStorage)
@@ -785,9 +790,6 @@ function openConnectionFromOverview(systemId: string): void {
 }
 
 onMounted(() => {
-  refreshReadSourceAdminHint()
-  window.addEventListener('storage', onReadSourceAccessStorage)
-  window.addEventListener('focus', refreshReadSourceAdminHint)
   // After nextTick so the target section element exists in the DOM to scroll to. Ordered
   // BEFORE the observer setup below only for readability — the observer's own callback can
   // still overwrite the highlight later, which is correct: once the operator scrolls, scroll
@@ -1344,6 +1346,7 @@ const hasRunnableSourceSystem = computed(() => runnableSourceSystems.value.lengt
 const selectedTargetObject = computed(() => targetObjects.value.find((object) => object.name === targetObjectName.value) || null)
 const selectedSourceSystem = computed(() => systems.value.find((system) => system.id === sourceSystemId.value) || null)
 const selectedTargetSystem = computed(() => systems.value.find((system) => system.id === targetSystemId.value) || null)
+const targetWriteFenced = computed(() => isK3ExternalWriteTargetKind(selectedTargetSystem.value?.kind))
 const selectedStagingDescriptor = computed(() => stagingDescriptors.value.find((descriptor) => descriptor.id === stagingSheetId.value) || null)
 const selectedSourcePlmDataSourceId = computed(() => bridgeDataSourceIdForSystem(selectedSourceSystem.value))
 const selectedSourcePlmCapabilities = computed(() => (
@@ -1357,13 +1360,6 @@ const targetConnectionStatus = computed(() => selectedTargetSystem.value?.status
 const sourceConnectionLabel = computed(() => connectionStatusLabel(selectedSourceSystem.value))
 const targetConnectionLabel = computed(() => connectionStatusLabel(selectedTargetSystem.value))
 const sourceRuntimeBlocker = computed(() => runtimeBlockerForSystem(selectedSourceSystem.value))
-// G10: is the target this run would push to inside the permanent K3 external-write fence?
-//
-// Read off the SELECTED target system's kind — the same fact the server fence checks — so the answer
-// tracks the dropdown rather than a saved pipeline the operator may not be looking at. No target
-// selected => false => the pre-G10 rendering, unchanged. This never gates a REQUEST (the runtime fence
-// does that, at four layers); it only stops the UI offering a push that is refused by design.
-const targetWriteFenced = computed(() => isK3ExternalWriteTargetKind(selectedTargetSystem.value?.kind))
 const k3WebApiReadGateNotice = computed(() => {
   const targetOnlyK3WebApi = visibleSystems.value.some((system) => system.kind === 'erp:k3-wise-webapi' && canWriteToSystem(system) && !canReadFromSystem(system))
   if (!targetOnlyK3WebApi) return ''

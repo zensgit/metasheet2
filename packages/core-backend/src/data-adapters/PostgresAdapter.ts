@@ -21,6 +21,7 @@ import {
 } from './BaseAdapter'
 import type { Transaction } from './BaseAdapter'
 import { startSchemaDetailBudget } from './schema-detail-budget'
+import { assertDataSourceReadOperationAllowed, isDataSourceReadExecutionError, runDataSourceReadIO } from './data-source-read-execution'
 
 // Dynamic pg import
 let pg: typeof import('pg') | null = null
@@ -76,32 +77,40 @@ export class PostgresAdapter extends BaseDataAdapter {
       throw new Error('pg package is not installed')
     }
 
+    let connectingPool: PgPool | null = null
     try {
-      const sslConfig = this.config.connection.ssl
-      this.pool = new pg.Pool({
-        host: getStringConfig(this.config.connection.host),
-        port: getNumberConfig(this.config.connection.port) || 5432,
-        database: getStringConfig(this.config.connection.database),
-        user: getStringConfig(this.config.credentials?.username),
-        password: getStringConfig(this.config.credentials?.password),
-        ssl: typeof sslConfig === 'boolean' ? sslConfig : (typeof sslConfig === 'object' ? sslConfig as Record<string, unknown> : undefined),
-        max: this.config.poolConfig?.max || 20,
-        min: this.config.poolConfig?.min || 2,
-        idleTimeoutMillis: this.config.poolConfig?.idleTimeout || 10000,
-        connectionTimeoutMillis: this.config.poolConfig?.acquireTimeout || 30000
-      })
+      const driver = pg
+      const pool = await runDataSourceReadIO(this, 'query', async () => {
+        const sslConfig = this.config.connection.ssl
+        const candidate = new driver.Pool({
+          host: getStringConfig(this.config.connection.host),
+          port: getNumberConfig(this.config.connection.port) || 5432,
+          database: getStringConfig(this.config.connection.database),
+          user: getStringConfig(this.config.credentials?.username),
+          password: getStringConfig(this.config.credentials?.password),
+          ssl: typeof sslConfig === 'boolean' ? sslConfig : (typeof sslConfig === 'object' ? sslConfig as Record<string, unknown> : undefined),
+          max: this.config.poolConfig?.max || 20,
+          min: this.config.poolConfig?.min || 2,
+          idleTimeoutMillis: this.config.poolConfig?.idleTimeout || 10000,
+          connectionTimeoutMillis: this.config.poolConfig?.acquireTimeout || 30000
+        })
+        connectingPool = candidate
 
-      // Test connection
-      await this.pool.query('SELECT 1')
+        // pg opens connections lazily; the health query is the first native IO.
+        await candidate.query('SELECT 1')
+        return candidate
+      })
+      this.pool = pool
       this.connected = true
       await this.onConnect()
     } catch (error) {
-      await this.onError(error as Error)
       // A failed connect must not leak the pool created above. The ephemeral test-before-save helper
       // gates teardown on isConnected() (false here) and disconnect() self-guards on `connected`, so
-      // neither would end it — close it here. connect() always recreates the pool, so nulling is safe.
-      try { await this.pool?.end() } catch { /* pool may be partially constructed */ }
-      this.pool = null
+      // neither would end it — close this unpublished pool here, never an existing shared pool.
+      try { await (connectingPool as PgPool | null)?.end() } catch { /* pool may be partially constructed */ }
+      if (this.pool === connectingPool) this.pool = null
+      if (isDataSourceReadExecutionError(error)) throw error
+      await this.onError(error as Error)
       throw new Error(`Failed to connect to PostgreSQL: ${error}`)
     }
   }
@@ -132,9 +141,11 @@ export class PostgresAdapter extends BaseDataAdapter {
     }
 
     try {
-      const result = await this.pool.query('SELECT NOW()')
+      const pool = this.pool
+      const result = await runDataSourceReadIO(this, 'query', () => pool.query('SELECT NOW()'))
       return result.rows.length > 0
     } catch (error) {
+      if (isDataSourceReadExecutionError(error)) throw error
       await this.onError(error as Error) // A3: record the redacted cause (else the test failure is silent)
       return false
     }
@@ -146,7 +157,8 @@ export class PostgresAdapter extends BaseDataAdapter {
     }
 
     try {
-      const result = await this.pool.query(sql, params)
+      const pool = this.pool
+      const result = await runDataSourceReadIO(this, 'query', () => pool.query(sql, params))
 
       return {
         data: result.rows as T[],
@@ -160,6 +172,7 @@ export class PostgresAdapter extends BaseDataAdapter {
         }
       }
     } catch (error) {
+      if (isDataSourceReadExecutionError(error)) throw error
       return {
         data: [],
         error: error as Error
@@ -476,6 +489,7 @@ export class PostgresAdapter extends BaseDataAdapter {
   }
 
   async beginTransaction(): Promise<Transaction> {
+    assertDataSourceReadOperationAllowed(this)
     if (!this.pool) {
       throw new Error('Not connected to database')
     }
@@ -486,6 +500,7 @@ export class PostgresAdapter extends BaseDataAdapter {
   }
 
   async commit(transaction: Transaction): Promise<void> {
+    assertDataSourceReadOperationAllowed(this)
     const client = transaction as unknown as PoolClient
     try {
       await client.query('COMMIT')
@@ -495,6 +510,7 @@ export class PostgresAdapter extends BaseDataAdapter {
   }
 
   async rollback(transaction: Transaction): Promise<void> {
+    assertDataSourceReadOperationAllowed(this)
     const client = transaction as unknown as PoolClient
     try {
       await client.query('ROLLBACK')
@@ -504,6 +520,7 @@ export class PostgresAdapter extends BaseDataAdapter {
   }
 
   async inTransaction<R = unknown>(transaction: Transaction, callback: () => Promise<R>): Promise<R> {
+    assertDataSourceReadOperationAllowed(this)
     try {
       const result = await callback()
       await this.commit(transaction)
@@ -519,6 +536,7 @@ export class PostgresAdapter extends BaseDataAdapter {
     params?: DbValue[],
     _options?: { highWaterMark?: number; objectMode?: boolean }
   ): AsyncIterableIterator<T> {
+    assertDataSourceReadOperationAllowed(this)
     if (!this.pool) {
       throw new Error('Not connected to database')
     }

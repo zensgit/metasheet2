@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": [
+    "verify-stock-preparation-plm-full-app.mts",
+    "../tests/utils/stock-preparation-plm-full-app-fixture.ts",
+    "../tests/utils/stock-preparation-plm-full-app-browser.ts",
+    "../tests/utils/stock-preparation-k3-full-app-fixture.ts",
+    "../tests/utils/stock-preparation-k3-full-app-browser.ts",
+    "../tests/utils/stock-preparation-yida-full-app-browser.ts",
+    "../tests/utils/stock-preparation-yida-initialization-full-app.ts",
+    "../tests/utils/stock-preparation-yida-initialization-full-app-ui.mts",
+    "../tests/utils/stock-preparation-automation-full-app-fixture.ts",
+    "../tests/utils/stock-preparation-automation-full-app-browser.ts",
+    "../tests/utils/stock-preparation-automation-interval-full-app-fixture.ts",
+    "../tests/utils/stock-preparation-automation-interval-full-app-browser.ts",
+    "../tests/utils/stock-preparation-plm-full-app-ui.mts",
+    "../tests/utils/stock-preparation-plm-full-app-sockets.mts"
+  ]
+}

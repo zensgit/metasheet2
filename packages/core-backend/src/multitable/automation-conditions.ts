@@ -34,7 +34,7 @@
  * comparison so an exception from any comparator still evaluates as unmatched (reported with side
  * `'unknown'`) instead of failing the automation run.
  */
-import { getZonedParts } from './automation-timezone'
+import { getZonedParts, isValidIanaTimeZone } from './automation-timezone'
 import { resolveDateTimeFieldTimeZone } from './business-timezone'
 import { dateTimeMinuteKey, isValidWallClockParts, parseDateTimeText } from './date-time-wall-clock'
 
@@ -1049,4 +1049,391 @@ export function evaluateConditions(
 
   // logic === 'or'
   return conditions.some((c) => evaluateConditionNode(c, recordData, options))
+}
+
+// Strict, opt-in foundation for a host-private canonical after-image. This is NOT wired to automation
+// admission: the caller must separately prove the image's origin, field access and captured revisions.
+// The ordinary evaluator above deliberately keeps its legacy permissive behaviour.
+export const STRICT_AUTOMATION_CONDITION_LIMITS = Object.freeze({
+  nodes: 128,
+  groupDepth: MAX_CONDITION_GROUP_DEPTH,
+  arrayItems: 128,
+  stringLength: 4096,
+  totalStringLength: 65536,
+  literalItems: 1024,
+  fieldIdLength: 256,
+  fields: 2048,
+})
+
+export type StrictConditionValidationCode =
+  | 'INVALID_AST'
+  | 'LIMIT_EXCEEDED'
+  | 'INVALID_FIELD_METADATA'
+  | 'UNKNOWN_FIELD'
+  | 'UNSUPPORTED_FIELD_TYPE'
+  | 'INVALID_TIME_ZONE'
+  | 'INVALID_CONDITION'
+
+/** No condition, cell value, field id or validator message crosses this error boundary. */
+export class StrictConditionValidationError extends Error {
+  constructor(readonly code: StrictConditionValidationCode) {
+    super(code)
+    this.name = 'StrictConditionValidationError'
+  }
+}
+
+export type StrictAutomationConditionField = AutomationConditionField & {
+  /** Required for date/dateTime: the caller's already-resolved IANA zone, NOT a legacy 'UTC' marker. */
+  resolvedTimeZone?: string
+}
+
+export type CompiledStrictAutomationConditions = Readonly<{
+  kind: 'strict-automation-conditions'
+  /** All dependencies, including leaves that AND/OR may short-circuit. Stable first-appearance order. */
+  fieldIds: readonly string[]
+}>
+
+export type StrictConditionEvaluationResult =
+  | Readonly<{ kind: 'match' | 'no_match' }>
+  | Readonly<{
+    kind: 'unreadable'
+    reason: 'INVALID_COMPILED_CONDITIONS' | 'INVALID_AFTER_IMAGE' | 'MISSING_FIELD' | 'UNREADABLE_FIELD'
+  }>
+
+type StrictField = {
+  field: AutomationConditionField
+  kind: TypedComparisonKind | 'text'
+  timeZone?: string
+}
+type StrictProgram = { group: ConditionGroup; fields: Map<string, StrictField> }
+const strictPrograms = new WeakMap<CompiledStrictAutomationConditions, StrictProgram>()
+const STRICT_TEXT_TYPES = new Set(['string', 'longText', 'url', 'email', 'phone', 'barcode', 'qrcode', 'select'])
+const STRICT_ENV = Object.freeze({ MULTITABLE_BUSINESS_TIMEZONE: 'Etc/UTC' })
+
+function strictComparisonKind(type: string): StrictField['kind'] | null {
+  return typedComparisonKind(type) ?? (STRICT_TEXT_TYPES.has(type) ? 'text' : null)
+}
+
+/** Comparison capability only, NOT field visibility, source authorization, or a target-field policy. */
+export function isStrictAutomationConditionFieldType(type: string): boolean {
+  return strictComparisonKind(type) !== null
+}
+
+function strictFailure(code: StrictConditionValidationCode): never {
+  throw new StrictConditionValidationError(code)
+}
+
+function strictObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+/** Read a data property only. Neither user ASTs nor cell values may execute a getter. */
+function strictOwn(object: object, key: string, code: StrictConditionValidationCode): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(object, key)
+  if (!descriptor || !('value' in descriptor) || !descriptor.enumerable) return strictFailure(code)
+  return descriptor.value
+}
+
+function strictKeys(object: object, allowed: readonly string[]): void {
+  for (const key of Reflect.ownKeys(object)) {
+    if (typeof key !== 'string' || !allowed.includes(key)) strictFailure('INVALID_AST')
+    strictOwn(object, key, 'INVALID_AST')
+  }
+}
+
+/** A bounded, dense ordinary array with no extra properties/accessors. */
+function strictArray(value: unknown, max: number, code: StrictConditionValidationCode): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return strictFailure(code)
+  if (value.length > max) return strictFailure('LIMIT_EXCEEDED')
+  if (Reflect.ownKeys(value).length !== value.length + 1) return strictFailure(code)
+  return Array.from({ length: value.length }, (_, index) => strictOwn(value, String(index), code))
+}
+
+function strictScalar(value: unknown): string | number | boolean | null {
+  if (typeof value === 'string') {
+    if (value.length > STRICT_AUTOMATION_CONDITION_LIMITS.stringLength) strictFailure('LIMIT_EXCEEDED')
+    return value
+  }
+  if (value === null) return null
+  if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) return value
+  return strictFailure('INVALID_AST')
+}
+
+function strictAstSnapshot(input: unknown): ConditionGroup {
+  let nodes = 0
+  let stringLength = 0
+  let literalItems = 0
+  function literal(value: unknown): string | number | boolean | null {
+    if (++literalItems > STRICT_AUTOMATION_CONDITION_LIMITS.literalItems) strictFailure('LIMIT_EXCEEDED')
+    const scalar = strictScalar(value)
+    if (typeof scalar === 'string') stringLength += scalar.length
+    if (stringLength > STRICT_AUTOMATION_CONDITION_LIMITS.totalStringLength) strictFailure('LIMIT_EXCEEDED')
+    return scalar
+  }
+  function visit(value: unknown, depth: number, root = false): Record<string, unknown> {
+    if (++nodes > STRICT_AUTOMATION_CONDITION_LIMITS.nodes) {
+      strictFailure('LIMIT_EXCEEDED')
+    }
+    if (!strictObject(value)) return strictFailure('INVALID_AST')
+    if (Object.hasOwn(value, 'conditions')) {
+      if (depth > MAX_CONDITION_GROUP_DEPTH) strictFailure('LIMIT_EXCEEDED')
+      strictKeys(value, ['logic', 'conjunction', 'conditions'])
+      const children = strictArray(strictOwn(value, 'conditions', 'INVALID_AST'), STRICT_AUTOMATION_CONDITION_LIMITS.nodes, 'INVALID_AST')
+      if (children.length === 0) strictFailure('INVALID_AST')
+      const group: Record<string, unknown> = {
+        conditions: children.map((child) => visit(child, depth + 1)),
+      }
+      for (const key of ['logic', 'conjunction']) {
+        if (Object.hasOwn(value, key)) group[key] = strictScalar(strictOwn(value, key, 'INVALID_AST'))
+      }
+      return group
+    }
+    if (root) return strictFailure('INVALID_AST')
+    strictKeys(value, ['fieldId', 'operator', 'value'])
+    const fieldId = strictOwn(value, 'fieldId', 'INVALID_AST')
+    if (typeof fieldId !== 'string' || fieldId.length > STRICT_AUTOMATION_CONDITION_LIMITS.fieldIdLength) {
+      return strictFailure('INVALID_AST')
+    }
+    const leaf: Record<string, unknown> = { fieldId, operator: strictScalar(strictOwn(value, 'operator', 'INVALID_AST')) }
+    if (Object.hasOwn(value, 'value')) {
+      const conditionValue = strictOwn(value, 'value', 'INVALID_AST')
+      leaf.value = Array.isArray(conditionValue)
+        ? strictArray(conditionValue, STRICT_AUTOMATION_CONDITION_LIMITS.arrayItems, 'INVALID_AST').map(literal)
+        : literal(conditionValue)
+    }
+    return leaf
+  }
+  return normalizeConditionGroupInput(visit(input, 0, true))
+}
+
+function strictAstAndRefsSnapshot(input: unknown): { group: ConditionGroup; fieldIds: readonly string[] } {
+  try {
+    const group = strictAstSnapshot(input)
+    const refs = new Set<string>()
+    const collect = (node: AutomationConditionNode): void => {
+      if (isConditionGroup(node)) node.conditions.forEach(collect)
+      else refs.add(node.fieldId)
+    }
+    collect(group)
+    return { group, fieldIds: Object.freeze([...refs]) }
+  } catch (error) {
+    if (error instanceof StrictConditionValidationError) throw error
+    return strictFailure('INVALID_CONDITION')
+  }
+}
+
+/** Validate/snapshot the bounded AST and return ALL dependencies before fetching field metadata.
+ * This does not establish field existence, type/literal validity or permission. Compile must still
+ * run against the same saved rule and its authorized metadata; unknown ids are not filtered out.
+ */
+export function inspectStrictAutomationConditionFieldIds(input: unknown): readonly string[] {
+  return strictAstAndRefsSnapshot(input).fieldIds
+}
+
+/** Snapshot only option values used by the existing validator; never retain caller-owned metadata. */
+function strictOptionProperty(field: Record<string, unknown>, budget: { items: number; stringLength: number }): Record<string, unknown> {
+  if (!Object.hasOwn(field, 'property')) return {}
+  let property = strictOwn(field, 'property', 'INVALID_FIELD_METADATA')
+  if (property === undefined || property === null) return {}
+  if (typeof property === 'string') {
+    if (property.length > STRICT_AUTOMATION_CONDITION_LIMITS.stringLength) strictFailure('LIMIT_EXCEEDED')
+    property = JSON.parse(property) as unknown
+  }
+  if (!strictObject(property)) return strictFailure('INVALID_FIELD_METADATA')
+  if (!Object.hasOwn(property, 'options')) return {}
+  const options = strictArray(strictOwn(property, 'options', 'INVALID_FIELD_METADATA'), STRICT_AUTOMATION_CONDITION_LIMITS.arrayItems, 'INVALID_FIELD_METADATA')
+  return {
+    options: options.map((option) => {
+      if (!strictObject(option)) return strictFailure('INVALID_FIELD_METADATA')
+      const value = strictScalar(strictOwn(option, 'value', 'INVALID_FIELD_METADATA'))
+      if (typeof value !== 'string' && typeof value !== 'number') return strictFailure('INVALID_FIELD_METADATA')
+      if (++budget.items > STRICT_AUTOMATION_CONDITION_LIMITS.literalItems) strictFailure('LIMIT_EXCEEDED')
+      budget.stringLength += String(value).length
+      if (budget.stringLength > STRICT_AUTOMATION_CONDITION_LIMITS.totalStringLength) strictFailure('LIMIT_EXCEEDED')
+      return { value }
+    }),
+  }
+}
+
+function strictFieldSnapshot(value: Record<string, unknown>, id: string, budget: { items: number; stringLength: number }): StrictField {
+  const type = strictOwn(value, 'type', 'INVALID_FIELD_METADATA')
+  if (typeof type !== 'string') return strictFailure('INVALID_FIELD_METADATA')
+  // autoNumber is system-owned but stores a number and already has typed comparison semantics. Its
+  // inclusion here does not authorize reading it or allocate a sequence; the host must supply the cell.
+  const kind = strictComparisonKind(type)
+  if (!kind) return strictFailure('UNSUPPORTED_FIELD_TYPE')
+  const field: AutomationConditionField = { id, type }
+  if (type === 'select' || type === 'multiSelect') field.property = strictOptionProperty(value, budget)
+  if (kind === 'day' || kind === 'instant') {
+    const zone = strictOwn(value, 'resolvedTimeZone', 'INVALID_TIME_ZONE')
+    if (typeof zone !== 'string' || zone.length > 128 || zone !== zone.trim() || !isValidIanaTimeZone(zone)) {
+      return strictFailure('INVALID_TIME_ZONE')
+    }
+    // The ordinary field resolver treats literal UTC as unset. Here the input is already resolved.
+    const timeZone = zone === 'UTC' ? 'Etc/UTC' : zone
+    field.property = { timezone: timeZone }
+    return { field, kind, timeZone }
+  }
+  return { field, kind }
+}
+
+/**
+ * Compile a NONEMPTY condition tree. No implicit always-true/null program, unknown field fallback,
+ * expression evaluation or ambient timezone resolution. Authorization is explicitly out of scope.
+ * Reuses the existing AST normalizer, field/operator/value validator and typed comparison machinery.
+ */
+export function compileStrictAutomationConditions(
+  input: unknown,
+  fields: readonly StrictAutomationConditionField[],
+): CompiledStrictAutomationConditions {
+  try {
+    const { group, fieldIds } = strictAstAndRefsSnapshot(input)
+    const available = new Map<string, Record<string, unknown>>()
+    for (const value of strictArray(fields, STRICT_AUTOMATION_CONDITION_LIMITS.fields, 'INVALID_FIELD_METADATA')) {
+      if (!strictObject(value)) return strictFailure('INVALID_FIELD_METADATA')
+      const id = strictOwn(value, 'id', 'INVALID_FIELD_METADATA')
+      if (typeof id !== 'string' || !id || id !== id.trim() || id.length > STRICT_AUTOMATION_CONDITION_LIMITS.fieldIdLength || available.has(id)) {
+        return strictFailure('INVALID_FIELD_METADATA')
+      }
+      available.set(id, value)
+    }
+    const captured = new Map<string, StrictField>()
+    const metadataBudget = { items: 0, stringLength: 0 }
+    for (const id of fieldIds) {
+      const value = available.get(id)
+      if (!value) return strictFailure('UNKNOWN_FIELD')
+      captured.set(id, strictFieldSnapshot(value, id, metadataBudget))
+    }
+    validateConditionGroupAgainstFields(group, [...captured.values()].map(({ field }) => field))
+    // Validate every literal with the actual resolved date zone too; keep the shared DST convention.
+    const validateLiterals = (node: AutomationConditionNode): void => {
+      if (isConditionGroup(node)) return node.conditions.forEach(validateLiterals)
+      if (!VALUE_REQUIRED_OPERATORS.has(node.operator)) return
+      const field = captured.get(node.fieldId)!
+      const values = ARRAY_VALUE_OPERATORS.has(node.operator) ? node.value as unknown[] : [node.value]
+      for (const value of values) strictReadableValue(value, field)
+    }
+    validateLiterals(group)
+    const compiled: CompiledStrictAutomationConditions = Object.freeze({
+      kind: 'strict-automation-conditions',
+      fieldIds,
+    })
+    strictPrograms.set(compiled, { group, fields: captured })
+    return compiled
+  } catch (error) {
+    if (error instanceof StrictConditionValidationError) throw error
+    return strictFailure('INVALID_CONDITION')
+  }
+}
+
+/** Canonical decimal value without expanding an exponent or passing digits through Number.
+ * The caller already used numberKeyOf to check the existing legal grammar. Hex/binary/octal integer
+ * spellings remain supported, but their conversion must preserve the exact integer as well.
+ * Input length is bounded by strictScalar; even a huge exponent remains a bounded BigInt, not an
+ * allocation of that many zeros. Zero need not interpret the exponent at all.
+ */
+function strictDecimalKey(input: string): string {
+  const text = /^0[xob]/iu.test(input) ? BigInt(input).toString() : input
+  const match = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/u.exec(text)
+  if (!match) return strictFailure('INVALID_CONDITION')
+  const fraction = match[3] ?? match[4] ?? ''
+  const digits = `${match[2] ?? ''}${fraction}`.replace(/^0+/u, '')
+  if (!digits) return '0'
+  const significant = digits.replace(/0+$/u, '')
+  const exponent = BigInt(match[5] ?? '0') - BigInt(fraction.length) + BigInt(digits.length - significant.length)
+  return `${match[1] === '-' ? '-' : ''}${significant}e${exponent}`
+}
+
+function strictNumericStringRoundTrips(value: string, converted: number): boolean {
+  return strictDecimalKey(value.trim()) === strictDecimalKey(String(converted))
+}
+
+/**
+ * Reject unreadable values before the shared engine can negate/short-circuit/ignore them. This is NOT
+ * write validation: CS-21 copy deliberately preserves out-of-set select/multiSelect strings, which
+ * remain readable historical values. Only condition literals use the configured-option validator.
+ */
+function strictReadableValue(value: unknown, field: StrictField, budget = { items: 0, stringLength: 0 }): unknown {
+  function scalarOf(input: unknown): string | number | boolean | null {
+    const scalar = strictScalar(input)
+    if (++budget.items > STRICT_AUTOMATION_CONDITION_LIMITS.literalItems) strictFailure('LIMIT_EXCEEDED')
+    if (typeof scalar === 'string') budget.stringLength += scalar.length
+    if (budget.stringLength > STRICT_AUTOMATION_CONDITION_LIMITS.totalStringLength) strictFailure('LIMIT_EXCEEDED')
+    return scalar
+  }
+  if (value === null) return null
+  if (field.kind === 'set') {
+    const items = Array.isArray(value)
+      ? strictArray(value, STRICT_AUTOMATION_CONDITION_LIMITS.arrayItems, 'INVALID_CONDITION')
+      : [value]
+    const copied = items.map((item) => {
+      if (strictObject(item)) {
+        strictKeys(item, ['id'])
+        const id = strictOwn(item, 'id', 'INVALID_CONDITION')
+        if (typeof id !== 'string' || !id.trim()) return strictFailure('INVALID_CONDITION')
+        return { id: scalarOf(id) }
+      }
+      const scalar = scalarOf(item)
+      if (typeof scalar !== 'string' && typeof scalar !== 'number') return strictFailure('INVALID_CONDITION')
+      // An empty scalar represents an empty cell, but a mixed array may not silently discard members.
+      if (Array.isArray(value) && typeof scalar === 'string' && !scalar.trim()) return strictFailure('INVALID_CONDITION')
+      return scalar
+    })
+    const snapshot = Array.isArray(value) ? copied : copied[0]
+    if (idSetOf(snapshot) === null) return strictFailure('INVALID_CONDITION')
+    return snapshot
+  }
+  const scalar = scalarOf(value)
+  if (field.kind === 'text') {
+    if (typeof scalar !== 'string') return strictFailure('INVALID_CONDITION')
+    return scalar
+  }
+  if ((field.kind === 'day' || field.kind === 'instant') && typeof scalar === 'number' && !isRepresentableEpochMs(scalar)) {
+    return strictFailure('INVALID_CONDITION')
+  }
+  const key = field.kind === 'number' ? numberKeyOf(scalar)
+    : field.kind === 'boolean' ? booleanKeyOf(scalar)
+      : field.kind === 'day' ? dayKeyOf(scalar, field.timeZone!)
+        : minuteKeyOf(scalar, field.timeZone!)
+  if (key === null) return strictFailure('INVALID_CONDITION')
+  // Stored numeric strings and condition literals retain their original decimal meaning. Finite
+  // alone would let e.g. '1.0000000000000001' equal 1 or '1e-400' equal 0. Already-decoded JSON numbers
+  // need a separate source-text/JSONB round-trip proof from the caller; this cannot recover lost digits.
+  if (field.kind === 'number' && typeof scalar === 'string' && typeof key === 'number'
+    && !strictNumericStringRoundTrips(scalar, key)) return strictFailure('INVALID_CONDITION')
+  return scalar
+}
+
+/**
+ * All dependencies must be own, readable data properties, even in an untaken OR/AND branch. Explicit
+ * JSON null is empty; absent/undefined is not. This consumes a supplied after-image and never hydrates
+ * a record, resolves identities, reads environment configuration or loads field metadata.
+ */
+export function evaluateStrictAutomationConditions(
+  compiled: CompiledStrictAutomationConditions,
+  canonicalAfterImage: unknown,
+): StrictConditionEvaluationResult {
+  const program = strictPrograms.get(compiled)
+  if (!program) return { kind: 'unreadable', reason: 'INVALID_COMPILED_CONDITIONS' }
+  try {
+    if (!strictObject(canonicalAfterImage)) return { kind: 'unreadable', reason: 'INVALID_AFTER_IMAGE' }
+    const snapshot: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+    const budget = { items: 0, stringLength: 0 }
+    for (const [id, field] of program.fields) {
+      if (!Object.hasOwn(canonicalAfterImage, id)) return { kind: 'unreadable', reason: 'MISSING_FIELD' }
+      snapshot[id] = strictReadableValue(strictOwn(canonicalAfterImage, id, 'INVALID_CONDITION'), field, budget)
+    }
+    let unreadable = false
+    const matched = evaluateConditions(program.group, snapshot, {
+      fields: new Map([...program.fields].map(([id, { field }]) => [id, field])),
+      env: STRICT_ENV,
+      onUnreadableValue: () => { unreadable = true },
+    })
+    return unreadable ? { kind: 'unreadable', reason: 'UNREADABLE_FIELD' }
+      : { kind: matched ? 'match' : 'no_match' }
+  } catch {
+    return { kind: 'unreadable', reason: 'UNREADABLE_FIELD' }
+  }
 }

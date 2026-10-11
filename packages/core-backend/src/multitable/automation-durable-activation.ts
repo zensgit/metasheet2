@@ -14,13 +14,15 @@
  *     OFF ⇒ legacy emit, byte-identical). REPLACE is necessary, not stylistic — the webhook sink has no
  *     event-id dedup, so keep-both would double-deliver every webhook. An earlier draft of this header
  *     described a transitional keep-both window; that described only the pre-P1#2 state and is superseded.
- *   - `buildConsumerAdapterRegistry(handlers)` — the ratified consumers (manifest v3 universe), each a
+ *   - `buildConsumerAdapterRegistry(handlers, integrationReadAdapter)` — the eight legacy consumers, each a
  *     thin adapter delegating to an injected handler (S5 wiring passes the REAL service methods —
  *     `handleApprovalCompletionResume` / `...Trigger` / projection / task / record / webhook-bridge — which
  *     structurally REPLACES the anonymous bus closures and closes the manifest's un-enumerable direction).
  *     Outcome mapping: handler resolves → success; throws `PermanentDeliveryFailure` → poison; any other
  *     throw → retryable `adapter_error` (raw message never persisted). Sink idempotency is the handlers'
  *     contract (they receive the stable original `eventId`, fence-free — the outbound-idempotency seed).
+ *     The separate v4 read adapter is registered directly: it needs delivery cancellation context and
+ *     returns its own durable outcome. It is required even when its execution plugin is inactive.
  *   - `bootDurableDelivery(db, handlers, opts)` — startup: flag OFF → returns null (nothing registered, no
  *     loop, no reads); flag ON → build registry, `assertManifestCompleteness` (bidirectional, throws on
  *     boot misconfiguration BEFORE any claim), start the dispatch loop. Returns the loop handle.
@@ -33,12 +35,14 @@ import {
   ConsumerAdapterRegistry,
   startDurableDispatchLoop,
   type AdapterOutcome,
+  type ConsumerAdapter,
   type DispatchLoopHandle,
   type DispatchLoopObserver,
   type DispatchTickOptions,
 } from './automation-durable-dispatch-loop'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import type { TransactionalQueryable } from './pg-transaction-guard'
+import { AUTOMATION_READ_CONSUMER } from '../integration/automation-read-contracts'
 
 /** Throw this from a handler to mark a DETERMINISTIC permanent failure (→ dead_letter, not retried). */
 export class PermanentDeliveryFailure extends Error {}
@@ -49,7 +53,7 @@ export interface DurableConsumerHandlers {
   'approval-trigger': (event: ClaimedConsumer) => Promise<void>
   'approval-projection': (event: ClaimedConsumer) => Promise<void>
   'approval-task-trigger': (event: ClaimedConsumer) => Promise<void>
-  'automation-record-trigger': (event: ClaimedConsumer) => Promise<void>
+  'automation-record-trigger': (event: ClaimedConsumer, context?: { signal: AbortSignal }) => Promise<void>
   'webhook-event-bridge': (event: ClaimedConsumer) => Promise<void>
   /** Manifest v2 addition — record-level submit-for-approval completion (multitable × approval phase 2). */
   'multitable-record-approval': (event: ClaimedConsumer) => Promise<void>
@@ -89,9 +93,11 @@ export async function produceAutomationEvent(
   return enqueueOutboxEvent(trx, input)
 }
 
-/** Build the adapter registry (one per DURABLE_CONSUMER_KEYS entry) from injected handlers, with the
- *  ratified outcome mapping. */
-export function buildConsumerAdapterRegistry(handlers: DurableConsumerHandlers): ConsumerAdapterRegistry {
+/** Legacy handlers keep their outcome mapping; the v4 read adapter retains its context and outcome. */
+export function buildConsumerAdapterRegistry(
+  handlers: DurableConsumerHandlers,
+  integrationReadAdapter: ConsumerAdapter,
+): ConsumerAdapterRegistry {
   const registry = new ConsumerAdapterRegistry()
   for (const key of DURABLE_CONSUMER_KEYS) {
     const handler = handlers[key]
@@ -100,9 +106,9 @@ export function buildConsumerAdapterRegistry(handlers: DurableConsumerHandlers):
     }
     registry.register({
       key,
-      async handle(event): Promise<AdapterOutcome> {
+      async handle(event, context): Promise<AdapterOutcome> {
         try {
-          await handler(event)
+          await handler(event, context)
           return { outcome: 'success' }
         } catch (err) {
           return err instanceof PermanentDeliveryFailure
@@ -112,12 +118,18 @@ export function buildConsumerAdapterRegistry(handlers: DurableConsumerHandlers):
       },
     })
   }
+  if (integrationReadAdapter?.key !== AUTOMATION_READ_CONSUMER || typeof integrationReadAdapter.handle !== 'function') {
+    throw new RangeError('bootDurableDelivery: integration-read-preview adapter required')
+  }
+  registry.register(integrationReadAdapter)
   return registry
 }
 
 export interface BootOptions extends DispatchTickOptions {
   intervalMs?: number
   env?: NodeJS.ProcessEnv
+  /** Required when durable delivery is enabled; flag-OFF boot remains a no-op. */
+  integrationReadAdapter?: ConsumerAdapter
 }
 
 /**
@@ -174,7 +186,8 @@ export function bootDurableDelivery(
 ): DispatchLoopHandle | null {
   const env = opts.env ?? process.env
   if (!isDurableDeliveryEnabled(env)) return null
-  const registry = buildConsumerAdapterRegistry(handlers)
+  // Runtime validation also covers JS callers and a missing flag-ON dependency.
+  const registry = buildConsumerAdapterRegistry(handlers, opts.integrationReadAdapter as ConsumerAdapter)
   assertManifestCompleteness(registry, CURRENT_ROUTING_MANIFEST)
   return startDurableDispatchLoop(db, registry, observer, { ...opts, env })
 }

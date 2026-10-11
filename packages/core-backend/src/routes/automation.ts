@@ -25,7 +25,7 @@ import {
   type AutomationService,
   type AutomationTestRunSampleRecord,
 } from '../multitable/automation-service'
-import { redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
+import { closedIntegrationRead, redactAutomationExecutionForResponse } from '../multitable/automation-log-service'
 import type { AutomationExecution, AutomationStepResult } from '../multitable/automation-executor'
 import { legacyAutomationStatusToJobStatus } from '../multitable/workflow-job-contract'
 import { requireAdminRole } from '../guards/audit-integration'
@@ -146,12 +146,14 @@ function toRunView(
   { includeSnapshot, jobs }: { includeSnapshot: boolean; jobs?: ReturnType<typeof toWorkflowJobView>[] },
 ) {
   const hasCompleteTerminalJobs = shouldUsePersistedJobs(execution, jobs)
+  const integrationRead = closedIntegrationRead(execution.integrationRead)
   return {
     id: execution.id,
     ruleId: execution.ruleId,
     sheetId: execution.sheetId ?? null,
     status: legacyAutomationStatusToJobStatus(execution.status),
     statusLegacy: execution.status,
+    ...(integrationRead ? { integrationRead } : {}),
     triggeredBy: execution.triggeredBy,
     triggeredAt: execution.triggeredAt,
     finishedAt: execution.finishedAt ?? null,

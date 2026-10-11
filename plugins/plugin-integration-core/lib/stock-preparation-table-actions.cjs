@@ -118,6 +118,7 @@ const {
 const {
   B2A_PURPOSE_STOCK_PREPARATION_MVP_PERSIST,
   B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW,
   assertB2aReadAuthorization,
   assertB2aFullBatchComplete,
   assertB2aSchemaContract,
@@ -2388,7 +2389,10 @@ function hasHardApplyBlockingRowErrors(expansion) {
   return rowErrors.some((entry) => isPlainObject(entry) && HARD_APPLY_BLOCKING_ROW_ERROR_TYPES.has(entry.type))
 }
 
-async function dryRunStockPreparationAction(input = {}) {
+// Private shared computation: callers supply a fixed module purpose, never input.purpose.
+// Keep the interactive ordering intact, including target readiness before B2a and the
+// field/schema/completeness checks inside computeDryRun. This function cannot mint tokens.
+async function computeGuardedStockPreparationPreview(input, purpose) {
   const action = assertStockPreparationTargetReady(input.action)
   const parameters = normalizeActionParameters(input.parameters)
   // B2a: BEFORE the source is read. Dormant unless INTEGRATION_CORE_B2A_REGISTRY_PATH is set.
@@ -2405,7 +2409,7 @@ async function dryRunStockPreparationAction(input = {}) {
     action,
     parameters,
     runId: input.b2aRunId,
-    purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+    purpose,
     now: input.now,
     sourceObjects: b2aSourceObjects,
   })
@@ -2434,14 +2438,37 @@ async function dryRunStockPreparationAction(input = {}) {
     extFieldMapping: input.extFieldMapping,
     // Confirmation-ledger readback, same server-held family (see computeDryRun).
     confirmationDecisionResolver: input.confirmationDecisionResolver,
-    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
-    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    // B2a-specific hardening and refusal translation are dormant when registration is null.
+    // The expander's explicit broken-cursor check is unconditional (SA01D).
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
     b2aSourceObjects,
     b2aNow: input.now,
   })
+  return { action, parameters, runOnlyReview, dryRun, b2aTrialRegistration }
+}
+
+// Server-internal primitive only. This does NOT authorize an Automation consumer: the
+// private port must validate its owner/grant/active plan/target and execution lease.
+// There is deliberately no route, grant fallback, caller-selected purpose or tokenStore
+// access here. Guarded failures remain internal rejections for the port to classify;
+// neither raw exceptions nor this private result belong in ordinary Automation logs.
+async function previewStockPreparationForAutomation(input = {}) {
+  const { dryRun } = await computeGuardedStockPreparationPreview(input, B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW)
+  const counts = {}
+  for (const decision of [DECISIONS.ADD, DECISIONS.UPDATE, DECISIONS.SKIP, DECISIONS.INACTIVE, DECISIONS.MANUAL_CONFIRM]) {
+    const count = dryRun.plan.counts[decision]
+    if (!Number.isSafeInteger(count) || count < 0) {
+      throw new StockPreparationTableActionError(500, 'TABLE_ACTION_PREVIEW_COUNTS_INVALID', 'preview counts must be nonnegative safe integers')
+    }
+    counts[decision] = count
+  }
+  return { status: dryRunStatus(dryRun), counts, canApply: false }
+}
+
+async function dryRunStockPreparationAction(input = {}) {
+  const { action, parameters, runOnlyReview, dryRun, b2aTrialRegistration } = await computeGuardedStockPreparationPreview(input, B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION)
   let dryRunToken = null
   if (dryRun.canApply) {
     dryRunToken = await createDryRunToken(input.tokenStore, {
@@ -2924,6 +2951,7 @@ module.exports = {
   resolveTargetFieldIds,
   createTargetScopedRecordsApi,
   dryRunStockPreparationAction,
+  previewStockPreparationForAutomation,
   largeBomBackgroundExpansionCaps,
   prepareStockPreparationConfirmationDecisions,
   prepareStockPreparationMvpSnapshot,

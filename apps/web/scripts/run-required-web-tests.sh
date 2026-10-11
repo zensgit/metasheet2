@@ -1937,6 +1937,10 @@ exec npx vitest run \
   StockPreparationSourcePlanDraft \
   StockPreparationSourcePlanValidation \
   StockPreparationSourcePlanVersions \
+  automationRead \
+  automation-read-authoring \
+  multitable-automation-read-editor \
+  StockPreparationAutomationReadPanel \
   StockPreparationSourcePreflight \
   StockPreparationStageOverview \
   StockPreparationStageStepper \

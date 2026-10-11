@@ -1305,6 +1305,20 @@ jobs:
       # participating transaction. Two-session races against a real PostgreSQL; the suite's own
       # sentinel makes a missing DATABASE_URL fail (EXPECT_DB=1), never skip-green. Excluded from
       # the no-DB default run in vitest.config.ts and wired here as a WHOLE FILE.
+      - name: PLM full-app acceptance isolation and CI contracts
+        id: stock-preparation-plm-full-app-contracts
+        if: matrix.node-version == '20.x'
+        run: node --test scripts/ops/stock-preparation-plm-full-app-contract.test.mjs scripts/ops/stock-preparation-plm-owned-pg.test.mjs scripts/ops/run-stock-preparation-yida-synthetic-trial.test.mjs
+
+      # Each scenario owns fresh synthetic migrations and production app lifecycle.
+      - name: Run synthetic PLM full-app manual and interval acceptance
+        id: stock-preparation-plm-full-app
+        if: matrix.node-version == '20.x'
+        timeout-minutes: 20
+        run: |
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval
+
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
         if: matrix.node-version == '20.x'
@@ -1316,6 +1330,28 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/external-system-delete-bind-lock-protocol.db.test.ts \
             tests/integration/stock-preparation-read-plan-host-realdb.test.ts \
+            tests/integration/automation-read-authoring-realdb.test.ts \
+            tests/integration/automation-read-authority-realdb.test.ts \
+            tests/integration/automation-read-date-schedule-realdb.test.ts \
+            tests/integration/automation-read-delivery-realdb.test.ts \
+            tests/integration/automation-read-execution-audit-realdb.test.ts \
+            tests/integration/automation-read-installed-material-realdb.test.ts \
+            tests/integration/automation-read-ledger-realdb.test.ts \
+            tests/integration/automation-read-linked-retry-realdb.test.ts \
+            tests/integration/automation-read-material-epochs-realdb.test.ts \
+            tests/integration/automation-read-owner-realdb.test.ts \
+            tests/integration/automation-read-profiles-realdb.test.ts \
+            tests/integration/automation-read-record-activation-realdb.test.ts \
+            tests/integration/automation-read-recovery-realdb.test.ts \
+            tests/integration/automation-read-rule-authority-realdb.test.ts \
+            tests/integration/automation-read-runtime-realdb.test.ts \
+            tests/integration/automation-read-schedule-activation-realdb.test.ts \
+            tests/integration/automation-read-source-authority-realdb.test.ts \
+            tests/integration/automation-read-source-pointer-realdb.test.ts \
+            tests/integration/automation-read-target-authority-realdb.test.ts \
+            tests/integration/automation-read-target-records-realdb.test.ts \
+            tests/integration/automation-record-after-image-realdb.test.ts \
+            tests/integration/automation-record-after-image-retention-realdb.test.ts \
             tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts \
             tests/integration/stock-preparation-yida-create-fence-realdb.test.ts \
             tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts \
@@ -1370,6 +1406,51 @@ jobs:
         run: |
           pnpm --filter @metasheet/core-backend exec vitest run \
             tests/unit/data-source-validation-revision.test.ts \
+            --reporter=dot
+
+      - name: Run Automation read unit contracts
+        run: |
+          pnpm --filter @metasheet/core-backend exec vitest run \
+            tests/unit/integration/automation-live-authority.test.ts \
+            tests/unit/integration/automation-read-authoring-migration.test.ts \
+            tests/unit/integration/automation-read-authoring.test.ts \
+            tests/unit/integration/automation-read-authority-record.test.ts \
+            tests/unit/integration/automation-read-authority.test.ts \
+            tests/unit/integration/automation-read-contracts.test.ts \
+            tests/unit/integration/automation-read-date-linked-retry-migration.test.ts \
+            tests/unit/integration/automation-read-date-schedule.test.ts \
+            tests/unit/integration/automation-read-delivery.test.ts \
+            tests/unit/integration/automation-read-discovery.test.ts \
+            tests/unit/integration/automation-read-execution-audit.test.ts \
+            tests/unit/integration/automation-read-executor.test.ts \
+            tests/unit/integration/automation-read-installed-material.test.ts \
+            tests/unit/integration/automation-read-interval-schedule-migration.test.ts \
+            tests/unit/integration/automation-read-linked-retry-migration.test.ts \
+            tests/unit/integration/automation-read-management.test.ts \
+            tests/unit/integration/automation-read-material-epochs.test.ts \
+            tests/unit/integration/automation-read-operation-policy.test.ts \
+            tests/unit/integration/automation-read-owner-wiring.test.ts \
+            tests/unit/integration/automation-read-profiles.test.ts \
+            tests/unit/integration/automation-read-record-activation.test.ts \
+            tests/unit/integration/automation-read-record-conditions-migration.test.ts \
+            tests/unit/integration/automation-read-record-conditions.test.ts \
+            tests/unit/integration/automation-read-routes.test.ts \
+            tests/unit/integration/automation-read-rule-authority.test.ts \
+            tests/unit/integration/automation-read-runtime.test.ts \
+            tests/unit/integration/automation-read-schedule-activation.test.ts \
+            tests/unit/integration/automation-read-source-pointer.test.ts \
+            tests/unit/integration/automation-read-target-authority.test.ts \
+            tests/unit/integration/automation-read-target-context.test.ts \
+            tests/unit/integration/automation-read-target-records.test.ts \
+            tests/unit/integration/data-source-read-execution.test.ts \
+            tests/unit/automation-producer-emit-approval.test.ts \
+            tests/unit/automation-producer-emit.test.ts \
+            tests/unit/automation-read-schedule-producer.test.ts \
+            tests/unit/automation-record-after-image-retention.test.ts \
+            tests/unit/automation-record-after-image.test.ts \
+            tests/unit/automation-record-schema.test.ts \
+            tests/unit/automation-scheduler-occurrence.test.ts \
+            tests/unit/recovery-record-after-image-ci-wiring.test.ts \
             --reporter=dot
 
       - name: Run required after-sales install integration
@@ -1561,6 +1642,7 @@ jobs:
             tests/integration/multitable-l5wire-checkpoint-activation-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-realdb.test.ts \
             tests/integration/multitable-exact-anchor-recovery-plan-realdb.test.ts \
+            tests/integration/multitable-recovery-record-after-image-realdb.test.ts \
             tests/integration/multitable-recovery-archive-catalog-realdb.test.ts \
             tests/integration/multitable-recovery-archive-stale-pin-cleanup-realdb.test.ts \
             tests/integration/multitable-recovery-archive-section-causality-realdb.test.ts \

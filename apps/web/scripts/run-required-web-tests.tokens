@@ -508,6 +508,10 @@ StockPreparationSourceBinding
 StockPreparationSourcePlanDraft
 StockPreparationSourcePlanValidation
 StockPreparationSourcePlanVersions
+automationRead
+automation-read-authoring
+multitable-automation-read-editor
+StockPreparationAutomationReadPanel
 StockPreparationSourcePreflight
 StockPreparationStageOverview
 StockPreparationStageStepper

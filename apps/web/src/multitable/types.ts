@@ -9,6 +9,7 @@
 // their original names, so every existing import of these 4 names from `'../types'` / `'./types'`
 // keeps resolving unchanged.
 import type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment } from '../shared/comments/types'
+import type { AutomationReadRequestRef } from '../services/integration/automationRead'
 import { COMMENT_REACTION_PALETTE } from '../shared/comments/types'
 
 export type { MetaCommentMentionSuggestion, MultitableCommentReaction, MultitableComment }
@@ -1235,6 +1236,7 @@ export interface ConditionGroup {
 }
 
 export type AutomationActionType =
+  | 'integration_read_preview'
   | 'update_record'
   | 'create_record'
   | 'send_webhook'
@@ -1347,6 +1349,7 @@ export interface AutomationExecution {
    */
   duration?: number
   steps?: AutomationStepResult[]
+  integrationRead?: AutomationReadRequestRef
   error?: string
 }
 
@@ -1398,6 +1401,8 @@ export interface AutomationRunView {
   error: string | null
   schemaVersion: number | null
   steps: AutomationRunStepView[]
+  /** Closed, values-free link to the separately authorized read request. */
+  integrationRead?: AutomationReadRequestRef
   triggerEvent?: unknown
   ruleSnapshot?: unknown
   /**

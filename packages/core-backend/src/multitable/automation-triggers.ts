@@ -49,6 +49,22 @@ export interface ScheduleIntervalConfig {
   startAt?: string
 }
 
+export const MIN_SCHEDULE_INTERVAL_MS = 1000
+export const MAX_SCHEDULE_INTERVAL_MS = 2 ** 31 - 1
+
+/** Read intervals are exact authoring contracts. Ordinary intervals retain
+ * existing extra keys, but must never hit Node's invalid-delay clamp. */
+export function scheduleIntervalMs(config: unknown, closed = false): number | null {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return null
+  if (closed && ((Object.getPrototypeOf(config) !== Object.prototype && Object.getPrototypeOf(config) !== null)
+    || Reflect.ownKeys(config).length !== 1 || !Object.hasOwn(config, 'intervalMs'))) return null
+  const descriptor = Object.getOwnPropertyDescriptor(config, 'intervalMs')
+  if (!descriptor || !Object.hasOwn(descriptor, 'value')) return null
+  const value: unknown = descriptor.value
+  return typeof value === 'number' && Number.isSafeInteger(value)
+    && value >= MIN_SCHEDULE_INTERVAL_MS && value <= MAX_SCHEDULE_INTERVAL_MS ? value : null
+}
+
 /** Config shape for webhook.received */
 export interface WebhookReceivedConfig {
   secret?: string

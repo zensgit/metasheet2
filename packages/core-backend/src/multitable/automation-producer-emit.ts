@@ -23,6 +23,7 @@
 import { produceAutomationEvent } from './automation-durable-activation'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import type { TransactionalQueryable } from './pg-transaction-guard'
+import { persistAutomationRecordAfterImage, type AutomationRecordAfterImageInput } from './automation-record-after-image'
 
 /** A record-event payload as built by `withAutomationEventId` — carries `_eventId` (+ optional depth). */
 export interface RecordEventLike {
@@ -46,11 +47,13 @@ export async function enqueueRecordEventIfDurable(
   eventType: string,
   payload: RecordEventLike,
   env: NodeJS.ProcessEnv = process.env,
+  afterImage?: AutomationRecordAfterImageInput,
 ): Promise<boolean> {
   if (!isDurableDeliveryEnabled(env)) return false
   const eventId = typeof payload._eventId === 'string' ? payload._eventId : ''
   const automationDepth = typeof payload._automationDepth === 'number' ? payload._automationDepth : 0
   const res = await produceAutomationEvent(trx, { eventType, eventId, payload, automationDepth }, env)
+  if (res !== null && afterImage !== undefined) await persistAutomationRecordAfterImage(trx, res, afterImage)
   return res !== null
 }
 

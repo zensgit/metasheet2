@@ -217,6 +217,10 @@ pnpm --filter @metasheet/web exec vitest run \
   StockPreparationSourcePlanDraft \
   StockPreparationSourcePlanValidation \
   StockPreparationSourcePlanVersions \
+  automationRead \
+  automation-read-authoring \
+  multitable-automation-read-editor \
+  StockPreparationAutomationReadPanel \
   StockPreparationStageOverview \
   StockPreparationStageStepper \
   StockPreparationUnitConfirmView \

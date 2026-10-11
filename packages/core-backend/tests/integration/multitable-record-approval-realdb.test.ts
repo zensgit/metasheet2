@@ -192,7 +192,7 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
     app = express()
     app.use(express.json())
     app.use((req, _res, next) => {
-      ;(req as { user?: unknown }).user = { id: currentUserId, roles: ['member'], perms: [] }
+      (req as { user?: unknown }).user = { id: currentUserId, roles: ['member'], perms: [] }
       next()
     })
     app.use('/api/multitable', createMultitableRecordApprovalRoutes())
@@ -506,7 +506,10 @@ describeIfDatabase('multitable record-level submit-for-approval (real DB)', () =
         handleApprovalCompletionTrigger: async () => {},
         handleApprovalTaskCreatedTrigger: async () => {},
         handleEvent: async () => {},
+        handleDurableRecordEvent: async () => {},
       },
+      // This suite proves only ordinary approval delivery; the no-op read leg is not read-path evidence.
+      automationReadRecord: { produce: async () => undefined },
       projectionService: { reconcile: async () => undefined },
       webhookService: { deliverEvent: async () => [] },
       recordApprovalService: sink,

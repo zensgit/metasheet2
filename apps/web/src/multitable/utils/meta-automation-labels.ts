@@ -1440,6 +1440,8 @@ export function automationActionTypeLabel(type: AutomationActionType | UnknownAu
       return isZh ? '更新记录' : 'Update record'
     case 'create_record':
       return isZh ? '创建记录' : 'Create record'
+    case 'integration_read_preview':
+      return isZh ? '只读集成预览' : 'Read-only integration preview'
     case 'send_webhook':
       return isZh ? '发送 Webhook' : 'Send webhook'
     case 'send_notification':

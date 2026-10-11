@@ -5,6 +5,8 @@
 // records API, and values-free evidence. No UI, no external DB write, no K3.
 
 const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const Module = require('node:module')
 const path = require('node:path')
 
 const {
@@ -15,6 +17,7 @@ const {
   resolveStockPrepApplySandboxPolicy,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
+  previewStockPreparationForAutomation,
   prepareStockPreparationConfirmationDecisions,
   normalizeStockPreparationActionConfig,
   createTargetScopedRecordsApi,
@@ -43,6 +46,14 @@ const {
 const {
   PROD_CANONICAL_OBJECT_ID,
 } = require(path.join(__dirname, '..', 'lib', 'stock-preparation-production-policy.cjs'))
+const {
+  B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW,
+  B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION,
+  B2A_OPERATION_CLAIM_TABLE,
+  createB2aRegistry,
+  createB2aOperationClaim,
+  readPlanSourceObjects,
+} = require(path.join(__dirname, '..', 'lib', 'b2a-trial-registry.cjs'))
 
 // Read off the REAL committed pack rather than a hand-typed stand-in, so the ext_ write-口 scope
 // assertions below cannot quietly disagree with the pack about which ids it declares.
@@ -341,6 +352,281 @@ function createRecordsApi({ existing = [], failCreateWith = null } = {}) {
       },
     },
   }
+}
+
+// SA-06 first primitive only: real B2a/expander/planner, with synthetic source,
+// metadata, records and claim-storage IO. This does not prove owner/grant/active
+// plan authorization, a PG claim race, a consumer, or a terminal error boundary.
+function automationPreviewFixture({ data = multiRootPlmData(), existing = [], action = baseAction(),
+  purpose = B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW, armed = true, registration = {} } = {}) {
+  const io = []
+  const source = createSourceAdapter(data)
+  const records = createRecordsApi({ existing })
+  const sourceBefore = clone(data)
+  const targetBefore = clone(records.rows)
+  const tokenStore = createMemoryStorage()
+  const tokenCalls = { get: 0, set: 0, delete: 0 }
+  for (const name of Object.keys(tokenCalls)) {
+    const original = tokenStore[name]
+    tokenStore[name] = async (...args) => { tokenCalls[name]++; return original(...args) }
+  }
+  const state = { missingTargetField: false, schemaChanged: false, changeSchemaDuringRead: false }
+  const sourceRead = source.adapter.read
+  source.adapter.read = async (input) => {
+    io.push('source-row')
+    if (state.changeSchemaDuringRead) state.schemaChanged = true
+    return sourceRead(input)
+  }
+  source.adapter.getSchema = async () => {
+    io.push('source-schema')
+    return { fields: [{ name: 'synthetic-field', type: state.schemaChanged ? 'integer' : 'string', nullable: false }] }
+  }
+  const queryRecords = records.recordsApi.queryRecords
+  records.recordsApi.queryRecords = async (input) => { io.push('target-row'); return queryRecords(input) }
+  const input = {
+    action, parameters: { projectNo: 'P-001' }, sourceAdapter: source.adapter,
+    recordsApi: records.recordsApi, tokenStore, plannedAt: '2026-10-01T00:00:00.000Z',
+    tenantId: 'automation-tenant', now: Date.parse('2026-10-01T00:00:00.000Z'), b2aRunId: 'automation-run',
+    targetFieldExistence: {
+      projectId: 'automation-project',
+      provisioning: {
+        getObjectSheetId: () => 'sheet_stock',
+        resolveFieldIds: ({ fieldIds }) => Object.fromEntries(fieldIds.map((id) => [id, id])),
+        async resolveExistingObjectFieldIds({ fieldIds }) {
+          io.push('target-schema')
+          return Object.fromEntries(fieldIds.filter((id) => !state.missingTargetField || id !== 'material').map((id) => [id, id]))
+        },
+      },
+    },
+  }
+  if (armed) {
+    const objects = readPlanSourceObjects(normalizeStockPreparationActionConfig(action).source.readPlan)
+    const claims = new Map()
+    input.b2aSourceObjects = objects
+    input.b2aClaimStore = createMemoryStorage()
+    input.b2aOperationClaim = createB2aOperationClaim({ db: {
+      async insertOne(table, row) {
+        assert.equal(table, B2A_OPERATION_CLAIM_TABLE)
+        io.push('claim')
+        if (claims.has(row.claim_key)) throw Object.assign(new Error('synthetic duplicate'), { code: '23505' })
+        claims.set(row.claim_key, clone(row))
+        return [clone(row)]
+      },
+      async selectOne(table, where) {
+        assert.equal(table, B2A_OPERATION_CLAIM_TABLE)
+        return claims.get(where.claim_key) || null
+      },
+    } })
+    input.b2aTrialRegistry = createB2aRegistry({ config: { b2aTrialRegistry: {
+      registryId: 'automation-registry', registryVersion: 1, registrations: [{
+        registrationId: 'automation-registration', registrationVersion: 1,
+        tenantScope: input.tenantId, sourceSystemType: action.source.kind,
+        sourceBindingRef: action.source.externalSystemId,
+        projectDataScope: { dataScopeRefs: ['P-001'] }, objectScope: { sourceObjects: objects }, purpose,
+        ownerPrincipalRef: 'synthetic-owner', authorizationRef: 'synthetic-authorization', operationRef: 'synthetic-operation',
+        effectiveAt: '2026-09-30T00:00:00Z', expiresAt: '2026-10-02T00:00:00Z',
+        forbidReuse: true, sourceReadOperationLimit: 1, artifactReplayLimit: 0,
+        consumptionState: 'unconsumed', consumedAt: null, b2bMigrationCondition: 'synthetic fixture',
+        expiryHandling: 'deny_replay', status: 'active', ...registration,
+      }],
+    } } })
+  }
+  return { input, io, source, records, tokenCalls, tokenStore, state,
+    assertUnchanged() {
+      assert.deepEqual(data, sourceBefore, 'source business snapshot is unchanged')
+      assert.deepEqual(records.rows, targetBefore, 'target business snapshot is unchanged')
+      assert.ok(records.calls.every(([method]) => method === 'queryRecords'), 'preview never writes records')
+    },
+  }
+}
+
+function assertAutomationDto(result, status, counts) {
+  assert.deepEqual(result, { status, counts, canApply: false }, 'private preview returns only closed status and five counts')
+  assert.ok(Object.values(result.counts).every((count) => Number.isSafeInteger(count) && count >= 0))
+}
+
+function assertNoAutomationTokenAccess(fixture) {
+  assert.deepEqual(fixture.tokenCalls, { get: 0, set: 0, delete: 0 }, 'Automation never calls token storage')
+  assert.equal(fixture.tokenStore.map.size, 0, 'Automation never persists even a hidden token')
+  fixture.assertUnchanged()
+}
+
+async function assertAutomationMixedPreview(preview = previewStockPreparationForAutomation) {
+  const existing = x4ExistingRecords({ 'PART-B': { rawQuantity: 1, totalQuantity: 1 } }).slice(0, 2)
+  existing.push({ id: 'obsolete', data: x4ExistingRowData({ ...X4_ROOT_SEEDS[0], componentSourceId: 'PART-OLD' }) })
+  existing.push({ id: 'keyless', data: { projectNo: 'P-001', active: true, notes: 'private synthetic value' } })
+  const fixture = automationPreviewFixture({ existing })
+  // Even opt-ins and a caller purpose cannot expand this private summary.
+  fixture.input.includeMissingComponents = true
+  fixture.input.purpose = B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION
+  const result = await preview(fixture.input)
+  assertAutomationDto(result, 'manual_confirm_required', { add: 1, update: 1, skip: 1, inactive: 1, manual_confirm: 1 })
+  assertNoAutomationTokenAccess(fixture)
+  assert.ok(fixture.source.calls.length > 0, 'real expander used the synthetic source IO')
+  assert.equal(fixture.io[0], 'claim')
+  assert.ok(fixture.io.indexOf('target-schema') < fixture.io.indexOf('source-schema'))
+  assert.ok(fixture.io.indexOf('source-schema') < fixture.io.indexOf('source-row'))
+  assert.ok(fixture.io.lastIndexOf('source-schema') < fixture.io.indexOf('target-row'))
+  assert.equal(fixture.io.filter((step) => step === 'source-schema').length, fixture.input.b2aSourceObjects.length * 2)
+  assert.deepEqual(fixture.records.calls[0][1].filters, { projectNo: 'P-001' })
+  assert.ok(fixture.records.calls.every(([, input]) => input.sheetId === 'sheet_stock'))
+
+  const manual = automationPreviewFixture({ existing, purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION })
+  const legacy = await dryRunStockPreparationAction(manual.input)
+  assert.equal(legacy.status, result.status)
+  assert.deepEqual(legacy.counts, result.counts)
+  assert.equal(legacy.canApply, true, 'legacy apply eligibility is unchanged')
+  assert.equal(typeof legacy.dryRunToken, 'string')
+  assert.deepEqual(manual.tokenCalls, { get: 0, set: 1, delete: 0 })
+  assert.equal(manual.tokenStore.map.size, 1)
+  assert.equal(legacy.evidence.b2aTrialRegistration.purpose, B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION)
+  const stored = [...manual.tokenStore.map.values()][0]
+  assert.equal(stored.revision, legacy.revision)
+  assert.deepEqual(manual.source.calls, fixture.source.calls, 'shared computation preserves source IO sequence')
+  assert.deepEqual(manual.records.calls, fixture.records.calls, 'shared computation preserves target IO sequence')
+  manual.assertUnchanged()
+}
+
+async function testAutomationPreviewCountsAndNoTokenAccess() {
+  await assertAutomationMixedPreview()
+  const ready = automationPreviewFixture()
+  let tokenPropertyReads = 0
+  Object.defineProperty(ready.input, 'tokenStore', { get() { tokenPropertyReads++; throw new Error('token store must not be consulted') } })
+  assertAutomationDto(await previewStockPreparationForAutomation(ready.input), 'ready', { add: 3, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
+  assert.equal(tokenPropertyReads, 0)
+  assertNoAutomationTokenAccess(ready)
+  const empty = automationPreviewFixture({ data: basePlmData({ DN_PDM_PathExAttrInfo: [] }) })
+  assertAutomationDto(await previewStockPreparationForAutomation(empty.input), 'not_found', { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 })
+  assert.equal(empty.records.calls.length, 0, 'not_found retains the existing no-target-row-read branch')
+  assert.equal(empty.io.filter((step) => step === 'source-schema').length, empty.input.b2aSourceObjects.length * 2)
+  assertNoAutomationTokenAccess(empty)
+}
+
+async function assertAutomationPurposeRefusal(preview = previewStockPreparationForAutomation) {
+  const fixture = automationPreviewFixture({ purpose: B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION })
+  fixture.input.purpose = B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION
+  await assert.rejects(() => preview(fixture.input), (error) => error.code === 'B2A_SCOPE_MISMATCH' && error.details.reason === 'purpose_not_permitted')
+  assert.deepEqual(fixture.io, [], 'manual-purpose registration refuses before claim, target or source IO')
+  assertNoAutomationTokenAccess(fixture)
+}
+
+async function assertAutomationTargetRefusal(preview = previewStockPreparationForAutomation) {
+  const fixture = automationPreviewFixture()
+  fixture.state.missingTargetField = true
+  await assert.rejects(() => preview(fixture.input), { code: 'TARGET_SCHEMA_INCOMPLETE' })
+  assert.deepEqual(fixture.io, ['claim', 'target-schema'], 'missing material field refuses before source schema or row IO')
+  assertNoAutomationTokenAccess(fixture)
+}
+
+async function testAutomationPreviewGuardOrdering() {
+  await assertAutomationPurposeRefusal()
+  await assertAutomationTargetRefusal()
+  const unboundTarget = automationPreviewFixture()
+  unboundTarget.input.action.target.fieldIdMap = { projectNo: 'fld_projectNo' }
+  await assert.rejects(() => previewStockPreparationForAutomation(unboundTarget.input), { code: 'TARGET_SCHEMA_INCOMPLETE' })
+  assert.deepEqual(unboundTarget.io, [], 'target-map completeness still precedes B2a claim')
+  assertNoAutomationTokenAccess(unboundTarget)
+  for (const registration of [
+    { status: 'revoked' }, { expiresAt: '2026-09-30T12:00:00Z' },
+    { projectDataScope: { dataScopeRefs: ['P-OTHER'] } }, { objectScope: { sourceObjects: ['DN_PDM_PathExAttrInfo'] } },
+  ]) {
+    const fixture = automationPreviewFixture({ registration })
+    await assert.rejects(() => previewStockPreparationForAutomation(fixture.input), (error) => /^B2A_/.test(error.code))
+    assert.deepEqual(fixture.io, [], 'B2a window/scope/status gate refuses before IO')
+    assertNoAutomationTokenAccess(fixture)
+  }
+  const missingObjects = automationPreviewFixture()
+  delete missingObjects.input.b2aSourceObjects
+  await assert.rejects(() => previewStockPreparationForAutomation(missingObjects.input), { code: 'B2A_SCOPE_MISMATCH' })
+  assert.deepEqual(missingObjects.io, [], 'config-bound source objects are required before claim')
+  const consumed = automationPreviewFixture()
+  await previewStockPreparationForAutomation(consumed.input)
+  consumed.io.length = 0
+  consumed.input.b2aRunId = 'different-automation-run'
+  await assert.rejects(() => previewStockPreparationForAutomation(consumed.input), (error) => error.code === 'B2A_AUTHORIZATION_INVALID' && error.details.reason === 'operation_already_consumed')
+  assert.deepEqual(consumed.io, ['claim'], 'spent operation cannot start another source read')
+  assertNoAutomationTokenAccess(consumed)
+  const foreign = automationPreviewFixture({ existing: [{ projectNo: 'P-OTHER', active: true }] })
+  await assert.rejects(() => previewStockPreparationForAutomation(foreign.input), { code: 'TARGET_SHEET_FOREIGN_PROJECT' })
+  assert.ok(foreign.source.calls.length > 0, 'target row scope retains its post-expansion position')
+  assertNoAutomationTokenAccess(foreign)
+}
+
+async function assertAutomationMidReadDrift(preview = previewStockPreparationForAutomation) {
+  const fixture = automationPreviewFixture()
+  fixture.state.changeSchemaDuringRead = true
+  await assert.rejects(() => preview(fixture.input), (error) => error.code === 'C6_FULL_BATCH_INCOMPLETE' && error.details.reason === 'source_changed_mid_read')
+  assert.ok(fixture.source.calls.length > 0)
+  assert.equal(fixture.records.calls.length, 0, 'post-read schema drift refuses before target rows and planning')
+  assertNoAutomationTokenAccess(fixture)
+}
+
+async function testAutomationPreviewRetainsBoundsAndSchemaChecks() {
+  for (const action of [baseAction({ maxRows: 1 }), baseAction({ maxReadCount: 1 }), baseAction({ pageLimit: 1, maxPages: 1 })]) {
+    const fixture = automationPreviewFixture({ action })
+    await assert.rejects(() => previewStockPreparationForAutomation(fixture.input), { code: 'B2A_PAGE_LIMIT_EXCEEDED' })
+    assert.equal(fixture.records.calls.length, 0, 'armed incomplete batch never reaches target planning')
+    assertNoAutomationTokenAccess(fixture)
+  }
+  const broken = automationPreviewFixture()
+  broken.input.sourceAdapter.read = async () => ({ records: [], done: false, nextCursor: null })
+  await assert.rejects(() => previewStockPreparationForAutomation(broken.input), { code: 'C6_FULL_BATCH_INCOMPLETE' })
+  assert.equal(broken.records.calls.length, 0)
+  assertNoAutomationTokenAccess(broken)
+  const timeout = automationPreviewFixture()
+  timeout.input.sourceAdapter.read = async () => { throw Object.assign(new Error('private synthetic transport detail'), { code: 'ETIMEDOUT' }) }
+  await assert.rejects(() => previewStockPreparationForAutomation(timeout.input), { code: 'B2A_SOURCE_TIMEOUT' })
+  assertNoAutomationTokenAccess(timeout)
+  const pinned = automationPreviewFixture()
+  await previewStockPreparationForAutomation(pinned.input)
+  pinned.io.length = 0
+  pinned.state.schemaChanged = true
+  await assert.rejects(() => previewStockPreparationForAutomation(pinned.input), { code: 'B2A_SCHEMA_DRIFT' })
+  assert.equal(pinned.io.includes('source-row'), false, 'pinned drift refuses before new row IO')
+  assertNoAutomationTokenAccess(pinned)
+  await assertAutomationMidReadDrift()
+  // Dormant B2a semantics are preserved; these statuses do not mean an Automation
+  // grant was checked or that a request reached its terminal publication boundary.
+  for (const [data, action, status] of [
+    [childBomPlmData(), baseAction({ maxRows: 1 }), 'large_bom_bounded'],
+    [childBomPlmData(), baseAction({ maxDepth: 0 }), 'failed'],
+  ]) {
+    const fixture = automationPreviewFixture({ data, action, armed: false })
+    const legacyFixture = automationPreviewFixture({ data, action, armed: false })
+    const result = await previewStockPreparationForAutomation(fixture.input)
+    const legacy = await dryRunStockPreparationAction(legacyFixture.input)
+    assertAutomationDto(result, status, legacy.counts)
+    assert.equal(legacy.status, status)
+    assertNoAutomationTokenAccess(fixture)
+  }
+}
+
+async function testAutomationPreviewInMemoryMutations() {
+  const filename = path.join(__dirname, '..', 'lib', 'stock-preparation-table-actions.cjs')
+  const source = fs.readFileSync(filename, 'utf8')
+  const mutations = [
+    ['hidden-token',
+      '  const counts = {}\n  for (const decision of [DECISIONS.ADD',
+      '  await createDryRunToken(input.tokenStore, {})\n  const counts = {}\n  for (const decision of [DECISIONS.ADD',
+      assertAutomationMixedPreview],
+    ['manual-purpose',
+      'computeGuardedStockPreparationPreview(input, B2A_PURPOSE_STOCK_PREPARATION_AUTOMATION_PREVIEW)',
+      'computeGuardedStockPreparationPreview(input, B2A_PURPOSE_STOCK_PREPARATION_TABLE_ACTION)',
+      assertAutomationPurposeRefusal],
+    ['target-field-gate', '  await assertTargetFieldsExist(action, targetFieldExistence)', '  void targetFieldExistence', assertAutomationTargetRefusal],
+    ['post-read-schema-gate', '  await assertB2aSourceUnchangedAfterRead({', '  await Promise.resolve({', assertAutomationMidReadDrift],
+  ]
+  for (const [name, needle, replacement, check] of mutations) {
+    const normalized = source.replace(/\r\n/g, '\n')
+    assert.equal(normalized.split(needle).length, 2, `${name}: exact one mutation hit`)
+    const altered = new Module(filename, module)
+    altered.filename = filename
+    altered.paths = module.paths
+    altered._compile(normalized.replace(needle, replacement), filename)
+    await assert.rejects(() => check(altered.exports.previewStockPreparationForAutomation),
+      (error) => error instanceof assert.AssertionError, `${name}: killed by the actual preview-path assertion`)
+  }
+  assert.equal(fs.readFileSync(filename, 'utf8'), source, 'in-memory mutations never modify production files')
 }
 
 async function testRegistryListsConfiguredMetadataWithoutTargetSecrets() {
@@ -1459,6 +1745,10 @@ async function testTargetScopedApiForwardsTheHostFilterValueListDeclaration() {
 }
 
 async function main() {
+  await testAutomationPreviewCountsAndNoTokenAccess()
+  await testAutomationPreviewGuardOrdering()
+  await testAutomationPreviewRetainsBoundsAndSchemaChecks()
+  await testAutomationPreviewInMemoryMutations()
   await testSourceMembershipGuardsReachRealDryRunPlanAndApply()
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()

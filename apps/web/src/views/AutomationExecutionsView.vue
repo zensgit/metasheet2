@@ -51,7 +51,10 @@
       >
         <div class="automation-runs__summary">
           <span class="automation-runs__time">{{ formatTime(run.triggeredAt) }}</span>
-          <StatusTag domain="automationRun" :status="run.status" />
+          <span v-if="run.integrationRead" data-field="integration-read-status" :data-read-status="run.integrationRead.status">
+            {{ automationReadExecutionStatusLabel(run.integrationRead.status, isZh) }}
+          </span>
+          <StatusTag v-else domain="automationRun" :status="run.status" />
           <span class="automation-runs__rule" data-field="ruleName">
             <template v-if="run.ruleName && run.ruleName !== run.ruleId">{{ run.ruleName }}</template>
             <code v-else class="automation-runs__code" data-field="ruleId">{{ run.ruleId }}</code>
@@ -67,9 +70,14 @@
         <div v-if="expandedId === run.id" class="automation-runs__detail" data-detail="true">
           <div v-if="detailLoading" class="automation-runs__empty">{{ automationLabel('runs.loadingDetail', isZh) }}</div>
           <template v-else-if="detail">
-            <h2 class="automation-runs__detail-h">{{ automationLabel('runs.steps', isZh) }}</h2>
+            <div v-if="detail.integrationRead" data-field="integration-read-detail" role="note">
+              <span data-field="integration-read-status" :data-read-status="detail.integrationRead.status">{{ automationReadExecutionStatusLabel(detail.integrationRead.status, isZh) }}</span>
+              · <code data-field="integration-read-request-id">{{ detail.integrationRead.requestId }}</code>
+              <p>{{ integrationReadOwnerHint }}</p>
+            </div>
+            <h2 v-if="!detail.integrationRead" class="automation-runs__detail-h">{{ automationLabel('runs.steps', isZh) }}</h2>
             <div
-              v-for="step in detail.steps"
+              v-for="step in detail.integrationRead ? [] : detail.steps"
               :key="step.id"
               class="automation-runs__step"
               :class="{ 'automation-runs__step--branch-child': branchChildStep(step.stepKey) || parallelChildStep(step.stepKey) }"
@@ -171,10 +179,10 @@
               role="alert"
             >{{ rerunError }}</div>
 
-            <h2 class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
-            <pre class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
-            <h2 class="automation-runs__detail-h">{{ automationLabel('runs.ruleSnapshot', isZh) }}</h2>
-            <pre class="automation-runs__json" data-field="rule-snapshot">{{ jsonView(detail.ruleSnapshot) }}</pre>
+            <h2 v-if="!detail.integrationRead" class="automation-runs__detail-h">{{ automationLabel('runs.triggerEvent', isZh) }}</h2>
+            <pre v-if="!detail.integrationRead" class="automation-runs__json" data-field="trigger-event">{{ jsonView(detail.triggerEvent) }}</pre>
+            <h2 v-if="!detail.integrationRead" class="automation-runs__detail-h">{{ automationLabel('runs.ruleSnapshot', isZh) }}</h2>
+            <pre v-if="!detail.integrationRead" class="automation-runs__json" data-field="rule-snapshot">{{ jsonView(detail.ruleSnapshot) }}</pre>
           </template>
         </div>
       </div>
@@ -183,15 +191,18 @@
 </template>
 
 <script setup lang="ts">
-import { onUnmounted, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useLocale } from '../composables/useLocale'
 import { useAuth } from '../composables/useAuth'
-import { getAuthPrincipalKey, onAuthPrincipalChange } from '../composables/authPrincipal'
+import { getAuthPrincipalKey, onAuthPrincipalChange, onAuthSessionSwitch, readAuthSessionSignature, TOKEN_KEYS } from '../composables/authPrincipal'
+import { EXPLICIT_SESSION_ORG_KEY } from '../utils/explicitSessionOrg'
 import { authHeaders } from '../utils/api'
 import { multitableClient, type MultitableApiClient } from '../multitable/api/client'
 import type { AutomationActionType, AutomationRunView, AutomationRunStepView, WorkflowJobStatus } from '../multitable/types'
 import { automationActionTypeLabel, automationLabel, automationStatusLabel, automationStepOutputView, type AutomationLabelKey, type AutomationStepOutputView } from '../multitable/utils/meta-automation-labels'
+import { containsAutomationReadAction } from '../multitable/automationReadAuthoring'
+import { automationReadExecutionStatusLabel, normalizeAutomationRunReadReference } from '../multitable/automationReadExecution'
 import { redactString, redactValue, summarizeStepError, summarizeStepOutput } from '../multitable/utils/automation-log-redact'
 import { formatBusinessTimestamp } from '../multitable/utils/business-timezone'
 import StatusTag from '../components/status/StatusTag.vue'
@@ -203,6 +214,9 @@ const client = props.client ?? multitableClient
 const { isZh } = useLocale()
 const auth = useAuth()
 const isAdmin = auth.hasAdminAccess()
+const integrationReadOwnerHint = computed(() => isZh.value
+  ? '只读预览不能从运行历史重跑。请由连接负责人在备料面板授权并发起预览。'
+  : 'Read previews cannot be rerun from execution history. The connection owner must authorize and start a preview in the preparation panel.')
 
 // Statuses a stored run can currently carry (legacy 4-state mapped to C1). The other
 // C1 states (queued/suspended/rejected/errored) only appear once the convergence
@@ -230,15 +244,47 @@ const rerunSuccessGeneric = ref(false)
 const rerunError = ref<string | null>(null)
 let detailRequestScope = ''
 let detailRequestGeneration = 0
+let listRequestGeneration = 0
 let rerunGeneration = 0
 let disposed = false
+let sessionSignature = readAuthSessionSignature()
 const invalidateRerun = () => { rerunGeneration += 1 }
-const unsubscribeRerun = onAuthPrincipalChange(invalidateRerun)
+function clearSessionRuns() {
+  listRequestGeneration += 1
+  detailRequestGeneration += 1
+  invalidateRerun()
+  runs.value = []
+  expandedId.value = null
+  detail.value = null
+  loading.value = false
+  detailLoading.value = false
+  loadError.value = null
+  resumeError.value = null
+  rerunError.value = null
+  rerunSuccessId.value = null
+  rerunSuccessGeneric.value = false
+  rerunTargetId.value = null
+  sessionSignature = readAuthSessionSignature()
+}
+function checkSessionRuns() {
+  if (sessionSignature !== readAuthSessionSignature()) clearSessionRuns()
+}
+function onSessionStorage(event: StorageEvent) {
+  if (event.key === null || event.key === EXPLICIT_SESSION_ORG_KEY || TOKEN_KEYS.some(key => event.key === key)) clearSessionRuns()
+  else checkSessionRuns()
+}
+const unsubscribeRerun = onAuthPrincipalChange(clearSessionRuns)
+const unsubscribeSession = onAuthSessionSwitch(clearSessionRuns)
+window.addEventListener('storage', onSessionStorage)
+window.addEventListener('focus', checkSessionRuns)
 watch([expandedId, detail], invalidateRerun, { flush: 'sync' })
 onUnmounted(() => {
   disposed = true
   invalidateRerun()
   unsubscribeRerun()
+  unsubscribeSession()
+  window.removeEventListener('storage', onSessionStorage)
+  window.removeEventListener('focus', checkSessionRuns)
 })
 
 // Equality only, never logged or used as authorization. Includes the actual token (and its org
@@ -298,22 +344,34 @@ function parallelBranchSummary(step: AutomationRunStepView): { branches: Array<{
 }
 
 async function loadData() {
+  checkSessionRuns()
+  if (disposed || !auth.hasAdminAccess()) return
+  const requestGeneration = ++listRequestGeneration
+  const requestScope = executionRequestScope()
+  const requestSession = sessionSignature
+  const current = () => {
+    checkSessionRuns()
+    return !disposed && requestGeneration === listRequestGeneration && requestSession === sessionSignature
+      && requestScope !== null && requestScope === executionRequestScope() && auth.hasAdminAccess()
+  }
   loading.value = true
   loadError.value = null
   expandedId.value = null
   detail.value = null
   try {
-    runs.value = await client.listAutomationRuns({
+    const received = (await client.listAutomationRuns({
       status: statusFilter.value || undefined,
       sheetId: sheetFilter.value || undefined,
       limit: 100,
-    })
+    })).map(normalizeAutomationRunReadReference)
+    if (current()) runs.value = received
   } catch (err: unknown) {
+    if (!current()) return
     const message = err instanceof Error ? err.message : String(err)
     loadError.value = redactString(message) || automationLabel('error.unknown', isZh.value)
     runs.value = []
   } finally {
-    loading.value = false
+    if (current()) loading.value = false
   }
 }
 
@@ -336,7 +394,7 @@ async function toggleExpand(id: string) {
   const generation = rerunGeneration
   let run: AutomationRunView | null = null
   try {
-    run = await client.getAutomationRun(id)
+    run = normalizeAutomationRunReadReference(await client.getAutomationRun(id))
   } catch {
     run = null
   }
@@ -559,17 +617,25 @@ function rerunBlockedReasonKey(run: AutomationRunView): AutomationLabelKey | nul
 }
 
 function rerunBlockedReason(run: AutomationRunView): string | null {
+  // Ordinary retry cannot mint a private owner grant or a linked read attempt.
+  // The executor also refuses this action; a generic confirmation cannot lift it.
+  if (run.integrationRead || detail.value?.integrationRead
+    || run.triggeredBy === 'integration-read-owner' || detail.value?.triggeredBy === 'integration-read-owner'
+    || containsAutomationReadAction(run.ruleSnapshot) || containsAutomationReadAction(detail.value?.ruleSnapshot)) {
+    return integrationReadOwnerHint.value
+  }
   const key = rerunBlockedReasonKey(run)
   return key ? automationLabel(key, isZh.value) : null
 }
 
 // Exhaustive over the current leaf vocabulary; a new action must acquire an explicit preview policy.
-const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' | 'parallel_branch'>, true> = {
+const RERUN_LEAF_TYPES: Record<Exclude<AutomationActionType, 'condition_branch' | 'parallel_branch'>, boolean> = {
   update_record: true, create_record: true, send_webhook: true, send_notification: true,
   start_approval: true, send_email: true, send_dingtalk_group_message: true,
   send_dingtalk_person_message: true, send_dingtalk_approval_card: true, delete_record: true,
   lock_record: true, wait_for_callback: true, write_approval_form_values: true,
   notify: true, update_field: true,
+  integration_read_preview: false,
 }
 
 /** Enumerate all possible action kinds, including unselected branches, or refuse the whole list. */
@@ -610,7 +676,8 @@ function rerunConsequences(): RerunConsequences {
           if (!visit(childActions, type)) return false
         }
       } else {
-        if (!Object.prototype.hasOwnProperty.call(RERUN_LEAF_TYPES, type)) return false
+        if (!Object.prototype.hasOwnProperty.call(RERUN_LEAF_TYPES, type)
+          || RERUN_LEAF_TYPES[type as keyof typeof RERUN_LEAF_TYPES] !== true) return false
         if (parent === 'condition_branch' && type === 'start_approval') return false
         if (parent === 'parallel_branch' && type !== 'update_record' && type !== 'send_notification') return false
       }
@@ -685,7 +752,7 @@ async function rerunExecution(run: AutomationRunView) {
   // run in round 2), because a disabled button swallows the click before the handler; it earns its
   // place only against a future refactor that drops `disabled`. Silent by design: the reason is
   // already on screen next to the button (`data-field="rerun-blocked-reason"`).
-  if (rerunBlockedReasonKey(run) !== null) return
+  if (rerunBlockedReason(run) !== null) return
   const generation = rerunGeneration
   const requestScope = detailRequestScope
   const isCurrent = () => !disposed && generation === rerunGeneration
@@ -695,7 +762,7 @@ async function rerunExecution(run: AutomationRunView) {
   // Reserve before awaiting either dialog so repeated clicks cannot queue duplicate executions.
   rerunning.value = run.id
   try {
-    if (!(await confirmRerunExecution(run, isCurrent)) || !isCurrent()) return
+    if (!(await confirmRerunExecution(run, isCurrent)) || !isCurrent() || rerunBlockedReason(run) !== null) return
     rerunTargetId.value = run.id
     rerunError.value = null
     rerunSuccessId.value = null

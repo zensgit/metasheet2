@@ -3972,13 +3972,25 @@ describe('AutomationService — Rule CRUD', () => {
   // F9: captures updateTable().set(...) payloads so a write-path assertion can read the COLUMNS that
   // were actually written (the returned row comes from the mocked SELECT and would prove nothing).
   let dbSetCalls: Record<string, unknown>[]
+  let dbValuesCalls: Record<string, unknown>[]
+  const storedCreateTime = new Date('2026-01-02T03:04:05.678Z')
+
+  function insertedRuleRow(value: Record<string, unknown>) {
+    const stored: Record<string, unknown> = { ...value, created_at: storedCreateTime, updated_at: storedCreateTime }
+    for (const key of ['trigger_config', 'action_config', 'conditions', 'actions']) {
+      if (typeof stored[key] === 'string') stored[key] = JSON.parse(stored[key] as string)
+    }
+    return stored
+  }
 
   function makeMockDb() {
     dbExecuteResults = []
     dbExecuteTakeFirstResults = []
     dbSetCalls = []
+    dbValuesCalls = []
 
     const chain: Record<string, unknown> = {}
+    let inserting = false
     const chainFn = (..._args: unknown[]) => chain
     const methods = [
       'selectFrom', 'selectAll', 'select', 'where', 'orderBy',
@@ -3990,9 +4002,20 @@ describe('AutomationService — Rule CRUD', () => {
     for (const m of methods) {
       chain[m] = vi.fn(chainFn)
     }
+    chain.insertInto = vi.fn(() => { inserting = true; return chain })
+    chain.selectFrom = vi.fn(() => { inserting = false; return chain })
+    chain.updateTable = vi.fn(() => { inserting = false; return chain })
+    chain.deleteFrom = vi.fn(() => { inserting = false; return chain })
     chain.set = vi.fn((value: unknown) => { dbSetCalls.push(value as Record<string, unknown>); return chain })
+    chain.values = vi.fn((value: unknown) => { dbValuesCalls.push(value as Record<string, unknown>); return chain })
     chain.execute = vi.fn(async () => {
-      return dbExecuteResults.shift() ?? []
+      const result = dbExecuteResults.shift() ?? []
+      // Model PostgreSQL INSERT RETURNING, including server-set timestamps and
+      // JSONB decoding, instead of relying on a fabricated service return row.
+      if (inserting && Array.isArray(result) && result.length === 0) {
+        return [insertedRuleRow(dbValuesCalls.at(-1)!)]
+      }
+      return result
     })
     chain.executeTakeFirst = vi.fn(async () => {
       return dbExecuteTakeFirstResults.shift()
@@ -4065,6 +4088,71 @@ describe('AutomationService — Rule CRUD', () => {
     expect(rule.name).toBe('My Rule')
     expect(rule.trigger_type).toBe('record.created')
     expect(rule.enabled).toBe(true)
+    expect(rule.created_at).toBe(storedCreateTime.toISOString())
+    expect(rule.updated_at).toBe(storedCreateTime.toISOString())
+  })
+
+  afterEach(async () => {
+    // CRUD cases also create real scheduler registrations. Drain this service
+    // before restoring timers so no scheduled work can outlive its test.
+    await service.shutdown()
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  function observeScheduledExecutions() {
+    // Keep the real create/register/scheduler path; stop only at the action
+    // boundary so an accidentally admitted rule cannot reach real persistence.
+    return vi.spyOn(service, 'executeRule').mockImplementation(async rule => ({
+      id: 'synthetic-scheduled-execution', ruleId: rule.id, triggeredBy: 'schedule',
+      triggeredAt: new Date().toISOString(), status: 'success', steps: [],
+    }))
+  }
+
+  async function createScheduledRule(enabled: boolean) {
+    return service.createRule('sheet_1', {
+      name: 'Scheduler admission regression', triggerType: 'schedule.interval',
+      triggerConfig: { intervalMs: 1000 }, actionType: 'update_record',
+      actionConfig: { fields: { status: 'synthetic' } }, enabled,
+    })
+  }
+
+  it('schedule admission: creating a disabled rule never fires on the real scheduler', async () => {
+    vi.useFakeTimers()
+    const executions = observeScheduledExecutions()
+    const rule = await createScheduledRule(false)
+    expect(rule.enabled).toBe(false)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(executions).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('schedule admission: a disabled replacement removes an existing registration', async () => {
+    vi.useFakeTimers()
+    const executions = observeScheduledExecutions()
+    const rule = await createScheduledRule(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(executions).toHaveBeenCalledTimes(1)
+    service.registerSchedule({ ...rule, enabled: false })
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(executions).toHaveBeenCalledTimes(1)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('schedule admission: enabled create and replacement each keep exactly one live registration', async () => {
+    vi.useFakeTimers()
+    const executions = observeScheduledExecutions()
+    const rule = await createScheduledRule(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(executions).toHaveBeenCalledTimes(1)
+    service.registerSchedule(rule)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(executions).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(1)
+    await service.shutdown()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(executions).toHaveBeenCalledTimes(3)
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   // F9 write path — LEGACY_ACTION_TYPES stays accepted as INPUT (old clients keep working) but nothing
@@ -4126,6 +4214,46 @@ describe('AutomationService — Rule CRUD', () => {
     // no longer repair, because a canonical type is not normalized on read.
     expect(written.action_type).toBe('update_record')
     expect(JSON.parse(written.action_config as string)).toMatchObject({ fields: { f1: 'v' } })
+  })
+
+  it.each([{ intervalMinutes: 1 }, { intervalMs: 1000, intervalMinutes: 1 }, { intervalMs: 1000, startAt: 'legacy' },
+    { intervalMs: 999 }, { intervalMs: 1000.5 }, { intervalMs: Infinity }, { intervalMs: 2147483648 }])('read interval create refuses invalid configuration %j before persistence', async triggerConfig => {
+    await expect(service.createRule('sheet_1', { name: 'Read interval', triggerType: 'schedule.interval', triggerConfig,
+      actionType: 'integration_read_preview', actionConfig: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false },
+      enabled: false })).rejects.toThrow(/schedule.interval requires/)
+    expect(dbValuesCalls).toEqual([])
+  })
+  it.each([1000, 2147483647])('read interval create persists exact valid millisecond bound %s', async intervalMs => {
+    const created = await service.createRule('sheet_1', { name: 'Read interval', triggerType: 'schedule.interval',
+      triggerConfig: { intervalMs }, actionType: 'integration_read_preview',
+      actionConfig: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false }, enabled: false })
+    expect(created.trigger_config).toEqual({ intervalMs })
+    expect(JSON.parse((dbValuesCalls.at(-1) as Record<string, unknown>).trigger_config as string)).toEqual({ intervalMs })
+  })
+  it.each([{ enabled: true }, { actionConfig: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false } },
+    { triggerConfig: { intervalMs: 1000, intervalMinutes: 1 } }])('read interval update or enable validates the resulting configuration %j', async patch => {
+    const old = makeRuleRow({ trigger_type: 'schedule.interval', trigger_config: { intervalMinutes: 1 },
+      action_type: 'integration_read_preview', action_config: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false }, enabled: false })
+    dbExecuteTakeFirstResults.push(old, old)
+    await expect(service.updateRule('atr_1', 'sheet_1', patch)).rejects.toThrow(/schedule.interval requires/)
+    expect(dbSetCalls).toEqual([])
+  })
+  it('ordinary interval preserves unused extra configuration while rejecting timer-clamping delays', async () => {
+    const created = await service.createRule('sheet_1', { name: 'Ordinary interval', triggerType: 'schedule.interval',
+      triggerConfig: { intervalMs: 1000, startAt: 'legacy' }, actionType: 'update_record',
+      actionConfig: { fields: { status: 'x' } }, enabled: false })
+    expect(created.trigger_config).toEqual({ intervalMs: 1000, startAt: 'legacy' })
+    await expect(service.createRule('sheet_1', { name: 'Invalid ordinary', triggerType: 'schedule.interval',
+      triggerConfig: { intervalMs: Infinity }, actionType: 'update_record', actionConfig: {}, enabled: false }))
+      .rejects.toThrow(/schedule.interval requires/)
+  })
+  it('read interval explicit update converts the stored legacy unit only through the supplied exact millisecond configuration', async () => {
+    const old = makeRuleRow({ trigger_type: 'schedule.interval', trigger_config: { intervalMinutes: 5 },
+      action_type: 'integration_read_preview', action_config: { operation: 'plm.stock-preparation.diff-preview.v1', allowManual: false } })
+    dbExecuteTakeFirstResults.push(old)
+    dbExecuteResults.push([makeRuleRow({ ...old, trigger_config: { intervalMs: 300000 } })])
+    await service.updateRule('atr_1', 'sheet_1', { triggerConfig: { intervalMs: 300000 } })
+    expect(JSON.parse(dbSetCalls.at(-1)!.trigger_config as string)).toEqual({ intervalMs: 300000 })
   })
 
   it('T2-5: createRule REJECTS an invalid IANA timezone on a cron trigger (400 at save)', async () => {
@@ -5195,7 +5323,7 @@ describe('AutomationService — Rule CRUD', () => {
       'returningAll', 'leftJoin',
     ]) chain[m] = vi.fn(chainFn)
     chain.values = vi.fn((v: Record<string, unknown>) => { insertValues.push(v); return chain })
-    chain.execute = vi.fn(async () => [])
+    chain.execute = vi.fn(async () => [insertedRuleRow(insertValues.at(-1)!)])
     chain.executeTakeFirst = vi.fn(async () => undefined)
     const localService = new AutomationService(
       new EventBus(),

@@ -373,6 +373,13 @@
       />
     </section>
 
+    <StockPreparationAutomationReadPanel
+      v-if="openedProjectNo"
+      :project-no="openedProjectNo"
+      :sheet-id="composedFillTarget?.sheetId ?? null"
+      :scope-key="JSON.stringify(scope)"
+    />
+
     <template v-if="board">
       <!-- ── 2. 状态条 ──────────────────────────────────────────────────────────────────────────
            Everything an operator needs to know before deciding what to press, in one line each. No
@@ -675,6 +682,7 @@ import { onAuthSessionSwitch, readAuthSessionSignature } from '../../../composab
 import { useLocale } from '../../../composables/useLocale'
 import type { IntegrationScope } from '../../../services/integration/workbench'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
+import StockPreparationAutomationReadPanel from './StockPreparationAutomationReadPanel.vue'
 import StockPreparationOperatorHome from './StockPreparationOperatorHome.vue'
 import StockPreparationConfirmationQueueView from './StockPreparationConfirmationQueueView.vue'
 import StockPreparationYidaPreviewPanel from './StockPreparationYidaPreviewPanel.vue'

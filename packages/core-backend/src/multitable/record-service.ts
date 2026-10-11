@@ -3,6 +3,8 @@ import { randomUUID } from 'crypto'
 import type { EventBus } from '../integration/events/event-bus'
 import { withAutomationEventId } from './automation-event-dedup'
 import { enqueueRecordEventIfDurable, emitRecordEventIfLegacy } from './automation-producer-emit'
+import { AUTOMATION_RECORD_AFTER_IMAGE_LIMITS, AUTOMATION_RECORD_AFTER_IMAGE_RETURNING } from './automation-record-after-image'
+import { captureAutomationRecordSchema } from './automation-record-schema'
 import type { TransactionalQueryable } from './pg-transaction-guard'
 import type { MultitableCapabilities } from './access'
 import {
@@ -664,6 +666,7 @@ export class RecordService {
       Object.keys(data),
     )
     const recordRes = await this.pool.transaction(async ({ query }) => {
+      const producerTrx = asProducerTrx(query)
       // W0-1 L4 (canonical fence): create ALREADY takes this fence unconditionally (the auto-number key,
       // now renamed to `acquireCanonicalSheetFence` — same key). Byte-identical when the flag is off. The
       // NEW, flag-gated part is the durable-block refusal AFTER the fence (fence-before-check ordering).
@@ -676,6 +679,9 @@ export class RecordService {
       // W0-1 L6-a: mint the sealed operation AFTER the fence (so seq reflects commit order). Inert when the
       // fence flag is off / L6 migration absent ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
+
+      // Copy deliberately emits no record event, so it must not capture event-only schema evidence.
+      const recordSchema = copy ? undefined : await captureAutomationRecordSchema(producerTrx, sheetId)
 
       const fieldRes = await query(
         'SELECT id, name, type, property FROM meta_fields WHERE sheet_id = $1',
@@ -872,7 +878,7 @@ export class RecordService {
         : await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by)
            VALUES ($1, $2, $3::jsonb, 1, $4, $4)
-           RETURNING version`,
+           RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}`,
           [recordId, sheetId, JSON.stringify(patch), actorId],
         )
 
@@ -933,7 +939,18 @@ export class RecordService {
       // Copy-sheet (CS-19): SUPPRESSED — no per-row `record.created` leaves the copy path on either leg;
       // the route emits at most one values-free `multitable.sheet.copied` after COMMIT.
       if (!copy) {
-        await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', createdEventPayload)
+        const savedRow = inserted.rows[0] as {
+          version?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+        } | undefined
+        await enqueueRecordEventIfDurable(producerTrx, 'multitable.record.created', createdEventPayload, undefined, {
+          sheetId,
+          recordId,
+          recordVersion: Number(savedRow?.version),
+          data: undefined,
+          rawJson: savedRow?.automation_after_image_json,
+          oversized: savedRow?.automation_after_image_oversized === true,
+          schema: recordSchema,
+        })
       }
       return inserted
     })
@@ -1334,6 +1351,7 @@ export class RecordService {
     // enqueue (flag ON, inside the txn) and the legacy post-commit emit (flag OFF) carry the same identity.
     const restoredEventPayload = withAutomationEventId({ sheetId, recordId, actorId })
     await this.pool.transaction(async ({ query }) => {
+      const producerTrx = asProducerTrx(query)
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
       try {
@@ -1347,6 +1365,7 @@ export class RecordService {
       }
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
+      const recordSchema = await captureAutomationRecordSchema(producerTrx, sheetId)
       // 4c-3 C4: the trash row is re-read FOR UPDATE inside the txn — two concurrent restores of the
       // same record serialize here; the loser sees the row gone (winner deleted it on success) and
       // gets a clean 409 instead of racing to a duplicate insert / double replay.
@@ -1373,13 +1392,15 @@ export class RecordService {
       if (occupied.rows.length > 0) {
         throw new RecordRestoreConflictError(`Record id is occupied, cannot restore: ${recordId}`)
       }
-      let inserted: { rows: Array<{ version?: number }> }
+      let inserted: { rows: Array<{
+        version?: number; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+      }> }
       try {
         // revision-emitted: trash restore — recordRecordRevision(action:'create', source:'restore') below.
         inserted = await query(
           `INSERT INTO meta_records (id, sheet_id, data, version, created_by, modified_by, created_at, updated_at)
            VALUES ($1, $2, $3::jsonb, 1, $4, $5, COALESCE($6, now()), COALESCE($7, now()))
-           RETURNING version`,
+           RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}`,
           [recordId, sheetId, JSON.stringify(snapshot), createdBy, actorId, originalCreatedAt, originalUpdatedAt],
         )
       } catch (err) {
@@ -1463,7 +1484,16 @@ export class RecordService {
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the restore
       // INSERT + revision + trash-row delete above (a restore-conflict throw rolls back and enqueues nothing).
       // Flag OFF ⇒ no-op (the legacy emit below fires instead).
-      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.created', restoredEventPayload)
+      const savedRow = inserted.rows[0]
+      await enqueueRecordEventIfDurable(producerTrx, 'multitable.record.created', restoredEventPayload, undefined, {
+        sheetId,
+        recordId,
+        recordVersion: Number(savedRow?.version),
+        data: undefined,
+        rawJson: savedRow?.automation_after_image_json,
+        oversized: savedRow?.automation_after_image_oversized === true,
+        schema: recordSchema,
+      })
     })
 
     publishMultitableSheetRealtime({
@@ -1679,10 +1709,13 @@ export class RecordService {
       actorId: access.userId ?? 'system',
     })
     await this.pool.transaction(async ({ query }) => {
+      const producerTrx = asProducerTrx(query)
+      let recordSchema: Awaited<ReturnType<typeof captureAutomationRecordSchema>>
       // W0-1 L4 (canonical fence): fence FIRST, then refuse if a recovery holds a durable block. No-op &
       // byte-identical when MULTITABLE_ENABLE_WRITER_FENCE is off.
       if (linkWriterFencePlan) {
         await enterLinkWriterFencePlan(query, linkWriterFencePlan)
+        recordSchema = await captureAutomationRecordSchema(producerTrx, sheetId)
         for (const [fieldId, { ids, cfg }] of linkUpdates.entries()) {
           if (ids.length === 0) continue
           const exists = await query(
@@ -1700,6 +1733,7 @@ export class RecordService {
         }
       } else {
         await fenceWriterEntry(query, sheetId)
+        recordSchema = await captureAutomationRecordSchema(producerTrx, sheetId)
       }
       // Field retype slice 3a (ADR §3.11 row 4, REST + OAPI single-record PATCH): `fieldById` was loaded through
       // the pool BEFORE this transaction and the patch was validated against it. Re-read the touched fields FOR
@@ -1708,7 +1742,10 @@ export class RecordService {
       // W0-1 L6-a: mint the sealed operation after the fence; inert ⇒ byte-identical to L4cov.
       const op = await mintOperation(query, sheetId)
       const currentRes = await query(
-        'SELECT id, version, data, created_by, locked, locked_by FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE',
+        `SELECT id, version, data, created_by, locked, locked_by,
+         CASE WHEN octet_length(data::text)<=${AUTOMATION_RECORD_AFTER_IMAGE_LIMITS.bytes} THEN data::text ELSE NULL END AS automation_after_image_json,
+         (octet_length(data::text)>${AUTOMATION_RECORD_AFTER_IMAGE_LIMITS.bytes}) AS automation_after_image_oversized
+         FROM meta_records WHERE id = $1 AND sheet_id = $2 FOR UPDATE`,
         [recordId, sheetId],
       )
       if (currentRes.rows.length === 0) {
@@ -1757,6 +1794,9 @@ export class RecordService {
         }
       }
 
+      let afterImageRawJson: unknown
+      let afterImageVersion: number
+      let afterImageOversized = false
       if (Object.keys(patch).length > 0) {
         // lock-guarded: single PATCH — ensureRecordNotLocked enforced above in this txn.
         // revision-emitted: REST patchRecord — recordRecordRevision(action:'update') below, same txn.
@@ -1764,9 +1804,15 @@ export class RecordService {
           `UPDATE meta_records
            SET data = data || $1::jsonb, updated_at = now(), version = version + 1, modified_by = $4
            WHERE id = $2 AND sheet_id = $3
-           RETURNING version`,
+           RETURNING ${AUTOMATION_RECORD_AFTER_IMAGE_RETURNING}`,
           [JSON.stringify(patch), recordId, sheetId, patchActorId],
         )
+        const savedRow = updateRes.rows[0] as {
+          version?: unknown; automation_after_image_json?: unknown; automation_after_image_oversized?: unknown
+        } | undefined
+        afterImageRawJson = savedRow?.automation_after_image_json
+        afterImageVersion = Number(savedRow?.version)
+        afterImageOversized = savedRow?.automation_after_image_oversized === true
         nextVersion = Number((updateRes.rows[0] as { version?: unknown } | undefined)?.version ?? serverVersion)
         const revisionId = await recordRecordRevision(query, {
           sheetId,
@@ -1789,6 +1835,9 @@ export class RecordService {
         }
       } else {
         nextVersion = serverVersion
+        afterImageRawJson = currentRow.automation_after_image_json
+        afterImageVersion = serverVersion
+        afterImageOversized = currentRow.automation_after_image_oversized === true
       }
 
       // Bidirectional / mirror links (design 2026-06-14 §4): same as the create path above — the mirror
@@ -1843,7 +1892,15 @@ export class RecordService {
       // P1#2 REPLACE: same-transaction durable enqueue on the SUCCESS path (flag ON) — atomic with the UPDATE +
       // revision above (a version-conflict/permission throw rolls back and enqueues nothing). Fires even for a
       // zero-field patch, mirroring the legacy emit (which fired unconditionally post-commit). Flag OFF ⇒ no-op.
-      await enqueueRecordEventIfDurable(asProducerTrx(query), 'multitable.record.updated', updatedEventPayload)
+      await enqueueRecordEventIfDurable(producerTrx, 'multitable.record.updated', updatedEventPayload, undefined, {
+        sheetId,
+        recordId,
+        recordVersion: afterImageVersion,
+        data: undefined,
+        rawJson: afterImageRawJson,
+        oversized: afterImageOversized,
+        schema: recordSchema,
+      })
     })
 
     if (pendingSubscriberNotification) {
