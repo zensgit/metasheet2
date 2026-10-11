@@ -871,11 +871,13 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Pressing again will not change it — a platform administrator has to upgrade the server; give an administrator this error code.',
   }),
   // S3 fix round 2 (F4): the refresh never waits for another overview update; it says so and does nothing.
+  // Follow-ups 2 fix round 2: the next step promises nothing about the running update's outcome — that run can
+  // itself end 503 INCOMPLETE, so it only says to press again later and read the answer.
   STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY: Object.freeze({
     zh: '项目总览表正在被另一次更新改写,这次刷新没有做任何事,什么都没有改动。',
     en: 'The project overview is being updated by another run right now, so this refresh did nothing and nothing changed.',
-    zhNext: '稍等一会儿再点「刷新项目总览」;正在进行的那次更新完成后,总览就是最新的。',
-    enNext: 'Wait a moment and press "Refresh the project overview" again; once the running update finishes, the overview is current.',
+    zhNext: '稍等一会儿再点「刷新项目总览」,看那次更新的结果;那次更新不一定能写完全部项目。',
+    enNext: 'Wait a moment and press "Refresh the project overview" again to see how that update ended; it may not write every project.',
   }),
   // S3 follow-up C: the refresh wrote some rows but could not write every project — the overview is NOT current.
   // Follow-ups 2 (item 2): the next line promises only what is true across a server restart — a refresh redoes

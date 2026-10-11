@@ -768,6 +768,14 @@ describe('PO-HOME — 今天要处理: the archived section, real postures, 刷�
     expect(String(entry.enNext).toLowerCase()).not.toMatch(/remember/)
   })
 
+  it('S3 follow-ups 2 fix round 2: the BUSY next step never promises the overview will be current — the running update can itself end INCOMPLETE', () => {
+    const entry = STOCK_PREP_ERROR_PLAIN.STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY
+    expect(entry.zhNext).toContain('稍等一会儿再点「刷新项目总览」')
+    expect(entry.zhNext).not.toContain('最新')
+    expect(entry.enNext).toContain('Refresh the project overview')
+    expect(String(entry.enNext).toLowerCase()).not.toContain('current')
+  })
+
   it('「打开项目总览」 is offered ONLY when the host says this caller can read the overview (fix round 1, R1); never for a non-ready handle', async () => {
     const onOpenMultitable = vi.fn()
     // (a) readable: a floor operator WITHOUT the refresh right gets the link (a deep link grants nothing).
