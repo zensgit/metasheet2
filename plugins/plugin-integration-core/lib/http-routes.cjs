@@ -1949,6 +1949,242 @@ function toValuesFreeS3RouteError(error) {
 }
 
 /**
+ * VALUES-FREE 500s FOR EVERY STOCK-PREP AND TABLE-ACTION ROUTE (integration-layer audit 2026-10-10).
+ *
+ * THE GAP. Outside the four S3 handlers above, a stock-prep / table-action handler that let an UNTYPED error
+ * escape (a driver error, a host error, a TypeError) answered through the plain `sendError`, which puts the
+ * error's `message` verbatim into the body — and a driver or host message can quote a host, a submitted value
+ * or an id. Same rule as the admin trees (#6287, #6172) and S3 E2: a 5xx body never echoes caught error text.
+ *
+ * THE RULE (`stockPreparationRouteErrorIsTyped`). What a handler answers TODAY for a typed refusal is kept
+ * byte-for-byte — status, code, message and details all come from the same `sendError` as before:
+ *   - an `HttpRouteError` (the route layer's own typed refusals);
+ *   - an error with an integer `status` in 400–599 other than 500 (the domain error classes all carry one);
+ *   - an error with integer `status` 500 AND an error-code-shaped `code` (a deliberate typed 500, e.g. a B2a
+ *     config fault) — the S3 typed rule;
+ *   - an error with NO integer `status` that `inferHttpStatus` already maps to something other than 500 (the
+ *     class-name / data-source mappings: NotFound → 404, Conflict → 409, Validation → 400, … → 422).
+ * Anything else — i.e. everything that today answers an untyped 500 — becomes ONE fixed code and message with
+ * empty details. A 42703 (missing column) has no special status here: outside the overview it names no
+ * deployment state an operator can act on, so it is the same fixed 500 (the S3 handlers keep their 503).
+ * The wrapper's existing warn line (route TEMPLATE + one closed-list code, never a message) is unchanged.
+ */
+const STOCK_PREPARATION_ROUTE_FAILED_CODE = 'STOCK_PREPARATION_ROUTE_FAILED'
+const STOCK_PREPARATION_ROUTE_FAILED_MESSAGE = 'the request could not be completed; this response does not describe the failure'
+
+/**
+ * Every stock-prep (`…/stock-preparation/…`, including the internal SQL Server run) and table-action
+ * (`/api/integration/table-actions…`) handler that is not one of the four S3 handlers. Hand-written ON PURPOSE
+ * so a reviewer can read it; `__tests__/stock-preparation-route-values-free.test.cjs` derives the registered
+ * route list from `registerIntegrationRoutes` and fails if a stock-prep / table-action route is missing here
+ * (or in the S3 set), or if any other route is in neither a values-free set nor the pending set below.
+ */
+const STOCK_PREPARATION_VALUES_FREE_HANDLERS = new Set([
+  // table-actions
+  'tableActionsList',
+  'tableActionDryRun',
+  'tableActionMvpPersist',
+  'tableActionApply',
+  'tableActionLargeBomExpansionJobStart',
+  'tableActionLargeBomExpansionJobGet',
+  'tableActionLargeBomExpansionJobRun',
+  'tableActionLargeBomExpansionJobPlan',
+  'tableActionLargeBomApplyJobStart',
+  'tableActionLargeBomApplyJobGet',
+  'tableActionLargeBomApplyJobRun',
+  'tableActionLargeBomExpansionJobCancel',
+  'tableActionConflictPoliciesList',
+  'tableActionConflictPoliciesSave',
+  'tableActionConflictPoliciesDelete',
+  'tableActionConfirmationDecisionsReconcile',
+  // stock-preparation
+  'stockPreparationPreflight',
+  'stockPreparationSourcePreflight',
+  'stockPreparationTargetReadiness',
+  'stockPreparationTargetEnsure',
+  'stockPreparationSandboxTargetReadiness',
+  'stockPreparationSandboxTargetEnsure',
+  'stockPreparationManagedTableRelabel',
+  'stockPreparationOptionsSync',
+  'stockPreparationMvpReadiness',
+  'stockPreparationMvpEnsure',
+  'stockPreparationMvpRepair',
+  'stockPreparationMvpOptionsSync',
+  'stockPreparationMvpSyncPlan',
+  'stockPreparationMvpSyncPersist',
+  'stockPreparationPlmBomSourceRun',
+  'stockPreparationErpMaterialSourceRun',
+  'stockPreparationErpMaterialSync',
+  'stockPreparationProjectList',
+  'stockPreparationSnapshotBatchList',
+  'stockPreparationSnapshotDiff',
+  'stockPreparationSnapshotDiffRows',
+  'stockPreparationMaterialMappingSummary',
+  'stockPreparationMaterialMappingCandidates',
+  'stockPreparationUnitConversionSummary',
+  'stockPreparationUnitConversionCandidates',
+  'stockPreparationMaterialMappingCandidatesSync',
+  'stockPreparationMaterialMappingConfirm',
+  'stockPreparationMaterialMappingRetire',
+  'stockPreparationUnitConversionConfirm',
+  'stockPreparationUnitConversionRetire',
+  'stockPreparationCarryConfirm',
+  'stockPreparationGenerationRun',
+  'stockPreparationExceptionResolve',
+  'stockPreparationExceptionBulkResolve',
+  'stockPreparationExceptionList',
+  'stockPreparationPrepLineList',
+  'stockPreparationPrepLineExport',
+  'stockPreparationOperatorProjectDirectory',
+  'stockPreparationHandoffStatus',
+  'stockPreparationHandoffAdvance',
+  'stockPreparationOperatorProjectBoard',
+  'stockPreparationProjectTargetList',
+  'stockPreparationProjectTargetGet',
+  'stockPreparationProjectTargetCreate',
+  'stockPreparationProjectTargetArchive',
+  'stockPreparationProjectTargetRestore',
+  'stockPreparationAuditList',
+  'stockPreparationSourceBindingGet',
+  'stockPreparationSourceBindingSet',
+  // The SA02 read-plan routes share this wrapper, including failures before
+  // their typed management-service error boundary is reached.
+  'stockPreparationReadPlanConfigsList',
+  'stockPreparationReadPlanConfigsSave',
+  'stockPreparationReadPlanConfigsDeactivate',
+  'stockPreparationReadPlanConfigsValidate',
+  'stockPreparationReadPlanConfigsConfirmSample',
+  'stockPreparationReadPlanConfigsApprove',
+  'stockPreparationReadPlanConfigsRetire',
+  'stockPreparationReadPlanConfigsActivate',
+  'stockPreparationMembersRead',
+  'stockPreparationMembersCustomRoleCreate',
+  'stockPreparationMembersCustomRoleUpdate',
+  'stockPreparationMembersCustomRoleProjectTargets',
+  'stockPreparationConfirmationDecisionsReadiness',
+  'stockPreparationConfirmationDecisionsEnsure',
+  'stockPreparationConfirmationDecisionsConfirm',
+  'stockPreparationConfirmationDecisionsValueEntry',
+  'stockPreparationConfirmationDecisionsList',
+  'stockPreparationCustomerPackList',
+  'stockPreparationCustomerPackInstallList',
+  'stockPreparationCustomerPackDryRun',
+  'stockPreparationCustomerPackInstall',
+  'schemaMappingCopilotPropose',
+  'schemaMappingCopilotConfirm',
+  'stockPreparationSqlServerSealedSnapshotRun',
+])
+
+/**
+ * 切片 9（集成层线）接管 — TRANSITIONAL. The integration-admin handlers (external systems, read sources,
+ * pipelines, data factory, templates, runs, dead letters, …) still answer an untyped error through the plain
+ * `sendError`. They are listed here so the stock-prep guard can tell "deliberately not yet covered" from
+ * "forgotten": a registered route in NEITHER a values-free set NOR this list turns that guard red. The
+ * integration-layer line moves these names into its own `INTEGRATION_ADMIN_VALUES_FREE_HANDLERS` set (one
+ * more row in `VALUES_FREE_ROUTE_ERROR_MAPPERS` below) and deletes them from here. Nothing reads this list at
+ * request time.
+ */
+const INTEGRATION_ADMIN_VALUES_FREE_PENDING = Object.freeze([
+  'status',
+  'k3WiseCallAudit',
+  'adaptersList',
+  'integrationHubOverview',
+  'externalSystemsList',
+  'externalSystemsUpsert',
+  'externalSystemsGet',
+  'externalSystemsDelete',
+  'externalSystemsTest',
+  'externalSystemReadSmoke',
+  'externalSystemReadSourceProbe',
+  'readSourceConfigsSave',
+  'readSourceConfigsList',
+  'readSourceConfigsGet',
+  'readSourceConfigsAudit',
+  'readSourceConfigsApprove',
+  'readSourceConfigsRetire',
+  'readSourceConfigsRead',
+  'readSourceCompositionsSave',
+  'readSourceCompositionsList',
+  'readSourceCompositionsGet',
+  'readSourceCompositionsAudit',
+  'readSourceCompositionsApprove',
+  'readSourceCompositionsRetire',
+  'readSourceCompositionsRun',
+  'bridgeAgentChecklistsSave',
+  'bridgeAgentChecklistsGet',
+  'bridgeAgentChecklistsApprove',
+  'bridgeAgentChecklistsRetire',
+  'externalSystemObjects',
+  'externalSystemSchema',
+  'pipelinesList',
+  'pipelinesUpsert',
+  'pipelinesGet',
+  'pipelinesRun',
+  'pipelinesDryRun',
+  'pipelinesExternalWriteDryRun',
+  'pipelinesExternalWriteApply',
+  'fieldOptionsSync',
+  'templatesList',
+  'templatesUpsert',
+  'templatesReferences',
+  'templatesGet',
+  'templatesDelete',
+  'templatesPreview',
+  'templatesDerive',
+  'templatesInstantiate',
+  'stagingDescriptors',
+  'stagingInstall',
+  'runsList',
+  'runsGet',
+  'runsProvenance',
+  'provenanceByRow',
+  'deadLettersList',
+  'deadLettersReplay',
+])
+
+/** See the rule above. Synchronous, never throws: a hostile thrown value (throwing getter, `null`) is untyped. */
+function stockPreparationRouteErrorIsTyped(error) {
+  try {
+    if (error instanceof HttpRouteError) return true
+    if (error === null || typeof error !== 'object') return false
+    const status = error.status
+    if (Number.isInteger(status)) {
+      if (status < 400 || status >= 600) return false
+      if (status !== 500) return true
+      return typeof error.code === 'string' && STOCK_PREPARATION_S3_TYPED_CODE_PATTERN.test(error.code)
+    }
+    const inferred = inferHttpStatus(error)
+    return Number.isInteger(inferred) && inferred >= 400 && inferred < 600 && inferred !== 500
+  } catch {
+    return false
+  }
+}
+
+function toValuesFreeStockPreparationRouteError(error) {
+  if (stockPreparationRouteErrorIsTyped(error)) return error
+  return new HttpRouteError(500, STOCK_PREPARATION_ROUTE_FAILED_CODE, STOCK_PREPARATION_ROUTE_FAILED_MESSAGE, {})
+}
+
+/**
+ * THE ONE REGISTRY the route wrapper consults: handler set → the function that turns whatever escaped the
+ * handler into what the response may carry. A handler is in at most one set (the guard checks). EXTENSION
+ * POINT for 切片 9（集成层线）: add `{ handlers: INTEGRATION_ADMIN_VALUES_FREE_HANDLERS, toValuesFree: … }`
+ * as one more row and move those names out of INTEGRATION_ADMIN_VALUES_FREE_PENDING.
+ */
+const VALUES_FREE_ROUTE_ERROR_MAPPERS = Object.freeze([
+  Object.freeze({ handlers: STOCK_PREPARATION_S3_VALUES_FREE_HANDLERS, toValuesFree: toValuesFreeS3RouteError }),
+  Object.freeze({ handlers: STOCK_PREPARATION_VALUES_FREE_HANDLERS, toValuesFree: toValuesFreeStockPreparationRouteError }),
+])
+
+/** The values-free mapper for a handler, or null when its route still answers through the plain `sendError`. */
+function valuesFreeRouteErrorMapperFor(handlerName) {
+  for (const entry of VALUES_FREE_ROUTE_ERROR_MAPPERS) {
+    if (entry.handlers.has(handlerName)) return entry.toValuesFree
+  }
+  return null
+}
+
+/**
  * S3 fix round 1 (R5): an error's code as a per-event overview-update log line may carry it — the code
  * when it has error-code shape, otherwise the closed word UNKNOWN. Never a message, never a value.
  */
@@ -12320,6 +12556,8 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
     : ROUTES
   for (const [method, path, handlerName] of routeDefinitions) {
     const handler = handlers[handlerName]
+    // Resolved once per route at registration: the S3 set, the stock-prep / table-action set, or none.
+    const toValuesFree = valuesFreeRouteErrorMapperFor(handlerName)
     context.api.http.addRoute(method, path, async (req, res) => {
       try {
         return await handler(req, res)
@@ -12333,8 +12571,9 @@ function registerIntegrationRoutes({ context, services, logger } = {}) {
             code: loggableRouteFailureCode(error),
           })
         }
-        // S3 fix round 1 (E2): the S3 handlers answer typed refusals only — see toValuesFreeS3RouteError.
-        if (STOCK_PREPARATION_S3_VALUES_FREE_HANDLERS.has(handlerName)) return sendError(res, toValuesFreeS3RouteError(error))
+        // S3 fix round 1 (E2) and the 2026-10-10 audit: a stock-prep / table-action route answers typed
+        // refusals as built and anything else as one fixed values-free 500 — see VALUES_FREE_ROUTE_ERROR_MAPPERS.
+        if (toValuesFree) return sendError(res, toValuesFree(error))
         return sendError(res, error)
       }
     })
@@ -12388,5 +12627,13 @@ module.exports = {
     // vocabularies.
     assertStockPreparationTargetBelongsToTenant,
     STOCK_PREPARATION_TARGET_TENANT_WALLS,
+    // The values-free 500 registry, exported so the guard can check coverage against the registered routes.
+    STOCK_PREPARATION_S3_VALUES_FREE_HANDLERS,
+    STOCK_PREPARATION_VALUES_FREE_HANDLERS,
+    INTEGRATION_ADMIN_VALUES_FREE_PENDING,
+    VALUES_FREE_ROUTE_ERROR_MAPPERS,
+    STOCK_PREPARATION_ROUTE_FAILED_CODE,
+    stockPreparationRouteErrorIsTyped,
+    toValuesFreeStockPreparationRouteError,
   },
 }

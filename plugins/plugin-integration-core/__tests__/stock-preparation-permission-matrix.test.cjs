@@ -857,9 +857,12 @@ async function theConfirmAuditRowCarriesTheProjectFromTheLedger() {
       },
     })
     assert.equal(res.statusCode, 500, `confirm projectId: a dead records service still fails the request, got ${JSON.stringify(res.body)}`)
-    // The failure the CALLER sees is the downstream read's, verbatim — the soft lookup contributed
-    // no error of its own, which is the difference between "swallowed" and "hidden".
-    assert.equal(res.body.error.message, 'records service unavailable', JSON.stringify(res.body))
+    // The failure the CALLER sees is the request's own untyped 500 — since the 2026-10-10 values-free
+    // audit that is ONE fixed code with no echo of the downstream text (lib/http-routes.cjs
+    // VALUES_FREE_ROUTE_ERROR_MAPPERS). The soft lookup still contributes no error of its own: the
+    // request failed on the downstream read, and the intent row below is still on the trail.
+    assert.equal(res.body.error.code, 'STOCK_PREPARATION_ROUTE_FAILED', JSON.stringify(res.body))
+    assert.ok(!JSON.stringify(res.body).includes('records service unavailable'), 'the downstream text is not echoed')
     assert.equal(auditAppends.length, 1, 'confirm projectId: …and the intent row is STILL on the trail, which is the whole point')
     assert.equal(auditAppends[0].projectId, null, 'confirm projectId: a failed lookup fills nothing rather than blocking')
     assert.equal(auditAppends[0].actor, OPERATOR_CONFIRM.id, 'confirm projectId: the principal is stamped either way')

@@ -84,4 +84,5 @@ jobs:
           tests/integration/task-m4-delivery.db.test.ts
           tests/integration/task-m4-scheduler.db.test.ts
           tests/integration/task-m4-dingtalk.db.test.ts
+          tests/integration/task-m4-realtime.db.test.ts
           --reporter=verbose

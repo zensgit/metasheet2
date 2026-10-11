@@ -30,7 +30,7 @@ import {
   summarizeDirectorySyncApiCalls,
   type DirectorySyncApiCallCounters,
 } from './directory-sync-api-telemetry'
-import { DingTalkCorpNotAllowedError, assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
+import { assertDingTalkCorpAllowed } from '../integrations/dingtalk/runtime-policy'
 import {
   deriveDelegatedAdminNamespace,
   isNamespaceAdmissionControlledResource,
@@ -3794,6 +3794,16 @@ export class DirectorySyncLeaseLostError extends Error {
  * each one's message is a developer-authored sentence by its class contract (some interpolate the caller's own
  * input or our own ids, never provider, transport or driver text). Declared here, after the last of the
  * directory classes, because class declarations are not hoisted.
+ *
+ * Deliberately NOT listed: DingTalkCorpNotAllowedError. This list serves only the sync failure
+ * (markSyncFailure) and the three batch routes' `failed[].error`, and no code on those paths can throw it:
+ * its only producer is assertDingTalkCorpAllowed (integrations/dingtalk/runtime-policy.ts), called by
+ * normalizeIntegrationInput (create / update / test integration — admin routes only), by
+ * readDingTalkOauthConfig (OAuth login, auth/dingtalk-oauth.ts — outside this module's import closure) and
+ * by isDingTalkConfigured (which catches it). The directory-test route, where it IS reachable, lists it in
+ * DIRECTORY_TEST_FIXED_SENTENCES (routes/admin-directory.ts). An entry nothing can reach is an entry nobody
+ * re-checks — if a sync or batch path starts throwing it, add it back with a test in
+ * tests/unit/directory-batch-fixed-sentence-members.test.ts.
  */
 const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   DirectoryValidationError,
@@ -3805,7 +3815,6 @@ const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
   LoginNameRuleError,
   PasswordPolicyError,
   LoginAliasClaimError,
-  DingTalkCorpNotAllowedError,
 ]
 
 /**
