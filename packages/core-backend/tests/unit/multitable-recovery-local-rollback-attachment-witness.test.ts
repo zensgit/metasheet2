@@ -26,15 +26,55 @@ async function fixture(present = true, stableTimestamps = false) {
     await writeFile(file, 'captured', { mode: 0o600 })
   }
   const attachment = { id: 'synthetic-attachment', sheet_id: 'synthetic-sheet', storage_path: 'nested/object' }
+  const sheet = { id: 'synthetic-sheet', name: 'synthetic-before', recovery_writer_state: null as string | null,
+    recovery_writer_owner_kind: null, recovery_writer_owner_id: null, recovery_writer_owner_fence: null,
+    recovery_writer_lease_until: null, recovery_writer_updated_at: null }
+  const operation = { sheet_id: 'synthetic-sheet', operation_id: 'synthetic-operation', endpoint_seq: '17',
+    event_count: 1, operation_kind: 'ordinary', event_contract_version: 2, component_count: null }
+  const member = { sheet_id: 'synthetic-sheet', parent_operation_id: 'synthetic-parent', ordinal: 1,
+    child_operation_id: operation.operation_id, child_endpoint_seq: '17', child_event_count: 1 }
+  const sequence = { last_value: '17', is_called: true }
+  const auth = { last_login_at: null as string | null, updated_at: 'synthetic-before-login' }
+  const missingTables = new Set<string>()
+  let sheetPresent = true
+  let sequencePresent = true
   const start = vi.fn<[], Promise<void>>(async () => {})
   const end = vi.fn(async () => {})
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
     if (sql.includes('current_database()')) return { rows: [{ name: 'synthetic-db' }] }
-    if (sql.includes('pg_catalog.pg_tables')) return { rows: [
-      'meta_recovery_archives', 'meta_recovery_archive_jobs',
-      'meta_recovery_archive_job_chunks', 'meta_recovery_archive_nonce_reservations',
-    ].map(tablename => ({ tablename })) }
+    expect(sql).not.toMatch(/\b(?:nextval|setval)\s*\(/i)
+    if (sql.includes('pg_catalog.pg_tables')) {
+      const names = [
+        'meta_recovery_archives', 'meta_recovery_archive_jobs',
+        'meta_recovery_archive_job_chunks', 'meta_recovery_archive_nonce_reservations',
+        'meta_sheets', 'meta_records', 'meta_record_revisions', 'multitable_attachments',
+        'meta_record_history_operations', 'meta_record_history_operation_members', 'users',
+      ]
+      return { rows: names.filter(name => !missingTables.has(name)
+        && (!sql.includes('left(tablename') || name.startsWith('meta_recovery_')))
+        .map(tablename => ({ tablename })) }
+    }
+    if (sql.includes('FROM public.meta_record_chain_seq')) {
+      expect(sql).toMatch(/SELECT last_value::text, is_called FROM public\.meta_record_chain_seq/)
+      expect(values).toBeUndefined()
+      return { rows: sequencePresent ? [{ ...sequence }] : [] }
+    }
     const table = sql.match(/FROM public\."([a-z_]+)"/)?.[1]
+    if (table && missingTables.has(table)) throw new Error('synthetic missing table')
+    if (table === 'users') return { rows: [{ value: { ...auth } }] }
+    if (table === 'meta_sheets') {
+      expect(sql).toContain('WHERE id=$1')
+      expect(values).toEqual(['synthetic-sheet'])
+      const columns = sql.match(/\(SELECT ([\s\S]+?)\s+FROM public\."meta_sheets"/)?.[1]
+        .split(',').map(column => column.trim())
+      const value = columns ? Object.fromEntries(Object.entries(sheet).filter(([key]) => columns.includes(key))) : { ...sheet }
+      return { rows: sheetPresent ? [{ value }] : [] }
+    }
+    if (table === 'meta_record_history_operations' || table === 'meta_record_history_operation_members') {
+      expect(sql).toContain('WHERE sheet_id=$1')
+      expect(values).toEqual(['synthetic-sheet'])
+      return { rows: [{ value: { ...(table === 'meta_record_history_operations' ? operation : member) } }] }
+    }
     if (table === 'multitable_attachments') {
       expect(sql).toContain('WHERE sheet_id=$1')
       expect(values).toEqual(['synthetic-sheet'])
@@ -78,7 +118,11 @@ async function fixture(present = true, stableTimestamps = false) {
     process: { env: { NODE_ENV: 'test', MULTITABLE_RECOVERY_ARCHIVE_ENABLED: 'false',
       MULTITABLE_ENABLE_WRITER_FENCE: 'false', ATTACHMENT_PATH: attachmentPath } },
     fetch: async (url: string) => {
-      if (url.endsWith('/api/auth/login')) return new Response(JSON.stringify({ data: { token: 'synthetic-only' } }))
+      if (url.endsWith('/api/auth/login')) {
+        auth.last_login_at = 'synthetic-login'
+        auth.updated_at = 'synthetic-after-login'
+        return new Response(JSON.stringify({ data: { token: 'synthetic-only' } }))
+      }
       const response = url.endsWith('/preview') ? responses.preview : responses.catalog
       return new Response(JSON.stringify(response.body), { status: response.status })
     },
@@ -90,7 +134,9 @@ async function fixture(present = true, stableTimestamps = false) {
   }) as (input: { databaseName: string; identity: { sheetId: string; actorId: string }; password: string; generationId: string }) => Promise<{
     responses: typeof responses; tableCount: number
   }>
-  return { root, attachmentPath, file, attachment, start, end, run: () => run({ databaseName: 'synthetic-db',
+  return { root, attachmentPath, file, attachment, sheet, operation, member, sequence, auth, missingTables,
+    omitSheet: () => { sheetPresent = false }, omitSequence: () => { sequencePresent = false },
+    start, end, query, run: () => run({ databaseName: 'synthetic-db',
     identity: { sheetId: 'synthetic-sheet', actorId: 'synthetic-actor' }, password: 'synthetic-only', generationId: 'synthetic-generation' }) }
 }
 
@@ -101,8 +147,51 @@ describe('local flag-off rollback attachment witness', () => {
       const result = await f.run()
       expect(result.responses).toEqual(responses)
       expect(Number.isSafeInteger(result.tableCount) && result.tableCount >= 6).toBe(true)
+      expect(f.auth).toEqual({ last_login_at: 'synthetic-login', updated_at: 'synthetic-after-login' })
+      expect(f.query.mock.calls.some(([sql]) => sql.includes('FROM public."users"'))).toBe(false)
       expect(f.end).toHaveBeenCalledTimes(1)
       if (!present) await expect(lstat(f.attachmentPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally { await rm(f.root, { recursive: true, force: true }) }
+  })
+
+  it.each(['sheet', 'sheet-metadata', 'operation', 'member', 'sequence-value', 'sequence-called'] as const)(
+    'refuses independent %s drift while flags are off', async mutation => {
+      const f = await fixture()
+      try {
+        f.start.mockImplementation(async () => {
+          if (mutation === 'sheet') f.sheet.recovery_writer_state = 'applying'
+          else if (mutation === 'sheet-metadata') f.sheet.name = 'synthetic-after'
+          else if (mutation === 'operation') f.operation.event_count = 2
+          else if (mutation === 'member') f.member.child_event_count = 2
+          else if (mutation === 'sequence-value') f.sequence.last_value = '18'
+          else f.sequence.is_called = false
+        })
+        await expect(f.run()).rejects.toThrow('RECOVERY_LOCAL_ROLLBACK_UNEXPECTED_WRITE')
+        expect(f.end).toHaveBeenCalledTimes(1)
+      } finally { await rm(f.root, { recursive: true, force: true }) }
+    },
+  )
+
+  it.each(['meta_sheets', 'meta_record_history_operations', 'meta_record_history_operation_members'])(
+    'refuses a missing required %s table before starting a server', async table => {
+      const f = await fixture()
+      try {
+        f.missingTables.add(table)
+        await expect(f.run()).rejects.toThrow('RECOVERY_LOCAL_ROLLBACK_TABLE_MISSING')
+        expect(f.start).not.toHaveBeenCalled()
+        expect(f.end).toHaveBeenCalledTimes(1)
+      } finally { await rm(f.root, { recursive: true, force: true }) }
+    },
+  )
+
+  it.each(['sheet', 'sequence'] as const)('refuses missing required %s state before starting a server', async state => {
+    const f = await fixture()
+    try {
+      if (state === 'sheet') f.omitSheet()
+      else f.omitSequence()
+      await expect(f.run()).rejects.toThrow('RECOVERY_LOCAL_ROLLBACK_STATE_MISSING')
+      expect(f.start).not.toHaveBeenCalled()
+      expect(f.end).toHaveBeenCalledTimes(1)
     } finally { await rm(f.root, { recursive: true, force: true }) }
   })
 
