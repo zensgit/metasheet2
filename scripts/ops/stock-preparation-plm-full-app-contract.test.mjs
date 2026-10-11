@@ -17,7 +17,7 @@ import { EventEmitter, errorMonitor } from 'node:events'
 import * as yidaStatic from '../../plugins/plugin-integration-core/lib/yida-static-plan.mjs'
 import { parseYamlDocument } from './ci-realdb-step-contract.mjs'
 import { cleanEnvironment, parseArguments, validateProductionStopEvidence, validateK3Evidence, validateYidaEvidence, validateAutomationEvidence,
-  createOwnedProcessCapture, createFullAppStageRunner, verifyStageLogs, recoverUnobservedProcessLogs,
+  createOwnedProcessCapture, createFullAppStageRunner, publicBrowserFailure, verifyStageLogs, recoverUnobservedProcessLogs,
   validateYidaOwnerOffEvidence, verifyYidaOwnerOffRawLogs, validateYidaInitializationEvidence,
   validateBrowserProcessEvidence, initializationFailurePhases, validateYidaInitializationFailureMarker } from './run-stock-preparation-plm-full-app.mjs'
 
@@ -530,6 +530,45 @@ async function ownedLogFixture() {
   const emitted = []
   return { repoRoot, scratchDir, emitted, run: createFullAppStageRunner({ repoRoot, scratchDir, emit: line => emitted.push(line) }) }
 }
+test('browser failure public projection rejects unknown strings and private frame fields', () => {
+  const secret = 'SYNTHETIC_PRIVATE_VALUE'
+  for (const input of [null, [], secret, { stage: secret }, { stage: 'browser-failure-counts', counts: secret }]) {
+    assert.equal(publicBrowserFailure(input), null)
+  }
+  assert.deepEqual(publicBrowserFailure({ stage: 'browser-api-denied', routeCategory: secret, method: secret,
+    path: secret, token: secret }), { stage: 'browser-api-denied', routeCategory: 'OTHER', method: 'OTHER' })
+  for (const diagnostic of [secret, 'APP_BROWSER_TOPBAR_' + secret, 'APP_BROWSER_' + secret + '_TIMEOUT']) {
+    const projected = publicBrowserFailure({ stage: 'isolated-browser-failed', diagnostic, token: secret })
+    assert(!JSON.stringify(projected).includes(secret))
+    assert.equal(projected.reason, 'OTHER')
+  }
+})
+
+test('actual stage runner publishes closed browser failure diagnostics without private payloads', async () => {
+  const f = await ownedLogFixture()
+  const secret = 'SYNTHETIC_PRIVATE_VALUE'
+  const records = [
+    { stage: 'browser-api-denied', routeCategory: 'OTHER_STOCK_PREPARATION', method: 'GET', path: secret },
+    { stage: 'isolated-browser-failed', diagnostic: 'APP_BROWSER_TOPBAR_UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS', payload: secret },
+    { stage: 'isolated-browser-failed', diagnostic: 'APP_BROWSER_TOPBAR_' + secret },
+    { stage: 'browser-failure-counts', counts: { secret } },
+  ]
+  const result = await f.run('browser-failure', ['-e',
+    `for (const record of ${JSON.stringify(records)}) console.log('PLM_FULL_APP_PROBE ' + JSON.stringify(record)); process.exitCode = 1`],
+  cleanEnvironment(process.env))
+  assert.equal(result.code, 1)
+  assert.equal(result.markers.length, 4)
+  const frames = f.emitted.filter(line => line.startsWith('PLM_FULL_APP_PROBE '))
+    .map(line => JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)))
+  assert.deepEqual(frames, [
+    { stage: 'browser-api-denied', routeCategory: 'OTHER_STOCK_PREPARATION', method: 'GET' },
+    { stage: 'isolated-browser-failed', phase: 'TOPBAR', reason: 'UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS' },
+    { stage: 'isolated-browser-failed', phase: 'TOPBAR', reason: 'OTHER' },
+  ])
+  assert(!f.emitted.join('\n').includes(secret))
+  await verifyStageLogs({ ...f, stages: [result] })
+})
+
 test('actual stage runner preserves separate binary raw streams and Unicode split frames', async () => {
   const f = await ownedLogFixture()
   const marker = 'PLM_FULL_APP_PROBE ' + JSON.stringify({ stage: 'browser-phase', phase: '汉字' }) + '\n'

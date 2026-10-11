@@ -169,6 +169,34 @@ export async function recoverUnobservedProcessLogs({ repoRoot, scratchDir, name,
   }
   return { name, ordinal, lifecycleObserved: false, captureComplete: false, streams }
 }
+// Child frames are private input, not safe public log lines. Publish a closed
+// classification only: even an uppercase-looking error may contain a secret.
+export function publicBrowserFailure(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  if (record.stage === 'browser-api-denied') {
+    const categories = ['OTHER_STOCK_PREPARATION', 'OTHER_MULTITABLE', 'OTHER_API',
+      'EDITOR_RULE_STATS', 'EDITOR_RULE_LOGS']
+    return { stage: 'browser-api-denied',
+      routeCategory: categories.includes(record.routeCategory) ? record.routeCategory : 'OTHER',
+      method: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(record.method) ? record.method : 'OTHER' }
+  }
+  if (record.stage !== 'isolated-browser-failed') return null
+  const phases = ['CONFIG', 'CONFIG_CREATE', 'LISTEN', 'BROWSER', 'LOGIN', 'WORKBENCH', 'K3_WORKBENCH',
+    'TOPBAR', 'INSTALL', 'BIND', 'EXPLICIT_TENANT_SCOPE', 'EXACT_TENANT_REBIND', 'SAVE', 'VALIDATE',
+    'CONFIRM_SAMPLE', 'APPROVE', 'ACTIVATE', 'PREVIEW_NAVIGATION', 'PREVIEW', 'RELOAD',
+    'YIDA_BOARD_NAVIGATION', 'YIDA_STATIC_PREVIEW', 'YIDA_OWNER_DEFAULT_OFF',
+    'AUTOMATION_INTERVAL_EDITOR', 'AUTOMATION_INTERVAL', 'AUTOMATION_MANUAL']
+  const diagnostic = typeof record.diagnostic === 'string' ? record.diagnostic : ''
+  const phase = phases.sort((a, b) => b.length - a.length)
+    .find(value => diagnostic.startsWith('APP_BROWSER_' + value + '_'))
+  const reason = phase ? diagnostic.slice(('APP_BROWSER_' + phase + '_').length) : ''
+  const reasons = ['TIMEOUT', 'TYPE_ERROR', 'FAILED', 'REQUEST_FAILED',
+    'DEPLOYMENT_POSTURE_REQUIRED', 'UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_MEMBERS',
+    'UNEXPECTED_API_GET_TASKS_COUNTS', 'UNEXPECTED_API_GET_INTEGRATION_STOCK_PREPARATION_DEPLOYMENT_PREFLIGHT']
+  return { stage: 'isolated-browser-failed', phase: phase ?? 'OTHER',
+    reason: reasons.includes(reason) ? reason : 'OTHER' }
+}
+
 export function createFullAppStageRunner({ repoRoot, scratchDir, emit = console.log, namespaceScope }) {
   const namespaceAuthority = createRequire(import.meta.url)('./lib/stock-preparation-plm-namespace-scope.cjs')
   let ordinal = 1
@@ -198,7 +226,14 @@ export function createFullAppStageRunner({ repoRoot, scratchDir, emit = console.
       const acceptLine = line => {
         if (/^(?:PLM_FULL_APP_PROBE|PLM_FULL_APP_ISOLATION|PLM_FULL_APP_BUILD|PLM_FULL_APP_BUILD_FAILED|PLM_FULL_APP_WEB_TYPECHECK) /.test(line)) markers.push(line)
         if (line.startsWith('PLM_FULL_APP_PROBE ')) {
-          try { if (JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)).stage === 'browser-phase') emit(line) }
+          try {
+            const record = JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length))
+            if (record.stage === 'browser-phase') emit(line)
+            else {
+              const failure = publicBrowserFailure(record)
+              if (failure) emit('PLM_FULL_APP_PROBE ' + JSON.stringify(failure))
+            }
+          }
           catch { malformedMarker = true; terminate('malformed-marker') }
         }
       }
