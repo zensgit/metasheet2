@@ -26,7 +26,8 @@ const read = relative => readFileSync(path.join(repoRoot, relative), 'utf8')
 const workflow = parseYamlDocument(read('.github/workflows/plugin-tests.yml'))
 const acceptanceId = 'stock-preparation-plm-full-app'
 const contractsId = 'stock-preparation-plm-full-app-contracts'
-const browserId = 'stock-preparation-read-plan-browser-install'
+// YiDa and PLM share the actual Chromium installation step after stack alignment.
+const browserId = 'stock-preparation-yida-owner-browser-install'
 const dependencyInstallId = 'workspace-dependency-install'
 const node20 = "matrix.node-version == '20.x'"
 const acceptanceCommand = 'node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin'

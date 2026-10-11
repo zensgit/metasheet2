@@ -689,6 +689,7 @@ jobs:
             ${{ runner.os }}-pnpm-store-
 
       - name: Install dependencies (with log)
+        id: workspace-dependency-install
         run: |
           set -o pipefail
           pnpm install --frozen-lockfile 2>&1 | tee install.log
