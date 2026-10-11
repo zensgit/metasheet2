@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **最新续记（2026-10-11，§188）**：Automation已提交、推送并开草稿PR #6337，head `6d0d0c33d`、base为PLM #6324；宜搭六路径修复已合流，保留全部后部接线。40个后端unit整文件实际2191/2191通过，原validate:all通过；此前whole128和前端947通过仍各自绑定原输入，不移记为最终组合全绿。新head CI已排队，余真库整文件、原manual/interval应用生命周期、最终provenance及独立终审待闭合，尚非全部SA06或可合并状态。授权旧66B产物不存在，未读无关产物。goal active，真实客户读取/token交换/宜搭发送、GitHub合并和部署均未进行，K3永久禁写。以下旧“最新/当前”保留各自历史时点。
+> **最新续记（2026-10-12，§189）**：草稿PR #6337最新head `014116f0b`已修复两处实际CI接线遗漏；官方备料浏览器完整job通过，Integration Guard接线与插件整链通过、web步骤尚运行。关键更正：叠层PR不自动触发仅面向main/develop的plugin-tests，因此已显式在同一head启动原workflow_dispatch run `38153947825`，完整真库/manual/interval验收仍运行，不能用其它绿灯代替。最新main的19个新增Automation迁移编号无碰撞只属元数据盘点，非迁移通过。独立终审、最终base对齐和完整目标仍未闭合。无客户读取/token交换/宜搭发送、GitHub合并或部署，K3永久禁写，goal active。以下旧“最新/当前”保留各自历史时点。
 
 > **最新续记（2026-10-11，§180）**：新C1 factory仅补generated core的directory-realdb phase与expected 2→3；session38027实际20/20 PASS。11 lanes现10 PASS/1 FAIL（carry-core 18/25）；35项完整索引排除仍不可擅自加入。PLM仍no-commit、未push。#6315 exact509的archive reader为`READ_COMPLETE`，但owner step仍`UNKNOWN/INVALID`，`RESULT=0`不证明native零tasks；两ops实现尚未提交。有限Linux unit projection实际32/32 PASS，但不代表57/70 workflow、完整C1或CI通过；#6315 CI失败根因仍未知。#6323 14项未覆盖filter为0的whole-index unit。无merge/deploy/客户读取/token/send，sender OFF、K3永久禁写。
 
@@ -2158,3 +2158,10 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 精确248路径manifest经全量复算，242保持原值、6处明确修订（前端3、whole128测试1、本节workflow/契约2）；另加provenance向量共249路径，提交 `9476a0c38d010e1e9f7b5374737d4c241995c1bb`。随后正常本地merge宜搭 `0b62562c97f8c791efbd2c214c360bbadadd5d9a`，恰6路径、无冲突，得到 `6d0d0c33d1db91aa9e8fdad7e751d9cba3ac43a1`；不是GitHub合并、不是覆盖整个workflow。唯一workflow合流增量为test job临时runner pin及说明，后部PLM/Automation/恢复接线保留。
 - 已正常推送并建立草稿 [PR #6337](https://github.com/zensgit/metasheet2/pull/6337)，base为PLM分支精确 `a546cbc1170222564bafc6350954d26bf2e3879b`。初始状态OPEN/DRAFT/MERGEABLE，CI排队；MERGEABLE不是通过或合并授权。PR正文逐项披露证据输入与剩余项：其他23个Automation/recovery真库整文件及同链用例、原manual/interval全应用、完整插件链/最终LF provenance、独立保证型终审、迁移顺序及最终base对齐。没有把已有128/947/2191相加当成完整SA06，也未把旧分支绿转借到新head。
 - 四个开发切片均已有可定位PR，但本草稿不能转正式或合并；真实客户读取、token交换、宜搭发送、GitHub合并、生产迁移与部署均未发生，K3永久禁写。私有诊断/截图未上传，goal active。
+
+## 189. 修复真实CI接线遗漏，并显式补跑叠层PR未触发的完整工作流（2026-10-12）
+
+- 初始head `6d0d0c33d`有两项真实失败：备料browser classifier未覆盖实际导入的 `automationRead.ts`；Integration Guard触发清单已有 `AutomationExecutionsView`、`multitable-automation-manager`、`multitable-automation-rule-editor`，执行清单却缺这三项。原失败日志仅内存分类、输出固定标签/哈希，未上传或打印原文。修复精确两文件，不改测试或权限，正常提交/push `014116f0b02eb777f79a143d19dd62a4b29b3fd4`；逐一移除三项登记的静态变异各重新形成缺口，不称该静态检查为整套运行。
+- 新私有Linux副本仅派生browser classifier，原浏览器接线完整6项＋原provenance完整脚本共7/7 PASS，零skip/fail/cancel/todo，receipt `80084e667fd5216de24db22ca7682403498f2751681612e110eaec6b8e3adef3`、stdout `2aa6ef7407f4aadbe2ccd2a73b33f8785eeaf6259d9ca47573ae19c1f8bac8ac`，stderr空；root另核真实TAP计数与provenance完成标志，输入父源/派生源前后未改。该局部派生不是全部最终head输入。随后官方精确head run `38153871619` 已success，包含第13接线、第14类型与第15真实浏览器步骤；Integration Guard run `38153871580` 的第8原接线契约与第15插件整链success，第16前端仍运行，未宣告全绿。
+- 重新亲读workflow发现 `.github/workflows/plugin-tests.yml` 的PR目标分支只有main/develop，#6337 base为PLM，因此§188“CI排队”不能覆盖完整数据库/应用工作流；实际branch run列表为空。已用原有workflow_dispatch显式启动run `38153947825`、test20 job `114512936997`，返回head精确匹配014116；工作流尚运行，不改触发范围、不调用部署工作流，不声明其余23真库或manual/interval已通过。coverage job本来仅PR运行，dispatch不能代替其覆盖率门。
+- 只读核最新main `906840c74cab5120aac73132644372e678f6b334` 的379个core迁移文件名，与本片19个新增Automation编号无碰撞，payload读取0；不是最新main合流或DDL执行证明。#6313实际含31份独立决策/目标文档，与功能PR分开；最终保证型独立审查仍未完成。所有前轮失败与证据原样保留，真实系统操作/发送/合并/部署仍未发生，目标保持active。
