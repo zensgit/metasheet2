@@ -46,6 +46,10 @@ describe('AttendanceView server clock and aligned rules', () => {
   }
   function time() { return container.querySelector('[data-testid="attendance-hero-time"]')?.textContent }
   function timezone() { return container.querySelector('[data-attendance-hero-timezone]')?.textContent }
+  function calendarTodayDates() {
+    return [...container.querySelectorAll('.attendance__calendar-cell--today')]
+      .map(cell => cell.getAttribute('title')?.split(' · ')[0])
+  }
   function button(label: string) {
     const found = [...container.querySelectorAll('button')].find(el => el.textContent?.trim() === label)
     expect(found, label).toBeTruthy()
@@ -109,11 +113,13 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(time()).toBe('10:00:00')
     expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
     expect(container.textContent).toContain('2026-04-15')
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
     const today = requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')
     expect(today.map(url => [url.searchParams.get('from'), url.searchParams.get('to')])).toEqual([['2026-04-15', '2026-04-15']])
     vi.setSystemTime(new Date('2026-05-20T00:00:00Z'))
     await tick(1_000)
     expect(time()).toBe('10:00:01')
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
     expect(requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1')).toHaveLength(1)
   })
   it.each([undefined, 'invalid'])('missing/malformed server sample %s stays unavailable, ordinary punch still submits without timezone/time', async sample => {
@@ -121,6 +127,7 @@ describe('AttendanceView server clock and aligned rules', () => {
     await mount()
     expect(time()).toBe('Server time unavailable')
     expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(calendarTodayDates()).toEqual([])
     const punch = container.querySelector('[data-testid="attendance-hero-punch"] button') as HTMLButtonElement
     expect(punch.disabled).toBe(false)
     punch.click()
@@ -131,6 +138,22 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(body).not.toHaveProperty('timezone')
     expect(body).not.toHaveProperty('occurredAt')
     expect(body).not.toHaveProperty('occurred_at')
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click()
+    await flush()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
+  })
+  it('calendar Today refuses an invalid rule timezone and recovers only after valid server rules', async () => {
+    rulesReply = async url => response({ ok: true, data: rules(url, {
+      runtimeRule: { timezone: 'Invalid/Timezone' },
+    }) })
+    await mount()
+    expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(calendarTodayDates()).toEqual([])
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click()
+    await flush()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
   })
   it.each(['Asia/Tokyo', 'Asia/Singapore'])('aligns UTC previous-day rules once in %s with complete header omissions', async timezone => {
     zone = timezone
@@ -152,9 +175,14 @@ describe('AttendanceView server clock and aligned rules', () => {
     await mount()
     expect(count).toBe(2)
     expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(calendarTodayDates()).toEqual([])
     expect(container.querySelector('[data-selfservice-card="rules"]')?.textContent).not.toContain('aligned-group')
     await tick(1_000)
     expect(count).toBe(2)
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click()
+    await flush()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
   })
   it('checks processing-time midnight before publishing a delayed body', async () => {
     serverEpoch = Date.parse('2026-04-15T15:59:59Z') - mono
@@ -201,14 +229,17 @@ describe('AttendanceView server clock and aligned rules', () => {
       runtimeRule: { timezone: zone, workStartTime: url.searchParams.get('asOf') === '2026-04-16' ? '10:00' : '09:00', workEndTime: '18:00' },
     }) })
     await mount()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
     await tick(1_000)
     expect(time()).toBe('00:00:00')
+    expect(calendarTodayDates()).toEqual(['2026-04-16'])
     expect(container.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('10:00')
     expect(requests.filter(url => url.pathname === '/api/attendance/rules/me').map(url => url.searchParams.get('asOf'))).toEqual([null, '2026-04-16'])
     expect(requests.filter(url => url.pathname === '/api/attendance/records' && url.searchParams.get('pageSize') === '1').map(url => url.searchParams.get('from'))).toEqual(['2026-04-15', '2026-04-16'])
   })
   it('resamples at 60s, retains fresh background context only while pending, and expires without fallback', async () => {
     await mount()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
     const pending = deferred<Response>()
     rulesReply = () => pending.promise
     await tick(59_000)
@@ -217,9 +248,15 @@ describe('AttendanceView server clock and aligned rules', () => {
     expect(requests.filter(url => url.pathname === '/api/attendance/rules/me')).toHaveLength(2)
     expect(time()).toBe('10:01:00')
     expect(timezone()).toBe('Attendance timezone: Asia/Shanghai')
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
     await tick(240_000)
     expect(time()).toBe('Server time unavailable')
     expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(calendarTodayDates()).toEqual([])
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    button('Refresh').click()
+    await flush()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
   })
   it('manual refresh clears availability and older response cannot overwrite a later background round', async () => {
     await mount()
@@ -294,6 +331,11 @@ describe('AttendanceView server clock and aligned rules', () => {
     await flush()
     expect(time()).toBe('Server time unavailable')
     expect(timezone()).toBe('Attendance timezone unavailable')
+    expect(calendarTodayDates()).toEqual([])
+    app?.unmount(); app = null
+    rulesReply = async url => response({ ok: true, data: rules(url) })
+    await mount()
+    expect(calendarTodayDates()).toEqual(['2026-04-15'])
   })
   it.each(['admin', 'reports'])('does not add employee self-rules sampling to %s', async mode => {
     await mount(mode)

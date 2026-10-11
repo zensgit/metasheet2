@@ -16300,7 +16300,6 @@ const calendarDays = computed<CalendarDay[]>(() => {
   const weekStartsOn = 1
   const startOffset = (firstDay.getDay() - weekStartsOn + 7) % 7
   const totalCells = Math.ceil((lastDay.getDate() + startOffset) / 7) * 7
-  const now = new Date()
 
   return Array.from({ length: totalCells }, (_, index) => {
     const date = new Date(year, month, index - startOffset + 1)
@@ -16335,7 +16334,7 @@ const calendarDays = computed<CalendarDay[]>(() => {
     return {
       key,
       day: date.getDate(),
-      isToday: date.toDateString() === now.toDateString(),
+      isToday: Boolean(todayWorkDateKey.value && key === todayWorkDateKey.value),
       isCurrentMonth: date.getMonth() === month,
       status,
       statusLabel,
