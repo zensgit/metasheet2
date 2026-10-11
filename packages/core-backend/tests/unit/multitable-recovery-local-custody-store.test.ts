@@ -2,13 +2,15 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { createLocalCustodyBackup, createLocalCustodySession } from '../../src/multitable/recovery-local-custody'
 import { assertLocalCustodyMountIsolation, createLocalCustodyStore } from '../../src/multitable/recovery-local-custody-store'
 
+import * as localFilesystem from '../../src/multitable/recovery-local-filesystem'
+
 const roots: string[] = []
 const refusal = 'RECOVERY_LOCAL_CUSTODY_STORE_REFUSED'
-afterEach(async () => { for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
+afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await fs.rm(root, { recursive: true, force: true }) })
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'tm-custody-store-'))
   roots.push(root)
@@ -26,6 +28,15 @@ async function fixture() {
 }
 
 describe('explicit encrypted local custody package storage', () => {
+  test('filesystem refusal precedes custody publication and preserves values-free errors', async () => {
+    const f = await fixture()
+    const store = await createLocalCustodyStore(f.options)
+    vi.spyOn(localFilesystem, 'isRecoveryLocalFilesystem').mockResolvedValue(false)
+    await expect(createLocalCustodyStore(f.options)).rejects.toThrow(refusal)
+    await expect(store.putBackup(randomUUID(), f.backup)).rejects.toThrow(refusal)
+    expect(await fs.readdir(f.custodyPath)).toEqual([])
+    expect(await fs.readdir(f.archivePath)).toEqual([])
+  })
   test('mount admission rejects device aliases and subdirectory mounts, without mounting anything', () => {
     const base = '1 0 8:1 / / rw - ext4 /dev/synthetic rw'
     expect(() => assertLocalCustodyMountIsolation(base, ['/custody', '/archive'])).not.toThrow()
