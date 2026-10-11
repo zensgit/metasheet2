@@ -382,7 +382,9 @@ test('production capture and outer caller publish bootstrap rejection before unc
     assert.deepEqual(JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)), {
       protocol: 'YIDA_BROWSER_CI_FAILURE_V1', stage: 'BOOTSTRAP_LO_UP', reason: 'BOOTSTRAP_FAILED',
       diagnosticSource: 'STDERR', diagnosticOutcome: 'FRAME_ACCEPTED',
-      childExit: 1, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false })
+      childExit: 1, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false,
+      stderrObservation: { byteCount: bootstrapFrame('BOOTSTRAP_LO_UP').length, lineCount: 2,
+        pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN' } })
     assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
   }, { stderr: bootstrapFrame('BOOTSTRAP_LO_UP').toString() })
 })
@@ -420,7 +422,12 @@ test('production capture and outer caller classify only exact unshare denial and
       assert.deepEqual(JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length)), {
         protocol: 'YIDA_BROWSER_CI_FAILURE_V1', stage, reason, childExit: 1,
         diagnosticSource, diagnosticOutcome,
-        signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false }, variant)
+        signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false,
+        ...(['exact', 'prefix', 'suffix', 'missing-newline', 'extra-newline', 'unknown'].includes(variant)
+          ? { stderrObservation: { byteCount: Buffer.byteLength(stderr),
+            lineCount: ['prefix', 'suffix', 'extra-newline'].includes(variant) ? 2 : 1,
+            pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false,
+            toolPrefix: variant === 'prefix' ? 'UNKNOWN' : 'UNSHARE' } } : {}) }, variant)
       assert.equal(lines.length, 2, variant)
       assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}', variant)
       assert.equal(lines.join('\n').includes('synthetic-secret'), false, variant)
@@ -479,7 +486,88 @@ function assertRefusedDiagnostic(owner, ownerSha, terminal, sandbox, expected) {
   for (const privateValue of ['synthetic-secret', sandbox, ownerSha, sha(JSON.stringify(owner.hashes))]) {
     assert.equal(lines.join('\n').includes(privateValue), false)
   }
+  return diagnostic
 }
+
+test('verified stderr shape observations remain values-free and never turn nonprotocol logs into accepted frames', async () => {
+  const header = 'Traceback (most recent call last):\n'
+  const secret = 'synthetic-secret token=synthetic-token authorityCode=synthetic-authority host=192.0.2.17 /synthetic/private/path'
+  const missing = 'unshare: failed to execute /usr/bin/python3: No such file or directory\n'
+  const fixtures = [
+    { stderr: secret, lineCount: 1 },
+    { stderr: header + secret + '\nAssertionError\n', lineCount: 3, pythonTracebackHeader: true, terminalAssertionError: true },
+    { stderr: header + secret + '\nAssertionError', lineCount: 3, pythonTracebackHeader: true, terminalAssertionError: true },
+    { stderr: header + secret + '\nAssertionError: ' + secret + '\n', lineCount: 3, pythonTracebackHeader: true },
+    { stderr: header + secret + '\nAssertionError\n' + secret + '\n', lineCount: 4, pythonTracebackHeader: true },
+    { stderr: secret + '\n' + header + 'AssertionError\n', lineCount: 3, terminalAssertionError: true },
+    { stderr: 'Traceback (most recent call last): ' + secret + '\nAssertionError\n', lineCount: 2, terminalAssertionError: true },
+    { stderr: header.replace('\n', '\r\n') + secret + '\r\nAssertionError\r\n', lineCount: 3 },
+    { stderr: header + secret + '\nAssertionError\n\n', lineCount: 4, pythonTracebackHeader: true },
+    { stderr: 'AssertionError\n', lineCount: 1, terminalAssertionError: true },
+    { stderr: missing, lineCount: 1, unshareExecutableMissing: true, toolPrefix: 'UNSHARE' },
+    { stderr: missing + secret + '\n', lineCount: 2, toolPrefix: 'UNSHARE' },
+    { stderr: missing.replace('/usr/bin/python3', '/synthetic/private/path'), lineCount: 1, toolPrefix: 'UNSHARE' },
+    { stderr: missing.trimEnd(), lineCount: 1, toolPrefix: 'UNSHARE' },
+    { stderr: 'unshare: ' + secret + '\n', lineCount: 1, toolPrefix: 'UNSHARE' },
+    { stderr: 'setpriv: ' + secret + '\n', lineCount: 1, toolPrefix: 'SETPRIV' },
+    { stderr: 'ip: ' + secret + '\n', lineCount: 1, toolPrefix: 'IP' },
+    { stderr: secret + '\nunshare: ' + secret + '\n', lineCount: 2 },
+    { stderr: 'unshare:' + secret + '\n', lineCount: 1 },
+    { stderr: 'synthetic-secret-' + 'x'.repeat(1007), lineCount: 1 },
+  ]
+  for (const { stderr, lineCount, ...shape } of fixtures) {
+    assert.deepEqual(parseChildFailureFrame(Buffer.from(stderr)), { stage: 'UNKNOWN', reason: 'INVALID' })
+    await syntheticChild(({ terminal, sandbox }) => {
+      const diagnostic = assertRefusedDiagnostic(diagnosticOwner(), 'a'.repeat(64), terminal, sandbox,
+        { diagnosticSource: 'STDERR', diagnosticOutcome: 'UNRECOGNIZED_FRAME',
+          stderrObservation: { byteCount: Buffer.byteLength(stderr), lineCount, pythonTracebackHeader: false,
+            terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN', ...shape } })
+      for (const privateValue of [secret, 'synthetic-token', 'synthetic-authority', '192.0.2.17', '/synthetic/private/path']) {
+        assert.equal(JSON.stringify(diagnostic).includes(privateValue), false)
+      }
+      assert.equal(Object.isFrozen(childFailureDiagnostic(terminal, sandbox, 'a'.repeat(64), 'b'.repeat(64)).stderrObservation), true)
+    }, { stderr })
+  }
+})
+
+test('stderr observations require original capture identity, source verification, empty stdout and verified bounded bytes', async () => {
+  const stderr = 'Traceback (most recent call last):\nsynthetic-secret\nAssertionError\n'
+  for (const fault of ['hash', 'missing', 'directory', 'hardlink', 'mode', 'oversize', 'stdout', 'source', 'forged', 'receipt', 'invalid-receipt']) {
+    const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64)
+    const receipt = failedWorkerReceipt(ownerSha, sha(JSON.stringify(owner.hashes)), 'CLEANUP')
+    if (fault === 'invalid-receipt') receipt.passed = true
+    const receiptRaw = JSON.stringify(receipt)
+    await syntheticChild(async ({ terminal, sandbox }) => {
+      const file = path.join(sandbox, 'namespace.stderr.log')
+      if (fault === 'hash') await fs.appendFile(file, 'synthetic-secret')
+      if (fault === 'missing' || fault === 'directory') await fs.unlink(file)
+      if (fault === 'directory') await fs.mkdir(file, { mode: 0o700 })
+      if (fault === 'hardlink') await fs.link(file, path.join(sandbox, 'stderr-alias'))
+      if (fault === 'mode') await fs.chmod(file, 0o644)
+      if (fault === 'source') owner.hashes[path.join(lib, 'stock-preparation-plm-owned-pg.mjs')] = '0'.repeat(64)
+      if (fault === 'receipt' || fault === 'invalid-receipt') {
+        await fs.writeFile(path.join(sandbox, 'receipt.json'), receiptRaw, { mode: 0o600 })
+      }
+      const diagnosticSource = fault === 'source' ? 'SOURCE' : fault === 'forged' ? 'CAPTURE'
+        : ['receipt', 'invalid-receipt'].includes(fault) ? 'RECEIPT' : fault === 'stdout' ? 'STDOUT' : 'STDERR'
+      const diagnosticOutcome = fault === 'source' ? 'POST_HASH_REJECTED' : fault === 'forged' ? 'UNAVAILABLE'
+        : fault === 'receipt' ? 'FRAME_ACCEPTED' : fault === 'invalid-receipt' ? 'RECEIPT_INVALID'
+          : fault === 'stdout' ? 'UNRECOGNIZED_FRAME' : fault === 'hash' ? 'HASH_REJECTED'
+            : fault === 'oversize' ? 'SIZE_REJECTED' : 'PATH_REJECTED'
+      const lines = []
+      assert.equal(reportOuterResult(owner, ownerSha, fault === 'forged' ? { ...terminal, passed: true } : terminal, sandbox, line => lines.push(line)), false)
+      const diagnostic = JSON.parse(lines[0].slice('YIDA_BROWSER_CI_CHILD_FAILED '.length))
+      assert.equal(Object.hasOwn(diagnostic, 'stderrObservation'), false)
+      assert.equal(diagnostic.diagnosticSource, diagnosticSource)
+      assert.equal(diagnostic.diagnosticOutcome, diagnosticOutcome)
+      assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
+      assert.equal(process.exitCode, 1)
+      assert.equal(lines.join('\n').includes('synthetic-secret'), false)
+    }, { stderr: fault === 'oversize' ? stderr + 'x'.repeat(1025) : stderr,
+      stdout: fault === 'stdout' ? 'synthetic-secret\n' : ['receipt', 'invalid-receipt'].includes(fault)
+        ? 'YIDA_BROWSER_CI_RECEIPT_SHA256 ' + sha(receiptRaw) + '\n' : '' })
+  }
+})
 
 test('actual capture to outer report routes each private file rejection without changing refusal', async () => {
   const owner = diagnosticOwner(), ownerSha = 'a'.repeat(64), sourceSha = sha(JSON.stringify(owner.hashes))
@@ -559,7 +647,9 @@ test('actual capture to outer report keeps stdout precedence, clean empty stream
   }
   await syntheticChild(({ terminal, sandbox }) => {
     assertRefusedDiagnostic(diagnosticOwner(), 'a'.repeat(64), terminal, sandbox,
-      { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN', diagnosticSource: 'STDERR', diagnosticOutcome: 'EMPTY' })
+      { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN', diagnosticSource: 'STDERR', diagnosticOutcome: 'EMPTY',
+        stderrObservation: { byteCount: 0, lineCount: 0, pythonTracebackHeader: false,
+          terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN' } })
   })
   await syntheticChild(async ({ terminal, sandbox }) => {
     const owner = diagnosticOwner(), probe = path.join(sandbox, 'source-probe.mjs')
