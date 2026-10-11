@@ -397,6 +397,20 @@
                 @click="switchView(viewOption.value)"
               >{{ t[viewOption.labelKey] }}</button>
             </nav>
+            <!-- G2-core: the status switch, orthogonal to the view switcher above. Default 未完成;
+                 the choice is remembered per browser (tasks/tasksStatusFilter.ts). -->
+            <nav class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
+              <button
+                v-for="statusOption in STATUS_FILTERS"
+                :key="statusOption.value"
+                type="button"
+                class="tasks-view__switch-button"
+                :data-testid="`tasks-status-switch-${statusOption.value}`"
+                :aria-pressed="currentStatus === statusOption.value"
+                :disabled="currentStatus === statusOption.value"
+                @click="switchStatus(statusOption.value)"
+              >{{ t[statusOption.labelKey] }}</button>
+            </nav>
 
             <form class="tasks-view__create" data-testid="tasks-create-form" @submit.prevent="onCreate">
               <input
@@ -559,12 +573,14 @@ import {
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { onListsChanged } from '../../tasks/tasksListsBus'
+import { readTaskStatusFilter, writeTaskStatusFilter } from '../../tasks/tasksStatusFilter'
 import {
   buildTaskPatch,
   checkRemindAt,
@@ -614,6 +630,16 @@ const VIEWS: Array<{ value: TaskView; labelKey: keyof TasksText }> = [
 ]
 
 const currentView = ref<TaskView>('assigned')
+
+// G2-core: the status filter (lock §2 item 1: 未完成 by default, switchable to 已完成 / 全部),
+// orthogonal to the view. Read once at setup from this browser's storage; every list read sends it.
+const STATUS_FILTERS: Array<{ value: TaskStatusFilter; labelKey: keyof TasksText }> = [
+  { value: 'open', labelKey: 'statusFilterOpen' },
+  { value: 'done', labelKey: 'statusFilterDone' },
+  { value: 'all', labelKey: 'statusFilterAll' },
+]
+
+const currentStatus = ref<TaskStatusFilter>(readTaskStatusFilter())
 
 type ListRenderState =
   | { kind: 'loading' }
@@ -796,7 +822,7 @@ async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
   listResult.value = { kind: 'loading' }
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
 
   if (result.kind === 'ok') {
@@ -820,7 +846,7 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
   if (result.kind === 'ok') {
     listResult.value = result.items.length === 0 ? { kind: 'empty' } : { kind: 'ok', items: result.items }
@@ -880,6 +906,16 @@ function switchView(view: TaskView): void {
   if (view === currentView.value) return
   listPageToken += 1
   currentView.value = view
+  void loadList()
+}
+
+/** G2-core: same page-moved-on discipline as `switchView` — a row action or create started under
+ *  the previous status must not act on this one's rows. */
+function switchStatus(status: TaskStatusFilter): void {
+  if (status === currentStatus.value) return
+  listPageToken += 1
+  currentStatus.value = status
+  writeTaskStatusFilter(status)
   void loadList()
 }
 

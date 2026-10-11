@@ -344,7 +344,8 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 // Request helpers
 // ---------------------------------------------------------------------------------------------
 
-const ASSIGNED = '/api/tasks?view=assigned'
+// G2-core: the list page always sends its status filter; with nothing remembered it is `open`.
+const ASSIGNED = '/api/tasks?view=assigned&status=open'
 const USER_GROUPS = '/api/task-groups?limit=100&offset=0'
 const USER_PLACEMENTS = '/api/task-groups/items?limit=100&offset=0'
 
