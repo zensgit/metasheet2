@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * #4556 combined-soak shadow-diff FAMILY pins (real host, real DB) — the mechanical
  * statement of what staging soak-status 31962440160 counted, built while dispositioning it:
@@ -49,7 +50,10 @@ const { buildAttendanceGroupFixedScheduleProducerKey } = requireCjs(
 )
 
 type HttpResponse = { status: number; body?: any; raw: string }
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<HttpResponse> {

@@ -1593,6 +1593,8 @@ exec npx vitest run \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
+  attendance-server-clock-view.spec.ts \
+  attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
   attendanceCapabilityUnavailable \
   attendanceEmployeeLeaveRequestCard \

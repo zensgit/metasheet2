@@ -1027,7 +1027,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Punch attendance (check in/out) */
+        /**
+         * Punch attendance (check in/out)
+         * @description Ordinary online punches use one server-generated instant. Supplying occurredAt or occurred_at, including null, returns 400 PUNCH_CLIENT_TIMESTAMP_FORBIDDEN with message "The server determines online punch time". Historical timestamps require the separately governed import or correction workflow.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1040,16 +1043,6 @@ export interface paths {
                     "application/json": {
                         /** @enum {string} */
                         eventType: "check_in" | "check_out";
-                        /**
-                         * Format: date-time
-                         * @description Preferred punch timestamp in ISO 8601 format.
-                         */
-                        occurredAt?: string;
-                        /**
-                         * Format: date-time
-                         * @description Compatibility alias for occurredAt.
-                         */
-                        occurred_at?: string;
                         timezone?: string;
                         source?: string;
                         location?: Record<string, never>;

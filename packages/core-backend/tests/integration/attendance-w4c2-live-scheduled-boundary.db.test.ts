@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §12.3) — canonical live/scheduled write-boundary WIRING gates
  * (route-level, real DB, real MetaSheetServer + plugin activate).
@@ -65,7 +66,10 @@ const describeDb = dbUrl ? describe : describe.skip
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -549,8 +553,11 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(replay.body).toEqual(first.body)
     expect(await eventCount(compatUser)).toBe(1)
 
-    // Same key, different business time: closed 409 conflict, still zero new DML.
-    const conflict = await punch(token, { ...body, occurredAt: '2026-07-20T03:00:00.000Z' })
+    // Advancing only the server clock replays the first sealed receipt exactly.
+    const laterReplay = await punch(token, { ...body, occurredAt: '2026-07-21T03:00:00.000Z' })
+    expect(laterReplay).toEqual(first)
+    // A real client business-frame change still conflicts with zero new DML.
+    const conflict = await punch(token, { ...body, meta: { note: 'changed client business frame' } })
     expect(conflict.status).toBe(409)
     expect(conflict.body?.error?.code).toBe('ATTENDANCE_OPERATION_CONFLICT')
     expect(await eventCount(compatUser)).toBe(1)

@@ -1,3 +1,4 @@
+import { withOnlinePunchFixtureTime } from '../utils/attendance-online-punch-fixture'
 import { randomUUID } from 'node:crypto'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,7 +48,9 @@ describe('live punch order and original event evidence (real HTTP and PostgreSQL
     return { id, token }
   }
 
-  const punch = (token: string, input: Punch) => request('/api/attendance/punch', token, { orgId, timezone: 'Asia/Shanghai', ...input })
+  const punch = (token: string, input: Punch) => withOnlinePunchFixtureTime(
+    { orgId, timezone: 'Asia/Shanghai', ...input }, body => request('/api/attendance/punch', token, body),
+  )
 
   async function stored(id: string) {
     const events = await pool.query(

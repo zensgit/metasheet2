@@ -55,7 +55,16 @@ function jsonResponse(status: number, payload: unknown): Response {
   } as unknown as Response
 }
 
-async function flushUi(cycles = 8): Promise<void> {
+// The fixture server follows this legacy suite's fake timer, not production wall time.
+function rulesClockFixture(url = '') {
+  return {
+    resolvedAt: new Date().toISOString(),
+    resolvedForDate: new URL(url || '/api/attendance/rules/me', 'http://fixture.invalid').searchParams.get('asOf')
+      ?? new Date().toISOString().slice(0, 10),
+  }
+}
+
+async function flushUi(cycles = 16): Promise<void> {
   for (let i = 0; i < cycles; i += 1) {
     await Promise.resolve()
     await nextTick()
@@ -270,7 +279,7 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
         data: {
           userId: 'swap-user-a',
           orgId: 'default',
-          resolvedForDate: '2026-04-15',
+          ...rulesClockFixture(url),
           assignment: {
             attendanceGroups: [{ id: 'group-a', name: 'Shanghai Store A', attendanceType: 'scheduled_shift' }],
             scheduleGroups: [{ id: 'schedule-a', name: 'Morning rotation', effectiveFrom: '2026-04-01', effectiveTo: null }],
@@ -409,7 +418,7 @@ function installZeroStateMock(): void {
         data: {
           userId: 'swap-user-a',
           orgId: 'default',
-          resolvedForDate: '2026-04-15',
+          ...rulesClockFixture(url),
           assignment: { attendanceGroups: [], scheduleGroups: [] },
           runtimeRule: { timezone: 'Asia/Shanghai' },
           punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },
@@ -747,6 +756,8 @@ describe('Attendance self-service dashboard', () => {
     vi.clearAllMocks()
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-04-15T08:00:00Z'))
+    // Legacy midnight fixtures advance both server sample and monotonic time with the fake timer.
+    vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
     authMockState.currentUserId = 'swap-user-a'
     authMockState.sessionOrgId = ''
     authMockState.identityPending = null
@@ -766,6 +777,7 @@ describe('Attendance self-service dashboard', () => {
     if (container) container.remove()
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView
     useLocale().setLocale('en')
+    vi.restoreAllMocks()
     vi.useRealTimers()
     app = null
     container = null
@@ -1652,6 +1664,7 @@ describe('Attendance self-service dashboard', () => {
             data: {
               userId: 'swap-user-a',
               orgId: 'default',
+              ...rulesClockFixture(url),
               assignment: { attendanceGroups: [{ id: 'group-a', name: 'Store A' }], scheduleGroups: [] },
               runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] },
               punchPolicy: { unscheduledMode: 'block', outdoorApprovalRequired: false, merge: {} },
@@ -1684,6 +1697,7 @@ describe('Attendance self-service dashboard', () => {
       data: {
         userId: 'swap-user-a',
         orgId: 'default',
+        ...rulesClockFixture(),
         assignment: { attendanceGroups: [{ id: 'group-b', name: 'Store B' }], scheduleGroups: [] },
         runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '10:00', workEndTime: '19:00', workingDays: [2, 3, 4] },
         punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },
@@ -1709,6 +1723,7 @@ describe('Attendance self-service dashboard', () => {
             data: {
               userId: 'swap-user-a',
               orgId: 'default',
+              ...rulesClockFixture(url),
               assignment: { attendanceGroups: [{ id: 'group-a', name: 'Store A' }], scheduleGroups: [] },
               runtimeRule: { timezone: 'Asia/Shanghai', workStartTime: '09:00', workEndTime: '18:00', workingDays: [1, 2, 3, 4, 5] },
               punchPolicy: { unscheduledMode: 'block', outdoorApprovalRequired: false, merge: {} },
@@ -1739,7 +1754,7 @@ describe('Attendance self-service dashboard', () => {
     resolveSecondRules!(jsonResponse(500, { ok: false, error: { message: 'rules failed' } }))
     await flushUi(12)
     const rulesCardAfterFailure = container?.querySelector('[data-selfservice-card="rules"]')?.textContent ?? ''
-    expect(rulesCardAfterFailure).toContain('rules failed')
+    expect(rulesCardAfterFailure).toContain('Server time or today’s attendance rules unavailable')
     expect(rulesCardAfterFailure).not.toContain('Store A')
   })
 
@@ -3196,7 +3211,7 @@ describe('Attendance self-service dashboard', () => {
     const baseMock = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       if (String(input).includes('/api/attendance/rules/me')) {
-        return jsonResponse(200, { ok: true, data: { runtimeRule: { timezone: 'Mars/Olympus' } } })
+        return jsonResponse(200, { ok: true, data: { ...rulesClockFixture(), runtimeRule: { timezone: 'Mars/Olympus' } } })
       }
       return baseMock(input, init)
     })
@@ -3233,7 +3248,7 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container!.querySelector('[data-testid="attendance-hero-time"]')?.textContent).toBe('--:--:--')
+    expect(container!.querySelector('[data-testid="attendance-hero-time"]')?.textContent).toBe('Server time unavailable')
     expect(container!.textContent).toContain('Rule timezone unavailable')
   })
 

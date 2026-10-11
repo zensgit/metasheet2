@@ -101,7 +101,11 @@ function installBaselineMock(): void {
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
         ok: true,
-        data: { runtimeRule: { timezone: 'Asia/Shanghai' } },
+        data: {
+          resolvedAt: new Date().toISOString(),
+          resolvedForDate: new URL(url, 'http://fixture.invalid').searchParams.get('asOf') ?? new Date().toISOString().slice(0, 10),
+          runtimeRule: { timezone: 'Asia/Shanghai' },
+        },
       })
     }
     return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })

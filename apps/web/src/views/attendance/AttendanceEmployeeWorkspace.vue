@@ -59,7 +59,12 @@
       <div class="attendance__hero-punch" data-testid="attendance-hero-punch">
         <div class="attendance-ew__hero-top">
           <div class="attendance__hero-clock">
-            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
+            <p class="attendance-ew__hero-timezone" data-attendance-hero-timezone>{{ heroClockTimezone }}</p>
+            <span
+              class="attendance__hero-time"
+              :class="{ 'attendance__hero-time--unavailable': !/^\d{2}:\d{2}:\d{2}$/.test(heroClockTime) }"
+              data-testid="attendance-hero-time"
+            >{{ heroClockTime }}</span>
             <p class="attendance-ew__clock-status" :data-attendance-clock-state="punchEmphasis">
               <span
                 class="attendance-ew__clock-dot"
@@ -567,6 +572,7 @@ const props = defineProps<{
   // Today band
   heroClockTime: string
   heroClockDate: string
+  heroClockTimezone?: string
   punching: boolean
   // Punch button release (fix/attendance-punch-button-release, 2026-08-21):
   // display-only — never used to disable anything. `punching` alone still
@@ -836,6 +842,7 @@ const hasRequestBody = computed(() =>
   min-width: 0;
 }
 
+.attendance-ew__hero-timezone,
 .attendance-ew__clock-status {
   display: inline-flex;
   align-items: center;
@@ -1531,6 +1538,12 @@ const hasRequestBody = computed(() =>
   color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
+}
+
+.attendance__hero-time.attendance__hero-time--unavailable {
+  font-size: 20px;
+  line-height: 1.4;
+  letter-spacing: normal;
 }
 
 .attendance__hero-actions {

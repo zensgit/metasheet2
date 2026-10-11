@@ -138,6 +138,7 @@
         :tr="tr"
         :hero-clock-time="heroClockTime"
         :hero-clock-date="heroClockDate"
+        :hero-clock-timezone="heroClockTimezone"
         :punching="punching"
         :refreshing-after-punch="refreshingAfterPunch"
         :hero-timeline="heroTodayTimeline"
@@ -10545,6 +10546,7 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import { createAttendanceServerClock, ATTENDANCE_CLOCK_RESAMPLE_MS } from './attendance/attendanceServerClock'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -12107,23 +12109,54 @@ const refreshingAfterPunch = computed(() => refreshingAfterPunchCount.value > 0)
 
 // UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
 // clock, display-only — punch handlers/copy/classes above are untouched.
-const heroClockNow = ref(new Date())
+const serverClock = createAttendanceServerClock()
+const heroClockNow = ref<Date | null>(null)
 let heroClockTimer: ReturnType<typeof setInterval> | null = null
+let serverClockTimer: ReturnType<typeof setInterval> | null = null
+function updateHeroClock(): void {
+  heroClockNow.value = attendanceSessionGuard.isCurrent() && !document.hidden
+    ? serverClock.now(performance.now()) : null
+}
+function recoverServerClock(): void {
+  invalidateServerClock()
+  if (showOverview.value && attendancePluginActive.value && !document.hidden
+    && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules()
+}
+function onClockVisibility(): void {
+  if (document.hidden) invalidateServerClock()
+  else recoverServerClock()
+}
+function onClockPageShow(event: PageTransitionEvent): void {
+  if (event.persisted) recoverServerClock()
+}
 onMounted(() => {
-  heroClockTimer = setInterval(() => { heroClockNow.value = new Date() }, 1000)
+  heroClockTimer = setInterval(updateHeroClock, 1000)
+  serverClockTimer = setInterval(() => {
+    if (showOverview.value && attendancePluginActive.value && !document.hidden
+      && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+  }, ATTENDANCE_CLOCK_RESAMPLE_MS)
+  document.addEventListener('visibilitychange', onClockVisibility)
+  window.addEventListener('pageshow', onClockPageShow)
 })
 onUnmounted(() => {
   if (heroClockTimer) clearInterval(heroClockTimer)
+  if (serverClockTimer) clearInterval(serverClockTimer)
+  document.removeEventListener('visibilitychange', onClockVisibility)
+  window.removeEventListener('pageshow', onClockPageShow)
+  invalidateServerClock()
 })
+const heroClockTimezone = computed(() => resolvedAttendanceTimezone.value
+  ? tr(`Attendance timezone: ${resolvedAttendanceTimezone.value}`, `考勤时区：${resolvedAttendanceTimezone.value}`)
+  : tr('Attendance timezone unavailable', '考勤时区不可用'))
 const heroClockTime = computed(() => {
-  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? '--:--:--'
+  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? tr('Server time unavailable', '服务器时间不可用')
 })
 const heroClockDate = computed(() => {
   const now = heroClockNow.value
   const weekdayLocale = isZh.value ? 'zh-CN' : 'en-US'
   const dateKey = formatAttendanceDateKey(now, resolvedAttendanceTimezone.value)
   const weekday = formatAttendanceWeekday(now, weekdayLocale, resolvedAttendanceTimezone.value)
-  return dateKey && weekday ? `${dateKey} · ${weekday}` : '--'
+  return dateKey && weekday ? `${dateKey} · ${weekday}` : tr('Server date unavailable', '服务器日期不可用')
 })
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
@@ -12403,9 +12436,10 @@ const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
 )
 function selfServiceRuleTimezone(): string | null {
-  return normalizeAttendanceTimeZone(
-    String(selfRulesData.value?.runtimeRule?.timezone ?? '').trim(),
-  )
+  const instant = serverClock.now(performance.now())
+  const zone = normalizeAttendanceTimeZone(selfRulesData.value?.runtimeRule?.timezone)
+  return instant && !document.hidden && attendanceSessionGuard.isCurrent()
+    && formatAttendanceDateKey(instant, zone) === selfRulesData.value?.resolvedForDate ? zone : null
 }
 const reportRecordTimezoneValues = computed(() => Array.from(new Set(
   records.value
@@ -22582,7 +22616,7 @@ async function loadRecords() {
   recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
   recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
   if (showOverview.value && !loading.value) {
-    const reuseHistory = formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    const reuseHistory = !recordsStartedAt || formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
     await loadTodayAttendanceRecord(reuseHistory)
   }
 }
@@ -23171,7 +23205,7 @@ async function refreshAll(): Promise<boolean> {
     }
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
-    const reuseHistory = formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    const reuseHistory = !refreshStartedAt || formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
     if (showOverview.value && !await loadTodayAttendanceRecord(reuseHistory)) success = false
     loading.value = false
   }
@@ -25447,6 +25481,7 @@ interface AttendanceSelfRulesData {
   userId?: string
   orgId?: string
   resolvedForDate?: string
+  resolvedAt?: string
   assignment?: {
     attendanceGroups?: AttendanceSelfRulesGroupSummary[]
     scheduleGroups?: AttendanceSelfRulesGroupSummary[]
@@ -25484,7 +25519,15 @@ const annualBalanceUserId = ref('')
 const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 
-const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
+const selfRulesSnapshot = ref<AttendanceSelfRulesData | null>(null)
+const lastAlignedRuleZone = ref<string | null>(null)
+let selfRulesRoundVersion = 0
+const selfRulesData = computed(() => {
+  const snapshot = selfRulesSnapshot.value
+  const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+  const date = formatAttendanceDateKey(heroClockNow.value, zone)
+  return snapshot && date && date === snapshot.resolvedForDate ? snapshot : null
+})
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
@@ -25726,31 +25769,67 @@ async function loadEmployeeQuickActionIcons(): Promise<void> {
   }
 }
 
-async function loadSelfAttendanceRules(): Promise<void> {
-  selfRulesData.value = null
+function invalidateServerClock(): void {
+  selfRulesRoundVersion += 1
+  serverClock.invalidate()
+  heroClockNow.value = null
+  selfRulesSnapshot.value = null
+  selfRulesLoading.value = false
+}
+
+async function loadSelfAttendanceRules(background = false): Promise<void> {
+  const round = ++selfRulesRoundVersion
+  const current = () => round === selfRulesRoundVersion && !document.hidden
+    && attendanceSessionGuard.isCurrent()
+  if (!current()) return
+  const initialDate = formatAttendanceDateKey(serverClock.now(performance.now()), lastAlignedRuleZone.value)
+  if (!background) {
+    selfRulesSnapshot.value = null
+    serverClock.invalidate()
+    heroClockNow.value = null
+  }
   selfRulesLoading.value = true
   selfRulesError.value = null
+  let asOf = initialDate
   try {
-    // SR-1 self-service contract: rules/me REJECTS subject-override headers (including
-    // the globally injected x-tenant-id) instead of ignoring them — subject and org come
-    // from the token alone. Human-tail finding 2026-08-19: real browsers with a tenant
-    // hint got a 400 banner here; synthetic traffic never sends the header.
-    const response = await apiFetch('/api/attendance/rules/me', {
-      // The COMPLETE server forbidden set, via the ONE shared contract mirror — the
-      // required-lane fixture-sync spec pins it against the server source (#5012).
-      omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
-    })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.ok) {
-      throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+    for (let leg = 0; leg < 2; leg += 1) {
+      const sample = serverClock.beginSample()
+      const sent = performance.now()
+      const response = await apiFetch(`/api/attendance/rules/me${asOf ? `?asOf=${asOf}` : ''}`, {
+        // Self subject/org come from the token, including on the corrective read.
+        omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
+      })
+      const received = performance.now()
+      const data = await response.json().catch(() => null)
+      if (!current()) return
+      if (!response.ok || !data?.ok) {
+        serverClock.fail(sample)
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      const snapshot = data.data as AttendanceSelfRulesData | null
+      if (!serverClock.accept(sample, snapshot?.resolvedAt, sent, received)) {
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      updateHeroClock()
+      const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+      const target = formatAttendanceDateKey(heroClockNow.value, zone)
+      if (target && snapshot?.resolvedForDate === target) {
+        lastAlignedRuleZone.value = zone
+        selfRulesSnapshot.value = snapshot
+        return
+      }
+      selfRulesSnapshot.value = null
+      if (!target || leg === 1) throw new Error('ATTENDANCE_RULES_DATE_UNAVAILABLE')
+      asOf = target
     }
-    selfRulesData.value = data.data && typeof data.data === 'object'
-      ? data.data as AttendanceSelfRulesData
-      : null
-  } catch (error: any) {
-    selfRulesError.value = readErrorMessage(error, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+  } catch (error) {
+    if (!current()) return
+    if (!(error instanceof Error) || error.message !== 'ATTENDANCE_RULES_DATE_UNAVAILABLE') serverClock.invalidate()
+    updateHeroClock()
+    selfRulesSnapshot.value = null
+    selfRulesError.value = tr('Server time or today’s attendance rules unavailable. You can still punch.', '服务器时间或今日考勤规则不可用，仍可打卡。')
   } finally {
-    selfRulesLoading.value = false
+    if (current()) selfRulesLoading.value = false
   }
 }
 
@@ -30282,7 +30361,17 @@ onMounted(() => {
     })
 })
 
-watch([todayWorkDateKey, attendanceSessionStale, showOverview], ([date], [previousDate]) => {
+watch(attendanceSessionStale, (stale) => { if (stale) invalidateServerClock() }, { flush: 'sync' })
+const serverCalendarDate = computed(() => formatAttendanceDateKey(heroClockNow.value, lastAlignedRuleZone.value))
+watch(serverCalendarDate, (date, previous) => {
+  if (date && previous && date !== previous && !selfRulesLoading.value
+    && showOverview.value && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+}, { flush: 'sync' })
+
+let lastAvailableTodayDate = ''
+watch([todayWorkDateKey, attendanceSessionStale, showOverview], ([date]) => {
+  const dayChanged = Boolean(date && lastAvailableTodayDate && date !== lastAvailableTodayDate)
+  if (date) lastAvailableTodayDate = date
   todayRecordLoadVersion += 1
   todayRecordState.value = 'loading'
   todayRecord.value = null
@@ -30290,7 +30379,7 @@ watch([todayWorkDateKey, attendanceSessionStale, showOverview], ([date], [previo
   // Refresh already waits for rules and history. Midnight needs a fresh self read,
   // even when an older history response happened to include the new date range.
   if (showOverview.value && date && attendanceSessionGuard.isCurrent()
-    && (!loading.value || (previousDate && date !== previousDate))) {
+    && (!loading.value || dayChanged)) {
     void loadTodayAttendanceRecord(false)
   }
 }, { flush: 'sync' })

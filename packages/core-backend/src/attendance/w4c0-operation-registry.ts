@@ -30,6 +30,7 @@
  *
  * Values-free discipline: closed codes only; no caller value is echoed.
  */
+import { requireOnlinePunchRequestV1, readOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, ONLINE_PUNCH_SOURCE_REF, OLD_OUTDOOR_PUNCH_SOURCE_REF, OnlinePunchClaimCollisionError, isOnlinePunchClaimPrimaryKeyCollision, type OnlinePunchRequestV1 } from './online-punch-request'
 import type {
   AttendanceSourceEntrypointV1,
   AttendanceW4TransactionClientV1,
@@ -599,7 +600,7 @@ export async function attendanceResultOperationPreflightV1(
   trx: AttendanceW4TransactionClientV1,
   authorization: unknown,
   envelope: AttendanceResultOperationEnvelopeInputV1,
-  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' },
+  options?: { readonly attendanceCleaningReplay: 'allow-new' | 'require-completed' } | { readonly onlinePunch: OnlinePunchRequestV1 },
 ): Promise<AttendanceResultOperationPreflightResultV1> {
   const plan = planEnvelope(envelope)
   // Step 1: branded authorization covers every envelope item; org binding; SQL recheck.
@@ -609,8 +610,21 @@ export async function attendanceResultOperationPreflightV1(
   }
   await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
   // Internal adapter decision, never inferred from a sourceRef or HTTP body.
-  const cleaningReplay = options?.attendanceCleaningReplay
-  if (options !== undefined && (
+  if (options !== undefined && (Object.keys(options).length !== 1
+    || (!('onlinePunch' in options) && !('attendanceCleaningReplay' in options)))) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  const onlinePunch = options && 'onlinePunch' in options ? requireOnlinePunchRequestV1(options.onlinePunch) : null
+  if (onlinePunch && (plan.entrypoint !== 'live_punch' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF
+    || auth.actorId !== onlinePunch.userId || plan.orgKey !== onlinePunch.orgId
+    || plan.sourced[0]!.candidateOperationId !== onlinePunch.operationId
+    || plan.sourced[0]!.input.commandFingerprint !== onlinePunch.fingerprint)) fail('W4C0_ENVELOPE_INVALID')
+  const onlineCompanion = readOnlinePunchCompanionV1(trx)
+  if (onlineCompanion && (plan.entrypoint !== 'request_create' || plan.batch !== null || plan.sourced.length !== 1
+    || plan.legacyNullIdCount !== 0 || auth.sourceRef !== OLD_OUTDOOR_PUNCH_SOURCE_REF
+    || auth.orgId !== onlineCompanion.orgId || auth.actorId !== onlineCompanion.userId
+    || plan.sourced[0]!.candidateOperationId !== onlineCompanion.operationId)) fail('W4C0_ENVELOPE_INVALID')
+  const cleaningReplay = options && 'attendanceCleaningReplay' in options ? options.attendanceCleaningReplay : undefined
+  if (options !== undefined && !onlinePunch && (
     (cleaningReplay !== 'allow-new' && cleaningReplay !== 'require-completed')
     || plan.entrypoint !== 'manual_edit' || plan.batch !== null
     || plan.sourced.length !== 1 || plan.legacyNullIdCount !== 0
@@ -672,7 +686,10 @@ export async function attendanceResultOperationPreflightV1(
 
   // Canonical exclusive identity advisory locks for ALL supplied identities.
   const allIdentities = batchIdentity ? [batchIdentity, ...itemIdentities] : [...itemIdentities]
+  if (onlinePunch) allIdentities.push(createVerifiedAttendanceOperationIdentityV1({ org, kind: 'item',
+    entrypoint: 'request_create', source: { sourceKind: 'direct_request_create', clientOperationId: onlinePunch.operationId } }))
   await acquireAttendanceResultOperationLocks(trx, allIdentities)
+  if (onlinePunch) await refuseOldOutdoorPunchV1(trx, onlinePunch)
 
   // Re-read under locks; now strict: mixed/incomplete/non-congruent conflicts.
   const lockedBatchRow = plan.batch
@@ -719,16 +736,15 @@ export async function attendanceResultOperationPreflightV1(
     .map((item, index) => ({ item, identity: itemIdentities[index] }))
     .sort((a, b) => (a.identity.id < b.identity.id ? -1 : a.identity.id > b.identity.id ? 1 : 0))
   for (const { item, identity } of orderedForInsert) {
-    await insertClaimedItemRow(
-      trx,
-      org,
-      identity,
-      auth,
-      item.input.commandFingerprint,
-      plan.batch ? plan.batch.batchCommandId : null,
-      item.ordinal,
-      item.input.normalizedBusinessInputSnapshot,
-    )
+    try {
+      await insertClaimedItemRow(
+        trx, org, identity, auth, item.input.commandFingerprint,
+        plan.batch ? plan.batch.batchCommandId : null, item.ordinal, item.input.normalizedBusinessInputSnapshot,
+      )
+    } catch (error) {
+      if ((onlinePunch || onlineCompanion) && isOnlinePunchClaimPrimaryKeyCollision(error)) throw new OnlinePunchClaimCollisionError()
+      throw error
+    }
   }
   return {
     kind: 'claimed',
@@ -738,6 +754,27 @@ export async function attendanceResultOperationPreflightV1(
     legacyNullIdCount: plan.legacyNullIdCount,
     referenceSegments: posture.referenceSegments,
   }
+}
+
+/** Online read probe never claims; immutable completed rows preserve replay before suspension. */
+export async function readOnlinePunchReplayV1(
+  trx: AttendanceW4TransactionClientV1, authorization: unknown, input: OnlinePunchRequestV1,
+): Promise<unknown | null> {
+  const request = requireOnlinePunchRequestV1(input)
+  const auth = requireAuthorizedCapabilityForEntrypointV1(authorization, 'live_punch')
+  if (auth.orgId !== request.orgId || auth.actorId !== request.userId || auth.sourceRef !== ONLINE_PUNCH_SOURCE_REF) {
+    throw new AttendanceW4OperationError('ATTENDANCE_WRITE_NOT_AUTHORIZED')
+  }
+  await recheckAttendanceActorLivenessInTransactionV1(trx, auth)
+  const rows = await readOperationRows(trx, request.orgId, 'live_punch', [request.operationId])
+  if (!rows.size) { await refuseOldOutdoorPunchV1(trx, request); return null }
+  const result = classify(planEnvelope(request.registryInput), auth, null, rows, true)
+  if (result.kind !== 'all_completed_congruent') conflict('ATTENDANCE_OPERATION_CONFLICT')
+  return result.responses.itemResponses[request.operationId] ?? null
+}
+async function refuseOldOutdoorPunchV1(trx: AttendanceW4TransactionClientV1, request: OnlinePunchRequestV1): Promise<void> {
+  const rows = await readOperationRows(trx, request.orgId, 'request_create', [request.operationId])
+  if (rows.get(request.operationId)?.source_ref === OLD_OUTDOOR_PUNCH_SOURCE_REF) conflict('ATTENDANCE_OPERATION_CONFLICT')
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,6 +1115,7 @@ export async function runAttendanceResultOperationTransactionV1<T>(
     } catch (error) {
       try { await connection.query('ROLLBACK', []) } catch {
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
+        if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
       }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1

@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
@@ -27,7 +28,10 @@ function canListen(): Promise<boolean> {
   })
 }
 
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: Record<string, unknown> } = {},
 ): Promise<JsonResponse> {
@@ -1164,6 +1168,19 @@ describeIfDatabase('W4C-3b P13 request operation routes (real plugin, real Postg
       expect(replay.status, replay.raw).toBe(202)
       expect(replay.body).toEqual(punch.body)
       expect(punch.body?.data?.pendingApproval).toBe(true)
+      const pairedReceipts = await pool.query(
+        `SELECT entrypoint, identity_source_kind, state, source_ref, response_snapshot,
+                normalized_business_input_snapshot FROM attendance_result_operations
+         WHERE org_id=$1 AND operation_id=$2::uuid ORDER BY entrypoint`, [fixture.orgId, operationId],
+      )
+      expect(pairedReceipts.rows).toEqual([
+        { entrypoint: 'live_punch', identity_source_kind: 'direct_live_punch', state: 'completed',
+          source_ref: 'plugin-attendance:POST /api/attendance/punch:online-v1', normalized_business_input_snapshot: null,
+          response_snapshot: { version: 'attendance-online-punch-v1', status: 202, body: punch.body } },
+        { entrypoint: 'request_create', identity_source_kind: 'direct_request_create', state: 'completed',
+          source_ref: 'plugin-attendance:POST /api/attendance/punch#outdoor-approval',
+          normalized_business_input_snapshot: expect.any(Object), response_snapshot: punch.body },
+      ])
       const residue = await createResidue(fixture.orgId, operationId)
       expect(residue).toMatchObject({
         requests: 1,

@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4612 review, P2 findings — owner-authorized HOLD restricted to two
  * remediation legs; P1-2 is explicitly OUT OF SCOPE here) — real DB, route-level.
@@ -56,7 +57,10 @@ const describeDb = dbUrl ? describe : describe.skip
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
