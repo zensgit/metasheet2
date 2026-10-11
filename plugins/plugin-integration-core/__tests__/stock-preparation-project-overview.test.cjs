@@ -2121,7 +2121,8 @@ test('O-28 (fix round 1) failed projects are retried BOUNDED by per-event writer
 // S3 follow-ups, fix round 1 (item 2): the failure bookkeeping paths only the verifier's probes covered.
 test('O-29a (fix round 1) a project-less overview row whose delete fails is COUNTED: 503 REFRESH_INCOMPLETE, nothing to re-mark, the next refresh removes it', async () => {
   // (a) A project-less overview row whose delete fails: counted → 503 INCOMPLETE; nothing to re-mark.
-  const h = mount()
+  const logger = capturingLogger()
+  const h = mount({ logger })
   try {
     h.seedRegistryRow(PROJECT)
     assert.equal((await ensure(h, PULLER)).statusCode, 200)
@@ -2137,6 +2138,9 @@ test('O-29a (fix round 1) a project-less overview row whose delete fails is COUN
     assert.equal(res.body.error.details.failedProjectCount, 1)
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.equal(state.dirty.size, 0, 'no project number → nothing to re-mark')
+    // Follow-ups 2, fix round 1 (M9): the project-less failure is the only one that stands — ITS code is the one logged.
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_OVERVIEW_DOWN', failedProjectCount: 1 }], 'the warn names the project-less failure that stands')
     h.overviewPort.deleteRecord = realDelete
     // Follow-ups 2 (item 1): the 503 left the shorter INCOMPLETE cooldown; the next refresh after it removes the row.
     passIncompleteCooldown()
@@ -2442,6 +2446,82 @@ test('O-31b (follow-ups 2, item 4) the PER-EVENT path: the logged code is the la
     assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING' }], 'the writer logs the failure that stands, never the healed one')
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
+  } finally { h.restore() }
+})
+
+// S3 follow-ups 2, fix round 1 (M8): the failure that STANDS is named even when a LATER failure of the same run was
+// healed — O-31/O-31b only had the healed failure first, where "the first failure" picks the right one too.
+test('O-31c (follow-ups 2, fix round 1) a failure that still stands is named over a LATER failure the same run healed: an unregistered project\'s row whose delete fails, then a project whose write fails and an event deferred into the refresh heals', async () => {
+  const GONE = 'PRJ-S3-GONE'
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // The full pass deletes orphans BEFORE it writes projects: GONE's failed delete is the run's FIRST failure.
+    h.rows.push({ id: 'rec_gone', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: GONE } })
+    const realDelete = h.overviewPort.deleteRecord
+    h.overviewPort.deleteRecord = async (input = {}) => {
+      if (input.recordId === 'rec_gone') throw Object.assign(new Error('delete failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realDelete(input)
+    }
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let projectCreates = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT) {
+        projectCreates += 1
+        if (projectCreates === 1) {
+          // The run's LATER failure — healed below by the drain of an event deferred into this refresh.
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 1, 'only the orphan delete still stands')
+    assert.equal(projectCreates, 2, 'the project failed once in the full pass and was written by the drain')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING', failedProjectCount: 1 }], 'the warn names the failure that stands, never the later healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [GONE])
+  } finally { h.restore() }
+})
+
+// S3 follow-ups 2, fix round 1 (M7): of failures that ALL stand, the logged one is the most recent.
+test('O-31d (follow-ups 2, fix round 1) two failures that both stand: the warn names the LATER one', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    const failedOrder = []
+    h.overviewPort.createRecord = async (input = {}) => {
+      const no = input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')]
+      if (no === PROJECT || no === PROJECT_B) {
+        failedOrder.push(no)
+        throw Object.assign(new Error('create failed'), { code: `SYNTHETIC_FAILED_${failedOrder.length}` })
+      }
+      return realCreate(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 2)
+    assert.equal(failedOrder.length, 2, 'each project failed exactly once')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_FAILED_2', failedProjectCount: 2 }], 'the later of the two standing failures is named')
   } finally { h.restore() }
 })
 
