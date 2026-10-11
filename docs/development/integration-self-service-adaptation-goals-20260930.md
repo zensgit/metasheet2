@@ -1,5 +1,7 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
+> **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
+
 > **最新续记（2026-10-12，§194）**：K3/PLM已携带宜搭main对齐，精确head普通检查分别14/14和43/43。Automation已推送`9a9ca90e0`，修复完整CI的三处前置契约问题并携带PLM；最终受检树通过196条契约、试用脚本类型检查、66个后端文件3226/3226、52个插件文件、13个前端文件787/787及8个守卫变异。新完整run `38160924399`已核head一致、排队中，不称manual/interval或全目标通过。宜搭仍59成功/1跳过/1运行。独立终审未闭合，无GitHub合并、部署、客户读取或外发。以下续记保留历史时点。
 
 > **最新续记（2026-10-12，§193）**：#6337精确`4e9f665f5`普通PR检查47/47 success；完整run `38158303603`通过类型检查、仍在core全套，不代表数据库/manual/interval通过。宜搭#6315已完成局部对齐回归并普通推送`dcfb0903b`，恢复MERGEABLE，新CI待出；提交树与受检暂存树一致。下游stack尚未携带本次main增量，独立终审及全目标未闭合。无GitHub合并、部署、客户读取或外发；以下续记保留历史时点。
@@ -2212,3 +2214,10 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 随后携带PLM73b5，唯一冲突为provenance向量；保留Automation实际pluginIndex的SHA `9aad528a9187a723facc9e1f4035bdacc7aead832a18ead61d31d4c4d932a570`，HTTP路由采用实际SHA `e9f652b93f75fbb3f7f6599f163e39fea9df319efb2a76ff3f647ed7f7862f6a`。未机械选择一侧。最终Git树`b1efdcac9cfdbaec893d7e3600fb1cb23fbc8dc4`经准入导出13742项、排除89项，manifest `506e3dc5e1a71e810a415d41707d6a7a9aafaaa5d8b52c5af736a4334ccd85dc`；在新私有Linux副本离线安装后，196契约、trial类型检查、66后端整文件3226/3226、52插件整文件（含完整provenance）、13前端整文件787/787、八项逐条守卫变异全部通过。单元/前端零skip/retry/unhandled；tracked原始字节前后不变。alignment receipt `125751c0181d70499d4d1b4d0b73b5e008c582fb20f4316e3912ae88a79cf642`；196契约stdout SHA `346bece4925414093c83e3a8c2671d0f78f8daab86d175195689754d57207853`。只声称private loopback/caps0/NNP，不声称filesystem/Unix-socket隔离，未启动PG或客户连接。
 - 最终提交`9a9ca90e05c99eff2bb142d4c16fbbc3e534a05d`的树与上项精确一致，已普通推送#6337，仍DRAFT。新完整原workflow_dispatch [run 38160924399](https://github.com/zensgit/metasheet2/actions/runs/38160924399)已核head一致、排队中；旧run已终态失败，并非因为慢而取消重跑。验收细节已追加[PR评论](https://github.com/zensgit/metasheet2/pull/6337#issuecomment-6111857800)。宜搭#6315精确dcfb仍59成功/1跳过/1运行，不宣告完整验收通过。
 - 下一门是当前head完整数据库/原manual/interval验收和独立保证型终审；本节为root检查，未冒充独立反驳。全部失败副本/证据保留，未操作主检出的历史改动。无GitHub PR合并、部署、客户SQL/API读取、真实token交换或宜搭发送；K3永久禁写，目标active。
+
+## 195. 补齐实际试用文档与最终迁移名称核查（2026-10-12）
+
+- 实读发现§152所链接的本地试用指南仅在旧工作区，#6313和最终代码分支的Git文件清单均未包含它。现将[指南](yida-local-synthetic-trial-guide-20261010.md)补入文档PR：明确文档分支不能当完整代码运行、候选9a9ca90e0已携带main但尚未合并部署；增加WSL独立Linux依赖、`pg_config --bindir`与实际PG目录校验、正常停止后该次诊断目录保留/清理、异常交接文件定点清理限制。保留假材料、非root、60–900秒TTL、发送OFF、浏览器无内核隔离保证、未知不重试及真实发送另行授权。没有删除旧工作区文件。
+- 与候选实际public parser、typed parent/worker、私有交接文件所有权及停止路径逐项对照；实际`node scripts/ops/run-stock-preparation-yida-synthetic-trial.mjs --help` exit0，未加载实际host、未启动PG、未进行试用或网络请求。文档核验不冒称最终候选人工生命周期重新通过。
+- 只读Git名称核查：main906840c74有441个迁移文件，最终候选9a9ca90e0有470个，新增29个的编号/时间戳与同目录存量无新增重号，名称roster SHA `c73f318e2c193488402d8096ef3f8299c780a732eb3a46f5b814275fe02e3dd3`。仓库原有16组同前缀保留，未机械改名历史迁移；此检查不读取payload、不证明执行顺序或迁移实跑。
+- 完整CI原run仍保持运行，未因观察超时重启；本节只补交付缺件，不改代码head、不触发新完整CI。独立终审及全目标仍待闭合；没有合并、部署、客户读取、token交换或宜搭发送。
