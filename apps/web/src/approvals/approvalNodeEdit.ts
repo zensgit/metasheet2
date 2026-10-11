@@ -6,6 +6,7 @@ import type {
   ApprovalNodeConfig,
   ApprovalType,
   AutoApprovalPolicy,
+  EmptyAssigneeFallback,
   EmptyAssigneePolicy,
   HandlerMode,
   HandlerNodeConfig,
@@ -20,7 +21,9 @@ import {
   NODE_FIELD_ACCESS_VALUES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
   NODE_TIMEOUT_SUPPORTED_EFFECTS,
+  SAME_PERSON_POLICIES,
 } from '../types/approval'
+import type { SamePersonPolicy } from '../types/approval'
 import { runtimeSuccessorTargets } from './parallelEdit'
 
 const NODE_TIMEOUT_SUPPORTED_EFFECT_SET = new Set<string>(NODE_TIMEOUT_SUPPORTED_EFFECTS)
@@ -30,11 +33,13 @@ const HANDLER_ASSIGNEE_SOURCE_KIND_SET = new Set<string>(HANDLER_ASSIGNEE_SOURCE
 const APPROVAL_TYPE_SET = new Set<string>(APPROVAL_TYPE_VALUES)
 
 // Approval-node editing inside a preserved graph. The editor owns the fields already available in
-// the linear authoring surface: approver source, approval/empty-assignee modes, requester-merge,
-// and field permissions. Any other allowlisted config stays preserved verbatim. The node's edges
-// are TOPOLOGY — preserved byte-for-byte (G-1 anti-flatten floor). Every OTHER node/edge —
-// condition (G-2), parallel (G-3), cc (G-4), start/end — is preserved verbatim. No .vue / Element
-// Plus import, so this runs under the approval-web-guard vitest gate.
+// the linear authoring surface: approver source, approval/empty-assignee modes (incl. the W1-1a
+// 'designated' fallback targets), the four-value same-person control (which owns
+// `mergeWithRequester` + `samePersonPolicy` together), and field permissions. Any other
+// allowlisted config stays preserved verbatim. The node's edges are TOPOLOGY — preserved
+// byte-for-byte (G-1 anti-flatten floor). Every OTHER node/edge — condition (G-2), parallel (G-3),
+// cc (G-4), start/end — is preserved verbatim. No .vue / Element Plus import, so this runs under
+// the approval-web-guard vitest gate.
 //
 // PRE-CHECK FINDING (backend approval-node assignee rule, ApprovalProductService.ts):
 //   - `validateApprovalAssigneeSourcesAgainstFormSchema` (:457-480): a `form_field_user` source's
@@ -80,6 +85,14 @@ export interface ApprovalNodeSourceEdit {
    */
   omitAssigneeSources?: boolean
   emptyAssigneePolicy?: EmptyAssigneePolicy
+  /**
+   * W1-1a (Lock-4 §3 F4-B) — the `'designated'` target set, authored by the typed user/role
+   * pickers. Seeded VERBATIM from a persisted config (identity: an untouched edit reproduces the
+   * persisted object byte-for-byte). Same absent/`null` grammar as `autoApprovalPolicy`: absent ≡
+   * untouched, `null` ≡ the author cleared every target (key REMOVED). Emitted ONLY while the
+   * effective `emptyAssigneePolicy` is `'designated'` (`applyApprovalNodeEditsToGraph`).
+   */
+  emptyAssigneeFallback?: EmptyAssigneeFallback | null
   autoApprovalPolicy?: AutoApprovalPolicy | null
   fieldPermissions?: NodeFieldPermission[]
   // Lock-3 §1.1 — handler-only. `handlerMode` absent ≡ 'all'; `opinionRequired` absent ≡ false.
@@ -109,6 +122,248 @@ export type ApprovalNodeEdits = Record<string, ApprovalNodeSourceEdit>
 // is wrapped in.
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T
+}
+
+// ── W1-1a (Lock-4 §2 F4-C) — the four-value 审批人与发起人为同一人时 control, shared by BOTH editors ──
+//
+// Lock text (approval-lock4-flow-policies-20260817.md F4-C): "Enum `samePersonPolicy?:
+// 'self_approve' | 'auto_skip' | 'transfer_direct_manager' | 'transfer_dept_head'`, absent ≡
+// `'self_approve'` ≡ today's behavior when `mergeWithRequester` is off." and "`mergeWithRequester:true`
+// … IS the 自动跳过 family … retained as the *implementation* of `'auto_skip'` and stays the persisted
+// carrier for that value, so no existing graph changes shape."
+//
+// Implementer defaults (owner-visible, recorded in reviews/approval-w1-1a-impl-20261010.md):
+//   (a) this control REPLACES the shipped 自审合并 checkbox and owns BOTH keys: picking 'auto_skip'
+//       writes `samePersonPolicy:'auto_skip'` AND `mergeWithRequester:true` (exactly the shape the
+//       backend `normalizeAutoApprovalPolicy` persists anyway); every other pick DELETES
+//       `mergeWithRequester`, so the UI can never say 自审/转交 while the merge cascade auto-skips.
+//   (b) the 'default' choice (默认) OMITS `samePersonPolicy` (and `mergeWithRequester`). An explicit
+//       'self_approve' is written ONLY when the author picks it: in code (not in the lock) an
+//       explicit value creates a node-level `autoApprovalPolicy`, and a node key PRESENT overrides
+//       the template-level `policy.autoApproval` there (Lock-4 §0 precedence row — "an all-false node
+//       policy DISABLES the template policy there"; `getEffectiveAutoApprovalPolicy` +
+//       `hasEnabledAutoApprovalRule`, which excludes 'self_approve'), so explicit and absent are
+//       NOT interchangeable once a template-level policy exists.
+//   (c) an untouched node is never rewritten: the setter is a no-op when the pick equals the current
+//       projection, so a bare legacy `{ mergeWithRequester: true }` (projected 'auto_skip') keeps its
+//       shape unless the author actually changes the choice.
+
+/**
+ * `'default'` = 默认: the control writes NO `samePersonPolicy` and NO `mergeWithRequester` key. A
+ * non-empty sentinel on purpose — Element Plus `el-select` treats `''` as an EMPTY value (its default
+ * `empty-values`) and would render the placeholder instead of the 默认 option's label. It is never
+ * written to a config (`applySamePersonChoice` / `setStepSamePersonChoice` translate it to absence).
+ */
+export type SamePersonChoice = 'default' | SamePersonPolicy
+
+/**
+ * `editable` carries the RUNTIME-faithful projection; `unknown` is a persisted `samePersonPolicy`
+ * outside the frontend enum (gate X-3) — rendered read-only, never projected onto a known choice.
+ */
+export type SamePersonControlState =
+  | { kind: 'editable'; choice: SamePersonChoice }
+  | { kind: 'unknown' }
+
+const SAME_PERSON_POLICY_SET = new Set<string>(SAME_PERSON_POLICIES)
+
+export function isKnownSamePersonPolicy(value: unknown): value is SamePersonPolicy {
+  return typeof value === 'string' && SAME_PERSON_POLICY_SET.has(value)
+}
+
+/**
+ * Projection order follows what the backend actually RUNS, not the literal key:
+ *   1. transfer_* — the resolver substitutes the requester's seat BEFORE the auto-approval cascade
+ *      (ApprovalAssigneeResolver.ts `pushResolved`), so a co-present `mergeWithRequester:true` can
+ *      never fire on that seat;
+ *   2. `mergeWithRequester:true` (or an explicit 'auto_skip') → 'auto_skip' — the shipped carrier;
+ *      an API-only `{ samePersonPolicy:'self_approve', mergeWithRequester:true }` therefore shows
+ *      自动通过, which is what the merge cascade does at runtime;
+ *   3. explicit 'self_approve';
+ *   4. otherwise 'default' (默认).
+ */
+export function samePersonControlState(policy: AutoApprovalPolicy | null | undefined): SamePersonControlState {
+  // Read as `unknown`: a persisted value may lie OUTSIDE the typed union (gate X-3).
+  const raw: unknown = policy?.samePersonPolicy
+  if (raw !== undefined && !isKnownSamePersonPolicy(raw)) return { kind: 'unknown' }
+  if (raw === 'transfer_direct_manager' || raw === 'transfer_dept_head') return { kind: 'editable', choice: raw }
+  if (raw === 'auto_skip' || policy?.mergeWithRequester === true) return { kind: 'editable', choice: 'auto_skip' }
+  if (raw === 'self_approve') return { kind: 'editable', choice: 'self_approve' }
+  return { kind: 'editable', choice: 'default' }
+}
+
+/**
+ * Applies a pick, deleting BOTH owned keys first and keeping every sibling
+ * (`mergeAdjacentApprover` / `dedupeHistoricalApprover` / `actorMode`) — the delete-key-keep-siblings
+ * pattern Lock-4 OD-L4-6 names. Returns `null` when nothing is left (the canvas grammar for "remove
+ * the `autoApprovalPolicy` key"). Fail-closed no-ops (returns the input unchanged): an `unknown`
+ * persisted value (X-3), or a pick equal to the current projection (default (c) above).
+ */
+export function applySamePersonChoice(
+  policy: AutoApprovalPolicy | null | undefined,
+  choice: SamePersonChoice,
+): AutoApprovalPolicy | null | undefined {
+  const current = samePersonControlState(policy)
+  if (current.kind !== 'editable' || current.choice === choice) return policy
+  if (choice !== 'default' && !isKnownSamePersonPolicy(choice)) return policy
+  const next: AutoApprovalPolicy = { ...(policy ?? {}) }
+  delete next.samePersonPolicy
+  delete next.mergeWithRequester
+  if (choice === 'auto_skip') {
+    next.mergeWithRequester = true
+    next.samePersonPolicy = 'auto_skip'
+  } else if (choice !== 'default') {
+    next.samePersonPolicy = choice
+  }
+  return Object.keys(next).length > 0 ? next : null
+}
+
+/**
+ * True when the node policy carries a key OTHER than the two the same-person control owns. Then the
+ * node already overrides the template-level policy no matter what this control shows, so neither the
+ * 默认 label nor the override hint may imply the template tier applies here (M8 honesty). KEY
+ * PRESENCE, not truthiness: an all-false `{ mergeAdjacentApprover: false }` or an `actorMode`-only
+ * object enables no rule, yet its mere presence still suppresses the template tier at this node
+ * (`getEffectiveAutoApprovalPolicy` returns the node policy or `null`, never the template's).
+ */
+export function autoApprovalPolicyHasNonSamePersonKeys(policy: AutoApprovalPolicy | null | undefined): boolean {
+  if (!policy) return false
+  return Object.keys(policy).some((key) => key !== 'samePersonPolicy' && key !== 'mergeWithRequester')
+}
+
+/**
+ * Business labels for the four-value control, shared VERBATIM by both editors (one vocabulary).
+ * Never the raw enum (M8). The 默认 label is computed by `samePersonDefaultChoiceLabel`.
+ */
+export const SAME_PERSON_EXPLICIT_CHOICE_LABELS: Record<SamePersonPolicy, string> = {
+  self_approve: '由发起人本人审批（本节点单独设置）',
+  auto_skip: '自动通过（自审合并）',
+  transfer_direct_manager: '转交发起人的直属上级审批',
+  transfer_dept_head: '转交发起人的部门负责人审批',
+}
+
+/**
+ * 默认 label, M8-honest about precedence: it only "跟随模板" when the node carries NO other
+ * node-level auto-approval key — otherwise the node already overrides the template-level policy
+ * (Lock-4 §0 precedence row) and the label must not claim it follows the template. The sibling-key
+ * wording is deliberately neutral ("已有单独的…设置", not "已设置…规则"): it must stay true for an
+ * all-false or `actorMode`-only object, which enables no rule (gate r1 NIT-1).
+ */
+export const SAME_PERSON_DEFAULT_FOLLOWS_TEMPLATE_LABEL = '默认（跟随模板设置）'
+export const SAME_PERSON_DEFAULT_NODE_OVERRIDES_LABEL = '默认（本节点已有单独的自动审批设置）'
+export function samePersonDefaultChoiceLabel(policy: AutoApprovalPolicy | null | undefined): string {
+  return autoApprovalPolicyHasNonSamePersonKeys(policy)
+    ? SAME_PERSON_DEFAULT_NODE_OVERRIDES_LABEL
+    : SAME_PERSON_DEFAULT_FOLLOWS_TEMPLATE_LABEL
+}
+
+/**
+ * Select value for an `unknown` persisted `samePersonPolicy` (gate X-3). Rendered with its own
+ * honest option label so the control never shows the raw off-enum string (M8) — Element Plus falls
+ * back to displaying the raw model value when no option matches.
+ */
+export const SAME_PERSON_UNKNOWN_SELECT_VALUE = '__unknown__'
+export const SAME_PERSON_UNKNOWN_LABEL = '未识别的设置（只读，保存时保留原值）'
+
+/** The control's model value: the projected choice, or the unknown sentinel. */
+export function samePersonSelectValue(policy: AutoApprovalPolicy | null | undefined): string {
+  const state = samePersonControlState(policy)
+  return state.kind === 'editable' ? state.choice : SAME_PERSON_UNKNOWN_SELECT_VALUE
+}
+
+/** The options in display order: 默认 first, then the four ratified values (Lock-4 F4-C order);
+ *  an `unknown` persisted value gets one extra, leading, read-only option. */
+export function samePersonChoiceOptions(policy: AutoApprovalPolicy | null | undefined): Array<{ value: string; label: string }> {
+  const options: Array<{ value: string; label: string }> = [
+    { value: 'default', label: samePersonDefaultChoiceLabel(policy) },
+    ...SAME_PERSON_POLICIES.map((value) => ({ value, label: SAME_PERSON_EXPLICIT_CHOICE_LABELS[value] })),
+  ]
+  if (samePersonControlState(policy).kind === 'unknown') {
+    options.unshift({ value: SAME_PERSON_UNKNOWN_SELECT_VALUE, label: SAME_PERSON_UNKNOWN_LABEL })
+  }
+  return options
+}
+
+/** Narrows a raw select value to a writable choice (`null` for the unknown sentinel / garbage). */
+export function samePersonChoiceFromSelectValue(value: unknown): SamePersonChoice | null {
+  if (value === 'default') return 'default'
+  return isKnownSamePersonPolicy(value) ? value : null
+}
+
+/** Business label for the 'designated' empty-assignee option (both editors). */
+export const EMPTY_ASSIGNEE_DESIGNATED_LABEL = '转交指定人员'
+
+/**
+ * M8 honesty copy (both editors), each sentence traceable to a ratified clause or shipped code:
+ * - designated: "Fallback is exactly ONE non-recursive step (locked)" — zero usable targets ends at
+ *   the shipped APPROVAL_ASSIGNEE_EMPTY error, never auto-approve (gate B-2); eligibility (active
+ *   users / roles with ≥1 active member) is resolved once at create
+ *   (`loadApprovalDesignatedFallbackEligibility`); OD-L4-3(a): 转审批管理员 = designate that ROLE.
+ */
+export const EMPTY_ASSIGNEE_DESIGNATED_HINT =
+  '仅转交一次：若指定的用户均已停用、指定的角色没有可用成员，该节点按「报错」处理，不会自动通过。可用人员在发起审批时确定。如需转交给审批管理员，请指定审批管理员所在的角色。'
+/**
+ * - override: Lock-4 §0 precedence row — a node-level `autoApprovalPolicy` key PRESENT is a
+ *   whole-object override, so any non-默认 pick stops the template-level 审批人去重 tier at this node.
+ */
+export const SAME_PERSON_OVERRIDE_HINT =
+  '选择「默认」以外的选项会为本节点单独设置自动审批规则，模板级「审批人去重」将不再作用于本节点。'
+/**
+ * - override, node ALREADY overrides (gate r1 NIT-2): when the node carries another node-level
+ *   auto-approval key (`autoApprovalPolicyHasNonSamePersonKeys`), the template tier is suppressed at
+ *   this node whatever this control shows, so the conditional "将不再作用" sentence above would imply
+ *   it currently applies. Same neutral wording as the 默认 label (true for all-false / `actorMode`-only).
+ */
+export const SAME_PERSON_OVERRIDE_ACTIVE_HINT =
+  '本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。'
+/** The precedence hint both editors render under the control (M8: never implies a tier that is off). */
+export function samePersonOverrideHint(policy: AutoApprovalPolicy | null | undefined): string {
+  return autoApprovalPolicyHasNonSamePersonKeys(policy) ? SAME_PERSON_OVERRIDE_ACTIVE_HINT : SAME_PERSON_OVERRIDE_HINT
+}
+/**
+ * - transfer: OD-L4-5(a) — an absent transfer target means the seat is simply not produced, and only
+ *   if the node then has no assignee at all does `emptyAssigneePolicy` govern (L4:130-132 — a
+ *   requester who is one member of a multi-member role just loses that seat; the others remain). It
+ *   must NEVER fall back to self_approve (gate C-3).
+ */
+export const SAME_PERSON_TRANSFER_HINT =
+  '若发起人没有直属上级/部门负责人（或该负责人就是发起人本人），本节点不会生成这位审批人；若本节点因此没有任何审批人，按「空审批人策略」处理，不会退回由发起人本人审批。'
+
+// ── W1-1a (Lock-4 §3 F4-B) — 'designated' fallback targets, shared by BOTH editors ──────────────
+
+/** True when the fallback names at least one non-blank user or role id (mirrors the backend B-s10
+ *  emptiness check in `validateEmptyAssigneeFallbackConfigs`, where an empty array ≡ absent). */
+export function emptyAssigneeFallbackHasTarget(fallback: EmptyAssigneeFallback | null | undefined): boolean {
+  if (!fallback) return false
+  const hasAny = (ids: unknown) => Array.isArray(ids) && ids.some((id) => typeof id === 'string' && id.trim().length > 0)
+  return hasAny(fallback.userIds) || hasAny(fallback.roleIds)
+}
+
+/**
+ * Replaces ONE side (users or roles) of a fallback from a typed picker, keeping the other side.
+ * Trims, drops blanks and duplicates, omits an empty side, and returns `undefined` when both sides
+ * end up empty — the same normalization the backend `normalizeEmptyAssigneeFallback` applies, so the
+ * FE never sends a shape the server would rewrite. Always a fresh object (never aliases the input).
+ */
+export function withEmptyAssigneeFallbackIds(
+  fallback: EmptyAssigneeFallback | null | undefined,
+  side: 'user' | 'role',
+  ids: string[],
+): EmptyAssigneeFallback | undefined {
+  const clean = (values: readonly string[] | undefined) => {
+    const out: string[] = []
+    for (const value of values ?? []) {
+      const trimmed = typeof value === 'string' ? value.trim() : ''
+      if (trimmed && !out.includes(trimmed)) out.push(trimmed)
+    }
+    return out
+  }
+  const userIds = clean(side === 'user' ? ids : fallback?.userIds)
+  const roleIds = clean(side === 'role' ? ids : fallback?.roleIds)
+  if (userIds.length === 0 && roleIds.length === 0) return undefined
+  return {
+    ...(userIds.length > 0 ? { userIds } : {}),
+    ...(roleIds.length > 0 ? { roleIds } : {}),
+  }
 }
 
 /**
@@ -284,6 +539,11 @@ export function approvalNodeEditsFromGraph(graph: ApprovalGraph | undefined): Ap
         ...(config.approvalType !== undefined ? { approvalType: config.approvalType } : {}),
         ...(sourcelessAutoApprove ? { omitAssigneeSources: true } : {}),
         ...(config.emptyAssigneePolicy !== undefined ? { emptyAssigneePolicy: config.emptyAssigneePolicy } : {}),
+        // W1-1a: identity seed — present only when persisted, so a node without the key seeds
+        // exactly as before this slice (no round-trip churn).
+        ...(config.emptyAssigneeFallback !== undefined
+          ? { emptyAssigneeFallback: cloneJson(config.emptyAssigneeFallback) }
+          : {}),
         ...(config.autoApprovalPolicy !== undefined ? { autoApprovalPolicy: cloneJson(config.autoApprovalPolicy) } : {}),
         ...(config.fieldPermissions !== undefined ? { fieldPermissions: cloneJson(config.fieldPermissions) } : {}),
         ...(config.timeout !== undefined ? { timeout: cloneJson(config.timeout) } : {}),
@@ -408,11 +668,15 @@ export function applyApprovalNodeEditsToGraph(graph: ApprovalGraph, edits: Appro
     if (edit.emptyAssigneePolicy !== undefined) config.emptyAssigneePolicy = edit.emptyAssigneePolicy
     // Fix-round advisor catch (post-P1-1): `emptyAssigneeFallback` rides ONLY with an effective
     // policy of 'designated' — mirrors `approvalThreshold`'s own conditional-emission arm
-    // immediately above. It is not in the edit model (no typed picker ships yet), so it survives
-    // via the `{...originalConfig}` spread above UNLESS explicitly cleared here; an author
-    // switching a designated node's 空审批人策略 control away must not leave an orphaned key behind
-    // — P2-3's own new validator would then 400 the save on a key no canvas UI can see or clear.
+    // immediately above. An author switching a designated node's 空审批人策略 control away must not
+    // leave an orphaned key behind — the backend B-s10 validator would 400 the save
+    // (APPROVAL_EMPTY_ASSIGNEE_FALLBACK_NOT_ALLOWED). W1-1a: the key is now IN the edit model (typed
+    // user/role pickers); absent ≡ untouched (the `{...originalConfig}` spread keeps the persisted
+    // value), `null` ≡ every target cleared (key removed — `validateApprovalNodeEdits` then flags
+    // the designated-without-target state before save, mirroring APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED).
     if (config.emptyAssigneePolicy !== 'designated') delete config.emptyAssigneeFallback
+    else if (edit.emptyAssigneeFallback === null) delete config.emptyAssigneeFallback
+    else if (edit.emptyAssigneeFallback !== undefined) config.emptyAssigneeFallback = cloneJson(edit.emptyAssigneeFallback)
     if (edit.autoApprovalPolicy === null) delete config.autoApprovalPolicy
     else if (edit.autoApprovalPolicy !== undefined) config.autoApprovalPolicy = cloneJson(edit.autoApprovalPolicy)
     if (edit.fieldPermissions !== undefined) {
@@ -595,6 +859,12 @@ export function validateApprovalNodeEdits(
       // different code path than `unsupportedTemplateAuthoringReason`).
       if (edit.emptyAssigneePolicy !== undefined && !(['error', 'auto-approve', 'designated'] as const).includes(edit.emptyAssigneePolicy)) {
         errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略无效`)
+      }
+      // W1-1a — FE mirror of the backend B-s10 authoring gate (`validateEmptyAssigneeFallbackConfigs`,
+      // APPROVAL_EMPTY_ASSIGNEE_FALLBACK_REQUIRED), which runs on create/update as well as publish, so
+      // this is a SAVE-blocking preview, not a publish-only one. Values-free: node key + policy only.
+      if (edit.emptyAssigneePolicy === 'designated' && !emptyAssigneeFallbackHasTarget(edit.emptyAssigneeFallback)) {
+        errors.push(`审批节点 ${edit.nodeKey} 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色`)
       }
       const inParallelRegion = parallelRegionNodeKeys?.has(edit.nodeKey) ?? false
       // Lock-4 §1 F4-A — the value door (a seeded off-union value, `'auto_reject'` included, is never
