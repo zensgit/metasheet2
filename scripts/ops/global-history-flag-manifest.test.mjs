@@ -780,4 +780,17 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   assert.doesNotMatch(host, /every other `user_roles` write/)
   assert.doesNotMatch(host, /no second pool connection (?:is taken )?while (?:the locks|they) are held/)
   assert.match(host, /WHAT OTHER SESSIONS SEE/)
+  // Fix round 2 (N3 stated exactly): the row locks hold only EXISTING rows, so an insert-only downgrade
+  // of the grantor waits on nothing and a sheet not reached yet may still be granted after it; a G1
+  // call's pool-connection wait is not a lock wait. Both the switch-on record and the header say so,
+  // and the old "cannot be revoked … nothing is granted after it" claims may not come back.
+  assert.match(spec.purpose, /an insert-only downgrade of the grantor \(.*standard PUT.*member group holding a lower level.*\) waits on nothing, and a named sheet the add has not reached yet may still be granted after it/)
+  assert.match(spec.purpose, /A G1 call waiting for a pool connection is not a lock wait and no lock_timeout bounds it: .*pool connect timeout \(10 s by default\) and ends in 500/)
+  assert.match(host, /THE INSERT-ONLY DOWNGRADE IS NOT COVERED/)
+  assert.match(host, /may STILL BE GRANTED AFTER IT/)
+  assert.match(host, /A G1 CALL WAITING FOR A POOL CONNECTION IS[\s*]+NOT A LOCK WAIT/)
+  assert.doesNotMatch(host, /cannot be revoked between the in-lock check and the G1 call/)
+  assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
+  assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
+  assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
 })

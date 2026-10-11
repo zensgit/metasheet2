@@ -915,10 +915,22 @@ describe('stock-prep members port (S5b, R-39)', () => {
     expect([...STOCK_PREP_MEMBERS_ADVISORY_LOCK_KEY]).toEqual(['stock-prep', 'members-port'])
     expect(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL).toBe('SELECT id FROM roles WHERE id = $1 FOR UPDATE')
     for (const sql of STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL) expect(sql).toMatch(/ = \$1\)? FOR SHARE$/)
-    expect(norm(STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL[0])).toBe('SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1 FOR SHARE')
+    // Fix round 2: ALL SEVEN grantor locks written out as literals — the expected lock order below is
+    // built from this list, not from the exported constant, so dropping any one of them (the
+    // member-group FOR SHARE included) is red here.
+    const GRANTOR_LOCKS_LITERAL = [
+      'SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1 FOR SHARE',
+      'SELECT rp.role_id FROM role_permissions rp WHERE rp.role_id IN (SELECT ur.role_id FROM user_roles ur WHERE ur.user_id = $1) FOR SHARE',
+      'SELECT up.permission_code FROM user_permissions up WHERE up.user_id = $1 FOR SHARE',
+      'SELECT gm.group_id FROM platform_member_group_members gm WHERE gm.user_id = $1 FOR SHARE',
+      'SELECT una.namespace FROM user_namespace_admissions una WHERE una.user_id = $1 FOR SHARE',
+      'SELECT s.namespace FROM delegated_role_admin_scopes s WHERE s.admin_user_id = $1 FOR SHARE',
+      'SELECT g.namespace FROM delegated_role_admin_member_groups g WHERE g.admin_user_id = $1 FOR SHARE',
+    ]
+    expect(STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm)).toEqual(GRANTOR_LOCKS_LITERAL)
     expect(norm(STOCK_PREP_MEMBERS_GRANTOR_SHEET_LOCK_SQL)).toMatch(/^SELECT sp\.sheet_id FROM spreadsheet_permissions sp WHERE sp\.sheet_id = ANY\(\$2::text\[\]\) .* FOR SHARE OF sp$/)
     const timeout = norm(STOCK_PREP_MEMBERS_LOCK_TIMEOUT_SQL)
-    const grantor = STOCK_PREP_MEMBERS_GRANTOR_LOCK_SQL.map(norm)
+    const grantor = GRANTOR_LOCKS_LITERAL
     const roleRow = norm(STOCK_PREP_MEMBERS_ROLE_ROW_LOCK_SQL)
     const writes: Array<[string, (h: Harness) => Promise<unknown>, string[]]> = [
       ['create', (h) => h.port.createCustomRole({ actorId: DELEGATED, name: '甲', permissionCodes: ['stock-prep:read'] }), [timeout, norm(STOCK_PREP_MEMBERS_ADVISORY_LOCK_SQL), ...grantor]],
@@ -953,6 +965,30 @@ describe('stock-prep members port (S5b, R-39)', () => {
       expect([error.status, error.code], kind).toEqual([404, 'STOCK_PREP_CUSTOM_ROLE_NOT_FOUND'])
       expect(t.granted).toEqual([])
       expect(h.audits).toEqual([])
+    }
+
+    // Fix round 2 (S1 under the lock, both write paths): the platform role editor commits a platform
+    // code to the role between the fast check and the role-row lock. The write re-reads the role's
+    // committed codes under the lock and answers 409 HAS_PLATFORM_CODES — the sheet grant with ZERO
+    // G1 calls (the fast check before the lock passed, so only the in-lock re-read can catch it).
+    for (const kind of ['update', 'grant'] as const) {
+      const widen = (text: string, world: World) => {
+        if (text === roleRow && !world.rolePermissions.some((row) => row.role_id === CUSTOM && row.permission_code === 'users:write')) {
+          world.rolePermissions.push({ role_id: CUSTOM, permission_code: 'users:write' })
+        }
+      }
+      const h = harness({ onTxStatement: widen })
+      const t = targets([SHEET_A])
+      let resolved = 0
+      const error = await refusal(kind === 'update'
+        ? h.port.updateCustomRole({ actorId: DELEGATED, roleId: CUSTOM, name: '戊' })
+        : h.port.grantCustomRoleProjectSheets({ actorId: DELEGATED, roleId: CUSTOM, resolveTargets: async () => { resolved += 1; return t.list } }))
+      expect([error.status, error.code, error.details], kind).toEqual([409, 'STOCK_PREP_CUSTOM_ROLE_HAS_PLATFORM_CODES', { foreignCodeCount: 1 }])
+      if (kind === 'grant') expect(resolved, 'the fast check passed: targets were resolved before the lock').toBe(1)
+      expect(t.granted, kind).toEqual([])
+      expect(h.boundCalls, `${kind}: no G1 call`).toEqual([])
+      expect(h.audits, kind).toEqual([])
+      expect(h.world.roles.get(CUSTOM)?.name, kind).toBe('仓库只填两张表')
     }
 
     // The window between the fast checks and the locks: someone else commits there. `at` = the

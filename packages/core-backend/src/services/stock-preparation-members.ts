@@ -57,8 +57,16 @@
  *     per-namespace advisory lock instead (the role does not exist yet, and the 100 cap is a count no
  *     row lock can serialise). Then FOR SHARE on the grantor's own authority rows — role memberships,
  *     role codes, direct codes, member groups, admission, delegation scope, and (for a sheet grant)
- *     their existing grants on the named sheets — so none of them can be revoked between the decision
- *     and the commit. The checks that ran before the transaction stay as fast refusals.
+ *     their existing grants on the named sheets — so none of those EXISTING rows can be deleted or
+ *     changed between the decision and the commit. The checks that ran before the transaction stay as
+ *     fast refusals. THE INSERT-ONLY DOWNGRADE IS NOT COVERED (fix round 2): a row lock holds only rows
+ *     that exist, so a downgrade that only INSERTS — a lower direct level on a named sheet for a
+ *     grantor who has no direct row there (the sheet-permission page's standard PUT is exactly that:
+ *     its DELETE finds no row of theirs and waits on nothing, its INSERT commits at once), or a new
+ *     membership in a member group holding a lower level on that sheet (direct beats member group
+ *     beats role, permission-service.ts) — waits on nothing, and a named sheet the grant has not
+ *     reached yet may STILL BE GRANTED AFTER IT (the same outcome as granting first and downgrading
+ *     second).
  *     WHAT OTHER SESSIONS SEE (stated exactly, because switching the page ON is the owner's acceptance
  *     of it): a write that touches NEITHER the role being written NOR the grantor's own authority rows
  *     is unaffected. A write that touches the grantor's own authority — revoking any role they hold
@@ -73,13 +81,22 @@
  *     cannot see as a cycle — the route holds the sheet row and waits on this port's grant row lock,
  *     the G1 call waits on the sheet row — and only the G1 call's own `lock_timeout` breaks it: the
  *     grant answers 409 BUSY after ≈ 5 s, the sheets granted before it stay granted, then the revoke
- *     lands (nothing is granted after it).
+ *     lands — and nothing is granted after THAT revoke. This holds only when the route's DELETE finds
+ *     an existing grant row of the grantor's on that sheet (a role or member-group grant is not the
+ *     grantor's direct row): an insert-only downgrade (above) waits on nothing, and a sheet the grant
+ *     has not reached yet may still be granted after it. A G1 CALL WAITING FOR A POOL CONNECTION IS
+ *     NOT A LOCK WAIT — no `lock_timeout` bounds it: while this grant holds the role row, same-role
+ *     writers that queue on that row without a `lock_timeout` of their own (delegation-route
+ *     appointments to the role) can fill the pool; the G1 call then waits up to the pool's connect
+ *     timeout (10 s by default), the grant ends in a 500 (the connect-timeout error, not 409 BUSY),
+ *     and every other pool user of the process waits for that time too.
  *   * PROJECT SHEETS: ADD-ONLY, WRITE LEVEL, THROUGH G1. This port never writes a sheet grant
  *     itself; the plugin hands it the G1 port call (`grantSheetRoleWrite` via the plugin-scope
  *     wrapper: plugin-owned project sheets only, role subjects only, `spreadsheet:write` literal,
  *     `ON CONFLICT DO NOTHING`). There is no remove path (ADR §11.7). The G1 calls run while this
- *     port's locks are held — so the decision (role, members, grantor, the grantor's own grants on
- *     those sheets) cannot change under them — and each runs in its own transaction on another
+ *     port's locks are held — so the decision (role, members, grantor, the grantor's EXISTING grant
+ *     rows on those sheets) cannot be deleted or changed under them; an insert-only downgrade of the
+ *     grantor is not held off (see above) — and each runs in its own transaction on another
  *     connection, so the hold is BOUNDED three ways: every lock wait inside a G1 call is bounded by
  *     the same `lock_timeout` (deps.boundGrantLockWaits → the G1 service sets it transaction-locally),
  *     no further G1 call starts once STOCK_PREP_MEMBERS_GRANT_BUDGET_MS has passed (409 BUSY,
@@ -199,10 +216,14 @@ const DEADLOCK_SQLSTATE = '40P01'
  *      lock on something other than a row can serialise. Only creates take it;
  *   3. FOR SHARE on the grantor's own authority rows — their role memberships (the caller tier and
  *      every role-derived code), the codes of those roles, their direct codes, their member groups,
- *      their admission and their delegation scope cannot be revoked under the decision;
+ *      their admission and their delegation scope — so those EXISTING rows cannot be deleted under the
+ *      decision (a new row, e.g. a new member-group membership, is not held off);
  *   4. (sheet grant only) FOR SHARE on the grantor's existing grants on the named sheets — direct,
- *      member-group and role subjects, the rows the grid's write decision reads — so the grantor's own
- *      write on a sheet cannot be revoked between the in-lock check and the G1 call (N3). The sheet
+ *      member-group and role subjects, the rows the grid's write decision reads — so the grantor's
+ *      EXISTING grant rows on a sheet cannot be deleted or changed between the in-lock check and the
+ *      G1 call (N3). It does NOT stop an insert-only downgrade (a lower direct row for a grantor with
+ *      no direct row there, or a new membership in a lower-level member group): that waits on nothing,
+ *      and a sheet not reached yet may still be granted after it (see the header). The sheet
  *      row (`meta_sheets`) is deliberately NOT locked: the G1 call takes it `FOR UPDATE` on its own
  *      connection while these locks are held, and would wait on this transaction. A sheet-permission
  *      route that DOES hold that sheet row and then edits the grantor's grant on it waits here while
@@ -1139,7 +1160,8 @@ export function createStockPrepMembersPort(deps: StockPrepMembersDeps): StockPre
             // Decided again under the locks, on the transaction's connection: the role, every
             // member's scope, the sheets. The G1 calls then run while those locks are held — the
             // role row (no delegated appointment to it can land), the grantor's rows and their
-            // grants on these sheets (no revoke of the grantor's write can land) — each bounded.
+            // EXISTING grant rows on these sheets (no delete of them can land; an insert-only
+            // downgrade is not held off — see the header) — each bounded.
             await loadWritableCustomRole(query, id)
             await assertRoleMembersWithinScope(caller, id, query)
             await assertSheetsWritable(caller, sheetIds, query)
