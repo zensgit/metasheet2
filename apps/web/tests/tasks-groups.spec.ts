@@ -27,7 +27,7 @@ const h_ = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
   notifyTasksChanged: vi.fn(),
   getCurrentUserId: vi.fn(),
-  /** `GET /api/tasks?view=…` (the view). */
+  /** `GET /api/tasks?view=…` (the view, then the G2-core `status` or null). */
   tasksReply: vi.fn(),
   /** `POST /api/tasks/:id/complete` (task id). */
   completeReply: vi.fn(),
@@ -281,7 +281,10 @@ async function fakeFetch(path: string, init?: FetchInit): Promise<Response> {
   const method = init?.method ?? 'GET'
   const [pathname, query = ''] = path.split('?')
   let match: RegExpExecArray | null
-  if (method === 'GET' && pathname === '/api/tasks') return h_.tasksReply(new URLSearchParams(query).get('view'))
+  if (method === 'GET' && pathname === '/api/tasks') {
+    const params = new URLSearchParams(query)
+    return h_.tasksReply(params.get('view'), params.get('status'))
+  }
   if (method === 'GET' && (match = /^\/api\/tasks\/([^/]+)$/.exec(pathname))) return jsonResponse(200, detailBody(decodeURIComponent(match[1])))
   if (method === 'GET' && /^\/api\/tasks\/[^/]+\/comments$/.test(pathname)) return jsonResponse(200, { items: [], total: 0 })
   if (method === 'POST' && (match = /^\/api\/tasks\/([^/]+)\/complete$/.exec(pathname))) return h_.completeReply(decodeURIComponent(match[1]))
@@ -2315,5 +2318,80 @@ describe('/task-lists/:id — answers that land after the page moved on', () => 
     oldPlacements.resolve(page([at('tg_l2', 't7', 0)], 'offset=0'))
     await flush()
     expect(layout(el)).toEqual([['tg_l2', [], ['t7']]])
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// G2-core (design task-g2-core-design-20261011.md §4.1): the status filter and the assigned
+// view's board. The placements read is not filtered by status (its visible set is the assigned
+// view, open and done), so under the default 未完成 a placed completed task names a task that is
+// not a row: the board is not the server's index space, and the existing rule holds moves off with
+// its notice. 全部 makes the board whole again. The fake backend here honours `status` the way the
+// server does; the cells above keep the fake that ignores it.
+// ---------------------------------------------------------------------------------------------
+
+describe('/tasks — the status filter and the board (G2-core)', () => {
+  function clearStorage(): void {
+    try {
+      window.localStorage.clear()
+    } catch {
+      // Nothing to clear.
+    }
+  }
+
+  function byStatus(_view: string | null, status: string | null): Response {
+    const items = status === 'open' || status === 'done' ? assigned.filter((item) => item.status === status) : assigned
+    return jsonResponse(200, { items, total: items.length })
+  }
+
+  /** seedGrouped with t2 (placed in the default group, between t5 and t6) completed. */
+  function seedWithPlacedDone(): void {
+    seedGrouped()
+    assigned = assigned.map((item) => (item.id === 't2' ? { ...item, status: 'done' as const } : item))
+    h_.tasksReply.mockImplementation(byStatus)
+  }
+
+  beforeEach(clearStorage)
+  afterEach(clearStorage)
+
+  it('g2core|board|under the default 未完成 a placed completed task is not a row: the order shows without it, moves are off with the notice', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    expect(reads('/api/tasks?view=assigned&status=open')).toBe(1)
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't6'], ['t3']])
+    expect(text(el, 'tasks-groups-reorder-off')).toBe('部分任务未显示，排序已停用')
+    expect(moveState(el, 't6')).toEqual({ up: false, down: false, join: null, select: false })
+    expect(handles(el).every((value) => value === 'false')).toBe(true)
+    // A move control forced back on still sends nothing: no PUT in the wrong index space.
+    const up = inRow(el, 't6', 'tasks-group-move-up') as HTMLButtonElement
+    up.disabled = false
+    up.click()
+    await flush()
+    expect(writes()).toEqual([])
+  })
+
+  it('g2core|board|全部 shows the completed task again: moves are back and count it (the server\'s index space)', async () => {
+    seedWithPlacedDone()
+    const el = await mountAt('/tasks')
+    must(el, 'tasks-groups-reorder-off')
+    ;(must(el, 'tasks-status-switch-all') as HTMLButtonElement).click()
+    await flush()
+    expect(reads('/api/tasks?view=assigned&status=all')).toBe(1)
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't2', 't6'], ['t3']])
+    await clickIn(el, 't6', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t6 {"groupId":null,"position":1}'])
+    expect(layout(el)[0]).toEqual(['tg_def', ['t5', 't6', 't2'], ['t3']])
+  })
+
+  it('g2core|board|with no completed task placed, the default 未完成 board keeps its moves', async () => {
+    seedGrouped()
+    h_.tasksReply.mockImplementation(byStatus)
+    const el = await mountAt('/tasks')
+    expect(reads('/api/tasks?view=assigned&status=open')).toBe(1)
+    expect(shown(el, 'tasks-groups-reorder-off')).toBeNull()
+    expect(layout(el)).toEqual(GROUPED_LAYOUT)
+    await clickIn(el, 't2', 'tasks-group-move-up')
+    expect(writes()).toEqual(['PUT /api/task-groups/items/t2 {"groupId":null,"position":0}'])
   })
 })

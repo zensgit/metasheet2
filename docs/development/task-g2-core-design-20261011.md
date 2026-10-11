@@ -65,6 +65,28 @@ Implementation:
 - `tasks/labels.ts`: `statusFilterLabel`, `statusFilterOpen` (未完成 / Not completed),
   `statusFilterDone` (已完成 / Completed), `statusFilterAll` (全部 / All).
 
+### 4.1 The assigned view's grouping board under a status filter (visible consequence)
+
+The assigned view renders its rows through the personal grouping board (M4 FE-7). The board joins
+the rows from `GET /api/tasks` with the placements from `GET /api/task-groups/items`. The placements
+read is **not** filtered by status: its visible set is the assigned view, open and done, and a move's
+`position` counts that set (M4 PR-3a design §3.5). The board's existing rule (`[fe-35]`,
+`tasks/tasksGroupBoard.ts`) offers moves only while every placement names a shown row. Otherwise it
+shows the order without the missing tasks, disables every move control, and shows the notice
+「部分任务未显示，排序已停用」.
+
+The consequence under the default 未完成: once a task placed in a personal group is completed, it is
+no longer a row. The board then holds every move off, with the notice, for as long as any completed
+task stays placed. 全部 shows the completed tasks again, and moves come back in the server's index
+space. Groups can still be created, renamed and deleted. No request goes out in the wrong index
+space, so no placement is written wrong. `tasks-groups.spec.ts` pins three cells:
+- moves are off under 未完成 with a placed completed task, and a forced control sends nothing;
+- 全部 restores moves, and the PUT counts the completed task;
+- with no completed task placed, moves stay on under 未完成.
+
+G2-core does not change the board rules. That would be FE-7 scope and outside the owner's G2-core
+ruling. The choice is listed as Q-G2-2.
+
 ## 5. Owner question (not ruled)
 
 **Q-G2-1: the server default when `status` is absent.** Implemented: `all`. This keeps the row sets
@@ -73,6 +95,19 @@ of ratified gate 19 and gate 4 (and every existing caller and test) unchanged, a
 parameter (including any external client) see only unfinished tasks. That would change the
 gate 19 and gate 4 row sets, and would need those gates re-cut. Changing the default later is a
 one-line change in `taskStatusClause` plus the cells that pin `absent = all`.
+
+**Q-G2-2: reordering on the assigned view's board under 未完成 (§4.1).** Implemented: the existing
+board rule holds moves off while a completed task is placed, and 全部 restores them. This is
+data-safe but visible: a user of personal groups loses reordering under the default as soon as they
+complete a placed task. Alternatives, each outside G2-core's scope as ruled:
+- (a) a follow-up FE slice: the board keeps the server's index space by counting placements of tasks
+  hidden by the status filter, while still not showing them;
+- (b) the placements read takes the same status filter, and the move position counts only that set.
+  This changes the PR-3a contract;
+- (c) the assigned view's board reads its rows with `all` whatever the switch says. The filter would
+  then not apply to the grouped rows.
+
+The server default in Q-G2-1 does not affect this, because the page always sends its status.
 
 Recorded assumption (not an owner question unless the owner wants it to be): a repeated `status`
 is answered as invalid rather than defaulted. `view` defaults a non-string to `assigned`; doing the
@@ -115,7 +150,9 @@ one is a no-op; a late answer for the previous status cannot paint; a reload aft
 the status; persistence across a remount; stored `open`/`done`/`all` honoured; stored garbage reads
 as `open`; `getItem` throws; `setItem` throws; the `localStorage` accessor throws. Changed:
 `tasks-list-view.spec.ts` and `tasks-groups.spec.ts` (the list read now carries `status=open`), and
-`tasks-api-m4.spec.ts` (the request string with a status).
+`tasks-api-m4.spec.ts` (the request string with a status). `tasks-groups.spec.ts` also gains the
+three board cells of §4.1. Their fake backend filters rows by `status` as the server does, and passes
+the status to the reply as a second argument; the existing cells keep the fake that ignores it.
 
 ## 7. Registration
 
@@ -127,3 +164,12 @@ as `open`; `getItem` throws; `setItem` throws; the `localStorage` accessor throw
   `.github/workflows/tasks-web-guard.yml` lists it as the twenty-fifth whole-file argument.
 - The PR-3c touchpoint census (`task-counts-touchpoints.test.ts`) scans writes of pending inputs. This
   change only reads `tasks.status`, and the census stays green.
+
+## 8. Earlier records not edited
+
+- The route table in `task-m4-pr3a-backend-design-20260930.md` lists `view` `limit` `offset` for
+  `GET /api/tasks`. That table is the M4 record; this design adds `status`, and the older record is
+  not rewritten.
+- Lock §12 gate 4 and gate 19 call `GET /api/tasks?view=…` without `status`. With the server default
+  `all` (Q-G2-1), their row sets are unchanged. If the owner picks `open`, those gates need re-cutting
+  as part of that ruling.

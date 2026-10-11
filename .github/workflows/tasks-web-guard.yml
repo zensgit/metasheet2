@@ -141,7 +141,9 @@
 # the view switch keeps the status, a late answer for the previous status cannot paint, the choice
 # remembered per browser, and stored garbage or a storage that throws falls back to `open`.
 # `tasks-list-view.spec.ts` and `tasks-groups.spec.ts` now expect the status on the list read;
-# `tasks-api-m4.spec.ts` gains the request string with a status.
+# `tasks-groups.spec.ts` also gains the board under the filter (a placed completed task hidden by
+# 未完成 holds moves off with the notice; 全部 restores them); `tasks-api-m4.spec.ts` gains the
+# request string with a status.
 #
 # Scope: deliberately TARGETED (same convention as elearning/approval/attendance/multitable/
 # plm-embed web-guards). NOT a required check: it cannot hang a PR, but it turns a silent FE

@@ -1,8 +1,10 @@
 # Task line G2-core: status filter — verification (2026-10-11)
 
 Design: `task-g2-core-design-20261011.md`. Code head under test: `a44b168260` (branch
-`claude/tasks-g2-core`, based on main `906840c74c`). This note is added in a docs-only commit on top
-of that head. Every row below says RAN or NOT RUN. Nothing was pushed to GitHub, and no PR was
+`claude/tasks-g2-core`, based on main `906840c74c`). This note is added in a later commit on top of
+that head. The same commit also adds the three board cells to `tasks-groups.spec.ts`, a comment in
+`tasks-web-guard.yml`, and the design's §4.1 and Q-G2-2. Those are test and docs changes only, so the
+real-DB runs below still apply. Every row below says RAN or NOT RUN. Nothing was pushed to GitHub, and no PR was
 opened. No DDL, no flag, and no staging or production step.
 
 Machines: "local" is the development laptop, with node_modules linked from the main clone.
@@ -19,7 +21,8 @@ the tasks auth gate).
 | Backend unit `tests/unit/task*`, `tests/unit/tasks*` and the supertest tripwire | RAN — 40 files, 1618 passed, 0 failed (new `task-status-filter.test.ts`: 37 passed) |
 | Backend unit, full default config (`vitest run`) | RAN — 1308 files: 1132 passed, 4 failed, 172 skipped. Tests: 20415 passed, 43 failed, 1742 skipped. The 4 failing files are `multitable-recovery-*`. The same 4 files fail the same 43 tests on main `906840c74c` on the other machine (43 failed / 48 passed on both trees), so they are not from this change |
 | Source-scanning guards (touchpoint census, coverage enumeration, auth CI wiring, gate-19 identities, route/closure scanners) | RAN — all passed, as part of the two rows above |
-| Web specs `tests/App.spec.ts` + `tests/tasks-*.spec.ts` | RAN — 25 files, 1962 passed, 0 failed (new `tasks-status-filter.spec.ts`: 20 passed) |
+| Web specs `tests/App.spec.ts` + `tests/tasks-*.spec.ts` | RAN — 25 files, 1965 passed, 0 failed (new `tasks-status-filter.spec.ts`: 20 passed; `tasks-groups.spec.ts`: 177 passed, including the 3 G2-core board cells) |
+| Board under the filter (design §4.1) | RAN — under 未完成 a placed completed task holds moves off with the notice and a forced control sends nothing; 全部 restores moves and the PUT counts the completed task (`{"groupId":null,"position":1}`); with no completed task placed, moves stay on |
 | Required web token manifest `--check` | RAN — matches (587 tokens). Token-set diff from main: one token added, `tasks-status-filter.spec.ts` |
 
 ## 2. Other machine, real DB (RAN)
@@ -102,16 +105,17 @@ byte-compared:
 | BU6 no closed-set validation | 14 |
 
 Frontend mutants, RAN locally against `tasks-status-filter` + `tasks-list-view` + `tasks-groups`
-(226 cells), each restored and byte-compared:
+(229 cells, board cells included), each restored and byte-compared:
 
-| Mutant | Failed / 226 |
+| Mutant | Failed / 229 |
 |---|---|
-| FM1 default `all` instead of `open` | 27 |
+| FM1 default `all` instead of `open` | 30 |
 | FM2 the switch is not persisted | 2 |
 | FM3 `getItem` not guarded | 1 |
 | FM4 a stored value not checked against the closed set | 6 |
-| FM5 `loadList` drops the status | 33 |
+| FM5 `loadList` drops the status | 36 |
 | FM6 `setItem` not guarded | 1 |
+| FM7 the board's missing-row rule removed (existing `[fe-35]` guard) | 4 |
 
 ## 5. Not run / open
 
@@ -121,3 +125,5 @@ Frontend mutants, RAN locally against `tasks-status-filter` + `tasks-list-view` 
 - Browser check of the switch on a running app: NOT RUN. The spec mounts the real `TasksView` with
   the API mocked.
 - Owner question Q-G2-1 (server default for an absent status): open. See the design §5.
+- Owner question Q-G2-2 (reordering on the assigned view's board under 未完成 while a completed task
+  is placed): open. See the design §4.1 and §5.
