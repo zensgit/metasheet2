@@ -253,6 +253,26 @@ WHERE p.code IN (
 ON CONFLICT (user_id, permission_code) DO NOTHING;
 SQL
 
+# The grant above only inserts codes that exist in the permission catalogue; a code the catalogue
+# does not have is skipped without a word. Report those codes (diagnostics only): one read-only
+# query whose code list is the grant's list, nothing written, and a failing query never changes the
+# exit status. The PowerShell twin (multitable-onprem-bootstrap-admin.ps1) carries the same query
+# and messages; scripts/ops/attendance-onprem-bootstrap-admin-skipped-codes.test.mjs pins them.
+BOOTSTRAP_GRANT_SKIPPED_CODES_SQL="SELECT string_agg(t.code, ',' ORDER BY t.code) FROM unnest(ARRAY['attendance:read', 'attendance:write', 'attendance:approve', 'attendance:admin', 'permissions:read', 'permissions:write', 'roles:read', 'roles:write']) AS t(code) WHERE NOT EXISTS (SELECT 1 FROM permissions p WHERE p.code = t.code);"
+
+info "read-only check for permission codes not in catalogue"
+if skipped_grant_codes="$(
+  psql "${DATABASE_URL}" -v ON_ERROR_STOP=1 -X -A -t <<<"$BOOTSTRAP_GRANT_SKIPPED_CODES_SQL" | tr -d '[:space:]'
+)"; then
+  if [[ ! "$skipped_grant_codes" =~ ^[a-z_:,]*$ ]]; then
+    info "Permission codes not in catalogue: the read-only check returned an unexpected shape (non-fatal; the grants above are unchanged)"
+  elif [[ -n "$skipped_grant_codes" ]]; then
+    info "Permission codes not in catalogue (skipped; admin role bypass covers them): ${skipped_grant_codes}"
+  fi
+else
+  info "Permission codes not in catalogue: the read-only check failed (non-fatal; the grants above are unchanged)"
+fi
+
 login_response_file=""
 admin_session_token=""
 if [[ "$VERIFY_LOGIN" == "1" ]]; then

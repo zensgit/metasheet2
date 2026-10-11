@@ -95,6 +95,9 @@ function makeFixture() {
       '    elif [[ "$sql" == "$PINNED_POSTCONDITION_SQL" ]]; then',
       '      [[ "${STUB_POSTCONDITION_FAIL:-0}" == "1" ]] && { echo "stub failure" >&2; exit 3; }',
       '      echo "${STUB_POSTCONDITION:-1:1:1}"',
+      // The direct-grant skipped-codes report (pinned by ...-skipped-codes.test.mjs): every code present.
+      '    elif [[ "$sql" == "SELECT string_agg(t.code, \',\' ORDER BY t.code) FROM unnest(ARRAY["* ]]; then',
+      '      echo ""',
       '    else',
       '      echo "UNEXPECTED_SQL" >&2; exit 9',
       '    fi ;;',
