@@ -286,6 +286,8 @@ test('finite output and total deadline remain bounded', () => {
 
 const sha = raw => createHash('sha256').update(raw).digest('hex')
 const unshareDenied = 'unshare: unshare failed: Operation not permitted\n'
+const uidMapDenied = 'unshare: write failed /proc/self/uid_map: Operation not permitted\n'
+const gidMapDenied = 'unshare: write failed /proc/self/gid_map: Operation not permitted\n'
 const bootstrapFrame = stage => Buffer.from('YIDA_BROWSER_CI_BOOTSTRAP_STAGE ' +
   JSON.stringify({ stage, reason: 'BOOTSTRAP_FAILED' }) + '\nYIDA_BROWSER_CI_BOOTSTRAP_FAILED\n')
 function diagnosticOwner() {
@@ -384,7 +386,8 @@ test('production capture and outer caller publish bootstrap rejection before unc
       diagnosticSource: 'STDERR', diagnosticOutcome: 'FRAME_ACCEPTED',
       childExit: 1, signaled: false, timedOut: false, interrupted: false, outputExceeded: false, error: false,
       stderrObservation: { byteCount: bootstrapFrame('BOOTSTRAP_LO_UP').length, lineCount: 2,
-        pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN' } })
+        pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false,
+        toolPrefix: 'UNKNOWN', unsharePermissionObservation: 'NONE' } })
     assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}')
   }, { stderr: bootstrapFrame('BOOTSTRAP_LO_UP').toString() })
 })
@@ -427,12 +430,28 @@ test('production capture and outer caller classify only exact unshare denial and
           ? { stderrObservation: { byteCount: Buffer.byteLength(stderr),
             lineCount: ['prefix', 'suffix', 'extra-newline'].includes(variant) ? 2 : 1,
             pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false,
-            toolPrefix: variant === 'prefix' ? 'UNKNOWN' : 'UNSHARE' } } : {}) }, variant)
+            toolPrefix: variant === 'prefix' ? 'UNKNOWN' : 'UNSHARE',
+            unsharePermissionObservation: variant === 'exact' ? 'CREATE_DENIED' : 'NONE' } } : {}) }, variant)
       assert.equal(lines.length, 2, variant)
       assert.equal(lines[1], 'YIDA_BROWSER_CI_RESULT {"passed":false,"tests":0,"business":0,"sentinels":0}', variant)
       assert.equal(lines.join('\n').includes('synthetic-secret'), false, variant)
       assert.equal(process.exitCode, 1, variant)
     }, { stderr, stdout: variant === 'stdout' ? 'synthetic-secret\n' : '' })
+  }
+})
+
+test('verified unshare map denials are fixed observations and remain unrecognized failure frames', async () => {
+  for (const [stderr, unsharePermissionObservation] of [
+    [uidMapDenied, 'UID_MAP_WRITE_DENIED'], [gidMapDenied, 'GID_MAP_WRITE_DENIED'],
+  ]) {
+    assert.deepEqual(parseChildFailureFrame(Buffer.from(stderr)), { stage: 'UNKNOWN', reason: 'INVALID' })
+    await syntheticChild(({ terminal, sandbox }) => {
+      assertRefusedDiagnostic(diagnosticOwner(), 'a'.repeat(64), terminal, sandbox,
+        { diagnosticSource: 'STDERR', diagnosticOutcome: 'UNRECOGNIZED_FRAME',
+          stderrObservation: { byteCount: Buffer.byteLength(stderr), lineCount: 1,
+            pythonTracebackHeader: false, terminalAssertionError: false, unshareExecutableMissing: false,
+            toolPrefix: 'UNSHARE', unsharePermissionObservation } })
+    }, { stderr })
   }
 })
 
@@ -513,6 +532,11 @@ test('verified stderr shape observations remain values-free and never turn nonpr
     { stderr: 'ip: ' + secret + '\n', lineCount: 1, toolPrefix: 'IP' },
     { stderr: secret + '\nunshare: ' + secret + '\n', lineCount: 2 },
     { stderr: 'unshare:' + secret + '\n', lineCount: 1 },
+    { stderr: ' ' + uidMapDenied, lineCount: 1 },
+    { stderr: gidMapDenied + ' ', lineCount: 2, toolPrefix: 'UNSHARE' },
+    { stderr: uidMapDenied.replace('\n', '\r\n'), lineCount: 1, toolPrefix: 'UNSHARE' },
+    { stderr: gidMapDenied.replace('/proc/self/gid_map', '/synthetic/private/path'), lineCount: 1, toolPrefix: 'UNSHARE' },
+    { stderr: uidMapDenied + 'x'.repeat(950), lineCount: 2, toolPrefix: 'UNSHARE' },
     { stderr: 'synthetic-secret-' + 'x'.repeat(1007), lineCount: 1 },
   ]
   for (const { stderr, lineCount, ...shape } of fixtures) {
@@ -521,7 +545,8 @@ test('verified stderr shape observations remain values-free and never turn nonpr
       const diagnostic = assertRefusedDiagnostic(diagnosticOwner(), 'a'.repeat(64), terminal, sandbox,
         { diagnosticSource: 'STDERR', diagnosticOutcome: 'UNRECOGNIZED_FRAME',
           stderrObservation: { byteCount: Buffer.byteLength(stderr), lineCount, pythonTracebackHeader: false,
-            terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN', ...shape } })
+            terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN',
+            unsharePermissionObservation: 'NONE', ...shape } })
       for (const privateValue of [secret, 'synthetic-token', 'synthetic-authority', '192.0.2.17', '/synthetic/private/path']) {
         assert.equal(JSON.stringify(diagnostic).includes(privateValue), false)
       }
@@ -649,7 +674,8 @@ test('actual capture to outer report keeps stdout precedence, clean empty stream
     assertRefusedDiagnostic(diagnosticOwner(), 'a'.repeat(64), terminal, sandbox,
       { stage: 'NO_FAILURE_FRAME_OBSERVED', reason: 'UNKNOWN', diagnosticSource: 'STDERR', diagnosticOutcome: 'EMPTY',
         stderrObservation: { byteCount: 0, lineCount: 0, pythonTracebackHeader: false,
-          terminalAssertionError: false, unshareExecutableMissing: false, toolPrefix: 'UNKNOWN' } })
+          terminalAssertionError: false, unshareExecutableMissing: false,
+          toolPrefix: 'UNKNOWN', unsharePermissionObservation: 'NONE' } })
   })
   await syntheticChild(async ({ terminal, sandbox }) => {
     const owner = diagnosticOwner(), probe = path.join(sandbox, 'source-probe.mjs')
