@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **最新续记（2026-10-12，§189）**：草稿PR #6337最新head `014116f0b`已修复两处实际CI接线遗漏；官方备料浏览器完整job通过，Integration Guard接线与插件整链通过、web步骤尚运行。关键更正：叠层PR不自动触发仅面向main/develop的plugin-tests，因此已显式在同一head启动原workflow_dispatch run `38153947825`，完整真库/manual/interval验收仍运行，不能用其它绿灯代替。最新main的19个新增Automation迁移编号无碰撞只属元数据盘点，非迁移通过。独立终审、最终base对齐和完整目标仍未闭合。无客户读取/token交换/宜搭发送、GitHub合并或部署，K3永久禁写，goal active。以下旧“最新/当前”保留各自历史时点。
+> **最新续记（2026-10-12，§190）**：草稿PR #6337冻结head `d066ca4d0`恢复工作台既有挂载接线，11个完整前端文件1364/1364通过；官方浏览器及Integration Guard（含282套插件与完整provenance）均通过，仍不是全部SA06。旧014116完整run已取消且不记PASS；当前head完整workflow_dispatch run `38155201515`已启动，实际真库/manual/interval结论待出。旧计划“先等过期run结束”已显式调整，以避免在不能背书当前提交的输入上继续消耗时间；失败历史不删、不重分类。独立终审与最终base对齐仍待闭合。无客户读取/token交换/宜搭发送、GitHub合并或部署，K3永久禁写，goal active。以下旧“最新/当前”保留各自历史时点。
 
 > **最新续记（2026-10-11，§180）**：新C1 factory仅补generated core的directory-realdb phase与expected 2→3；session38027实际20/20 PASS。11 lanes现10 PASS/1 FAIL（carry-core 18/25）；35项完整索引排除仍不可擅自加入。PLM仍no-commit、未push。#6315 exact509的archive reader为`READ_COMPLETE`，但owner step仍`UNKNOWN/INVALID`，`RESULT=0`不证明native零tasks；两ops实现尚未提交。有限Linux unit projection实际32/32 PASS，但不代表57/70 workflow、完整C1或CI通过；#6315 CI失败根因仍未知。#6323 14项未覆盖filter为0的whole-index unit。无merge/deploy/客户读取/token/send，sender OFF、K3永久禁写。
 
@@ -2165,3 +2165,9 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 新私有Linux副本仅派生browser classifier，原浏览器接线完整6项＋原provenance完整脚本共7/7 PASS，零skip/fail/cancel/todo，receipt `80084e667fd5216de24db22ca7682403498f2751681612e110eaec6b8e3adef3`、stdout `2aa6ef7407f4aadbe2ccd2a73b33f8785eeaf6259d9ca47573ae19c1f8bac8ac`，stderr空；root另核真实TAP计数与provenance完成标志，输入父源/派生源前后未改。该局部派生不是全部最终head输入。随后官方精确head run `38153871619` 已success，包含第13接线、第14类型与第15真实浏览器步骤；Integration Guard run `38153871580` 的第8原接线契约与第15插件整链success，第16前端仍运行，未宣告全绿。
 - 重新亲读workflow发现 `.github/workflows/plugin-tests.yml` 的PR目标分支只有main/develop，#6337 base为PLM，因此§188“CI排队”不能覆盖完整数据库/应用工作流；实际branch run列表为空。已用原有workflow_dispatch显式启动run `38153947825`、test20 job `114512936997`，返回head精确匹配014116；工作流尚运行，不改触发范围、不调用部署工作流，不声明其余23真库或manual/interval已通过。coverage job本来仅PR运行，dispatch不能代替其覆盖率门。
 - 只读核最新main `906840c74cab5120aac73132644372e678f6b334` 的379个core迁移文件名，与本片19个新增Automation编号无碰撞，payload读取0；不是最新main合流或DDL执行证明。#6313实际含31份独立决策/目标文档，与功能PR分开；最终保证型独立审查仍未完成。所有前轮失败与证据原样保留，真实系统操作/发送/合并/部署仍未发生，目标保持active。
+
+## 190. 工作台挂载回归闭合与最终head完整CI（2026-10-12）
+
+- §189之后，014116的Integration Guard web步骤实际失败：新增first `onMounted`令既有深链接source pin选到权限初始化块。仅将原3行权限提示/监听初始化放回既有挂载块，保留session/storage/focus更新、清理与深链接行为，不改测试。新独立副本11个完整前端文件实际1364/1364、native唯一task ID逐条对应JSON、零fail/skip/unhandled、源图前后未改；receipt `d5543a673f31225b4c499e4c7049d130ded12a77def0f879b5bfd0c4a9fcaea2`，JSON `ab97e91cca2c93610e77ab7b80dae26e4822b18e9055982982562c0810a2c4ee`，native `8449808d6161f2dcb0e91cc8fb83c8aa9ca32d911af1f52d10891a005fed4126`。正常提交/push `d066ca4d0ff5d3f4f8d702d9e5612b328b4efe36`。此局部派生不是全候选重新验收。
+- 精确d066的官方browser run `38154712279`与Integration Guard run `38154712347`已success。亲读实际test runner确认282条唯一命令、child非零/信号/启动失败均传播退出；清单包含完整provenance一次，不是只检查pin数字。其它数据库/full-app门不由此替代。新代码未发现具体失败前保持冻结，不主动扩展功能。
+- 原完整dispatch `38153947825`固定在014116，已明确取消并确认completed/cancelled；当时core unit步骤未终态，不记为通过或失败修复。此前“保留其运行到结束”的计划在d066关键guard通过后调整，原因是head已被修复提交替代，非观察超时/静默，不重试凑绿。当前head完整dispatch为 `38155201515`、test20 job `114516681988`，已核head=d066及in_progress；等待真实迁移、其余整文件和原manual/interval结果。取消历史和日志仍在，未借旧绿；独立终审、最新main整合及全部目标保持未完成。未合并、部署、客户读取、token交换或发送。
