@@ -132,7 +132,7 @@ resolve_tsx_runner() {
 
 # Calculate percentiles using Node.js script
 calculate_percentiles() {
-    local metrics_url="$1"
+    local raw_file="$1"
     local output_file="$2"
 
     log_info "Calculating percentiles..."
@@ -143,7 +143,7 @@ calculate_percentiles() {
     # Ensure thresholds path is available to the TS script regardless of cwd (use non-readonly env var)
     export THRESHOLDS_PATH="$THRESHOLDS_FILE"
 
-    if ! eval "$TSX_CMD \"$PERCENTILES_SCRIPT\" \"$metrics_url\" \"$output_file\"" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
+    if ! eval "$TSX_CMD \"$PERCENTILES_SCRIPT\" --metrics-file \"$raw_file\" \"$output_file\"" 2>&1 | grep -E '\[INFO\]|\[SUCCESS\]|\[ERROR\]' >&2; then
         log_error "Failed to calculate percentiles"
         exit 1
     fi
@@ -485,7 +485,7 @@ main() {
     fetch_raw_metrics "$metrics_url" "$temp_raw"
 
     # Calculate percentiles
-    calculate_percentiles "$metrics_url" "$temp_percentiles"
+    calculate_percentiles "$temp_raw" "$temp_percentiles"
 
     # Load percentiles data
     local percentiles_json=$(cat "$temp_percentiles")
@@ -636,6 +636,7 @@ main() {
     "thresholds_file": "$THRESHOLDS_FILE"
   },
   "percentiles": $(echo "$percentiles_json" | jq '.metrics'),
+  "latency_source_census": $(echo "$percentiles_json" | jq '.latency_source_census'),
   "counters": {
     "cache_hit_rate": $cache_hit_rate,
     "cache_hit_rate_source": "$cache_hit_rate_source",

@@ -48,6 +48,7 @@ async function close(server) {
 async function runPhase5Validation(metricsText) {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'phase5-required-samples-'));
   const outputPath = path.join(dir, 'phase5.json');
+  let requestCount = 0;
   const server = createServer((req, res) => {
     if (req.url !== '/metrics/prom') {
       res.writeHead(404);
@@ -55,6 +56,7 @@ async function runPhase5Validation(metricsText) {
       return;
     }
 
+    requestCount += 1;
     res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4' });
     res.end(metricsText);
   });
@@ -72,7 +74,7 @@ async function runPhase5Validation(metricsText) {
       },
     );
     const json = JSON.parse(await readFile(outputPath, 'utf8'));
-    return { ...result, json };
+    return { ...result, json, requestCount };
   } finally {
     await close(server);
     await rm(dir, { recursive: true, force: true });
@@ -109,6 +111,76 @@ test('marks overall status fail when required latency samples are missing', asyn
   assert.equal(result.json.summary.na, 6);
   assert.equal(result.json.summary.passed, 5);
   assert.equal(result.json.assertions.filter((assertion) => assertion.status === 'na').length, 6);
+  assert.equal(result.requestCount, 1);
+  assert.deepEqual(result.json.latency_source_census.plugin_reload_latency_p95, {
+    declared: false,
+    family_series: 0,
+    selector_series: 0,
+    selector_samples: 0,
+    reason: 'absent_family',
+  });
+});
+
+test('attributes declared-empty, selector-mismatched, and zero-sample latency families', async () => {
+  const metricsText = `${passingCounters}
+# TYPE metasheet_plugin_reload_duration_seconds histogram
+# TYPE metasheet_snapshot_operation_duration_seconds histogram
+metasheet_snapshot_operation_duration_seconds_bucket{operation="other",le="1"} 3
+metasheet_snapshot_operation_duration_seconds_count{operation="other"} 3
+metasheet_snapshot_operation_duration_seconds_bucket{operation="create",le="1"} 0
+metasheet_snapshot_operation_duration_seconds_count{operation="create"} 0
+`;
+  const result = await runPhase5Validation(metricsText);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.requestCount, 1);
+  assert.equal(result.json.summary.na, 6);
+  assert.equal(result.json.latency_source_census.plugin_reload_latency_p95.reason, 'declared_empty');
+  assert.deepEqual(result.json.latency_source_census.snapshot_restore_latency_p95, {
+    declared: true,
+    family_series: 2,
+    selector_series: 0,
+    selector_samples: 0,
+    reason: 'selector_mismatch',
+  });
+  assert.deepEqual(result.json.latency_source_census.snapshot_create_latency_p95, {
+    declared: true,
+    family_series: 2,
+    selector_series: 1,
+    selector_samples: 0,
+    reason: 'no_positive_samples',
+  });
+});
+
+test('recognizes histogram TYPE declarations with valid horizontal whitespace', async () => {
+  const result = await runPhase5Validation(`${passingCounters}
+#\tTYPE\tmetasheet_plugin_reload_duration_seconds\thistogram\t
+ \t#  TYPE  metasheet_snapshot_operation_duration_seconds   histogram \t
+`);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.requestCount, 1);
+  assert.deepEqual(result.json.summary, {
+    total_checks: 11,
+    passed: 5,
+    failed: 0,
+    na: 6,
+    overall_status: 'fail',
+  });
+  assert.deepEqual(result.json.latency_source_census, Object.fromEntries([
+    'plugin_reload_latency_p95',
+    'plugin_reload_latency_p99',
+    'snapshot_create_latency_p95',
+    'snapshot_create_latency_p99',
+    'snapshot_restore_latency_p95',
+    'snapshot_restore_latency_p99',
+  ].map(metric => [metric, {
+    declared: true,
+    family_series: 0,
+    selector_series: 0,
+    selector_samples: 0,
+    reason: 'declared_empty',
+  }])));
 });
 
 test('keeps overall status pass when required latency samples satisfy thresholds', async () => {
@@ -119,4 +191,23 @@ test('keeps overall status pass when required latency samples satisfy thresholds
   assert.equal(result.json.summary.failed, 0);
   assert.equal(result.json.summary.na, 0);
   assert.equal(result.json.summary.passed, 11);
+  assert.equal(result.requestCount, 1);
+  assert.equal(result.json.latency_source_census.snapshot_create_latency_p99.reason, 'observed');
+  assert.equal(result.json.latency_source_census.snapshot_create_latency_p99.selector_samples, 10);
+});
+
+test('keeps measured latency breaches failed when all required samples are present', async () => {
+  const slowLatencySamples = passingLatencySamples.replaceAll('le="1"', 'le="20"');
+  const result = await runPhase5Validation(`${passingCounters}\n${slowLatencySamples}`);
+
+  assert.equal(result.code, 1);
+  assert.equal(result.requestCount, 1);
+  assert.deepEqual(result.json.summary, {
+    total_checks: 11,
+    passed: 5,
+    failed: 6,
+    na: 0,
+    overall_status: 'fail',
+  });
+  assert.equal(result.json.latency_source_census.snapshot_restore_latency_p95.reason, 'observed');
 });
