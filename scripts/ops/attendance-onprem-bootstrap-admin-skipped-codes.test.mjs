@@ -18,7 +18,10 @@ import { spawn, spawnSync } from 'node:child_process'
  *   - the query is a read-only SELECT, byte-identical in sh and ps1,
  *   - its code list is the same as the grant's code list (both twins),
  *   - nothing is printed when every code is in the catalogue,
- *   - a failing query never changes the exit status (it is reported and the run continues).
+ *   - a failing query never changes the exit status (it is reported and the run continues),
+ *   - the query runs with the psql flags the step depends on (`-v ON_ERROR_STOP=1 -A -t -X`): without
+ *     ON_ERROR_STOP a failing statement exits 0 and the step would be silent, so the stub logs each
+ *     call's argv and the flags are asserted for the skipped-codes call.
  *
  * Hermetic and VALUES-FREE: synthetic env fixtures built here, `psql` replaced by a PATH stub that
  * answers from env, `node` wrapped so the bcrypt step never needs node_modules, VERIFY_LOGIN=0 so no
@@ -73,13 +76,15 @@ function makeFixture() {
 
   // psql stub: both twins feed SQL on stdin. The admin upsert and the grant are answered by shape;
   // the skipped-codes query only on an EXACT match with the pinned literal (passed in via env).
+  // Each call is logged as ONE record: its argv (unit-separator joined), a `=====` line, its SQL.
   const psql = path.join(bin, 'psql')
   writeFileSync(
     psql,
     [
       '#!/usr/bin/env bash',
       'sql="$(cat)"',
-      `printf '%s\\n-----\\n' "$sql" >> ${JSON.stringify(psqlLog)}`,
+      'argv="$(printf \'%s\\037\' "$@")"',
+      `printf '%s\\n=====\\n%s\\n-----\\n' "$argv" "$sql" >> ${JSON.stringify(psqlLog)}`,
       'case "$sql" in',
       `  *"INSERT INTO users"*) echo "${SYNTHETIC_ADMIN_ID}" ;;`,
       '  *"INSERT INTO user_roles"*) : ;;',
@@ -134,12 +139,21 @@ function makeFixture() {
     bin,
     psql,
     envFile,
-    readSql: () => {
+    readCalls: () => {
+      let log
       try {
-        return read(psqlLog).split('\n-----\n').filter(chunk => chunk.trim())
+        log = read(psqlLog)
       } catch {
         return []
       }
+      return log
+        .split('\n-----\n')
+        .filter(record => record.trim())
+        .map(record => {
+          const at = record.indexOf('\n=====\n')
+          assert.ok(at >= 0, 'psql stub log record without an argv/SQL separator')
+          return { argv: record.slice(0, at).split('\x1f').slice(0, -1), sql: record.slice(at + '\n=====\n'.length) }
+        })
     },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
@@ -205,7 +219,8 @@ function runPs1(fixture, stub) {
 }
 
 /** Only the pre-existing users upsert and role/permission grant write; the new query is a SELECT. */
-function assertSqlShape(sqlChunks) {
+function assertSqlShape(calls) {
+  const sqlChunks = calls.map(call => call.sql)
   const writers = sqlChunks.filter(chunk => /\b(INSERT|UPDATE|DELETE|TRUNCATE|ALTER|CREATE|DROP)\b/i.test(chunk))
   assert.equal(writers.length, 2, 'only the pre-existing users upsert and role/permission grant may write')
   assert.equal(sqlChunks.filter(chunk => chunk === EXPECTED_SKIPPED_CODES_SQL).length, 1)
@@ -213,6 +228,23 @@ function assertSqlShape(sqlChunks) {
   const grantIndex = sqlChunks.findIndex(chunk => chunk.includes('INSERT INTO user_permissions'))
   const checkIndex = sqlChunks.indexOf(EXPECTED_SKIPPED_CODES_SQL)
   assert.ok(grantIndex >= 0 && checkIndex > grantIndex, 'the read-only check must follow the grant')
+  assertSkippedCodesPsqlFlags(calls)
+}
+
+/**
+ * The skipped-codes call runs with `-v ON_ERROR_STOP=1 -A -t -X`, each as its own argv element.
+ * ON_ERROR_STOP is load-bearing: without it a failing statement exits 0 and the step is silent
+ * (the "check failed" branch is never reached). -A/-t keep the answer a bare list; -X skips psqlrc.
+ */
+function assertSkippedCodesPsqlFlags(calls) {
+  const checkCalls = calls.filter(call => call.sql === EXPECTED_SKIPPED_CODES_SQL)
+  assert.equal(checkCalls.length, 1, 'exactly one psql call runs the skipped-codes query')
+  const { argv } = checkCalls[0]
+  const stopAt = argv.findIndex((arg, index) => arg === '-v' && argv[index + 1] === 'ON_ERROR_STOP=1')
+  assert.ok(stopAt >= 0, `skipped-codes psql call must pass -v ON_ERROR_STOP=1 (argv: ${JSON.stringify(argv.slice(1))})`)
+  for (const flag of ['-A', '-t', '-X']) {
+    assert.ok(argv.includes(flag), `skipped-codes psql call must pass ${flag} (argv: ${JSON.stringify(argv.slice(1))})`)
+  }
 }
 
 function assertValuesFree(output) {
@@ -240,7 +272,7 @@ for (const { name, run, enabled } of RUNNERS) {
       assert.equal(result.status, 0, result.output)
       assert.ok(result.output.includes(`${SKIPPED_MESSAGE_PREFIX}${missing}`), result.output)
       assert.doesNotMatch(result.output, /read-only check failed|unexpected shape/)
-      assertSqlShape(fixture.readSql())
+      assertSqlShape(fixture.readCalls())
       assertValuesFree(result.output)
     } finally {
       fixture.cleanup()
@@ -254,7 +286,7 @@ for (const { name, run, enabled } of RUNNERS) {
       assert.equal(result.status, 0, result.output)
       assert.ok(!result.output.includes(SKIPPED_MESSAGE_PREFIX), result.output)
       assert.doesNotMatch(result.output, /read-only check failed|unexpected shape/)
-      assertSqlShape(fixture.readSql())
+      assertSqlShape(fixture.readCalls())
     } finally {
       fixture.cleanup()
     }
@@ -268,7 +300,7 @@ for (const { name, run, enabled } of RUNNERS) {
       assert.ok(result.output.includes(CHECK_FAILED_MESSAGE), result.output)
       assert.ok(!result.output.includes(SKIPPED_MESSAGE_PREFIX), result.output)
       assert.match(result.output, /Admin bootstrap OK|Local org bootstrap: skipped/)
-      assertSqlShape(fixture.readSql())
+      assertSqlShape(fixture.readCalls())
     } finally {
       fixture.cleanup()
     }

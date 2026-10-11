@@ -51,7 +51,9 @@ const BARE_ANCHOR_MESSAGE =
 
 // The step's three read-only statements, pinned VERBATIM. They are the tenancy guard (gate r1
 // P2-1): any semantic change to either twin must change these literals in the same PR, and the
-// psql stub below answers ONLY these exact statements (anything else exits 9 = check failed).
+// psql stub below answers these exact statements; besides them it answers only the direct-grant
+// skipped-codes query, by prefix (that query and its psql flags are pinned verbatim by
+// attendance-onprem-bootstrap-admin-skipped-codes.test.mjs). Anything else exits 9 = check failed.
 const EXPECTED_EMPTINESS_SQL =
   "SELECT (SELECT count(*) FROM user_orgs) || ':' || (SELECT count(*) FROM directory_integrations);"
 const EXPECTED_LEFTOVER_ANCHOR_SQL =
