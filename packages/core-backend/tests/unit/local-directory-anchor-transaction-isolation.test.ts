@@ -11,7 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
  * lane cannot change that default on its shared CI database without affecting every other file.
  * The cycle-detection suite already proves the isolation MECHANISM on a raw connection; this file
  * pins that every writer actually issues the SET first, on the transaction's own client, before the
- * anchor get-or-create. Deleting the SET (or moving it after the anchor work) turns all eight red.
+ * anchor get-or-create. Deleting the SET (or moving it after the anchor work) turns all nine cases red.
  *
  * The fake transaction client records each statement and fails the second one, so each writer
  * stops right after its first two statements; nothing else about the writer is exercised here.
