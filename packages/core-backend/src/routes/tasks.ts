@@ -179,7 +179,10 @@ export function tasksRouter(): Router | null {
         res.status(422).json({ error: { code: 'ORG_MISSING' } })
         return
       }
-      const result = await completeTask({ orgId: org, actorId: actorId(req), taskId: req.params.id })
+      // M5 PR-4a slice 1 (design §3.1): the body's raw `scope` field (undefined without one); the
+      // service checks it after the row-level checks, so it is not checked here.
+      const scope = req.body && typeof req.body === 'object' ? (req.body as { scope?: unknown }).scope : undefined
+      const result = await completeTask({ orgId: org, actorId: actorId(req), taskId: req.params.id, scope })
       res.json(result)
     } catch (err) {
       sendError(res, err)

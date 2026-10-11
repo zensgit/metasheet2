@@ -381,3 +381,16 @@ export function canChangeTaskMembers(input: { task: TaskRoleRow; me: string }): 
   )
   return can(direct, 'edit')
 }
+
+// RULED(2026-10-09): six items, item 3: only the task's creator completes it for every assignee;
+// the decision reads `tasks.created_by` alone (M5 PR-4a design §3.1, §5 rule 1).
+// ASSUMPTION(task-m5a): [a-02] anyone else who asks for it gets the same 404 as a missing task.
+/**
+ * Whether `actorId` may complete, for every assignee, the task whose creator is `createdBy`. It
+ * takes no role set, so neither list identity nor an assignee or follower row can stand in for the
+ * creator (the same shape as `canChangeTaskMembers`). Used by the complete route and by the detail's
+ * `canCompleteForAll`, so the two cannot disagree.
+ */
+export function canCompleteForAll(input: { actorId: string; createdBy: string }): boolean {
+  return input.actorId === input.createdBy
+}

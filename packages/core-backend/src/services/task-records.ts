@@ -11,6 +11,7 @@ import {
   can,
   canChangeCompletion,
   canChangeTaskMembers,
+  canCompleteForAll,
   resolveTaskRoles,
   TASK_VIEWS,
   type TaskAbility,
@@ -28,6 +29,7 @@ import {
 } from '../tasks/task-edit'
 import {
   applyComplete,
+  applyCompleteForAll,
   applyReopen,
   computeTaskDone,
   type TaskAssigneeRow,
@@ -398,6 +400,13 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
       taskListIds: await loadTaskListIds(plainDb, input.taskId),
       memberListIds: (memberships.get(input.taskId) ?? []).map((membership) => membership.listId),
     }),
+    // M5 PR-4a slice 1 (design §3.8). ASSUMPTION(task-m5a): [a-05] true only where a complete for
+    // every assignee would change something: the caller is the creator, the task is open, in `all`
+    // mode, and has an assignee (elsewhere that call is the default complete or a no-op).
+    canCompleteForAll: canCompleteForAll({ actorId: input.actorId, createdBy: String(row.created_by) })
+      && row.status === 'open'
+      && row.completion_mode === 'all'
+      && assignees.length > 0,
   }
 }
 
@@ -638,25 +647,44 @@ export async function writeTaskDoneState(db: Db, taskId: string, done: boolean, 
 
 /**
  * Writes `events` and returns them as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: the
- * notification producer reads the event ids, so each id is generated before its INSERT).
+ * notification producer reads the event ids, so each id is generated before its INSERT). M5 PR-4a
+ * slice 1: each event's `payload` goes into `task_events.payload`; an event without one writes `{}`,
+ * the column's default, as before.
  */
 export async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
   const written: WrittenTaskEvent[] = []
   for (const event of events) {
     const id = newTaskEventId()
     const occurredAt = event.occurredAt ?? fallbackAt
+    const payload = JSON.stringify(event.payload ?? {})
     await db.query(
-      `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,
-      [id, taskId, event.userId, event.type, occurredAt],
+      `INSERT INTO task_events (id, task_id, actor_id, event_type, payload, occurred_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+      [id, taskId, event.userId, event.type, payload, occurredAt],
     )
     written.push({ id, type: event.type, actorId: event.userId, occurredAt })
   }
   return written
 }
 
+/** The `scope` of a complete request (M5 PR-4a design §3.1). */
+type TaskCompleteScope = 'self' | 'all'
+
+// ASSUMPTION(task-m5a): [a-01] strict: an absent `scope` is 'self' (the behaviour before M5); any
+// other present value than 'self' or 'all', `null` included, is 422 INVALID_SCOPE. The reopen route
+// keeps its own reading (anything but 'all' is 'self'). Called only after the row-level checks.
+function parseCompleteScope(raw: unknown): TaskCompleteScope {
+  if (raw === undefined) return 'self'
+  if (raw === 'self' || raw === 'all') return raw
+  return fail(422, 'INVALID_SCOPE')
+}
+
 // RULED(2026-10-07): [R03] complete / reopen answer with `version`: the value read under the
 // lock, plus one when this call flipped the task's status (the only write that bumps it here).
-export async function completeTask(input: { orgId: string; actorId: string; taskId: string }): Promise<{ done: boolean; version: number }> {
+// M5 PR-4a slice 1: `scope` is the raw `scope` field of the request body. The checks run after the
+// structure lock, in the order of design §3.1: the task (404), the complete ability (404), the
+// scope (422), and for 'all' the creator (404); a caller who cannot complete the task gets the 404
+// whatever the body holds.
+export async function completeTask(input: { orgId: string; actorId: string; taskId: string; scope?: unknown }): Promise<{ done: boolean; version: number }> {
   const counts = taskCountsSignal()
   const result = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
@@ -664,15 +692,21 @@ export async function completeTask(input: { orgId: string; actorId: string; task
     // Lock §6.2: zero-assignee tasks are completed by the creator only. Refused here as the same
     // 404 as any other missing ability, before `applyComplete` (which throws for that case).
     if (!canChangeCompletion(roles, 'complete', rows.length)) fail(404, 'NOT_FOUND')
+    const scope = parseCompleteScope(input.scope)
+    // RULED(2026-10-09): six items, item 3: creator only; ASSUMPTION(task-m5a): [a-02] 404 otherwise.
+    if (scope === 'all' && !canCompleteForAll({ actorId: input.actorId, createdBy: task.createdBy })) fail(404, 'NOT_FOUND')
+    // ASSUMPTION(task-m5a): [a-37] one application clock reading, taken under the lock, stamps the
+    // rows, the task and the event of this write, for scope 'all' as for 'self'.
     const now = new Date()
-    const next = applyComplete({
+    const transition = {
       mode: task.mode,
       rows,
       actorId: input.actorId,
       createdBy: task.createdBy,
       now,
       wasDone: task.status === 'done',
-    })
+    }
+    const next = scope === 'all' ? applyCompleteForAll(transition) : applyComplete(transition)
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
     const flipped = (task.status === 'done') !== next.done
     if (flipped) await writeTaskDoneState(db, input.taskId, next.done, now)

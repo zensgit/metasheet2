@@ -13,6 +13,7 @@ import {
   can,
   canChangeCompletion,
   canChangeTaskMembers,
+  canCompleteForAll,
   resolveTaskRoles,
   taskMatchesView,
   type TaskAbility,
@@ -669,5 +670,48 @@ describe('canChangeTaskMembers ([own-53], M4 §6.3)', () => {
     expect(canChangeTaskMembers({ task: row({ follower: true }), me: ME })).toBe(false)
     expect(canChangeTaskMembers({ task: row({ creator: true }), me: ME })).toBe(true)
     expect(canChangeTaskMembers({ task: row({ assignee: true }), me: ME })).toBe(true)
+  })
+})
+
+// M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1, §5 rule 1). RULED(2026-10-09):
+// six items, item 3: only the creator completes a task for every assignee, decided on
+// `tasks.created_by` alone. ASSUMPTION(task-m5a): [a-02].
+describe('canCompleteForAll (M5 PR-4a slice 1, G1)', () => {
+  const ME = 'usr_me'
+
+  it('the creator: true; anyone else: false', () => {
+    expect(canCompleteForAll({ actorId: ME, createdBy: ME })).toBe(true)
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other' })).toBe(false)
+    expect(canCompleteForAll({ actorId: 'usr_other', createdBy: ME })).toBe(false)
+  })
+
+  it('agrees with "the role set holds creator" for every combination of direct roles and list identity, while `complete` does not', () => {
+    const editorship = [{ listId: 'tlst_1', role: 'editor' as const }]
+    for (const creator of [false, true]) {
+      for (const assignee of [false, true]) {
+        for (const follower of [false, true]) {
+          for (const memberships of [[], editorship]) {
+            const task = {
+              createdBy: creator ? ME : 'usr_other',
+              assigneeIds: assignee ? ['usr_x', ME] : ['usr_x'],
+              followerIds: follower ? [ME] : [],
+            }
+            const roles = resolveTaskRoles(task, ME, memberships)
+            expect(canCompleteForAll({ actorId: ME, createdBy: task.createdBy })).toBe(roles.includes('creator'))
+          }
+        }
+      }
+    }
+    // Control: an assignee and a list-only editor may complete (their own row), yet not for everyone.
+    expect(can(resolveTaskRoles({ createdBy: 'usr_other', assigneeIds: [ME], followerIds: [] }, ME), 'complete')).toBe(true)
+    expect(can(resolveTaskRoles({ createdBy: 'usr_other', assigneeIds: ['usr_x'], followerIds: [] }, ME, editorship), 'complete')).toBe(true)
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other' })).toBe(false)
+  })
+
+  it('takes no role set: roles or list memberships passed alongside change nothing', () => {
+    expect(canCompleteForAll.length).toBe(1)
+    const extra = { roles: ['creator', 'list-editor'], listMemberships: [{ listId: 'tlst_1', role: 'editor' }] }
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other', ...extra } as never)).toBe(false)
+    expect(canCompleteForAll({ actorId: ME, createdBy: ME, ...extra } as never)).toBe(true)
   })
 })
