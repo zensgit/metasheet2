@@ -1,5 +1,7 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
+> **最新续记（2026-10-12，§191）**：#6337已普通推送 `c7d905b24`，仅补18行旧重跑测试断言，生产权限逻辑不变；12个完整前端文件1423/1423通过。d066的multitable-web-guard原4259通过/2失败保留，根因是旧测试期待切换账号后保留旧按钮。完整run `38155201515`仍固定d066继续，不取消重启、不转借为新head通过。草稿、独立终审及最终base对齐未闭合；无合并、部署或真实系统操作。
+
 > **最新续记（2026-10-12，§190）**：草稿PR #6337冻结head `d066ca4d0`恢复工作台既有挂载接线，11个完整前端文件1364/1364通过；官方浏览器及Integration Guard（含282套插件与完整provenance）均通过，仍不是全部SA06。旧014116完整run已取消且不记PASS；当前head完整workflow_dispatch run `38155201515`已启动，实际真库/manual/interval结论待出。旧计划“先等过期run结束”已显式调整，以避免在不能背书当前提交的输入上继续消耗时间；失败历史不删、不重分类。独立终审与最终base对齐仍待闭合。无客户读取/token交换/宜搭发送、GitHub合并或部署，K3永久禁写，goal active。以下旧“最新/当前”保留各自历史时点。
 
 > **最新续记（2026-10-11，§180）**：新C1 factory仅补generated core的directory-realdb phase与expected 2→3；session38027实际20/20 PASS。11 lanes现10 PASS/1 FAIL（carry-core 18/25）；35项完整索引排除仍不可擅自加入。PLM仍no-commit、未push。#6315 exact509的archive reader为`READ_COMPLETE`，但owner step仍`UNKNOWN/INVALID`，`RESULT=0`不证明native零tasks；两ops实现尚未提交。有限Linux unit projection实际32/32 PASS，但不代表57/70 workflow、完整C1或CI通过；#6315 CI失败根因仍未知。#6323 14项未覆盖filter为0的whole-index unit。无merge/deploy/客户读取/token/send，sender OFF、K3永久禁写。
@@ -2171,3 +2173,9 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - §189之后，014116的Integration Guard web步骤实际失败：新增first `onMounted`令既有深链接source pin选到权限初始化块。仅将原3行权限提示/监听初始化放回既有挂载块，保留session/storage/focus更新、清理与深链接行为，不改测试。新独立副本11个完整前端文件实际1364/1364、native唯一task ID逐条对应JSON、零fail/skip/unhandled、源图前后未改；receipt `d5543a673f31225b4c499e4c7049d130ded12a77def0f879b5bfd0c4a9fcaea2`，JSON `ab97e91cca2c93610e77ab7b80dae26e4822b18e9055982982562c0810a2c4ee`，native `8449808d6161f2dcb0e91cc8fb83c8aa9ca32d911af1f52d10891a005fed4126`。正常提交/push `d066ca4d0ff5d3f4f8d702d9e5612b328b4efe36`。此局部派生不是全候选重新验收。
 - 精确d066的官方browser run `38154712279`与Integration Guard run `38154712347`已success。亲读实际test runner确认282条唯一命令、child非零/信号/启动失败均传播退出；清单包含完整provenance一次，不是只检查pin数字。其它数据库/full-app门不由此替代。新代码未发现具体失败前保持冻结，不主动扩展功能。
 - 原完整dispatch `38153947825`固定在014116，已明确取消并确认completed/cancelled；当时core unit步骤未终态，不记为通过或失败修复。此前“保留其运行到结束”的计划在d066关键guard通过后调整，原因是head已被修复提交替代，非观察超时/静默，不重试凑绿。当前head完整dispatch为 `38155201515`、test20 job `114516681988`，已核head=d066及in_progress；等待真实迁移、其余整文件和原manual/interval结果。取消历史和日志仍在，未借旧绿；独立终审、最新main整合及全部目标保持未完成。未合并、部署、客户读取、token交换或发送。
+
+## 191. 账号切换后的重跑测试契约闭合（2026-10-12）
+
+- d066的multitable-web-guard run `38154712358` / job `114515193370`实际4259 passed、2 failed，非基础设施偶发。两项旧principal切换用例在711行读取已清空的按钮；新实现清空旧账号列表是预期安全行为，不能为旧断言恢复旧数据。日志仅内存分类，SHA `bf4c2934699a3b867b6d5f6cd79c190d2f1e56bbd66a57a0cbd7707e9ac3ae36`，不输出原文。
+- 仅 `apps/web/tests/automation-rerun-execution.spec.ts`补18行：切换立即清空行/详情/按钮、不自动另读；迟到成功或错误不回写；显式刷新并重新展开后按钮解除busy。保留execution切换分支和原断言，不改生产代码/授权逻辑。新私有Linux派生只含上一轮挂载修复与本测试，原配置12整文件实际1423/1423（包含重跑文件59项），零fail/skip/unhandled，native唯一ID与JSON逐条对应；receipt `b77e2919688000817d33cc39172862935633d280cfe0472af680faf100707ab5`，JSON `26128b51a97454c0ab0a9d31102c1019ac8bdba9317e2217e4c337ede2f600cc`，native `ae81b54241ef0427dbdd51aa23249752161fc643c57cd5edbfb3e0dd8fa8cfe7`。原父源和派生源执行前后未变，root核验不冒称独立反驳。
+- 正常提交/push `c7d905b2478497040efb221ee7b4985db4c9570a`，#6337保持draft并更新正文。新head检查待出；完整dispatch `38155201515`仍属于d066，继续运行且未因这次test-only修改取消重启，其最终结果不能标为c7d905实跑。全目标active，独立终审、最终main/base对齐仍待闭合。无客户读取、token交换、宜搭发送、GitHub合并或部署，K3永久禁写。
