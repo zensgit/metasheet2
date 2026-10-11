@@ -926,6 +926,14 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # / `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
 # of any token, and it matches exactly one file on disk.
 #
+# 备料 values-free 500 (integration-layer audit, 2026-10-10): ONE token added, `StockPreparationRouteFailedPlain` —
+# the NEW spec (apps/web/tests/StockPreparationRouteFailedPlain.spec.ts) pinning that the fixed
+# STOCK_PREPARATION_ROUTE_FAILED 500 every stock-prep / table-action route now answers resolves to its own
+# plain-language entry (never the generic one) and that the admin workbench never shows its fixed English
+# sentence. Substring collision checked in BOTH directions: no existing token is a substring of
+# `StockPreparationRouteFailedPlain` (its neighbour `StockPreparationRail` diverges right after
+# `StockPreparationR`), it is not a substring of any token, and it matches exactly one file on disk.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1924,6 +1932,7 @@ exec npx vitest run \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
+  StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
   StockPreparationSourceBinding \
