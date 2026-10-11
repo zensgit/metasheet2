@@ -241,6 +241,14 @@ function createApiState(): UserFixture[] {
 interface ApiImplementationOptions {
   /** Limit the default user list to the first N rows so deep-link pinning can be exercised. */
   paginatedPageSize?: number
+  /** W1-6: org ids GET /api/auth/session-orgs returns, or 'fail' for a 503. Default: one org. */
+  sessionOrgs?: string[] | 'fail'
+  /** W1-6: the currentOrgId GET /api/auth/session-orgs reports (the token's org). Default: null. */
+  sessionCurrentOrgId?: string | null
+  /** W1-6 ⑥: the `orgId` the attendance group list reports for its group. Default: no `orgId` field. */
+  attendanceGroupOrgId?: string
+  /** W1-6 ⑥: the `orgId` the shift list reports for its shift. Default: no `orgId` field. */
+  attendanceShiftOrgId?: string
 }
 
 function createApiImplementation(
@@ -424,6 +432,16 @@ function createApiImplementation(
       })
     }
 
+    if (pathname === '/api/auth/session-orgs') {
+      if (options.sessionOrgs === 'fail') {
+        return createJsonResponse({ success: false, error: 'Organization list unavailable', code: 'SESSION_ORGS_UNAVAILABLE' }, 503)
+      }
+      return createJsonResponse({
+        success: true,
+        data: { orgs: options.sessionOrgs ?? ['org-alpha'], currentOrgId: options.sessionCurrentOrgId ?? null },
+      })
+    }
+
     if (pathname === '/api/attendance/groups') {
       return createJsonResponse({
         ok: true,
@@ -433,6 +451,7 @@ function createApiImplementation(
               id: '11111111-1111-4111-8111-111111111111',
               name: '总装一组',
               code: 'ASM-1',
+              ...(options.attendanceGroupOrgId !== undefined ? { orgId: options.attendanceGroupOrgId } : {}),
             },
           ],
         },
@@ -449,6 +468,7 @@ function createApiImplementation(
               name: '早班',
               workStartTime: '09:00',
               workEndTime: '18:00',
+              ...(options.attendanceShiftOrgId !== undefined ? { orgId: options.attendanceShiftOrgId } : {}),
             },
           ],
         },
@@ -1810,6 +1830,232 @@ describe('UserManagementView', () => {
       expect(describeCreateUserError({ code: 'INVALID_USERNAME' }, 'zh')).toBeNull()
       expect(describeCreateUserError({ code: 'USER_ALREADY_EXISTS', message: 'x' }, 'zh')).toBeNull()
       expect(describeCreateUserError(undefined, 'zh')).toBeNull()
+    })
+  })
+
+  describe('W1-6: create-form org selector (owner ruling 2026-10-10)', () => {
+    function mountWith(options: ApiImplementationOptions): void {
+      apiFetchMock.mockImplementation(createApiImplementation(callLog, createApiState(), options))
+      app = createApp(UserManagementView)
+      registerRouterLink(app, true)
+      app.mount(container!)
+    }
+
+    function orgSelect(): HTMLSelectElement {
+      const select = container!.querySelector<HTMLSelectElement>('select[aria-label="所属组织（可选）"]')
+      if (!select) throw new Error('Org select not found')
+      return select
+    }
+
+    async function fillRequiredAndSubmit(): Promise<Record<string, unknown>> {
+      const inputs = Array.from(container!.querySelectorAll<HTMLInputElement>('.user-admin__panel--create input'))
+      const nameInput = inputs.find((candidate) => candidate.getAttribute('placeholder') === '姓名')
+      const usernameInput = inputs.find((candidate) => candidate.getAttribute('aria-label') === '登录名（可选）')
+      if (!nameInput || !usernameInput) throw new Error('Create-user form inputs not found')
+      nameInput.value = '组织测试'
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      usernameInput.value = 'org.tester'
+      usernameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi(2)
+      findButtonByText(container!, '创建用户').click()
+      await waitForCondition(() => apiFetchMock.mock.calls.some((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST'))
+      await flushUi(8)
+      const createCall = apiFetchMock.mock.calls.find((args) => String(args[0]) === '/api/admin/users' && (args[1] as RequestInit | undefined)?.method === 'POST')
+      if (!createCall) throw new Error('Create-user request not found')
+      return JSON.parse(String((createCall[1] as RequestInit | undefined)?.body)) as Record<string, unknown>
+    }
+
+    it('lists the session orgs but never pre-selects one, even when it is the only option', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'] })
+      await flushUi(20)
+
+      expect(callLog).toContain('/api/auth/session-orgs')
+      const select = orgSelect()
+      expect(Array.from(select.options).map((option) => option.value)).toEqual(['', 'org-alpha'])
+      expect(select.options[0].textContent?.trim()).toBe('不指定组织（不写入组织归属）')
+      expect(select.value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    // Gate r1 P2-2: "never silently default" must hold for every option count, and also when the
+    // session reports a current org (a single-org install's admin token carries one).
+    for (const [label, sessionOrgs, sessionCurrentOrgId] of [
+      ['two options, no current org', ['org-alpha', 'org-beta'], null],
+      ['one option that is also the current org', ['org-alpha'], 'org-alpha'],
+      ['several options, the current org listed second', ['org-alpha', 'org-beta', 'org-gamma'], 'org-beta'],
+    ] as const) {
+      it(`does not pre-select or send an org without a choice (${label})`, async () => {
+        mountWith({ sessionOrgs: [...sessionOrgs], sessionCurrentOrgId })
+        await flushUi(20)
+
+        const select = orgSelect()
+        expect(Array.from(select.options).map((option) => option.value)).toEqual(['', ...sessionOrgs])
+        expect(select.value).toBe('')
+        expect(select.selectedIndex).toBe(0)
+        expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+        const body = await fillRequiredAndSubmit()
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+    }
+
+    // Reconcile §5.3 acceptance: picking only an attendance group must not drag an org along (on an
+    // anchorless upgrade install an added attendanceOrgId would turn today's 200 into a 404).
+    it('does not add attendanceOrgId when only an attendance group is picked', async () => {
+      mountWith({ sessionOrgs: ['org-alpha'], sessionCurrentOrgId: 'org-alpha' })
+      await flushUi(20)
+
+      const groupSelect = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+      if (!groupSelect) throw new Error('Attendance group select not found')
+      await setSelectValue(groupSelect, '11111111-1111-4111-8111-111111111111')
+      expect(orgSelect().value).toBe('')
+
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceGroupId).toBe('11111111-1111-4111-8111-111111111111')
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('sends attendanceOrgId only when an org is chosen, and the clear button drops it again', async () => {
+      mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta' })
+      await flushUi(20)
+      expect(orgSelect().value).toBe('')
+
+      await setSelectValue(orgSelect(), 'org-beta')
+      const clear = container!.querySelector<HTMLButtonElement>('[data-create-user-org-clear]')
+      expect(clear?.textContent?.trim()).toBe('清除组织')
+      clear!.click()
+      await flushUi(2)
+      expect(orgSelect().value).toBe('')
+      expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+      await setSelectValue(orgSelect(), 'org-alpha')
+      const body = await fillRequiredAndSubmit()
+      expect(body.attendanceOrgId).toBe('org-alpha')
+      // The form resets after a successful create: the org choice does not leak into the next user.
+      expect(orgSelect().value).toBe('')
+    })
+
+    it('keeps the form usable with no org when the org list cannot be loaded', async () => {
+      mountWith({ sessionOrgs: 'fail' })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('组织列表暂不可用；不指定组织时不会写入组织归属。')
+      const body = await fillRequiredAndSubmit()
+      expect(body).not.toHaveProperty('attendanceOrgId')
+    })
+
+    it('says so when the signed-in admin has no org to offer', async () => {
+      mountWith({ sessionOrgs: [] })
+      await flushUi(20)
+
+      expect(Array.from(orgSelect().options).map((option) => option.value)).toEqual([''])
+      expect(container!.querySelector('[data-create-user-org-hint]')?.textContent?.trim())
+        .toBe('当前账号没有可选的组织；不指定组织时不会写入组织归属。')
+    })
+
+    // W1-6 ⑥ (owner ruling 2026-10-10): show which org a picked attendance group / default shift puts
+    // the new user in -- display only, never an implicit attendanceOrgId.
+    describe('⑥ the org an attendance group / default shift puts the new user in', () => {
+      const GROUP_ID = '11111111-1111-4111-8111-111111111111'
+      const SHIFT_ID = '22222222-2222-4222-8222-222222222222'
+
+      function groupSelect(): HTMLSelectElement {
+        const select = container!.querySelector<HTMLSelectElement>('select[aria-label="考勤组（可选）"]')
+        if (!select) throw new Error('Attendance group select not found')
+        return select
+      }
+
+      function shiftSelect(): HTMLSelectElement {
+        const select = container!.querySelector<HTMLSelectElement>('select[aria-label="默认班次（可选）"]')
+        if (!select) throw new Error('Default shift select not found')
+        return select
+      }
+
+      function note(): string | null {
+        return container!.querySelector('[data-create-user-attendance-org-note]')?.textContent?.trim() ?? null
+      }
+
+      it('shows nothing while no group or shift is picked', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha', attendanceShiftOrgId: 'org-alpha' })
+        await flushUi(20)
+        expect(note()).toBeNull()
+      })
+
+      it('group picked: names the group\'s org, leaves the org selector empty and sends no attendanceOrgId', async () => {
+        mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], sessionCurrentOrgId: 'org-beta', attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选考勤组所属的组织）。')
+        expect(orgSelect().value).toBe('')
+        expect(container!.querySelector('[data-create-user-org-clear]')).toBeNull()
+
+        const body = await fillRequiredAndSubmit()
+        expect(body.attendanceGroupId).toBe(GROUP_ID)
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+
+      it('shift only: names the shift\'s org and still sends no attendanceOrgId', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceShiftOrgId: 'org-alpha' })
+        await flushUi(20)
+
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选默认班次所属的组织）。')
+        expect(orgSelect().value).toBe('')
+
+        const body = await fillRequiredAndSubmit()
+        expect(body.defaultShiftId).toBe(SHIFT_ID)
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+
+      it('the note disappears again when the group is cleared', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).not.toBeNull()
+        await setSelectValue(groupSelect(), '')
+        expect(note()).toBeNull()
+      })
+
+      it('says the create will be refused when the chosen org differs from the group\'s org', async () => {
+        mountWith({ sessionOrgs: ['org-alpha', 'org-beta'], attendanceGroupOrgId: 'org-alpha' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        await setSelectValue(orgSelect(), 'org-beta')
+        expect(note()).toBe('所选考勤组属于组织 org-alpha，与上面选择的组织不一致，创建会被拒绝；请改选组织或清除组织。')
+        await setSelectValue(orgSelect(), 'org-alpha')
+        expect(note()).toBe('新用户将加入组织 org-alpha（所选考勤组所属的组织）。')
+      })
+
+      it('says the create will be refused when the group and the shift belong to different orgs', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'], attendanceGroupOrgId: 'org-alpha', attendanceShiftOrgId: 'org-beta' })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        await setSelectValue(shiftSelect(), SHIFT_ID)
+        expect(note()).toBe('所选考勤组和默认班次属于不同的组织，创建会被拒绝；请改选其中之一。')
+      })
+
+      it('shows nothing (never a guessed default) when the group list carries no org', async () => {
+        mountWith({ sessionOrgs: ['org-alpha'] })
+        await flushUi(20)
+        await setSelectValue(groupSelect(), GROUP_ID)
+        expect(note()).toBeNull()
+        const body = await fillRequiredAndSubmit()
+        expect(body).not.toHaveProperty('attendanceOrgId')
+      })
+    })
+
+    it('renders the org validation failures as values-free Chinese sentences', () => {
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND', message: 'attendanceOrgId does not match a known org' }, 'zh'))
+        .toBe('所选组织尚未在目录中建立，未创建用户；请改选其他组织或不指定组织')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_CONFLICT' }, 'zh'))
+        .toBe('所选组织与考勤组/默认班次所属的组织不一致，未创建用户')
+      expect(describeCreateUserError({ code: 'ATTENDANCE_ORG_NOT_FOUND' }, 'en')).toContain('not set up in the directory')
     })
   })
 

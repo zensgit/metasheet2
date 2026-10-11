@@ -7,6 +7,8 @@ import stat
 import subprocess
 import sys
 
+phase = 'BOOTSTRAP_ARGUMENTS'
+
 
 def plain(file, dependency_hardlinks=False):
     value = os.lstat(file)
@@ -24,7 +26,9 @@ def digest(file, dependency_hardlinks=False):
 
 
 def main():
+    global phase
     assert len(sys.argv) == 3 and os.getpid() == 1 and os.getuid() > 0
+    phase = 'BOOTSTRAP_OWNER'
     owner_path, expected = sys.argv[1:]
     value = os.lstat(plain(owner_path))
     assert stat.S_IMODE(value.st_mode) == 0o600 and value.st_size < 65536 and value.st_uid == os.getuid()
@@ -33,6 +37,7 @@ def main():
         owner = json.load(stream)
     helper = os.path.realpath(__file__)
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(helper))))
+    phase = 'BOOTSTRAP_PATHS'
     assert owner['root'] == root
     assert owner['runner'] == os.path.join(root, 'scripts/ops/run-stock-preparation-yida-browser-ci.mjs')
     assert owner['native'] == os.path.join(root, 'scripts/ops/lib/stock-preparation-browser-network-isolation.cjs')
@@ -46,7 +51,9 @@ def main():
     assert owner['protocol'] == 'YIDA_BROWSER_CI_NATIVE_V1'
     assert owner['uid'] == os.getuid() and owner['gid'] == os.getgid()
     assert owner['helper'] == os.path.realpath(__file__)
+    phase = 'BOOTSTRAP_NAMESPACE'
     assert os.readlink('/proc/self/ns/net') != owner['parentNetworkNamespace']
+    phase = 'BOOTSTRAP_SOURCE_INTEGRITY'
     for file, sha in owner['hashes'].items():
         # The trusted outer launcher resolved this exact CLI; Node readOwner
         # independently rechecks it before any Vitest execution. No source or
@@ -54,14 +61,17 @@ def main():
         assert digest(file, file == owner['cli']) == sha
     with open(plain(owner['node']), 'rb') as stream:
         assert stream.read(4) == b'\x7fELF'
+    phase = 'BOOTSTRAP_LINKS'
     links = json.loads(subprocess.check_output(
         ['/usr/sbin/ip', '-json', 'link', 'show'], env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'},
         timeout=3))
     assert len(links) == 1 and links[0]['ifname'] == 'lo'
     assert links[0]['link_type'] == 'loopback' and 'LOOPBACK' in links[0]['flags']
+    phase = 'BOOTSTRAP_LO_UP'
     subprocess.run(['/usr/sbin/ip', 'link', 'set', 'dev', 'lo', 'up'],
                    env={'PATH': '/usr/bin:/bin', 'LANG': 'C.UTF-8'}, check=True, timeout=3,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    phase = 'BOOTSTRAP_EXEC'
     os.execve('/usr/bin/setpriv', ['/usr/bin/setpriv', '--no-new-privs', '--bounding-set=-all', '--inh-caps=-all',
               '--ambient-caps=-all', owner['node'], owner['runner'], '--namespace-init',
               owner_path, expected], dict(os.environ))
@@ -73,5 +83,11 @@ try:
     main()
 except BaseException:
     # No exception, path, namespace, environment or subprocess output is public.
+    phases = {'BOOTSTRAP_ARGUMENTS', 'BOOTSTRAP_OWNER', 'BOOTSTRAP_PATHS',
+              'BOOTSTRAP_SOURCE_INTEGRITY', 'BOOTSTRAP_NAMESPACE', 'BOOTSTRAP_LINKS',
+              'BOOTSTRAP_LO_UP', 'BOOTSTRAP_EXEC'}
+    public_phase = phase if phase in phases else 'UNKNOWN'
+    sys.stderr.write('YIDA_BROWSER_CI_BOOTSTRAP_STAGE ' +
+                     json.dumps({'stage': public_phase, 'reason': 'BOOTSTRAP_FAILED'}, separators=(',', ':')) + '\n')
     sys.stderr.write('YIDA_BROWSER_CI_BOOTSTRAP_FAILED\n')
     sys.exit(1)

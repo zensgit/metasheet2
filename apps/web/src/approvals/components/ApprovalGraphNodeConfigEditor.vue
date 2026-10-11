@@ -966,7 +966,7 @@
       <!-- Approval-node policy grid: 审批模式 / 空审批人策略 / 自审策略. Handler nodes render NONE of
            these (M7 no inert controls) — a handler has NO empty-assignee/fallback key (§1.2) and no
            self-approval merge; its own controls are the 办理模式 + 办理意见 below. -->
-      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('policy'))" class="template-authoring__grid template-authoring__approval-node-policy">
         <el-form-item label="审批模式">
           <el-select
             :model-value="approvalNodeMode(node.key)"
@@ -1021,6 +1021,10 @@
             需要 N 位不同审批人同意才通过；实际可用人数（M）由上方审批人来源在实例运行时解析，若解析结果不足 N 人，该节点会在运行时失败（而非发布时被拒绝）。
           </p>
         </el-form-item>
+        <!-- W1-1a (Lock-4 §3 F4-B, OD-L4-3(a)): 'designated' joins 报错/自动通过; its targets ride the ONE
+             key `emptyAssigneeFallback`, filled through the SAME typed directory pickers as the
+             static_user/static_role sub-form above (D0 §10.2 — never a raw-id input). Approval-only:
+             this whole grid never renders for a handler node (§1.2). -->
         <el-form-item label="空审批人策略">
           <el-select
             :model-value="approvalNodeEmptyPolicy(node.key)"
@@ -1031,21 +1035,90 @@
           >
             <el-option label="报错" value="error" />
             <el-option label="自动通过" value="auto-approve" />
+            <el-option :label="EMPTY_ASSIGNEE_DESIGNATED_LABEL" value="designated" />
           </el-select>
         </el-form-item>
-        <el-form-item label="自审策略">
-          <el-checkbox
-            :model-value="approvalNodeMergeWithRequester(node.key)"
-            :disabled="readOnly"
-            data-testid="approval-node-merge-with-requester"
-            @update:model-value="(enabled: boolean) => setApprovalNodeMergeWithRequester(node.key, enabled)"
-          >发起人自动通过（自审合并）</el-checkbox>
+        <!-- Full-width, label-on-top rows: outside an <el-form>, an item's label auto-sizes to its text, so
+             in the narrow inspector a long label (or the hint copy) left the control 0px wide —
+             found by the browser lane (approval-canvas-sole-surface.spec.ts, W1-1a test). -->
+        <template v-if="approvalNodeEmptyPolicy(node.key) === 'designated'">
+          <el-form-item label="转交给（用户）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'user')"
+              multiple
+              filterable
+              remote
+              :remote-method="onUserSearch"
+              :loading="directoryUsersLoading"
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="搜索用户名 / 邮箱"
+              data-testid="approval-node-empty-fallback-user-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'user', ids)"
+              @visible-change="(visible: boolean) => visible && onUserSearch('')"
+            >
+              <el-option
+                v-for="user in directoryUsers"
+                :key="user.id"
+                :label="formatUserLabel(user)"
+                :value="user.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="转交给（角色）" label-position="top" class="template-authoring__approval-node-policy-wide">
+            <el-select
+              :model-value="approvalNodeEmptyFallbackIds(node.key, 'role')"
+              multiple
+              filterable
+              size="small"
+              :disabled="readOnly"
+              class="ms-w-360"
+              placeholder="选择角色"
+              data-testid="approval-node-empty-fallback-role-picker"
+              @update:model-value="(ids: string[]) => setApprovalNodeEmptyAssigneeFallbackIds(node.key, 'role', ids)"
+            >
+              <el-option
+                v-for="role in directoryRoles"
+                :key="role.id"
+                :label="formatRoleLabel(role)"
+                :value="role.id"
+              />
+            </el-select>
+            <p class="template-authoring__hint" data-testid="approval-node-empty-fallback-hint">{{ EMPTY_ASSIGNEE_DESIGNATED_HINT }}</p>
+          </el-form-item>
+        </template>
+        <!-- W1-1a (Lock-4 §2 F4-C): the four-value same-person control REPLACES the shipped 自审合并
+             checkbox (implementer default (a)) and owns `mergeWithRequester` + `samePersonPolicy`
+             together; 默认 omits both keys (default (b)). Value/options are DERIVED from the live edit's
+             `autoApprovalPolicy` via the shared helpers, so the canvas and linear editors agree. -->
+        <el-form-item label="审批人与发起人为同一人时" label-position="top" class="template-authoring__approval-node-policy-wide">
+          <el-select
+            :model-value="approvalNodeSamePersonValue(node.key)"
+            :disabled="readOnly || !approvalNodeSamePersonEditable(node.key)"
+            class="ms-w-100pct"
+            data-testid="approval-node-same-person-policy"
+            @update:model-value="(value: string) => setApprovalNodeSamePersonPolicy(node.key, value)"
+          >
+            <el-option
+              v-for="option in approvalNodeSamePersonOptions(node.key)"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <p class="template-authoring__hint" data-testid="approval-node-same-person-hint">{{ approvalNodeSamePersonOverrideHint }}</p>
+          <p
+            v-if="isSamePersonTransferValue(approvalNodeSamePersonValue(node.key))"
+            class="template-authoring__hint"
+            data-testid="approval-node-same-person-transfer-hint"
+          >{{ SAME_PERSON_TRANSFER_HINT }}</p>
         </el-form-item>
       </div>
       <!-- P1-C (T1-1) node-level SLA timeout — approval-node-only (a handler config forbids the
            `timeout` key, §1.2), so this section renders only in the SAME `node.type === 'approval'`
            scope as the policy grid above, never for a handler. -->
-      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockHasLiveErrors('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
+      <div v-if="node.type === 'approval' && (!approvalNodeOmitsSources(node.key) || hiddenBlockRevealed('timeout'))" class="template-authoring__approval-node-timeout" data-testid="approval-node-timeout-section">
         <el-form-item label="节点超时">
           <el-checkbox
             :model-value="Boolean(approvalNodeTimeout(node.key))"
@@ -1328,6 +1401,14 @@ import {
   AUTO_APPROVE_HIDDEN_BLOCK_IDS,
   type AutoApproveHiddenBlockId,
   type HiddenBlockLiveErrors,
+  // W1-1a (Lock-4 F4-B / F4-C) — the SAME helpers + copy the linear editor uses.
+  EMPTY_ASSIGNEE_DESIGNATED_HINT,
+  EMPTY_ASSIGNEE_DESIGNATED_LABEL,
+  SAME_PERSON_TRANSFER_HINT,
+  samePersonChoiceOptions,
+  samePersonControlState,
+  samePersonOverrideHint,
+  samePersonSelectValue,
 } from '../templateAuthoring'
 import {
   APPROVAL_ASSIGNEE_SOURCE_LABELS,
@@ -1569,6 +1650,14 @@ const hiddenBlockLiveErrorList = computed(() =>
 function hiddenBlockHasLiveErrors(blockId: AutoApproveHiddenBlockId): boolean {
   return (hiddenBlockLiveErrors.value[blockId]?.length ?? 0) > 0
 }
+// W1-1a (merge-train r3 F9) — STICKY REVEAL: whether a hidden block is rendered. The view owns the
+// sticky state, keyed by node key (this instance is reused across selections in the Canvas-first
+// inspector, so it must keep none). Absent api method ⇒ rendered exactly while it has a live error.
+const approvalNodeHiddenBlockRevealedApi = api.approvalNodeHiddenBlockRevealed
+function hiddenBlockRevealed(blockId: AutoApproveHiddenBlockId): boolean {
+  if (hiddenBlockHasLiveErrors(blockId)) return true
+  return props.node.type === 'approval' && Boolean(approvalNodeHiddenBlockRevealedApi?.(props.node.key, blockId))
+}
 function clearApprovalNodeTimeout(nodeKey: string): void {
   if (readOnly.value) return
   setApprovalNodeTimeoutEnabled(nodeKey, false)
@@ -1591,8 +1680,42 @@ function nodeTimeoutEffectOptionLabel(effect: SupportedNodeTimeoutEffect): strin
 }
 const approvalNodeEmptyPolicy = api.approvalNodeEmptyPolicy
 const setApprovalNodeEmptyPolicy = api.setApprovalNodeEmptyPolicy
-const approvalNodeMergeWithRequester = api.approvalNodeMergeWithRequester
-const setApprovalNodeMergeWithRequester = api.setApprovalNodeMergeWithRequester
+// W1-1a (Lock-4 §2 F4-C / §3 F4-B) — writers live on the api (the view owns every mutation); the
+// displayed state is DERIVED here from the live edit through the shared pure helpers.
+const setApprovalNodeSamePersonPolicy = api.setApprovalNodeSamePersonPolicy
+const setApprovalNodeEmptyAssigneeFallbackIds = api.setApprovalNodeEmptyAssigneeFallbackIds
+function approvalNodeSamePersonValue(nodeKey: string): string {
+  return samePersonSelectValue(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+function approvalNodeSamePersonOptions(nodeKey: string): Array<{ value: string; label: string }> {
+  return samePersonChoiceOptions(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy)
+}
+/**
+ * Precedence hint — never implies the template tier applies at a node that already overrides it. A
+ * computed over `props.node`, not a template interpolation that passes the node's key to a helper:
+ * the raw-id census (approval-member-identity-coverage-enumeration.spec.ts, `mustache-id`) flags any
+ * key token inside an interpolation, even one that only feeds a lookup.
+ */
+const approvalNodeSamePersonOverrideHint = computed(() =>
+  samePersonOverrideHint(approvalNodeEditFor(props.node.key)?.autoApprovalPolicy),
+)
+/**
+ * False for an X-3 unknown persisted value — the control renders read-only (never re-projected).
+ * Component-level contract, independent of the host's `readOnly`: inside TemplateAuthoringView an
+ * off-enum value already makes the whole template read-only, so this clause is a belt for any other
+ * host of this reusable editor; it is pinned by a direct mount with `readOnly: false`
+ * (approval-template-authoring-canvas-inspector.spec.ts, gate r1 P3-1).
+ */
+function approvalNodeSamePersonEditable(nodeKey: string): boolean {
+  return samePersonControlState(approvalNodeEditFor(nodeKey)?.autoApprovalPolicy).kind === 'editable'
+}
+function isSamePersonTransferValue(value: string): boolean {
+  return value === 'transfer_direct_manager' || value === 'transfer_dept_head'
+}
+function approvalNodeEmptyFallbackIds(nodeKey: string, side: 'user' | 'role'): string[] {
+  const fallback = approvalNodeEditFor(nodeKey)?.emptyAssigneeFallback
+  return [...((side === 'user' ? fallback?.userIds : fallback?.roleIds) ?? [])]
+}
 // Lock-3 §1.1 — handler-only controls (办理模式 / 办理意见).
 const handlerNodeMode = api.handlerNodeMode
 const setHandlerNodeMode = api.setHandlerNodeMode
@@ -1957,6 +2080,12 @@ const { node } = toRefs(props)
 
 .template-authoring__approval-node-policy {
   margin-top: 8px;
+}
+
+/* W1-1a: the designated-fallback pickers and the four-value same-person select span the whole policy
+   grid (their labels and honesty hints are long; a half-width column squeezed the control to 0px). */
+.template-authoring__approval-node-policy-wide {
+  grid-column: 1 / -1;
 }
 
 /* Lock-0 L0-1: transparent section wrappers — no border/shadow of their own (parent §3.2). */

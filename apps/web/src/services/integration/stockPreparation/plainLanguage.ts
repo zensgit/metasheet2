@@ -2545,8 +2545,9 @@ export function stockPrepClockText(iso: string): string | null {
 }
 
 /**
- * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus a clause for the projects whose
- * sheet could not be read this time and one for a refresh that stopped at its bound. Counts only.
+ * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus failed count read attempts and
+ * a refresh that stopped at its bound. Failed attempts can later heal; they do not count distinct projects
+ * or establish the final numbers' freshness. Counts only.
  */
 export function stockPrepProjectOverviewRefreshText(result: {
   projectCount: number
@@ -2559,8 +2560,8 @@ export function stockPrepProjectOverviewRefreshText(result: {
   let en = clock ? `Refreshed ${result.projectCount} project(s) (as of ${clock})` : `Refreshed ${result.projectCount} project(s)`
   const unreadable = result.unreadableCount ?? 0
   if (unreadable > 0) {
-    zh += `;其中 ${unreadable} 个项目的表这次没读到,数字没有更新`
-    en += `; ${unreadable} project sheet(s) could not be read this time and keep their old numbers`
+    zh += `;本次计数读取有 ${unreadable} 次未成功,请查看各项目的「截至」时间`
+    en += `; ${unreadable} count read attempt(s) failed; check each project's "as of" time`
   }
   zh += '。'
   en += '.'
