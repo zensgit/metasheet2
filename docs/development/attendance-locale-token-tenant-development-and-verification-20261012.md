@@ -1,6 +1,7 @@
 # Attendance locale token tenant repair — development and verification
 
 Status: locally validated patch; public PR, remote CI and merge not performed. No deployment or shared-runtime acceptance.
+Fresh-base replay: 1dd42d08761039c9937dae06c712fadd10092ab6; parent local repair4a00287848a2e57312a8471f0b60ea96fb9e796d, source/spec bytes unchanged. Rebased134/134 focused/neighbor tests and pnpm validate:all exit0, tracked Macmini source clean.
 Initial source baseline: 2ee3531faa978ec01865c4b89423707137bd3830. Branch: codex/attendance-operational-target-20261012. Contract: attendance-locale-token-tenant-design-lock-20261012.md.
 
 ## Problem and change
