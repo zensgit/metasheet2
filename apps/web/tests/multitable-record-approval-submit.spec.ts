@@ -79,7 +79,7 @@ const SIMPLE_FORM = {
     { id: 'reason', type: 'text', label: '事由', required: true },
     { id: 'days', type: 'number', label: '天数' },
     // FIXTURE-ONLY type: the server's form-field type list has no `checkbox`, so a real template never
-    // carries one. It is kept to exercise the dialog's boolean branch (submit shape, prune of `false`).
+    // carries one. It is kept to exercise the dialog's boolean branch (submit shape: unchecked ⇒ `false` is sent).
     { id: 'urgent', type: 'checkbox', label: '加急' },
   ],
 }
@@ -1200,6 +1200,39 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     expect(submitBtn()!.disabled).toBe(false)
   })
 
+  it('locks the template picker while a submit is in flight, so its failure stays visible on its own template', async () => {
+    useLocale().setLocale('zh-CN')
+    let rejectSubmit: (reason: unknown) => void = () => {}
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSubmit = reject
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(templateSelect()!.disabled).toBe(false)
+    submitBtn()!.click()
+    await flushUi(4)
+    expect(client.submitRecordApproval).toHaveBeenCalledTimes(1)
+    // Asserted DIRECTLY: jsdom still dispatches a synthetic `change` on a disabled <select>, so a blocked
+    // pickTemplate() would prove nothing — the attribute itself is what stops a real actor switching.
+    expect(templateSelect()!.disabled).toBe(true)
+    rejectSubmit(Object.assign(new Error('Approval template is not published'), {
+      status: 400,
+      code: 'RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED',
+    }))
+    await flushUi(8)
+    expect(templateSelect()!.value).toBe('tpl_leave')
+    const error = document.querySelector<HTMLElement>('[data-testid="record-approval-submit-error"]')
+    expect(error).not.toBeNull()
+    expect(error!.textContent).toContain('该审批模板未发布。')
+    expect(templateSelect()!.disabled).toBe(false)
+  })
+
   it('a LATE 422 for the previous template does not block the template picked while it was in flight', async () => {
     let rejectSubmit: (reason: unknown) => void = () => {}
     const client = fakeApiClient({
@@ -1216,7 +1249,9 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     submitBtn()!.click()
     await flushUi(4)
     expect(client.submitRecordApproval).toHaveBeenCalledTimes(1)
-    // Switch while tpl_leave's request is still in flight, THEN let its refusal arrive.
+    // Switch while tpl_leave's request is still in flight, THEN let its refusal arrive. The picker is
+    // disabled in flight (pinned above); jsdom's synthetic `change` bypasses that and stands in for the
+    // path the guard really covers — close/reopen, then pick another template.
     await pickTemplate('tpl_purchase')
     rejectSubmit(requesterChoiceRefusal())
     await flushUi(8)
@@ -1240,7 +1275,7 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     await flushUi()
     await openDialog(container)
     for (const late of [
-      Object.assign(new Error('Approval template is not published'), { status: 400, code: 'APPROVAL_TEMPLATE_NOT_PUBLISHED' }),
+      Object.assign(new Error('Approval template is not published'), { status: 400, code: 'RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED' }),
       Object.assign(new Error('in flight'), {
         status: 409,
         name: 'MultitableRecordApprovalInFlightError',

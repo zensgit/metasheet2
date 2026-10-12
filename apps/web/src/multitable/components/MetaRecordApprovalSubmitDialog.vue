@@ -86,6 +86,7 @@
               class="meta-approval__select"
               data-testid="record-approval-template-select"
               :value="selectedTemplateId"
+              :disabled="submitting"
               @change="onSelectTemplate($event)"
             >
               <option value="">{{ l('approval.templatePlaceholder') }}</option>
@@ -566,9 +567,10 @@ function buildFormData(): Record<string, unknown> {
 
 async function onSubmit(): Promise<void> {
   if (!canSubmit.value) return
-  // The template this request is FOR. The picker stays usable while the request is in flight (and a
-  // close/reopen resets `submitting` anyway), so a late failure must not land on a template the actor
-  // has since switched to: every failure state below is about THIS template, and is dropped otherwise.
+  // The template this request is FOR. The picker is disabled while `submitting`, so within one dialog
+  // session a failure lands — visibly — on the template it was sent for. A close/reopen resets
+  // `submitting`, though, and the actor may then pick another template while this request is still in
+  // flight: every failure state below is about THIS template, and is dropped once the selection differs.
   // A success is still emitted unconditionally — the server did create the request.
   const submitTemplateId = selectedTemplateId.value
   submitting.value = true
