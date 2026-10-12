@@ -659,6 +659,7 @@ describe('approved business trip cancellation entry', () => {
     expect(calls()).toEqual([
       ['GET', '/api/attendance/requests/req-1/cancel-round', null],
       ['POST', '/api/attendance/requests/req-1/cancel-round', '{}'],
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
     ])
   })
 
