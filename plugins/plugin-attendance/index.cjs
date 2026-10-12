@@ -23359,6 +23359,8 @@ async function resolveW4LiveCandidateInTransactionV1(trx, args) {
 
 // W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
 async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
+  const frame = attendanceTimezoneRuntime?.scheduledFrameFor(trx,args)
+  if (frame) return frame.resolution
   const { adapters } = createPluginAttendanceWorkDateResolver(trx, {
     lockScheduleFacts: true, ...(args.effectiveTimezone === undefined ? {} : {effectiveTimezone:args.effectiveTimezone,strictSources:true}),
   })
@@ -23566,6 +23568,28 @@ function clearHolidaySyncSchedule() {
 async function runAutoAbsenceForOrgDate(db, options) {
   const { orgId, workDate, logger, emit, skipDedup = false } = options
   const recoveryRunId = typeof options.recoveryRunId === 'string' ? options.recoveryRunId : null
+  if (options.w4Boundary?.resolvesScheduledTimezone === true) {
+    const key = `${orgId}:${workDate}`
+    const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
+    // Fresh membership and each target's context belong to the owning transaction.
+    // In particular, a completed recovery never reads today's mutable sources.
+    const input = {orgId,workDate,targetUserIds:[],reviewTargets:[],initiator,
+      legacyDedupHit:!skipDedup && key === lastAutoAbsenceKey}
+    const outcome = recoveryRunId === null
+      ? await options.w4Boundary.executeScheduledRun({...input,adminActorId:initiator === 'admin_run' ? (options.adminActorId || null) : null})
+      : await options.w4Boundary.recoverScheduledRun({...input,runId:recoveryRunId})
+    if (outcome.kind === 'suspended') return {skipped:true,reason:'segment_calculation_suspended',total:0}
+    if (outcome.kind === 'legacy_dedup') return {skipped:true,reason:'dedup',total:0}
+    const rows = outcome.rows
+    const reviewRequired = outcome.reviewTargets ?? []
+    if (!skipDedup) lastAutoAbsenceKey = key
+    if (emit && outcome.kind !== 'w4') {
+      emit('attendance.absence.generated',{orgId,workDate,total:rows.length})
+      if (reviewRequired.length) emit('attendance.work_date.review_required',{orgId,workDate,total:reviewRequired.length,reasons:reviewRequired})
+    }
+    if (logger && rows.length) logger.info(`Auto absence generated for ${workDate}`,{orgId,total:rows.length})
+    return {skipped:false,total:rows.length,targetUsers:outcome.targetCount ?? 0,generated:rows.length,reviewRequired}
+  }
   const rule = options.rule ?? await loadDefaultRule(db, orgId)
   let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
   if (calendarOverrides === null) {
@@ -25681,7 +25705,8 @@ module.exports = {
      * run inside the caller's transaction rather than on a second connection.
      */
     const issueW4FrozenContextViaW7SeamV1 = async (pluginTrx, args) => {
-      const liveFrame = attendanceTimezoneRuntime?.frameFor(pluginTrx)
+      const scheduledFrame = args.purpose === 'persist' ? attendanceTimezoneRuntime?.scheduledFrameFor(pluginTrx,args) : null
+      const liveFrame = attendanceTimezoneRuntime?.frameFor(pluginTrx) ?? scheduledFrame
       if (liveFrame?.issued) return liveFrame.issued
       const effectiveArgs = liveFrame ? { ...args, timezone: liveFrame.timezone, effectiveTimezone: liveFrame.timezone } : args
       if (!w4IssueFrozenContextV1) {
@@ -25693,7 +25718,7 @@ module.exports = {
       const coreTrx = {
         query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
       }
-      return w4IssueFrozenContextV1(
+      const issued = await w4IssueFrozenContextV1(
         coreTrx,
         {
           deriveFixedScheduleEffectiveness:
@@ -25720,6 +25745,8 @@ module.exports = {
         },
         effectiveArgs,
       )
+      return scheduledFrame && issued.arm !== 'blocked'
+        ? attendanceTimezoneRuntime.acceptScheduledIssued(pluginTrx,args,issued) : issued
     }
     __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
       issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
@@ -25878,6 +25905,10 @@ module.exports = {
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
 
+              acquireScheduledTimezoneLocks: (trx, input) => attendanceTimezoneRuntime.acquireScheduledLocks(trx,input),
+              resolveScheduledMembers: (trx, input) => attendanceTimezoneRuntime.resolveScheduledMembers(trx,input),
+              prepareScheduledTimezoneContext: (trx, input) => attendanceTimezoneRuntime.prepareScheduledContext(trx,input),
+              bindScheduledTimezoneContext: (trx, proof) => attendanceTimezoneRuntime.bindRelatedRecordContext(trx,proof),
               prepareLiveTimezoneContext: async (trx, input, lockMode) => {
                 const frame = await attendanceTimezoneRuntime.prepareLivePunch(trx, { ...input, runtimeLockMode: lockMode })
                 if (frame.resolution.kind === 'resolved' && !frame.issued) {
@@ -50872,6 +50903,10 @@ module.exports = {
           }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.code } })
             return
           }
           logger.error('Manual auto-absence run failed', error)

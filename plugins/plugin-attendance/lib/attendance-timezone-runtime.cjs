@@ -368,7 +368,7 @@ function createAttendanceTimezoneRuntime({
   async function prepareRelatedRecordContext(trx,{orgId,userId,workDate,expectedContextFingerprint}) {
     try {
       const target = await readTargetTimezoneContext(trx,{orgId,userId,workDate})
-      if (target.contextFingerprint !== expectedContextFingerprint) fail('ATTENDANCE_TIMEZONE_CONTEXT_CHANGED',409)
+      if (expectedContextFingerprint !== undefined && target.contextFingerprint !== expectedContextFingerprint) fail('ATTENDANCE_TIMEZONE_CONTEXT_CHANGED',409)
       const facts = requestTargetFactsFor(trx)
       let frame = facts?.frame
       if (!frame) {
@@ -427,14 +427,75 @@ function createAttendanceTimezoneRuntime({
       fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
     }
   }
-  async function bindRelatedRecordContext(trx) {
+  async function bindRelatedRecordContext(trx, proof) {
     const frame = relatedRecordFrames.get(trx)
     if (!frame) fail('ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED',503)
-    try { await companion.bindFirst(trx,frame) }
+    try { await companion.bindFirst(trx,frame,proof) }
     catch (error) {
       if (error instanceof HttpError) throw error
       fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
     }
+  }
+  const scheduledFrames = new WeakMap()
+  function scheduledFrameFor(trx, input) {
+    const frame = scheduledFrames.get(trx)
+    return frame && frame.orgId === input.orgId && frame.userId === input.userId
+      && frame.workDate === (input.workDate ?? input.calendarWorkDate) ? frame : null
+  }
+  function acceptScheduledIssued(trx,input,issued) {
+    const frame = scheduledFrameFor(trx,input)
+    if (!frame || canonicalContextFingerprint(issued.context) !== canonicalContextFingerprint(frame.identity.calculationDefinition)) {
+      fail('ATTENDANCE_TIMEZONE_CONTEXT_CHANGED',409)
+    }
+    frame.issued = issued
+    return issued
+  }
+  async function acquireScheduledLocks(trx,{orgId,userId}) {
+    // Org exclusivity serializes the membership snapshot and prevents an upgrade
+    // from shared after the registry's class-00/01 locks have been acquired.
+    await lockOrgPolicy(trx,orgId)
+    const users = userId ? [{user_id:userId}] : await trx.query(`SELECT uo.user_id
+      FROM user_orgs uo JOIN users u ON u.id=uo.user_id
+      WHERE uo.org_id=$1 AND uo.is_active=true AND u.is_active=true ORDER BY uo.user_id`,[orgId])
+    for (const row of users) await acquireRuntimeLocks(trx,{orgId,userId:row.user_id,mode:'exclusive'})
+  }
+  async function prepareScheduledContext(trx,input) {
+    scheduledFrames.delete(trx)
+    relatedRecordFrames.delete(trx)
+    const existing = await trx.query(`SELECT timezone,is_workday FROM attendance_records
+      WHERE org_id=$1 AND user_id=$2 AND work_date=$3`,[input.orgId,input.userId,input.workDate])
+    // Preserve NOT EXISTS and authoritative retirement handling for old records.
+    // Their historical bytes need no current-policy read or synthetic migration.
+    if (existing.length) return {timezone:existing[0].timezone,isWorkday:existing[0].is_workday === true,existing:true}
+    const target = await prepareRelatedRecordContext(trx,input)
+    const frame = relatedRecordFrames.get(trx)
+    scheduledFrames.set(trx,frame)
+    // The related-record reader retained the served mirror definition. Scheduled
+    // producers must still issue with purpose persist to retain W7's shadow half.
+    delete frame.issued
+    return {timezone:target.timezone,isWorkday:target.isWorkingDay,existing:false,
+      holidayKind:frame.context.holiday?.isWorkingDay === false ? 'holiday' : null}
+  }
+  async function resolveScheduledMembers(trx,{orgId,workDate}) {
+    const users = await trx.query(`SELECT uo.user_id FROM user_orgs uo JOIN users u ON u.id=uo.user_id
+      WHERE uo.org_id=$1 AND uo.is_active=true AND u.is_active=true`,[orgId])
+    const members = []
+    for (const row of users) {
+      const input = {orgId,userId:row.user_id,workDate}
+      const target = await prepareScheduledContext(trx,input)
+      if (!target.isWorkday) continue
+      const frame = scheduledFrameFor(trx,input)
+      const resolution = frame?.resolution
+      const reason = target.existing || (resolution?.kind === 'resolved' && resolution.workDate === workDate)
+        || (frame?.context.source === 'rule' && resolution?.reasonCode === 'UNSCHEDULED_NO_SHIFT') ? null
+        : resolution?.kind === 'ambiguous' ? 'WORK_DATE_ATTRIBUTION_AMBIGUOUS'
+        : resolution?.kind === 'resolved' ? 'WORK_DATE_ATTRIBUTION_MISMATCH'
+        : resolution?.reasonCode || 'WORK_DATE_ATTRIBUTION_UNRESOLVED'
+      members.push({userId:row.user_id,targetKind:reason ? 'review' : 'generate',reviewReasonCode:reason})
+    }
+    scheduledFrames.delete(trx)
+    relatedRecordFrames.delete(trx)
+    return members
   }
   const requestTargetFacts = new WeakMap()
   const requestTargetBatchFacts = new WeakMap()
@@ -778,7 +839,7 @@ function createAttendanceTimezoneRuntime({
     return async () => protectedSource(verify)
   }
   const readFrozenTimezoneWindows = require('./attendance-timezone-frozen-windows.cjs').createAttendanceTimezoneFrozenWindowReader({ HttpError })
-  return { prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
+  return { acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
 }
 
 function canonicalTimezoneProvenance(context) {

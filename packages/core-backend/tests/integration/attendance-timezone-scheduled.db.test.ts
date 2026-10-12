@@ -1,0 +1,282 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import type { AttendanceW4LiveScheduledBoundaryV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
+import { createOnlinePunchDbFixture, punchClock, punchPlugin } from '../utils/attendance-online-punch-db'
+
+// Observe the factory used by actual plugin activation; every call delegates to
+// the unchanged production factory with its real pool and production adapters.
+const observed = vi.hoisted(() => ({ boundary: null as AttendanceW4LiveScheduledBoundaryV1 | null }))
+vi.mock('../../src/attendance/w4c2-live-scheduled-boundary', async importOriginal => {
+  const actual = await importOriginal<typeof import('../../src/attendance/w4c2-live-scheduled-boundary')>()
+  return { ...actual, createAttendanceLiveScheduledBoundaryV1: (...args: Parameters<typeof actual.createAttendanceLiveScheduledBoundaryV1>) => {
+    const boundary = actual.createAttendanceLiveScheduledBoundaryV1(...args)
+    observed.boundary = boundary
+    return boundary
+  } }
+})
+
+if (!process.env.ATTENDANCE_TEST_DATABASE_URL) throw new Error('ATTENDANCE_TIMEZONE_SCHEDULED_REAL_DATABASE_REQUIRED')
+const fixture = createOnlinePunchDbFixture({ retainHistoryInIsolatedDatabase: true })
+const requireCjs = createRequire(import.meta.url)
+const tripClock = requireCjs('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs') as {
+  setBusinessTripInstantForTests(value: string | null): void
+}
+type Actor = Awaited<ReturnType<typeof fixture.user>>
+type RunResult = { skipped: boolean; total: number; targetUsers: number; generated: number; reviewRequired: unknown[] }
+const plugin = punchPlugin as unknown as {
+  __attendanceWorkDateResolverForTests: {
+    runAutoAbsenceForOrgDate(db: { query(text: string, values?: unknown[]): Promise<unknown[]> }, options: {
+      orgId: string; workDate: string; skipDedup: boolean; initiator: 'cron';
+      w4Boundary: AttendanceW4LiveScheduledBoundaryV1; recoveryRunId?: string;
+    }): Promise<RunResult>
+  }
+}
+let admin: Actor
+const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+
+async function policy(enabled: boolean) {
+  await fixture.pool.query(`INSERT INTO attendance_timezone_policies(org_id,enabled,version,updated_by)
+    VALUES($1,$2,1,$3) ON CONFLICT(org_id) DO UPDATE SET enabled=$2,
+    version=attendance_timezone_policies.version+1,updated_by=$3`, [fixture.orgId,enabled,admin.userId])
+}
+async function employeeZone(actor: Actor, timezone: string) {
+  await fixture.pool.query(`INSERT INTO attendance_employee_timezone_overrides
+    (org_id,user_id,timezone,effective_from,created_by,updated_by)
+    VALUES($1,$2,$3,'2026-01-01T00:00:00Z',$4,$4)`, [fixture.orgId,actor.userId,timezone,admin.userId])
+}
+async function assignment(actor: Actor, workDate: string, timezone = 'Asia/Tokyo') {
+  const shiftId = randomUUID()
+  await fixture.pool.query(`INSERT INTO attendance_shifts(id,org_id,name,timezone,work_start_time,work_end_time,working_days)
+    VALUES($1,$2,'scheduled timezone synthetic',$3,'09:00','18:00','[0,1,2,3,4,5,6]'::jsonb)`, [shiftId,fixture.orgId,timezone])
+  await fixture.pool.query(`INSERT INTO attendance_shift_assignments
+    (id,org_id,user_id,shift_id,start_date,end_date,is_active,publish_status)
+    VALUES($1,$2,$3,$4,$5,$5,true,'published')`, [randomUUID(),fixture.orgId,actor.userId,shiftId,workDate])
+  return shiftId
+}
+async function adminRun(workDate: string) {
+  return fixture.request('/api/attendance/auto-absence/run',admin.token,{orgId:fixture.orgId,workDate})
+}
+async function cronRun(workDate: string, recoveryRunId?: string) {
+  expect(observed.boundary?.resolvesScheduledTimezone).toBe(true)
+  return plugin.__attendanceWorkDateResolverForTests.runAutoAbsenceForOrgDate({
+    query: async (text,values) => (await fixture.pool.query(text,values)).rows,
+  }, {orgId:fixture.orgId,workDate,skipDedup:true,initiator:'cron',
+    w4Boundary:observed.boundary!,...(recoveryRunId === undefined ? {} : {recoveryRunId})})
+}
+async function records(workDate: string) {
+  return (await fixture.pool.query(`SELECT user_id,timezone,status,is_workday FROM attendance_records
+    WHERE org_id=$1 AND work_date=$2 ORDER BY user_id`, [fixture.orgId,workDate])).rows
+}
+async function companions(workDate: string) {
+  return (await fixture.pool.query(`SELECT c.* FROM attendance_timezone_context_companions c
+    WHERE c.org_id=$1 AND c.work_date=$2 ORDER BY c.user_id`, [fixture.orgId,workDate])).rows
+}
+async function assertFrozenTarget(actor: Actor, workDate: string, timezone: string) {
+  const response = await fixture.request('/api/attendance/timezone-context/me?workDate='+workDate,actor.token,undefined,'GET')
+  expect(response.status,response.body.error?.code).toBe(200)
+  const row = (await companions(workDate)).find(value => value.user_id === actor.userId)
+  expect(row).toBeDefined()
+  const frame = row.frame_snapshot
+  expect(response.body).toEqual({ok:true,data:{
+    orgId:fixture.orgId,userId:actor.userId,workDate,timezone,contextFingerprint:row.context_fingerprint,
+    frozen:true,referenceId:row.record_id,provenance:frame.timezoneContext,
+    window:{startAt:row.absolute_start_at.toISOString(),endAt:row.absolute_end_at.toISOString()},
+    rule:frame.context.rule,isWorkingDay:true,
+  }})
+}
+async function rollout(target: 'shadow' | 'authoritative') {
+  process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+  await fixture.pool.query(`INSERT INTO attendance_calculation_rollout_state
+    (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
+    VALUES($1,'legacy','scheduled-timezone-test','TEST_FIXTURE',$2,1,NULL)
+    ON CONFLICT(org_id) DO NOTHING`, [fixture.orgId,admin.userId])
+  const states = ['legacy','shadow','eligible','authoritative']
+  const current = (await fixture.pool.query('SELECT state,version FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows[0]
+  let version = Number(current.version)
+  for (let index=states.indexOf(current.state)+1;index<=states.indexOf(target);index+=1) {
+    await fixture.pool.query('UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',
+      [fixture.orgId,states[index],states[index-1],++version])
+  }
+}
+
+describe('scheduled absence uses the production timezone runtime (HTTP/PostgreSQL)', () => {
+  beforeAll(async () => {
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    punchClock.setOnlinePunchInstantForTests('2026-01-01T00:00:00Z')
+    tripClock.setBusinessTripInstantForTests('2026-01-01T00:00:00Z')
+    admin = await fixture.start()
+    expect(observed.boundary?.resolvesScheduledTimezone).toBe(true)
+  },180_000)
+  beforeEach(async () => {
+    delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    // A run visits active org members, so previous cases must not grow this
+    // case's target set. Keep the real authenticated administrator active.
+    await fixture.pool.query('UPDATE user_orgs SET is_active=(user_id=$2) WHERE org_id=$1',[fixture.orgId,admin.userId])
+    await fixture.pool.query('DELETE FROM attendance_timezone_policies WHERE org_id=$1',[fixture.orgId])
+    punchClock.setOnlinePunchInstantForTests('2026-01-01T00:00:00Z')
+    tripClock.setBusinessTripInstantForTests('2026-01-01T00:00:00Z')
+  })
+  afterAll(async () => {
+    tripClock.setBusinessTripInstantForTests(null)
+    if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+    await fixture.stop()
+  },60_000)
+
+  it('OFF admin HTTP freezes org default for every user despite employee and published-shift zones', async () => {
+    const workDate = '2026-01-12'
+    const tokyo = await fixture.user(), newYork = await fixture.user()
+    await employeeZone(tokyo,'Asia/Tokyo')
+    await employeeZone(newYork,'America/New_York')
+    await assignment(tokyo,workDate,'Asia/Tokyo')
+    const result = await adminRun(workDate)
+    expect({status:result.status,body:result.body}).toEqual({status:200,body:{ok:true,data:{
+      skipped:false,total:3,targetUsers:3,generated:3,reviewRequired:[],
+    }}})
+    expect(await records(workDate)).toEqual([admin,tokyo,newYork].map(actor => ({
+      user_id:actor.userId,timezone:'UTC',status:'absent',is_workday:true,
+    })).sort((a,b) => a.user_id.localeCompare(b.user_id)))
+    for (const actor of [admin,tokyo,newYork]) await assertFrozenTarget(actor,workDate,'UTC')
+    expect((await companions(workDate)).map(row => ({timezone:row.timezone,source:row.frame_snapshot.timezoneContext.source,
+      mode:row.frame_snapshot.timezoneContext.mode,calculationId:row.original_calculation_id})))
+      .toEqual(Array.from({length:3},() => ({timezone:'UTC',source:'system_default',mode:'default_only',calculationId:null})))
+  })
+
+  it('ON real cron caller uses each employee zone and an actually approved effective trip', async () => {
+    const workDate = '2026-01-21'
+    const tokyo = await fixture.user(), newYork = await fixture.user(), traveler = await fixture.user()
+    await policy(true)
+    await employeeZone(tokyo,'Asia/Tokyo')
+    await employeeZone(newYork,'America/New_York')
+    // UTC midnight does not cut Tokyo (00–09Z) or Singapore (01–10Z) shifts.
+    await employeeZone(traveler,'Asia/Tokyo')
+    const flow = await fixture.request('/api/attendance/approval-flows',admin.token,{
+      orgId:fixture.orgId,name:'scheduled synthetic trip',requestType:'business_trip',steps:[{approverUserIds:[admin.userId]}],
+    })
+    expect(flow.status,flow.body.error?.code).toBe(201)
+    const made = await fixture.request('/api/attendance/business-trip-requests',traveler.token,{
+      destinationTimezone:'Asia/Singapore',startAt:'2026-01-20T00:00:00Z',endAt:'2026-01-23T00:00:00Z',approvalFlowId:flow.body.data.id,
+    })
+    expect(made.status,made.body.error?.code).toBe(201)
+    const requestId = made.body.data.request.id
+    const approved = await fixture.request('/api/attendance/requests/'+requestId+'/approve',admin.token,{})
+    expect({status:approved.status,statusValue:approved.body.data?.status},approved.body.error?.code).toEqual({status:200,statusValue:'approved'})
+    expect((await fixture.pool.query('SELECT request_id,destination_timezone FROM attendance_business_trip_arrangements WHERE org_id=$1 AND request_id=$2',
+      [fixture.orgId,requestId])).rows).toEqual([{request_id:requestId,destination_timezone:'Asia/Singapore'}])
+    expect(await cronRun(workDate)).toEqual({skipped:false,total:4,targetUsers:4,generated:4,reviewRequired:[]})
+    const targets: Array<[Actor,string,string]> = [[admin,'UTC','system_default'],[tokyo,'Asia/Tokyo','employee_override'],
+      [newYork,'America/New_York','employee_override'],[traveler,'Asia/Singapore','trip']]
+    expect(await records(workDate)).toEqual(targets.map(([actor,timezone]) => ({
+      user_id:actor.userId,timezone,status:'absent',is_workday:true,
+    })).sort((a,b) => a.user_id.localeCompare(b.user_id)))
+    for (const [actor,timezone,source] of targets) {
+      await assertFrozenTarget(actor,workDate,timezone)
+      const row = (await companions(workDate)).find(value => value.user_id === actor.userId)
+      expect({timezone:row.timezone,source:row.frame_snapshot.timezoneContext.source}).toEqual({timezone,source})
+    }
+  })
+
+  it('an existing legacy row is skipped byte-for-byte without fabricating a companion', async () => {
+    const workDate = '2026-02-02'
+    const actor = await fixture.user()
+    await fixture.pool.query(`INSERT INTO attendance_records(user_id,org_id,work_date,timezone,status,is_workday,work_minutes)
+      VALUES($1,$2,$3,'Asia/Tokyo','normal',true,480)`,[actor.userId,fixture.orgId,workDate])
+    const before = (await fixture.pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND user_id=$2 AND work_date=$3',
+      [fixture.orgId,actor.userId,workDate])).rows
+    const result = await adminRun(workDate)
+    expect({status:result.status,body:result.body}).toEqual({status:200,body:{ok:true,data:{
+      skipped:false,total:1,targetUsers:2,generated:1,reviewRequired:[],
+    }}})
+    expect((await fixture.pool.query('SELECT * FROM attendance_records WHERE org_id=$1 AND user_id=$2 AND work_date=$3',
+      [fixture.orgId,actor.userId,workDate])).rows).toEqual(before)
+    expect((await companions(workDate)).filter(row => row.user_id === actor.userId)).toEqual([])
+  })
+
+  it('a real companion INSERT failure rolls the whole legacy batch back; retry then freezes all targets', async () => {
+    const workDate = '2026-02-03'
+    const actor = await fixture.user()
+    const guard = 'scheduled_timezone_bind_'+randomUUID().replaceAll('-','')
+    await fixture.pool.query(`CREATE FUNCTION ${guard}() RETURNS trigger LANGUAGE plpgsql AS $guard$
+      BEGIN IF NEW.org_id='${fixture.orgId}' AND NEW.user_id='${actor.userId}' THEN
+      RAISE EXCEPTION 'SYNTHETIC_COMPANION_FAILURE' USING ERRCODE='23514'; END IF; RETURN NEW; END $guard$`)
+    await fixture.pool.query(`CREATE TRIGGER ${guard} BEFORE INSERT ON attendance_timezone_context_companions
+      FOR EACH ROW EXECUTE FUNCTION ${guard}()`)
+    try {
+      const result = await adminRun(workDate)
+      expect({status:result.status,body:result.body}).toEqual({status:503,body:{ok:false,error:{
+        code:'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',message:'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+      }}})
+      expect(await records(workDate)).toEqual([])
+      expect(await companions(workDate)).toEqual([])
+      expect((await fixture.pool.query('SELECT count(*)::int AS count FROM attendance_events WHERE org_id=$1 AND work_date=$2',
+        [fixture.orgId,workDate])).rows).toEqual([{count:0}])
+    } finally {
+      await fixture.pool.query(`DROP TRIGGER ${guard} ON attendance_timezone_context_companions`)
+      await fixture.pool.query(`DROP FUNCTION ${guard}()`)
+    }
+    const retry = await adminRun(workDate)
+    expect({status:retry.status,body:retry.body}).toEqual({status:200,body:{ok:true,data:{
+      skipped:false,total:2,targetUsers:2,generated:2,reviewRequired:[],
+    }}})
+    await assertFrozenTarget(actor,workDate,'UTC')
+  })
+
+  it.each(['shadow','authoritative'] as const)('%s binds the real scheduled calculation identity and effective context', async state => {
+    const workDate = state === 'shadow' ? '2026-02-04' : '2026-02-05'
+    const actor = await fixture.user()
+    await policy(true)
+    await employeeZone(actor,'Asia/Singapore')
+    const shiftId = await assignment(actor,workDate,'America/New_York')
+    await assignment(admin,workDate,'UTC')
+    await rollout(state)
+    const result = await adminRun(workDate)
+    expect({status:result.status,body:result.body}).toEqual({status:200,body:{ok:true,data:{
+      skipped:false,total:2,targetUsers:2,generated:2,reviewRequired:[],
+    }}})
+    const joined = (await fixture.pool.query(`SELECT c.original_calculation_id,c.original_freeze_snapshot,
+      r.current_calculation_id,calc.id,calc.context_snapshot,calc.attribution_snapshot,calc.source_definition_fingerprint,
+      calc.entrypoint,o.resolved_calculation_id,o.state AS operation_state
+      FROM attendance_timezone_context_companions c JOIN attendance_records r ON r.id=c.record_id
+      JOIN attendance_record_calculations calc ON calc.id=c.original_calculation_id AND calc.attendance_record_id=c.record_id AND calc.org_id=c.org_id
+      JOIN attendance_result_operations o ON o.operation_id=calc.operation_id AND o.org_id=calc.org_id
+      WHERE c.org_id=$1 AND c.user_id=$2 AND c.work_date=$3`,[fixture.orgId,actor.userId,workDate])).rows
+    expect(joined).toHaveLength(1)
+    const row = joined[0]
+    expect({calculationId:row.original_calculation_id,resolvedCalculationId:row.resolved_calculation_id,
+      pointer:row.current_calculation_id,entrypoint:row.entrypoint,operationState:row.operation_state})
+      .toEqual({calculationId:row.id,resolvedCalculationId:row.id,pointer:state === 'authoritative' ? row.id : null,
+        entrypoint:'scheduled',operationState:'completed'})
+    expect({timezone:row.context_snapshot.timezone,shiftId:row.context_snapshot.shiftId}).toEqual({timezone:'Asia/Singapore',shiftId})
+    expect(row.attribution_snapshot.value.absoluteWindow).toEqual({startAt:workDate+'T01:00:00.000Z',endAt:workDate+'T10:00:00.000Z'})
+    expect(row.original_freeze_snapshot).toEqual({calculation:{id:row.id,context_snapshot:row.context_snapshot,
+      attribution_snapshot:row.attribution_snapshot,source_definition_fingerprint:row.source_definition_fingerprint}})
+    await assertFrozenTarget(actor,workDate,'Asia/Singapore')
+  })
+
+  it('completed exact recovery skips unavailable mutable policy while a fresh run fails closed', async () => {
+    const workDate = '2026-02-06'
+    const actor = await fixture.user()
+    await assignment(actor,workDate)
+    await assignment(admin,workDate,'UTC')
+    await rollout('authoritative')
+    expect(await cronRun(workDate)).toEqual({skipped:false,total:2,targetUsers:2,generated:2,reviewRequired:[]})
+    const runs = (await fixture.pool.query(`SELECT run_id,state FROM attendance_scheduled_runs
+      WHERE org_id=$1 AND work_date=$2 AND initiator='cron'`,[fixture.orgId,workDate])).rows
+    expect(runs).toHaveLength(1)
+    expect(runs[0].state).toBe('completed')
+    const beforeRecords = await records(workDate), beforeCompanions = await companions(workDate)
+    const renamed = 'scheduled_timezone_policy_fault_'+randomUUID().replaceAll('-','')
+    await fixture.pool.query('ALTER TABLE attendance_timezone_policies RENAME TO '+renamed)
+    try {
+      expect(await cronRun(workDate,runs[0].run_id)).toEqual({skipped:false,total:0,targetUsers:0,generated:0,reviewRequired:[]})
+      expect(await records(workDate)).toEqual(beforeRecords)
+      expect(await companions(workDate)).toEqual(beforeCompanions)
+      await expect(cronRun('2026-02-07')).rejects.toMatchObject({status:503,code:'ATTENDANCE_TIMEZONE_STORE_UNAVAILABLE'})
+      expect(await records('2026-02-07')).toEqual([])
+      expect(await companions('2026-02-07')).toEqual([])
+    } finally {
+      await fixture.pool.query('ALTER TABLE '+renamed+' RENAME TO attendance_timezone_policies')
+    }
+  })
+})

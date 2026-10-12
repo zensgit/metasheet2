@@ -1167,6 +1167,7 @@ export default defineConfig({
       'tests/integration/attendance-timezone-policy-preview.db.test.ts',
       'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
       'tests/integration/attendance-timezone-runtime.db.test.ts',
+      'tests/integration/attendance-timezone-scheduled.db.test.ts',
       'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
       'tests/integration/attendance-timezone-policy-store.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',

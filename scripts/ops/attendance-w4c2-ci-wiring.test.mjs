@@ -2225,6 +2225,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-timezone-read-context.db.test.ts',
   'tests/integration/attendance-timezone-runtime-locks.db.test.ts',
   'tests/integration/attendance-timezone-runtime.db.test.ts',
+  'tests/integration/attendance-timezone-scheduled.db.test.ts',
   'tests/integration/attendance-timezone-target-routes.db.test.ts',
   'tests/integration/attendance-trip-context-transition-dates.db.test.ts',
   'tests/integration/attendance-unscheduled-reminder.test.ts',
