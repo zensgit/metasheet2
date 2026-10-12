@@ -49,13 +49,13 @@
 | 项 | 命令 | 结果 |
 |---|---|---|
 | type-check | `tsc --noEmit -p .` | 0 errors |
-| 新测试文件的类型 | 临时 tsconfig（`extends` 本包配置，加 `noUnusedLocals`，`include` 新真库文件、新单测与 `src`），不入库 | 本切片新增与改动的文件 0 条诊断；其余诊断都在本切片没有碰的文件里 |
+| 本切片新增与改动的测试文件的类型 | 两份临时 tsconfig，不入库：(a) `extends` 本包配置、加 `noUnusedLocals`，`include` 新真库文件、新字段单测与 `src`；(b) `extends` 本包配置，`include` 本切片新增与改动的全部 9 个测试文件（新真库文件、`task-field-access`、`task-access`、`task-counts-touchpoints`、`task-records-guards`、`tasks-auth-gate`、`task-p0a`、`task-m3-comments-deletion`、`task-m3-membership`）与 `src` | (a) 两个新文件 0 条诊断，其余诊断都在本切片没有碰的 `src` 文件里；(b) 共 7 条，都是 `import.meta` 在这份临时配置的 `module` 选项下的 TS1343：`tasks-auth-gate.ts` 第 1010–1149 行的 6 条与 `task-m4-fixtures.ts` 的 1 条，都在本切片没有改的行（本切片改的是 `tasks-auth-gate.ts` 第 223–232 行与第 1243–1270 行）；其余 8 个文件 0 条 |
 | 任务单测子集 + 绊线 | `vitest run --config vitest.config.ts tests/unit/task-*.test.ts tests/unit/tasks-*.test.ts tests/unit/supertest-app-mode-tripwire.test.ts` | 51 files / 2102 passed / 0 failed。比切片 2 多 1 个文件、5 格：`task-recurrence` 1、`task-access` 2、`task-field-access` 2 |
 | PR-3c 普查 | 上一行里的 `task-counts-touchpoints.test.ts` | 绿：人口仍是三个服务文件；写入者恰为八个写入点之五加五个 helper；两个新 helper 只被写入点直接调用；规则 ③ 的模块遍历含 `task-recurrence-records.ts`，没有吞错点 |
 | 门 17 ④ | 上一行里的 `task-ci-coverage-enumeration.test.ts` | 绿 |
 | 门 17 ① | `vitest run --config vitest.config.ts tests/integration/task-m5-recurrence.db.test.ts` | `No test files found`，exit 1，不是 skipped |
 | ops | `node --test scripts/ops/tasks-auth-ci-wiring.test.mjs scripts/ops/staging-tasks-smoke.test.mjs` | 194/194 |
-| 门 7 | ERE `pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(` 扫 `src/tasks`、`src/services/task-*`、`src/routes/tasks*`、`src/db/task-*` | 恰 3 行，都在 `src/db/task-advisory-locks.ts` 的三个登记导出里 |
+| 门 7 | ERE `pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(` 扫 `src/tasks`、`src/services/task-*`、`src/routes/tasks*`、`src/db/task-*` | 恰 3 行：`src/db/task-advisory-locks.ts` 第 17、25、29 行，即三个登记导出各一处（本切片对 `src/db/` 的 diff 为空） |
 | 新 `TASKS_*` 读点 | `grep TASKS_` 三个新源文件 | 只有 `tasks-entity.ts` 头注里的一句说明，没有读点 |
 | 文本扫描 | 两个字面扫描器与引号扫描器，对本记录、新真库文件与全部提交说明 | 都 exit 0 |
 
@@ -102,7 +102,7 @@
 
 三遍里新文件的收集与通过都是 47（门 17 ②：静态展开 47 = 收集 47）；929 = 切片 2 记录 §11 之后的 882 + 47，其余 23 个文件的格数与切片 2 相同。三遍日志里 `socket hang up` / `ECONNRESET` 都是 0。门 19：`tsx tests/helpers/gate19-identities.ts <lane 第 3 遍日志> <锁>` ⇒ `gate19: passed identities equal the i-m2 list`。
 
-第 2 遍红的一格是 `task-m4-scheduler` 的 leader 会话上限格（「扫描超过空闲上限、靠页间心跳保住」的那一半得到 `leader_client_lost`）。这一格按真实时钟比较心跳与服务器的空闲上限；本切片没有改 `task-scheduler.ts`、`src/db/` 任何文件（相对 `5822434947` 的 diff 为空）。对照：同一台机器上，切片 2 的头 `5822434947`（对照工作树，新建库）与本切片最终提交各单独跑这个文件 5 遍，两边都是 5/5、每遍 25/25。判为负载下的计时偶发，不是本切片的缺陷；第 1、3 遍同一格是绿的。
+第 2 遍红的一格是 `task-m4-scheduler` 的 leader 会话上限格（「扫描超过空闲上限、靠页间心跳保住」的那一半得到 `leader_client_lost`）。这一格按真实时钟比较心跳与服务器的空闲上限；本切片没有改 `task-scheduler.ts`、`src/db/` 任何文件（相对 `5822434947` 的 diff 为空）。对照：同一台机器上，切片 2 的头 `5822434947`（对照工作树，新建库）与本切片最终提交各单独跑这个文件 5 遍，两边都是 5/5、每遍 25/25；两边都没有复现。没有在对照提交上跑整条 lane，所以「计时偶发」是依据「本切片没有碰调度器与取锁文件」与「第 1、3 遍同一格是绿的」作出的判断，不是在对照上观察到同样的红。
 
 ## 7. 变异（RAN，另一台机器的开发工作树与开发库）
 
@@ -156,4 +156,4 @@
 
 ## 10. 清理
 
-另一台机器上本次的工作树（开发、最终）、两个库与临时文件都已删除，以及对照工作树与它的库；删除后核对过：那台机器的工作树列表、库列表与临时目录里都不再有本次的条目。推过去的引用留在那台机器的克隆里，推错的一个（指向本机主检出当时的 HEAD）当场删掉了。
+另一台机器上本次的工作树（开发、最终）、两个库与临时文件都已删除，以及对照工作树与它的库；删除后核对过：那台机器的工作树列表、库列表与临时目录里都不再有本次的条目。推过去的引用留在那台机器的克隆里。中途有一次推错了引用（推成了本机主检出当时的 HEAD，而不是本切片的提交），在它建出的工作树上起的那次 lane 因为抽取不到文件清单而跑成了全部集成测试；发现后当即停掉，那次的结果全部作废、没有计入本记录，工作树、库与那个推错的引用都删掉了，之后的工作树都按提交号重建并先核对 `git log`。
