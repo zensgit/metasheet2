@@ -177,6 +177,18 @@ interface KnownSite {
 
 // prettier-ignore
 const KNOWN_SITES: KnownSite[] = [
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0))",
+    kind: 'display',
+  },
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value.trim() }).format(new Date(0))",
+    kind: 'display',
+  },
   // ---------------------------------------------------------------------------------
   // PARSING sites — output reaches formatToParts() with numeric consumption, or a
   // format() string is split/Number-parsed. Every entry MUST carry explicit
@@ -694,7 +706,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 28 = 25 + the three task-dates.ts sites (one parsing formatter with hourCycle 'h23', two
     // resolvedOptions-only canonicalizations).
     // 29 = 28 + the hour-free history-reconcile local-day key.
-    expect(KNOWN_SITES.length).toBe(29)
+    // 31 = 29 + two hour-free attendance timezone validity probes.
+    expect(KNOWN_SITES.length).toBe(31)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

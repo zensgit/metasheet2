@@ -68,6 +68,12 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
  * is the half that carries meaning.
  */
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
+  // Multi-timezone policy inputs, configuration and loader feed frozen context;
+  // retain both W6 aggregate bans with no not-calculation carve-out.
+  'plugins/plugin-attendance/lib/attendance-timezone-context-loader.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy-routes.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+  'plugins/plugin-attendance/lib/attendance-timezone-policy.cjs',
   'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
   // Online punch identity and receipt framing feed the live calculation boundary;
   // both W6 aggregate bans apply, with no carve-out.
