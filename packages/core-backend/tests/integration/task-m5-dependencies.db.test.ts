@@ -621,18 +621,24 @@ describe('M5 PR-4a slice 4, M5-c: adding and removing an edge', () => {
     expect((await postDep(w.a, full, { predecessorId: free })).status).toBe(200)
   }, LIMIT_CELL_TIMEOUT_MS)
 
-  it('dep-soft-deleted | D17: soft-deleting a counterpart leaves the edge row and writes no dependency_removed; the reads leave it out; an edge to it is 404', async () => {
+  it('dep-soft-deleted | D17: soft-deleting a counterpart, at either end, leaves the edge row and writes no dependency_removed; the reads leave it out; an edge to it is 404', async () => {
     const w = await world('soft')
     const t = await taskOf(w)
     const p = await plain(w.orgId, w.a)
+    const s = await plain(w.orgId, w.a)
     expect((await postDep(w.a, t, { predecessorId: p })).status).toBe(200)
+    expect((await postDep(w.a, t, { successorId: s })).status).toBe(200)
+    const before = await getDeps(w.a, t)
+    expect([before.body.predecessors.length, before.body.successors.length]).toEqual([1, 1])
     await deleteTaskById({ orgId: w.orgId, actorId: w.a.userId, taskId: p })
-    expect(await edgesTouching([t])).toEqual([`${p}>${t}`])
-    expect((await changeEvents(t)).map((event) => event.type)).toEqual(['dependency_added'])
+    await deleteTaskById({ orgId: w.orgId, actorId: w.a.userId, taskId: s })
+    expect(await edgesTouching([t])).toEqual([`${p}>${t}`, `${t}>${s}`].sort())
+    expect((await changeEvents(t)).map((event) => event.type)).toEqual(['dependency_added', 'dependency_added'])
     const read = await getDeps(w.a, t)
     expect([read.status, read.body]).toEqual([200, { predecessors: [], successors: [] }])
     expect((await detail(w.a, t)).body.dependencies).toEqual({ predecessors: [], successors: [] })
     expect((await postDep(w.a, t, { successorId: p })).status).toBe(404)
+    expect((await postDep(w.a, t, { predecessorId: s })).status).toBe(404)
   })
 })
 
