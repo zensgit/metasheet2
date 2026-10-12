@@ -176,6 +176,7 @@ import {
   type RoleAssignmentScope,
 } from '../../src/rbac/role-assignment'
 import { Logger } from '../../src/core/logger'
+import { matchesPermission } from '../../src/auth/permission-match'
 
 const ROLE_ROUTE = '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)'
 const ADMISSION_ROUTE = '/api/admin/role-delegation/users/:userId/namespaces/:namespace/admission'
@@ -574,6 +575,27 @@ describe('R5 — the delegate is never offered what the route refuses', () => {
     }
   })
 
+  it('platform admin: a membership whose role row is gone is not offered for revoke (the route answers it 404), on both the access read and the write response', async () => {
+    // No user_roles -> roles FK on the migrated schema, so such memberships are a normal state.
+    db.userRoles.set(TARGET, new Set(['attendance_employee', 'stock-prep_admin', 'ghost_role']))
+    expect(db.roles.has('ghost_role')).toBe(false)
+
+    const access = await call('get', ACCESS_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET } })
+    expect(access.statusCode).toBe(200)
+    expect(access.body.data.roles).toContain('ghost_role')
+    expect(access.body.data.delegableRoles).toEqual(['attendance_employee', 'stock-prep_admin'])
+
+    // The route really refuses that revoke — the list agrees with it.
+    const revoke = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'ghost_role' } })
+    expect({ status: revoke.statusCode, code: revoke.body?.error?.code }).toEqual({ status: 404, code: 'ROLE_NOT_FOUND' })
+
+    // The write response carries the same cut.
+    const write = await call('post', ROLE_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET, action: 'unassign' }, body: { roleId: 'attendance_employee' } })
+    expect(write.statusCode).toBe(200)
+    expect(write.body.data.roles).toContain('ghost_role')
+    expect(write.body.data.delegableRoles).toEqual(['stock-prep_admin'])
+  })
+
   it('POSITIVE CONTROL — a platform admin still sees the whole catalog, main-admin roles included', async () => {
     const res = await call('get', ACCESS_ROUTE, { actor: PLATFORM_ADMIN, params: { userId: TARGET } })
 
@@ -764,10 +786,50 @@ describe('R7 — admin power via codes: a role carrying an admin-level code of i
       expect({ code, adminLevel: isAdminLevelPermissionCode(code) }).toEqual({ code, adminLevel: true })
     }
     // Domain actions are not wildcards in any access matcher (`manage` is approval-templates',
-    // `all` is a wildcard only in the demo metrics middleware).
-    for (const code of ['attendance:read', 'attendance:approve', 'attendance:manage', 'attendance:all', 'stock-prep:pull', 'attendance', 'attendance:', ':admin', '', 'attendance:administer', 'attendance:Admin']) {
+    // `all` is a wildcard only in the demo metrics middleware). Case variants are NOT here: the
+    // predicate folds case (see the normalisation leg below).
+    for (const code of ['attendance:read', 'attendance:approve', 'attendance:manage', 'attendance:all', 'stock-prep:pull', 'attendance', 'attendance:', ':admin', '', 'attendance:administer', 'Attendance:Read']) {
       expect({ code, adminLevel: isAdminLevelPermissionCode(code) }).toEqual({ code, adminLevel: false })
     }
+  })
+
+  it('NORMALISATION — the predicate covers every case/whitespace variant of an admin-level code, and every code the matcher treats as admin-level', () => {
+    // How codes travel: the role editor TRIMS on write and keeps case (routes/roles.ts
+    // normalizePermissionCodes); rbacGuard and permission-match TRIM and compare case-sensitively.
+    // So a stored ` stock-prep:admin ` is `stock-prep:admin` to the guard (must be admin-level), and
+    // `Attendance:Admin` grants nothing today but is folded to admin-level anyway (an over-refusal,
+    // never an admission, and the editor's former case-folded gate is preserved).
+    const canonical = ['attendance:admin', 'stock-prep:admin', 'attendance:*', '*:*', 'admin:all', 'admin:users']
+    for (const code of canonical) {
+      const [resource, action] = code.split(':')
+      const variants = [
+        code,
+        ` ${code} `,
+        `\t${code}\n`,
+        code.toUpperCase(),
+        `${resource.charAt(0).toUpperCase()}${resource.slice(1)}:${action.charAt(0).toUpperCase()}${action.slice(1)}`,
+        `${resource} : ${action}`,
+      ]
+      for (const variant of variants) {
+        expect({ variant, adminLevel: isAdminLevelPermissionCode(variant) }).toEqual({ variant, adminLevel: true })
+      }
+    }
+    // Superset of the access matcher: any code that, held alone, admits an action it does not
+    // name (the admin/wildcard power) must be admin-level here — over the variants above too.
+    const corpus = [
+      ...canonical, ...canonical.map((code) => ` ${code} `),
+      'attendance:read', 'attendance:write', 'attendance:approve', 'attendance:manage', 'Attendance:Admin', ' ATTENDANCE:* ',
+    ]
+    let matcherAdminCodes = 0
+    for (const code of corpus) {
+      const resource = code.trim().split(':')[0]
+      const grantsUnnamedAction = matchesPermission([code], `${resource}:zz-unnamed-probe`)
+      if (!grantsUnnamedAction) continue
+      matcherAdminCodes += 1
+      expect({ code, adminLevel: isAdminLevelPermissionCode(code) }).toEqual({ code, adminLevel: true })
+    }
+    // Floor: the matcher really does treat some of the corpus as admin-level (the loop is not vacuous).
+    expect(matcherAdminCodes).toBeGreaterThanOrEqual(8)
   })
 
   it.each([

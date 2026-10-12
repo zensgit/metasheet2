@@ -22,8 +22,21 @@
 //
 // Output is the suites' existing format (`  <name> OK`, `FAIL: <name>` + stack, `<label> FAILED (<n>)`,
 // `<label>: all assertions passed`), so adopting it changes no log a reader greps for.
+//
+// S3 follow-ups 2 (item 5) — TWO ADOPTION FORMS:
+//   * `runFailClosedSuite(label, tests)` for a suite that already keeps `tests.push([name, fn])` (each test runs on its
+//     own, under the per-test timeout);
+//   * `runFailClosedMain(label, main)` — the MECHANICAL form for a suite whose checks live in one `async function
+//     main()` (its own awaited sequence, its own failure count): `main` is the ONE test, under the exit sentinel and
+//     the whole-suite timeout WHOLE_SUITE_TIMEOUT_MS. It replaces the `main().catch(…)` / `main().then(…)` tail.
+// THE REPORTED EXIT CODE: a suite whose own body reports its failures by setting `process.exitCode` (and resolves) is
+// a FAILED suite here too — `<label> FAILED (process.exitCode …)` and exit 1, never `all assertions passed` over it.
 
 const DEFAULT_TEST_TIMEOUT_MS = 60 * 1000
+// S3 follow-ups 2 (item 5): the bound on a WHOLE `main()` adopted through `runFailClosedMain`. Far above any adopted
+// suite's runtime (the slowest stock-prep suite runs in seconds): it only ends a hang that keeps the loop alive — the
+// exit sentinel ends a drained one at once.
+const WHOLE_SUITE_TIMEOUT_MS = 5 * 60 * 1000
 
 class SuiteTestTimeoutError extends Error {
   constructor(name, timeoutMs) {
@@ -50,9 +63,12 @@ function runWithTimeout(name, fn, timeoutMs) {
  * Run `tests` (`[[name, fn], …]`) in order, fail-closed. `label` names the suite in the summary lines.
  * Returns the run's promise (the suites call it last and do not await it).
  */
-function runFailClosedSuite(label, tests, { testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS } = {}) {
+function runFailClosedSuite(label, tests, { testTimeoutMs = DEFAULT_TEST_TIMEOUT_MS, passLine } = {}) {
   if (!Number.isInteger(testTimeoutMs) || testTimeoutMs <= 0) {
     throw new TypeError('runFailClosedSuite: testTimeoutMs must be a positive integer')
+  }
+  if (passLine !== undefined && (typeof passLine !== 'string' || passLine.length === 0)) {
+    throw new TypeError('runFailClosedSuite: passLine must be a non-empty string')
   }
   let completed = false
   process.once('beforeExit', () => {
@@ -73,16 +89,54 @@ function runFailClosedSuite(label, tests, { testTimeoutMs = DEFAULT_TEST_TIMEOUT
       }
     }
     completed = true
+    // S3 follow-ups 2, fix round 1 (R5): a counted failure sets `process.exitCode = 1` FIRST, and both failing exits
+    // return after `process.exit(1)` — so a failed run can never end 0 nor print `all assertions passed`, even where
+    // `process.exit` does not end the process (stubbed, or the line lost; the second exit already has a non-zero
+    // `process.exitCode` by definition). The runner's own self-tests do NOT run on
+    // this runner (stock-preparation-project-overview.test.cjs runs them at top level, before it), so breaking this
+    // exit path turns that suite red on its own.
     if (failed) {
       console.error(`${label} FAILED (${failed})`)
+      process.exitCode = 1
       process.exit(1)
+      return
     }
+    // S3 follow-ups 2 (item 5): a body that reported its own failures through `process.exitCode` failed.
+    if (exitCodeReported()) {
+      console.error(`${label} FAILED (process.exitCode ${String(process.exitCode)} was set by the suite)`)
+      process.exit(1)
+      return
+    }
+    // S3 follow-ups 2 (item 5): the pass line the suite's own tail used to print (`<file> OK`, `✓ <name>`) — kept, so
+    // adopting the runner drops no line a reader greps for; printed only on a pass, right before the runner's own.
+    if (passLine !== undefined) console.log(passLine)
     console.log(`${label}: all assertions passed`)
   })()
 }
 
+/** Whether something in this process already set a non-zero `process.exitCode` (a number or a numeric string). */
+function exitCodeReported() {
+  const code = process.exitCode
+  if (code === undefined || code === null) return false
+  const numeric = Number(code)
+  return !Number.isFinite(numeric) || numeric !== 0
+}
+
+/**
+ * S3 follow-ups 2 (item 5): the mechanical adoption for a suite whose checks live in one `async function main()` —
+ * `main` runs as the ONE test of a fail-closed run (exit sentinel + `testTimeoutMs`, WHOLE_SUITE_TIMEOUT_MS by
+ * default). Returns the run's promise; the suite calls it last, in place of its `main().catch(…)` tail. `passLine`:
+ * the line the old tail printed on a pass, if it printed one.
+ */
+function runFailClosedMain(label, main, { testTimeoutMs = WHOLE_SUITE_TIMEOUT_MS, passLine } = {}) {
+  if (typeof main !== 'function') throw new TypeError('runFailClosedMain: main must be a function')
+  return runFailClosedSuite(label, [['main', main]], { testTimeoutMs, passLine })
+}
+
 module.exports = {
   DEFAULT_TEST_TIMEOUT_MS,
+  WHOLE_SUITE_TIMEOUT_MS,
   SuiteTestTimeoutError,
   runFailClosedSuite,
+  runFailClosedMain,
 }

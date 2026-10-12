@@ -3048,7 +3048,7 @@ export class MetaSheetServer {
                     legacyAdapters: config.legacyAdapters,
                     acquireConnection: async () => {
                       const client = await poolManager.get().getInternalPool().connect()
-                      return { client, release: () => client.release() }
+                      return { client, release: (error?: Error) => client.release(error) }
                     },
                   }),
                 createRequestOperationBoundary: (config: {
