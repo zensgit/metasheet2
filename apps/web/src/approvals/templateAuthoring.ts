@@ -36,7 +36,16 @@ import {
   validateDetailColumnsDraft,
   type DetailColumnDraft,
 } from './detailField'
-import { validateRecordLinkPinAgainstLoadedCatalog } from './recordLinkField'
+import { validateRecordLinkPinAgainstLoadedCatalog, visibilityReferenceBaseFieldId } from './recordLinkField'
+import {
+  conditionValueKind,
+  formatConditionListText,
+  parseConditionListText,
+  sameConditionList,
+  visibilityOperatorsFor,
+  type ConditionValueField,
+  type ConditionValueKind,
+} from './conditionValueTyping'
 import {
   applyConditionEditsToGraph,
   conditionEditsFromGraph,
@@ -147,11 +156,22 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
  * Editable representation of a `FormFieldVisibilityRule`. `dependsOnFieldId === ''`
  * means "no rule". `valueText` holds the eq/neq single value, or — for `in` —
  * newline-separated values; it is unused for isEmpty/notEmpty.
+ *
+ * R-43 (B): two OPTIONAL typed carriers. Anything a plain trimmed string can express losslessly
+ * stays in `valueText` only (the three-key shape every existing caller/spec writes); a number,
+ * boolean, null, a string with edge whitespace, or a list entry containing a newline rides the
+ * carrier, so a number-field rule is saved as a number and an API-authored typed rule survives an
+ * edit-and-save round trip instead of silently degrading to a string.
  */
 export interface FieldVisibilityDraft {
   dependsOnFieldId: string
   operator: FormFieldVisibilityOperator
+  /** Text-mode buffer: the eq/neq single value, or the `in` one-value-per-line text. */
   valueText: string
+  /** R-43 (B): typed eq/neq value. When present (`!== undefined`) it wins over `valueText`. */
+  value?: unknown
+  /** R-43 (B): typed `in` values. When present (an array) it wins over splitting `valueText`. */
+  values?: unknown[]
 }
 
 export interface FieldAuthoringDraft {
@@ -472,10 +492,17 @@ export function emptyVisibilityDraft(): FieldVisibilityDraft {
 /** Hydrate an editable visibility draft from a stored rule (or blank for none). */
 function visibilityDraftFromRule(rule: FormFieldVisibilityRule | undefined): FieldVisibilityDraft {
   if (!rule) return emptyVisibilityDraft()
-  const valueText = rule.operator === 'in'
-    ? (rule.values ?? []).map((value) => String(value)).join('\n')
-    : (rule.value === undefined || rule.value === null ? '' : String(rule.value))
-  return { dependsOnFieldId: rule.fieldId, operator: rule.operator, valueText }
+  const base: FieldVisibilityDraft = { dependsOnFieldId: rule.fieldId, operator: rule.operator, valueText: '' }
+  if (rule.operator === 'in') {
+    return visibilityDraftWithList(base, Array.isArray(rule.values) ? rule.values : [])
+  }
+  if (rule.operator === 'eq' || rule.operator === 'neq') {
+    return visibilityDraftWithScalar(base, rule.value === undefined ? '' : rule.value)
+  }
+  return {
+    ...base,
+    valueText: rule.value === undefined || rule.value === null ? '' : String(rule.value),
+  }
 }
 
 /**
@@ -483,17 +510,171 @@ function visibilityDraftFromRule(rule: FormFieldVisibilityRule | undefined): Fie
  * The editor is authoritative: callers MUST delete a missing rule rather than let
  * a stale one survive via the `original` spread (see buildFormSchema).
  */
-function buildVisibilityRule(visibility: FieldVisibilityDraft): FormFieldVisibilityRule | undefined {
+export function buildVisibilityRule(visibility: FieldVisibilityDraft): FormFieldVisibilityRule | undefined {
   const fieldId = visibility.dependsOnFieldId.trim()
   if (!fieldId) return undefined
   if (visibility.operator === 'in') {
-    const values = visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean)
-    return { fieldId, operator: 'in', values }
+    return { fieldId, operator: 'in', values: visibilityDraftList(visibility) }
   }
   if (visibility.operator === 'isEmpty' || visibility.operator === 'notEmpty') {
     return { fieldId, operator: visibility.operator }
   }
-  return { fieldId, operator: visibility.operator, value: visibility.valueText.trim() }
+  return {
+    fieldId,
+    operator: visibility.operator,
+    value: visibility.value !== undefined ? visibility.value : visibility.valueText.trim(),
+  }
+}
+
+// --- R-43 (B): typed visibility values ------------------------------------------------------------
+// Readers/writers over the optional `value`/`values` carriers. Every writer returns a NEW draft and
+// copies arrays (the form command layer only shallow-copies `visibility`). Normalisation keeps any
+// value a plain trimmed string expresses losslessly in `valueText` alone (three-key shape).
+
+/** Draft field → condition-value description (options parsed for select / multi-select). */
+export function conditionValueFieldFromDraft(field: Pick<FieldAuthoringDraft, 'type' | 'optionsText'>): ConditionValueField {
+  return {
+    type: field.type,
+    options: field.type === 'select' || field.type === 'multi-select' ? parseOptionsText(field.optionsText) : [],
+  }
+}
+
+/**
+ * Visibility dependency id → description. A date_range dotted endpoint (`${id}.start|end`) compares
+ * a date string (text kind); an unknown id → null.
+ */
+export function visibilityDependencyValueField(
+  dependsOnFieldId: string,
+  fields: readonly FieldAuthoringDraft[],
+): ConditionValueField | null {
+  const raw = dependsOnFieldId.trim()
+  if (!raw) return null
+  const direct = fields.find((field) => field.id.trim() === raw)
+  if (direct) return conditionValueFieldFromDraft(direct)
+  const baseId = visibilityReferenceBaseFieldId(raw)
+  if (baseId !== raw && fields.some((field) => field.id.trim() === baseId && field.type === 'date_range')) {
+    return { type: 'date', options: [] }
+  }
+  return null
+}
+
+/** Read: the eq/neq value (carrier first, else the raw `valueText`). */
+export function visibilityDraftScalar(visibility: FieldVisibilityDraft): unknown {
+  return visibility.value !== undefined ? visibility.value : visibility.valueText
+}
+
+/** Read: the `in` list (carrier first, else `valueText` split per line, trimmed, blanks dropped). */
+export function visibilityDraftList(visibility: FieldVisibilityDraft): unknown[] {
+  if (Array.isArray(visibility.values)) return [...visibility.values]
+  return visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+/**
+ * Read (display): the eq/neq text-box text. Number kind shows only a finite number (a stored
+ * non-number shows '' and is explained by the issue note, so re-typing the same digits is a real
+ * edit that commits a number). Text kind never shows a literal "null".
+ */
+export function visibilityDraftScalarText(visibility: FieldVisibilityDraft, kind: ConditionValueKind): string {
+  const scalar = visibilityDraftScalar(visibility)
+  if (kind === 'number') {
+    return typeof scalar === 'number' && Number.isFinite(scalar) ? String(scalar) : ''
+  }
+  if (visibility.value === undefined) return visibility.valueText
+  if (visibility.value === null) return ''
+  return typeof visibility.value === 'string' ? visibility.value : String(visibility.value)
+}
+
+/**
+ * Read (display): the `in` textarea text. Keeps the author's in-progress text (newlines, a trailing
+ * blank line) whenever it still parses to the stored list; otherwise renders the stored list.
+ */
+export function visibilityDraftListText(visibility: FieldVisibilityDraft, kind: ConditionValueKind): string {
+  const list = visibilityDraftList(visibility)
+  if (sameConditionList(parseConditionListText(visibility.valueText, kind), list)) return visibility.valueText
+  if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
+  return formatConditionListText(list)
+}
+
+/** Write (typed eq/neq value). */
+export function visibilityDraftWithScalar(visibility: FieldVisibilityDraft, value: unknown): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  if (typeof value === 'string' && value === value.trim()) return { ...base, valueText: value }
+  return { ...base, valueText: '', value }
+}
+
+/** Write (text-mode eq/neq value): drops any carrier so the typed text is what gets saved. */
+export function visibilityDraftWithScalarText(visibility: FieldVisibilityDraft, text: string): FieldVisibilityDraft {
+  return { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator, valueText: text }
+}
+
+/** Write (typed `in` list). */
+export function visibilityDraftWithList(visibility: FieldVisibilityDraft, list: readonly unknown[]): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  const plain = list.every((value) => (
+    typeof value === 'string' && value !== '' && value === value.trim() && !value.includes('\n')
+  ))
+  if (plain) return { ...base, valueText: list.join('\n') }
+  return { ...base, valueText: formatConditionListText(list), values: [...list] }
+}
+
+/** Write (`in` textarea text). Number kind parses each line so the saved list holds numbers. */
+export function visibilityDraftWithListText(
+  visibility: FieldVisibilityDraft,
+  text: string,
+  kind: ConditionValueKind,
+): FieldVisibilityDraft {
+  const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
+  if (kind === 'number') return { ...base, valueText: text, values: parseConditionListText(text, 'number') }
+  return { ...base, valueText: text }
+}
+
+/**
+ * Operator change. eq/neq ↔ eq/neq keeps the value; scalar → `in` wraps a non-empty value in a
+ * one-entry list; `in` → scalar keeps the first entry; → isEmpty/notEmpty keeps the value (ignored
+ * by build), exactly as before.
+ */
+export function visibilityDraftWithOperator(
+  visibility: FieldVisibilityDraft,
+  next: FormFieldVisibilityOperator,
+): FieldVisibilityDraft {
+  const current = visibility.operator
+  const renamed: FieldVisibilityDraft = { ...visibility, operator: next }
+  if (Array.isArray(visibility.values)) renamed.values = [...visibility.values]
+  const isScalar = (op: FormFieldVisibilityOperator) => op === 'eq' || op === 'neq'
+  if (isScalar(current) && next === 'in') {
+    const scalar = visibilityDraftScalar(visibility)
+    const empty = scalar === undefined || scalar === null || (typeof scalar === 'string' && scalar.trim() === '')
+    return visibilityDraftWithList(renamed, empty ? [] : [typeof scalar === 'string' ? scalar.trim() : scalar])
+  }
+  if (current === 'in' && isScalar(next)) {
+    const list = visibilityDraftList(visibility)
+    return visibilityDraftWithScalar(renamed, list.length > 0 ? list[0] : '')
+  }
+  return renamed
+}
+
+/**
+ * Dependency change. '' resets the rule. Otherwise the operator is kept when it can take effect on
+ * the new dependency, else the first one that can (multi-select ⇒ `in`). The value survives only a
+ * text → text move (the pre-R-43 behaviour); any typed kind on either side clears it, because an
+ * option value / number of one field means nothing for another.
+ */
+export function visibilityDraftForDependencyChange(
+  visibility: FieldVisibilityDraft,
+  nextDependsOnFieldId: string,
+  prev: ConditionValueField | null,
+  next: ConditionValueField | null,
+): FieldVisibilityDraft {
+  if (!nextDependsOnFieldId) return emptyVisibilityDraft()
+  const nextKind = conditionValueKind(next)
+  const allowed = visibilityOperatorsFor(nextKind)
+  const operator = allowed.includes(visibility.operator) ? visibility.operator : allowed[0]!
+  if (conditionValueKind(prev) === 'text' && nextKind === 'text') {
+    const kept: FieldVisibilityDraft = { ...visibility, dependsOnFieldId: nextDependsOnFieldId, operator }
+    if (Array.isArray(visibility.values)) kept.values = [...visibility.values]
+    return kept
+  }
+  return { dependsOnFieldId: nextDependsOnFieldId, operator, valueText: '' }
 }
 
 export function createEmptyStepDraft(index = 1): ApprovalStepDraft {
@@ -2460,7 +2641,7 @@ export function validateTemplateFormFields(
       return
     }
     if (field.visibility.operator === 'in'
-      && field.visibility.valueText.split('\n').map((line) => line.trim()).filter(Boolean).length === 0) {
+      && visibilityDraftList(field.visibility).length === 0) {
       errors.push(`字段 ${label} 的显隐"包含"规则需要至少一个值`)
     }
     if (fieldId) visibilityDeps.set(fieldId, dependencyBaseId)

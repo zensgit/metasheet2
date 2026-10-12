@@ -8,11 +8,13 @@ import {
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import {
+  CONDITION_RULE_OPERATORS,
   applyConditionEditsToGraph,
   conditionDefaultEdgeKeyText,
   conditionEditsFromGraph,
   validateConditionEdits,
 } from '../src/approvals/conditionEdit'
+import { conditionOperatorsFor, conditionRuleValueIssues } from '../src/approvals/conditionValueTyping'
 
 // G-2 — condition branch editing. PURE-LOGIC tests (no .vue / no Element Plus) so they run under
 // the approval-web-guard CI gate. The GATE is topology-preservation: editing a condition node's
@@ -587,5 +589,76 @@ describe('T5a / verify X1 — a non-string defaultEdgeKey in the edit model mean
       expect(() => validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).not.toThrow()
       expect(validateConditionEdits(edits, formSchema, CONDITION_GRAPH)).toEqual([])
     }
+  })
+})
+
+// R-43 (B) — branch condition values by field type. The editor stores typed values; the graph
+// pass-through and the validation preview are unchanged (marking is display-only, never a blocker).
+describe('R-43 (B) typed branch condition values', () => {
+  const single = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }, { label: '乙', value: 'opt_b' }] }
+  const multi = { type: 'multi-select' as const, options: single.options }
+  const number = { type: 'number' as const, options: [] }
+  const text = { type: 'text' as const, options: [] }
+
+  it('multi select offers only in / isEmpty; every other kind keeps the full operator set in order', () => {
+    expect(conditionOperatorsFor('option-multi')).toEqual(['in', 'isEmpty'])
+    for (const kind of ['option-single', 'number', 'text'] as const) {
+      expect(conditionOperatorsFor(kind)).toEqual([...CONDITION_RULE_OPERATORS])
+    }
+  })
+
+  it('conditionRuleValueIssues mirrors the backend executor', () => {
+    for (const operator of ['eq', 'neq', 'gt'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, multi)).toEqual(['operator-not-effective'])
+    }
+    // the backend `includes`s a scalar rule value into a multi-select's array form value
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'opt_a' }, multi)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'opt_a' }, single)).toEqual(['in-not-list'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'a' }, text)).toEqual(['in-not-list'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['a', 'b'] }, text)).toEqual([])
+    // gt/gte/lt/lte normalise a numeric string (works today); eq/neq/in compare strictly
+    expect(conditionRuleValueIssues({ operator: 'gt', value: '5000' }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'gt', value: 'abc' }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: '5000' }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 5000 }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: [1, 2] }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['1'] }, number)).toEqual(['not-number'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'opt_gone' }, single)).toEqual(['value-not-option'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['opt_a', 'opt_gone'] }, single)).toEqual(['value-not-option'])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, single)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: undefined }, number)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'x' }, null)).toEqual([])
+  })
+
+  function editsWith(rules: Array<{ fieldId: string; operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'isEmpty'; value: unknown }>): ConditionEdits {
+    return {
+      cond_1: {
+        nodeKey: 'cond_1',
+        branches: [{ edgeKey: 'edge-cond_1-high', predicateMode: 'rules', conjunction: 'and', rules, formulaExpression: '' }],
+        defaultEdgeKey: 'edge-cond_1-low',
+      },
+    }
+  }
+
+  it('typed values pass through the graph unchanged (number, number list, option-value list)', () => {
+    const graph = applyConditionEditsToGraph(CONDITION_GRAPH, editsWith([
+      { fieldId: 'amount', operator: 'eq', value: 5000 },
+      { fieldId: 'amount', operator: 'in', value: [1, 2] },
+      { fieldId: 'kind', operator: 'in', value: ['a'] },
+    ]))
+    const node = graph.nodes.find((candidate) => candidate.key === 'cond_1')!
+    const rules = (node.config as { branches: Array<{ rules: Array<{ value?: unknown }> }> }).branches[0].rules
+    expect(rules.map((rule) => rule.value)).toStrictEqual([5000, [1, 2], ['a']])
+    expect(typeof rules[0].value).toBe('number')
+  })
+
+  it('rules that can never take effect are NOT turned into validation errors (marking only, no new blocker)', () => {
+    const formSchema = buildTemplate(CONDITION_GRAPH).formSchema
+    const errors = validateConditionEdits(editsWith([
+      { fieldId: 'kind', operator: 'eq', value: 'gone' },
+      { fieldId: 'kind', operator: 'in', value: 'a' },
+      { fieldId: 'amount', operator: 'eq', value: '5000' },
+    ]), formSchema, CONDITION_GRAPH)
+    expect(errors).toEqual([])
   })
 })

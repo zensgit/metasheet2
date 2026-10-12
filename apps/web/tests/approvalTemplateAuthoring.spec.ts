@@ -27,6 +27,13 @@ import {
   validateTemplateDraft,
   validateTemplateFormFields,
   validateTemplateBasicInfo,
+  buildVisibilityRule,
+  visibilityDraftForDependencyChange,
+  visibilityDraftWithListText,
+  visibilityDraftWithOperator,
+  visibilityDraftWithScalar,
+  visibilityDraftWithScalarText,
+  type FieldVisibilityDraft,
 } from '../src/approvals/templateAuthoring'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
@@ -6216,5 +6223,83 @@ describe('L8-C: formatted-number authoring (docs/development/approval-lock8-fiel
       } as any,
     }))
     expect(unauthorable).not.toBeNull()
+  })
+})
+
+// R-43 (B) — typed visibility drafts. The draft keeps the three-key text shape for any value a
+// trimmed string expresses losslessly, and carries a typed value otherwise, so a number-field rule
+// saves a NUMBER and an API-authored typed rule survives an edit-and-save round trip.
+describe('R-43 (B) typed visibility drafts', () => {
+  const visibilityTemplate = (rules: Record<string, unknown>) => buildTemplate({
+    formSchema: {
+      fields: [
+        { id: 'amount', type: 'number', label: '金额' },
+        { id: 'kind', type: 'select', label: '类型', options: [{ label: '出差', value: 'opt_trip' }] },
+        ...Object.entries(rules).map(([id, visibilityRule]) => ({ id, type: 'text', label: id, visibilityRule })),
+      ],
+    } as any,
+  })
+
+  it('round-trips typed and string rules verbatim through draft → formSchema', () => {
+    const rules = {
+      n_eq: { fieldId: 'amount', operator: 'eq', value: 5000 },
+      n_in: { fieldId: 'amount', operator: 'in', values: [1, 2] },
+      null_eq: { fieldId: 'amount', operator: 'eq', value: null },
+      s_eq: { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+      s_in: { fieldId: 'kind', operator: 'in', values: ['a', 'b'] },
+      padded: { fieldId: 'kind', operator: 'neq', value: ' a' },
+    }
+    const schema = buildFormSchema(draftFromTemplate(visibilityTemplate(rules)))
+    for (const [id, rule] of Object.entries(rules)) {
+      expect(schema.fields.find((field) => field.id === id)?.visibilityRule).toStrictEqual(rule)
+    }
+  })
+
+  it('a plain string rule hydrates to the three-key draft (no carrier keys)', () => {
+    const draft = draftFromTemplate(visibilityTemplate({
+      s_eq: { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+      s_in: { fieldId: 'kind', operator: 'in', values: ['a', 'b'] },
+    }))
+    expect(draft.fields[2].visibility).toStrictEqual({ dependsOnFieldId: 'kind', operator: 'eq', valueText: 'opt_trip' })
+    expect(draft.fields[3].visibility).toStrictEqual({ dependsOnFieldId: 'kind', operator: 'in', valueText: 'a\nb' })
+  })
+
+  it('writers: list text parses numbers for a number dependency; scalar writes keep the type; text writes drop the carrier', () => {
+    const base: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'in', valueText: '' }
+    expect(buildVisibilityRule(visibilityDraftWithListText(base, '1\n2\n', 'number'))).toEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+    expect(buildVisibilityRule(visibilityDraftWithListText(base, 'a\nb', 'text'))).toEqual({ fieldId: 'amount', operator: 'in', values: ['a', 'b'] })
+    const eq: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'eq', valueText: '' }
+    expect(buildVisibilityRule(visibilityDraftWithScalar(eq, 1500))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1500 })
+    const typed = visibilityDraftWithScalar(eq, 5)
+    expect(buildVisibilityRule(visibilityDraftWithScalarText(typed, 'x'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 'x' })
+  })
+
+  it('operator and dependency changes carry or clear the value sensibly', () => {
+    const eqOption: FieldVisibilityDraft = { dependsOnFieldId: 'kind', operator: 'eq', valueText: 'opt_a' }
+    expect(buildVisibilityRule(visibilityDraftWithOperator(eqOption, 'in'))).toEqual({ fieldId: 'kind', operator: 'in', values: ['opt_a'] })
+    const inNumbers: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2', values: [1, 2] }
+    expect(buildVisibilityRule(visibilityDraftWithOperator(inNumbers, 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1 })
+    const toEmpty = visibilityDraftWithOperator(eqOption, 'isEmpty')
+    expect(toEmpty.valueText).toBe('opt_a')
+    expect(buildVisibilityRule(toEmpty)).toStrictEqual({ fieldId: 'kind', operator: 'isEmpty' })
+
+    const text = { type: 'text' as const, options: [] }
+    const select = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }] }
+    const multi = { type: 'multi-select' as const, options: [{ label: '甲', value: 'opt_a' }] }
+    const eqText: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'keep' }
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, text)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: 'keep' })
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, select)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: '' })
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, multi)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
+    expect(visibilityDraftForDependencyChange(eqText, '', text, null)).toStrictEqual({ dependsOnFieldId: '', operator: 'eq', valueText: '' })
+  })
+
+  it('the "in needs a value" check reads the typed carrier (no new blocker added)', () => {
+    const draft = draftFromTemplate(visibilityTemplate({}))
+    const field = { ...draft.fields[0], id: 'dependent', visibility: { dependsOnFieldId: 'kind', operator: 'in' as const, valueText: '', values: [1] } }
+    const withCarrier = validateTemplateFormFields({ ...draft, fields: [...draft.fields, field] }, null, null)
+    expect(withCarrier.some((message) => message.includes('包含'))).toBe(false)
+    const emptyCarrier = { ...field, visibility: { ...field.visibility, values: [] } }
+    const withEmpty = validateTemplateFormFields({ ...draft, fields: [...draft.fields, emptyCarrier] }, null, null)
+    expect(withEmpty.some((message) => message.includes('包含'))).toBe(true)
   })
 })

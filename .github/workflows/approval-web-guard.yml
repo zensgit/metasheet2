@@ -259,6 +259,9 @@ on:
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
+      # R-43 (B): typed condition values — pure helpers shared by the visibility / branch editors and
+      # the summaries; covered by approval-field-visibility + approval-template-authoring-condition-edit.
+      - 'apps/web/src/approvals/conditionValueTyping.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
       # ApprovalNewView (same rounding family as amountAutoSum).
@@ -728,6 +731,9 @@ on:
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
+      # R-43 (B): typed condition values — pure helpers shared by the visibility / branch editors and
+      # the summaries; covered by approval-field-visibility + approval-template-authoring-condition-edit.
+      - 'apps/web/src/approvals/conditionValueTyping.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
       # ApprovalNewView (same rounding family as amountAutoSum).
