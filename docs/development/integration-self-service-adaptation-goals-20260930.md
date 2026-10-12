@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§202）**：Automation 当前提交为 `0216e45b4`，仅新增真实 SDK 的累计响应字节边界测试，本地整文件 25/25，当前 head 的 Integration Guard 成功；完整应用仍未通过。上一提交 `130a9341c` 的完整 run `38175124419` 失败：manual 成功，interval 的宜搭默认 OFF 阶段出现 POST / ABORTED。独立合成复现已发现“完整 no-store 分段响应、流读取到 EOF、未取消，Chromium 仍报失败”的现象，但尚未证明本次 CI 的全部内部因果链或得到安全修复。未改成无界正文读取、未忽略失败，#6337 保持草稿。历史完整 CI 或本次普通检查不能替代当前 head 完整验收；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§203）**：Automation 当前提交 `0216e45b4` 的普通检查 47/47 成功，#6337 保持草稿。经 owner 授权，冻结候选的 Firefox 隔离副本已通过本地 manual + interval 完整合成验收及原生回执复核；副本对原生 HTTP console 数量和 WebSocket 101 握手作了明确的浏览器适配，产品分支未改。这不是原 Chromium 验收通过：`130a9341c` 的完整 run `38175124419` 仍失败于 interval 的宜搭默认 OFF 阶段 POST / ABORTED，阻断保留。未采用无界正文读取、未忽略请求失败，尚无 Chromium 安全修复。独立终审未闭合；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2279,3 +2279,17 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 该测试名已存在于 required web token 清单、实际 web runner 及 Integration Guard targeted runner；没有另加工作流。当前 head 的 Integration Guard run `38179268386`、job `114588160506` 及第 16 步 targeted web specs 均为 success。首次记录时普通检查为 46 success、0 failure、1 pending；该时点不称全部检查通过。生产 SDK、运行时、权限、缓存策略和 provenance 输入均未改变。
 - 没有为这个 test-only 提交重跑完整工作流碰绿。§201 的 Chromium 失败继续作为未闭合项，Firefox 交叉验证选择及独立终审仍待处理。没有 GitHub 合并、部署、真实客户读取、真实 token 交换或宜搭发送，K3 永久禁写；本节 root 复核不是独立终审。
 - 后续终态复核：同一精确 head `0216e45b44cc1cf738f67fc06b9218d2f78c62a2` 的 multitable-web-guard job `114588160480` 已 success，PR 检查汇总为 47 success、0 failure、0 pending，仍 draft。该结果只关闭普通 PR 检查等待，不关闭 Chromium 完整应用验收或独立终审。
+
+## 203. 授权后的 Firefox 完整合成交叉验证（2026-10-12）
+
+- owner 明确批准增加 Firefox 完整合成验证并保留 Chromium 阻断。冻结候选为 `0216e45b44cc1cf738f67fc06b9218d2f78c62a2`；本轮不改产品分支、原 Chromium 预期、生产 SDK、缓存策略、大小限制、权限或开关。使用当前依赖所绑定的 Playwright Firefox 144.0.2，每次完整尝试均在独立 Linux 源码/依赖副本中执行原 runner，保留其 user/net/pid namespace、环境白名单、caps0/NNP、自建 PostgreSQL、真实构建和完整迁移。不是客户或真实宜搭验收，不声称文件系统或 Unix IPC 隔离。
+- 前两次在浏览器旅程之前失败：隔离副本缺插件 workspace 依赖；补齐后，worker 原有环境清洗不保留 HOME，Firefox 默认缓存查找失败。分别补依赖并验证解析仍在副本内、显式指向该副本的浏览器二进制；没有扩大环境白名单、使用共享全局缓存或改生产代码。原失败副本保留。另一次新加诊断误引用 try 内变量，被类型检查拒绝，数据库未启动；已纠正，不记成产品失败或成功验收。
+- 原始 console 预期下的完整实跑已定位到收尾 `APP_BROWSER_PROJECT_SHEETS_OFF_CONSOLES_REQUIRED`：project-sheets 三次请求/三次真实响应、members 三次请求/三次真实响应，均零 console error；手动流程已到撤销，网络请求失败为零，但原验收仍 exit 1，interval 未跑。原生回执 SHA `7a48b93b1e58d358e313eeeb27fa5a284efcb3edfffb6779c68846d3d1c12bc3`，私有 configured stdout SHA `f1ddfaef3e1228905317159184a4db2472b2ea8370a49fa5ff9c9973f736b538`，自建数据库已停删。不是把整个 `AUTOMATION_MANUAL` 阶段名误判为读取步骤失败。
+- 独立真实 HTTP/Firefox 控制确认：真实 404 正文完成、零 requestfailed、零原生 HTTP console error；主动发出一条固定合成 console error 则观察到一条。stdout SHA `73509c853d55bc742d9f3065aa2aaa955c33d5ade4e27d52461571593e43db40`。因此仅在 Firefox 副本将两个 OFF-window 的原生 HTTP console 数量从“等于请求数”改为“恰好零”，不是允许任意数量或忽略失败。原请求身份、GET、认证、tenant/workspace、状态码、业务错误码、响应逐一对应、真实请求数量检查均保留。Chromium 原契约未变；该浏览器差异必须随证据披露。
+- Firefox 专用前置契约已 exit 0：20 个负控制均拒绝，去掉各自零事件等式的两个独立变异均被捕获；stdout SHA `90b8b327066904a3c3bd23efae121276086ce79a0577c17b211c1fb616e1a818`。真实共享校验模块仅两处精确等式派生，保留原 Chromium 正反控制，不能以此替代整链成功、Chromium 验收或独立终审。
+- 使用该 Firefox 预期的首轮原应用浏览器旅程已完成，但后续独立宜搭初始化进程在 BOARD 阶段失败：`APP_CONFIGURED_YIDA_INIT_CHILD_FAILED`，整轮 manual exit 1、interval 未执行，自建数据库已停删。原生回执 SHA `1c6e4ecf5ddd1265d66400370325b1dceeb7a6a326890d07adde83d51fc4f5ff`，configured stdout SHA `3d2a75edb6c091114fd85701499a4a773e30a61905648633e91e33788481a4aa`。此项是新的未闭合失败，不能因前段通过而省略；仅在新隔离副本补固定初始化诊断，不放宽请求/响应守卫，复验待出。
+- 后续固定标签诊断与完整失败复验已确认：初始化尚未执行 GET/POST，错误来自非 API 的固定 WebSocket 通道，Firefox 响应事件中出现状态 `101`、请求资源类型 websocket、两侧 Upgrade 均为 websocket，而旧验收要求它等于普通 HTTP 的 200。原生失败回执 SHA `db7000aa4bd676fcbd820cb23054adff0210de60913dbeea34db6df4a68170ac`，初始化子进程 stdout SHA `44be9b980e14eb01fecd056d5979c431052c7b54c462c69fe90b8cee9a45a0da`，数据库已停删。诊断曾误用封闭的公共 marker 前缀，被父协议额外拒绝；随后改成仅落私有日志的独立前缀，不扩大公共证据协议。两轮失败均保留。
+- 独立真实 HTTP/WebSocket/Firefox 控制捕获同样的 101，且验证请求版本、握手 key 形状、两侧 Upgrade/Connection 与握手签名均匹配，stdout SHA `f4fd3b16f14246605cced35bdf098f9f04f47472f7590b32876dd7b6971732e7`。仅在 Firefox 隔离副本增加该固定通道的严格协议升级校验，普通 API/文档/资源仍走原 HTTP 状态断言，错误状态不被忽略。真实派生函数的前置正反控制 exit 0，stdout SHA `475e3c29c3636f9c4acab95776c5e41d93a9ecd34f58930e567d77c6d51a85c7`；完整双模式复验待出，未据此撤销 Chromium 阻断或批准交付。
+- 最终同一隔离副本的 manual、interval 原完整 runner 均 exit 0、stderr 空，原生回执均为 passed，两个自建数据库均正常停删。manual 原生回执 SHA `d2dd12853ee25334020246e71030ffef87223e89e7084e378d41931216dc830e`；interval 原生回执 SHA `423b9625be7cb4502330a2639b9cd9c932efc1619e5fc991f624018029076676`。两轮均包含真实构建、467 条迁移及重放、原应用浏览器旅程、宜搭默认 OFF 及独立初始化；interval 还由原验证器确认自然触发、预激活与次数耗尽负控制、只读结果、刷新和撤销。
+- root 回执复核 exit 0：每轮验证原回执、6,572 个实际受跟踪范围的源文件、18 份阶段日志、4 份嵌套浏览器日志、owner-OFF 私有日志扫描，以及原 K3/宜搭/初始化/Automation/停止验证器；不声称这 6,572 文件是完整仓库。当前候选八个覆盖输入前后哈希不变，六段派生变更的哈希链一致。console 契约 20 个负控制拒绝、2 个变异捕获；握手契约 15 个非法升级拒绝、4 个非升级回退、2 个变异捕获。复核 SHA `04e7791a47c7c5bca5f5169043f8c56ee3c2f05580eb5f05fd9be123b6c26b54`。这些是 root 核验，不冒充独立审查。
+- 交叉验证已完成，但结论只覆盖本地 Firefox 派生验收。未将副本适配写入产品分支或替换 Chromium CI，未重新 dispatch 碰绿，历史失败原样保留，#6337 仍 draft。Chromium 完整验收与独立终审继续阻断交付；没有合并、部署、真实客户 SQL/API、真实 token 交换或宜搭发送，K3 永久禁写。
