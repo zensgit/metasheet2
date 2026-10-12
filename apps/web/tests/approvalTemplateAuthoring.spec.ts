@@ -6391,6 +6391,35 @@ describe('TemplateAuthoringView', () => {
         await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
         expect(await saveRules()).toStrictEqual(rules)
       })
+
+      // Gate r5 P3-j: the「saved value」note follows what the `in` textarea actually SHOWS — never
+      // the author's unsaved lines, never a duplicate of text already in the box.
+      it(`${host}: gate r5 P3-j — typing a non-number line into a valid number list marks it but shows no saved-value note`, async () => {
+        const scope = await mountTyped([{ fieldId: 'amount', operator: 'in', value: [1, 2] }], canvas)
+        const box = () => inRule(scope, 0, 'approval-condition-rule-values')!
+        const issue = () => inRule(scope, 0, 'approval-condition-rule-issue')?.textContent ?? null
+        const storedNote = () => inRule(scope, 0, 'approval-condition-rule-stored-value')
+        expect(box().value).toBe('1\n2')
+        expect(issue()).toBeNull()
+        await type(box(), '1\nabc')
+        // positive control: the line is kept in the box and marked
+        expect(box().value).toBe('1\nabc')
+        expect(issue()).toBe(conditionValueIssueText(['not-number'], false))
+        expect(storedNote()).toBeNull()
+        await type(box(), '1\n2')
+        expect(issue()).toBeNull()
+        expect(storedNote()).toBeNull()
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'amount', operator: 'in', value: [1, 2] }])
+      })
+
+      it(`${host}: gate r5 P3-j — a number list stored as digit STRINGS shows an empty box plus the saved value; untouched it saves unchanged`, async () => {
+        const rules: Rule[] = [{ fieldId: 'amount', operator: 'in', value: ['1', '2'] }]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule, value: [...(rule.value as string[])] })), canvas)
+        expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('')
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+        expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('["1","2"]')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
     }
 
     it('gate r3 F3-2: a scalar in on a MULTI-person field takes effect (not marked); on a single-person field it is', async () => {
@@ -6595,6 +6624,31 @@ describe('TemplateAuthoringView', () => {
       expect(inNote('approval-field-visibility-issue')).toBeNull()
       expect(inNote('approval-field-visibility-stored-value')).toBeNull()
       expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 5000 })
+    })
+
+    it('gate r5 P3-j legacy designer: typing a non-number line into a valid number list marks it but shows no saved-value note', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'in', values: [1, 2] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-values')!.value).toBe('1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      await type(inNote('approval-field-visibility-values'), '1\nabc')
+      // positive control: the line is kept in the box and marked
+      expect(inNote('approval-field-visibility-values')!.value).toBe('1\nabc')
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      await type(inNote('approval-field-visibility-values'), '1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
+    it('gate r5 P3-j legacy designer: a number list stored as digit STRINGS shows an empty box plus the saved value; untouched it saves unchanged', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'in', values: ['1', '2'] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule: { ...visibilityRule, values: [...visibilityRule.values] } }])
+      expect(inNote('approval-field-visibility-values')!.value).toBe('')
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('["1","2"]')
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
     })
 
     it('legacy designer: in → isEmpty → eq on a text dependency keeps the first line (never the joined list)', async () => {

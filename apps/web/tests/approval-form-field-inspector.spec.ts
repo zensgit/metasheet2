@@ -1651,6 +1651,30 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     expect(storedNote(staleList)).toBeNull()
   })
 
+  it('gate r5 P3-j: the saved-value note on a number `in` list follows what the textarea shows (no duplicate of its lines; shown when it is empty)', async () => {
+    const storedNoteSelector = '[data-testid="approval-form-field-inspector-visibility-stored-value-text"]'
+    const valuesBox = (mounted: InspectorHarness) =>
+      mounted.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement
+    // API-written list with a non-number entry: the box shows its lines, so no note repeats them
+    const shown = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\nabc', values: [1, 'abc'] } })],
+      { selected: 'local_2' },
+    )
+    expect(valuesBox(shown).value).toBe('1\nabc')
+    expect(issueText(shown)).toContain(conditionValueIssueMessage('not-number', false))
+    expect(shown.root.querySelector(storedNoteSelector)).toBeNull()
+
+    // pre-R-43 digit strings: the box is empty, so the saved value is shown read-only
+    const blank = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\n2' } })],
+      { selected: 'local_2' },
+    )
+    expect(valuesBox(blank).value).toBe('')
+    expect(issueText(blank)).toContain(conditionValueIssueMessage('not-number', false))
+    expect(blank.root.querySelector(storedNoteSelector)?.textContent).toBe('["1","2"]')
+    expect(blank.commands).toHaveLength(0)
+  })
+
   it('multi-select dependency offers only effective operators; a stored eq is shown disabled and marked', async () => {
     const multi = (index: number, extra: Partial<FieldAuthoringDraft> = {}) => selectField(index, { type: 'multi-select', ...extra })
     const inspector = await mountInspector([multi(1), field(2)], { selected: 'local_2' })

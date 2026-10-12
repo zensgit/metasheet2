@@ -4,6 +4,7 @@ import {
   buildApprovalGraph,
   draftFromTemplate,
   validateTemplateDraft,
+  visibilityStoredValuePreview,
   type ConditionEdits,
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
@@ -761,6 +762,14 @@ describe('R-43 (B) typed branch condition values', () => {
       expect(conditionStoredValueNoteShown([issue])).toBe(false)
     }
     expect(conditionStoredValueNoteShown([])).toBe(false)
+
+    // gate r5 P3-j: for a number `in` list the note follows the textarea's displayed text — none
+    // while it shows the lines (a non-number one included), the saved value while it is empty
+    const amount = { type: 'number' as const, options: [] }
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\nabc', values: [1, 'abc'] }, amount)).toBeNull()
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2' }, amount)).toBe('["1","2"]')
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2', values: [1, 2] }, amount)).toBeNull()
+    expect(visibilityStoredValuePreview({ dependsOnFieldId: 'amount', operator: 'eq', valueText: '5000' }, amount)).toBe('5000')
 
     // strings verbatim; anything else as JSON so [1,2] / '1,2' stay distinguishable (5 / '5' both read 5)
     expect(conditionStoredValuePreview('a')).toBe('a')

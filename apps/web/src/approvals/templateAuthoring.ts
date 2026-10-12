@@ -558,7 +558,9 @@ export function conditionValueFieldFromDraft(
  * rule is marked (`conditionStoredValueNoteShown`: a blanked text box, or a number box left empty by
  * a non-number), so the author still sees what was saved; null when
  * the box shows the value itself (or the dependency is an option field, whose pickers carry their
- * own invalid-value placeholders).
+ * own invalid-value placeholders). For `in` this is decided by the textarea's actual text
+ * (`visibilityDraftListText`): a number list holding a non-number line can still show its lines
+ * (e.g. while the author is typing), and then there is nothing hidden to explain.
  */
 export function visibilityStoredValuePreview(
   visibility: FieldVisibilityDraft,
@@ -568,6 +570,7 @@ export function visibilityStoredValuePreview(
   const rule = buildVisibilityRule(visibility)
   if (!rule || rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return null
   if (!conditionStoredValueNoteShown(visibilityRuleValueIssues(rule, dependency))) return null
+  if (rule.operator === 'in' && visibilityDraftListText(visibility, conditionValueKind(dependency)) !== '') return null
   return conditionStoredValuePreview(rule.operator === 'in' ? rule.values : rule.value)
 }
 

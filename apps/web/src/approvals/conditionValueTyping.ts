@@ -368,7 +368,9 @@ export function conditionValueShowsBlank(issues: readonly ConditionValueIssue[])
  * Whether a free-entry box's marked stored value gets the read-only「stored value」note: every
  * text-box case above, plus a number box holding a non-number (it never hands one to
  * `el-input-number`, so the box is empty — e.g. the common pre-R-43 `'5000'` under eq). Option
- * pickers are excluded by the callers (they show their own invalid-value placeholders).
+ * pickers are excluded by the callers (they show their own invalid-value placeholders). A number
+ * `in` list is a textarea, not `el-input-number`: it may still SHOW a non-number line (e.g. while
+ * it is being typed), so the callers also require that textarea's displayed text to be empty.
  */
 export function conditionStoredValueNoteShown(issues: readonly ConditionValueIssue[]): boolean {
   return conditionValueShowsBlank(issues) || issues.includes('not-number')

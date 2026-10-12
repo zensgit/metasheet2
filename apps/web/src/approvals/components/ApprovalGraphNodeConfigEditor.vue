@@ -1704,9 +1704,14 @@ function ruleIssueText(rule: ConditionRuleEdit): string {
 function ruleValueShownBlank(rule: ConditionRuleEdit): boolean {
   return !ruleIsOption(rule) && rule.operator !== 'isEmpty' && conditionValueShowsBlank(ruleIssues(rule))
 }
-/** The read-only note: every blanked text box, plus a number box left empty by a non-number. */
+/**
+ * The read-only note: every blanked text box, plus a number box left empty by a non-number. Decided
+ * by what the box actually SHOWS: an `in` textarea that shows text (the author's in-progress lines,
+ * a non-number one included) has nothing hidden to explain, so it gets no note — only the issue mark.
+ */
 function ruleStoredValueShown(rule: ConditionRuleEdit): boolean {
   if (ruleIsOption(rule) || rule.operator === 'isEmpty' || isBlankRuleValue(rule.value)) return false
+  if (rule.operator === 'in' && ruleListText(rule) !== '') return false
   return conditionStoredValueNoteShown(ruleIssues(rule))
 }
 function ruleScalarText(rule: ConditionRuleEdit): string {
