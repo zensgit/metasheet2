@@ -376,6 +376,7 @@ interface DataSourceRecord {
   type: string
   description: string | null
   config: unknown // JSONB
+  validation_revision?: string | null
   status: string
   last_connected_at: Date | null
   last_error: string | null
@@ -415,6 +416,12 @@ export class DataSourceManager extends EventEmitter {
   // In-process re-seal serialization: a second re-seal of the same id while one is running is
   // refused (409) instead of racing the first one's post-commit runtime load.
   private resealsInFlight: Set<string> = new Set()
+  // Revision belongs to the exact installed adapter and ownership snapshot, never a later DB read.
+  private validationRevisions: Map<string, {
+    adapter: BaseDataAdapter
+    scope: NonNullable<ReturnType<DataSourceManager['getScope']>>
+    revision: string
+  }> = new Map()
   private db?: Kysely<unknown>
   private initialized = false
 
@@ -463,10 +470,11 @@ export class DataSourceManager extends EventEmitter {
           if (!this.adapterTypes.has(record.type.toLowerCase())) {
             throw new UnsupportedPersistedDataSourceTypeError(record.type)
           }
-          const config = this.recordToConfig(record)
+          const config = this.snapshotValidationConfig(this.recordToConfig(record))
           await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, this.scopeOfLoadedRecord(record))
+          this.bindValidationRevision(record.id, this.getDataSource(record.id), record.validation_revision)
           this.loadFailures.delete(record.id)
 
           if (record.auto_connect) {
@@ -638,6 +646,7 @@ export class DataSourceManager extends EventEmitter {
       persist?: boolean
     }
   ): Promise<BaseDataAdapter> {
+    config = this.snapshotValidationConfig(config)
     // Reject duplicates BEFORE persisting — otherwise a create that will be
     // rejected still runs the upsert and overwrites the existing row's config
     // and owner. Use updateDataSource() to change an existing source.
@@ -670,9 +679,8 @@ export class DataSourceManager extends EventEmitter {
     )
 
     // Persist to database first (if enabled)
-    if (persist && this.db) {
-      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
-    }
+    const revision = persist && this.db
+      ? await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind) : undefined
 
     const adapter = await this.addDataSourceInternal(config, false)
     this.scopes.set(config.id, {
@@ -681,6 +689,7 @@ export class DataSourceManager extends EventEmitter {
       tenantId,
       scopeKind
     })
+    this.bindValidationRevision(config.id, adapter, revision)
     return adapter
   }
 
@@ -701,6 +710,7 @@ export class DataSourceManager extends EventEmitter {
       scopeKind?: DataSourceScopeKind
     }
   ): Promise<BaseDataAdapter> {
+    config = this.snapshotValidationConfig(config)
     const existing = this.adapters.get(id)
     if (!existing) {
       throw new Error(`Data source with id '${id}' not found`)
@@ -739,9 +749,8 @@ export class DataSourceManager extends EventEmitter {
     )
 
     // Persist first — if this throws, the live source is untouched.
-    if (this.db !== undefined) {
-      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
-    }
+    const revision = this.db !== undefined
+      ? await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind) : undefined
 
     // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
     try {
@@ -753,6 +762,7 @@ export class DataSourceManager extends EventEmitter {
     }
     existing.removeAllListeners()
     this.adapters.delete(id)
+    this.validationRevisions.delete(id)
     this.connectionPool.delete(id)
 
     const adapter = await this.addDataSourceInternal(config, false)
@@ -762,6 +772,7 @@ export class DataSourceManager extends EventEmitter {
       tenantId,
       scopeKind
     })
+    this.bindValidationRevision(id, adapter, revision)
     this.loadFailures.delete(id)
     return adapter
   }
@@ -806,6 +817,32 @@ export class DataSourceManager extends EventEmitter {
     scopeKind: DataSourceScopeKind
   } | undefined {
     return this.scopes.get(id)
+  }
+
+  private snapshotValidationConfig(config: DataSourceConfig): DataSourceConfig {
+    // SQL adapters retain config references. Own one snapshot before any await so a caller
+    // cannot mutate the input between persistence and installation. Other adapter behavior stays unchanged.
+    return ['mysql', 'postgres', 'postgresql', 'sqlserver'].includes(config.type.toLowerCase())
+      ? structuredClone(config) : config
+  }
+
+  private bindValidationRevision(id: string, adapter: BaseDataAdapter, revision: unknown): void {
+    this.validationRevisions.delete(id)
+    const scope = this.scopes.get(id)
+    if (!scope || this.adapters.get(id) !== adapter || typeof revision !== 'string'
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(revision)) return
+    this.validationRevisions.set(id, { adapter, scope: { ...scope }, revision })
+  }
+
+  /** Metadata only: no connect, config read, database read or decrypt. Optional adapter pins caller identity. */
+  getLoadedValidationRevision(id: string, expectedAdapter?: BaseDataAdapter): string | undefined {
+    const loaded = this.validationRevisions.get(id)
+    const adapter = this.adapters.get(id)
+    const scope = this.scopes.get(id)
+    if (!loaded || !scope || adapter !== loaded.adapter || (expectedAdapter && adapter !== expectedAdapter)
+      || scope.ownerId !== loaded.scope.ownerId || scope.tenantId !== loaded.scope.tenantId
+      || scope.workspaceId !== loaded.scope.workspaceId || scope.scopeKind !== loaded.scope.scopeKind) return undefined
+    return loaded.revision
   }
 
   /**
@@ -1046,7 +1083,7 @@ export class DataSourceManager extends EventEmitter {
           poolConfig: storedConfig.poolConfig as DataSourceConfig['poolConfig'],
         }
 
-        await trx
+        const update = trx
           .updateTable('data_sources' as never)
           .set({
             config: { ...storedConfig, credentials: this.encryptCredentials(credentials) },
@@ -1055,9 +1092,15 @@ export class DataSourceManager extends EventEmitter {
           .where('id' as never, '=', id as never)
           .where('is_active' as never, '=', true as never)
           .where('deleted_at' as never, 'is', null as never)
-          .execute()
+        let revision: unknown
+        if (typeof update.returning === 'function') {
+          const returned = await update.returning('validation_revision' as never).execute()
+          revision = Array.isArray(returned) ? (returned[0] as { validation_revision?: unknown } | undefined)?.validation_revision : undefined
+        } else {
+          await update.execute()
+        }
 
-        return { config, record }
+        return { config, record: { ...record, validation_revision: typeof revision === 'string' ? revision : undefined } }
       })
     } catch (err) {
       if (err === gone) {
@@ -1125,6 +1168,7 @@ export class DataSourceManager extends EventEmitter {
       return result(true, false)
     }
     this.scopes.set(id, this.scopeOfLoadedRecord(record))
+    this.bindValidationRevision(id, adapter, record.validation_revision)
     this.loadFailures.delete(id)
 
     if (record.auto_connect) {
@@ -1382,12 +1426,12 @@ export class DataSourceManager extends EventEmitter {
     workspaceId: string | null | undefined,
     tenantId: string | null,
     scopeKind: DataSourceScopeKind
-  ): Promise<void> {
-    if (!this.db) return
+  ): Promise<string | undefined> {
+    if (!this.db) return undefined
 
     const record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
 
-    await this.db
+    const insert = this.db
       .insertInto('data_sources' as never)
       .values(record as never)
       .onConflict((oc) =>
@@ -1408,7 +1452,15 @@ export class DataSourceManager extends EventEmitter {
           updated_at: new Date()
         } as never)
       )
-      .execute()
+    // Old test doubles may expose execute only; they cannot attest a revision. The real
+    // Kysely path requires the migration and binds only the value returned by this exact write.
+    if (typeof insert.returning !== 'function') {
+      await insert.execute()
+      return undefined
+    }
+    const returned = await insert.returning('validation_revision' as never).execute()
+    const revision = Array.isArray(returned) ? (returned[0] as { validation_revision?: unknown } | undefined)?.validation_revision : undefined
+    return typeof revision === 'string' ? revision : undefined
   }
 
   /**
@@ -1626,6 +1678,7 @@ export class DataSourceManager extends EventEmitter {
 
     // ③ in-memory state only after the row is durably gone.
     this.adapters.delete(id)
+    this.validationRevisions.delete(id)
     this.connectionPool.delete(id)
     this.scopes.delete(id)
     this.loadFailures.delete(id)
@@ -2133,6 +2186,7 @@ export class DataSourceManager extends EventEmitter {
   async dispose(): Promise<void> {
     await this.disconnectAll()
     this.adapters.clear()
+    this.validationRevisions.clear()
     this.adapterTypes.clear()
     this.connectionPool.clear()
     this.scopes.clear()

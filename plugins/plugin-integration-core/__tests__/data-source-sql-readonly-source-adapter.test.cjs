@@ -56,8 +56,8 @@ function fakeFacade(overrides = {}) {
         ? overrides.getSchema()
         : { tables: [{ name: 'items', schema: 'public', columns: [] }], views: [] }
     },
-    async getTableInfo(id, object, principal, schema) {
-      calls.getTableInfo.push({ id, object, principal, schema })
+    async getTableInfo(id, object, principal, schema, validation, detail) {
+      calls.getTableInfo.push({ id, object, principal, schema, validation, detail, argumentCount: arguments.length })
       return overrides.getTableInfo ? overrides.getTableInfo() : { columns: [{ name: 'id', type: 'int', nullable: false }] }
     },
     async select(id, table, options, principal) {
@@ -843,6 +843,11 @@ async function main() {
     // follow-up: getTableInfo/getSchema want bare table + separate schema; read/select take schema.table).
     assert.equal(f.calls.getTableInfo[0].object, 't', 'getSchema splits schema.table → bare table for getTableInfo')
     assert.equal(f.calls.getTableInfo[0].schema, 'public', 'getSchema passes the qualified schema to getTableInfo')
+    assert.deepEqual(f.calls.getTableInfo[0], {
+      id: 'pg-1', object: 't', principal: 'owner-1', schema: 'public',
+      validation: undefined, detail: 'columns', argumentCount: 6,
+    }, 'only getSchema opts into column detail; listObjects still uses the original getSchema call')
+    assert.deepEqual(f.calls.getSchema, [{ id: 'pg-1', principal: 'owner-1', schema: undefined }])
   }
 
   // 9b. A bare object passes through unsplit (uses config.schema, here unset → undefined).
@@ -851,6 +856,33 @@ async function main() {
     await adapterWith(f).getSchema({ object: 'items' })
     assert.equal(f.calls.getTableInfo[0].object, 'items', 'bare object → table only')
     assert.equal(f.calls.getTableInfo[0].schema, undefined, 'bare object → no schema split')
+    assert.equal(f.calls.getTableInfo[0].validation, undefined)
+    assert.equal(f.calls.getTableInfo[0].detail, 'columns')
+    assert.equal(f.calls.getTableInfo[0].argumentCount, 6)
+  }
+
+  // 9c. The real factory preserves the fifth revision slot, explicit sixth projection, owner,
+  //     and configured/qualified schema. Repeated calls must observe live column metadata.
+  {
+    const f = fakeFacade({
+      getTableInfo: () => ({ columns: [{ name: f.calls.getTableInfo.length === 1 ? 'first' : 'second', type: 'int', nullable: false }] }),
+    })
+    const factory = createDataSourceSqlReadonlySourceAdapterFactory({ context: { api: { dataSources: f.api } } })
+    const a = factory({
+      system: { ...SYSTEM, config: { ...SYSTEM.config, schema: 'configured' } },
+      principal: 'owner-42', expectedValidationRevision: 'reviewed-revision',
+    })
+    const first = await a.getSchema({ object: 'items' })
+    const second = await a.getSchema({ object: 'qualified.items' })
+    assert.deepEqual(first.fields, [{ name: 'first', type: 'int', nullable: false }])
+    assert.deepEqual(second.fields, [{ name: 'second', type: 'int', nullable: false }])
+    assert.equal(f.calls.getTableInfo.length, 2, 'column metadata and authority must not be cached')
+    assert.deepEqual(f.calls.getTableInfo, ['configured', 'qualified'].map((schema) => ({
+      id: 'pg-1', object: 'items', principal: 'owner-42', schema,
+      validation: { expectedValidationRevision: 'reviewed-revision' }, detail: 'columns', argumentCount: 6,
+    })))
+    assert.ok(f.calls.getTableInfo.every((call) => Object.isFrozen(call.validation)), 'the per-call revision contract remains immutable')
+    assert.equal(f.calls.getSchema.length, 0, 'getSchema does not load the full object listing')
   }
 
   // 10. The factory threads the principal through to the adapter.

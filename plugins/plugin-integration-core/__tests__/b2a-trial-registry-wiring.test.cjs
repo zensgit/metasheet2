@@ -304,6 +304,8 @@ function baseServices({ sourceAdapter, spies, targetKind, pipelineProjectId, inc
     },
   })
   return {
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       async getExternalSystem(input = {}) {
@@ -1348,7 +1350,7 @@ async function R06_schemaDriftRefusesBeforeAnyBusinessArtifact() {
 //
 // The check is `done === false`, not falsy, because the ordinary single-page shape
 // (`{ records: [...] }`) leaves `done` UNDEFINED and must keep terminating normally — an assertion
-// the dormant leg below would catch if it were widened.
+// the ordinary-termination leg below would catch if it were widened.
 async function E3_02_brokenCursorRefusesAndNoPlanIsProduced() {
   const brokenCursor = (input) => (input.object === PLM_STOCK_PREPARATION_BOM_READ_PLAN.pathExAttr.object
     ? { records: sourceData()[input.object].map(clone), done: false, nextCursor: null }
@@ -1362,12 +1364,15 @@ async function E3_02_brokenCursorRefusesAndNoPlanIsProduced() {
   }, records, 'E3-02 broken cursor')
   assert.equal(res.body.error.details.fullBatch, false, 'the refusal states the property it failed')
 
-  // DORMANT: byte-identically the old behaviour, truncation included. The guard is armed-only, and
-  // this leg is what proves it rather than asserting it.
+  // SA01D: a dormant deployment still returns its normal dry-run envelope, but an explicitly
+  // incomplete read is failed and cannot mint an apply token. Armed B2a keeps its C6 refusal above.
   const dormantSource = createRecordingSourceAdapter(sourceData(), { onRead: brokenCursor })
   const dormant = await routeDryRun(mount({ source: dormantSource }).routes)
-  assert.equal(dormant.statusCode, 200, 'a dormant deployment keeps the loop it had')
-  assert.equal(dormant.body.data.evidence.expansion.errorTypes.includes('read_cursor_broken'), false)
+  assert.equal(dormant.statusCode, 200, 'a dormant deployment retains the dry-run response contract')
+  assert.equal(dormant.body.data.status, 'failed')
+  assert.equal(dormant.body.data.canApply, false)
+  assert.equal(dormant.body.data.dryRunToken, null)
+  assert.equal(dormant.body.data.evidence.expansion.errorTypes.includes('read_cursor_broken'), true)
 
   // AND THE ORDINARY TERMINATION IS UNTOUCHED WHEN ARMED: `done: true` with no cursor is a complete
   // batch, and `done` absent is the common fixture shape. Neither may be read as a broken cursor.

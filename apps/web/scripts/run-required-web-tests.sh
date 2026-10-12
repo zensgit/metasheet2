@@ -1956,6 +1956,9 @@ exec npx vitest run \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
   StockPreparationSourceBinding \
+  StockPreparationSourcePlanDraft \
+  StockPreparationSourcePlanValidation \
+  StockPreparationSourcePlanVersions \
   StockPreparationSourcePreflight \
   StockPreparationStageOverview \
   StockPreparationStageStepper \

@@ -61,8 +61,9 @@ const {
   PROJECT_SHEET_GRANT_ROLE_IDS_ENV,
   MAX_PROJECT_TARGETS_PER_TENANT,
   deriveProjectSheetObjectId,
+  resolveProjectTargetForAction,
 } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID, createStockPreparationTableActionRegistry } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
 const { STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-templates.cjs'))
 const { STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID } = require(path.join(LIB, 'stock-preparation-target-provisioning.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
@@ -210,6 +211,8 @@ function baseServices() {
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
+    // Explicitly no activation pointer on this synthetic scope; an absent runtime is not legacy.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
   }
 }
 
@@ -295,36 +298,59 @@ function registerActive(harness, projectNo = PROJECT, { archived = false, tenant
 }
 
 /**
- * A completed, authoritative, already-planned large-BOM expansion job written straight into the
- * route's own durable storage — the state a job is in once a puller has expanded and planned it —
- * with its snapshot bound to `target`. Rows and decisions are empty: these cases are about WHICH
- * sheet the job addresses, not what it writes.
+ * Resolve the actual deployment/project action, then run the real enqueue → expansion → plan
+ * producers over a synthetic empty source. They alone mint evaluation identity and artifact/plan
+ * revisions. Empty decisions keep these cases about WHICH sheet the job addresses, not its rows.
  */
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const actionId = PLM_STOCK_PREPARATION_ACTION_ID
   const at = '2026-10-09T00:00:00.000Z'
-  const job = {
-    jobId, ...JOB_SCOPE, actionId,
-    status: 'completed', authoritative: true, projectNoPresent: true,
+  const registry = createStockPreparationTableActionRegistry({
+    actions: h.context.config.stockPreparationTableActions,
+    resolveProjectTarget: (input) => resolveProjectTargetForAction({
+      ...input, store: h.store, provisioning: h.provisioning, projectId: PROJECT_ID, env: process.env,
+    }),
+  })
+  const action = await registry.getTableAction({ ...JOB_SCOPE, actionId, projectNo, targetPurpose: 'write' })
+  assert.equal(action.target.sheetId, target.sheetId, 'producer uses the actual resolved sheet')
+  assert.equal(action.target.objectId, target.objectId, 'producer uses the actual resolved object')
+  await largeBomJobs.createLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, action,
     parameters: { projectNo },
-    principal: 'u_pull',
-    actionSnapshot: {
-      actionId,
-      source: { externalSystemId: 'plm_sql_source', kind: 'data-source:sql-readonly' },
-      target,
+    principal: PULLER.id, actor: PULLER.id, createJobId: () => jobId, now: () => at,
+  })
+  let reads = 0
+  const expanded = await largeBomJobs.runLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, now: () => at,
+    sourceAdapter: {
+      async read(input) {
+        reads += 1
+        assert.equal(input.object, 'DN_PDM_PathExAttrInfo')
+        assert.deepEqual(input.filters, { FileCode: projectNo })
+        return { records: [], done: true, nextCursor: null, metadata: { filtersApplied: true } }
+      },
     },
-    sourceKind: 'data-source:sql-readonly',
-    artifactRevision: 'artifact-1',
-    artifact: { revision: 'artifact-1', status: 'expanded', rows: [], summary: {}, sealedAt: at },
-    planRevision: 'plan-1',
-    planArtifact: { revision: 'plan-1', artifactRevision: 'artifact-1', plan: { revision: 'plan-1', decisions: [], plannedAt: at }, existingRowCount: 0, plannedAt: at },
-    progress: { rowsExpanded: 0, readCount: 0, frontierRemaining: 0, completedChunks: 1 },
-    budgets: {},
-    evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
-    createdAt: at, updatedAt: at,
+  })
+  assert.equal(reads, 1, 'the real expander read the synthetic source')
+  assert.equal(expanded.status, 'completed')
+  largeBomJobs.assertAuthoritativeLargeBomExpansion(expanded)
+  assert.deepEqual(expanded.artifact.rows, [])
+  // Independent negative controls: neither producer identity may be omitted, even when the
+  // other identity and the computed revision are intact. Never backfill a fixture stamp.
+  const noJobIdentity = { ...expanded }
+  delete noJobIdentity.bomEvaluationVersion
+  const noArtifactIdentity = { ...expanded, artifact: { ...expanded.artifact } }
+  delete noArtifactIdentity.artifact.bomEvaluationVersion
+  for (const stale of [noJobIdentity, noArtifactIdentity]) {
+    assert.throws(() => largeBomJobs.assertAuthoritativeLargeBomExpansion(stale),
+      (error) => error.code === 'LARGE_BOM_ARTIFACT_NOT_AUTHORITATIVE')
   }
-  await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId, jobId }), job)
-  return job
+  const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId, jobId, existingRows: [], plannedAt: at,
+  })
+  largeBomJobs.assertAuthoritativeLargeBomPlan(planned)
+  assert.deepEqual(planned.planArtifact.plan.decisions, [])
+  return planned
 }
 
 const jobParams = (jobId, applyJobId) => ({ actionId: PLM_STOCK_PREPARATION_ACTION_ID, jobId, ...(applyJobId ? { applyJobId } : {}) })
@@ -335,6 +361,23 @@ const ENV_TARGET = Object.freeze({ sheetId: ENV_SHEET, objectId: ENV_OBJECT, fie
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+
+test('R-19 read-plan runtime absent or unavailable never falls back to legacy source IO', async () => {
+  for (const [store, status, code] of [
+    [undefined, 501, 'READ_PLAN_RUNTIME_UNAVAILABLE'],
+    [{ async getActiveForRuntime() { throw new Error('synthetic runtime unavailable') } }, 503, 'READ_PLAN_RUNTIME_UNAVAILABLE'],
+  ]) {
+    const h = mount({ env: { [PROJECT_SHEETS_ENABLED_ENV]: 'true' }, serviceExtras: { stockPreparationReadPlanStore: store } })
+    try {
+      registerActive(h)
+      const res = await dryRun(h.routes, PULLER)
+      assert.equal(res.statusCode, status, JSON.stringify(res.body))
+      assert.equal(res.body.error.code, code)
+      assert.deepEqual(h.records.queries, [], 'no target-row read through a legacy fallback')
+      assert.deepEqual(h.records.writes, [], 'no write')
+    } finally { h.restore() }
+  }
+})
 
 test('R-14 (R1) a large-BOM job planned against the env sheet BEFORE the flip is refused 409 JOB_TARGET_STALE by plan, apply-start and apply-run once the switch is on', async () => {
   const h = mount({ env: {} })

@@ -15,6 +15,7 @@ const {
   resolveStockPrepApplySandboxPolicy,
   createStockPreparationTableActionRegistry,
   dryRunStockPreparationAction,
+  prepareStockPreparationConfirmationDecisions,
   normalizeStockPreparationActionConfig,
   createTargetScopedRecordsApi,
   __internals: tableActionInternals,
@@ -115,6 +116,142 @@ function childBomPlmData(overrides = {}) {
     DN_PDM_BomDetailsInfo: [{ bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' }],
     ...overrides,
   })
+}
+
+// SA01C: exercise the ACTUAL table-action -> expander -> planner -> writer chain.
+// The source broadens one predicate at a time; records and token storage remain
+// in-memory. Neither metadata nor a different guard can mask the one under test.
+async function testSourceMembershipGuardsReachRealDryRunPlanAndApply() {
+  let externalCalls = 0
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = () => { externalCalls += 1; throw new Error('external transport forbidden in synthetic membership test') }
+  try {
+    for (const metadata of [false, true, 'absent']) {
+      for (const guard of ['order-path', 'order-owner', 'head-parent', 'head-version', 'detail-parent']) {
+        const data = childBomPlmData()
+        data.DN_PDM_PartLibraryInfo.push({ OBJ_ID: 'PART-FOREIGN', IdentityNo: 'SYN-FOREIGN', IdentityName: 'Synthetic foreign part', Material: 'Synthetic', SysVer: 'V1' })
+        if (guard === 'order-path') data.DN_PDM_OrderHeadInfo.push({ OBJ_ID: 'ORDER-FOREIGN', path_id: 'PATH-FOREIGN' })
+        if (guard === 'order-path' || guard === 'order-owner') data.DN_PDM_OrderDetailInfo.push({ order_id: 'ORDER-FOREIGN', part_id: 'PART-FOREIGN', quantity: '5' })
+        if (guard === 'head-parent' || guard === 'head-version') data.DN_PDM_BomHeadInfo.push({
+          part_id: guard === 'head-parent' ? 'PART-OTHER' : 'PART-A', bom_id: 'BOM-FOREIGN',
+          SysVer: guard === 'head-version' ? 'V2' : 'V1', bom_able: true,
+        })
+        if (['head-parent', 'head-version', 'detail-parent'].includes(guard)) data.DN_PDM_BomDetailsInfo.push({ bom_pid: 'BOM-FOREIGN', part_id: 'PART-FOREIGN', Bom_ExAttr1: '5' })
+        const sourceCalls = []
+        const sourceAdapter = { async read(input) {
+          sourceCalls.push(clone(input))
+          const wideField = guard === 'order-path' && input.object === 'DN_PDM_OrderHeadInfo' ? 'path_id'
+            : guard === 'order-owner' && input.object === 'DN_PDM_OrderDetailInfo' ? 'order_id'
+              : ['head-parent', 'head-version'].includes(guard) && input.object === 'DN_PDM_BomHeadInfo' && input.filters.part_id === 'PART-A'
+                ? guard === 'head-parent' ? 'part_id' : 'SysVer'
+                : guard === 'detail-parent' && input.object === 'DN_PDM_BomDetailsInfo' && input.filters.bom_pid === 'BOM-A' ? 'bom_pid' : undefined
+          return {
+            records: data[input.object].filter((row) => Object.entries(input.filters).every(([field, value]) => field === wideField || row[field] === value)).map(clone),
+            done: true, nextCursor: null, ...(metadata === 'absent' ? {} : { metadata: { filtersApplied: metadata } }),
+          }
+        } }
+        const records = createRecordsApi()
+        const tokenStore = createMemoryStorage()
+        const common = { action: baseAction(), parameters: { projectNo: 'P-001' }, sourceAdapter,
+          recordsApi: records.recordsApi, tokenStore, plannedAt: '2026-09-30T00:00:00.000Z' }
+        const dryRun = await dryRunStockPreparationAction(common)
+        assert.equal(dryRun.status, 'ready', `${guard}/${metadata}`)
+        assert.equal(dryRun.canApply, true)
+        assert.equal(dryRun.counts.add, 2, 'the actual preview has only the matching root and child')
+        assert.equal(typeof dryRun.dryRunToken, 'string')
+        assert.equal(records.calls.some(([method]) => method === 'createRecord' || method === 'patchRecord'), false)
+        const planned = await prepareStockPreparationConfirmationDecisions(common)
+        assert.equal(planned.canApply, true)
+        assert.deepEqual(planned.plan.decisions.filter((decision) => decision.decision === 'add').map((decision) => decision.record.componentSourceId), ['PART-A', 'PART-B'])
+        assert.equal(JSON.stringify(planned.plan).includes('PART-FOREIGN'), false)
+        const beforeApplyReads = sourceCalls.length
+        const applied = await applyStockPreparationAction({ ...common, dryRunToken: dryRun.dryRunToken, sandboxPolicy: SANDBOX_POLICY, permission: 'write' })
+        assert.equal(applied.status, 'succeeded')
+        assert.equal(applied.apply.counts.created, 2)
+        assert.ok(sourceCalls.length > beforeApplyReads, 'apply recomputes through the real guarded source reads')
+        assert.deepEqual(records.rows.map((record) => record.data.componentSourceId), ['PART-A', 'PART-B'])
+        assert.deepEqual(records.rows.map((record) => record.data.totalQuantity), [2, 6])
+        assert.equal(JSON.stringify(records.rows).includes('FOREIGN'), false)
+        assert.equal(tokenStore.map.size, 0, 'the in-memory one-use apply token was consumed')
+      }
+    }
+    assert.equal(externalCalls, 0)
+  } finally { globalThis.fetch = originalFetch }
+}
+
+async function testOrderBomVersionFlowsThroughRealDryRunAndBlocksApply() {
+  const readPlan = clone(PLM_STOCK_PREPARATION_BOM_READ_PLAN)
+  readPlan.orderDetail.versionField = 'BomVersion'
+  const action = normalizeStockPreparationActionConfig(baseAction({
+    source: { ...baseAction().source, readPlan },
+  }))
+  assert.equal(action.source.readPlan.orderDetail.versionField, 'BomVersion')
+
+  const run = async (version, quantity = '2', dataOverrides = {}) => {
+    const data = childBomPlmData({
+      DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: 'PART-A', quantity, BomVersion: version }],
+      DN_PDM_BomHeadInfo: [
+        { part_id: 'PART-A', bom_id: 'BOM-A1', SysVer: 'V1', bom_able: true },
+        { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V2', bom_able: true },
+      ],
+      DN_PDM_BomDetailsInfo: [
+        { bom_pid: 'BOM-A1', part_id: 'PART-B', Bom_ExAttr1: '3' },
+        { bom_pid: 'BOM-A2', part_id: 'PART-B', Bom_ExAttr1: '3' },
+      ],
+      ...dataOverrides,
+    })
+    const source = createSourceAdapter(data)
+    const records = createRecordsApi()
+    const storage = createMemoryStorage()
+    const dryRun = await dryRunStockPreparationAction({
+      action,
+      parameters: { projectNo: 'P-001' },
+      sourceAdapter: source.adapter,
+      recordsApi: records.recordsApi,
+      tokenStore: storage,
+      plannedAt: '2026-09-30T00:00:00.000Z',
+    })
+    return { dryRun, records, storage, source }
+  }
+  const first = await run('V1')
+  const second = await run('V2')
+  assert.equal(first.dryRun.canApply, true)
+  assert.equal(second.dryRun.canApply, true)
+  assert.deepEqual(first.dryRun.counts, second.dryRun.counts)
+  assert.notEqual(first.dryRun.revision, second.dryRun.revision, 'the configured field reaches the revision through the real dry-run')
+  assert.equal(JSON.stringify(first.dryRun.evidence).includes('V1'), false, 'values-free evidence hides the requested version')
+  assert.ok(first.source.calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.SysVer === 'V1'))
+  assert.ok(second.source.calls.some((call) => call.object === 'DN_PDM_BomHeadInfo' && call.filters.SysVer === 'V2'))
+
+  const missing = await run(undefined, 'not-a-quantity')
+  assert.equal(missing.dryRun.canApply, false, 'missing version still blocks when quantity is also invalid')
+  assert.equal(missing.dryRun.dryRunToken, null)
+  assert.equal(missing.storage.map.size, 0, 'no usable apply token is stored')
+  assert.ok(missing.dryRun.evidence.expansion.errorTypes.includes('order_bom_version_invalid'))
+  assert.equal(missing.records.calls.some(([name]) => name === 'createRecord' || name === 'patchRecord'), false, 'dry-run never writes')
+
+  const assertNoApplyPath = (result, errorType) => {
+    assert.equal(result.dryRun.canApply, false)
+    assert.equal(result.dryRun.dryRunToken, null)
+    assert.equal(result.storage.map.size, 0)
+    assert.ok(result.dryRun.evidence.expansion.errorTypes.includes(errorType))
+    assert.equal(result.records.calls.some(([name]) => name === 'createRecord' || name === 'patchRecord'), false)
+  }
+  const missingVersionAndComponent = await run(undefined, '2', {
+    DN_PDM_OrderDetailInfo: [{ order_id: 'ORDER-1', part_id: null, quantity: '2' }],
+  })
+  assertNoApplyPath(missingVersionAndComponent, 'order_bom_version_invalid')
+
+  const noActiveMatch = await run('V1', '2', { DN_PDM_BomHeadInfo: [] })
+  assertNoApplyPath(noActiveMatch, 'order_bom_version_no_active_match')
+
+  const ambiguous = await run('V1', '2', {
+    DN_PDM_BomHeadInfo: [
+      { part_id: 'PART-A', bom_id: 'BOM-A1', SysVer: 'V1', bom_able: true },
+      { part_id: 'PART-A', bom_id: 'BOM-A2', SysVer: 'V1', bom_able: true },
+    ],
+  })
+  assertNoApplyPath(ambiguous, 'order_bom_version_ambiguous')
 }
 
 function duplicateRootPlmData(overrides = {}) {
@@ -308,6 +445,18 @@ async function testDryRunUsesPhysicalTargetFieldMapForExistingRowFilter() {
 
 async function testBridgeSourceKindRequiresExplicitMatchingReadPlanAndCanDryRun() {
   const source = createSourceAdapter()
+  // This positive fixture models a cursorless Bridge, not the generic paging fake.
+  // Preserve its identity and its finite applied bound so short-page completeness
+  // is proved under the same contract as the production adapter.
+  const read = source.adapter.read
+  source.adapter.kind = 'bridge:legacy-sql-readonly'
+  source.adapter.read = async (input) => {
+    assert.equal(input.cursor, undefined)
+    const limit = Math.min(input.limit, 20)
+    const result = await read({ ...input, limit })
+    assert.equal(result.done, true, 'the synthetic Bridge fixture fits its finite bound')
+    return { ...result, metadata: { source: source.adapter.kind, limit } }
+  }
   const records = createRecordsApi()
   const storage = createMemoryStorage()
   const action = normalizeStockPreparationActionConfig(baseAction({
@@ -1310,6 +1459,7 @@ async function testTargetScopedApiForwardsTheHostFilterValueListDeclaration() {
 }
 
 async function main() {
+  await testSourceMembershipGuardsReachRealDryRunPlanAndApply()
   await testRegistryListsConfiguredMetadataWithoutTargetSecrets()
   await testDryRunRequiresAllowlistedParametersAndStoresToken()
   await testDryRunUsesPhysicalTargetFieldMapForExistingRowFilter()
@@ -1337,6 +1487,7 @@ async function main() {
   testRowErrorLimitIsAConditionalActionConfigKey()
   testExtensionFieldIdsEnforceNamespaceShapeAndPackMembershipIsOneLayerOut()
   await testRootSelectionIsReachableFromTheActionConfig()
+  await testOrderBomVersionFlowsThroughRealDryRunAndBlocksApply()
   await testCollapsedSiblingCountReachesDryRunEvidence()
   await testRetiredParentPackColumnsDoNotReachTheInteractiveChain()
   // X4 — canonical order for the hashed arrays (222/r34 revision churn -> apply 409).

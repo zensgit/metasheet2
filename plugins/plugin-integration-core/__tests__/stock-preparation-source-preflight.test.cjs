@@ -1428,6 +1428,8 @@ function mountRoute({ catalog, action = tableActionConfig(), systems, adapterOve
   httpRoutes.registerIntegrationRoutes({
     context,
     services: {
+      // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
       externalSystemRegistry: registry,
       adapterRegistry,
       pipelineRegistry: inertService(['upsertPipeline', 'getPipeline', 'listPipelines', 'listPipelineRuns']),

@@ -23,6 +23,8 @@ const { createConnectionResolver } = require('./lib/connection-resolver.cjs')
 const { createReadSourceConfigStore } = require('./lib/read-source-config-store.cjs')
 const { createStockPreparationAuditStore } = require('./lib/stock-preparation-audit-store.cjs')
 const { createStockPreparationSourceBindingStore } = require('./lib/stock-preparation-source-binding-store.cjs')
+const { createStockPreparationReadPlanStore } = require('./lib/stock-preparation-read-plan-store.cjs')
+const { createStockPreparationReadPlanManagement } = require('./lib/stock-preparation-read-plan-management.cjs')
 const { createStockPreparationHandoffStore } = require('./lib/stock-preparation-handoff-store.cjs')
 const { createStockPreparationProjectTargetStore } = require('./lib/stock-preparation-project-target-store.cjs')
 const { createConfirmationDecisionReconcileLease } = require('./lib/stock-preparation-confirmation-decisions.cjs')
@@ -86,6 +88,8 @@ let externalSystemRegistry = null
 let readSourceConfigStore = null
 let stockPreparationAuditStore = null
 let stockPreparationSourceBindingStore = null
+let stockPreparationReadPlanStore = null
+let stockPreparationReadPlanManagement = null
 let stockPreparationHandoffStore = null
 let stockPreparationProjectTargetStore = null
 let stockPreparationPackInstallStore = null
@@ -339,6 +343,11 @@ module.exports = {
     // the whole mechanism by which changing the source stops needing a backend restart. Absent (no
     // SQL db) → no resolver is wired → the action resolves the env default exactly as before.
     stockPreparationSourceBindingStore = createStockPreparationSourceBindingStore({ db })
+    // Always wire the real ledger: an unavailable migration must fail closed.
+    stockPreparationReadPlanStore = createStockPreparationReadPlanStore({ db })
+    stockPreparationReadPlanManagement = createStockPreparationReadPlanManagement({
+      store: stockPreparationReadPlanStore, externalSystemRegistry, connectionRegistration: dataSourceFacade,
+    })
     // 通知下一步 (migration 084): the per-(tenant,projectNo) cursor saying whose turn it is
     // on a 备料 project. Built here so both handoff routes can compare-and-set it in one transaction —
     // which is what makes a double click a detectable replay instead of a second advance. Absent (no
@@ -540,6 +549,8 @@ module.exports = {
         readSourceConfigStore,
         stockPreparationAuditStore,
         stockPreparationSourceBindingStore,
+        stockPreparationReadPlanStore,
+        stockPreparationReadPlanManagement,
         stockPreparationHandoffStore,
         stockPreparationProjectTargetStore,
         stockPreparationPackInstallStore,
@@ -648,6 +659,8 @@ module.exports = {
     credentialStore = null
     externalSystemRegistry = null
     readSourceConfigStore = null
+    stockPreparationReadPlanStore = null
+    stockPreparationReadPlanManagement = null
     readSourceCompositionConfigStore = null
     bridgeAgentChecklistStore = null
     adapterRegistry = null

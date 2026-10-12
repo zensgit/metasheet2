@@ -46,6 +46,7 @@ interface AdapterStubOptions {
 function adapterStub(opts: AdapterStubOptions = {}) {
   return {
     isConnected: () => opts.connected ?? true,
+    connect: vi.fn(async () => undefined),
     testConnection: vi.fn(async () => opts.healthy ?? true),
     isReadOnly: () => opts.readOnly ?? true,
     getName: () => opts.name ?? 'pg',
@@ -64,6 +65,7 @@ function adapterStub(opts: AdapterStubOptions = {}) {
     })),
     getSchema: vi.fn(async (_schema?: string) => ({ tables: [], views: [] })),
     getTableInfo: vi.fn(async (table: string, _schema?: string) => ({ name: table, columns: [] })),
+    getColumns: vi.fn(async (_table: string, _schema?: string) => [{ name: 'id', type: 'int', nullable: false }]),
   }
 }
 
@@ -440,6 +442,81 @@ describe('createDataSourcePluginFacade', () => {
     await facade.getSchema('pg', 'owner-1')
     expect(m.stub.connectDataSource).toHaveBeenCalledWith('pg')
     expect(m.adapter.getSchema).toHaveBeenCalled()
+  })
+
+  describe('getTableInfo(..., validation, columns)', () => {
+    it('returns the adapter columns without inventing empty constraints, while omitted detail stays full', async () => {
+      const m = managerStub()
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      const columns = await m.adapter.getColumns('items', 'public')
+      m.adapter.getColumns.mockClear()
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public', undefined, 'columns'))
+        .resolves.toEqual({ name: 'items', schema: 'public', columns, columnsLoaded: true })
+      expect(m.adapter.getColumns).toHaveBeenCalledWith('items', 'public')
+      expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
+      const bare = await facade.getTableInfo('pg', 'items', 'owner-1', undefined, undefined, 'columns')
+      for (const absent of ['schema', 'primaryKey', 'indexes', 'foreignKeys']) expect(bare).not.toHaveProperty(absent)
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public'))
+        .resolves.toEqual({ name: 'items', columns: [] })
+      expect(m.adapter.getTableInfo).toHaveBeenCalledTimes(1)
+      expect(m.adapter.getTableInfo).toHaveBeenCalledWith('items', 'public')
+      expect(m.adapter.getColumns).toHaveBeenCalledTimes(2)
+    })
+
+    it('requires the owner and a readonly source before any columns or connection IO', async () => {
+      const unresolved = vi.fn(() => managerStub().manager)
+      await expect(createDataSourcePluginFacade(unresolved)
+        .getTableInfo('pg', 'items', undefined, undefined, undefined, 'columns'))
+        .rejects.toThrow(MISSING_PRINCIPAL_MESSAGE)
+      expect(unresolved).not.toHaveBeenCalled()
+      for (const m of [managerStub({ deny: true }), managerStub({ adapter: adapterStub({ readOnly: false, connected: false }) })]) {
+        await expect(createDataSourcePluginFacade(() => m.manager)
+          .getTableInfo('pg', 'items', 'intruder', undefined, undefined, 'columns'))
+          .rejects.toMatchObject({ code: m.adapter.isReadOnly() ? DATA_SOURCE_NOT_FOUND_CODE : DATA_SOURCE_NOT_READ_ONLY_CODE })
+        expect(m.stub.assertAccess).toHaveBeenCalledWith('pg', 'intruder')
+        expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+        expect(m.adapter.connect).not.toHaveBeenCalled()
+        expect(m.adapter.getColumns).not.toHaveBeenCalled()
+        expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
+      }
+    })
+
+    it('checks the exact adapter revision on every call, including after a connect changes it', async () => {
+      const m = managerStub({ adapter: adapterStub({ connected: false }) })
+      let revision = 'reviewed-revision'
+      const getLoadedValidationRevision = vi.fn(() => revision)
+      Object.assign(m.stub, { getLoadedValidationRevision })
+      const facade = createDataSourcePluginFacade(() => m.manager)
+      const validation = { expectedValidationRevision: revision }
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public', validation, 'columns')).resolves.toHaveProperty('columnsLoaded', true)
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public', validation, 'columns')).resolves.toHaveProperty('columnsLoaded', true)
+      expect(m.stub.assertAccess).toHaveBeenCalledTimes(2)
+      expect(getLoadedValidationRevision.mock.calls).toEqual(Array.from({ length: 4 }, () => ['pg', m.adapter]))
+      expect(m.adapter.getColumns).toHaveBeenCalledTimes(2)
+      m.adapter.getColumns.mockClear()
+      m.adapter.connect.mockClear()
+      revision = 'changed-before-connect'
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public', validation, 'columns'))
+        .rejects.toMatchObject({ code: 'DATA_SOURCE_VALIDATION_REVISION_MISMATCH' })
+      expect(m.adapter.connect).not.toHaveBeenCalled()
+      expect(m.adapter.getColumns).not.toHaveBeenCalled()
+      revision = validation.expectedValidationRevision
+      m.adapter.connect.mockImplementation(async () => { revision = 'changed-during-connect' })
+      await expect(facade.getTableInfo('pg', 'items', 'owner-1', 'public', validation, 'columns'))
+        .rejects.toMatchObject({ code: 'DATA_SOURCE_VALIDATION_REVISION_MISMATCH' })
+      expect(m.adapter.connect).toHaveBeenCalledTimes(1)
+      expect(m.stub.connectDataSource).not.toHaveBeenCalled()
+      expect(m.adapter.getColumns).not.toHaveBeenCalled()
+      expect(m.adapter.getTableInfo).not.toHaveBeenCalled()
+    })
+
+    it('rejects an unknown detail with the fixed invalid-query error before resolving the manager', async () => {
+      const getManager = vi.fn(() => managerStub().manager)
+      await expect(createDataSourcePluginFacade(getManager)
+        .getTableInfo('pg', 'items', 'owner-1', undefined, undefined, 'full' as never))
+        .rejects.toMatchObject({ status: 422, code: DATA_SOURCE_QUERY_INVALID_CODE, message: 'table detail must be columns when specified' })
+      expect(getManager).not.toHaveBeenCalled()
+    })
   })
 
   it('test on a read-only source returns { success }', async () => {

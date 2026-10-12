@@ -133,6 +133,11 @@ function mount(options = {}) {
     packs: { [PACK_ID]: bandPack() },
     ledger: [{ packId: PACK_ID, packVersion: PACK_VERSION }],
     ...options,
+    serviceExtras: {
+      // Synthetic no-pointer scope; keep the production fail-closed runtime requirement.
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
+      ...options.serviceExtras,
+    },
   })
 }
 

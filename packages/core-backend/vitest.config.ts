@@ -61,6 +61,8 @@ export default defineConfig({
       // #6076 external-system delete x pointer-write lock protocol: two-session real-PG races,
       // excluded from the no-DB job and wired as a whole file in plugin-tests.yml (EXPECT_DB=1).
       'tests/integration/external-system-delete-bind-lock-protocol.db.test.ts',
+      // PLM read-plan host/JWT/PG/Chromium proof; required whole-file EXPECT_DB lane.
+      'tests/integration/stock-preparation-read-plan-host-realdb.test.ts',
       'tests/integration/stock-preparation-yida-write-ledger-realdb.test.ts',
       'tests/integration/stock-preparation-yida-create-fence-realdb.test.ts',
       'tests/integration/stock-preparation-yida-credential-materials-realdb.test.ts',

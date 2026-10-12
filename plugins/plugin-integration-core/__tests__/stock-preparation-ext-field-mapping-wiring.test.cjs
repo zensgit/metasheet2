@@ -249,6 +249,8 @@ function adapterReadyRow(input = {}) {
 
 function baseServices(sourceAdapter) {
   return {
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       ...inertService(['upsertExternalSystem', 'deleteExternalSystem', 'listExternalSystems']),
       // G4/M2 (#5553 §3): the two accessors are DIFFERENT objects here, not an alias, because the

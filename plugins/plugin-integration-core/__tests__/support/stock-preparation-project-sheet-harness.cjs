@@ -392,6 +392,8 @@ function baseServices(sourceAdapter) {
     templateRegistry: inertService(['upsertTemplate', 'getTemplate', 'listTemplates', 'deleteTemplate', 'instantiateTemplate']),
     readSourceConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
     readSourceCompositionConfigStore: inertService(['saveVersion', 'list', 'get', 'approve', 'retire', 'listAudit', 'getForRuntime']),
+    // This synthetic scope explicitly has no activation pointer; absence of the runtime is not legacy.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     bridgeAgentChecklistStore: inertService(['saveVersion', 'approve', 'retire', 'getForApply']),
   }
 }

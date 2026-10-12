@@ -194,7 +194,7 @@ function projectionScalarIdentity(value) {
   return JSON.stringify([typeof value, value])
 }
 
-async function applyLookupProjection({ api, dataSourceId, principal, projection, records, armed, b2aAuthorization }) {
+async function applyLookupProjection({ api, dataSourceId, principal, projection, records, armed, b2aAuthorization, validationOptions }) {
   const enriched = []
   const seenLocalKeys = new Set()
   const seenMaterialCodes = new Set()
@@ -234,6 +234,7 @@ async function applyLookupProjection({ api, dataSourceId, principal, projection,
         // silently off. Floor 2 is a no-op here (offset is 0), so a legitimate armed lookup is
         // unaffected; floor 1 now covers this leg too.
         armed,
+        ...(validationOptions ? [validationOptions] : []),
       )
     } catch (error) {
       // Floor 1's refusal takes precedence over the lookup catch-all, exactly as it does on the base
@@ -554,7 +555,7 @@ function mapObjects(schemaInfo) {
   return [...tables.map((t) => toEntry(t, 'table')), ...views.map((v) => toEntry(v, 'view'))]
 }
 
-function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization } = {}) {
+function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization, expectedValidationRevision } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const config = normalizedSystem.config || {}
   // The integration row carries only the reference to the data source — NEVER its credentials.
@@ -563,6 +564,7 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, 
   // Optional projection is system-config-bound. A read request cannot choose or override its
   // lookup object, keys, projected fields, or row bound.
   const lookupProjection = normalizeLookupProjection(config.lookupProjection)
+  const validationOptions = expectedValidationRevision === undefined ? undefined : Object.freeze({ expectedValidationRevision })
 
   return {
     async testConnection() {
@@ -592,7 +594,10 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, 
       // A schema-qualified object (e.g. `public.items`, as listObjects emits) is split back into
       // table + schema for getTableInfo, which takes them separately; a bare object keeps config.schema.
       const { schema: effectiveSchema, table } = splitQualifiedObject(object, schema)
-      const tableInfo = await api.getTableInfo(dataSourceId, table, principal, effectiveSchema)
+      // Only column metadata is consumed here. The host retains every authorization
+      // and native-IO checkpoint while omitting unused PK/index/FK queries.
+      const tableInfo = await api.getTableInfo(dataSourceId, table, principal, effectiveSchema,
+        validationOptions, 'columns')
       return {
         object,
         fields: mapColumns(tableInfo && tableInfo.columns),
@@ -627,7 +632,8 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, 
           request.object,
           selectOptions,
           principal,
-          armed
+          armed,
+          ...(validationOptions ? [validationOptions] : [])
         )
       } catch (error) {
         // Floor 1's refusal takes precedence over the lookup-projection catch-all below: an operator
@@ -648,7 +654,7 @@ function createDataSourceSqlReadonlySourceAdapter({ system, context, principal, 
       }
       const baseRecords = rows.map((row) => (isPlainObject(row) ? { ...row } : row))
       const records = lookupProjection
-        ? await applyLookupProjection({ api, dataSourceId, principal, projection: lookupProjection, records: baseRecords, armed, b2aAuthorization })
+        ? await applyLookupProjection({ api, dataSourceId, principal, projection: lookupProjection, records: baseRecords, armed, b2aAuthorization, validationOptions })
         : baseRecords
       const fullPage = records.length >= request.limit
       const nextCursor = watermarkPlan && fullPage
@@ -690,8 +696,8 @@ function createDataSourceSqlReadonlySourceAdapterFactory({ context } = {}) {
   // system, { principal, b2aAuthorization })` by a caller that already computed it (see
   // http-routes.cjs's stock-preparation table-action/MVP-persist/large-BOM entry points) — never
   // read off `context`, which is shared across every request for the life of the plugin.
-  return ({ system, principal, b2aAuthorization } = {}) =>
-    createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization })
+  return ({ system, principal, b2aAuthorization, expectedValidationRevision } = {}) =>
+    createDataSourceSqlReadonlySourceAdapter({ system, context, principal, b2aAuthorization, expectedValidationRevision })
 }
 
 const DATA_SOURCE_SQL_READONLY_ADAPTER_METADATA = {

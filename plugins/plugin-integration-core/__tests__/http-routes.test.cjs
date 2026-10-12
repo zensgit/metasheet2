@@ -263,6 +263,8 @@ function createMockServices(overrides = {}) {
   }
 
   const services = {
+    // SA-02: this legacy-path fixture explicitly models a reachable empty plan ledger.
+    stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
     externalSystemRegistry: {
       async listExternalSystems(input) {
         calls.push(['listExternalSystems', input])

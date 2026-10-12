@@ -257,6 +257,21 @@ const ROUTE_PUBLIC_PROJECTION_FORMS = Object.freeze([
     why: 'source-binding admission check: kind + accessibility of a candidate row. Nothing downstream builds an adapter from it.',
   },
   {
+    exact: 'const system = await externalSystems.getExternalSystem({ id: externalSystemId, tenantId, workspaceId: workspaceId || null })',
+    count: 1,
+    why: 'PLM unconfigured preflight scope resolution: returns only the matched tenant/workspace identifiers, never the public row or adapter input. Actual source loading remains through the decrypting accessor.',
+  },
+  {
+    exact: "loadSourceSystemConfig: exactSourceScope && typeof externalSystems.getExternalSystemAdapterConfig === 'function'",
+    count: 1,
+    why: 'PLM B2a object-scope loader: the server-resolved matched scope selects a credential-free config read solely for the source-object fence; it is not adapter input.',
+  },
+  {
+    exact: '? () => externalSystems.getExternalSystemAdapterConfig({ ...exactSourceScope, id: action.source.externalSystemId })',
+    count: 1,
+    why: 'the same matched-scope object-fence loader, continued. When B2a is armed for data-source:sql-readonly, an unavailable config accessor/loader is refused; the config result is used only for the object fence, never as adapter input.',
+  },
+  {
     exact: 'function resolveC6WritePlanInputs({ targetSystem, pipeline, context, adapterRegistry, ownerPrincipal, readSourceConfigs, getExternalSystem, instanceDigestOf }) {',
     count: 1,
     why: 'the PARAMETER that receives the `getExternalSystem: (input) => …` seam rostered above (K3 B4 same-INSTANCE comparison: kind + baseUrl, no adapter). On the roster because the match is on the IDENTIFIER, not on `.name` / `\'name\'` — a binding created by destructuring is exactly the form that used to be invisible.',

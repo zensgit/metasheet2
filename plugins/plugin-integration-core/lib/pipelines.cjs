@@ -480,7 +480,7 @@ async function conflictFromRunningRun(db, normalized, details = {}) {
 // that arrives while this KEY SHARE is held waits for this transaction to commit, then counts the
 // pipeline and refuses 409. Only meaningful because `upsertPipeline` and `instantiateTemplate` run
 // this INSIDE `db.transaction`; a helper that cannot lock is refused rather than degraded to the
-// unprotected `selectOne` this replaces. LOCK ORDER: source system, target system, pipeline row,
+// unprotected `selectOne` this replaces. LOCK ORDER: external-system IDs in default sort order, then pipeline row,
 // field mappings — KEY SHARE is compatible with KEY SHARE, so two pipeline writers naming the same
 // two systems in opposite orders cannot deadlock. ISOLATION: this check cannot pin the level itself —
 // `SET TRANSACTION` must be a transaction's FIRST statement and `instantiateTemplate` reads its
@@ -538,8 +538,12 @@ async function loadFieldMappings(db, pipelineId) {
 // pipeline-write path (no row-builder drift). Runs on the caller's scopedDb, so a caller can
 // wrap it in a single db.transaction for all-or-nothing.
 async function writePipelineRow(scopedDb, normalized, idGenerator) {
-  await requireExternalSystem(scopedDb, normalized, normalized.sourceSystemId, SOURCE_ROLES, 'sourceSystemId')
-  await requireExternalSystem(scopedDb, normalized, normalized.targetSystemId, TARGET_ROLES, 'targetSystemId')
+  const endpointFields = [normalized.sourceSystemId, normalized.targetSystemId].sort()[0] === normalized.sourceSystemId
+    ? ['sourceSystemId', 'targetSystemId']
+    : ['targetSystemId', 'sourceSystemId']
+  for (const field of endpointFields) {
+    await requireExternalSystem(scopedDb, normalized, normalized[field], field === 'sourceSystemId' ? SOURCE_ROLES : TARGET_ROLES, field)
+  }
 
   const existing = await selectPipeline(scopedDb, normalized)
   const baseRow = {

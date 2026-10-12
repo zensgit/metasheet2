@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+const previewHttp = vi.hoisted(() => ({ fetch: vi.fn() }))
+vi.mock('../src/utils/api', () => ({ apiFetch: previewHttp.fetch }))
 
 // 项目接入 — the RUN. This suite drives the pure half of
 // apps/web/src/services/integration/stockPreparation/projectSync.ts through an injected API double,
@@ -27,7 +29,9 @@ import {
   classifyPlanReadFailureReason,
   classifyPlanStep,
   clampErrorCode,
+  createStockPreparationProjectSyncApi,
   plannedCountsOf,
+  runStockPreparationProjectPreview,
   runStockPreparationProjectSync,
   summarizeProjectSync,
   writtenCountsOf,
@@ -97,6 +101,120 @@ function assertValuesFree(report: StockPreparationProjectSyncReport): void {
   const text = JSON.stringify(report.steps)
   for (const forbidden of FORBIDDEN) expect(text).not.toContain(forbidden)
 }
+
+describe('preview change plan only', () => {
+  it.each([
+    ['ready', true, 0, 'PLAN_READY'],
+    ['manual_confirm_required', true, 2, 'PLAN_HELD_FOR_CONFIRMATION'],
+    ['not_found', false, 0, 'PLAN_PROJECT_NOT_FOUND'],
+    ['large_bom_bounded', false, 0, 'PLAN_LARGE_BOM_BOUNDED'],
+    ['failed', false, 0, 'PLAN_NOT_APPLYABLE'],
+  ])('projects %s without writing even when a token exists', async (status, canApply, manualConfirm, reason) => {
+    const counts = status === 'not_found'
+      ? { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 }
+      : { add: 3, update: 2, skip: 7, inactive: 1, manual_confirm: manualConfirm }
+    const api = makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ status, canApply, revision: PLANTED_SECRET,
+      raw: { secret: PLANTED_SECRET }, counts })) })
+    const report = await runStockPreparationProjectPreview(api, `  ${PROJECT_NO}  `)
+    expect(report).toEqual({ status, reason, counts: { add: counts.add, update: counts.update, skip: counts.skip, inactive: counts.inactive, manualConfirm } })
+    expect(api.dryRun).toHaveBeenCalledTimes(1)
+    expect(api.dryRun).toHaveBeenCalledWith(PROJECT_NO)
+    for (const fn of [api.reconcile, api.apply, api.archive]) expect(fn).not.toHaveBeenCalled()
+    for (const value of [...FORBIDDEN, 'tok_abc', 'dryRunToken', 'revision', 'evidence', 'raw']) expect(JSON.stringify(report)).not.toContain(value)
+  })
+
+  it.each(['', '   ', 'P'.repeat(129), 'P\nSYN', 'P\u007fSYN'])('rejects invalid project input without a request (%s)', async project => {
+    const api = makeApi()
+    expect(await runStockPreparationProjectPreview(api, project)).toEqual({ status: null, reason: 'PROJECT_NUMBER_INVALID', counts: null })
+    expect(api.dryRun).not.toHaveBeenCalled()
+  })
+
+  it('accepts a trimmed 128-character project and measured zero counts', async () => {
+    const api = makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ counts: { add: 0, update: 0, skip: 0, inactive: 0, manual_confirm: 0 } })) })
+    expect(await runStockPreparationProjectPreview(api, ` ${'P'.repeat(128)} `)).toMatchObject({ reason: 'PLAN_READY', counts: { add: 0 } })
+    expect(api.dryRun).toHaveBeenCalledWith('P'.repeat(128))
+  })
+
+  it.each(['add', 'update', 'skip', 'inactive', 'manual_confirm'].flatMap(key =>
+    [undefined, -1, 1.5, '1', NaN, Infinity, Number.MAX_SAFE_INTEGER + 1].map(value => ({ key, value }))))('refuses invalid $key count $value instead of manufacturing zero', async ({ key, value }) => {
+    const api = makeApi({ dryRun: vi.fn().mockResolvedValue(plan({ counts: { ...plan().counts as object, [key]: value } })) })
+    expect(await runStockPreparationProjectPreview(api, PROJECT_NO)).toEqual({ status: null, reason: 'PLAN_MALFORMED_RESPONSE', counts: null })
+    expect(api.apply).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    null, [], {}, plan({ counts: [] }), plan({ counts: null }), plan({ status: PLANTED_SECRET }),
+    plan({ canApply: 'true' }), plan({ status: 'ready', canApply: false }),
+    plan({ status: 'failed', canApply: true }), plan({ status: 'not_found', canApply: true }),
+    plan({ status: 'not_found', canApply: false }),
+    plan({ status: 'large_bom_bounded', canApply: true }), plan({ status: 'manual_confirm_required', canApply: false }),
+    plan({ status: 'manual_confirm_required' }), plan({ counts: { add: 1, update: 0, skip: 0, inactive: 0, manual_confirm: 2 } }),
+  ])('refuses malformed or contradictory plans %#', async raw => {
+    const api = makeApi({ dryRun: vi.fn().mockResolvedValue(raw) })
+    expect(await runStockPreparationProjectPreview(api, PROJECT_NO)).toEqual({ status: null, reason: 'PLAN_MALFORMED_RESPONSE', counts: null })
+  })
+
+  it.each([
+    [new Error(PLANTED_SECRET), 'PLAN_READ_FAILED'],
+    [new StockPreparationProjectSyncCallError(400, '/dry-run', { code: 'PRIVATE_POISON_CODE' }), 'PLAN_READ_FAILED_UNKNOWN'],
+    [new StockPreparationProjectSyncCallError(401, '/dry-run'), 'PLAN_READ_UNAUTHENTICATED'],
+    [new StockPreparationProjectSyncCallError(403, '/dry-run'), 'PLAN_READ_NOT_PERMITTED'],
+    [new StockPreparationProjectSyncCallError(200, '/dry-run', { malformed: true }), 'PLAN_MALFORMED_RESPONSE'],
+  ])('projects errors to fixed reasons only %#', async (error, reason) => {
+    const api = makeApi({ dryRun: vi.fn().mockRejectedValue(error) })
+    expect(await runStockPreparationProjectPreview(api, PROJECT_NO)).toEqual({ status: null, reason, counts: null })
+  })
+
+  it('uses the real default HTTP API once without consuming its token', async () => {
+    previewHttp.fetch.mockReset().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: plan() })))
+    const report = await runStockPreparationProjectPreview(createStockPreparationProjectSyncApi({ tenantId: 'synthetic_tenant', workspaceId: 'synthetic_workspace' }), PROJECT_NO)
+    expect(report.reason).toBe('PLAN_READY')
+    expect(previewHttp.fetch).toHaveBeenCalledTimes(1)
+    expect(previewHttp.fetch.mock.calls[0][0]).toContain('/dry-run?tenantId=synthetic_tenant&workspaceId=synthetic_workspace')
+    expect(JSON.parse(previewHttp.fetch.mock.calls[0][1].body)).toEqual({ parameters: { projectNo: PROJECT_NO }, includeMissingComponents: true })
+    expect(JSON.stringify(report)).not.toContain('tok_abc')
+  })
+
+  it.each([
+    [409, 'STOCK_PREPARATION_PROJECT_ABSENT', 'PLAN_PROJECT_SHEET_ABSENT'],
+    [409, 'STOCK_PREPARATION_PROJECT_ARCHIVED', 'PLAN_PROJECT_SHEET_ARCHIVED'],
+    [409, 'TABLE_ACTION_TARGET_TENANT_MISMATCH', 'PLAN_TARGET_NOT_OURS'],
+    [409, 'TABLE_ACTION_TARGET_OWNER_UNKNOWN', 'PLAN_TARGET_NOT_OURS'],
+    [409, 'TABLE_ACTION_TARGET_UNBOUND', 'PLAN_TARGET_NOT_OURS'],
+    // Shared with the legacy env sheet: preview has not established project-sheet context.
+    [422, 'TARGET_SCHEMA_INCOMPLETE', 'PLAN_READ_FAILED_UNKNOWN'],
+  ])('keeps project-target refusal %s/%s read-only through the actual HTTP producer', async (status, code, reason) => {
+    previewHttp.fetch.mockReset().mockResolvedValue(new Response(JSON.stringify({
+      ok: false, error: { code, message: PLANTED_SECRET }, data: { dryRunToken: 'PRIVATE_PREVIEW_TOKEN' },
+    }), { status }))
+    const report = await runStockPreparationProjectPreview(createStockPreparationProjectSyncApi({}, undefined, { strictPreview: true }), PROJECT_NO)
+    expect(report).toEqual({ status: null, reason, counts: null })
+    expect(previewHttp.fetch).toHaveBeenCalledTimes(1)
+    expect(String(previewHttp.fetch.mock.calls[0][0])).toContain('/dry-run')
+    for (const value of [...FORBIDDEN, code, 'PRIVATE_PREVIEW_TOKEN', 'dryRunToken']) {
+      expect(JSON.stringify(report)).not.toContain(value)
+    }
+  })
+
+  it('preserves the default API single opt-in fallback, without any other route', async () => {
+    previewHttp.fetch.mockReset()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: false, error: { code: 'TABLE_ACTION_REQUEST_INVALID', message: PLANTED_SECRET } }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true, data: plan() })))
+    expect((await runStockPreparationProjectPreview(createStockPreparationProjectSyncApi({}), PROJECT_NO)).reason).toBe('PLAN_READY')
+    expect(previewHttp.fetch).toHaveBeenCalledTimes(2)
+    expect(previewHttp.fetch.mock.calls.every(([url]) => String(url).endsWith('/dry-run'))).toBe(true)
+    expect(JSON.parse(previewHttp.fetch.mock.calls[1][1].body)).toEqual({ parameters: { projectNo: PROJECT_NO } })
+  })
+
+  it('strict preview rejects an ambiguous success envelope while legacy transport remains unchanged', async () => {
+    const response = () => new Response(JSON.stringify({ ok: true, data: plan(), error: { code: 'PRIVATE_POISON_CODE', message: PLANTED_SECRET } }))
+    previewHttp.fetch.mockReset().mockImplementation(response)
+    const strict = createStockPreparationProjectSyncApi({}, undefined, { strictPreview: true })
+    expect(await runStockPreparationProjectPreview(strict, PROJECT_NO)).toEqual({ status: null, reason: 'PLAN_MALFORMED_RESPONSE', counts: null })
+    expect(previewHttp.fetch).toHaveBeenCalledTimes(1)
+    await expect(createStockPreparationProjectSyncApi({}).dryRun(PROJECT_NO)).resolves.toMatchObject({ status: 'ready', dryRunToken: 'tok_abc' })
+  })
+})
 
 describe('項目接入 — the four-step import run', () => {
   it('the happy path plans, skips the confirm step, writes, and archives', async () => {

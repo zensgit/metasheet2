@@ -56,8 +56,8 @@ const {
   STOCK_PREP_PULL,
   STOCK_PREP_READ,
 } = require(path.join(LIB, 'stock-preparation-workbench-access.cjs'))
-const { PLM_STOCK_PREPARATION_ACTION_ID } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
-const { MAX_PROJECT_TARGETS_PER_TENANT, PROJECT_SHEETS_ENABLED_ENV } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
+const { PLM_STOCK_PREPARATION_ACTION_ID, createStockPreparationTableActionRegistry } = require(path.join(LIB, 'stock-preparation-table-actions.cjs'))
+const { MAX_PROJECT_TARGETS_PER_TENANT, PROJECT_SHEETS_ENABLED_ENV, resolveProjectTargetForAction } = require(path.join(LIB, 'stock-preparation-project-targets.cjs'))
 const { createStockPreparationProjectTargetStore } = require(path.join(LIB, 'stock-preparation-project-target-store.cjs'))
 const largeBomJobs = require(path.join(LIB, 'stock-preparation-large-bom-jobs.cjs'))
 const {
@@ -115,7 +115,14 @@ const getTarget = (h, user, projectNo = PROJECT) => projectSheet.call(h.routes, 
 const dryRun = (h, user = PULLER, projectNo = PROJECT) => projectSheet.call(h.routes, 'POST', DRY_RUN_PATH, { user, params: { actionId: ACTION_ID }, body: { parameters: { projectNo } }, query: { tenantId: TENANT } })
 
 function mount(options = {}) {
-  return projectSheet.mountProjectSheetRoutes({ tenantId: TENANT, projectNo: PROJECT, switchOn: true, ...options })
+  return projectSheet.mountProjectSheetRoutes({
+    tenantId: TENANT, projectNo: PROJECT, switchOn: true, ...options,
+    serviceExtras: {
+      // This synthetic binding has no activation pointer, not a missing read-plan runtime.
+      stockPreparationReadPlanStore: { async getActiveForRuntime() { return null } },
+      ...options.serviceExtras,
+    },
+  })
 }
 
 function snapshotObject(h, objectId) {
@@ -330,26 +337,45 @@ test('A-07 the 200 cap counts archived rows: a new create is 409 LIMIT; archivin
   } finally { h.restore() }
 })
 
-/** A completed, planned large-BOM job written straight into the route's durable storage. */
+/** Real action resolution and enqueue → expansion → plan producers, using only an empty synthetic source. */
 async function seedPlannedExpansionJob(h, { jobId, target, projectNo = PROJECT }) {
   const at = '2026-10-09T00:00:00.000Z'
-  const job = {
-    jobId, ...JOB_SCOPE, actionId: ACTION_ID,
-    status: 'completed', authoritative: true, projectNoPresent: true,
+  const registry = createStockPreparationTableActionRegistry({
+    actions: h.context.config.stockPreparationTableActions,
+    resolveProjectTarget: (input) => resolveProjectTargetForAction({
+      ...input, store: createStockPreparationProjectTargetStore({ db: h.db }),
+      provisioning: h.provisioning, projectId: h.staging, env: process.env,
+    }),
+  })
+  const action = await registry.getTableAction({ ...JOB_SCOPE, actionId: ACTION_ID, projectNo, targetPurpose: 'write' })
+  assert.equal(action.target.sheetId, target.sheetId)
+  assert.equal(action.target.objectId, target.objectId)
+  await largeBomJobs.createLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, action,
     parameters: { projectNo },
-    principal: PLATFORM_ADMIN.id,
-    actionSnapshot: { actionId: ACTION_ID, source: { externalSystemId: 'plm_sql_source_synthetic', kind: 'data-source:sql-readonly' }, target },
-    sourceKind: 'data-source:sql-readonly',
-    artifactRevision: 'artifact-1',
-    artifact: { revision: 'artifact-1', status: 'expanded', rows: [], summary: {}, sealedAt: at },
-    planRevision: 'plan-1',
-    planArtifact: { revision: 'plan-1', artifactRevision: 'artifact-1', plan: { revision: 'plan-1', decisions: [], plannedAt: at }, existingRowCount: 0, plannedAt: at },
-    progress: { rowsExpanded: 0, readCount: 0, frontierRemaining: 0, completedChunks: 1 },
-    budgets: {},
-    evidence: { sourceKind: 'data-source:sql-readonly', readObjects: [], errorTypes: [], readDiagnosticShapePresent: false },
-    createdAt: at, updatedAt: at,
-  }
-  await h.context.storage.set(largeBomJobs.__internals.backgroundJobKey({ ...JOB_SCOPE, actionId: ACTION_ID, jobId }), job)
+    principal: PLATFORM_ADMIN.id, actor: PLATFORM_ADMIN.id, createJobId: () => jobId, now: () => at,
+  })
+  let reads = 0
+  const expanded = await largeBomJobs.runLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId: ACTION_ID, jobId, now: () => at,
+    sourceAdapter: {
+      async read(input) {
+        reads += 1
+        assert.equal(input.object, 'DN_PDM_PathExAttrInfo')
+        assert.deepEqual(input.filters, { FileCode: projectNo })
+        return { records: [], done: true, nextCursor: null, metadata: { filtersApplied: true } }
+      },
+    },
+  })
+  assert.equal(reads, 1)
+  assert.equal(expanded.status, 'completed')
+  largeBomJobs.assertAuthoritativeLargeBomExpansion(expanded)
+  assert.deepEqual(expanded.artifact.rows, [])
+  const planned = await largeBomJobs.planLargeBomBackgroundExpansionJob({
+    storage: h.context.storage, ...JOB_SCOPE, actionId: ACTION_ID, jobId, existingRows: [], plannedAt: at,
+  })
+  largeBomJobs.assertAuthoritativeLargeBomPlan(planned)
+  assert.deepEqual(planned.planArtifact.plan.decisions, [])
 }
 
 /** Status + error code: the short form a failure message names (a 200 is `200:ok`). */

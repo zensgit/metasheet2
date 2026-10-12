@@ -28,6 +28,11 @@
 //       Four negative guards pin those four.
 
 const crypto = require('node:crypto')
+const {
+  approvedReadPlanExecution,
+  normalizeReadPlanExecutionIdentity,
+  readPlanExecutionBudget,
+} = require('./stock-preparation-read-plan-execution.cjs')
 
 // S1: the project-sheet objectId rule (own-base.cjs holds it beside the base pair; see its note on
 // why it lives there). Read by the apply write gate's project-sheet branch and the field-id
@@ -35,9 +40,12 @@ const crypto = require('node:crypto')
 const { isStockPreparationProjectSheetObjectId } = require('./stock-preparation-own-base.cjs')
 
 const {
+  DEFAULT_PAGE_LIMIT,
   DEFAULT_MAX_PAGES,
+  DEFAULT_MAX_DEPTH,
   DEFAULT_MAX_ROWS,
   PLM_STOCK_PREPARATION_BOM_READ_PLAN,
+  ROW_ERROR_LIMIT,
   ROW_ERROR_LIMIT_CEILING,
   STOCK_PREPARATION_BOM_SOURCE_KINDS,
   expandPlmProjectBom,
@@ -46,6 +54,7 @@ const {
   // F1c 根选择规则的 config-time 校验器。Reused rather than reimplemented so a config can only
   // express what the expander can mean — one vocabulary, one refusal.
   normalizeRootSelection,
+  normalizeStockPreparationBomReadPlan,
   // Values-BEARING (see the module header). The only import in this file that is.
   summarizeMissingComponents,
 } = require('./stock-preparation-bom-expansion.cjs')
@@ -451,6 +460,12 @@ function largeBomBackgroundExpansionCaps(action = {}) {
     if (base === undefined) continue
     caps[field] = Math.min(base * LARGE_BOM_BACKGROUND_CAP_MULTIPLIERS[field], ceiling)
   }
+  // An activated plan's approved read budget is a hard ceiling on both lanes,
+  // including explicit background caps and the normal background multiplier.
+  const approvedBudget = readPlanExecutionBudget(action)
+  if (approvedBudget !== undefined) {
+    caps.maxReadCount = Math.min(caps.maxReadCount === undefined ? approvedBudget : caps.maxReadCount, approvedBudget)
+  }
   return caps
 }
 
@@ -472,7 +487,7 @@ function normalizeStockPreparationActionConfig(input = {}) {
   const largeBom = normalizeActionLargeBomCaps(input.largeBom)
   const rowErrorLimit = normalizeActionRowErrorLimit(input.rowErrorLimit)
   const rootSelection = normalizeActionRootSelection(input.rootSelection)
-  return {
+  const action = {
     actionId,
     kind,
     label: optionalString(input.label) || 'PLM project BOM -> stock preparation',
@@ -520,6 +535,90 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // and would otherwise drop it on the floor.
     ...(isPlainObject(input.projectTarget) ? { projectTarget: cloneJson(input.projectTarget) } : {}),
   }
+  if (Object.prototype.hasOwnProperty.call(input, 'readPlanExecutionIdentity')) {
+    action.readPlanExecutionIdentity = normalizeReadPlanExecutionIdentity(input.readPlanExecutionIdentity, action)
+    const approvedBudget = action.source.readPlan.maxReadCount
+    action.maxReadCount = Math.min(action.maxReadCount === undefined ? approvedBudget : action.maxReadCount, approvedBudget)
+  }
+  return action
+}
+
+// The caller supplies the actual verified binding scope and explicit ledger
+// results. No latest-version selection, lookup, permission grant or I/O occurs.
+function composeStockPreparationReadPlanAction({ action: input, scope, activation, version } = {}) {
+  const action = normalizeStockPreparationActionConfig(input)
+  const execution = approvedReadPlanExecution({ action, scope, activation, version })
+  // Preserve a stricter existing effective budget, including a read-plan budget
+  // that used to be the expander's fallback when no invocation cap was set.
+  const previousPlanBudget = normalizeStockPreparationBomReadPlan(action.source.readPlan).maxReadCount
+  const previousInteractiveBudget = action.maxReadCount === undefined ? previousPlanBudget : action.maxReadCount
+  const previousBackgroundCaps = largeBomBackgroundExpansionCaps(action)
+  const previousBackgroundBudget = previousBackgroundCaps.maxReadCount === undefined
+    ? previousPlanBudget
+    : previousBackgroundCaps.maxReadCount
+  return normalizeStockPreparationActionConfig({
+    ...action,
+    source: { ...action.source, readPlan: execution.readPlan },
+    readPlanExecutionIdentity: execution.identity,
+    ...(previousInteractiveBudget === undefined ? {} : { maxReadCount: previousInteractiveBudget }),
+    ...(previousBackgroundBudget === undefined ? {} : {
+      largeBom: { ...action.largeBom, maxReadCount: Math.min(previousBackgroundBudget, execution.readPlan.maxReadCount) },
+    }),
+  })
+}
+
+// The stored large-BOM plan and each later write must name the same effective action. Re-run
+// both normalizers: raw JSON order, omitted defaults, and action.label cannot be authority.
+// Keep only fields that can change source reads, row planning, or target writes.
+function largeBomActionExecutionContract(input) {
+  const action = normalizeStockPreparationActionConfig(input)
+  const readPlan = normalizeStockPreparationBomReadPlan(action.source.readPlan)
+  const maxDepth = action.maxDepth === undefined || action.maxDepth === null || action.maxDepth === ''
+    ? DEFAULT_MAX_DEPTH
+    : Number(action.maxDepth)
+  if (!Number.isInteger(maxDepth) || maxDepth < 0) throw new Error('invalid maxDepth')
+  return {
+    actionId: action.actionId,
+    kind: action.kind,
+    ...(action.readPlanExecutionIdentity ? { readPlanExecutionIdentity: action.readPlanExecutionIdentity } : {}),
+    source: {
+      externalSystemId: action.source.externalSystemId,
+      workspaceId: action.source.workspaceId || null,
+      kind: action.source.kind,
+      readPlan,
+    },
+    target: action.target,
+    template: action.template,
+    extensionFieldIds: action.extensionFieldIds || [],
+    carryPolicy: action.carryPolicy || null,
+    conflictStrategy: action.conflictStrategy,
+    rootSelection: normalizeRootSelection(action.rootSelection),
+    pageLimit: action.pageLimit || DEFAULT_PAGE_LIMIT,
+    maxPages: action.maxPages || DEFAULT_MAX_PAGES,
+    maxRows: positiveInteger(action.maxRows, 'maxRows', DEFAULT_MAX_ROWS),
+    maxDepth,
+    maxReadCount: action.maxReadCount || readPlan.maxReadCount || null,
+    maxElapsedMs: action.maxElapsedMs || null,
+    rowErrorLimit: action.rowErrorLimit || ROW_ERROR_LIMIT,
+    largeBom: largeBomBackgroundExpansionCaps(action),
+  }
+}
+
+function assertLargeBomActionExecutionContract(currentAction, snapshotAction) {
+  const refused = () => new StockPreparationTableActionError(
+    409,
+    'TABLE_ACTION_LARGE_BOM_ACTION_CHANGED',
+    'large-BOM action execution contract changed',
+  )
+  let current
+  let snapshot
+  try {
+    current = largeBomActionExecutionContract(currentAction)
+    snapshot = largeBomActionExecutionContract(snapshotAction)
+  } catch (_error) {
+    throw refused()
+  }
+  if (stableStringify(current) !== stableStringify(snapshot)) throw refused()
 }
 
 /**
@@ -861,9 +960,9 @@ function withoutDeployTimeProjectTargetMarker(action) {
  * The registry, and THE ONE SEAM THAT MAKES REBINDING A SOURCE A RUNTIME ACT.
  *
  * `actions` is still the deploy-time config, still drained into a Map ONCE at construction (which
- * happens inside `createHandlers`, i.e. at plugin activation). That is correct for everything in it
- * — the target sheet, the template, the read plan, the bounds — because all of those are decisions
- * a deployment makes about ITSELF and a restart is a fine cadence for changing them.
+ * happens inside `createHandlers`, i.e. at plugin activation). It remains the
+ * deployment fallback. Online read-plan composition occurs only through the
+ * separate execution resolver after this registry resolves the actual binding.
  *
  * `source.externalSystemId` is not that kind of fact, and treating it as one is the single biggest
  * onboarding cost this product has. It is a foreign key into a table the customer's own admin
@@ -874,9 +973,8 @@ function withoutDeployTimeProjectTargetMarker(action) {
  *
  * `resolveSourceBinding` is how that stops being true, and WHERE it sits is the whole design:
  *
- *   * it is consulted INSIDE `getTableAction`, which every stock-prep route already calls per
- *     request (dry-run, apply, mvp-persist, large-BOM start/run, reconcile, readiness, the hub
- *     overview join). So a binding written at 10:00 is read by the 10:00:01 request. No restart, no
+ *   * both `getTableAction` (metadata) and `getTableActionForExecution` consult it
+ *     per request. So a binding written at 10:00 is read by the 10:00:01 request. No restart, no
  *     plugin reload, no cache to invalidate — because there is no cache: the override was never
  *     read until the request asked for it.
  *   * it is consulted AFTER `cloneJson`, so the override mutates this request's private copy and
@@ -971,8 +1069,29 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
     }
   }
 
-  async function applyPersistedSourceBinding(action, input) {
-    if (!sourceBindingResolver) return action
+  async function applyPersistedSourceBinding(action, input, execution = false) {
+    const result = (effective, binding) => {
+      if (!execution) return effective
+      if (binding && (!isPlainObject(binding) || !Object.prototype.hasOwnProperty.call(binding, 'matchedWorkspaceId'))) {
+        throw new StockPreparationTableActionError(409, 'READ_PLAN_BINDING_SCOPE_INVALID', 'read-plan binding scope is unavailable')
+      }
+      return {
+        action: effective,
+        bindingScope: {
+          tenantId: optionalString(input.tenantId),
+          workspaceId: binding ? binding.matchedWorkspaceId : (effective.source.workspaceId || null),
+        },
+        sourceScope: {
+          tenantId: optionalString(input.tenantId),
+          workspaceId: effective.source.workspaceId || (binding ? binding.matchedWorkspaceId : optionalString(input.workspaceId)) || null,
+        },
+        legacySourceScope: {
+          tenantId: optionalString(input.tenantId),
+          workspaceId: effective.source.workspaceId || optionalString(input.workspaceId) || (binding && binding.matchedWorkspaceId) || null,
+        },
+      }
+    }
+    if (!sourceBindingResolver) return result(action, null)
     const tenantId = optionalString(input.tenantId)
     if (!tenantId) {
       throw new StockPreparationTableActionError(
@@ -982,15 +1101,16 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
         { actionId: action.actionId },
       )
     }
-    const bound = optionalString(await sourceBindingResolver({
+    const binding = await sourceBindingResolver({
       tenantId,
       workspaceId: optionalString(input.workspaceId),
       actionId: action.actionId,
-    }))
-    if (!bound) return action
+    })
+    const bound = optionalString(isPlainObject(binding) ? binding.externalSystemId : binding)
+    if (!bound) return result(action, null)
     // Re-normalize rather than assigning in place: `normalizeSource` is the ONE definition of what a
     // valid source is, and a stored value has to clear the same bar a configured one does.
-    return { ...action, source: normalizeSource({ ...action.source, externalSystemId: bound }) }
+    return result({ ...action, source: normalizeSource({ ...action.source, externalSystemId: bound }) }, binding)
   }
 
   return {
@@ -1011,6 +1131,20 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
         throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', `table action is not configured: ${actionId}`, { actionId })
       }
       return applyProjectTarget(await applyPersistedSourceBinding(cloneJson(action), input), input)
+    },
+    async getTableActionForExecution(input = {}) {
+      const actionId = optionalString(input.actionId) || PLM_STOCK_PREPARATION_ACTION_ID
+      if (actionId !== PLM_STOCK_PREPARATION_ACTION_ID) {
+        throw new StockPreparationTableActionError(404, 'TABLE_ACTION_NOT_FOUND', 'table action not found')
+      }
+      const action = configs.get(actionId)
+      if (!action) throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', 'table action is not configured')
+      const resolved = await applyPersistedSourceBinding(cloneJson(action), input, true)
+      // Execution must resolve the same project target as metadata. Retain the
+      // matched source/activation scope outside the serialized action, while the
+      // registry alone stamps the current per-project target and write marker.
+      resolved.action = await applyProjectTarget(resolved.action, input)
+      return resolved
     },
   }
 }
@@ -1579,6 +1713,7 @@ function canonicalHashOrderDuplicateResolution(resolution) {
 function buildRevision({ action, parameters, expansion, existingRows, conflictPolicyReview, plan }) {
   return hashJson({
     actionId: action.actionId,
+    ...(action.readPlanExecutionIdentity ? { readPlanExecutionIdentity: action.readPlanExecutionIdentity } : {}),
     parameters,
     source: {
       externalSystemId: action.source.externalSystemId,
@@ -1807,6 +1942,31 @@ async function consumeDryRunToken(tokenStore, token, expected) {
     throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current dry-run revision')
   }
   return stored
+}
+
+// Read-only admission check. The later consume and full recomputed revision
+// comparison remain authoritative for all non-read-plan changes.
+async function assertDryRunTokenReadPlanCurrent({ tokenStore, dryRunToken, action, parameters } = {}) {
+  const currentOnline = Object.prototype.hasOwnProperty.call(action, 'readPlanExecutionIdentity')
+  const token = optionalString(dryRunToken)
+  if (!token && !currentOnline) return
+  if (!token) throw new StockPreparationTableActionError(400, 'TABLE_ACTION_DRY_RUN_TOKEN_REQUIRED', 'dryRunToken is required for apply')
+  const store = requireTokenStore(tokenStore)
+  let stored
+  try { stored = await store.get(tokenStoreKey(token)) } catch (error) {
+    // A missing current pointer does not prove the supplied token is legacy.
+    // Refuse an unreadable token before any adapter load or later consume.
+    throw new StockPreparationTableActionError(503, 'TABLE_ACTION_TOKEN_STORE_UNAVAILABLE', 'dry-run token store is unavailable')
+  }
+  const storedOnline = isPlainObject(stored) && Object.prototype.hasOwnProperty.call(stored, 'readPlanExecutionIdentity')
+  if (!currentOnline && !storedOnline) return
+  if (!isPlainObject(stored) || Date.parse(stored.expiresAt) < Date.now()) {
+    throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_INVALID', 'dryRunToken is missing, expired, or already used')
+  }
+  if (currentOnline !== storedOnline || stored.actionId !== action.actionId || stored.parametersHash !== hashJson(normalizeActionParameters(parameters))
+    || stableStringify(stored.readPlanExecutionIdentity || null) !== stableStringify(action.readPlanExecutionIdentity || null)) {
+    throw new StockPreparationTableActionError(409, 'TABLE_ACTION_DRY_RUN_TOKEN_MISMATCH', 'dryRunToken does not match the current read-plan execution')
+  }
 }
 
 // `installedFieldProperties` (OPTIONAL) is the ownership projection of what is actually
@@ -2069,8 +2229,8 @@ async function computeDryRun({ action, parameters, sourceAdapter, recordsApi, pl
     // owner's ruling arrives without anyone having to configure it.
     rootSelection: action.rootSelection,
     extFieldMapping,
-    // E3-02's 断游标 half. Armed only: a page that claims `done: false` and offers no cursor stops
-    // being a silent truncation and becomes a refusal.
+    // Retained B2a option. SA01D rejects an explicit broken cursor in the expander for every caller;
+    // the armed-only boundary below still translates it into the existing B2a refusal contract.
     requireCompleteBatch: Boolean(b2aTrialRegistration),
   }))
   // R-05 + E3-02, result side: the expander CATCHES its own bounds and returns them as global error
@@ -2288,6 +2448,7 @@ async function dryRunStockPreparationAction(input = {}) {
       actionId: action.actionId,
       parametersHash: hashJson(parameters),
       revision: dryRun.revision,
+      ...(action.readPlanExecutionIdentity ? { readPlanExecutionIdentity: cloneJson(action.readPlanExecutionIdentity) } : {}),
       conflictPolicyReview: runOnlyReview,
     })
   }
@@ -2428,8 +2589,8 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
     // coerce values that the very next function drops — production for no consumer, which is the
     // defect this change exists to remove, not to reproduce. Carrying `ext_` into a snapshot line is
     // a snapshot-schema change with its own migration.
-    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
-    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    // B2a-specific hardening and refusal translation are dormant when registration is null.
+    // The expander's explicit broken-cursor check is unconditional (SA01D).
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
@@ -2673,8 +2834,8 @@ async function applyStockPreparationAction(input = {}) {
     // confirmed or superseded between the two calls changes the recomputed
     // revision and fails the token check — fail-closed, never fail-open.
     confirmationDecisionResolver: input.confirmationDecisionResolver,
-    // B2a read hardening (R-05/R-06) and the full-batch guards (E3-02/E3-05). Every one of them
-    // is a no-op when `b2aTrialRegistration` is null, which is the dormant case.
+    // B2a-specific hardening and refusal translation are dormant when registration is null.
+    // The expander's explicit broken-cursor check is unconditional (SA01D).
     b2aTrialRegistration,
     b2aClaimStore: input.b2aClaimStore,
     // R-02: the list the guard above matched, unchanged — the contract pins and re-checks it.
@@ -2750,11 +2911,14 @@ module.exports = {
   TABLE_ACTION_KIND,
   StockPreparationTableActionError,
   applyStockPreparationAction,
+  assertDryRunTokenReadPlanCurrent,
+  assertLargeBomActionExecutionContract,
   assertProductionCleanRowsWithinBound,
   assertStockPrepApplyAllowed,
   assertStockPrepApplySandboxAllowed,
   assertStockPreparationTargetReady,
   createStockPreparationTableActionRegistry,
+  composeStockPreparationReadPlanAction,
   resolveStockPrepApplyProductionPolicy,
   resolveStockPrepApplySandboxPolicy,
   resolveTargetFieldIds,
@@ -2768,6 +2932,7 @@ module.exports = {
   publicActionMetadata,
   __internals: {
     assertB2aTrialForStockPreparationRead,
+    largeBomActionExecutionContract,
     assertExtFieldMappingAgreesWithAction,
     assertTargetFieldMapCompleteness,
     assertTargetFieldsExist,
