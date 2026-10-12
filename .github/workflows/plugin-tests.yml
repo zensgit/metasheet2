@@ -648,6 +648,13 @@ jobs:
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          # Backend log rotation (runbook-backend-log-rotation-20261012): hermetic, pm2 / schtasks /
+          # ScheduledTasks replaced by functions. The Windows-only cases self-report SKIP here; the
+          # script's PowerShell 5.1 grammar is pinned statically by the suite itself. The explicit
+          # exit check is required: a `shell: pwsh` step only fails on the LAST command's
+          # $LASTEXITCODE, so a script that exits 1 before another script is otherwise swallowed.
+          ./scripts/ops/__tests__/multitable-onprem-backend-log-rotate.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
           # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
           # job, now in .github/workflows/stock-prep-powershell51.yml.
