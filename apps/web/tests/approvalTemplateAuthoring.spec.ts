@@ -6286,6 +6286,45 @@ describe('TemplateAuthoringView', () => {
       expect(await saveRules()).toStrictEqual([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
     })
 
+    // ── default (flag-on) Designer 2.0 surface: the PRODUCTION builder wiring (ApprovalFormBuilder
+    // passes the dependency's type + options to the inspector) and the live option names reaching
+    // the Canvas branch editor ──
+    it('Designer 2.0 (flag on): a select dependency picks an option name and saves the option value; renaming the option in the inspector renames it in the Canvas branch editor', async () => {
+      const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }], true, [{ id: 'note', type: 'text', label: '备注' }])
+      const card = (fieldId: string) => {
+        const index = [...OPTION_FIELDS.map((field) => field.id), 'note'].indexOf(fieldId)
+        return container!.querySelectorAll('[data-testid="approval-form-builder-card"]')[index] as HTMLElement
+      }
+      const inInspector = (testId: string) =>
+        container!.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLInputElement | null
+      card('note').click()
+      await flushUi()
+      await choose(inInspector('approval-form-field-inspector-visibility-depends'), 'kind')
+      const valueSelect = inInspector('approval-form-field-inspector-visibility-option-value')!
+      expect(Array.from(valueSelect.options).map((option) => option.textContent?.trim()))
+        .toEqual([CONDITION_VALUE_COPY_EN.chooseOption, '出差', '其他'])
+      expect(inInspector('approval-form-field-inspector-visibility-value')).toBeNull()
+      await choose(valueSelect, 'opt_trip')
+
+      card('kind').click()
+      await flushUi()
+      const label = inInspector('approval-form-field-inspector-option-label-0')!
+      label.value = '差旅'
+      label.dispatchEvent(new Event('input'))
+      label.dispatchEvent(new Event('blur'))
+      await flushUi()
+      const branchSelect = inRule(scope, 0, 'approval-condition-rule-option-value')!
+      expect(Array.from(branchSelect.options).map((option) => option.textContent)).toEqual(['差旅', '其他'])
+      expect(branchSelect.getAttribute('data-model-value')).toBe('"opt_trip"')
+
+      const fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'note').visibilityRule).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'opt_trip' })
+      expect(fields.find((field: any) => field.id === 'kind').options).toEqual([
+        { label: '差旅', value: 'opt_trip' },
+        { label: '其他', value: 'opt_other' },
+      ])
+    })
+
     // ── legacy (flag-off) form designer: visibility rules ──
     const NOTE = { id: 'note', type: 'text', label: '备注' }
     const noteRow = () => {
