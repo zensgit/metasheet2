@@ -924,7 +924,7 @@ async function lockAndPlanSeriesDelete(db: Db, input: { orgId: string; actorId: 
 
 /**
  * Series delete, step 3's writes (M5 PR-4a design §3.8; [a-41]: called only by `deleteTaskById`).
- * One `clock_timestamp()` evaluation, taken after the locks, is written to `deleted_at` and
+ * One `clock_timestamp()` reading, taken after the locks, is written to `deleted_at` and
  * `updated_at` of every target, and each target's `deleted` event copies it from its row, as the M3
  * single delete does (M3R2-CONC-5, M3R3-LOCK-2). The latest surviving occurrence that still has a rule
  * loses it, with a `recurrence_cleared` event at the same instant. Returns, per occurrence that got an
@@ -932,11 +932,13 @@ async function lockAndPlanSeriesDelete(db: Db, input: { orgId: string; actorId: 
  */
 async function softDeleteSeriesOccurrences(db: Db, input: { actorId: string; plan: SeriesDeletePlan }): Promise<Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }>> {
   const targetIds = input.plan.targets.map((target) => target.taskId)
+  // One reading for every target, kept as text so its microseconds never pass through a JS Date: a
+  // `clock_timestamp()` in the UPDATE's FROM list is evaluated again for each joined row, which gave
+  // two occurrences of one delete two instants (found by rec-delete-later-open).
+  const clock = await db.query(`SELECT clock_timestamp()::text AS at`)
   await db.query(
-    `UPDATE tasks AS t SET deleted_at = s.at, updated_at = s.at
-     FROM (SELECT clock_timestamp() AS at) AS s
-     WHERE t.id = ANY($1::text[])`,
-    [targetIds],
+    `UPDATE tasks SET deleted_at = $2::timestamptz, updated_at = $2::timestamptz WHERE id = ANY($1::text[])`,
+    [targetIds, String(clock.rows[0]?.at)],
   )
   const written: Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }> = []
   for (const target of input.plan.targets) {
