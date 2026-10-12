@@ -323,10 +323,15 @@ export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: s
   }
 }
 
-// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) the one
-// reader of a task that may be soft-deleted is the notification delivery worker, for a `deleted`
-// event: by then the task row is soft-deleted. Every other read selects live rows through the
-// builder above. The org clause is the same single emission, so its org guarantee is the same.
+// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) readers
+// of a task that may be soft-deleted, each for its own reason:
+// - the notification delivery worker, for a `deleted` event: by then the task row is soft-deleted;
+// - the recurrence series reads (M5 PR-4a design §2.10, §3.2 step 3, §3.8): the anchor and the
+//   chain walk of the ordinal read the series' first occurrence by id, and series delete loads it,
+//   whether or not it is soft-deleted, because a soft-deleted occurrence still holds the chain
+//   together. The other occurrences come through `buildTaskSeriesMembersCondition` below.
+// Every other read selects live rows through the builder above. The org clause is the same single
+// emission, so its org guarantee is the same.
 /**
  * `{ sql, params }` TEXT selecting one task of one org by id, live or soft-deleted. `$1` = task id,
  * `$2` = org. A caller that appends its own parameters numbers them from `params.length + 1`.
@@ -335,6 +340,35 @@ export function buildTaskByIdAnyStateCondition(input: { taskIdParam: string; org
   return {
     sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
     params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §4.7: the recurrence series reads (the ordinal of §2.10, the latest occurrence of
+// §3.2 and §3.8, series delete) select a series' occurrences through this builder, soft-deleted ones
+// included, never with an org condition of their own; `idx_tsk_recurrence_series` serves it.
+/**
+ * `{ sql, params }` TEXT selecting the tasks of one org whose `recurrence_series_id` is the given
+ * first-occurrence id, live or soft-deleted (the first occurrence itself is not among them: it is
+ * read by id through `buildTaskByIdAnyStateCondition`). `$1` = first-occurrence id, `$2` = org.
+ */
+export function buildTaskSeriesMembersCondition(input: { seriesIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.recurrence_series_id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
+    params: [input.seriesIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §3.8 step 1, §4.7: the live children of the occurrences a series delete removes,
+// for `planSeriesDelete`'s `nodes`. `tasks_parent_fk` is a single-column key, so a join alone would
+// not keep the children inside the org; the org comes from this builder.
+/**
+ * `{ sql, params }` TEXT selecting the live tasks of one org whose `parent_id` is one of the given
+ * ids. `$1` = text array of parent ids, `$2` = org.
+ */
+export function buildLiveChildrenOfTasksCondition(input: { parentIdsParam: readonly string[]; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.parent_id = ANY(${TASK_ID_PLACEHOLDER}::text[]) AND ${taskOrgLiveClause()}`,
+    params: [[...input.parentIdsParam], input.orgParam],
   }
 }
 

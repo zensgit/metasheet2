@@ -38,6 +38,7 @@ import {
 } from '../services/task-structure'
 import { isVersionConflict, patchTask } from '../services/task-patch'
 import { actorId, orgId, sendError } from './tasks-http'
+import { registerTaskEntityRoutes } from './tasks-entity'
 import { registerTaskListRoutes } from './tasks-lists'
 import { registerTaskSettingsRoutes } from './tasks-settings'
 
@@ -404,6 +405,8 @@ export function tasksRouter(): Router | null {
   // new mount, no new flag read). One call per line: gate 13's negative control rewrites it.
   registerTaskSettingsRoutes(router)
   registerTaskListRoutes(router)
+  // M5 PR-4a (design §3.0): the entity routes, on this same router.
+  registerTaskEntityRoutes(router)
 
   return router
 }

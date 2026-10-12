@@ -1420,6 +1420,9 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     }
     if (sql.includes('FROM directory_integrations')) return { rows: [{ dingtalk_active: true }] }
     if (sql.includes('UNION ALL')) return { rows: [{ member_kind: 'follower', user_id: 'usr-9' }] }
+    // M5 PR-4a slice 3: the task has no later occurrence (not in a series), so the delete keeps the
+    // single-task path.
+    if (sql.includes('tasks.recurrence_series_id = $1')) return { rows: [] }
     if (sql.includes('FROM tasks WHERE') || sql.includes('FROM tasks t WHERE')) {
       return { rows: [{ created_by: 'usr-0', completion_mode: 'all', status: taskStatus, parent_id: null, depth: 0, version: 1 }] }
     }

@@ -740,7 +740,7 @@ describe('tasks M3 comments and deletion real db', () => {
         await parked.release()
       }
       await expect(parked.edit).resolves.toMatchObject({ id: seeded.id, body: '停在事务里的编辑' })
-      await expect(pendingDelete).resolves.toEqual({ id: task.id, deleted: true })
+      await expect(pendingDelete).resolves.toEqual({ id: task.id, deleted: true, deletedIds: [task.id] })
       const rows = await poolManager.get().query<{ edited_at: Date; deleted_at: Date }>(
         `SELECT c.edited_at, t.deleted_at FROM task_comments c JOIN tasks t ON t.id = c.task_id WHERE c.id = $1`,
         [seeded.id],
@@ -801,7 +801,7 @@ describe('tasks M3 comments and deletion real db', () => {
         await parked.release()
       }
       await expect(parked.edit).resolves.toMatchObject({ id: seeded.id })
-      await expect(deleteTaskById({ orgId, actorId: userA, taskId: task.id })).resolves.toEqual({ id: task.id, deleted: true })
+      await expect(deleteTaskById({ orgId, actorId: userA, taskId: task.id })).resolves.toEqual({ id: task.id, deleted: true, deletedIds: [task.id] })
     }, 30000)
 
     // M3R3-LOCK-1 / M3R4-TAM-2 / M3R5-TST-1: a hand-off chain of short FOR
@@ -915,7 +915,7 @@ describe('tasks M3 comments and deletion real db', () => {
       try {
         const started = Date.now()
         await expect(within(deleteTaskById({ orgId, actorId: userA, taskId: task.id }), 8000, 'delete with a slow stamp'))
-          .resolves.toEqual({ id: task.id, deleted: true })
+          .resolves.toEqual({ id: task.id, deleted: true, deletedIds: [task.id] })
         // Positive control: the trigger did run, so the UPDATE took > 3 s.
         expect(Date.now() - started).toBeGreaterThanOrEqual(3500)
         const row = await db.query('SELECT deleted_at IS NOT NULL AS deleted FROM tasks WHERE id = $1', [task.id])
@@ -998,7 +998,7 @@ describe('tasks M3 comments and deletion real db', () => {
         await new Promise((resolve) => setTimeout(resolve, 50))
         await addComment({ orgId, actorId: userA, taskId: task.id, body: { body: '删除排队时的评论' } })
         await holder.query('COMMIT')
-        await expect(pendingDelete).resolves.toEqual({ id: task.id, deleted: true })
+        await expect(pendingDelete).resolves.toEqual({ id: task.id, deleted: true, deletedIds: [task.id] })
       } finally {
         try { await holder.query('ROLLBACK') } catch { /* already committed */ }
         if (pendingDelete) await pendingDelete.catch(() => undefined)
@@ -1245,9 +1245,9 @@ describe('tasks M3 comments and deletion real db', () => {
 
       // Delete the child first, then the parent succeeds.
       const childDeleted = await deleteTaskById({ orgId, actorId: userA, taskId: child.id })
-      expect(childDeleted).toEqual({ id: child.id, deleted: true })
+      expect(childDeleted).toEqual({ id: child.id, deleted: true, deletedIds: [child.id] })
       const parentDeleted = await deleteTaskById({ orgId, actorId: userA, taskId: parent.id })
-      expect(parentDeleted).toEqual({ id: parent.id, deleted: true })
+      expect(parentDeleted).toEqual({ id: parent.id, deleted: true, deletedIds: [parent.id] })
     })
 
     it('is creator-only (404 for a non-creator), writes a deleted_at + deleted event, and a second delete is 404', async () => {
@@ -1258,7 +1258,7 @@ describe('tasks M3 comments and deletion real db', () => {
         .rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
 
       const deleted = await deleteTaskById({ orgId, actorId: userA, taskId: task.id })
-      expect(deleted).toEqual({ id: task.id, deleted: true })
+      expect(deleted).toEqual({ id: task.id, deleted: true, deletedIds: [task.id] })
       const row = await poolManager.get().query<{ deleted_at: string | null }>('SELECT deleted_at FROM tasks WHERE id = $1', [task.id])
       expect(row.rows[0]?.deleted_at).not.toBeNull()
       const events = await poolManager.get().query<{ event_type: string; actor_id: string }>(

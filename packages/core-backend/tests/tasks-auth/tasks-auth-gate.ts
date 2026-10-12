@@ -228,6 +228,14 @@ describe('tasks auth gate', () => {
     'POST /api/tasks/:id/reopen',
   ]
 
+  // The M5 PR-4a routes registered so far (design task-m5-pr4a-backend-design-20261010.md §3.0):
+  // slice 3 adds PUT /api/tasks/:id/recurrence. Only the route population and the dispatch binding
+  // below cover them for now; their gate 1 / 2 rows are slice 6 (that design, §1.3).
+  const M5_PLACEHOLDER = { taskId: 'tsk_missing' }
+  const M5_ROUTES: Array<{ label: string; method: 'put'; path: (c: { taskId: string }) => string }> = [
+    { label: 'PUT /api/tasks/:id/recurrence', method: 'put', path: (c) => `/api/tasks/${c.taskId}/recurrence` },
+  ]
+
   // The 30 M4 (PR-3a) routes, design §3 and §10.7: PATCH /api/tasks/:id (S4), task settings (S3),
   // lists (S5), list members (S6), list items (S7), groups in both scopes (S8). Writes take
   // tasks:write and answer 422 ORG_MISSING without an org; reads take tasks:read and answer 404
@@ -1232,7 +1240,7 @@ describe('tasks auth gate', () => {
   // dispatches them (the first stack layer whose route has that method and whose path matches),
   // and that layer's "METHOD path" must be the row's label. A row whose method or path drifted to
   // a sibling route fails here even though its label still matches the router.
-  it('gates 1/2/16 (M4): tasksRouter() registers exactly the P0-A, M3 and M4 route tables, no table repeats a route, and every M3 / M4 row requests the route its label names', () => {
+  it('gates 1/2/16 (M4): tasksRouter() registers exactly the P0-A, M3, M4 and M5 route tables, no table repeats a route, and every M3 / M4 / M5 row requests the route its label names', () => {
     const router = tasksRouter()
     expect(router).not.toBeNull()
     type StackLayer = { route?: { path: unknown; methods: Record<string, boolean> }; match: (path: string) => boolean }
@@ -1245,10 +1253,12 @@ describe('tasks auth gate', () => {
       }
       for (const method of Object.keys(layer.route.methods)) registered.push(`${method.toUpperCase()} ${String(layer.route.path)}`)
     }
-    const tables = [...P0A_ROUTES, ...M3_ROUTES.map((route) => route.label), ...M4_ROUTES.map((route) => route.label)]
+    const tables = [
+      ...P0A_ROUTES, ...M3_ROUTES.map((route) => route.label), ...M4_ROUTES.map((route) => route.label), ...M5_ROUTES.map((route) => route.label),
+    ]
     expect(new Set(tables).size, 'a route appears twice in the tables').toBe(tables.length)
     expect(new Set(registered).size, 'the router registers a route twice').toBe(registered.length)
-    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 30])
+    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length, M5_ROUTES.length]).toEqual([8, 13, 30, 1])
     expect([...registered].sort()).toEqual([...tables].sort())
     const dispatchedTo = (method: string, url: string): string => {
       const layer = stack.find((candidate) => candidate.route?.methods[method] === true && candidate.match(url))
@@ -1259,6 +1269,9 @@ describe('tasks auth gate', () => {
     }
     for (const route of M4_ROUTES) {
       expect(dispatchedTo(route.method, route.path(M4_PLACEHOLDER)), route.label).toBe(route.label)
+    }
+    for (const route of M5_ROUTES) {
+      expect(dispatchedTo(route.method, route.path(M5_PLACEHOLDER)), route.label).toBe(route.label)
     }
   })
 

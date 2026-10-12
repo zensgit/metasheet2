@@ -71,6 +71,13 @@ function respondWith(seed: Seed): void {
     if (/^(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
     if (sql.startsWith('SELECT current_setting')) return { rows: [{ value: '0' }] }
     if (seed.missing && /FROM tasks WHERE/.test(sql)) return { rows: [] }
+    // M5 PR-4a slice 3 (design §4.1, closing part): the series reads answer "no rule, not in a
+    // series, no later occurrence, no recurrence_spawned", before the `SELECT 1` wildcard below.
+    if (sql.startsWith('SELECT recurrence IS NOT NULL AS has_recurrence, recurrence_series_id FROM tasks WHERE')) {
+      return { rows: [{ has_recurrence: false, recurrence_series_id: null }] }
+    }
+    if (sql.startsWith('SELECT id FROM tasks WHERE tasks.recurrence_series_id')) return { rows: [] }
+    if (sql.startsWith('SELECT 1 AS spawned FROM task_events')) return { rows: [] }
     if (sql.startsWith('SELECT 1 FROM tasks WHERE')) return { rows: [{ one: 1 }] }
     if (sql.startsWith('SELECT id FROM tasks WHERE parent_id')) return { rows: (seed.children ?? []).map((id) => ({ id })) }
     if (sql.startsWith('SELECT created_by FROM tasks WHERE')) return { rows: [{ created_by: seed.createdBy }] }
@@ -472,7 +479,11 @@ const INPUT_COLUMNS = new RegExp(String.raw`\b${INPUT_COLUMN}"?\s*=|\([^()]*\b${
 const TOUCHPOINT_NAMES = [
   'createTask', 'completeTask', 'reopenTask', 'addAssignee', 'removeAssignee', 'switchCompletionMode', 'deleteTaskById', 'patchTask',
 ]
-const WRITE_HELPERS = ['writeChangedAssignees', 'writeTaskDoneState', 'writeCompletionModeState']
+// M5 PR-4a slice 3 ([a-41]): the spawn of the next occurrence and the series soft delete, each called
+// only by touchpoints.
+const WRITE_HELPERS = [
+  'writeChangedAssignees', 'writeTaskDoneState', 'writeCompletionModeState', 'spawnNextOccurrenceIfDue', 'softDeleteSeriesOccurrences',
+]
 
 interface FunctionSpan { name: string; start: number; end: number }
 
@@ -624,6 +635,7 @@ describe('census of the pending-predicate writers (design §2.3)', () => {
     for (const { text } of serviceSources()) for (const name of inputWriters(text)) writers.add(name)
     expect([...writers].sort()).toEqual([
       'addAssignee', 'createTask', 'deleteTaskById', 'patchTask', 'removeAssignee',
+      'softDeleteSeriesOccurrences', 'spawnNextOccurrenceIfDue',
       'writeChangedAssignees', 'writeCompletionModeState', 'writeTaskDoneState',
     ])
     for (const helper of WRITE_HELPERS) {

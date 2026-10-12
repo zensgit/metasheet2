@@ -473,6 +473,11 @@ describe('tasks P0-A real db', () => {
       // M5 PR-4a slice 1 (task-m5-pr4a-backend-design-20261010.md §3.8, [a-05]): only the creator
       // completes for every assignee; this reader is an assignee.
       canCompleteForAll: false,
+      // M5 PR-4a slice 3 (§3.8, [a-17], [a-35]): no rule, not in a series, no later occurrence.
+      recurrence: null,
+      seriesId: null,
+      previousOccurrenceId: null,
+      nextOccurrenceId: null,
     })
     const asCreator = await getTask({ orgId, actorId: userA, taskId: created.id })
     expect(asCreator.canComplete).toBe(true)

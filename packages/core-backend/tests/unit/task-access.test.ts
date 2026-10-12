@@ -5,7 +5,9 @@ import {
   TASK_ROLES,
   TASK_ROLE_ABILITY,
   TASK_VIEWS,
+  buildLiveChildrenOfTasksCondition,
   buildTaskByIdAnyStateCondition,
+  buildTaskSeriesMembersCondition,
   buildTaskByIdCondition,
   buildTaskInListCondition,
   buildTaskPendingCondition,
@@ -572,8 +574,31 @@ describe('buildTaskByIdAnyStateCondition (M4 PR-3b)', () => {
       buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
       buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }),
       buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildTaskSeriesMembersCondition({ seriesIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildLiveChildrenOfTasksCondition({ parentIdsParam: ['tsk_a'], orgParam: 'org1' }),
     ]
     for (const cond of outputs) expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
+  })
+})
+
+// M5 PR-4a slice 3 (design task-m5-pr4a-backend-design-20261010.md §4.7): the series reads and the
+// live children of a series delete go through the module's single org clause.
+describe('buildTaskSeriesMembersCondition / buildLiveChildrenOfTasksCondition (M5 PR-4a slice 3)', () => {
+  it('series members: pinned text and params, soft-deleted rows admitted, the org clause once', () => {
+    const cond = buildTaskSeriesMembersCondition({ seriesIdParam: 'tsk_first', orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.recurrence_series_id = $1 AND (tasks.org_id = $2) AND TRUE')
+    expect(cond.params).toEqual(['tsk_first', 'org1'])
+    expect(cond.sql.includes('deleted_at')).toBe(false)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+  })
+
+  it('live children: pinned text and params (a copied id array), live rows only, the org clause once', () => {
+    const parents = ['tsk_a', 'tsk_b']
+    const cond = buildLiveChildrenOfTasksCondition({ parentIdsParam: parents, orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.parent_id = ANY($1::text[]) AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL')
+    expect(cond.params).toEqual([['tsk_a', 'tsk_b'], 'org1'])
+    expect(cond.params[0]).not.toBe(parents)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
   })
 })
 

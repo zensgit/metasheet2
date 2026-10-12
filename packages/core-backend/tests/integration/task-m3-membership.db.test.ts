@@ -1079,7 +1079,7 @@ describe('tasks M3 membership real db', () => {
       expect((before.children as Array<{ id: string }>).map((c) => c.id)).toContain(child.id)
 
       const deleted = await deleteTaskById({ orgId, actorId: userA, taskId: child.id })
-      expect(deleted).toEqual({ id: child.id, deleted: true })
+      expect(deleted).toEqual({ id: child.id, deleted: true, deletedIds: [child.id] })
 
       const after = await getTask({ orgId, actorId: userA, taskId: root.id })
       expect((after.children as Array<{ id: string }>).map((c) => c.id)).not.toContain(child.id)
