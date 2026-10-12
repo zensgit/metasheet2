@@ -118,6 +118,10 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
         { site: 'roles:create', testFile: RBAC },
         { site: 'roles:update', testFile: RBAC },
         { site: 'roles:delete', testFile: RBAC },
+        // DELETE of a namespace main-admin / admin-equivalent role also removes the role's
+        // user_roles rows (rbac/role-assignment.ts unassignUserRoles) in the same transaction: a
+        // distinct write set reaching a triggered table, hence its own call site and leg.
+        { site: 'roles:delete-admin-role', testFile: RBAC },
       ],
     }],
   },
