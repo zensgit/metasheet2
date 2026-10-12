@@ -17,6 +17,7 @@ import {
 import {
   conditionOperatorsFor,
   conditionRuleValueIssues,
+  conditionStoredValueNoteShown,
   conditionStoredValuePreview,
   conditionValueShowsBlank,
 } from '../src/approvals/conditionValueTyping'
@@ -752,7 +753,16 @@ describe('R-43 (B) typed branch condition values', () => {
     }
     expect(conditionValueShowsBlank([])).toBe(false)
 
-    // strings verbatim; anything else as JSON so 5 / '5' and [1,2] / '1,2' stay distinguishable
+    // gate r4 NIT-f: the read-only note also covers a number box left empty by a non-number
+    for (const issue of ['not-text', 'in-not-list', 'list-not-scalar', 'not-number'] as const) {
+      expect(conditionStoredValueNoteShown([issue])).toBe(true)
+    }
+    for (const issue of ['not-date', 'value-not-option', 'operator-not-effective'] as const) {
+      expect(conditionStoredValueNoteShown([issue])).toBe(false)
+    }
+    expect(conditionStoredValueNoteShown([])).toBe(false)
+
+    // strings verbatim; anything else as JSON so [1,2] / '1,2' stay distinguishable (5 / '5' both read 5)
     expect(conditionStoredValuePreview('a')).toBe('a')
     expect(conditionStoredValuePreview(5)).toBe('5')
     expect(conditionStoredValuePreview([1, 2])).toBe('[1,2]')

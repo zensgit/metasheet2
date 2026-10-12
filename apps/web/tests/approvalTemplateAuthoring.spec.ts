@@ -6221,8 +6221,11 @@ describe('TemplateAuthoringView', () => {
       expect(storedNote(3)).toBe('a')
       expect((inRule(scope, 6, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('')
       expect(storedNote(6)).toBe('["a","b"]')
-      // option pickers / number boxes keep their own placeholders (no note); an unmarked rule has none
-      for (const index of [0, 1, 2, 4, 5]) expect(storedNote(index)).toBeNull()
+      // gate r4 NIT-f: the number box left empty by eq's string shows the saved value read-only too
+      expect(storedNote(2)).toBe('5000')
+      expect(storedNote(7)).toBe('[1,2]')
+      // option pickers keep their own placeholders (no note); an unmarked rule has none
+      for (const index of [0, 1, 4, 5]) expect(storedNote(index)).toBeNull()
       // The single-option picker shows the invalid placeholder for the list (never an option picked).
       const listPicker = inRule(scope, 5, 'approval-condition-rule-option-value')!
       expect(listPicker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
@@ -6578,6 +6581,20 @@ describe('TemplateAuthoringView', () => {
       expect(noteRow().textContent).not.toContain('opt_lv_one')
       // loading never rewrites it
       expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
+    it('gate r4 NIT-f legacy designer: a numeric STRING under eq on a number dependency shows an empty box plus the saved value; entering the number fixes it', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'eq', value: '5000' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect((inNote('approval-field-visibility-number-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('5000')
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+      updateTemplateSpy.mockClear()
+      await type(inNote('approval-field-visibility-number-value') as unknown as HTMLInputElement, '5000')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 5000 })
     })
 
     it('legacy designer: in → isEmpty → eq on a text dependency keeps the first line (never the joined list)', async () => {

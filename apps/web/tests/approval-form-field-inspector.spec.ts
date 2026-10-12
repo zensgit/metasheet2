@@ -1599,11 +1599,15 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     )
     expect(stale.input('approval-form-field-inspector-visibility-number-value').value).toBe('')
     expect(issueText(stale)).toContain(conditionValueIssueMessage('not-number', false))
+    // gate r4 NIT-f: the empty number box's saved value is shown read-only
+    const storedNoteSelector = '[data-testid="approval-form-field-inspector-visibility-stored-value-text"]'
+    expect(stale.root.querySelector(storedNoteSelector)?.textContent).toBe('5000')
     await stale.typeText('approval-form-field-inspector-visibility-number-value', '5000')
     await stale.blur('approval-form-field-inspector-visibility-number-value')
     expect(stale.commands).toHaveLength(1)
     expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 5000 })
     expect(issueText(stale)).toBe('')
+    expect(stale.root.querySelector(storedNoteSelector)).toBeNull()
   })
 
   it('gate r2 F2-1: a non-string value on a TEXT dependency is marked, shown empty, and re-entering the same text commits a string', async () => {

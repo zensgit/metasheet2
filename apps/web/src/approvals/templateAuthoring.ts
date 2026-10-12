@@ -39,8 +39,8 @@ import {
 import { validateRecordLinkPinAgainstLoadedCatalog, visibilityReferenceBaseFieldId } from './recordLinkField'
 import {
   conditionStoredValuePreview,
+  conditionStoredValueNoteShown,
   conditionValueKind,
-  conditionValueShowsBlank,
   formatConditionListText,
   isOptionKind,
   parseConditionListText,
@@ -555,7 +555,8 @@ export function conditionValueFieldFromDraft(
 
 /**
  * Read-only preview of a stored visibility value that its free-entry box shows EMPTY because the
- * rule is marked (`conditionValueShowsBlank`), so the author still sees what was saved; null when
+ * rule is marked (`conditionStoredValueNoteShown`: a blanked text box, or a number box left empty by
+ * a non-number), so the author still sees what was saved; null when
  * the box shows the value itself (or the dependency is an option field, whose pickers carry their
  * own invalid-value placeholders).
  */
@@ -566,7 +567,7 @@ export function visibilityStoredValuePreview(
   if (!dependency || isOptionKind(conditionValueKind(dependency))) return null
   const rule = buildVisibilityRule(visibility)
   if (!rule || rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return null
-  if (!conditionValueShowsBlank(visibilityRuleValueIssues(rule, dependency))) return null
+  if (!conditionStoredValueNoteShown(visibilityRuleValueIssues(rule, dependency))) return null
   return conditionStoredValuePreview(rule.operator === 'in' ? rule.values : rule.value)
 }
 

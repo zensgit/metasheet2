@@ -364,6 +364,16 @@ export function conditionValueShowsBlank(issues: readonly ConditionValueIssue[])
   return issues.some((issue) => BLANKED_TEXT_ISSUES.includes(issue))
 }
 
+/**
+ * Whether a free-entry box's marked stored value gets the read-only「stored value」note: every
+ * text-box case above, plus a number box holding a non-number (it never hands one to
+ * `el-input-number`, so the box is empty — e.g. the common pre-R-43 `'5000'` under eq). Option
+ * pickers are excluded by the callers (they show their own invalid-value placeholders).
+ */
+export function conditionStoredValueNoteShown(issues: readonly ConditionValueIssue[]): boolean {
+  return conditionValueShowsBlank(issues) || issues.includes('not-number')
+}
+
 const STORED_VALUE_PREVIEW_MAX = 60
 
 /**

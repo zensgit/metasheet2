@@ -1493,6 +1493,7 @@ import type { ConditionRuleEdit, ConditionRuleOperator } from '../conditionEdit'
 import {
   conditionOperatorsFor,
   conditionRuleValueIssues,
+  conditionStoredValueNoteShown,
   conditionStoredValuePreview,
   conditionValueCopy,
   conditionValueIssueText,
@@ -1703,8 +1704,10 @@ function ruleIssueText(rule: ConditionRuleEdit): string {
 function ruleValueShownBlank(rule: ConditionRuleEdit): boolean {
   return !ruleIsOption(rule) && rule.operator !== 'isEmpty' && conditionValueShowsBlank(ruleIssues(rule))
 }
+/** The read-only note: every blanked text box, plus a number box left empty by a non-number. */
 function ruleStoredValueShown(rule: ConditionRuleEdit): boolean {
-  return ruleValueShownBlank(rule) && !isBlankRuleValue(rule.value)
+  if (ruleIsOption(rule) || rule.operator === 'isEmpty' || isBlankRuleValue(rule.value)) return false
+  return conditionStoredValueNoteShown(ruleIssues(rule))
 }
 function ruleScalarText(rule: ConditionRuleEdit): string {
   return ruleValueShownBlank(rule) ? '' : conditionRuleValueText(rule)
