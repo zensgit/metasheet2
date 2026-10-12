@@ -97,7 +97,7 @@ async function punchBusinessFingerprint() {
   finally { client.release() }
 }
 type LoaderReply = {
-  type: 'ready' | 'result' | 'stopped' | 'error'; nodePid?: number; backendPid?: number; loaderInstances?: number;
+  type: 'ready' | 'result' | 'stopped' | 'error' | 'trace'; phase?: string; code?: string; name?: string; nodePid?: number; backendPid?: number; loaderInstances?: number;
   context?: { timezone: string; source: string; mode: string; policyVersion: number; employeeReads: number };
 }
 function loaderCommand(child: ChildProcess, message: Record<string, unknown>): Promise<LoaderReply> {
@@ -107,12 +107,15 @@ function loaderCommand(child: ChildProcess, message: Record<string, unknown>): P
       child.off('message', onMessage); child.off('error', onError); child.off('exit', onExit)
       if (error) reject(error); else resolve(reply!)
     }
-    const onMessage = (reply: LoaderReply) => reply.type === 'error'
-      ? finish(new Error('MT12_CHILD_FAILED')) : finish(undefined, reply)
+    const expectedType = message.type === 'init' ? 'ready' : message.type === 'read' ? 'result' : 'stopped'
+    const onMessage = (reply: LoaderReply) => {
+      if (reply.type === 'error') finish(new Error('MT12_CHILD_FAILED_'+reply.phase+'_'+reply.code))
+      else if (reply.type === expectedType) finish(undefined, reply)
+    }
     const onError = () => finish(new Error('MT12_CHILD_PROCESS_FAILED'))
     const onExit = () => finish(new Error('MT12_CHILD_EXITED_EARLY'))
     const timer = setTimeout(() => finish(new Error('MT12_CHILD_COMMAND_TIMEOUT')), 10_000)
-    child.once('message', onMessage); child.once('error', onError); child.once('exit', onExit)
+    child.on('message', onMessage); child.once('error', onError); child.once('exit', onExit)
     child.send(message, error => { if (error) onError() })
   })
 }
@@ -1556,6 +1559,11 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
     }
     const children: ChildProcess[] = []
     const stderrTraces: Array<{bytes:number;digest:ReturnType<typeof createHash>}> = []
+    const phaseTrace: Array<{child:number;phase:string;code?:string;name?:string;elapsedMs:number}> = []
+    const started = Date.now()
+    let phase = 'SPAWN'
+    let primaryFailure: unknown
+    let cleanupFailure: unknown
     try {
       for (let index=0;index<2;index+=1) {
         children.push(fork(new URL('../utils/attendance-timezone-loader-child.ts',import.meta.url), [], {
@@ -1565,7 +1573,12 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
         const trace = {bytes:0,digest:createHash('sha256')}
         stderrTraces.push(trace)
         children[index].stderr?.on('data', (chunk: Buffer) => { trace.bytes+=chunk.length; trace.digest.update(chunk) })
+        children[index].on('message', (reply: LoaderReply) => {
+          if (reply.type === 'trace' || reply.type === 'error') phaseTrace.push({child:index,phase:reply.phase!,
+            ...(reply.code ? {code:reply.code} : {}),...(reply.name ? {name:reply.name} : {}),elapsedMs:Date.now()-started})
+        })
       }
+      phase = 'INIT'
       const identities = await Promise.all(children.map(child => loaderCommand(child,{type:'init',input:inputs})))
       expect(identities.every((identity,index) => identity.type === 'ready' && identity.loaderInstances === 1
         && identity.nodePid === children[index].pid && identity.nodePid !== process.pid)).toBe(true)
@@ -1576,27 +1589,43 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
         expect(replies.every((reply,index) => reply.type === 'result' && reply.nodePid === identities[index].nodePid)).toBe(true)
         return replies.map(reply => reply.context)
       }
+      phase = 'READ_OFF_V0'
       expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:0,employeeReads:0,
       })))
       punchClock.setOnlinePunchInstantForTests('2025-12-01T00:00:00Z')
+      phase = 'PUT_ON'
       const enabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:true,expectedVersion:0},'PUT')
       expect(enabled).toMatchObject({status:200,body:{ok:true,data:{enabled:true,version:1}}})
+      phase = 'READ_ON_V1'
       expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'Asia/Tokyo',source:'employee_override',mode:'multi_timezone',policyVersion:1,employeeReads:1,
       })))
+      phase = 'PUT_OFF'
       const disabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:false,expectedVersion:1},'PUT')
       expect(disabled).toMatchObject({status:200,body:{ok:true,data:{enabled:false,version:2}}})
+      phase = 'READ_OFF_V2'
       expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:2,employeeReads:0,
       })))
       expect(await fixture.counts(actor.userId)).toEqual({events:0,records:0,requests:0,operations:0})
+    } catch (error) {
+      primaryFailure = error
     } finally {
-      await Promise.all(children.map(stopLoaderChild))
-      console.info('MT12_CHILD_STDERR_TRACES',JSON.stringify(stderrTraces.map(trace => ({bytes:trace.bytes,sha256:trace.digest.digest('hex')}))))
-      expect(children.every(child => child.exitCode === 0 && child.signalCode === null)).toBe(true)
-      await resetSources()
+      try {
+        await Promise.all(children.map(stopLoaderChild))
+        expect(children.every(child => child.exitCode === 0 && child.signalCode === null)).toBe(true)
+      } catch (error) { cleanupFailure = error }
+      console.info('MT12_CHILD_DIAGNOSTIC',JSON.stringify({phase,primaryFailure:primaryFailure !== undefined,
+        cleanupFailure:cleanupFailure !== undefined,phaseTrace,
+        exits:children.map(child => ({exitCode:child.exitCode,signal:child.signalCode})),
+        stderr:stderrTraces.map(trace => ({bytes:trace.bytes,sha256:trace.digest.digest('hex')}))}))
+      try { await resetSources() } catch (error) { cleanupFailure ??= error }
     }
+    // Preserve the first failure; a failed child must not be relabelled as a
+    // cleanup-only error. Cleanup failure remains fatal if the business passed.
+    if (primaryFailure !== undefined) throw primaryFailure
+    if (cleanupFailure !== undefined) throw cleanupFailure
   })
 
   describe('future employee timezone boundaries use the whole target context', () => {
