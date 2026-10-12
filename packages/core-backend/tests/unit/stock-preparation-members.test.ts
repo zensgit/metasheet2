@@ -961,6 +961,10 @@ describe('stock-prep members port (S5b, R-39)', () => {
       '开发成员（内置）', '开发成员(内置)', '开发成员 【内置】', '一线填写「内置」', '一线​填写',
       'ＤＥＶＥＬＯＰＥＲ', 'developer', 'Floor  Operator', 'Main administrator (built-in)', 'Data Manager (Puller)',
       'stock-prep_admin', 'Stock-Prep_Frontline', '（内置）', '​',
+      // owner 2026-10-12 (R-39): the frontline built-in is 「操作人员」 / "Operator"; its previous
+      // name stays reserved too (an instance not yet upgraded still shows it).
+      '操作人员', ' 操作人员 ', '操作人员（内置）', '操作 人员', 'Operator', 'OPERATOR', 'ｏｐｅｒａｔｏｒ (built-in)',
+      '一线填写', 'Floor operator',
     ]
     const h = harness()
     for (const name of reserved) {
@@ -970,7 +974,7 @@ describe('stock-prep members port (S5b, R-39)', () => {
       expect([rename.status, rename.code], `rename ${JSON.stringify(name)}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED'])
     }
     expect(h.depCallCount(), 'zero IO').toBe(0)
-    for (const name of ['开发成员甲', '一线填写组', '备料主管理员助理', 'Developers']) {
+    for (const name of ['开发成员甲', '一线填写组', '备料主管理员助理', 'Developers', '操作人员组', 'Operators', '审批与提交']) {
       await expect(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name, permissionCodes: [] }), name).resolves.toMatchObject({ name })
     }
   })

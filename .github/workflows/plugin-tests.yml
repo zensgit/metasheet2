@@ -905,14 +905,14 @@ jobs:
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
       # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (24) = 75. Get each file's own
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (37) = 88. Get each file's own
       # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=75
+          EXPECTED_OPS_TESTS_COUNT=88
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1160,8 +1160,11 @@ jobs:
       # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
       # mutate kysely_migration.
       # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
-      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39); every one
-      # of them runs inside a transaction it rolls back.
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39), and the
+      # owner-2026-10-12 cases: the frontline display-name migration (zzzz20261012090000) and the
+      # move script's option-1 split step (effective permissions through rbac/service.ts, routed
+      # to the test transaction by a db/pg mock local to that file); every one of them runs inside
+      # a transaction it rolls back.
       # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate

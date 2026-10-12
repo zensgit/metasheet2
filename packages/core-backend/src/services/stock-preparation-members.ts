@@ -91,15 +91,21 @@ export const STOCK_PREP_BUILTIN_ROLE_IDS = Object.freeze([
  * The built-ins' display names as the page renders them (zh and en). A custom role may not take one
  * of them — with or without a 「（内置）」 marker, in any width / case / spacing — so a custom role
  * cannot pose as a built-in on the page or in an appoint list (fix round 1, S8).
+ *
+ * `stock-prep_frontline` is 「操作人员」 / "Operator" since the owner ruling of 2026-10-12 (R-39;
+ * migration zzzz20261012090000). Its previous name 「一线填写」 / "Floor operator" stays reserved: an
+ * instance not yet upgraded, or one where that migration left the name as found, still shows it.
  */
 export const STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES = Object.freeze([
   '备料主管理员',
   '数据管理员（拉取人员）',
   '开发成员',
+  '操作人员',
   '一线填写',
   'Main administrator',
   'Data manager (puller)',
   'Developer',
+  'Operator',
   'Floor operator',
 ] as const)
 export const STOCK_PREP_CUSTOM_ROLE_ID_PREFIX = 'stock-prep_c_'
