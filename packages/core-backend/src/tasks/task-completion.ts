@@ -37,11 +37,22 @@ export type TaskCompletionEventType =
   | 'self_reopened'
   | 'reopened'
 
+/**
+ * What an event records in `task_events.payload`: closed key names and task-domain ids only, never
+ * business content such as a title or a value (M5 PR-4a design §1.2, §4.4).
+ */
+export type TaskCompletionEventPayload = Readonly<Record<string, string>>
+
 export interface TaskCompletionEvent {
   type: TaskCompletionEventType
   userId: string
   /** Present on complete events (an explicit `now` was supplied); absent on reopen events (no clock needed). */
   occurredAt?: Date
+  /**
+   * M5 PR-4a slice 1: written into `task_events.payload`; absent means the column's `{}`. Only the
+   * `completed` of a creator's complete for every assignee carries one (`applyCompleteForAll`).
+   */
+  payload?: TaskCompletionEventPayload
 }
 
 export interface ApplyCompleteResult {
@@ -149,6 +160,52 @@ export function applyComplete(input: {
     done,
     via: 'formula',
     events: [{ type: done ? 'completed' : 'self_completed', userId: actorId, occurredAt: now }],
+  }
+}
+
+// RULED(2026-10-09): six items, item 3: a task's creator may complete it for every assignee, and
+// completing a task that is already done again is a no-op that records no second event.
+// ASSUMPTION(task-m5a): [a-03] that completion records `completed` with payload `{ scope: 'all' }`.
+// ASSUMPTION(task-m5a): [a-04] in `any` mode and on a task without assignees it is exactly the
+// default complete (the creator's own completion already finishes the whole task there).
+/**
+ * `complete` with scope `all` (M5 PR-4a design §3.1, §4.1, §5). Order of the branches:
+ * 1. an actor other than `createdBy` throws (the service answers 404 first, via `canCompleteForAll`);
+ * 2. `wasDone` ⇒ no-op, no event, in every mode, even when a row is still null (task-c A6: an
+ *    assignee added to a done task, then the mode switched to `all`);
+ * 3. `all` mode with at least one assignee: every null row is stamped with the SAME `now`, a row that
+ *    already holds a completion instant keeps it, the task is done, and one `completed` is recorded
+ *    for the actor with payload `{ scope: 'all' }` (design §3.1 events row, §4.1: one `completed` on
+ *    the flip). That holds when no row was left to stamp too: past the `wasDone` branch every call
+ *    here flips the task, so it never flips without its event. `applyComplete` keeps its own
+ *    "no stamped row ⇒ no event" rule for the default path;
+ * 4. otherwise (`any` mode, or no assignee): `applyComplete` itself, result for result.
+ */
+export function applyCompleteForAll(input: {
+  mode: TaskCompletionMode
+  rows: TaskAssigneeRow[]
+  actorId: string
+  createdBy: string
+  now: Date
+  /** Same contract as `applyComplete`'s `wasDone`: the task row's status, read under the structure lock. */
+  wasDone: boolean
+}): ApplyCompleteResult {
+  const { mode, rows, actorId, createdBy, now, wasDone } = input
+  if (actorId !== createdBy) {
+    throw new Error('applyCompleteForAll: only the task creator may complete a task for every assignee')
+  }
+  if (wasDone === true) {
+    return { rows: rows.map((row) => ({ ...row })), done: true, via: rows.length === 0 ? 'creator-direct' : 'formula', events: [] }
+  }
+  if (mode !== 'all' || rows.length === 0) {
+    return applyComplete(input)
+  }
+  const newRows = rows.map((row) => (isCompleted(row) ? { ...row } : { ...row, completedAt: now }))
+  return {
+    rows: newRows,
+    done: computeTaskDone({ mode, assigneeRows: newRows }),
+    via: 'formula',
+    events: [{ type: 'completed', userId: actorId, occurredAt: now, payload: { scope: 'all' } }],
   }
 }
 

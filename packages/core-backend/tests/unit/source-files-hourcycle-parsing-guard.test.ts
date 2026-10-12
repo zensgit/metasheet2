@@ -326,6 +326,13 @@ const KNOWN_SITES: KnownSite[] = [
     kind: 'display',
   },
   {
+    // attendance-history-reconcile.mjs `localDay()` — formatToParts consumed,
+    // but only year/month/day parts; no `hour` requested.
+    file: 'scripts/ops/attendance-history-reconcile.mjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
+  {
     // staging-attendance-dispatch-d5-smoke.mjs `formatDateInTimeZone()` — formatToParts
     // consumed, but only year/month/day parts; no `hour` requested.
     file: 'scripts/ops/staging-attendance-dispatch-d5-smoke.mjs',
@@ -686,7 +693,8 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // above: IANA canonicalization and the hour-free local credit-day key.
     // 28 = 25 + the three task-dates.ts sites (one parsing formatter with hourCycle 'h23', two
     // resolvedOptions-only canonicalizations).
-    expect(KNOWN_SITES.length).toBe(28)
+    // 29 = 28 + the hour-free history-reconcile local-day key.
+    expect(KNOWN_SITES.length).toBe(29)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

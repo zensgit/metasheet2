@@ -186,12 +186,21 @@ const TASK_ID_PLACEHOLDER = '$1'
 const LIST_ID_PLACEHOLDER = '$1'
 
 /**
- * The org + liveness clause shared by every builder in this module. It is the ONLY place the
- * org clause text is written (lock §4.3 single-point emission); every exported builder calls this.
+ * The org clause shared by every builder in this module, followed by the row-state condition the
+ * builder selects on. It is the ONLY place the org clause text is written (lock §4.3 single-point
+ * emission); every exported builder goes through it, almost all of them through `taskOrgLiveClause`.
  */
-function taskOrgLiveClause(): string {
-  return `(tasks.org_id = ${ORG_PLACEHOLDER}) AND tasks.deleted_at IS NULL`
+function taskOrgClauseWith(rowState: string): string {
+  return `(tasks.org_id = ${ORG_PLACEHOLDER}) AND ${rowState}`
 }
+
+/** The org + liveness clause: live (not soft-deleted) tasks of the org. */
+function taskOrgLiveClause(): string {
+  return taskOrgClauseWith('tasks.deleted_at IS NULL')
+}
+
+/** Row-state condition that admits live and soft-deleted rows alike. */
+const TASK_ANY_ROW_STATE = 'TRUE'
 
 function scopeArm(view: Exclude<TaskView, 'any_role'>): string {
   switch (view) {
@@ -314,6 +323,21 @@ export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: s
   }
 }
 
+// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) the one
+// reader of a task that may be soft-deleted is the notification delivery worker, for a `deleted`
+// event: by then the task row is soft-deleted. Every other read selects live rows through the
+// builder above. The org clause is the same single emission, so its org guarantee is the same.
+/**
+ * `{ sql, params }` TEXT selecting one task of one org by id, live or soft-deleted. `$1` = task id,
+ * `$2` = org. A caller that appends its own parameters numbers them from `params.length + 1`.
+ */
+export function buildTaskByIdAnyStateCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
 // ASSUMPTION(task-m4): [own-02] tasks of one list (list item listing, "is this task in the list").
 /**
  * `{ sql, params }` TEXT selecting the live tasks of one org that are items of one list.
@@ -356,4 +380,17 @@ export function canChangeTaskMembers(input: { task: TaskRoleRow; me: string }): 
     input.me,
   )
   return can(direct, 'edit')
+}
+
+// RULED(2026-10-09): six items, item 3: only the task's creator completes it for every assignee;
+// the decision reads `tasks.created_by` alone (M5 PR-4a design §3.1, §5 rule 1).
+// ASSUMPTION(task-m5a): [a-02] anyone else who asks for it gets the same 404 as a missing task.
+/**
+ * Whether `actorId` may complete, for every assignee, the task whose creator is `createdBy`. It
+ * takes no role set, so neither list identity nor an assignee or follower row can stand in for the
+ * creator (the same shape as `canChangeTaskMembers`). Used by the complete route and by the detail's
+ * `canCompleteForAll`, so the two cannot disagree.
+ */
+export function canCompleteForAll(input: { actorId: string; createdBy: string }): boolean {
+  return input.actorId === input.createdBy
 }

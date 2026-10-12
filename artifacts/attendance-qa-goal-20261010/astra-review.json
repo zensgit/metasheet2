@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "review_date": "2026-10-10",
+  "reviewer": "astra-independent-read-only",
+  "baseline_sha": "a16a12aca35d46b6b621ae12f49b380b50b95b48",
+  "head_sha": "62d6801c5f126178ce197c81e8ef7f7e71913bf1",
+  "verdict": "ONE_REPRODUCED_P2_FINDING_TWO_REACHABLE_ENTRY_PATHS",
+  "findings": [
+    {
+      "id": "TODAY_MIDNIGHT_OLD_REFRESH_HISTORY_REUSE",
+      "priority": "P2",
+      "file": "apps/web/src/views/AttendanceView.vue",
+      "symbol": "refreshAll",
+      "line": 23043,
+      "related_symbols": [
+        {
+          "symbol": "loadTodayAttendanceRecord",
+          "line": 22461
+        },
+        {
+          "symbol": "todayWorkDateKey watcher",
+          "line": 30104
+        }
+      ],
+      "title": "Late pre-midnight refresh can overwrite a fresh next-day self read",
+      "trigger": [
+        "The selected self history interval already includes the next rule-timezone day.",
+        "A refresh loads a complete history snapshot before midnight while another refresh task remains pending.",
+        "The midnight watcher obtains a fresh next-day self row and renders clocked-in.",
+        "The older refresh finishes and its finally block reuses the pre-midnight history snapshot."
+      ],
+      "observed_result": "A confirmed next-day clocked-in state becomes not-clocked-in without a further self read.",
+      "expected_result": "Pre-midnight history must not supersede the newer next-day self response.",
+      "root_cause": "The final refresh read defaults to reuseHistory=true. History scope proves date/user/org/completeness but carries no observation date; a new load version cannot detect old data reused by a newer invocation.",
+      "minimal_fix_direction": "Stamp query/refresh start instants and prevent pre-midnight history reuse at both refreshAll finally and loadRecords direct today-read calls when the resolved rule-date has advanced.",
+      "candidate_fix_scope": "Four lines across two functions in isolated temporary source only; shared implementation unchanged.",
+      "candidate_fix": "Capture refreshStartedAt = heroClockNow.value; pass formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value to loadTodayAttendanceRecord.",
+      "reproduction_test": "ASTRA: late refresh completion cannot replace a fresh midnight read with pre-midnight history",
+      "validation": {
+        "frozen_head_new_probe": {
+          "passed": 0,
+          "failed": 1,
+          "skipped": 100
+        },
+        "candidate_new_probe_and_existing_midnight_neighbors": {
+          "passed": 3,
+          "failed": 0,
+          "skipped": 98
+        },
+        "restored_frozen_head_new_probe": {
+          "passed": 0,
+          "failed": 1,
+          "skipped": 100
+        }
+      },
+      "discarded_candidate": "Capturing only the initially empty today key forced an unnecessary first-load query and broke two existing midnight tests; that candidate was discarded.",
+      "additional_entry_path": {
+        "symbol": "loadRecords",
+        "line": 22457,
+        "caller_symbol": "resolveRequest",
+        "caller_line": 23367,
+        "reproduction_test": "ASTRA: focused approval history response cannot replace a fresh midnight self read",
+        "trigger": [
+          "Open a focused pending approval in Overview with a self history date range including the next rule day.",
+          "Click Approve and allow its successful POST, request reload and summary reload to complete.",
+          "Hold the resulting pre-midnight history response while the midnight independent self read returns next-day clocked-in.",
+          "Release the older history response: loadRecords calls loadTodayAttendanceRecord with history reuse enabled and overwrites the next-day state."
+        ],
+        "reachability": "DOM button path through the existing approval-center focused request fixture; no direct invocation of private component functions.",
+        "insufficient_fix": "The refreshAll-only candidate remains red for this path.",
+        "additional_minimal_fix": "Capture recordsLoadStartedAt = heroClockNow.value at loadRecords entry; its direct loadTodayAttendanceRecord call may reuse history only when formatAttendanceDateKey(recordsLoadStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value.",
+        "candidate_validation": {
+          "refreshAll_only_candidate_new_probe": {
+            "passed": 0,
+            "failed": 1,
+            "skipped": 101
+          },
+          "both_entry_guards_two_new_probes_and_two_midnight_neighbors": {
+            "passed": 4,
+            "failed": 0,
+            "skipped": 98
+          },
+          "restored_frozen_head_new_probe": {
+            "passed": 0,
+            "failed": 1,
+            "skipped": 101
+          }
+        },
+        "other_suggested_entry_points": "Records Reload and pagination UI are guarded by showReports, so those UI entry points themselves do not directly enter the overview-only today update; focused approval is sufficient confirmed reachability.",
+        "warning": "The green run logged a development WebSocket port collision; mocked DOM tests completed normally with exit 0."
+      }
+    }
+  ],
+  "reviewed_without_additional_findings": [
+    "Legacy punch guard evaluates the final append-or-merge projection after event and projection writes, before returning to the canonical transaction wrapper.",
+    "Canonical transaction wrapper rolls back adapter exceptions; legacy-compatible and shadow paths use the adapter, authoritative live path uses its distinct insert/core path.",
+    "Historical request prefill preserves unchanged absolute instants including seconds and milliseconds, parses edited wall time in the historical zone, rejects DST gaps by roundtrip, and documents earlier-overlap choice.",
+    "Prefill binds loaded history organization/user, record user and raw event user, clears history state before consumption, and drops raw responses after history scope replacement.",
+    "Dedicated today read carries immutable session organization and omits editable target user; unknown/error display and existing late-dedicated-response invalidation are covered by source and supplied tests."
+  ],
+  "review_bounds": {
+    "source_reads": "All reviewed implementation and test source extracted with git show or git archive at head_sha; no review reliance on mutable working-tree source.",
+    "new_execution": "Only two new synthetic Vue race probes and two existing midnight neighbors were executed in a temporary frozen copy.",
+    "prior_receipt": "artifacts/attendance-qa-fix-20261009/verification.json was read; its broader database, unit, frontend and browser results were not rerun and are not claimed as independently executed.",
+    "not_covered": [
+      "Remote CI",
+      "Deployment",
+      "Real customer data",
+      "Original QA environment acceptance",
+      "Full-suite rerun"
+    ]
+  },
+  "artifacts": {
+    "isolated_probe_file": "/tmp/astra-attendance-review-20261010/frozen/apps/web/tests/attendance-selfservice-dashboard.spec.ts",
+    "red_log": "/tmp/astra-attendance-review-20261010/midnight-probe-frozen-red.log",
+    "green_log": "/tmp/astra-attendance-review-20261010/midnight-probe-narrow-fix-clock.log",
+    "restored_source_sha256": "9d28c533eaa03bb2e740f9f2214ebf563b68e8f1016ae48159bbcb654c960785",
+    "approval_refresh_only_red_log": "/tmp/astra-attendance-review-20261010/approval-midnight-refresh-only-red.log",
+    "both_guards_green_log": "/tmp/astra-attendance-review-20261010/approval-midnight-both-guards-green.log",
+    "approval_frozen_red_log": "/tmp/astra-attendance-review-20261010/approval-midnight-frozen-red.log"
+  },
+  "side_effects": {
+    "shared_source_changed": false,
+    "shared_index_changed": false,
+    "commit_created": false,
+    "real_data_read_or_written": false,
+    "flags_changed": false,
+    "deployment": false,
+    "external_messages": false,
+    "markdown_created_or_changed": false
+  },
+  "final_follow_up": {
+    "verdict": "APPROVE_REVIEWED_TWO_FILE_DELTA_NO_ACTIONABLE_FINDINGS",
+    "worktree_head": "62d6801c5f126178ce197c81e8ef7f7e71913bf1",
+    "source_files_sha256": {
+      "apps/web/src/views/AttendanceView.vue": "269f85e06215bf2a7579f823bf3301f3377a3f5265b257da279ebec75f81e503",
+      "apps/web/tests/attendance-selfservice-dashboard.spec.ts": "ba3245306fd942910ca26bc7bbf95f7877a3b731339ed8219762e4dd95e9e4f1"
+    },
+    "freeze_hashes_match": true,
+    "scope": [
+      "apps/web/src/views/AttendanceView.vue",
+      "apps/web/tests/attendance-selfservice-dashboard.spec.ts"
+    ],
+    "checks": [
+      "loadRecords captures an immutable Date reference before initiating its history request and checks that instant in the final resolved rule timezone before reusing history for today.",
+      "refreshAll independently captures its start instant and applies the same condition in finally, covering the long-running parallel task path.",
+      "heroClockNow is replaced with a new Date each timer tick; the captured references retain the start instant across midnight.",
+      "First-load rule timezone may initially be unavailable. Both guards defer date formatting until the final rule timezone is available, preserving same-day initial history reuse.",
+      "Missing or invalid final timezone does not become a valid today key; loadTodayAttendanceRecord retains the unknown-state early return.",
+      "Two named DOM regressions exercise actual Refresh and focused-approval button paths, assert the fresh clocked-in intermediate state, release the older response, then assert it survives.",
+      "The final guards match the semantics independently validated in the temporary four-test green run recorded above."
+    ],
+    "prior_finding_resolution": "TODAY_MIDNIGHT_OLD_REFRESH_HISTORY_REUSE closed in the reviewed final uncommitted delta for both reproduced entry paths.",
+    "validation_provenance": {
+      "independent_this_follow_up": "Read-only final diff review and independent SHA256 verification; no suite rerun.",
+      "independent_prior_probe": "Both candidate guards passed two reproduced race tests plus two existing midnight neighbors in isolated temporary source; frozen original was restored and the new approval-path probe returned red.",
+      "implementer_receipt": "midnight-history-race/results.json reports dashboard 102 and today-helper 9 tests passed, zero skipped; this follow-up does not relabel those runs as independently executed."
+    },
+    "shared_source_changed_by_reviewer": false,
+    "publication_merge_deployment_authorized": false
+  }
+}

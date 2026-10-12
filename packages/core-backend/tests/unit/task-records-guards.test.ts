@@ -17,7 +17,7 @@ import {
   transferTaskListOwner,
 } from '../../src/services/task-list-records'
 import { completeTask, countPending, createTask, parseTaskPage, reopenTask, toTaskPendingItem } from '../../src/services/task-records'
-import { addAssignee, addFollower, leaveTask, removeAssignee, removeFollower } from '../../src/services/task-structure'
+import { addAssignee, addComment, addFollower, deleteTaskById, leaveTask, removeAssignee, removeFollower, switchCompletionMode } from '../../src/services/task-structure'
 import {
   createTaskListGroup,
   createUserTaskGroup,
@@ -1379,5 +1379,305 @@ describe('task org membership (M4 PR-3a S9)', () => {
     await expect(add({ ...memberBase, body: { userId: 'usr-2' } })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(lookups()).toEqual([])
     expect(written()).toEqual([])
+  })
+})
+
+// M4 PR-3b S2 (design task-m4-pr3b-backend-design-20261001.md §4.2, §4.3, §5.1): the producer runs
+// on the touchpoint's own transaction client, after the event it reads, and sends nothing while
+// the pipeline is off. ASSUMPTION(task-m4): [own-3b-01] [own-3b-12]. S3 adds the two assignee
+// writes, whose status flips now record events that notify.
+describe('notification producer wiring (M4 PR-3b S2)', () => {
+  const SWITCHES = [
+    'TASKS_SCHEDULER_ENABLED',
+    'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+  ] as const
+  let saved: Record<string, string | undefined> = {}
+
+  function setPipeline(on: boolean): void {
+    for (const key of SWITCHES) {
+      if (on) process.env[key] = 'true'
+      else delete process.env[key]
+    }
+  }
+
+  /** The task's assignee rows and status for the next write (the mode switch needs one completed
+   * row; an assignee change notifies only when it flips the status, S3). */
+  let assigneeRows: Array<{ user_id: string; completed_at: Date | null }> = []
+  let taskStatus = 'open'
+
+  /** One answer for both the pool (`query`, the reads before a comment's transaction) and the
+   * transaction client: a live `all` task created by usr-0 with `taskStatus` and `assigneeRows`, one
+   * follower, no children; an active integration; one follower as the member read. */
+  function answer(sql: string): { rows: Record<string, unknown>[] } | undefined {
+    if (sql.includes('INSERT INTO task_comments')) return { rows: [{ created_at: new Date(0) }] }
+    if (sql.includes('INSERT INTO task_notification_deliveries')) return { rows: [{ id: 'row-0' }, { id: 'row-1' }] }
+    if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
+    if (sql.includes("current_setting('statement_timeout')")) return { rows: [{ value: '0' }] }
+    if (sql.includes('parent_id = $1')) return { rows: [] }
+    if (sql.includes('FROM task_lists WHERE')) {
+      return { rows: [{ id: 'tlst_1', name: 'n', created_by: 'usr-0', archived_at: null, created_at: new Date(0), updated_at: new Date(0), owner_id: 'usr-1', my_role: 'owner' }] }
+    }
+    if (sql.includes('FROM directory_integrations')) return { rows: [{ dingtalk_active: true }] }
+    if (sql.includes('UNION ALL')) return { rows: [{ member_kind: 'follower', user_id: 'usr-9' }] }
+    if (sql.includes('FROM tasks WHERE') || sql.includes('FROM tasks t WHERE')) {
+      return { rows: [{ created_by: 'usr-0', completion_mode: 'all', status: taskStatus, parent_id: null, depth: 0, version: 1 }] }
+    }
+    if (sql.includes('FROM task_assignees')) return { rows: assigneeRows }
+    if (sql.includes('FROM task_followers')) return { rows: [{ user_id: 'usr-9' }] }
+    return undefined
+  }
+
+  function txSqls(): string[] {
+    return state.calls.map((call) => call.sql.replace(/\s+/g, ' ').trim())
+  }
+
+  function poolSqls(): string[] {
+    return vi.mocked(query).mock.calls.map((call) => String(call[0]).replace(/\s+/g, ' ').trim())
+  }
+
+  const touchesOutbox = (sql: string): boolean => sql.includes('directory_integrations') || sql.includes('task_notification_deliveries')
+
+  beforeEach(() => {
+    saved = Object.fromEntries(SWITCHES.map((key) => [key, process.env[key]]))
+    state.calls.length = 0
+    state.transactions = 0
+    state.respond = (sql) => answer(sql)
+    vi.mocked(query).mockReset()
+    vi.mocked(query).mockImplementation(async (sql: string) => (answer(sql) ?? { rows: [] }) as never)
+  })
+
+  afterEach(() => {
+    for (const key of SWITCHES) {
+      if (saved[key] === undefined) delete process.env[key]
+      else process.env[key] = saved[key]
+    }
+    state.respond = undefined
+  })
+
+  const open = (userId: string) => ({ user_id: userId, completed_at: null })
+  const done = (userId: string) => ({ user_id: userId, completed_at: new Date(0) })
+  const write = (rows: typeof assigneeRows, run: () => Promise<unknown>, status = 'open') => () => {
+    assigneeRows = rows
+    taskStatus = status
+    return run()
+  }
+  const writes: Array<[string, () => Promise<unknown>]> = [
+    ['completeTask', write([open('usr-1')], () => completeTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1' }))],
+    ['reopenTask', write([done('usr-1')], () => reopenTask({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1', scope: 'all' }))],
+    // S3, RULED(2026-10-07): [N1]: the creator adding themselves to a done task reopens it (no org
+    // lookup for the operator); removing the only open row of an open task completes it.
+    ['addAssignee', write([done('usr-1')], () => addAssignee({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', body: { userId: 'usr-0' } }), 'done')],
+    ['removeAssignee', write([done('usr-1'), open('usr-2')], () => removeAssignee({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', userId: 'usr-2' }))],
+    ['switchCompletionMode', write([done('usr-1'), open('usr-2')], () => switchCompletionMode({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1', body: { completionMode: 'any' } }))],
+    ['addComment', write([open('usr-1')], () => addComment({ orgId: 'org-1', actorId: 'usr-1', taskId: 'tsk_1', body: { body: '已核对' } }))],
+    ['deleteTaskById', write([open('usr-1')], () => deleteTaskById({ orgId: 'org-1', actorId: 'usr-0', taskId: 'tsk_1' }))],
+    ['setTaskListArchived', write([], () => setTaskListArchived({ orgId: 'org-1', actorId: 'usr-1', listId: 'tlst_1', archived: true }))],
+  ]
+
+  it('with the pipeline off, no touchpoint sends a statement to the integration or outbox table, on either client', async () => {
+    setPipeline(false)
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      vi.mocked(query).mockClear()
+      await expect(write(), name).resolves.toBeDefined()
+      expect(txSqls().filter(touchesOutbox), name).toEqual([])
+      expect(poolSqls().filter(touchesOutbox), name).toEqual([])
+      expect(txSqls().some((sql) => sql.startsWith('INSERT INTO task_events') || sql.startsWith('INSERT INTO task_list_events')), name).toBe(true)
+    }
+  })
+
+  it('with the pipeline on, each touchpoint runs the check, the member read and the outbox INSERT on its transaction client, after its event, never on the pool', async () => {
+    setPipeline(true)
+    const eventTable: Record<string, string> = {
+      completeTask: 'INSERT INTO task_events',
+      reopenTask: 'INSERT INTO task_events',
+      addAssignee: 'INSERT INTO task_events',
+      removeAssignee: 'INSERT INTO task_events',
+      switchCompletionMode: 'INSERT INTO task_events',
+      addComment: 'INSERT INTO task_events',
+      deleteTaskById: 'INSERT INTO task_events',
+      setTaskListArchived: 'INSERT INTO task_list_events',
+    }
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      vi.mocked(query).mockClear()
+      await expect(write(), name).resolves.toBeDefined()
+      expect(poolSqls().filter(touchesOutbox), name).toEqual([])
+      const sqls = txSqls()
+      const lastEvent = sqls.map((sql, i) => (sql.startsWith(eventTable[name]) ? i : -1)).filter((i) => i >= 0).pop() ?? -1
+      const check = sqls.findIndex((sql) => sql.includes('FROM directory_integrations'))
+      const insert = sqls.findIndex((sql) => sql.startsWith('INSERT INTO task_notification_deliveries'))
+      expect(lastEvent, name).toBeGreaterThanOrEqual(0)
+      expect(check, name).toBeGreaterThan(lastEvent)
+      expect(insert, name).toBeGreaterThan(check)
+      // Nothing after the event reads the task row again (a deleted task is still notified).
+      expect(sqls.slice(lastEvent + 1).some((sql) => /FROM tasks\b/.test(sql)), name).toBe(false)
+    }
+  })
+
+  it('each touchpoint writes each of its events exactly once, and the outbox rows carry the id the event was written with', async () => {
+    setPipeline(true)
+    // The event INSERTs of each write, in order and by type: one INSERT per event the write records
+    // (an assignee change or a mode switch that flips the status records two). A second event write
+    // in the same callback, placed before or after the write whose ids the producer reads, repeats
+    // the list and fails here in either order.
+    const eventsWritten: Record<string, string[]> = {
+      completeTask: ['completed'],
+      reopenTask: ['reopened'],
+      addAssignee: ['assignee_added', 'reopened'],
+      removeAssignee: ['assignee_removed', 'completed'],
+      switchCompletionMode: ['completion_mode_changed', 'completed_by_any'],
+      addComment: ['commented'],
+      deleteTaskById: ['deleted'],
+      setTaskListArchived: ['archived'],
+    }
+    // The bound fourth parameter, or the type literal of an INSERT that binds three.
+    const eventType = (call: { sql: string; params?: unknown[] }): unknown =>
+      typeof call.params?.[3] === 'string' ? call.params[3] : /'([a-z_]+)'/.exec(call.sql)?.[1]
+    for (const [name, write] of writes) {
+      state.calls.length = 0
+      await write()
+      const eventInserts = state.calls.filter((call) => /^\s*INSERT INTO task_(list_)?events/.test(call.sql))
+      expect(eventInserts.map(eventType), name).toEqual(eventsWritten[name])
+      // With the list exact, the notifying event of each fixture is its last one.
+      const eventId = eventInserts[eventInserts.length - 1]?.params?.[0]
+      const outbox = state.calls.find((call) => call.sql.includes('INSERT INTO task_notification_deliveries'))
+      const payloads = ((outbox?.params?.[7] ?? []) as string[]).map((text) => JSON.parse(text) as { eventId: string })
+      expect(payloads.length, name).toBeGreaterThan(0)
+      for (const payload of payloads) expect(payload.eventId, name).toBe(eventId)
+    }
+  })
+})
+
+// M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1): the order of the checks of a
+// complete with `scope`, all after the structure lock: the task (404), the complete ability (404),
+// the scope (422 INVALID_SCOPE), and for 'all' the creator (404); then the write, whose `completed`
+// carries `{ scope: 'all' }` in `task_events.payload`. ASSUMPTION(task-m5a): [a-01] [a-02] [a-03].
+describe('complete scope (M5 PR-4a slice 1, G1)', () => {
+  const base = { orgId: 'org-1', taskId: 'tsk_1' }
+
+  interface ScopeSeed {
+    createdBy: string
+    mode?: 'all' | 'any'
+    status?: 'open' | 'done'
+    assignees?: string[]
+    followers?: string[]
+    /** The task row is absent. */
+    missing?: boolean
+  }
+
+  function respondWith(seed: ScopeSeed): void {
+    state.respond = (sql) => {
+      if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
+      if (sql.includes('FROM tasks WHERE')) {
+        if (seed.missing) return { rows: [] }
+        return { rows: [{ created_by: seed.createdBy, completion_mode: seed.mode ?? 'all', status: seed.status ?? 'open', parent_id: null, depth: 0, version: 3 }] }
+      }
+      if (sql.includes('FROM task_assignees')) return { rows: (seed.assignees ?? []).map((user_id) => ({ user_id, completed_at: null })) }
+      if (sql.includes('FROM task_followers')) return { rows: (seed.followers ?? []).map((user_id) => ({ user_id })) }
+      return undefined
+    }
+  }
+
+  function written(): Array<{ sql: string; params?: unknown[] }> {
+    return state.calls
+      .map((call) => ({ sql: call.sql.replace(/\s+/g, ' ').trim(), params: call.params }))
+      .filter((call) => /^(INSERT|UPDATE|DELETE)/.test(call.sql))
+  }
+
+  const INVALID_SCOPES: unknown[] = ['x', null, 1, 0, true, false, '', 'ALL', 'Self', ' all', ['all'], { scope: 'all' }]
+
+  beforeEach(() => {
+    state.calls.length = 0
+    state.transactions = 0
+    state.respond = undefined
+  })
+
+  it('a missing task, a follower and an outsider get the 404 whatever the scope; nothing is written', async () => {
+    const seeds: Array<[string, ScopeSeed, string]> = [
+      ['missing task', { createdBy: 'usr-0', missing: true }, 'usr-0'],
+      ['follower', { createdBy: 'usr-0', assignees: ['usr-2'], followers: ['usr-1'] }, 'usr-1'],
+      ['outsider', { createdBy: 'usr-0', assignees: ['usr-2'] }, 'usr-1'],
+    ]
+    for (const [label, seed, actorId] of seeds) {
+      respondWith(seed)
+      for (const scope of [undefined, 'self', 'all', ...INVALID_SCOPES]) {
+        state.calls.length = 0
+        await expect(completeTask({ ...base, actorId, scope }), `${label} ${JSON.stringify(scope)}`).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+        expect(written(), label).toEqual([])
+      }
+    }
+  })
+
+  it('the creator with a present scope other than self or all: 422 INVALID_SCOPE after the lock and the row checks; nothing is written', async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-2'] })
+    for (const scope of INVALID_SCOPES) {
+      state.calls.length = 0
+      await expect(completeTask({ ...base, actorId: 'usr-0', scope }), JSON.stringify(scope)).rejects.toMatchObject({ status: 422, code: 'INVALID_SCOPE' })
+      expect(state.calls[0]?.sql).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      expect(state.calls.some((call) => call.sql.includes('FROM task_assignees'))).toBe(true)
+      expect(written()).toEqual([])
+    }
+  })
+
+  it("scope 'all' from an assignee or a list-only editor who may complete: the 404, nothing written; the same callers' own complete still writes", async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-1', 'usr-2'] })
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-1', scope: 'all' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(written()).toEqual([])
+    // Control: the assignee's own complete.
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-1', scope: 'self' })).resolves.toEqual({ done: false, version: 3 })
+    expect(written().map((call) => call.sql.split(' ').slice(0, 3).join(' '))).toEqual(['UPDATE task_assignees SET', 'INSERT INTO task_events'])
+    // A list-only editor (list identity grants `complete`, not the creator's decision).
+    state.respond = ((inner) => (sql: string, params?: unknown[]) => {
+      if (sql.includes('JOIN task_list_members tlm ')) return { rows: [{ task_id: 'tsk_1', list_id: 'tlst_1', role: 'edit' }] }
+      return inner?.(sql, params)
+    })(state.respond)
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-9', scope: 'all' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(written()).toEqual([])
+    // Control: the list identity is live, so the 404 above is the creator check: the same editor's
+    // own complete passes the ability check (no row of theirs to stamp: 200, nothing written).
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-9' })).resolves.toEqual({ done: false, version: 3 })
+    expect(written()).toEqual([])
+  })
+
+  it("the creator's scope 'all': every open row gets the same instant, the task flips once, one completed whose payload is { scope: all }", async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-1', 'usr-2'] })
+    await expect(completeTask({ ...base, actorId: 'usr-0', scope: 'all' })).resolves.toEqual({ done: true, version: 4 })
+    const writes = written()
+    expect(writes.map((call) => call.sql.split(' ').slice(0, 3).join(' '))).toEqual([
+      'UPDATE task_assignees SET', 'UPDATE task_assignees SET', 'UPDATE tasks SET', 'INSERT INTO task_events',
+    ])
+    const stamps = writes.slice(0, 2).map((call) => (call.params?.[2] as Date).getTime())
+    const taskStamp = (writes[2].params?.[1] as Date).getTime()
+    const event = writes[3]
+    expect(new Set([...stamps, taskStamp, (event.params?.[5] as Date).getTime()]).size).toBe(1)
+    expect(writes.slice(0, 2).map((call) => call.params?.[1]).sort()).toEqual(['usr-1', 'usr-2'])
+    expect(event.sql).toContain('payload')
+    expect(event.params?.slice(2, 5)).toEqual(['usr-0', 'completed', '{"scope":"all"}'])
+  })
+
+  it("scope 'all' on a task that is already done: 200 with the version unchanged, nothing written", async () => {
+    respondWith({ createdBy: 'usr-0', status: 'done', assignees: ['usr-1', 'usr-2'] })
+    await expect(completeTask({ ...base, actorId: 'usr-0', scope: 'all' })).resolves.toEqual({ done: true, version: 3 })
+    expect(written()).toEqual([])
+  })
+
+  it("no scope and scope 'self' send the same statements; their events write the payload {} (the column default)", async () => {
+    const shapes: string[][] = []
+    for (const scope of [undefined, 'self']) {
+      respondWith({ createdBy: 'usr-0', assignees: ['usr-1'] })
+      state.calls.length = 0
+      await expect(completeTask({ ...base, actorId: 'usr-1', scope })).resolves.toEqual({ done: true, version: 4 })
+      const writes = written()
+      const event = writes.find((call) => call.sql.startsWith('INSERT INTO task_events'))
+      expect(event?.params?.slice(2, 5)).toEqual(['usr-1', 'completed', '{}'])
+      shapes.push(writes.map((call) => call.sql))
+    }
+    expect(shapes[1]).toEqual(shapes[0])
   })
 })

@@ -1103,6 +1103,14 @@ async function refreshProjectOverview({ provisioning, recordsApi, store, tenantI
     },
   })
   if (run.busy) throw overviewBusyError()
+  // projectCount stays the full pass's registry count. Measurements count each recount (even before a failed
+  // write); row effects count completed operations. Include the drain once in either outcome.
+  for (const key of [
+    'countedCount', 'unreadableCount', 'boundedCount',
+    'rowsCreated', 'rowsUpdated', 'rowsUnchanged', 'rowsRemovedDuplicate', 'rowsRemovedOrphan',
+  ]) {
+    run.value[key] += drain.summary[key]
+  }
   // S3 follow-up C: a project of this run (the full pass OR the drain of the events it absorbed) is still failed
   // → not fresh. Never swallowed into a success.
   const failedProjectCount = drainFailedCount(drain)

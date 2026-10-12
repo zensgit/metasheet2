@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import {
   TASK_ABILITIES,
   TASK_ROLES,
   TASK_ROLE_ABILITY,
   TASK_VIEWS,
+  buildTaskByIdAnyStateCondition,
   buildTaskByIdCondition,
   buildTaskInListCondition,
   buildTaskPendingCondition,
@@ -11,6 +13,7 @@ import {
   can,
   canChangeCompletion,
   canChangeTaskMembers,
+  canCompleteForAll,
   resolveTaskRoles,
   taskMatchesView,
   type TaskAbility,
@@ -526,6 +529,54 @@ describe('buildTaskByIdCondition / buildTaskInListCondition (M4 R04)', () => {
   })
 })
 
+// ---------------------------------------------------------------------------------------------
+// M4 PR-3b S4 (design task-m4-pr3b-backend-design-20261001.md §3.4, §7.4, §10 item 1).
+// ASSUMPTION(task-m4): [own-3b-17] the by-id builder that also admits a soft-deleted row (owner
+// question §13-Q14); its org clause is the module's single emission.
+// ---------------------------------------------------------------------------------------------
+
+describe('buildTaskByIdAnyStateCondition (M4 PR-3b)', () => {
+  const ACCESS_SOURCE = new URL('../../src/tasks/task-access.ts', import.meta.url)
+
+  it('pinned text and params: the by-id text with TRUE in place of the liveness condition', () => {
+    const cond = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.id = $1 AND (tasks.org_id = $2) AND TRUE')
+    expect(cond.params).toEqual(['tsk_a', 'org1'])
+  })
+
+  it('the org clause appears exactly once, the liveness condition not at all, and only $1/$2 are bound', () => {
+    const cond = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
+    expect(cond.sql.includes('deleted_at')).toBe(false)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+    expect(cond.params).toHaveLength(2)
+  })
+
+  it('differs from the live by-id builder only in the row-state condition', () => {
+    const live = buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    const anyState = buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(live.sql.replace(/tasks\.deleted_at IS NULL$/, 'TRUE')).toBe(anyState.sql)
+    expect(anyState.params).toEqual(live.params)
+  })
+
+  it('the source writes the org clause text once, in the generator\'s template literal, and every builder output carries it once', () => {
+    const source = readFileSync(ACCESS_SOURCE, 'utf8')
+    const needle = '(tasks.org_id = ${ORG_PLACEHOLDER}) AND '
+    expect(source.split(needle).length - 1).toBe(1)
+    const lines = source.split('\n').filter((line) => line.includes('tasks.org_id'))
+    expect(lines).toHaveLength(1)
+    expect(lines[0].trim().startsWith('return `')).toBe(true)
+    const outputs = [
+      ...TASK_VIEWS.map((view) => buildTaskScopeCondition({ view, actorParam: 'u1', orgParam: 'org1' })),
+      buildTaskPendingCondition({ actorParam: 'u1', orgParam: 'org1', scope: 'overdue_or_today', viewerTzParam: 'UTC' }),
+      buildTaskByIdCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildTaskInListCondition({ listIdParam: 'tlst_a', orgParam: 'org1' }),
+      buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+    ]
+    for (const cond of outputs) expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
+  })
+})
+
 describe('canChangeCompletion (lock §6.2 zero-assignee rule, M4 §6.3)', () => {
   const identities: TaskRole[][] = [
     ['creator'],
@@ -619,5 +670,48 @@ describe('canChangeTaskMembers ([own-53], M4 §6.3)', () => {
     expect(canChangeTaskMembers({ task: row({ follower: true }), me: ME })).toBe(false)
     expect(canChangeTaskMembers({ task: row({ creator: true }), me: ME })).toBe(true)
     expect(canChangeTaskMembers({ task: row({ assignee: true }), me: ME })).toBe(true)
+  })
+})
+
+// M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1, §5 rule 1). RULED(2026-10-09):
+// six items, item 3: only the creator completes a task for every assignee, decided on
+// `tasks.created_by` alone. ASSUMPTION(task-m5a): [a-02].
+describe('canCompleteForAll (M5 PR-4a slice 1, G1)', () => {
+  const ME = 'usr_me'
+
+  it('the creator: true; anyone else: false', () => {
+    expect(canCompleteForAll({ actorId: ME, createdBy: ME })).toBe(true)
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other' })).toBe(false)
+    expect(canCompleteForAll({ actorId: 'usr_other', createdBy: ME })).toBe(false)
+  })
+
+  it('agrees with "the role set holds creator" for every combination of direct roles and list identity, while `complete` does not', () => {
+    const editorship = [{ listId: 'tlst_1', role: 'editor' as const }]
+    for (const creator of [false, true]) {
+      for (const assignee of [false, true]) {
+        for (const follower of [false, true]) {
+          for (const memberships of [[], editorship]) {
+            const task = {
+              createdBy: creator ? ME : 'usr_other',
+              assigneeIds: assignee ? ['usr_x', ME] : ['usr_x'],
+              followerIds: follower ? [ME] : [],
+            }
+            const roles = resolveTaskRoles(task, ME, memberships)
+            expect(canCompleteForAll({ actorId: ME, createdBy: task.createdBy })).toBe(roles.includes('creator'))
+          }
+        }
+      }
+    }
+    // Control: an assignee and a list-only editor may complete (their own row), yet not for everyone.
+    expect(can(resolveTaskRoles({ createdBy: 'usr_other', assigneeIds: [ME], followerIds: [] }, ME), 'complete')).toBe(true)
+    expect(can(resolveTaskRoles({ createdBy: 'usr_other', assigneeIds: ['usr_x'], followerIds: [] }, ME, editorship), 'complete')).toBe(true)
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other' })).toBe(false)
+  })
+
+  it('takes no role set: roles or list memberships passed alongside change nothing', () => {
+    expect(canCompleteForAll.length).toBe(1)
+    const extra = { roles: ['creator', 'list-editor'], listMemberships: [{ listId: 'tlst_1', role: 'editor' }] }
+    expect(canCompleteForAll({ actorId: ME, createdBy: 'usr_other', ...extra } as never)).toBe(false)
+    expect(canCompleteForAll({ actorId: ME, createdBy: ME, ...extra } as never)).toBe(true)
   })
 })

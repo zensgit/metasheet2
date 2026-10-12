@@ -1,10 +1,12 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   applyComplete,
+  applyCompleteForAll,
   applyReopen,
   assertAnyModeInvariant,
   computeTaskDone,
   type TaskAssigneeRow,
+  type TaskCompletionMode,
 } from '../../src/tasks/task-completion'
 
 const NOW = new Date('2026-09-15T12:30:00.000Z')
@@ -410,5 +412,110 @@ describe('task-c round 3: the A7 condition is "task no longer done", not "all ro
     const rows: TaskAssigneeRow[] = [{ userId: 'a', completedAt: new Date('2026-09-28T09:00:00.000Z') }]
     const result = applyReopen({ mode: 'all', rows, actorId: 'c', scope: 'self', createdBy: 'c', wasDone: true })
     expect(result.events).toEqual([])
+  })
+})
+
+// M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1, §4.1, §5): the creator
+// completes the task for every assignee. RULED(2026-10-09): six items, item 3 (creator only; a
+// repeat is a no-op with no second event). ASSUMPTION(task-m5a): [a-03] [a-04].
+describe('applyCompleteForAll (M5 PR-4a slice 1, G1)', () => {
+  const CREATOR = 'creator1'
+  const T0 = new Date('2026-09-01T00:00:00.000Z')
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('all mode: every null row gets the SAME now, the task is done, one completed with payload { scope: all } for the creator', () => {
+    const rows = [row('a', null), row('b', null)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(result.done).toBe(true)
+    expect(result.via).toBe('formula')
+    expect(result.rows).toEqual([row('a', NOW), row('b', NOW)])
+    expect(result.events).toEqual([{ type: 'completed', userId: CREATOR, occurredAt: NOW, payload: { scope: 'all' } }])
+  })
+
+  it('every stamped row carries the now argument, not a clock reading of its own (the system clock is elsewhere)', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2031-03-03T03:03:03.003Z'))
+    const rows = [row('a', null), row('b', null), row('c', null), row(CREATOR, null)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(result.rows.map((r) => r.completedAt?.getTime())).toEqual([NOW.getTime(), NOW.getTime(), NOW.getTime(), NOW.getTime()])
+    expect(result.events.map((event) => event.occurredAt?.getTime())).toEqual([NOW.getTime()])
+  })
+
+  it('a row that already holds a completion instant keeps it; only the null rows are stamped', () => {
+    const rows = [row('a', T0), row('b', null)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(result.rows).toEqual([row('a', T0), row('b', NOW)])
+    expect(result.done).toBe(true)
+    expect(result.events).toEqual([{ type: 'completed', userId: CREATOR, occurredAt: NOW, payload: { scope: 'all' } }])
+  })
+
+  it('a creator who is also an assignee has their own null row stamped with the others', () => {
+    const rows = [row(CREATOR, null), row('b', null)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(result.rows).toEqual([row(CREATOR, NOW), row('b', NOW)])
+    expect(result.events).toHaveLength(1)
+  })
+
+  it('wasDone (a repeat): no-op, rows unchanged, no event', () => {
+    const rows = [row('a', T0), row('b', T0)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: true })
+    expect(result).toEqual({ rows: [row('a', T0), row('b', T0)], done: true, via: 'formula', events: [] })
+  })
+
+  it('wasDone with a null row (task-c A6: an assignee added to a done task, then switched to all): no-op, the null row stays null, no event', () => {
+    const rows = [row('a', T0), row('b', null)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: true })
+    expect(result).toEqual({ rows: [row('a', T0), row('b', null)], done: true, via: 'formula', events: [] })
+  })
+
+  it('an open all-mode task whose rows are all stamped already: no row changes, the task flips to done and one completed with payload { scope: all } is recorded (design §3.1: one completed on the flip)', () => {
+    const rows = [row('a', T0), row('b', T0)]
+    const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(result).toEqual({
+      rows: [row('a', T0), row('b', T0)],
+      done: true,
+      via: 'formula',
+      events: [{ type: 'completed', userId: CREATOR, occurredAt: NOW, payload: { scope: 'all' } }],
+    })
+  })
+
+  it('any mode and a task without assignees: exactly what applyComplete gives the creator, done or not, assignee or not', () => {
+    const shapes: Array<{ mode: TaskCompletionMode; rows: TaskAssigneeRow[] }> = [
+      { mode: 'any', rows: [row('a', null), row('b', null)] },
+      { mode: 'any', rows: [row(CREATOR, null), row('b', null)] },
+      { mode: 'any', rows: [row('a', T0), row('b', null)] },
+      { mode: 'all', rows: [] },
+      { mode: 'any', rows: [] },
+    ]
+    for (const shape of shapes) {
+      for (const wasDone of [false, true]) {
+        const input = { ...shape, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone }
+        expect(applyCompleteForAll(input), `${shape.mode} x ${shape.rows.length} wasDone=${wasDone}`).toEqual(applyComplete(input))
+      }
+    }
+    // The delegated events carry no payload: the default complete writes `{}`.
+    const zero = applyCompleteForAll({ mode: 'all', rows: [], actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(zero.events).toEqual([{ type: 'completed', userId: CREATOR, occurredAt: NOW }])
+    const any = applyCompleteForAll({ mode: 'any', rows: [row('a', null)], actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(any.events).toEqual([{ type: 'completed_by_any', userId: CREATOR, occurredAt: NOW }])
+  })
+
+  it('anyone but the creator throws, in every mode and state, before anything else is decided', () => {
+    for (const mode of ['all', 'any'] as const) {
+      for (const rows of [[row('a', null), row('b', null)], [row('a', T0)], []]) {
+        for (const wasDone of [false, true]) {
+          expect(() => applyCompleteForAll({ mode, rows, actorId: 'a', createdBy: CREATOR, now: NOW, wasDone })).toThrow(/creator/)
+        }
+      }
+    }
+  })
+
+  it('does not change the rows it was given', () => {
+    const rows = [row('a', null), row('b', T0)]
+    applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
+    expect(rows).toEqual([row('a', null), row('b', T0)])
   })
 })

@@ -714,8 +714,58 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     // migration that is not applied yet. The purpose names all four route prefixes it mounts.
     danger: 'medium',
     purpose:
-      'Mounts the task routes: /api/tasks (P0-A/P0-B), /api/task-settings, /api/task-lists and /api/task-groups (M4). Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode registers none of them. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds). Since M4 PR-3a the task routes read task_list_items, task_list_members and task_user_settings, so any environment that sets this to true must have the M4 migration (zzzz20261009130000_create_task_m4_tables) applied; without it the task routes answer 500.',
+      'Mounts the task routes: /api/tasks (P0-A/P0-B), /api/task-settings, /api/task-lists and /api/task-groups (M4). Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode registers none of them. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds). Since M4 PR-3a the task routes read task_list_items, task_list_members and task_user_settings, so any environment that sets this to true must have the M4 migration (zzzz20261009130000_create_task_m4_tables) applied; without it the task routes answer 500. Since M4 PR-3b it is also a prerequisite of the task scheduler and its notification delivery worker (TASKS_SCHEDULER_ENABLED, TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED): while this is not the exact string true neither of them starts, whatever their own values.',
     source: 'packages/core-backend/src/routes/tasks.ts#tasksRouter; packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled',
+  },
+  // M4 PR-3b (design docs/development/task-m4-pr3b-backend-design-20261001.md §9.2; design lock §10 P1
+  // flags, gate 18). The three entries carry `dependsOn` as documentation only and no `rules`
+  // (ASSUMPTION(task-m4): [own-3b-22]); whether they become `requires` rules is owner question §13-Q19.
+  // Items the owner ruled on 2026-10-07 read RULED(2026-10-07); the rest stay ASSUMPTION(task-m4).
+  // Items are cited by id only. Draft PR: not merged, not on staging.
+  {
+    key: 'TASKS_SCHEDULER_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Task scheduler loop (M4 PR-3b design §6). Default OFF; exact literal 'true' only (no trim, no case folding). The scheduler is constructed and started only when this flag AND TASKS_ENABLED are both the exact string true and the database pool exists. Each tick takes the tasks-scheduler:leader advisory lock in a dedicated transaction; the tick that holds it runs the single-task reminder scan and the daily digest scan, and after that transaction commits runs the delivery loop when TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED is on. Both scans write outbox rows only while this flag, the worker flag and the DingTalk channel flag are all on (ASSUMPTION(task-m4): [own-3b-01]) and only for orgs that have an active DingTalk integration row ([own-3b-13]); otherwise the loop runs and writes nothing. Tick interval: TASKS_SCHEDULER_INTERVAL_MS, a numeric knob (default 60000 ms, clamped to 5000..3600000 ms) and not a switch. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. M4 has no hard delete and no purge job, so outbox rows are kept; the retention period is decided later (RULED(2026-10-07): [R13]). Not a session feature; not read by the web client.",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTasksSchedulerEnabled',
+  },
+  {
+    key: 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED', 'TASKS_SCHEDULER_ENABLED'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Task notification delivery worker (M4 PR-3b design §7). Default OFF; exact literal 'true' only. Registers the delivery job with the task scheduler; the job runs only after a tick's leader transaction has committed, so it runs only where TASKS_SCHEDULER_ENABLED (and TASKS_ENABLED) are on. The worker claims due outbox rows whose channel is registered (FOR UPDATE SKIP LOCKED, batch lease), writes a row to `sending` immediately before its single external send, and ends each claimed row as sent, retrying, failed, skipped or outcome_unknown; a `sending` row whose lease expires is swept to outcome_unknown and is never re-sent (ASSUMPTION(task-m4): [own-3b-04]). With no channel flag on the registered channel list is empty and a claim selects zero rows. Every lookup is bound to the delivery row's org_id; there is no default org. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. M4 has no hard delete and no purge job, so outbox rows are kept; the retention period is decided later (RULED(2026-10-07): [R13]).",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTaskNotificationDeliveryWorkerEnabled',
+  },
+  {
+    key: 'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED', 'TASKS_SCHEDULER_ENABLED', 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "DingTalk work-notification channel for task notifications (M4 PR-3b design §8), the only code in the task line that sends to an external service. Default OFF; exact literal 'true' only. Registers the channel `dingtalk_work_notification`. The producer and the two scheduler scans write outbox rows only while this flag, TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED and TASKS_SCHEDULER_ENABLED are all on (ASSUMPTION(task-m4): [own-3b-01]), and only for orgs that have an active DingTalk integration row ([own-3b-13]). The recipient's DingTalk identity is resolved through the org-bound directory tables of the delivery row's org, and the app credentials for the send are read from that same integration row only ([own-3b-19]); the integration's baseUrl must be https with host oapi.dingtalk.com or a .dingtalk.com subdomain ([own-3b-21]). Outbox rows hold ids and enum values only; title and body are rendered at send time. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. danger=high: outbound messages to employees.",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTaskDingTalkWorkNotificationEnabled',
+  },
+  {
+    key: 'TASKS_SCHEDULER_INTERVAL_MS',
+    type: 'numeric',
+    activationValue:
+      'numeric ms (default 60000 = 60s; unset / blank / anything but a plain non-negative integer after trimming = 60000; otherwise clamped to [5000, 3600000] = [5s, 1h = half the reminder scan window])',
+    dependsOn: ['TASKS_SCHEDULER_ENABLED'],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Tick interval of the task scheduler loop (M4 PR-3b design §6.6, §9.1). Read once at start-up through resolveTaskSchedulerIntervalMs: the value must be a plain digit string after trimming and a safe integer; unset, blank, signed, decimal, exponent, hex or unit-suffixed values fall back to 60000. The result is clamped to [5000, 3600000]; the ceiling is half the reminder scan window W, which keeps W >= 2 x interval so that one missed tick plus timer lateness still lands inside W (design §6.2), so 0 reads as 5000 and 86400000 as 3600000. The scheduler constructor validates the value it receives against the same range instead of clamping it. Not a gate: nothing turns on or off, and the default is the intended state. Inert unless TASKS_SCHEDULER_ENABLED (with TASKS_ENABLED) constructs the scheduler. Registered as a numeric knob although the PR-3b design (§9.1, ASSUMPTION(task-m4): [D3]) left it out of this manifest: AGENTS.md registers every new env knob here, and the other numeric knobs in this file follow the same rule.',
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#resolveTaskSchedulerIntervalMs',
   },
   {
     key: 'APPROVAL_CC_UNREAD_BADGE_ENABLED',

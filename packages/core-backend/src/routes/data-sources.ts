@@ -28,7 +28,7 @@ import {
   SUPPORTED_DATA_SOURCE_TYPES
 } from '../data-adapters/DataSourceManager'
 import type { DataSourceActorContext } from '../data-adapters/DataSourceManager'
-import type { DataSourceConfig, QueryOptions } from '../data-adapters/BaseAdapter'
+import type { DataSourceConfig, QueryOptions, QueryResult } from '../data-adapters/BaseAdapter'
 import {
   attemptsToClearK3Marker,
   K3_DESTINATION_MARKER_IMMUTABLE,
@@ -86,6 +86,136 @@ export const TABLE_INFO_FAILURE_MESSAGE =
   '读取数据表信息失败，请先「测试连接」查看原因 / Failed to read the table information; run "Test connection" for details'
 export const CONNECT_FAILURE_MESSAGE =
   '连接数据源失败，请先「测试连接」查看原因 / Could not connect the data source; run "Test connection" for details'
+
+// R-41 (docs/development/takeover-beiliao-20260821/decision-register.md) applied to this router: no body, of
+// any status, carries what an adapter, a driver or a transport said. Two shapes used to:
+//  - the READ RESULT of /query and /select (200). An adapter answers a failed read with its QueryResult whose
+//    `error` is the caught value itself: for the HTTP adapter an AxiosError, whose toJSON() serializes the
+//    request config (headers built from the stored write-only credentials: Authorization, X-API-Key), the stack
+//    and the message; for the SQL adapters the driver error (detail, schema / table / constraint, position).
+//    publicReadResult copies the typed QueryResult fields only and answers a failed read with a fixed sentence.
+//  - every GENERIC 500 arm answered `error.message`. Each now answers its literal status, its unchanged code and
+//    a fixed sentence below. The typed refusals ahead of it (codedGateRefusal, validation, not found) are as
+//    they were.
+// The server log gets values-free tokens only (logDataSourceFailure).
+export const SOURCE_READ_FAILED_CODE = 'SOURCE_READ_FAILED'
+export const SOURCE_READ_FAILURE_MESSAGE =
+  '读取数据源失败，请先「测试连接」查看原因 / Failed to read from the data source; run "Test connection" for details'
+
+/** The fixed sentence of each generic 500 arm (one per route; the codes are unchanged). */
+export const DATA_SOURCE_FAILURE_MESSAGES = Object.freeze({
+  list: '读取数据源列表失败 / Failed to list data sources',
+  health: '数据源健康检查失败 / Health check failed',
+  get: '读取数据源失败 / Failed to get data source',
+  create: '创建数据源失败 / Failed to create data source',
+  draftTest: '连接测试失败 / Connection test failed',
+  update: '更新数据源失败 / Failed to update data source',
+  credentials: '更新数据源凭据失败 / Failed to update data source credentials',
+  remove: '删除数据源失败 / Failed to remove data source',
+  disconnect: '断开数据源失败 / Failed to disconnect',
+  test: '连接测试失败 / Connection test failed',
+  query: '查询执行失败 / Query execution failed',
+  select: '读取数据失败 / Select query failed',
+} as const)
+
+/** A class name as the log may carry it: an identifier, nothing else. */
+const LOG_CLASS_NAME = /^[A-Za-z_$][A-Za-z0-9_$]{0,63}$/
+/** A driver / transport code as the log may carry it: SQLSTATE `42P01`, `ECONNREFUSED`, axios `ERR_BAD_REQUEST`, mysql `ER_…`. */
+const LOG_CODE_TOKEN = /^[A-Za-z0-9_]{1,64}$/
+
+function logCodeToken(value: unknown): string | number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : undefined
+  return typeof value === 'string' && LOG_CODE_TOKEN.test(value) ? value : undefined
+}
+
+/**
+ * Server-log line for a failure this router answers with a fixed sentence: the operation (a literal), the data
+ * source id the caller addressed, the error's class and its driver / transport codes — each code only when it
+ * has the shape of a code (an integer, or a bare token without dots, colons or spaces), so an address, a host,
+ * a path or a sentence that a driver put there is dropped. Never the message, the stack, a config or a body.
+ */
+function logDataSourceFailure(operation: string, dataSourceId: string | undefined, error: unknown): void {
+  try {
+    const record = error !== null && typeof error === 'object' ? (error as Record<string, unknown>) : undefined
+    const ctorName = record ? (record.constructor as { name?: unknown } | undefined)?.name : undefined
+    const errorClass = record
+      ? (typeof ctorName === 'string' && LOG_CLASS_NAME.test(ctorName) ? ctorName : 'unknown')
+      : error === null ? 'null' : typeof error
+    const response = record?.response
+    const httpStatus = response !== null && typeof response === 'object'
+      ? (response as { status?: unknown }).status
+      : undefined
+    logger.warn(`data source ${operation} failed`, {
+      ...(dataSourceId === undefined ? {} : { dataSourceId: dataSourceId.slice(0, 128) }),
+      errorClass,
+      code: logCodeToken(record?.code),
+      errno: logCodeToken(record?.errno),
+      sqlState: logCodeToken(record?.sqlState),
+      httpStatus: typeof httpStatus === 'number' && Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus < 600
+        ? httpStatus
+        : undefined,
+    })
+  } catch {
+    // Logging must never change the answer.
+  }
+}
+
+type ReadResultMetadata = NonNullable<QueryResult<unknown>['metadata']>
+
+interface PublicReadResult {
+  data: unknown[]
+  metadata?: ReadResultMetadata
+  error?: { code: typeof SOURCE_READ_FAILED_CODE; message: string }
+}
+
+/**
+ * The body form of an adapter's QueryResult: the TYPED fields, copied by name (an adapter's extra fields do
+ * not travel), and a failed read as `{ code: SOURCE_READ_FAILED, message: <fixed sentence> }` instead of the
+ * caught value. The rows (`data`) are the read's answer and travel as they are.
+ */
+function publicReadResult(result: QueryResult<unknown>, operation: 'query' | 'select', dataSourceId: string): PublicReadResult {
+  const out: PublicReadResult = { data: result.data }
+  const meta = result.metadata
+  if (meta) {
+    const metadata: ReadResultMetadata = {}
+    if (meta.totalCount !== undefined) metadata.totalCount = meta.totalCount
+    if (meta.pageCount !== undefined) metadata.pageCount = meta.pageCount
+    if (meta.currentPage !== undefined) metadata.currentPage = meta.currentPage
+    if (Array.isArray(meta.sources)) {
+      metadata.sources = meta.sources.map((source) => ({
+        name: source.name,
+        ok: source.ok,
+        count: source.count,
+        // A sub-source's failure text is adapter text too: present → the same fixed sentence.
+        ...(source.error ? { error: SOURCE_READ_FAILURE_MESSAGE } : {}),
+      }))
+    }
+    if (Array.isArray(meta.columns)) {
+      metadata.columns = meta.columns.map((column) => ({
+        name: column.name,
+        type: column.type,
+        ...(column.nullable === undefined ? {} : { nullable: column.nullable }),
+      }))
+    }
+    out.metadata = metadata
+  }
+  if (result.error !== undefined && result.error !== null) {
+    logDataSourceFailure(operation, dataSourceId, result.error)
+    out.error = { code: SOURCE_READ_FAILED_CODE, message: SOURCE_READ_FAILURE_MESSAGE }
+  }
+  return out
+}
+
+/**
+ * A3 (data-source-test-error-fidelity.test.ts): the two test routes deliberately show the adapter's REDACTED
+ * cause, a string. That contract is unchanged here; this only makes sure nothing but a string reaches
+ * `error.message` — any other value (an Error object some adapter or manager path hands back) is answered with
+ * the route's fixed sentence instead of being serialized with its config, headers and stack.
+ */
+function testCauseMessage(cause: unknown, fallback: string): string | undefined {
+  if (!cause) return undefined
+  return typeof cause === 'string' ? cause : fallback
+}
 
 // Zod schemas for request validation
 const ConnectionConfigSchema = z.record(z.union([z.string(), z.number(), z.boolean()]))
@@ -416,11 +546,12 @@ export function dataSourcesRouter(): Router {
         }
       })
     } catch (error) {
+      logDataSourceFailure('list', undefined, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to list data sources'
+          message: DATA_SOURCE_FAILURE_MESSAGES.list
         }
       })
     }
@@ -466,11 +597,12 @@ export function dataSourcesRouter(): Router {
         }
       })
     } catch (error) {
+      logDataSourceFailure('health', undefined, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Health check failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.health
         }
       })
     }
@@ -513,11 +645,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('get', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to get data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.get
         }
       })
     }
@@ -592,11 +725,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('create', parse.data.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to create data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.create
         }
       })
     }
@@ -648,12 +782,13 @@ export function dataSourcesRouter(): Router {
       })
       // RESULT-ONLY surface (design-lock 钉子②): success / latency / redacted error — NEVER echo the
       // submitted config, connection, or credentials back to the caller.
+      const cause = testCauseMessage(result.error, DATA_SOURCE_FAILURE_MESSAGES.draftTest)
       return res.json({
         ok: true,
         data: {
           success: result.success,
           ...(typeof result.latency === 'number' ? { latency: `${result.latency}ms` } : {}),
-          ...(result.error ? { error: { message: result.error } } : {})
+          ...(cause !== undefined ? { error: { message: cause } } : {})
         }
       })
     } catch (error) {
@@ -665,11 +800,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'VALIDATION_ERROR', message: error.message }
         })
       }
+      logDataSourceFailure('draft test', parse.data.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TEST_FAILED',
-          message: error instanceof Error ? error.message : 'Connection test failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.draftTest
         }
       })
     }
@@ -766,11 +902,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('update', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to update data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.update
         }
       })
     }
@@ -914,11 +1051,12 @@ export function dataSourcesRouter(): Router {
           }
         })
       }
+      logDataSourceFailure('credential update', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to update data source credentials'
+          message: DATA_SOURCE_FAILURE_MESSAGES.credentials
         }
       })
     }
@@ -1015,11 +1153,12 @@ export function dataSourcesRouter(): Router {
           }
         })
       }
+      logDataSourceFailure('remove', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to remove data source'
+          message: DATA_SOURCE_FAILURE_MESSAGES.remove
         }
       })
     }
@@ -1106,11 +1245,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('disconnect', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'INTERNAL_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to disconnect'
+          message: DATA_SOURCE_FAILURE_MESSAGES.disconnect
         }
       })
     }
@@ -1138,13 +1278,14 @@ export function dataSourcesRouter(): Router {
 
       // A3: keep request-layer ok:true (a completed test is a successful request); the connection
       // outcome is data.success, with a redacted cause in data.error.message on failure.
+      const cause = testCauseMessage(result.error, DATA_SOURCE_FAILURE_MESSAGES.test)
       return res.json({
         ok: true,
         data: {
           id,
           success: result.success,
           latency: `${latency}ms`,
-          ...(result.error ? { error: { message: result.error } } : {})
+          ...(cause !== undefined ? { error: { message: cause } } : {})
         }
       })
     } catch (error) {
@@ -1154,11 +1295,12 @@ export function dataSourcesRouter(): Router {
           error: { code: 'NOT_FOUND', message: `Data source '${req.params.id}' not found` }
         })
       }
+      logDataSourceFailure('test', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'TEST_FAILED',
-          message: error instanceof Error ? error.message : 'Connection test failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.test
         }
       })
     }
@@ -1242,7 +1384,7 @@ export function dataSourcesRouter(): Router {
 
       return res.json({
         ok: true,
-        data: result,
+        data: publicReadResult(result, 'query', req.params.id),
         ...(warning ? { warning } : {})
       })
     } catch (error) {
@@ -1260,11 +1402,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('query', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'QUERY_ERROR',
-          message: error instanceof Error ? error.message : 'Query execution failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.query
         }
       })
     }
@@ -1305,7 +1448,7 @@ export function dataSourcesRouter(): Router {
 
       return res.json({
         ok: true,
-        data: result
+        data: publicReadResult(result, 'select', req.params.id)
       })
     } catch (error) {
       if (error instanceof Error && error.message.includes('not found')) {
@@ -1320,11 +1463,12 @@ export function dataSourcesRouter(): Router {
       if (coded) {
         return res.status(coded.status).json({ ok: false, error: { code: coded.code, message: coded.message } })
       }
+      logDataSourceFailure('select', req.params.id, error)
       return res.status(500).json({
         ok: false,
         error: {
           code: 'SELECT_ERROR',
-          message: error instanceof Error ? error.message : 'Select query failed'
+          message: DATA_SOURCE_FAILURE_MESSAGES.select
         }
       })
     }

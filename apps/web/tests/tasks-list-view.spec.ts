@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App } from 'vue'
+import { createApp, nextTick, ref, type App } from 'vue'
 
 const h = vi.hoisted(() => ({
   loadTasksContext: vi.fn(),
@@ -15,6 +15,25 @@ const h = vi.hoisted(() => ({
   completeTask: vi.fn(),
   reopenTask: vi.fn(),
   notifyTasksChanged: vi.fn(),
+  // M4 FE-4: a detail-route mount also reads the viewer's lists, and the editor / lists section can
+  // send their writes. None is exercised here (tasks-detail-m4.spec.ts covers them) — stubbed so
+  // that mount does not throw.
+  listAllTaskLists: vi.fn(),
+  patchTask: vi.fn(),
+  addTaskToList: vi.fn(),
+  removeTaskFromList: vi.fn(),
+  resolveViewerTimeZone: vi.fn(),
+  // M4 FE-5: a list-route mount also mounts the lists sidebar, which reads one page of the viewer's
+  // lists and can create one. Neither is exercised here (tasks-lists-sidebar.spec.ts covers them)
+  // — stubbed so that mount does not throw.
+  listTaskLists: vi.fn(),
+  createTaskList: vi.fn(),
+  // M4 FE-7: the assigned view's rows render through the personal grouping board, which reads the
+  // viewer's groups and placements. Neither is exercised here (tasks-groups.spec.ts covers them) —
+  // stubbed with the answer for a viewer without groups (the synthetic default group, no
+  // placements), under which the board shows the rows in the plain list's order.
+  listUserGroups: vi.fn(),
+  listUserGroupItems: vi.fn(),
   route: { params: {} as Record<string, string> },
   router: { push: vi.fn() },
 }))
@@ -38,6 +57,15 @@ vi.mock('../src/tasks/tasksApi', () => ({
   createTask: h.createTask,
   completeTask: h.completeTask,
   reopenTask: h.reopenTask,
+  listAllTaskLists: h.listAllTaskLists,
+  patchTask: h.patchTask,
+  addTaskToList: h.addTaskToList,
+  removeTaskFromList: h.removeTaskFromList,
+  resolveViewerTimeZone: h.resolveViewerTimeZone,
+  listTaskLists: h.listTaskLists,
+  createTaskList: h.createTaskList,
+  listUserGroups: h.listUserGroups,
+  listUserGroupItems: h.listUserGroupItems,
 }))
 
 vi.mock('../src/tasks/tasksBadgeBus', () => ({
@@ -48,6 +76,17 @@ vi.mock('../src/tasks/tasksBadgeBus', () => ({
 // leave-button gating, covered in tasks-detail-m3.spec.ts). Defaults to an unresolved id here.
 vi.mock('../src/composables/useAuth', () => ({
   useAuth: () => ({ getCurrentUserId: h.getCurrentUserId }),
+}))
+
+// M4 FE-0: TasksView reads `useLocale()` for every string it renders (`tasks/labels.ts`). jsdom
+// reports `navigator.language` as en-US, so pin the Chinese table here — the same mock shape
+// tasks-badge.spec.ts uses — and every copy assertion in this file stays exactly as written.
+vi.mock('../src/composables/useLocale', () => ({
+  useLocale: () => ({
+    locale: ref('zh-CN'),
+    isZh: ref(true),
+    setLocale: vi.fn(),
+  }),
 }))
 
 import TasksView from '../src/views/tasks/TasksView.vue'
@@ -117,6 +156,19 @@ beforeEach(() => {
   h.listComments.mockReset().mockResolvedValue({ kind: 'ok', items: [] })
   h.getCurrentUserId.mockReset().mockResolvedValue(null)
   h.router.push.mockReset()
+  h.listAllTaskLists.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
+  h.patchTask.mockReset()
+  h.addTaskToList.mockReset()
+  h.removeTaskFromList.mockReset()
+  h.resolveViewerTimeZone.mockReset().mockReturnValue('UTC')
+  h.listTaskLists.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
+  h.createTaskList.mockReset()
+  h.listUserGroups.mockReset().mockResolvedValue({
+    kind: 'ok',
+    items: [{ id: null, scope: 'user', name: '默认分组', position: 0, isDefault: true }],
+    total: 1,
+  })
+  h.listUserGroupItems.mockReset().mockResolvedValue({ kind: 'ok', items: [], total: 0 })
 })
 
 afterEach(() => {
