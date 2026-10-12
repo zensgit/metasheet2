@@ -78,6 +78,8 @@ const SIMPLE_FORM = {
   formFields: [
     { id: 'reason', type: 'text', label: '事由', required: true },
     { id: 'days', type: 'number', label: '天数' },
+    // FIXTURE-ONLY type: the server's form-field type list has no `checkbox`, so a real template never
+    // carries one. It is kept to exercise the dialog's boolean branch (submit shape, prune of `false`).
     { id: 'urgent', type: 'checkbox', label: '加急' },
   ],
 }
@@ -878,6 +880,8 @@ const VISIBILITY_FORM = {
     { id: 'legacyNote', type: 'text', label: '旧规则说明', visibilityRule: { fieldId: 'days', operator: 'eq', value: '5' } },
     { id: 'reasonText', type: 'text', label: '事由' },
     { id: 'otherNote', type: 'text', label: '其他说明', visibilityRule: { fieldId: 'reasonText', operator: 'eq', value: '其他' } },
+    // FIXTURE-ONLY type (the server never serves `checkbox`, see SIMPLE_FORM): it pins the
+    // submit-time prune layer, which for real types sits behind the hide-clears-draft watcher.
     { id: 'proof', type: 'checkbox', label: '已附证明', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
   ],
 }
@@ -1121,6 +1125,9 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     await openDialog(container)
     await pickTemplate('tpl_leave')
     expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).not.toBeNull()
+    // `reason` is required and still empty, yet no "fill the required fields" hint: filling them would
+    // not make this template submittable, and the hint would suggest it does.
+    expect(document.querySelector('[data-testid="record-approval-required-notice"]')).toBeNull()
     setFieldValue('reason', '年假')
     await flushUi()
     expect(submitBtn()!.disabled).toBe(true)
@@ -1191,6 +1198,68 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     setFieldValue('reason', '年假')
     await flushUi()
     expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('a LATE 422 for the previous template does not block the template picked while it was in flight', async () => {
+    let rejectSubmit: (reason: unknown) => void = () => {}
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSubmit = reject
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(4)
+    expect(client.submitRecordApproval).toHaveBeenCalledTimes(1)
+    // Switch while tpl_leave's request is still in flight, THEN let its refusal arrive.
+    await pickTemplate('tpl_purchase')
+    rejectSubmit(requesterChoiceRefusal())
+    await flushUi(8)
+    expect(templateSelect()!.value).toBe('tpl_purchase')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-submit-error"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-in-flight-notice"]')).toBeNull()
+    setFieldValue('reason', '采购')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('a LATE coded failure / 409 for the previous template is dropped the same way', async () => {
+    const rejects: Array<(reason: unknown) => void> = []
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejects.push(reject)
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    for (const late of [
+      Object.assign(new Error('Approval template is not published'), { status: 400, code: 'APPROVAL_TEMPLATE_NOT_PUBLISHED' }),
+      Object.assign(new Error('in flight'), {
+        status: 409,
+        name: 'MultitableRecordApprovalInFlightError',
+        code: 'RECORD_APPROVAL_IN_FLIGHT',
+        approvalInstanceId: 'inst_9',
+        requestNo: 'AP-2026-0009',
+      }),
+    ]) {
+      await pickTemplate('tpl_leave')
+      setFieldValue('reason', '年假')
+      await flushUi()
+      submitBtn()!.click()
+      await flushUi(4)
+      await pickTemplate('tpl_purchase')
+      rejects.at(-1)!(late)
+      await flushUi(8)
+      expect(document.querySelector('[data-testid="record-approval-submit-error"]')).toBeNull()
+      expect(document.querySelector('[data-testid="record-approval-in-flight-notice"]')).toBeNull()
+    }
   })
 })
 

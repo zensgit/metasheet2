@@ -187,6 +187,8 @@
             >{{ l('approval.openApprovalCenter') }}</RouterLink>
           </p>
 
+          <!-- No "fill the required fields" hint while the template is blocked by 发起人自选: filling them
+               would not make it submittable, and the hint would say otherwise. -->
           <p
             v-if="hasUnsupportedField"
             class="meta-approval__hint meta-approval__hint--warn"
@@ -194,7 +196,7 @@
             data-testid="record-approval-unsupported-notice"
           >{{ l('approval.unsupportedField') }}</p>
           <p
-            v-else-if="selectedTemplateId && !formLoading && !formLoadFailed && missingRequired"
+            v-else-if="selectedTemplateId && !formLoading && !formLoadFailed && !requesterChoiceBlocked && missingRequired"
             class="meta-approval__hint"
             data-testid="record-approval-required-notice"
           >{{ l('approval.requiredMissing') }}</p>
@@ -564,17 +566,24 @@ function buildFormData(): Record<string, unknown> {
 
 async function onSubmit(): Promise<void> {
   if (!canSubmit.value) return
+  // The template this request is FOR. The picker stays usable while the request is in flight (and a
+  // close/reopen resets `submitting` anyway), so a late failure must not land on a template the actor
+  // has since switched to: every failure state below is about THIS template, and is dropped otherwise.
+  // A success is still emitted unconditionally — the server did create the request.
+  const submitTemplateId = selectedTemplateId.value
   submitting.value = true
   submitError.value = null
   inFlightNotice.value = null
   try {
     const submission = await props.client.submitRecordApproval(props.sheetId, props.recordId, {
-      templateId: selectedTemplateId.value,
+      templateId: submitTemplateId,
       formData: buildFormData(),
     })
     emit('submitted', submission)
   } catch (error) {
-    if (isRecordApprovalInFlightError(error)) {
+    if (selectedTemplateId.value !== submitTemplateId) {
+      // Stale: the actor moved on (resetFormState already cleared the previous template's notices).
+    } else if (isRecordApprovalInFlightError(error)) {
       inFlightNotice.value = {
         ...(error.requestNo ? { requestNo: error.requestNo } : {}),
         ...(error.approvalInstanceId ? { approvalInstanceId: error.approvalInstanceId } : {}),

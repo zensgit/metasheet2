@@ -1793,7 +1793,8 @@ export interface MetaApprovalFormVisibilityRule {
 
 /**
  * One form field of the version the template read serves (the LATEST one — see
- * activeVersionId/latestVersionId below), normalized down to what the generic submit dialog can render. `type` is kept as the RAW server string (normalization to a render kind happens in the
+ * activeVersionId/latestVersionId below), normalized down to what the generic submit dialog can
+ * render. `type` is kept as the RAW server string (normalization to a render kind happens in the
  * dialog) so an unknown type is visible as itself rather than silently coerced into a text box.
  * No `defaultValue` on purpose: the picker is values-free until the user types.
  */
