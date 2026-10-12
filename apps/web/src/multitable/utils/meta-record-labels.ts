@@ -163,6 +163,7 @@ export type MetaRecordLabelKey =
   | 'approval.errorTemplateNotPublished' | 'approval.errorRecordNotFound'
   | 'approval.errorCreateFailed' | 'approval.errorValidation'
   | 'approval.errorOrgUnresolved'
+  | 'approval.errorRequesterChoiceRequired' | 'approval.openApprovalCenter'
   | 'approval.templateDraftPending'
   // --- 2a 后续前端 / list page follow-up (backend PR #5763: the list route now answers
   //     `{ submissions, hasMore }` and stamps `RECORD_APPROVAL_NOTIFICATION_FAILED` on a row whose
@@ -485,6 +486,16 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   // user id) — the copy stays that way and only names the fix: an administrator must correct the
   // account's organization membership.
   'approval.errorOrgUnresolved': { en: "Your account's organization membership could not be resolved to a single organization. Ask an administrator to fix your organization membership before submitting.", zh: '你的账号无法解析到唯一所属组织，请联系管理员修正账号的组织归属后再送审。' },
+  // `APPROVAL_REQUESTER_CHOICE_REQUIRED` (ApprovalProductService §K2, passed through by
+  // mapCreateApprovalFailure): the template's published route lets the REQUESTER pick an approver or a
+  // handler, and record submission carries no such choice. Also rendered as a failed row's reason in
+  // MetaRecordApprovalPanel, so the copy must read correctly there too. It states plainly that a request
+  // started in the approval centre is NOT linked to this record.
+  'approval.errorRequesterChoiceRequired': {
+    en: 'This template requires the requester to choose an approver or handler, which record submission does not support yet. Start it from the approval centre instead — a request started there is not linked to this record.',
+    zh: '该模板需要发起人自选审批人或办理人，记录送审暂不支持。请到审批中心发起；在审批中心发起的申请不会关联到本记录。',
+  },
+  'approval.openApprovalCenter': { en: 'Start in the approval centre', zh: '去审批中心发起' },
   'approval.templateDraftPending': { en: 'This template has unpublished changes — the form below may differ from the one the approval will use.', zh: '该模板有未发布的改动，下方表单可能与实际审批表单不一致。' },
   // The ROW-LEVEL marker (`RECORD_APPROVAL_NOTIFICATION_FAILED`): the submission is terminal and correct,
   // only the requester's bell is missing. Two variants because the outcome differs: the auto-approve path
@@ -793,6 +804,10 @@ const RECORD_APPROVAL_ERROR_LABELS: Record<string, MetaRecordLabelKey> = {
   // ApprovalProductService's createApproval (approval-instance-org-derivation.ts) — without this entry
   // the dialog fell back to the route's fixed English sentence ("Approval creation was rejected").
   APPROVAL_ORG_UNRESOLVED: 'approval.errorOrgUnresolved',
+  // Passed through verbatim the same way (ApprovalProductService §K2): the template's published route
+  // has a 发起人自选 node and record submission carries no requester choice — without this entry the
+  // dialog showed only the route's English sentence.
+  APPROVAL_REQUESTER_CHOICE_REQUIRED: 'approval.errorRequesterChoiceRequired',
 }
 
 export function recordApprovalErrorLabel(code: string | undefined, isZh: boolean): string | null {
