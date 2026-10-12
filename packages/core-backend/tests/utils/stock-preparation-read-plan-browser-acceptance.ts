@@ -747,7 +747,10 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
     await page.getByTestId('stock-prep-plan-project').fill('SYN-REUSE')
     const measuredResponse = wait('POST', `${plansPath}/${version.id}/validate`)
     await page.getByTestId('stock-prep-plan-validate').click()
-    const measured = await responseData<{ validation: { validationId: string }; sample: { rows: Array<Record<string, unknown>>; totalRows: number } }>(await measuredResponse)
+    const measured = await responseData<{ validation: { validationId: string; status: string }; sample: { rows: Array<Record<string, unknown>>; totalRows: number } }>(await measuredResponse)
+    assert.equal(measured.validation.status, 'passed', 'BROWSER_REUSE_SOURCE_VALIDATED')
+    assert.equal(typeof measured.validation.validationId, 'string', 'BROWSER_REUSE_VALIDATION_ID_TYPE')
+    assert(measured.validation.validationId.length > 0, 'BROWSER_REUSE_VALIDATION_ID_PRESENT')
     assert.equal(measured.sample.totalRows, 2)
     assert.deepEqual(measured.sample.rows.map(row => ({ id: row.componentSourceId, quantity: row.totalQuantity,
       materialVersion: row.sourceVersion, ...(Object.hasOwn(row, 'orderBomVersion') ? { orderVersion: row.orderBomVersion } : {}) })), [
@@ -761,16 +764,31 @@ export async function runStockPreparationReadPlanReuseAcceptance(input: StockPre
     await page.getByTestId('stock-prep-plan-validation').screenshot({ path: path.join(artifactDir, 'second-owner-sample.png') })
     const confirm = wait('POST', `${plansPath}/${version.id}/confirm-sample`)
     await page.getByTestId('stock-prep-plan-confirm-sample').click()
-    await responseData(await confirm)
+    const confirmed = await responseData<{ validationId: string; status: string }>(await confirm)
+    assert.equal(confirmed.validationId, measured.validation.validationId, 'BROWSER_REUSE_EXACT_SAMPLE_CONFIRMED')
+    assert.equal(confirmed.status, 'confirmed', 'BROWSER_REUSE_CONFIRMATION_STATUS')
     let activatedGeneration = 0
     for (const operation of ['approve', 'activate']) {
       await page.getByTestId(`stock-prep-plan-${operation}`).click()
       const response = wait('POST', `${plansPath}/${version.id}/${operation}`)
       const refreshed = wait('GET', plansPath)
       await page.getByTestId('stock-prep-plan-confirm-submit').click()
-      await responseData(await response)
+      const data = await responseData<SourcePlanVersion | SourcePlanActivation>(await response)
       const current = await responseData<SourcePlanVersionList>(await refreshed)
-      if (operation === 'activate') {
+      if (operation === 'approve') {
+        assert('id' in data, 'BROWSER_REUSE_APPROVAL_RESPONSE_VERSION')
+        assert.equal(data.id, version.id, 'BROWSER_REUSE_APPROVAL_RESPONSE_ID')
+        assert.equal(data.status, 'approved', 'BROWSER_REUSE_APPROVAL_RESPONSE_STATUS')
+        const approved = current.versions.find(row => row.id === version.id)
+        assert.equal(approved?.status, 'approved', 'BROWSER_REUSE_APPROVED_READBACK')
+        assert.equal(approved?.validationId, measured.validation.validationId, 'BROWSER_REUSE_APPROVED_VALIDATION')
+        assert.deepEqual(current.activation, initial.activation, 'BROWSER_REUSE_APPROVAL_CHANGED_ACTIVATION')
+      } else {
+        assert('versionId' in data, 'BROWSER_REUSE_ACTIVATION_RESPONSE')
+        assert.equal(data.versionId, version.id, 'BROWSER_REUSE_ACTIVATION_RESPONSE_VERSION')
+        assert.equal(data.status, 'active', 'BROWSER_REUSE_ACTIVATION_RESPONSE_STATUS')
+        assert.equal(data.generation, (initial.activation?.generation ?? 0) + 1, 'BROWSER_REUSE_ACTIVATION_GENERATION')
+        assert.deepEqual(current.activation, data, 'BROWSER_REUSE_ACTIVATION_READBACK')
         assert.equal(current.activation?.status, 'active')
         assert.equal(current.activation?.versionId, version.id)
         assert.equal(current.activation?.systemId, input.systemId)

@@ -150,6 +150,8 @@ attendance-records-route-redirect
 attendance-scheduled-feature-status-wiring
 attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
+attendance-server-clock-view.spec.ts
+attendance-server-clock.spec.ts
 attendanceAdminEndpointCompatibility
 attendanceCapabilityUnavailable
 attendanceEmployeeLeaveRequestCard
@@ -461,6 +463,7 @@ platform-app-launcher
 platform-app-shell
 public-multitable-form
 requesterPreviewFields
+roleDelegationView
 roleManagementSave
 routePreviewErrors
 run-required-web-tests-shape

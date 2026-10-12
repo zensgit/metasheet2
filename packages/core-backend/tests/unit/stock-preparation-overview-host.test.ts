@@ -41,6 +41,7 @@ import { resolveSheetCapabilitiesForAccess, type QueryFn } from '../../src/multi
 import {
   MultitableProjectNamespaceError,
   MultitableSheetScopeError,
+  MultitableUnitOfWorkScopeError,
   assertPluginOwnsSheet,
   createPluginScopedMultitableApi,
 } from '../../src/multitable/plugin-scope'
@@ -1124,5 +1125,199 @@ describe('S3 follow-up E — the overview MODULE still provisions through the re
     expect(again.created).toBe(false)
     expect(host.ensureObject).toHaveBeenCalledTimes(1)
     expect(host.ensureView).toHaveBeenCalledTimes(2)
+  })
+})
+
+// S3 follow-ups 2 (item 3): the four READ-only object-keyed methods (and the two inside the repair transaction) read
+// projectId / objectId ONCE, like the writes (E-06): the namespace check, the scope hook and the host all see the
+// snapshot that was checked. Before, they checked `input.*` and forwarded `input` itself, so a getter could pass the
+// checks with the plugin's own object (or namespace) and have the host read another one.
+//   E-07 objectId: a getter answering the plugin's own object first and a foreign object afterwards.
+//   E-08 projectId: a getter answering the plugin's own namespace first and a foreign project afterwards.
+describe('S3 follow-ups 2 (item 3) — read-once on the READ-only object-keyed plugin-scope methods', () => {
+  const OWN_OBJECT = 'plm_stock_preparation_main'
+  const FOREIGN_OBJECT = 'someone_elses_object'
+  const FOREIGN_PROJECT = 'tenant_1:after-sales'
+  type HostFn = { mock: { calls: unknown[][] } }
+  const build = () => {
+    const txSurface = {
+      findObjectSheet: vi.fn(async () => null),
+      resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+      readObjectFieldsContent: vi.fn(async () => ({})),
+      ensureMissingObjectFields: vi.fn(async () => ({ addedFieldIds: [], skippedExistingFieldIds: [] })),
+    }
+    const host = {
+      getObjectSheetId,
+      resolveExistingObjectFieldIds: vi.fn(async () => ({})),
+      readObjectFieldsContent: vi.fn(async () => ({})),
+      findObjectView: vi.fn(async () => null),
+      getObjectField: vi.fn(async () => null),
+      runObjectFieldsRepairTransaction: vi.fn(async (fn: (surface: typeof txSurface) => Promise<unknown>) => fn(txSurface)),
+    }
+    const hooks = { assertObjectScope: vi.fn(async () => {}) }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-integration-core', hooks as never)
+    return { api, host, hooks, txSurface }
+  }
+  type Built = ReturnType<typeof build>
+  const flipping = (base: Record<string, unknown>, key: string, first: unknown, later: unknown) => {
+    let reads = 0
+    const input: Record<string, unknown> = { ...base }
+    Object.defineProperty(input, key, { enumerable: true, get() { reads += 1; return reads === 1 ? first : later } })
+    return { input, reads: () => reads }
+  }
+  const cases: Array<[string, (s: Built, input: Record<string, unknown>) => Promise<unknown>, (s: Built) => HostFn, Record<string, unknown>]> = [
+    ['resolveExistingObjectFieldIds', (s, input) => s.api.provisioning.resolveExistingObjectFieldIds(input as never), (s) => s.host.resolveExistingObjectFieldIds, { fieldIds: ['status'] }],
+    ['readObjectFieldsContent', (s, input) => s.api.provisioning.readObjectFieldsContent(input as never), (s) => s.host.readObjectFieldsContent, { fieldIds: ['status'] }],
+    ['findObjectView', (s, input) => s.api.provisioning.findObjectView!(input as never), (s) => s.host.findObjectView, { viewId: 'default' }],
+    ['getObjectField', (s, input) => s.api.provisioning.getObjectField(input as never), (s) => s.host.getObjectField, { fieldId: 'status' }],
+    ['repair-tx resolveExistingObjectFieldIds', (s, input) => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.resolveExistingObjectFieldIds(input as never)), (s) => s.txSurface.resolveExistingObjectFieldIds, { fieldIds: ['status'] }],
+    ['repair-tx readObjectFieldsContent', (s, input) => s.api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.readObjectFieldsContent(input as never)), (s) => s.txSurface.readObjectFieldsContent, { fieldIds: ['status'] }],
+  ]
+
+  it('E-07 objectId read once: the scope hook AND the host see the object that was checked — never the foreign one a getter answers later', async () => {
+    for (const [name, run, hostFn, extra] of cases) {
+      const s = build()
+      const f = flipping({ projectId: OV_PROJECT, ...extra }, 'objectId', OWN_OBJECT, FOREIGN_OBJECT)
+      await run(s, f.input)
+      const seen = hostFn(s).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.objectId, `${name}: the host reads the object that was checked`).toBe(OWN_OBJECT)
+      expect(f.reads(), `${name}: objectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { objectId?: unknown }).objectId, `${name}: the scope hook gets the checked object`).toBe(OWN_OBJECT)
+      expect(seen!.projectId, `${name}: projectId forwarded`).toBe(OV_PROJECT)
+      for (const [key, value] of Object.entries(extra)) expect(seen![key], `${name}: ${key} forwarded`).toEqual(value)
+    }
+  })
+
+  it('E-08 projectId read once: the namespace check, the scope hook and the host see the project that was checked — never a foreign project a getter answers later', async () => {
+    for (const [name, run, hostFn, extra] of cases) {
+      const s = build()
+      const f = flipping({ objectId: OWN_OBJECT, ...extra }, 'projectId', OV_PROJECT, FOREIGN_PROJECT)
+      await run(s, f.input)
+      const seen = hostFn(s).mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.projectId, `${name}: the host reads the project that was checked`).toBe(OV_PROJECT)
+      expect(f.reads(), `${name}: projectId is read once`).toBe(1)
+      expect((s.hooks.assertObjectScope.mock.calls.at(-1)?.[0] as { projectId?: unknown }).projectId, `${name}: the scope hook gets the checked project`).toBe(OV_PROJECT)
+    }
+    // Control: the foreign project itself is refused by the namespace check before the hook or the host.
+    const s = build()
+    await expect(s.api.provisioning.getObjectField({ projectId: FOREIGN_PROJECT, objectId: OWN_OBJECT, fieldId: 'status' } as never)).rejects.toBeInstanceOf(MultitableProjectNamespaceError)
+    expect(s.hooks.assertObjectScope).not.toHaveBeenCalled()
+    expect(s.host.getObjectField).not.toHaveBeenCalled()
+  })
+})
+
+// S3 follow-ups 2, fix round 1 (read-once, the rest of plugin-scope): findObjectSheet (and inside the repair transaction)
+// and resolveFieldIds read projectId ONCE; the generic record READS (listRecords / queryRecords / getRecord) and the
+// stock-preparation unit of work's queryRecords / createRecord / patchRecord read sheetId ONCE. Before, each checked
+// `input.*` and forwarded the raw input, so a getter could pass the check with the plugin's own value and have the host
+// act on another (another namespace's sheet descriptor; another sheet's records; a write outside the locked set).
+//   E-09 projectId: own namespace first, a foreign project afterwards.
+//   E-10 sheetId (generic reads): the plugin's own sheet first, a foreign sheet afterwards.
+//   E-11 sheetId (unit of work): a locked sheet first, a sheet outside the locked set afterwards.
+describe('S3 follow-ups 2, fix round 1 — read-once on findObjectSheet, resolveFieldIds, the generic record reads and the unit-of-work writes', () => {
+  const FOREIGN_PROJECT = 'tenant_1:after-sales'
+  const flipping = (base: Record<string, unknown>, key: string, first: unknown, later: unknown) => {
+    let reads = 0
+    const input: Record<string, unknown> = { ...base }
+    Object.defineProperty(input, key, { enumerable: true, get() { reads += 1; return reads === 1 ? first : later } })
+    return { input, reads: () => reads }
+  }
+
+  it('E-09 projectId read once: findObjectSheet (also inside the repair transaction) and resolveFieldIds forward the project that passed the namespace check', async () => {
+    const txSurface = { findObjectSheet: vi.fn(async () => null) }
+    const host = {
+      getObjectSheetId,
+      findObjectSheet: vi.fn(async () => null),
+      resolveFieldIds: vi.fn(async () => ({})),
+      runObjectFieldsRepairTransaction: vi.fn(async (fn: (surface: unknown) => Promise<unknown>) => fn(txSurface)),
+    }
+    const api = createPluginScopedMultitableApi({ provisioning: host, records: {} } as never, 'plugin-integration-core', {} as never)
+    const cases: Array<[string, (input: Record<string, unknown>) => Promise<unknown>, { mock: { calls: unknown[][] } }, Record<string, unknown>]> = [
+      ['findObjectSheet', (input) => api.provisioning.findObjectSheet(input as never), host.findObjectSheet, { objectId: 'plm_stock_preparation_main' }],
+      ['repair-tx findObjectSheet', (input) => api.provisioning.runObjectFieldsRepairTransaction!(async (surface) => surface.findObjectSheet(input as never)), txSurface.findObjectSheet, { objectId: 'plm_stock_preparation_main' }],
+      ['resolveFieldIds', (input) => api.provisioning.resolveFieldIds(input as never), host.resolveFieldIds, { objectId: 'plm_stock_preparation_main', fieldIds: ['status'] }],
+    ]
+    for (const [name, run, hostFn, extra] of cases) {
+      const f = flipping({ ...extra }, 'projectId', OV_PROJECT, FOREIGN_PROJECT)
+      await run(f.input)
+      const seen = hostFn.mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.projectId, `${name}: the host gets the project that was checked`).toBe(OV_PROJECT)
+      expect(f.reads(), `${name}: projectId is read once`).toBe(1)
+      for (const [key, value] of Object.entries(extra)) expect(seen![key], `${name}: ${key} forwarded`).toEqual(value)
+    }
+    // Control: the foreign project itself is refused before the host.
+    await expect(api.provisioning.findObjectSheet({ projectId: FOREIGN_PROJECT, objectId: 'x' } as never)).rejects.toBeInstanceOf(MultitableProjectNamespaceError)
+    expect(host.findObjectSheet).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-10 sheetId read once on the generic READS: the scope hook and the host see the sheet that was checked — never a foreign sheet a getter answers later', async () => {
+    const OWN_SHEET = 'sheet_own_s3fu2'
+    const FOREIGN_SHEET = 'sheet_foreign_s3fu2'
+    const records = {
+      listRecords: vi.fn(async () => []),
+      queryRecords: vi.fn(async () => []),
+      getRecord: vi.fn(async () => null),
+    }
+    const hooks = {
+      assertSheetScope: vi.fn(async ({ sheetId }: { sheetId: string }) => {
+        if (sheetId !== OWN_SHEET) throw new MultitableSheetScopeError('plugin-integration-core', sheetId, 'another-plugin')
+      }),
+    }
+    const api = createPluginScopedMultitableApi({ provisioning: {}, records } as never, 'plugin-integration-core', hooks as never)
+    const cases: Array<[string, (input: Record<string, unknown>) => Promise<unknown>, { mock: { calls: unknown[][] } }, Record<string, unknown>]> = [
+      ['listRecords', (input) => api.records.listRecords(input as never), records.listRecords, { limit: 5 }],
+      ['queryRecords', (input) => api.records.queryRecords(input as never), records.queryRecords, { filters: { a: 'b' }, limit: 5 }],
+      ['getRecord', (input) => api.records.getRecord(input as never), records.getRecord, { recordId: 'rec_1' }],
+    ]
+    for (const [name, run, hostFn, extra] of cases) {
+      const f = flipping({ ...extra }, 'sheetId', OWN_SHEET, FOREIGN_SHEET)
+      await run(f.input)
+      const seen = hostFn.mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.sheetId, `${name}: the host reads the sheet that was checked`).toBe(OWN_SHEET)
+      expect(f.reads(), `${name}: sheetId is read once`).toBe(1)
+      expect((hooks.assertSheetScope.mock.calls.at(-1)?.[0] as { sheetId?: unknown }).sheetId, `${name}: the scope hook gets the checked sheet`).toBe(OWN_SHEET)
+      for (const [key, value] of Object.entries(extra)) expect(seen![key], `${name}: ${key} forwarded`).toEqual(value)
+    }
+    // Control: the foreign sheet itself is refused by the scope hook before the host.
+    await expect(api.records.getRecord({ sheetId: FOREIGN_SHEET, recordId: 'rec_1' } as never)).rejects.toBeInstanceOf(MultitableSheetScopeError)
+    expect(records.getRecord).toHaveBeenCalledTimes(1)
+  })
+
+  it('E-11 sheetId read once in the unit of work: query / create / patch reach the host on the LOCKED sheet that was checked — never a sheet outside the set a getter answers later', async () => {
+    const LOCKED = ['sheet_uow_project', 'sheet_uow_batch', 'sheet_uow_c', 'sheet_uow_d']
+    const OUTSIDE = 'sheet_uow_outside'
+    const txRecords = {
+      queryRecords: vi.fn(async () => []),
+      createRecord: vi.fn(async () => ({ id: 'rec_new', version: 1 })),
+      patchRecord: vi.fn(async () => ({ id: 'rec_1', version: 2 })),
+    }
+    const hooks = {
+      runStockPreparationPersistUnitOfWork: vi.fn(async (_input: unknown, callback: (records: typeof txRecords) => Promise<unknown>) => callback(txRecords)),
+    }
+    const api = createPluginScopedMultitableApi({ provisioning: {}, records: {} } as never, 'plugin-integration-core', hooks as never)
+    const uowInput = { tenantId: 'tenant_1', sheetIds: LOCKED, project: { sheetId: LOCKED[0], projectId: OV_PROJECT }, batch: { sheetId: LOCKED[1], snapshotBatchId: 'batch_1' } }
+    const runUow = (operation: (records: Record<string, (input: never) => Promise<unknown>>) => Promise<unknown>) =>
+      (api.records as unknown as { runStockPreparationPersistUnitOfWork: (input: unknown, op: unknown) => Promise<unknown> }).runStockPreparationPersistUnitOfWork(uowInput, operation)
+    const cases: Array<[string, keyof typeof txRecords, Record<string, unknown>]> = [
+      ['queryRecords', 'queryRecords', { filters: { a: 'b' } }],
+      ['createRecord', 'createRecord', { data: { a: 1 } }],
+      ['patchRecord', 'patchRecord', { recordId: 'rec_1', changes: { a: 2 } }],
+    ]
+    for (const [name, method, extra] of cases) {
+      const f = flipping({ ...extra }, 'sheetId', LOCKED[2], OUTSIDE)
+      await runUow(async (scoped) => scoped[method](f.input as never))
+      const seen = txRecords[method].mock.calls.at(-1)?.[0] as Record<string, unknown> | undefined
+      expect(seen, `${name}: the host was called`).toBeTruthy()
+      expect(seen!.sheetId, `${name}: the host writes the locked sheet that was checked`).toBe(LOCKED[2])
+      expect(f.reads(), `${name}: sheetId is read once`).toBe(1)
+      for (const [key, value] of Object.entries(extra)) expect(seen![key], `${name}: ${key} forwarded`).toEqual(value)
+    }
+    // Control: a sheet outside the locked set is refused before the host.
+    await expect(runUow(async (scoped) => scoped.createRecord({ sheetId: OUTSIDE, data: {} } as never))).rejects.toBeInstanceOf(MultitableUnitOfWorkScopeError)
+    expect(txRecords.createRecord).toHaveBeenCalledTimes(1)
   })
 })

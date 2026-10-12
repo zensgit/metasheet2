@@ -73,7 +73,12 @@ import {
   unassignUserRoles,
   type RoleAssignmentScope,
 } from '../../src/rbac/role-assignment'
-import { ATTENDANCE_ROLE_TEMPLATES, attendanceAdminRouter } from '../../src/routes/attendance-admin'
+import {
+  ATTENDANCE_ROLE_TEMPLATES,
+  attendanceAdminRouter,
+  deriveAttendanceRoleAssignmentScope,
+  type AttendanceAdminUserScope,
+} from '../../src/routes/attendance-admin'
 import { adminUsersRouter, ATTENDANCE_ROLE_IDS } from '../../src/routes/admin-users'
 
 const REPO_ROOT = path.resolve(__dirname, '../../../../')
@@ -947,7 +952,7 @@ describe('user_roles has exactly one writer', () => {
     // the tree, which would race sibling suites under `pool: 'forks'`.
     const target = 'packages/core-backend/src/routes/attendance-admin.ts'
     const original = fs.readFileSync(path.join(REPO_ROOT, target), 'utf8')
-    const needle = 'const ATTENDANCE_ROLE_ASSIGNMENT_SCOPE'
+    const needle = 'const ATTENDANCE_ROLE_ID_BOUND'
     expect(original).toContain(needle)
     expect(matchingPatterns(original)).toEqual([])
 
@@ -979,5 +984,124 @@ describe('user_roles has exactly one writer', () => {
     expect(isExcluded('packages/core-backend/src/db/migrations/zzzz20260208100000_create_roles_table.ts')).toBe(true)
     expect(isExcluded('packages/core-backend/scripts/seed-rbac.ts')).toBe(true)
     expect(isExcluded('packages/core-backend/src/rbac/role-assignment.ts')).toBe(false)
+  })
+})
+
+/* ───────── B5. the attendance router's writer scope is DERIVED from the resolved caller ───────── */
+
+const ATTENDANCE_ADMIN_SOURCE = 'packages/core-backend/src/routes/attendance-admin.ts'
+
+/**
+ * Every `assignUserRoles({...})` / `unassignUserRoles({...})` call in the attendance router must hand
+ * the writer `scope: roleWriteScope`, and every `roleWriteScope` must be bound from
+ * `deriveAttendanceRoleAssignmentScope(scope)` — the resolved caller scope of the same route. A
+ * constant scope (what the router used before, guarded only by a comment) is a violation.
+ */
+function attendanceWriterScopeViolations(source: string): string[] {
+  const violations: string[] = []
+  const calls = [...source.matchAll(/\b(assignUserRoles|unassignUserRoles)\(\{([\s\S]*?)\}\)/g)]
+  // Floor: the four role routes. "No violations" over zero calls would be vacuous.
+  if (calls.length < 4) violations.push(`expected >= 4 writer calls, found ${calls.length}`)
+  for (const [, writer, body] of calls) {
+    if (!/\bscope:\s*roleWriteScope\s*,/.test(body)) violations.push(`${writer} call does not pass the derived roleWriteScope`)
+  }
+  const bindings = [...source.matchAll(/\bconst roleWriteScope = ([^\r\n]+)/g)].map((match) => match[1].trim())
+  if (bindings.length !== calls.length) {
+    violations.push(`expected one roleWriteScope binding per writer call (${calls.length}), found ${bindings.length}`)
+  }
+  for (const binding of bindings) {
+    if (binding !== 'deriveAttendanceRoleAssignmentScope(scope)') violations.push(`roleWriteScope bound from '${binding}'`)
+  }
+  return violations
+}
+
+describe('attendance role writes run under the scope derived from the resolved caller scope', () => {
+  it('global (granted to a platform administrator only) → platform-admin-in-namespaces on the router namespace', () => {
+    const derived = deriveAttendanceRoleAssignmentScope({ kind: 'global' })
+    expect(derived).toEqual({ kind: 'platform-admin-in-namespaces', namespaces: ['attendance'] })
+    // The platform arm keeps the namespace main-admin role assignable here, and nothing outside it.
+    expect(isRoleAssignable('attendance_admin', derived)).toBe(true)
+    expect(isRoleAssignable(PLATFORM_ADMIN_ROLE_ID, derived)).toBe(false)
+  })
+
+  it('anything that is not global — org, an unknown kind, nothing — is refused ORG_SCOPED_ROLE_WRITE_UNAVAILABLE, never handed the platform arm', () => {
+    const scopes = [
+      { kind: 'org', orgId: 'org-a' },
+      { kind: 'tenant' },
+      {},
+      null,
+      undefined,
+    ] as unknown as AttendanceAdminUserScope[]
+    for (const scope of scopes) {
+      let derived: unknown
+      let thrown: unknown
+      try {
+        derived = deriveAttendanceRoleAssignmentScope(scope)
+      } catch (error) {
+        thrown = error
+      }
+      expect(derived, JSON.stringify(scope ?? null)).toBeUndefined()
+      expect(thrown, JSON.stringify(scope ?? null)).toMatchObject({ status: 403, code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' })
+    }
+  })
+
+  it('every writer call in the router passes the derived scope, bound from the resolved caller scope', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
+    expect(attendanceWriterScopeViolations(source)).toEqual([])
+  })
+
+  it('POSITIVE CONTROL — the source check fires on a constant scope at a writer, or a binding that is not the derivation (mutated in memory)', () => {
+    const source = fs.readFileSync(path.join(REPO_ROOT, ATTENDANCE_ADMIN_SOURCE), 'utf8')
+    const constantAtWriter = source.replace('scope: roleWriteScope,', 'scope: ATTENDANCE_ROLE_ID_BOUND,')
+    expect(constantAtWriter).not.toBe(source)
+    expect(attendanceWriterScopeViolations(constantAtWriter)).toEqual(expect.arrayContaining([
+      expect.stringContaining('does not pass the derived roleWriteScope'),
+    ]))
+    const constantBinding = source.replace(
+      'const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)',
+      'const roleWriteScope = ATTENDANCE_ROLE_ID_BOUND',
+    )
+    expect(constantBinding).not.toBe(source)
+    expect(attendanceWriterScopeViolations(constantBinding)).toEqual([
+      "roleWriteScope bound from 'ATTENDANCE_ROLE_ID_BOUND'",
+    ])
+  })
+
+  it('all four role routes refuse an org-scoped caller before any user_roles write (the derivation is on every route)', async () => {
+    const ACTOR = '10000000-0000-4000-8000-000000000020'
+    const TARGET = '10000000-0000-4000-8000-000000000021'
+    for (const route of ROLE_ROUTES) {
+      const transactionSql: string[] = []
+      const txQuery = vi.fn(async (sql: string, params?: unknown[]) => {
+        transactionSql.push(sql)
+        if (/uo\.user_id = \$1/.test(sql)) return { rows: [{ '?column?': 1 }], rowCount: 1 }
+        if (/u\.id = ANY\(\$1::text\[\]\)/.test(sql)) {
+          const requested = (params?.[0] ?? []) as string[]
+          return {
+            rows: requested.map((id) => ({ id, email: `${id}@example.test`, name: 'T', employeeNo: null, department: null, is_active: true })),
+            rowCount: requested.length,
+          }
+        }
+        return { rows: [], rowCount: 0 }
+      })
+      pgMocks.query.mockReset()
+      pgMocks.query.mockResolvedValue({ rows: [], rowCount: 0 })
+      pgMocks.transaction.mockReset()
+      pgMocks.transaction.mockImplementation(async (handler: (client: { query: typeof txQuery }) => unknown) => (
+        handler({ query: txQuery })
+      ))
+      rbacServiceMocks.isAdmin.mockResolvedValue(false)
+      const body = { ...route.template, scope: undefined, orgId: 'org-a' } as Record<string, unknown>
+      if (Array.isArray(body.userIds)) body.userIds = [TARGET]
+      const res = mockResponse()
+      await invokeHandler(attendanceAdminRouter(), 'post', route.path, {
+        user: { id: ACTOR, role: 'user' } as unknown as Request['user'],
+        params: { userId: TARGET },
+        body,
+      }, res)
+      expect({ route: route.path, status: res.statusCode }).toEqual({ route: route.path, status: 403 })
+      expect(res.body).toMatchObject({ ok: false, error: { code: 'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE' } })
+      expect(transactionSql.filter((sql) => /(INSERT INTO|DELETE FROM)\s+user_roles/i.test(sql))).toEqual([])
+    }
   })
 })
