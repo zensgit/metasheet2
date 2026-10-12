@@ -2,7 +2,7 @@
 
 - 设计：分支 `claude/tasks-m5-pr4a`，文件 `docs/development/task-m5-pr4a-backend-design-20261010.md`（冻结稿 v4 及其后两次文档修订）。本切片按其 §1.3 切片 2、§1.1 第 2、8、9 项、§2 全节、§4.1 的 `task-ids.ts` / `task-projection.ts` / `task-advisory-locks.ts` / `task-records.ts` / `task-scheduler.ts` 五行、§4.2、§6.1 的 `M5|7|锁序控件` 与 §6.3 的形状格实现。锁：`docs/development/task-feature-design-lock-20260917.md`（main 版）。
 - 裁定只按日期与条目号引用：owner 2026-10-12（从切片 2 起继续实现 PR-4a，叠在 #6249 上，每片单独过闸，只开 Draft，未裁的问题取设计缺省，不合并，不对任何环境应用 DDL）；owner 2026-10-09（M5 受控叠放起草，合并按依赖串行）；S09（锁序包装器）、S30（两个 id 前缀与附件表随本迁移）及 §2 各处引用的 S 编号。本文自选的取舍按设计 §7.1 的 `[a-NN]` 缺省执行。
-- 分支：`claude/tasks-m5-pr4a-s2`，起点 `0edb426c55`（PR-4a 设计 + 切片 1 + #6249 叠放）。两个提交：代码与测试 `970d23444d` 一个，本记录一个。不推送、不开 PR、不合并；迁移是 Draft，没有对任何共享环境应用；没有新开关，也不打开任何 `TASKS_*` 开关。
+- 分支：`claude/tasks-m5-pr4a-s2`，起点 `0edb426c55`（PR-4a 设计 + 切片 1 + #6249 叠放）。四个提交加本次记录更新：代码与测试 `970d23444d`、本记录 `74a04a3464`、记录更正 `a5b442b848`、闸审第 1 轮修复 `f03391f105`，以及本记录的第 1 轮更新（§11）。不推送、不开 PR、不合并；迁移是 Draft，没有对任何共享环境应用；没有新开关，也不打开任何 `TASKS_*` 开关。
 - 本地环境：Node 25.9.0，`node_modules` 是指向主检出的符号链接，没有 `pnpm install`。真库在另一台机器上跑：PostgreSQL 16.15，Node 20；那里用的都是一次性的工作树与库，用完即删（§5 末段）。变异驱动、同步脚本与临时 tsconfig 都不入库。
 
 ## 1. 文件
@@ -15,8 +15,8 @@
 | `src/db/task-advisory-locks.ts` | 在三个 helper 之后追加锁序包装器：`TASK_LOCK_RANKS`（structure 1、fence 2、projection 3）、`TaskLockOrderViolation`、`withTaskLockOrder(query)`（方法 `structure` / `projection` / `schedulerLeader`）与只供测试的记录钩子 `setTaskLockOrderRecorderForTests`。三个 helper 的函数体逐字节未改（相对起点的 diff 没有删除行） |
 | `src/services/task-records.ts` | `withOrgStructure` 与 `createTask` 的取结构锁改经 `withTaskLockOrder(...).structure(orgId)`；导入只剩包装器与查询类型 |
 | `src/services/task-scheduler.ts` | leader 锁的取锁一行改经 `withTaskLockOrder(...).schedulerLeader()`；头注改写那一句；`catch` 与 follower 判定不动 |
-| `tests/integration/task-m5-schema.db.test.ts`（新） | 真库 50 格：目录形状钉（列、约束、索引、触发器逐项相等）、外键动作、映射表无外键无 org、触发器函数体、`pg_catalog` 依赖（含正控）、每条带名约束一正一反、§6.3 点名的各格、`down()` 后再 `up()`（同一连接同一事务内，比对快照后回滚）、`M5|7` 的真实路径格 |
-| `tests/unit/task-lock-order.test.ts`（新） | 单测 15 格：包装器 10 格（含反序格、leader 共存两格、错误原样透传且不记录、记录在 helper 返回之后），静态格 5 格（含正控） |
+| `tests/integration/task-m5-schema.db.test.ts`（新） | 真库 53 格（`970d23444d` 时 50 格，第 1 轮加 3 格，§11）：目录形状钉（列、约束、索引、触发器逐项相等）、外键动作、映射表无外键无 org、触发器函数体、`pg_catalog` 依赖（含正控）、每条带名约束一正一反、§6.3 点名的各格、`down()` 后再 `up()`（同一连接同一事务内，比对快照后回滚）、`M5|7` 的真实路径格 |
+| `tests/unit/task-lock-order.test.ts`（新） | 单测 18 格（`970d23444d` 时 15 格，第 1 轮加 3 格，§11）：包装器 13 格（含反序格、leader 共存两格、错误原样透传且不记录、记录在 helper 返回之后、同一实例上并发的两格、失败的请求仍计入），静态格 5 格（含正控） |
 | `tests/unit/task-ids.test.ts` | 闭集格改为八种；新增 `field`、`attachment` 两格 |
 | `tests/integration/task-m4-schema.db.test.ts` | `down()`→`up()` 那一格在同一事务里先 `m5Down`、后 `m4Down`，`m4Up` 之后再 `m5Up`（见 §3 第 3 条） |
 | `tests/integration/task-m3-comments-deletion.db.test.ts` | `task_comments` 约束名的整体钉加一项 `task_comments_id_task_id_key`（见 §3 第 3 条） |
@@ -25,7 +25,7 @@
 ## 2. 实现要点（对照冻结设计）
 
 - **迁移（§2）**：列、类型、缺省、约束名与表达式逐条照 §2.2–§2.9；CHECK 与触发器函数体里的函数都写 `pg_catalog.<名>`；不写任何行、不碰 `permissions`；不 `CREATE OR REPLACE`。两条系列外键 `NO ACTION`，绑定指向字段的外键 `RESTRICT`（`[a-08]`），附件指向评论的外键 `NO ACTION`（`[a-07]`），其余指向任务、清单、字段的外键 `CASCADE`。形状格里的期望值是照设计手写的，第一次在真库上跑就逐项相等，没有按库的输出回填。
-- **包装器（§4.2，S09，`[a-36]`）**：每次 `withTaskLockOrder(query)` 建一个实例，记录本实例取过的锁。取 rank 锁时，若已持有 leader，或 rank 低于已持有的最高 rank，抛 `TaskLockOrderViolation`；取 leader 时，若已持有任一 rank 锁，抛同一错误。判定在调用 helper 之前，所以违反时不发任何语句。helper 抛出的错误不经 `catch`，原样到达调用方，且不记录；包装器自己不发任何语句。整个包装器没有 `catch`、`finally`、`.then` / `.catch`，守 PR-3c 的规则 ③（普查单测 `task-counts-touchpoints` 绿，§4）。
+- **包装器（§4.2，S09，`[a-36]`）**：每次 `withTaskLockOrder(query)` 建一个实例，记录本实例已放行的取锁请求（第 1 轮起：请求在放行时即计入，早于其语句发出；helper 失败的请求仍计入，§11）。取 rank 锁时，若已放行 leader，或 rank 低于已放行的最高 rank，抛 `TaskLockOrderViolation`；取 leader 时，若已放行任一 rank 锁，抛同一错误。判定在调用 helper 之前，所以违反时不发任何语句。helper 抛出的错误不经 `catch`，原样到达调用方，且不记录；包装器自己不发任何语句。整个包装器没有 `catch`、`finally`、`.then` / `.catch`，守 PR-3c 的规则 ③（普查单测 `task-counts-touchpoints` 绿，§4）。
 - **生产路径**：取结构锁的两处与取 leader 锁的一处都改经包装器；三个 helper 在 `src/` 里除包装器之外没有任何引用（静态格钉住，§4）。门 7 的多重集不变：任务域扫描根里取锁字面量仍恰是三个登记导出各一处。
 - **记录钩子**：模块级、默认 `null`；测试装上后每取到一把锁回调一次（实例号、锁名）。真实路径格每次只跑一个操作，并在操作前重装钩子，所以每个操作的序列单独断言，不会被别的操作的序列遮住。
 - **`version`、事件、待办输入**：本切片不写任何业务行，不改任何写入点的事件或待办输入；PR-3c 普查的登记不变。
@@ -50,7 +50,7 @@
 |---|---|---|
 | type-check | `tsc --noEmit -p .` | 0 errors |
 | 新改测试文件的类型 | 临时 tsconfig（`extends` 本包配置，加 `noUnusedLocals`，`include` 本切片新增与改动的 5 个测试文件），不入库 | 本切片新增与改动的行 0 条诊断。共 15 条诊断：`task-lock-order.test.ts` 的 `import.meta` 一条是这份临时配置的 `module` 选项所致；其余 14 条都在 `task-m3-comments-deletion.db.test.ts` 本切片没有改的旧行里（`processID` 与 `import.meta`，第 671–1135 行；本切片只改了该文件第 1203–1204 行的约束名钉） |
-| 任务单测子集 + 绊线 | `vitest run --config vitest.config.ts tests/unit/task-*.test.ts tests/unit/tasks-*.test.ts tests/unit/supertest-app-mode-tripwire.test.ts` | 50 files / 2094 passed。起点 `0edb426c55` 上同一命令是 49 files / 2077（另一台机器上跑的对照，见 §5 第 3 条）；多出的 17 格：`task-lock-order` 15、`task-ids` 2 |
+| 任务单测子集 + 绊线 | `vitest run --config vitest.config.ts tests/unit/task-*.test.ts tests/unit/tasks-*.test.ts tests/unit/supertest-app-mode-tripwire.test.ts` | 50 files / 2094 passed。起点 `0edb426c55` 上同一命令是 49 files / 2077（另一台机器上跑的对照，见 §5 第 5 条）；多出的 17 格：`task-lock-order` 15、`task-ids` 2 |
 | PR-3c 普查 | 上一行里的 `task-counts-touchpoints.test.ts` | 绿，文件未改 |
 | 门 17 ④ | 上一行里的 `task-ci-coverage-enumeration.test.ts` | 绿：磁盘、`test.exclude`、lane 三个集合相等，都含新文件 |
 | supertest 绊线 | 上一行里的 `supertest-app-mode-tripwire.test.ts` | 绿（本切片没有路由格） |
@@ -61,7 +61,7 @@
 | 门 7 | `find` 计数 + ERE `pg_advisory_xact_lock[[:space:]]*\([[:space:]]*hashtext[[:space:]]*\(` 扫四个 M2 根 | 根内文件数：`src/tasks` 29、`src/services/task-*` 15、`src/routes/tasks*` 4、`src/db/task-*` 1；命中恰 3 行，都在 `src/db/task-advisory-locks.ts`，向上最近的导出分别是三个登记 helper，各一次。正控：同一 ERE 在 `src/multitable/approval-record-projection-service.ts` 命中 1 行。`src/multitable/task-*` 仍不存在（PR-4c 起扫） |
 | 门 15 | 本切片新增的 101 行生产注释（相对 `0edb426c55` 的 `src` diff 加新迁移文件），记号表同 PR-3c 验证记录 §6 | 0 命中 |
 | 门 20 静态 | `src/tasks` 29 个文件；(A)(B) 两条 grep；持池 ERE | (A)(B) 0 命中（exit 1，与文件数一起记）；持池 ERE 恰三行（`connection-pool.ts:76`、`PostgresAdapter.ts:81`、`sharded-pool-manager.ts:191`）；行为 harness `task-pure-no-io` 与 `task-m5-probe` 在上面的子集里绿 |
-| 文本扫描 | 两个字面扫描器与引号扫描器，对本记录与两个提交说明 | 都 exit 0 |
+| 文本扫描 | 两个字面扫描器与引号扫描器，对本记录与三个提交说明（`970d23444d`、`74a04a3464`、`a5b442b848`；第 1 轮的两个见 §11） | 都 exit 0 |
 
 ## 5. 另一台机器（PostgreSQL 16.15，RAN）
 
@@ -173,3 +173,80 @@
 ## 10. 清理
 
 另一台机器上：开发、最终、对照三个工作树（node_modules 符号链接先解除）、开发库与最终工作树的 lane 库、本次的临时日志与变异驱动、备份文件都已删除；本地：临时 tsconfig 已删，变异驱动与同步脚本不入库；分支 `claude/tasks-m5-pr4a-s2` 的本地检出保留，其中的 `node_modules` 是符号链接、未提交。
+
+## 11. 闸审第 1 轮修复（`f03391f105`，2026-10-12）
+
+闸审第 1 轮没有确认 P1 / P2；P3 两条、NIT 九条。本轮按「确认项全改、明显正确的 P3 / NIT 改、owner 问题不裁」处理。迁移文件本轮未改（`git diff a5b442b848 f03391f105 -- src/db/migrations` 为空），所以 §5 第 1、3 条的迁移与回滚证据仍然有效。
+
+### 11.1 改了的
+
+| 发现（转述） | 改动 | 承载 |
+|---|---|---|
+| P3：迁移的闭集 CHECK 与 #6249 纯模块常量之间没有格把二者绑在一起 | 形状文件新增一格：从目录读 `task_fields_type_chk`、`task_attachments_mime_type_chk` / `_status_chk` / `_bind_kind_chk` / `_scan_state_chk` 的取值（按集合比），与 `TASK_FIELD_TYPES`、`TASK_ATTACHMENT_MIME_EXTENSIONS` 的键、`TASK_ATTACHMENT_STATUSES` / `_BIND_KINDS` / `_SCAN_STATES` 相等；`task_attachments_size_chk` 的上界等于 `TASK_ATTACHMENT_LIMITS.maxFileBytes`。迁移不导出常量，文件不动。清除原因与意图状态在纯模块里没有对应常量，只由形状钉守 | 真库 1 格 |
+| NIT：两条行内主键没有按名拒绝的格 | `task_attachments_pkey`、`task_attachment_purge_intents_pkey` 各一格：同一 id、不同存储键再插一次，断言 23505 与约束名（存储键不同，避免两条唯一约束谁先触发不确定） | 真库 2 格 |
+| NIT：`down()`→`up()` 格对 `tasks` / `task_comments` 只看 M5 的名字 | 同一格里另取两张表的全部列、约束、索引、触发器：`down()` 之后等于「之前减去 M5 的四列、八条约束加评论键、两个索引加评论键」，`up()` 之后等于之前；并核减去的个数正好是这些 | 原格加断言，格数不变 |
+| NIT：同一实例上并发的两次取锁可以绕过顺序判定 | 包装器在放行时即把请求计入（早于语句发出），helper 失败的请求仍计入；记录钩子仍在 helper 返回之后调用；仍没有 `catch` / `finally` / `.then`（PR-3c 规则 ③ 普查绿） | 单测 3 格：并发 projection+structure、并发 leader+structure、失败请求仍计入 |
+| NIT：静态格漏掉计算键的 `require()` 与非 `.ts` 文件 | 遍历扩到 `.ts` / `.js` / `.cjs` / `.mjs`（`.d.ts` 除外，JS 文件按 JS 解析）；导入集合也收 `require(...)` 与 `import x = require(...)`；无替换的模板字面量与字符串字面量同样计为点名；正控加计算键 `require`、`.js` 文件、`import =` 三种；遍历格加断言 `server.js` 在内 | 静态格数不变，正控扩充 |
+| NIT：错误原样透传格是唯一能抓「重新包装但保留 SQLSTATE」的格 | 不改代码，在该格前加一行注释说明，免得以后被当成冗余删掉 | — |
+| NIT：记录里的提交数与交叉引用 | 抬头改为列出全部提交；§4 的对照引用改为 §5 第 5 条；§4 文本扫描一行改为三个提交说明（本轮两个见下）；§1 的格数与 §2 的包装器描述随本轮更新 | 本节 |
+
+### 11.2 只转记、不改代码的
+
+- **每次调用建一个实例，`run()` 拿不到它**（P3）：在 `f03391f105` 上不可达（每个生产事务只取一把任务锁，静态格与真实路径格都钉住）。第一个在一个事务里取两把任务锁的切片（切片 4 或 PR-4c）要么把实例传进 `run`，要么按连接共享已放行列表，并加一格「`run()` 内部取第二把锁」。现在改实例模型会与设计 §4.2 的写法和既有的「每实例各自序列」单元格冲突，所以留到那时。
+- **同一 rank 内的键序不受约束**（NIT）：PR-4a 每个事务只取一把结构锁，不会出现。PR-4c 在一个事务里取多把 projection 锁时按固定顺序取（如键文本排序），或由包装器拒绝排在已放行键之前的同 rank 键。包装器里加了一行注释说明这一点。
+- **`M5|7` 格看不到锁由哪条连接取**（NIT）：事务作用域由 `M3|6` 的门 6 格守（把锁改到池上会让 `task-m3-tree` 红 3 格）；`M3|` 行已是每个切片的必跑回归行（§1.3），保持不变。
+- **另一台机器上的计时类红**（NIT）：见 §11.4；处理办法同闸审建议：出现单个计时红时先与 main 对照。闸审自己的复现是 3 遍 lane 里 2 遍全绿，第 3 遍的红在起点上也出现。
+
+### 11.3 本地（RAN，`f03391f105` 的工作树）
+
+| 项 | 结果 |
+|---|---|
+| type-check（`tsc --noEmit -p .`） | 0 errors |
+| 两个改动测试文件的类型（临时 tsconfig，加 `noUnusedLocals`，不入库） | 这两个文件 0 条诊断（其余诊断都在这份临时配置下的既有 `src` 文件里，与本轮无关） |
+| 任务单测子集 + 绊线（同 §4 的命令） | 50 files / 2097 passed（= 2094 + 3） |
+| PR-3c 普查、门 17 ④、supertest 绊线 | 都在上一行里，绿 |
+| 门 17 ①（单测配置下收集形状文件） | `No test files found`，exit 1 |
+| 门 7 | 命中仍恰 3 行，都在 `src/db/task-advisory-locks.ts` 的三个登记 helper 里 |
+| 门 15 | 本轮新增的 6 行生产注释，§6 的记号表 0 命中 |
+| 门 20 静态 | `src/tasks` 本轮未改 |
+| 单测变异（工作树内备份→改写→跑→复制回并核 md5 相同） | MF1：把计入挪回 helper 返回之后 ⇒ 新增 3 格红；MF2a：`src/services` 新建一个 `.ts`，用 `require` 与计算键调用 helper ⇒ 导入集合格红；MF2b：`src/` 新建一个 `.js`，解构 `require` 一个 helper ⇒ 点名格与导入集合格红。两个临时文件跑后即删，工作树干净 |
+| 文本扫描 | 两个字面扫描器与引号扫描器，对本记录与本轮两个提交说明，都 exit 0 |
+
+### 11.4 另一台机器（PostgreSQL 16.15，RAN）
+
+两个一次性工作树：`f03391f105`（本轮）与当日 `origin/main` `1dd42d0876`（对照），各用新建的空库；环境变量与排除项同 §5。
+
+| 运行 | 结果 |
+|---|---|
+| 迁移 | 433 条 executed successfully |
+| 本轮 lane 第 1 遍 | 23 files / 881 passed、1 failed（882）：`task-rbac-trust` 的门 13 格，`/api/tasks/context` 的响应体为空（`orgId` 为 `undefined`） |
+| 本轮 lane 第 2 遍 | 881 passed、1 failed（882）：`task-m3-comments-deletion` 的 M3-CONC-5/6 一格（计时） |
+| 本轮 lane 第 3 遍 | 882 passed（882） |
+| 鉴权门 | 86/86 |
+| 门 19 | 第 3 遍日志：`gate19: passed identities equal the i-m2 list` |
+| 形状文件 | 三遍都是 53/53；882 = 879 + 3 |
+| 对照 lane 1 遍 | 21 files / 816 passed（816），鉴权门 86/86 |
+
+两条红的对照：
+
+- **M3-CONC-5/6**：两个文件交替跑 3 轮（本轮、对照各 3 遍），本轮第 3 轮红 1 格（「同一 org 的外人、执行人与不存在的 id 同时得到同样的 404」，用时 1179 ms，上限 1000 ms）；随后只跑该组格交替 6 轮，对照第 3 轮红同一格（1201 ms），本轮 6 轮全绿。与闸审在起点上见到的是同一格同一类（计时上限），本轮的包装器改动不发任何新语句，判为环境。
+- **门 13 格**：只读的三个 GET，不经过包装器、不取任务锁。之后单跑 `task-rbac-trust` 交替 8 轮，加上前面 3 轮，本轮与对照各 11 遍全绿，没有复现；日志里 `ECONNRESET` / `socket hang up` 为 0。判为本机回环 HTTP 的偶发（未在对照上复现，如实记录）。
+
+真库变异（本轮工作树与 lane 库；源文件备份→改写→跑形状文件→复制回并核 md5；库状态变异跑后按原名重建约束并核对存在）：
+
+| # | 变异 | 形状文件结果 |
+|---|---|---|
+| 对照 | 不改 | 53/53 |
+| MF3 | `TASK_FIELD_TYPES` 多一个 `'url'`（纯模块漂移、迁移不动） | 红 1 格：闭集与常量相等格 |
+| MF4 | lane 库里删掉 `task_attachments_pkey` | 红 4 格，含新加的按名拒绝格 |
+| MF4b | lane 库里删掉 `task_attachment_purge_intents_pkey` | 红 4 格，含新加的按名拒绝格 |
+| MF5 | `down()` 末尾多删 M2 的 `idx_tsk_due` | 红 1 格：`down()`→`up()` 格（整表断言；原有只看 M5 名字的断言不会红） |
+| MF6 | `up()` 末尾多建一个无名索引 `ON tasks (title)` | 红 1 格：同上 |
+| 还原后对照 | — | 53/53；两条主键按原名存在 |
+
+用完之后两个工作树、两个库与那台机器上本轮的临时日志都已删除，删除后核对过工作树、库与临时文件都不再有本轮的条目。推过去的两个引用（本轮提交与对照）留在那台机器的克隆里。
+
+### 11.5 本轮提交
+
+- `f03391f105`：代码与测试（包装器、单测、形状文件）。
+- 本记录的第 1 轮更新：只改本文件。
