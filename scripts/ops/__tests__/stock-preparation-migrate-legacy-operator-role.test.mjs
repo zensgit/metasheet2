@@ -1,6 +1,8 @@
 // stock-preparation-migrate-legacy-operator-role.test.mjs — the legacy floor-role move (R-39, ADR
 // adr-stock-prep-project-sheets-20261008 §11.2-1 / §8 step 3), driven in-process against a FAKE pg
-// client. No database, no network, no subprocess.
+// client. No database, no network. One test runs the script as a subprocess through a directory
+// junction / symbolic link (the entry check), on a throwaway copy under the OS temp directory, and
+// stops before any connection (its `--root` has no `pg`).
 //
 // THE FAKE IS STRICT. It answers only the statements written out below as golden text (whitespace-
 // normalised) and throws on anything else, so an edit to the script's SQL — a dropped `subject_type =
@@ -14,6 +16,9 @@
 // packages/core-backend/tests/integration/elearning-role-templates.db.test.ts.
 
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -23,7 +28,7 @@ const SCRIPT_PATH = path.join(ROOT_DIR, 'scripts', 'ops', 'stock-preparation-mig
 const {
   main, run, OLD_ROLE_ID, TARGET_ROLE_ID, EXIT_OK, EXIT_FAILURE, EXIT_REFUSED,
   RECOMMENDED_SPLIT_ROLE_ID, DEFAULT_SPLIT_ROLE_NAME, parseArgs, splitRoleIdProblem, splitRoleNameProblem,
-  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES, isEntryPoint, databaseUrlFromAppEnvText,
 } = await import(pathToFileURL(SCRIPT_PATH).href)
 
 const OLD = 'stock-prep-operator'
@@ -48,7 +53,9 @@ const G = {
   commit: 'COMMIT',
   rollback: 'ROLLBACK',
   tableExists: "SELECT count(*)::int AS count FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = $1",
+  columnExists: 'SELECT count(*)::int AS count FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2',
   rolesRead: 'SELECT id FROM roles WHERE id IN ($1, $2) ORDER BY id',
+  roleApprovalUsable: 'SELECT id, approval_usable FROM roles WHERE id = ANY($1::text[]) ORDER BY id',
   rolesLock: 'SELECT id FROM roles WHERE id IN ($1, $2) ORDER BY id FOR UPDATE',
   oldMembers: 'SELECT count(*)::int AS count FROM user_roles WHERE role_id = $1',
   sharedMembers: 'SELECT count(*)::int AS count FROM user_roles o WHERE o.role_id = $1 AND EXISTS (SELECT 1 FROM user_roles t WHERE t.role_id = $2 AND t.user_id = o.user_id)',
@@ -106,6 +113,9 @@ const LOCK_KEYS = new Set(['lockTimeout', 'lockRoleTables'])
 function baseState() {
   return {
     tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'approval_records', 'user_invites', 'permissions', 'user_permissions', 'approval_template_versions', 'approval_published_definitions', 'approval_templates']),
+    // `roles.approval_usable` exists (zzzz20260627150000); a role without the field reads as the
+    // column default, false.
+    approvalUsableColumn: true,
     roles: [
       { id: OLD, name: 'legacy floor' },
       { id: TARGET, name: '一线填写' },
@@ -200,6 +210,11 @@ function makeFakeClient(state, { failOn = null, afterWrite = null } = {}) {
     return { rows: [] }
   })
   on(G.tableExists, ([table]) => countRows(state.tables.has(table) ? 1 : 0))
+  on(G.columnExists, ([table, column]) => countRows(table === 'roles' && column === 'approval_usable' && state.approvalUsableColumn ? 1 : 0))
+  on(G.roleApprovalUsable, ([ids]) => {
+    if (!state.approvalUsableColumn) throw new Error('FAKE_PG: column roles.approval_usable does not exist')
+    return { rows: state.roles.filter((r) => ids.includes(r.id)).map((r) => ({ id: r.id, approval_usable: r.approval_usable === true })).sort((x, y) => x.id.localeCompare(y.id)) }
+  })
   const rolesIn = ([a, b]) => ({ rows: state.roles.filter((r) => r.id === a || r.id === b).map((r) => ({ id: r.id })).sort((x, y) => x.id.localeCompare(y.id)) })
   on(G.rolesRead, rolesIn)
   on(G.rolesLock, rolesIn)
@@ -1282,4 +1297,175 @@ test('the approval designer census counts template versions / published definiti
   assert.equal(idle.code, EXIT_OK)
   assert.ok(idle.out.includes(lostLine(TARGET, 3)) && idle.out.includes(gainedLine(TARGET, 2)), idle.out.join('\n'))
   assertValuesFree([...split.out, ...idle.out])
+})
+
+// ── fix round 4 (old-machine review of #6348) ──────────────────────────────────────────────────
+
+test('every --apply bounds its locks: SET LOCAL lock_timeout = 5s right after BEGIN, before the census FOR UPDATE — with or without the split; never in a dry run', async () => {
+  const plain = await runMain(['--apply'], baseState())
+  assert.equal(plain.code, EXIT_OK)
+  const keys = plain.client.calls.map((c) => c.key)
+  assert.deepEqual(keys.slice(0, 2), ['begin', 'lockTimeout'], 'the plain move path sets the lock bound first')
+  assert.equal(keys.filter((k) => k === 'lockTimeout').length, 1)
+  assert.ok(keys.indexOf('lockTimeout') < keys.indexOf('rolesLock'), 'the bound precedes the first FOR UPDATE')
+  assert.ok(!keys.includes('lockRoleTables'), 'the plain move takes no table lock')
+  assert.equal(plain.client.calls[1].sql, "SET LOCAL lock_timeout = '5s'")
+
+  const withDelete = await runMain(['--apply', '--delete-empty-old-role'], baseState())
+  assert.deepEqual(withDelete.client.calls.slice(0, 2).map((c) => c.key), ['begin', 'lockTimeout'])
+
+  const split = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], splitState())
+  assert.deepEqual(split.client.calls.slice(0, 3).map((c) => c.key), ['begin', 'lockTimeout', 'lockRoleTables'])
+
+  for (const argv of [[], ['--split-extra-codes-to-role', SPLIT]]) {
+    const dry = await runMain(argv, argv.length ? splitState() : baseState())
+    assert.ok(!dry.client.calls.some((c) => LOCK_KEYS.has(c.key) || c.key === 'rolesLock'), 'a dry run takes no lock and sets no bound')
+  }
+
+  // A lock wait past the bound (SQLSTATE 55P03) is exit 1, rolled back, reported by code only.
+  const state = baseState()
+  const before = snapshot(state)
+  const timedOut = await (async () => {
+    const out = []
+    const err = []
+    let client
+    const code = await main(['--apply'], { DATABASE_URL: 'postgres://fake' }, {
+      createClient: async () => {
+        client = makeFakeClient(state)
+        const query = client.query.bind(client)
+        client.query = async (text, params) => {
+          if (norm(text) === norm(G.rolesLock)) {
+            const error = new Error('canceling statement due to lock timeout')
+            error.code = '55P03'
+            throw error
+          }
+          return query(text, params)
+        }
+        return client
+      },
+      out: (line) => out.push(line),
+      err: (line) => err.push(line),
+    })
+    return { code, out, err, client }
+  })()
+  assert.equal(timedOut.code, EXIT_FAILURE)
+  assert.ok(timedOut.err.includes('failed (code 55P03); the transaction was rolled back and nothing was written'), timedOut.err.join('\n'))
+  assert.ok(!timedOut.err.join('\n').includes('canceling statement'), 'the error text is never printed')
+  assert.equal(timedOut.client.calls.at(-1).key, 'rollback')
+  assert.equal(snapshot(state), before)
+})
+
+test('the census prints approval_usable of the old role, the target and the split role, and says it is NOT copied (the owner decides); never a refusal, never a write', async () => {
+  const state = splitState()
+  state.roles.find((r) => r.id === OLD).approval_usable = true
+  const before = snapshot(state)
+  const dry = await runMain(['--split-extra-codes-to-role', SPLIT], state)
+  assert.equal(dry.code, EXIT_OK)
+  assert.deepEqual(dry.writes, [])
+  assert.ok(dry.out.includes(`approval_usable — ${OLD}: true; ${TARGET}: false; ${SPLIT}: role absent`), dry.out.join('\n'))
+  assert.ok(dry.out.includes(`approval_usable — NOT copied by this script (a role it creates starts with the default, false); the owner decides whether ${SPLIT} should get it`))
+  const call = dry.client.calls.find((c) => c.key === 'roleApprovalUsable')
+  assert.deepEqual(call.params, [[OLD, TARGET, SPLIT]], 'binds exactly the three role ids')
+  assert.equal(snapshot(state), before)
+
+  // the apply creates the split role WITHOUT copying the flag
+  const applied = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], state)
+  assert.equal(applied.code, EXIT_OK)
+  assert.notEqual(state.roles.find((r) => r.id === SPLIT).approval_usable, true, 'approval_usable is never copied to the split role')
+  assert.ok(applied.out.includes(`approval_usable — ${OLD}: true; ${TARGET}: false; ${SPLIT}: role absent`))
+
+  // without the split: the two roles, and the note names the recommended split id
+  const plain = await runMain([], baseState())
+  assert.ok(plain.out.includes(`approval_usable — ${OLD}: false; ${TARGET}: false`), plain.out.join('\n'))
+  assert.ok(plain.out.includes(`approval_usable — NOT copied by this script (a role it creates starts with the default, false); the owner decides whether ${SPLIT} should get it`))
+  assert.deepEqual(plain.client.calls.find((c) => c.key === 'roleApprovalUsable').params, [[OLD, TARGET]])
+
+  // an install without the column: said so, the per-role read is never issued
+  const noColumn = baseState()
+  noColumn.approvalUsableColumn = false
+  const old = await runMain([], noColumn)
+  assert.equal(old.code, EXIT_OK)
+  assert.ok(old.out.includes('approval_usable — column roles.approval_usable absent; nothing to compare'))
+  assert.ok(!old.client.calls.some((c) => c.key === 'roleApprovalUsable'))
+  assertValuesFree([...dry.out, ...applied.out, ...plain.out, ...old.out])
+})
+
+test('app.env: DATABASE_URL is parsed like ecosystem.config.cjs loads app.env — BOM, leading space, KEY = v, CRLF, quotes, comments, first wins; --root reads it', async () => {
+  const cases = [
+    ['﻿DATABASE_URL=postgres://bom\n', 'postgres://bom'],
+    ['  DATABASE_URL=postgres://indented\n', 'postgres://indented'],
+    ['DATABASE_URL = postgres://spaced\n', 'postgres://spaced'],
+    ['\tDATABASE_URL\t=\t"postgres://tabbed"  \r\n', 'postgres://tabbed'],
+    ['A=1\r\nDATABASE_URL=postgres://crlf\r\n', 'postgres://crlf'],
+    ["DATABASE_URL='postgres://single'\n", 'postgres://single'],
+    ['# DATABASE_URL=postgres://commented\nDATABASE_URL=postgres://real\n', 'postgres://real'],
+    ['   \n  # DATABASE_URL=postgres://indented-comment\n#DATABASE_URL=postgres://tight-comment\nDATABASE_URL=postgres://after\n', 'postgres://after'],
+    ['DATABASE_URL=postgres://first\nDATABASE_URL=postgres://second\n', 'postgres://first'],
+    ['DATABASE_URLX=postgres://other-key\nXDATABASE_URL=postgres://other-key\n', ''],
+    ['DATABASE_URL=postgres://a=b?c=d\n', 'postgres://a=b?c=d'],
+    ['=postgres://no-key\n', ''],
+  ]
+  for (const [text, expected] of cases) assert.equal(databaseUrlFromAppEnvText(text), expected, JSON.stringify(text))
+
+  // end to end: --root <dir> with docker/app.env carrying a BOM, CRLF and a spaced key
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'opm4-appenv-'))
+  try {
+    fs.mkdirSync(path.join(root, 'docker'))
+    fs.writeFileSync(path.join(root, 'docker', 'app.env'), '﻿# comment\r\n  DATABASE_URL = "postgres://from-app-env"\r\nOTHER=1\r\n')
+    let url = null
+    const code = await main(['--root', root], {}, {
+      createClient: async (databaseUrl) => { url = databaseUrl; return makeFakeClient(baseState()) },
+      out: () => {},
+      err: () => {},
+    })
+    assert.equal(code, EXIT_OK)
+    assert.equal(url, 'postgres://from-app-env')
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('entry check: a real-path match counts (junction / symlink), a different file does not; a realpath failure falls back to the URL comparison', () => {
+  const real = path.join(os.tmpdir(), 'opm4-real', 'script.mjs')
+  const linked = path.join(os.tmpdir(), 'opm4-link', 'script.mjs')
+  const realUrl = pathToFileURL(real).href
+  const resolve = (p) => (p === linked ? real : p)
+  assert.equal(isEntryPoint(real, realUrl, resolve), true, 'the plain path')
+  assert.equal(isEntryPoint(linked, realUrl, resolve), true, 'argv through a link resolves to the module')
+  assert.equal(isEntryPoint(path.join(os.tmpdir(), 'opm4-other', 'script.mjs'), realUrl, resolve), false)
+  assert.equal(isEntryPoint(undefined, realUrl, resolve), false)
+  assert.equal(isEntryPoint(linked, realUrl, () => { throw Object.assign(new Error('gone'), { code: 'ENOENT' }) }), false)
+  assert.equal(isEntryPoint(real, realUrl, () => { throw new Error('unused') }), true, 'the URL match needs no realpath')
+})
+
+test('run through a directory junction / symbolic link the script still runs: first stdout line is the OWNER ACTION banner; a --root without pg exits 1 with MODULE_NOT_FOUND before connecting', () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'opm4-entry-'))
+  const realDir = path.join(base, 'real')
+  const linkDir = path.join(base, 'link')
+  const emptyRoot = path.join(base, 'empty-root')
+  try {
+    fs.mkdirSync(realDir)
+    fs.mkdirSync(emptyRoot)
+    fs.copyFileSync(SCRIPT_PATH, path.join(realDir, path.basename(SCRIPT_PATH)))
+    // 'junction' needs no privilege on Windows; elsewhere the type is ignored (a directory symlink).
+    fs.symlinkSync(realDir, linkDir, 'junction')
+    const viaLink = path.join(linkDir, path.basename(SCRIPT_PATH))
+    assert.notEqual(fs.realpathSync.native(viaLink), viaLink, 'the argv path really goes through a link')
+    for (const scriptPath of [path.join(realDir, path.basename(SCRIPT_PATH)), viaLink]) {
+      const result = spawnSync(process.execPath, [scriptPath, '--root', emptyRoot], {
+        env: { ...process.env, DATABASE_URL: 'postgres://never-connected' },
+        encoding: 'utf8',
+        timeout: 30000,
+      })
+      const firstLine = result.stdout.split(/\r?\n/)[0]
+      assert.ok(firstLine.startsWith('OWNER ACTION (R-39):'), `${scriptPath === viaLink ? 'via link' : 'direct'}: first stdout line was ${JSON.stringify(firstLine)}`)
+      assert.equal(result.status, EXIT_FAILURE)
+      assert.ok(result.stderr.includes('failed (code MODULE_NOT_FOUND)'), result.stderr)
+      assert.ok(!`${result.stdout}${result.stderr}`.includes('never-connected'), 'DATABASE_URL is never printed')
+    }
+  } finally {
+    // Remove the link itself first (never recurse through it), then the throwaway copy.
+    try { fs.unlinkSync(linkDir) } catch { try { fs.rmdirSync(linkDir) } catch { /* not created */ } }
+    fs.rmSync(base, { recursive: true, force: true })
+  }
 })

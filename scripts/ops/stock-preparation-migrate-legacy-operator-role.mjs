@@ -33,7 +33,12 @@
  *      matches them) and zero pending `user_invites` rows naming it, its `role_permissions` rows and
  *      its `roles` row are deleted. Without that flag the (empty) old role stays.
  * Without `--apply` nothing is written: the dry run opens a READ ONLY transaction, prints counts and
- * the verdict `--apply` would reach, and rolls back.
+ * the verdict `--apply` would reach, and rolls back; it takes no lock.
+ * LOCK BOUND: every `--apply` transaction first runs `SET LOCAL lock_timeout = '5s'`, with or without
+ * the split, so neither the `FOR UPDATE` row locks of the census nor the split step's table locks
+ * wait longer than 5 s for another session (a DingTalk sync or an admin writing `user_roles`). A
+ * longer wait fails with SQLSTATE 55P03: exit 1, the transaction is rolled back, nothing is written —
+ * rerun later.
  *
  * THE SPLIT STEP (`--split-extra-codes-to-role <roleId>` [`--split-role-name <name>`], exact flags;
  * the name defaults to DEFAULT_SPLIT_ROLE_NAME 「审批与提交」). The EXTRA CODES are the old role's
@@ -41,8 +46,8 @@
  * assumed (the demo server was recorded holding three platform codes there). The built-in target
  * never receives them (ruled out in fix round 2: a `stock-prep_admin` delegate could hand them out
  * through it). With `--apply`, after `LOCK TABLE user_roles, role_permissions IN SHARE MODE` (bounded
- * by a 5 s `lock_timeout`; no other session can change a membership or a role's codes until this
- * transaction ends) and before the move:
+ * by the 5 s `lock_timeout` above; no other session can change a membership or a role's codes until
+ * this transaction ends) and before the move:
  *   a. the split role is created with exactly the extra codes — or an existing one is reused, only if
  *      its codes EQUAL the extra codes;
  *   b. every member of the old role is added to it (`ON CONFLICT DO NOTHING`);
@@ -144,6 +149,10 @@
  * NOT CHECKED, NOT CHANGED:
  *   - the `requester.role` ROUTING predicate of approval graphs (conditions on the requester's
  *     `approval_usable` roles) and any graph shape other than the five above are not read;
+ *   - `roles.approval_usable` is PRINTED for the old role, the target and the split role (census
+ *     lines `approval_usable — …`), never copied: a split role this script creates gets the column
+ *     default (false, migration zzzz20260627150000), and the owner decides whether it should be
+ *     usable in requester-role routing;
  *   - pending `user_invites` rows naming the old role are not re-pointed (the membership itself is a
  *     `user_roles` row written when the user is created, and moves like any other). They block only
  *     `--delete-empty-old-role`;
@@ -170,7 +179,15 @@
  *   --root <install root>  load `pg` from <root>/packages/core-backend and, if DATABASE_URL is not
  *                          set, read it from <root>/docker/app.env (never printed)
  *
- * Exit codes: 0 done (dry run, apply, or nothing to do) · 1 usage or execution failure · 2 refused.
+ * The first line printed on stdout once the arguments and DATABASE_URL are accepted — BEFORE `pg` is
+ * loaded or a connection is opened — is `OWNER ACTION (R-39): …`. A run without that line never
+ * reached the database (usage error, no DATABASE_URL — or the file was not run as the entry module;
+ * see `isEntryPoint`).
+ *
+ * Exit codes: 0 done (dry run, apply, or nothing to do) · 2 refused · 1 usage or execution failure:
+ * an unknown / inexact argument, no DATABASE_URL, `pg` not loadable (MODULE_NOT_FOUND — a wrong
+ * `--root`), a database error such as 55P03 (a lock wait over 5 s; rerun later) — each reported by
+ * argument position or by code only.
  * Permission caches: the backend caches effective permissions for up to 60 s; a moved member sees
  * the change after that, on page refresh.
  */
@@ -439,7 +456,8 @@ const GRAPH_NAMES_ROLE = (column) => `(
 // `oldSheetGrants`, `unmovedRoleRows` and `activeRoleApprovals` with the split role id as $1 and
 // `sharedMembers` with ($1 OLD_ROLE_ID, $2 split role id). `approvalTemplatesVisibleThrough` binds
 // four text arrays built from those same role ids and the split role's intended display name.
-// Nothing else is ever bound.
+// `columnExists` binds a literal table and column name; `roleApprovalUsable` binds a text array of
+// the old role id, the target id and (with the split) the split role id. Nothing else is ever bound.
 export const SQL = Object.freeze({
   begin: 'BEGIN',
   readOnly: 'SET TRANSACTION READ ONLY',
@@ -449,7 +467,14 @@ export const SQL = Object.freeze({
   FROM information_schema.tables
  WHERE table_schema = current_schema()
    AND table_name = $1`,
+  columnExists: `SELECT count(*)::int AS count
+  FROM information_schema.columns
+ WHERE table_schema = current_schema()
+   AND table_name = $1
+   AND column_name = $2`,
   rolesRead: `SELECT id FROM roles WHERE id IN ($1, $2) ORDER BY id`,
+  // $1 text[]: the old role, the target and (with the split) the split role id. Printed, never copied.
+  roleApprovalUsable: `SELECT id, approval_usable FROM roles WHERE id = ANY($1::text[]) ORDER BY id`,
   rolesLock: `SELECT id FROM roles WHERE id IN ($1, $2) ORDER BY id FOR UPDATE`,
   oldMembers: `SELECT count(*)::int AS count FROM user_roles WHERE role_id = $1`,
   sharedMembers: `SELECT count(*)::int AS count
@@ -583,8 +608,9 @@ SELECT count(*)::int AS count
      SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id)
       WHERE v.id IN (SELECT role_key FROM keys_out WHERE role_key <> '')
    )`,
-  // ── the split step (option ①). $1 is the split role id unless stated.
+  // Every --apply transaction, before its first lock (FOR UPDATE / LOCK TABLE); never in a dry run.
   lockTimeout: `SET LOCAL lock_timeout = '5s'`,
+  // ── the split step (option ①). $1 is the split role id unless stated.
   lockRoleTables: 'LOCK TABLE user_roles, role_permissions IN SHARE MODE',
   splitRoleRead: 'SELECT id, name FROM roles WHERE id = $1',
   splitRoleLock: 'SELECT id, name FROM roles WHERE id = $1 FOR UPDATE',
@@ -711,6 +737,7 @@ export async function readCensus(client, { lock, split = null }) {
   const census = {
     oldRoleExists: ids.has(OLD_ROLE_ID),
     targetRoleExists: ids.has(TARGET_ROLE_ID),
+    approvalUsable: await readApprovalUsable(client, split),
     oldMembers: await count(client, SQL.oldMembers, OLD),
     sharedMembers: await count(client, SQL.sharedMembers, BOTH),
     targetOnlyMembers: await count(client, SQL.targetOnlyMembers, BOTH),
@@ -784,6 +811,18 @@ export async function readCensus(client, { lock, split = null }) {
     census.templateVisibility.gained = await count(client, SQL.approvalTemplatesVisibleThrough, [afterIds, afterNames, [OLD_ROLE_ID], []])
   }
   return census
+}
+
+/**
+ * `roles.approval_usable` of the old role, the target and the split role: `{ column: false }` when
+ * the column does not exist, else `{ column: true, roles: { <id>: true | false | null } }` (null = no
+ * such role). Printed by the census, never copied, never a refusal.
+ */
+async function readApprovalUsable(client, split) {
+  if ((await count(client, SQL.columnExists, ['roles', 'approval_usable'])) === 0) return { column: false, roles: {} }
+  const roleIds = split ? [OLD_ROLE_ID, TARGET_ROLE_ID, split.roleId] : [OLD_ROLE_ID, TARGET_ROLE_ID]
+  const found = new Map((await client.query(SQL.roleApprovalUsable, [roleIds])).rows.map((row) => [row.id, row.approval_usable === true]))
+  return { column: true, roles: Object.fromEntries(roleIds.map((id) => [id, found.has(id) ? found.get(id) : null])) }
 }
 
 /** The namespaces of `roleId` a delegate controls now or could be given, read from the database. */
@@ -1062,8 +1101,22 @@ function oldRoleIsEmpty(census) {
     && Object.values(census.unmoved).every((rows) => rows === 0)
 }
 
+function describeApprovalUsable(census, write) {
+  const usable = census.approvalUsable
+  if (!usable || !usable.column) {
+    write('approval_usable — column roles.approval_usable absent; nothing to compare')
+    return
+  }
+  const show = (value) => (value === null ? 'role absent' : String(value))
+  write(`approval_usable — ${Object.entries(usable.roles).map(([id, value]) => `${id}: ${show(value)}`).join('; ')}`)
+  const splitId = Object.keys(usable.roles).find((id) => id !== OLD_ROLE_ID && id !== TARGET_ROLE_ID) ?? RECOMMENDED_SPLIT_ROLE_ID
+  write('approval_usable — NOT copied by this script (a role it creates starts with the default, false); '
+    + `the owner decides whether ${splitId} should get it`)
+}
+
 function describeCensus(census, write) {
   write(`roles: ${OLD_ROLE_ID} ${census.oldRoleExists ? 'exists' : 'absent'}; ${TARGET_ROLE_ID} ${census.targetRoleExists ? 'exists' : 'absent'}`)
+  describeApprovalUsable(census, write)
   write(`members of ${OLD_ROLE_ID}: ${census.oldMembers} (already also in ${TARGET_ROLE_ID}: ${census.sharedMembers})`)
   write(`members only in ${TARGET_ROLE_ID}: ${census.targetOnlyMembers}`)
   write(`codes on ${OLD_ROLE_ID}: ${census.oldCodeCount}; not held by ${TARGET_ROLE_ID}: ${census.oldCodesMissingOnTarget.length}`)
@@ -1114,10 +1167,12 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, s
   }
   let committed = false
   try {
+    // Every apply: no lock below (the census FOR UPDATE, the split's LOCK TABLE) waits more than 5 s;
+    // a longer wait is SQLSTATE 55P03 -> exit 1, rolled back. A dry run takes no lock and skips it.
+    if (apply) await client.query(SQL.lockTimeout)
     if (apply && split) {
       // No other session may change a membership or a role's codes between this census and the
       // commit: the split adds the old role's members to the split role, then moves them.
-      await client.query(SQL.lockTimeout)
       await client.query(SQL.lockRoleTables)
     }
     let census = await readCensus(client, { lock: apply, split })
@@ -1236,14 +1291,30 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, s
   }
 }
 
+/**
+ * DATABASE_URL from the text of an app.env, parsed the way the backend's PM2 config loads that file
+ * (ecosystem.config.cjs `loadOnPremEnvFile`, :24-49; the upgrade wrapper's `Import-AppEnvFile`,
+ * scripts/ops/multitable-onprem-package-upgrade-inplace.ps1 :1414-1455, splits lines the same way):
+ * a line is split at its FIRST `=`, the key is trimmed — String.prototype.trim also removes U+FEFF,
+ * so a leading BOM, leading spaces and `DATABASE_URL = v` all count, exactly as in
+ * ecosystem.config.cjs —, the value is trimmed and one layer of matching quotes stripped. Their
+ * whole-line trim and `#` / blank skips select nothing more for this one key: a comment line's key
+ * starts with `#`, a blank line has no `=`. The first DATABASE_URL line wins (ecosystem.config.cjs
+ * never overrides a key already set).
+ */
+export function databaseUrlFromAppEnvText(text) {
+  for (const line of String(text).split(/\r?\n/)) {
+    const eq = line.indexOf('=')
+    if (eq < 0 || line.slice(0, eq).trim() !== 'DATABASE_URL') continue
+    return line.slice(eq + 1).trim().replace(/^(['"])(.*)\1$/, '$2')
+  }
+  return ''
+}
+
 function readDatabaseUrlFromAppEnv(root) {
   const envPath = path.join(root, 'docker', 'app.env')
   if (!fs.existsSync(envPath)) return ''
-  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const match = /^DATABASE_URL=(.*)$/.exec(line)
-    if (match) return match[1].trim().replace(/^(['"])(.*)\1$/, '$2')
-  }
-  return ''
+  return databaseUrlFromAppEnvText(fs.readFileSync(envPath, 'utf8'))
 }
 
 function loadPg(root) {
@@ -1294,8 +1365,23 @@ export async function main(argv, env, { createClient, out = (line) => process.st
   }
 }
 
-const isEntryPoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
-if (isEntryPoint) {
+/**
+ * Whether the file at `argv1` (process.argv[1]) is this module (`moduleUrl`). ESM resolves the entry
+ * module to its REAL path while process.argv[1] keeps the path as typed, so a script reached through
+ * a junction or a symbolic link has a URL different from its argv; compared as URLs alone, that run
+ * printed nothing, did nothing and exited 0. The real paths of both are compared as well.
+ */
+export function isEntryPoint(argv1, moduleUrl, realpath = fs.realpathSync.native) {
+  if (!argv1) return false
+  if (moduleUrl === pathToFileURL(argv1).href) return true
+  try {
+    return realpath(argv1) === realpath(fileURLToPath(moduleUrl))
+  } catch {
+    return false
+  }
+}
+
+if (isEntryPoint(process.argv[1], import.meta.url)) {
   main(process.argv.slice(2), process.env).then((code) => {
     process.exitCode = code
   })
