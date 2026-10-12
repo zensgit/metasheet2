@@ -527,4 +527,148 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
     expect(await state()).toEqual(before)
   })
 
+
+  async function leaveRangeFixture(offset: number, night = false) {
+    const subject = await live.user()
+    await live.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1", [subject.userId])
+    const workDate = day(offset)
+    const leaveTypeId = randomUUID()
+    await live.pool.query("INSERT INTO attendance_leave_types(id,org_id,code,name) VALUES($1,$2,$3,'synthetic ordinary leave range')",
+      [leaveTypeId, live.orgId, 'read_range_' + leaveTypeId])
+    const flow = await live.request('/api/attendance/approval-flows', admin.token, {
+      orgId: live.orgId, name: 'Synthetic leave range ' + randomUUID(), requestType: 'leave',
+      steps: [{ approverUserIds: [admin.userId] }],
+    })
+    expect(flow.status, flow.body.error?.code).toBe(201)
+    if (night) {
+      const shiftId = randomUUID()
+      await live.pool.query(`INSERT INTO attendance_shifts
+        (id,org_id,name,timezone,work_start_time,work_end_time,is_overnight,working_days)
+        VALUES($1,$2,'synthetic frozen night','UTC','22:00','06:00',true,$3::jsonb)`,
+      [shiftId, live.orgId, JSON.stringify([0,1,2,3,4,5,6])])
+      await live.pool.query(`INSERT INTO attendance_shift_assignments
+        (id,org_id,user_id,shift_id,start_date,end_date,is_active,publish_status)
+        VALUES($1,$2,$3,$4,$5,$5,true,'published')`,
+      [randomUUID(), live.orgId, subject.userId, shiftId, workDate])
+    }
+    const target = await get('/api/attendance/timezone-context/me?workDate=' + workDate, subject.token)
+    expect(target.status, target.body.error?.code).toBe(200)
+    expect(target.body.data).toMatchObject({ orgId: live.orgId, userId: subject.userId, workDate, timezone: 'UTC' })
+    const body = {
+      orgId: live.orgId, workDate, requestType: 'leave', leaveTypeId, approvalFlowId: flow.body.data.id,
+      operationId: randomUUID(), expectedTimezoneContextFingerprint: target.body.data.contextFingerprint,
+      requestedInAt: instant(offset, night ? 22 : 9), requestedOutAt: instant(night ? offset + 1 : offset, night ? 6 : 11),
+    }
+    return { subject, workDate, toDate: day(offset + 1), target: target.body.data, body }
+  }
+  async function leaveRangeDurableState() {
+    const requests = await live.pool.query('SELECT to_jsonb(r) AS row FROM attendance_requests r WHERE org_id=$1 ORDER BY id', [live.orgId])
+    const approvals = await live.pool.query("SELECT id,status,version,form_snapshot FROM approval_instances WHERE form_snapshot->>'orgId'=$1 ORDER BY id", [live.orgId])
+    const audit = await live.pool.query(`SELECT id,instance_id,action,from_status,to_status,from_version,to_version,metadata
+      FROM approval_records WHERE instance_id IN
+      (SELECT id FROM approval_instances WHERE form_snapshot->>'orgId'=$1) ORDER BY id`, [live.orgId])
+    const operations = await live.pool.query('SELECT operation_id,state,version,command_fingerprint FROM attendance_result_operations WHERE org_id=$1 ORDER BY operation_id', [live.orgId])
+    const snapshots = await live.pool.query('SELECT request_id,version,payload_fingerprint FROM attendance_request_calculation_snapshots WHERE org_id=$1 ORDER BY request_id,version', [live.orgId])
+    return { counts: await state(), requests: requests.rows, approvals: approvals.rows, audit: audit.rows, operations: operations.rows, snapshots: snapshots.rows }
+  }
+  async function assertApprovedLeaveRange(fixture: Awaited<ReturnType<typeof leaveRangeFixture>>, requestId: string, minutes: number) {
+    const approved = await live.request('/api/attendance/requests/' + requestId + '/approve', admin.token, { orgId: live.orgId })
+    expect(approved.status, approved.body.error?.code).toBe(200)
+    const requests = await live.pool.query(`SELECT work_date::text,status,(metadata->>'minutes')::int AS minutes,
+      requested_in_at,requested_out_at FROM attendance_requests WHERE id=$1 AND org_id=$2`, [requestId, live.orgId])
+    expect(requests.rows).toEqual([{
+      work_date: fixture.workDate, status: 'approved', minutes,
+      requested_in_at: new Date(fixture.body.requestedInAt), requested_out_at: new Date(fixture.body.requestedOutAt),
+    }])
+    const physical = await live.pool.query('SELECT work_date::text,timezone FROM attendance_records WHERE org_id=$1 AND user_id=$2 ORDER BY work_date', [live.orgId, fixture.subject.userId])
+    expect(physical.rows).toEqual([{ work_date: fixture.workDate, timezone: 'UTC' }])
+    const listed = await get('/api/attendance/records?orgId=' + live.orgId + '&from=' + fixture.workDate + '&to=' + fixture.toDate, fixture.subject.token)
+    expect(listed.status, listed.body.error?.code).toBe(200)
+    expect(listed.body.data.items.map((row: { work_date: string; timezone: string; meta: { leave_minutes: number } }) => ({
+      work_date: row.work_date, timezone: row.timezone, leave_minutes: row.meta.leave_minutes,
+    }))).toEqual([{ work_date: fixture.workDate, timezone: 'UTC', leave_minutes: minutes }])
+  }
+
+  it('same-day ordinary leave creates and approves exactly 120 minutes on its one target workDate', async () => {
+    const fixture = await leaveRangeFixture(200)
+    const created = await live.request('/api/attendance/requests', fixture.subject.token, fixture.body)
+    expect(created.status, created.body.error?.code).toBe(201)
+    await assertApprovedLeaveRange(fixture, created.body.data.request.id, 120)
+  }, 60000)
+
+  it('rejects 33-hour ordinary leave creation with no durable request, approval, snapshot, audit or record', async () => {
+    const fixture = await leaveRangeFixture(201)
+    const before = await leaveRangeDurableState()
+    const rejected = await live.request('/api/attendance/requests', fixture.subject.token, {
+      ...fixture.body, requestedOutAt: instant(202, 18),
+    })
+    expect(rejected.status, rejected.body.error?.code).toBe(409)
+    expect(rejected.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT', message: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT',
+    } })
+    expect(await leaveRangeDurableState()).toEqual(before)
+    expect(await live.counts(fixture.subject.userId)).toEqual({ events: 0, records: 0, requests: 0, operations: 0 })
+  }, 60000)
+
+  it('rejects a normalized crossday pending edit and preserves the original request and approval audit', async () => {
+    const fixture = await leaveRangeFixture(203)
+    const created = await live.request('/api/attendance/requests', fixture.subject.token, fixture.body)
+    expect(created.status, created.body.error?.code).toBe(201)
+    const pending = await get('/api/attendance/requests/' + created.body.data.request.id + '?orgId=' + live.orgId, fixture.subject.token)
+    expect(pending.status, pending.body.error?.code).toBe(200)
+    expect(pending.body.data.request).toMatchObject({ id: created.body.data.request.id, status: 'pending' })
+    const cursor = pending.body.data.requestSnapshot
+    expect(cursor).toEqual({ version: expect.any(Number), fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    expect(cursor.version).toBeGreaterThan(0)
+    const before = await leaveRangeDurableState()
+    const rejected = await live.request('/api/attendance/requests/' + created.body.data.request.id, fixture.subject.token, {
+      orgId: live.orgId, operationId: randomUUID(), clockOut: instant(204, 18),
+      expectedSnapshotVersion: cursor.version, expectedSnapshotFingerprint: cursor.fingerprint,
+      expectedTimezoneContextFingerprint: fixture.target.contextFingerprint,
+    }, 'PUT')
+    expect(rejected.status, rejected.body.error?.code).toBe(409)
+    expect(rejected.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT', message: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT',
+    } })
+    expect(await leaveRangeDurableState()).toEqual(before)
+    const original = await live.pool.query(`SELECT status,requested_in_at,requested_out_at,(metadata->>'minutes')::int AS minutes
+      FROM attendance_requests WHERE id=$1`, [created.body.data.request.id])
+    expect(original.rows).toEqual([{ status: 'pending', requested_in_at: new Date(fixture.body.requestedInAt), requested_out_at: new Date(fixture.body.requestedOutAt), minutes: 120 }])
+  }, 60000)
+
+  it('approves an interval crossing midnight entirely inside its published frozen night-shift window', async () => {
+    const fixture = await leaveRangeFixture(205, true)
+    expect(fixture.target.window).toEqual({ startAt: fixture.body.requestedInAt, endAt: fixture.body.requestedOutAt })
+    const created = await live.request('/api/attendance/requests', fixture.subject.token, fixture.body)
+    expect(created.status, created.body.error?.code).toBe(201)
+    const stored = await live.pool.query('SELECT metadata FROM attendance_requests WHERE id=$1', [created.body.data.request.id])
+    expect(stored.rows[0].metadata.timezoneContextV1).toMatchObject({
+      workDate: fixture.workDate, timezone: 'UTC', window: fixture.target.window, contextFingerprint: fixture.target.contextFingerprint,
+    })
+    await assertApprovedLeaveRange(fixture, created.body.data.request.id, 480)
+  }, 60000)
+
+  it('refuses approval of a synthetic legacy pending illegal range without changing its frozen context or audit', async () => {
+    const fixture = await leaveRangeFixture(207)
+    const created = await live.request('/api/attendance/requests', fixture.subject.token, fixture.body)
+    expect(created.status, created.body.error?.code).toBe(201)
+    const requestId = created.body.data.request.id
+    // Model a previously persisted illegal request: only this owned synthetic
+    // row's endpoints/quantity change; status and its actual creation freeze stay.
+    await live.pool.query(`UPDATE attendance_requests SET requested_out_at=$2,
+      metadata=jsonb_set(metadata,'{minutes}','1980'::jsonb) WHERE id=$1 AND org_id=$3`,
+    [requestId, instant(208, 18), live.orgId])
+    const legacy = await live.pool.query('SELECT status,metadata FROM attendance_requests WHERE id=$1', [requestId])
+    expect(legacy.rows[0]).toMatchObject({ status: 'pending', metadata: {
+      minutes: 1980, timezoneContextV1: { contextFingerprint: fixture.target.contextFingerprint },
+    } })
+    const before = await leaveRangeDurableState()
+    const rejected = await live.request('/api/attendance/requests/' + requestId + '/approve', admin.token, { orgId: live.orgId })
+    expect(rejected.status, rejected.body.error?.code).toBe(409)
+    expect(rejected.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT', message: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT',
+    } })
+    expect(await leaveRangeDurableState()).toEqual(before)
+    expect((await live.counts(fixture.subject.userId)).records).toBe(0)
+  }, 60000)
 })

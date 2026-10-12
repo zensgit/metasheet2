@@ -58,6 +58,7 @@ export function isCancelRoundWorkflow(value: { workflowKey?: string | null } | n
 export const CANCEL_ROUND_STATUS_KEYS = [
   'cancellation_pending_approval', // V1
   'leave_cancelled', // V2
+  'business_trip_cancelled', // Trip arrangement cancelled; no leave reversal is implied
   'cancellation_rejected', // V3
   'cancellation_withdrawn', // V4
   'cancellation_window_closed', // V5
@@ -358,6 +359,7 @@ export const CANCEL_ROUND_ERROR_COPY: Readonly<Record<string, CancelRoundErrorCo
   APPROVAL_REVOKE_FORBIDDEN: { cls: 'withdraw', zh: '只有请假本人可以撤回撤销申请', en: 'Only the person who requested this leave can withdraw the cancellation' },
   APPROVAL_REVOKE_DISABLED: { cls: 'withdraw', zh: '该撤销申请不允许撤回', en: 'This cancellation cannot be withdrawn' },
   // Entry-level plugin codes that can reach the dialogs.
+  CANCEL_ROUND_REQUIRED: { cls: 'other', zh: '已通过的出差需通过撤销申请取消', en: 'An approved business trip must be cancelled through a cancellation request' },
   NOT_FOUND: { cls: 'other', zh: '找不到这条请假或撤销申请,请刷新后重试', en: 'This leave or cancellation was not found — please refresh and try again' },
   FORBIDDEN: { cls: 'other', zh: '没有权限执行此操作', en: 'You do not have permission to do this' },
 })

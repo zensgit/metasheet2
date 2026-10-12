@@ -7,17 +7,52 @@ const { createAttendanceTimezoneContextLoader } = require('./attendance-timezone
 
 function createAttendanceTimezoneRuntime({
   HttpError, loadPublishedCandidates, resolveLocalWallTime, validateIanaTimezone,
-  addDaysToDateKey, normalizeTimeString, readApprovedTrips, mapRuleRow, mapHolidayRow, resolveRuleContext, loadShiftById, toWorkDate, resolveOvernightFlag,
+  addDaysToDateKey, normalizeTimeString, readApprovedTrips, mapRuleRow, mapHolidayRow, resolveRuleContext: resolveBaseRuleContext, authorizeRequestTarget, prepareRuleContextBatch, loadShiftById, toWorkDate, resolveOvernightFlag,
   loadAttributionTail, loadApprovedOvertime, resolveScheduledCandidate, acquireRuntimeLocks, serverNow, lockOrgPolicy, prepareTripSourceChange, loadCalendarOverrides, readCalculationDefinition, validateFrozenContext, validateFrozenAttribution,
 }) {
   function fail(code, status = 422) { throw new HttpError(status, code, code) }
   function queryFor(trx) {
     return async (text, values) => ({ rows: await trx.query(text, values) })
   }
+  // Only a request-only wrapper receives this exact subject authorization.
+  // Public reads on the original transaction retain their active-member gate.
+  const requestReadScopes = new WeakMap()
+  function requestReadScope(trx,orgId,userId) {
+    const scope = requestReadScopes.get(trx)
+    if (!scope) return null
+    if (scope.orgId !== orgId || scope.userId !== userId) fail('ATTENDANCE_TIMEZONE_MEMBER_REQUIRED',403)
+    return scope
+  }
+  function resolveRuleContext(input) {
+    const scope = requestReadScope(input.db,input.orgId,input.userId)
+    return resolveBaseRuleContext({...input,...(scope ? {scopeContext:scope.scopeContext} : {})})
+  }
+  async function readRequestTimezoneContext(trx,input) {
+    if (typeof authorizeRequestTarget !== 'function') fail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
+    const {orgId,userId,workDate} = input
+    // The adapter has already established the original request authority.
+    // Capture calendar scope facts only after the same source-lock prefix.
+    await acquireRuntimeLocks(trx,{orgId,userId,mode:'shared'})
+    const scopeContext = await authorizeRequestTarget(trx,{orgId,userId})
+    if (!scopeContext || scopeContext.userId !== userId) fail('ATTENDANCE_TIMEZONE_MEMBER_REQUIRED',403)
+    const scopedTrx = {...trx,query:(text,values) => trx.query(text,values)}
+    requestReadScopes.set(scopedTrx,{orgId,userId,scopeContext})
+    try {
+      const target = await readTargetTimezoneContext(scopedTrx,{orgId,userId,workDate})
+      requestTargetFacts.set(trx,requestTargetFacts.get(scopedTrx))
+      return target
+    } finally {
+      requestReadScopes.delete(scopedTrx)
+      requestTargetFacts.delete(scopedTrx)
+    }
+  }
   function loaderFor(trx, { excludeTripRequestId, policyProjection } = {}) {
     const query = queryFor(trx)
     const policyStore = createAttendanceTimezonePolicyStore({
       query, transaction: work => work(query), authorizeManage: async () => false,
+      ...(requestReadScopes.has(trx) ? {
+        authorizeReadSubject:({orgId,userId}) => requestReadScope(trx,orgId,userId) !== null,
+      } : {}),
     })
     let sourceStore = policyStore
     if (policyProjection !== undefined) {
@@ -109,7 +144,7 @@ function createAttendanceTimezoneRuntime({
         if (candidates.some(candidate => candidate.workDate === workDate)) continue
         const timezoneContext = await load({ orgId, userId, occurredAt: from, workDate })
         contexts.set(workDate, timezoneContext)
-        const context = await resolveRuleContext({
+        const context = await (batch?.resolveRuleContext ?? resolveRuleContext)({
           db: trx, orgId, userId, workDate, defaultRule: mapRuleRow(defaultRows[0]),
           timezoneContext, calendarOverrides, strictSources:true,
           ...(batch ? {publishedSourcesAbsent:true,holidayPrefetched:true,holidayOverride:batch.holidays.get(workDate) ?? null} : {}),
@@ -142,7 +177,7 @@ function createAttendanceTimezoneRuntime({
         const profile = candidate.rule ?? await loadShiftById(trx, orgId, candidate.shiftId)
         if (!profile) fail('ATTENDANCE_TIMEZONE_INVALID_REFERENCE')
         const rule = { ...profile, timezone: zone }
-        const sourceContext = candidate.sourceContext ?? await resolveRuleContext({
+        const sourceContext = candidate.sourceContext ?? await (batch?.resolveRuleContext ?? resolveRuleContext)({
           db:trx,orgId,userId,workDate:candidate.workDate,defaultRule:mapRuleRow(defaultRows[0]),
           timezoneContext:{...contexts.get(candidate.workDate),timezone:zone},calendarOverrides,strictSources:true,
           publishedProfile:{rule,source:candidate.source,assignmentId:candidate.assignmentId,rotationRuleId:candidate.rotationRuleId},
@@ -336,6 +371,10 @@ function createAttendanceTimezoneRuntime({
       const frame = { orgId, userId, workDate, timezone, timezoneContext: identity.timezoneContext,
         context: { ...baseContext, rule }, resolution, identity,
         absoluteWindow, attributionWindow, fingerprint: canonicalContextFingerprint(identity) }
+      if (timezoneContext.mode === 'multi_timezone') {
+        const target = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate})
+        if (target.contextFingerprint !== frame.fingerprint) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
+      }
       frames.set(trx, frame)
       return frame
     } catch (error) {
@@ -505,6 +544,50 @@ function createAttendanceTimezoneRuntime({
     return workDate === undefined ? (requestTargetFacts.get(trx) ?? null)
       : (requestTargetBatchFacts.get(trx)?.get(workDate) ?? null)
   }
+  // Callers already hold the canonical org-policy/facts prefix. This is the
+  // same whole-work-date proof for preview, source changes, and fresh live punch.
+  async function readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate,policyProjection},batch) {
+    const midnight = new Date(workDate+'T00:00:00.000Z')
+    const q = queryFor(trx)
+    const store = createAttendanceTimezonePolicyStore({
+      query:q,transaction:work=>work(q),authorizeManage:async()=>false,
+    })
+    const policy = batch?.policy ?? await store.readPolicy({orgId})
+    if (!batch) await store.readDefault({orgId})
+    const from = new Date(midnight.getTime()-2*86400_000)
+    const to = new Date(midnight.getTime()+3*86400_000)
+    const cuts = new Set([from.getTime(),to.getTime()])
+    if (policyProjection?.enabled ?? policy.enabled) {
+      const sources = batch ? batch.cuts : await trx.query(`SELECT effective_from AS start_at,effective_to AS end_at
+        FROM attendance_employee_timezone_overrides WHERE org_id=$1 AND user_id=$2
+          AND effective_from<$4 AND (effective_to IS NULL OR effective_to>$3)
+        UNION ALL SELECT start_at,effective_end_at AS end_at FROM attendance_business_trip_arrangements
+        WHERE org_id=$1 AND user_id=$2 AND start_at<$4 AND effective_end_at>$3`,[orgId,userId,from,to])
+      for (const source of sources) for (const value of [source.start_at,source.end_at]) {
+        if (value === null) continue
+        const epoch = new Date(value).getTime()
+        if (!Number.isFinite(epoch)) fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
+        if (epoch>from.getTime() && epoch<to.getTime()) cuts.add(epoch)
+      }
+    }
+    const boundaries = [...cuts].sort((a,b)=>a-b)
+    const contexts = new Map()
+    for (let index=0;index<boundaries.length-1;index+=1) {
+      const start = boundaries[index],end = boundaries[index+1]
+      const probe = new Date(start)
+      const windows = await readPublishedTimezoneWindows(trx,{
+        orgId,userId,from:probe,to:new Date(start+1),targetWorkDates:[workDate],includeRestDay:true,
+        ...(policyProjection === undefined ? {} : {policyProjection}),
+      },batch)
+      for (const window of windows) {
+        if (window.startAt.getTime()<end && start<window.endAt.getTime()) {
+          contexts.set(window.contextFingerprint,window)
+        }
+      }
+    }
+    if (contexts.size !== 1) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
+    return [...contexts.values()][0]
+  }
   async function readTargetTimezoneContext(trx,{orgId,userId,workDate},batch) {
     const midnight = new Date(workDate+'T00:00:00.000Z')
     if (typeof workDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)
@@ -513,9 +596,11 @@ function createAttendanceTimezoneRuntime({
     }
     if (!batch) await acquireRuntimeLocks(trx,{orgId,userId,mode:'shared'})
     try {
-      const members = batch ? batch.members : await trx.query(`SELECT u.id FROM users u JOIN user_orgs uo ON uo.user_id=u.id
-        WHERE u.id=$1 AND uo.org_id=$2 AND u.is_active=true AND uo.is_active=true`,[userId,orgId])
-      if (members.length !== 1) fail('ATTENDANCE_TIMEZONE_MEMBER_REQUIRED',403)
+      if (!requestReadScope(trx,orgId,userId)) {
+        const members = batch ? batch.members : await trx.query(`SELECT u.id FROM users u JOIN user_orgs uo ON uo.user_id=u.id
+          WHERE u.id=$1 AND uo.org_id=$2 AND u.is_active=true AND uo.is_active=true`,[userId,orgId])
+        if (members.length !== 1) fail('ATTENDANCE_TIMEZONE_MEMBER_REQUIRED',403)
+      }
       const existing = batch ? batch.companions.get(workDate) : await companion.readForWorkDate(trx,{orgId,userId,workDate})
       function target(frame,referenceId,frozen) {
         requestTargetFacts.set(trx,{frame})
@@ -532,44 +617,7 @@ function createAttendanceTimezoneRuntime({
       const prior = batch ? (batch.priorDates.has(workDate) ? [{}] : []) : await trx.query(`SELECT id FROM attendance_records
         WHERE org_id=$1 AND user_id=$2 AND work_date=$3 AND visibility_state='active'`,[orgId,userId,workDate])
       if (prior.length) fail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',409)
-      const q = queryFor(trx)
-      const store = createAttendanceTimezonePolicyStore({
-        query:q,transaction:work=>work(q),authorizeManage:async()=>false,
-      })
-      const policy = batch?.policy ?? await store.readPolicy({orgId})
-      if (!batch) await store.readDefault({orgId})
-      const from = new Date(midnight.getTime()-2*86400_000)
-      const to = new Date(midnight.getTime()+3*86400_000)
-      const cuts = new Set([from.getTime(),to.getTime()])
-      if (policy.enabled) {
-        const sources = batch ? batch.cuts : await trx.query(`SELECT effective_from AS start_at,effective_to AS end_at
-          FROM attendance_employee_timezone_overrides WHERE org_id=$1 AND user_id=$2
-            AND effective_from<$4 AND (effective_to IS NULL OR effective_to>$3)
-          UNION ALL SELECT start_at,effective_end_at AS end_at FROM attendance_business_trip_arrangements
-          WHERE org_id=$1 AND user_id=$2 AND start_at<$4 AND effective_end_at>$3`,[orgId,userId,from,to])
-        for (const source of sources) for (const value of [source.start_at,source.end_at]) {
-          if (value === null) continue
-          const epoch = new Date(value).getTime()
-          if (!Number.isFinite(epoch)) fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
-          if (epoch>from.getTime() && epoch<to.getTime()) cuts.add(epoch)
-        }
-      }
-      const boundaries = [...cuts].sort((a,b)=>a-b)
-      const contexts = new Map()
-      for (let index=0;index<boundaries.length-1;index+=1) {
-        const start = boundaries[index],end = boundaries[index+1]
-        const probe = new Date(start)
-        const windows = await readPublishedTimezoneWindows(trx,{
-          orgId,userId,from:probe,to:new Date(start+1),targetWorkDates:[workDate],includeRestDay:true,
-        },batch)
-        for (const window of windows) {
-          if (window.startAt.getTime()<end && start<window.endAt.getTime()) {
-            contexts.set(window.contextFingerprint,window)
-          }
-        }
-      }
-      if (contexts.size !== 1) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
-      const window = [...contexts.values()][0]
+      const window = await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate},batch)
       requestTargetFacts.set(trx,{window})
       return {
         orgId,userId,workDate,timezone:window.timezone,contextFingerprint:window.contextFingerprint,
@@ -639,6 +687,9 @@ function createAttendanceTimezoneRuntime({
           if (fixed) fixedReads.set(key,rows)
           return rows
         }}
+        if (typeof prepareRuleContextBatch === 'function') {
+          batch.resolveRuleContext = await prepareRuleContextBatch(batchTrx,orgId)
+        }
         const q = queryFor(batchTrx)
         const store = createAttendanceTimezonePolicyStore({query:q,transaction:work=>work(q),authorizeManage:async()=>false})
         batch.policy = await store.readPolicy({orgId})
@@ -683,6 +734,46 @@ function createAttendanceTimezoneRuntime({
       if (error instanceof HttpError) throw error
       if (error instanceof AttendanceTimezonePolicyError) fail(error.code,error.status)
       fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
+    }
+  }
+  async function assertFutureEmployeeBoundaries(trx,{orgId,users,now,mutation,policyProjection}) {
+    const q = queryFor(trx)
+    const store = createAttendanceTimezonePolicyStore({query:q,transaction:work=>work(q),authorizeManage:async()=>false})
+    const policy = await store.readPolicy({orgId})
+    // OFF ignores optional sources, including invalid or unavailable overrides.
+    if (!(policyProjection?.enabled ?? policy.enabled)) return
+    for (const userId of users) {
+      // Employee mutations concern only the row just created/closed. Broader
+      // rule/policy/schedule changes must recheck all affected future boundaries.
+      const filter = mutation?.kind === 'employee_override_create' ? ' AND effective_from=$4'
+        : mutation?.kind === 'employee_override_close' ? ' AND id=$4' : ''
+      const values = [orgId,userId,now]
+      if (mutation?.kind === 'employee_override_create') values.push(mutation.effectiveFrom)
+      else if (mutation?.kind === 'employee_override_close') values.push(mutation.referenceId)
+      const rows = await trx.query(`SELECT effective_from,effective_to FROM attendance_employee_timezone_overrides
+        WHERE org_id=$1 AND user_id=$2 AND (effective_from >= $3 OR effective_to >= $3)`+filter,values)
+      const cuts = new Set()
+      for (const row of rows) for (const value of [row.effective_from,row.effective_to]) {
+        if (value === null) continue
+        const epoch = new Date(value).getTime()
+        if (!Number.isFinite(epoch)) fail('ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',503)
+        if (epoch >= now.getTime()) cuts.add(epoch)
+      }
+      const dates = new Set()
+      for (const cut of cuts) {
+        // Evaluate both source selections. Dateline/overnight windows may belong
+        // to different target dates; a rest day alone must not prohibit a change.
+        for (const epoch of [cut-1,cut]) {
+          const windows = await readPublishedTimezoneWindows(trx,{
+            orgId,userId,from:new Date(epoch),to:new Date(epoch+1),
+            ...(policyProjection === undefined ? {} : {policyProjection}),
+          })
+          for (const window of windows) if (window.isWorkingDay === true) dates.add(window.workDate)
+        }
+      }
+      for (const workDate of dates) {
+        await readFreshTargetTimezoneWindow(trx,{orgId,userId,workDate,policyProjection})
+      }
     }
   }
   async function prepareSourceChange(trx, { orgId, userIds = null, now = serverNow(), mutation, policyProjection }) {
@@ -756,6 +847,7 @@ function createAttendanceTimezoneRuntime({
         fail('ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT',409)
       }
       await verifyTrips()
+      await assertFutureEmployeeBoundaries(trx,{orgId,users,now,mutation,policyProjection})
     }
   }
   async function previewPolicyChangeCore(trx,{orgId,enabled,expectedVersion}) {
@@ -839,7 +931,7 @@ function createAttendanceTimezoneRuntime({
     return async () => protectedSource(verify)
   }
   const readFrozenTimezoneWindows = require('./attendance-timezone-frozen-windows.cjs').createAttendanceTimezoneFrozenWindowReader({ HttpError })
-  return { acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
+  return { acceptScheduledIssued, acquireScheduledLocks, prepareScheduledContext, resolveScheduledMembers, scheduledFrameFor, prepareRelatedRecordContext, bindRelatedRecordContext, previewPolicyChange, readCalendarSourceFactsFor, requestTargetFactsFor, readRequestTimezoneContext, readTargetTimezoneContext, readTargetTimezoneContexts, prepareSourceChange, prepareTimezoneSourceChange, readPublishedTimezoneWindows, readFrozenTimezoneWindows, loaderFor, uniqueWallInstant, prepareLivePunch, frameFor, assertLiveTarget, bindLiveContext }
 }
 
 function canonicalTimezoneProvenance(context) {

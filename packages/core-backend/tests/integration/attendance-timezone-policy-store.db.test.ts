@@ -3,7 +3,7 @@ import { createRequire } from 'node:module'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
 import { Pool } from 'pg'
-import { down, up } from '../../src/db/migrations/zzzz20261012090000_create_attendance_timezone_policy'
+import { down, up } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 
 const require = createRequire(import.meta.url)
 type Input = Record<string, unknown>

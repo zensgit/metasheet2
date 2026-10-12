@@ -1,4 +1,4 @@
-import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012090000_create_attendance_timezone_policy'
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 /**
  * Test-only shared fixture for W4C-3a P08 candidate A/B.

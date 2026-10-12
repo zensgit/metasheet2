@@ -17404,6 +17404,7 @@ function formatRequestType(value: string): string {
         missed_check_out: '漏打下班卡',
         time_correction: '时间更正',
         leave: '请假申请',
+        business_trip: '出差申请',
         overtime: '加班申请',
         outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
@@ -17414,6 +17415,7 @@ function formatRequestType(value: string): string {
         missed_check_out: 'Missed check-out',
         time_correction: 'Time correction',
         leave: 'Leave request',
+        business_trip: 'Business trip request',
         overtime: 'Overtime request',
         outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
@@ -21489,6 +21491,8 @@ function classifyStatusError(
     message = makeupCopy.message
     if (makeupCopy.hint) meta.hint = makeupCopy.hint
     if (makeupCopy.action) meta.action = makeupCopy.action
+  } else if (code === 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT') {
+    message = tr('This leave spans multiple attendance dates or shifts. Please split it into separate requests.', '该请假跨越多个考勤日期或班次，请拆分申请')
   } else if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
     message = tr('Import token expired before request completed.', '导入令牌已过期，请重试。')
     meta.hint = tr('Click retry to refresh commit token and submit again.', '点击重试以刷新导入令牌并重新提交。')

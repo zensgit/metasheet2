@@ -67,7 +67,7 @@ afterEach(() => {
 
 describe('cancelRound status domain (P-2)', () => {
   it('every round state names its subject and differs from the approvalInstance words', () => {
-    const subjects = ['撤销', '请假']
+    const subjects = ['撤销', '请假', '出差']
     for (const key of CANCEL_ROUND_STATUS_KEYS) {
       const zh = resolveStatusDisplay('cancelRound', key, true)
       expect(subjects.some((subject) => zh.label.includes(subject)), `${key}: ${zh.label}`).toBe(true)

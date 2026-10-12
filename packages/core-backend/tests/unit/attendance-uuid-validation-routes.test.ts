@@ -1,12 +1,33 @@
 import { createRequire } from 'node:module'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
+import { validateAttendanceIanaTimezoneV1 } from '../../src/attendance/w4c1-strict-time'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
 } from '../../src/attendance/w4c3a-import-proof'
 
 const require = createRequire(import.meta.url)
+// These unit seams exercise scheduling/RBAC, not timezone source resolution.
+// Supply the trusted guard collaborator; native runtime tests prove its SQL/locks.
+const runtimeModule = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+const originalRuntimeFactory = runtimeModule.createAttendanceTimezoneRuntime
+const verifyTimezoneSource = vi.fn(async () => {})
+const prepareTimezoneSource = vi.fn(async (_trx: unknown, input: { orgId: string }) => {
+  expect(input.orgId).toBeTruthy()
+  return verifyTimezoneSource
+})
+runtimeModule.createAttendanceTimezoneRuntime = (deps: unknown) => ({
+  ...originalRuntimeFactory(deps),
+  prepareSourceChange: prepareTimezoneSource,
+})
+delete require.cache[require.resolve('../../../../plugins/plugin-attendance/index.cjs')]
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
+
+runtimeModule.createAttendanceTimezoneRuntime = originalRuntimeFactory
+afterAll(() => {
+  const key = require.resolve('../../../../plugins/plugin-attendance/index.cjs')
+  if (require.cache[key]?.exports === attendancePlugin) delete require.cache[key]
+})
 
 type RouteHandler = (req: any, res: any, next: any) => Promise<void>
 type CommitSyncImportPlan = (input: unknown) => Promise<unknown>
@@ -134,6 +155,14 @@ async function createHarness(
         }),
       },
       attendanceW4SegmentCalculation: {
+        validateIanaTimezone: validateAttendanceIanaTimezoneV1,
+        // This UUID/RBAC harness represents the default organization only.
+        // Native approval-org tests exercise membership-based writer derivation.
+        deriveApprovalInstanceOrgIdForAttendanceSubjectV1: async ({ requestNamedOrgId }: { requestNamedOrgId: string | null }) =>
+          requestNamedOrgId === null || requestNamedOrgId === 'default'
+            ? { ok: true, orgId: 'default' }
+            : { ok: false, reason: 'selector_not_permitted' },
+
         resolveOrgSegmentCalculationPosture: async () => ({
           effectiveState: 'legacy',
           referenceSegments: false,
@@ -150,6 +179,7 @@ async function createHarness(
               routeVariant: input.routeVariant ?? null,
             }
             const adapter = adapters[input.kind]
+            await adapter.prepareIdentity(trx, input.routeInput, operation)
             const prepared = await adapter.prepare(trx, input.routeInput, operation)
             const result = await adapter.execute(trx, prepared, operation)
             return { kind: 'legacy', response: result.response }
@@ -624,6 +654,7 @@ function requestDecisionIdentityQueryResult(
     permissions?: string[]
   } = {},
 ) {
+  if (sql === "SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'") return []
   if (sql.includes('SELECT id, org_id, user_id, approval_instance_id, request_type')) {
     return [attendanceRequestRow()]
   }
@@ -1719,6 +1750,7 @@ describe('attendance UUID route validation', () => {
     })
 
     db.query.mockImplementation(async (sql: string) => {
+      if (sql === "SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'") return []
       if (sql.includes('FROM user_roles') && sql.includes('role_id = $2')) return [{ ok: 1 }]
       if (sql.includes('SELECT role_id FROM user_roles')) return []
       if (sql.includes('FROM user_permissions')) return []
@@ -1754,8 +1786,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'worker-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(409)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(409)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'W4C3B_REQUEST_SNAPSHOT_EXPECTED_VERSION_CONFLICT' },
     })
@@ -1807,8 +1839,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'approver-1', orgId: 'default', roles: ['admin'] },
     })
 
-    expect(res.statusCode).toBe(500)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(500)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'APPROVAL_RECORD_ID_MISSING' },
     })
@@ -1854,8 +1886,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'approver-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: false,
       error: { code: 'FORBIDDEN' },
     })
@@ -1905,8 +1937,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: true,
       data: {
         requestId: attendanceRequestId,
@@ -1962,8 +1994,8 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     const statements = db.query.mock.calls.map(([sql]) => String(sql))
     expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances'))).toBe(true)
     expect(statements.some(sql => sql.includes('SELECT * FROM approval_instances') && sql.includes('FOR UPDATE'))).toBe(false)
@@ -1976,6 +2008,12 @@ describe('attendance UUID route validation', () => {
     const { db, routes } = await createHarness('false')
 
     db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('SELECT u.id FROM users u JOIN user_orgs') && sql.includes('ANY($2::text[])')) {
+        expect(params).toEqual(['default',['scheduler-1','worker-1']])
+        return [{id:'scheduler-1'},{id:'worker-1'}]
+      }
+      if (sql.includes('FROM attendance_timezone_context_companions')) return []
+
       const rbac = attendanceReadOnlyRbacQueryResult(sql, params)
       if (rbac !== undefined) return rbac
       const actor = actorContextQueryResult(sql)
@@ -2001,10 +2039,11 @@ describe('attendance UUID route validation', () => {
         format: 'json',
       },
       user: { id: 'scheduler-1', orgId: 'default' },
+      authenticatedTenantId: 'default',
     })
 
-    expect(res.statusCode).toBe(200)
-    expect(res.body).toMatchObject({
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(200)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({
       ok: true,
       data: {
         total: 1,
@@ -2067,10 +2106,11 @@ describe('attendance UUID route validation', () => {
         format: 'json',
       },
       user: { id: 'scheduler-1', orgId: 'default' },
+      authenticatedTenantId: 'default',
     })
 
-    expect(res.statusCode).toBe(403)
-    expect(res.body).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
+    expect(res.statusCode, JSON.stringify(res.body)).toBe(403)
+    expect(res.body, JSON.stringify(res.body)).toMatchObject({ ok: false, error: { code: 'SCHEDULER_SCOPE_FORBIDDEN' } })
     expect(db.query.mock.calls.map(([sql]) => String(sql)).some(sql => sql.includes('FROM attendance_current_records ar'))).toBe(false)
   })
 
@@ -4912,5 +4952,42 @@ describe('cancel-round launch flag ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED: exact 
     // the unit harness's database refuses every query, so the route answers its own 500 — not the gate's 404
     expect(res.statusCode).toBe(500)
     expect(res.body).not.toEqual(NOT_FOUND)
+  })
+})
+
+
+// This is the fresh-hook defense after boundary preflight, not a claim that
+// a real caller can bypass preflight's original organization authorization.
+describe('generic request fresh authority congruence', () => {
+  it('refuses a derived organization outside the already claimed identity before target reads or DML', async () => {
+    type CreateAdapter = {
+      prepareIdentity: (trx: unknown, input: unknown, operation: unknown) => Promise<{orgId:string}>
+      prepareFreshTimezoneContext: (trx: unknown, identity: unknown, input: unknown, operation: unknown) => Promise<void>
+    }
+    let capturedAdapters: {request_create:CreateAdapter} | undefined
+    const derivedOrg = '22222222-2222-4222-8222-222222222222'
+    const derive = vi.fn(async () => ({ ok: true, orgId: derivedOrg }))
+    const { db } = await createHarness('true', undefined, {
+      deriveApprovalInstanceOrgIdForAttendanceSubjectV1: derive,
+      createRequestOperationBoundary: ({ adapters }: { adapters: {request_create:CreateAdapter} }) => {
+        capturedAdapters = adapters
+        return { execute: vi.fn() }
+      },
+    })
+    const rawInput = {
+      orgId: '11111111-1111-4111-8111-111111111111', actorId: 'unit-applicant',
+      tokenSubjectUserId: 'unit-applicant', requesterName: 'Unit applicant',
+      requestId: null, requestNamedOrgId: null,
+      requestBody: { requestType: 'leave', workDate: '2026-10-12' },
+    }
+    const operation = { operationId: '33333333-3333-4333-8333-333333333333', routeVariant: 'generic' }
+    const adapter = capturedAdapters!.request_create
+    const identity = await adapter.prepareIdentity(db, rawInput, operation)
+    expect(identity.orgId).toBe(rawInput.orgId)
+    expect(derive).not.toHaveBeenCalled()
+    await expect(adapter.prepareFreshTimezoneContext(db, identity, rawInput, operation))
+      .rejects.toMatchObject({ status: 409, code: 'W4C3B_REQUEST_IDENTITY_CHANGED' })
+    expect(derive).toHaveBeenCalledTimes(1)
+    expect(db.query).not.toHaveBeenCalled()
   })
 })

@@ -1823,6 +1823,10 @@ export interface PluginServices {
      * The host acquires the canonical shared rollout lock and resolves the one
      * posture seam on the caller's existing transaction/connection.
      */
+    resolveTimezoneSegmentReferencePosture(
+      trx: Pick<import('../attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
+      orgId: string,
+    ): Promise<{ readonly referenceSegments: boolean }>
     resolveOrgSegmentCalculationPosture(
       trx: DatabaseTransaction,
       orgId: string,

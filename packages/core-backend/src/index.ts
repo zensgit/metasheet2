@@ -3042,6 +3042,31 @@ export class MetaSheetServer {
                 }),
                 appendApprovedLeaveCancellationCalculation: (input) =>
                   appendApprovedLeaveCancellationCalculationV1(input),
+                // Timezone source guards also receive query-only, same-transaction
+                // adapters. Do not claim the wider canonical transaction identity.
+                resolveTimezoneSegmentReferencePosture: async (
+                  trx: Pick<import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1, 'query'>,
+                  orgId: string,
+                ) => {
+                  const client: AttendanceW4TransactionClientV1 = {
+                    query: async (text, values) => ({ rows: await trx.query(text, [...(values ?? [])]) }),
+                  }
+                  let orgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1>
+                  try {
+                    orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+                  } catch (error) {
+                    if (
+                      error instanceof AttendanceW4IdentityError &&
+                      error.code === 'W4C0_ROLLOUT_ORG_KEY_INVALID'
+                    ) {
+                      return { referenceSegments: false }
+                    }
+                    throw error
+                  }
+                  await acquireAttendanceCalculationRolloutLock(client, orgKey, 'shared')
+                  const posture = await resolveSegmentCalculationPosture(client, orgKey)
+                  return { referenceSegments: posture.referenceSegments }
+                },
                 resolveOrgSegmentCalculationPosture: async (
                   trx: import('./types/plugin').DatabaseTransaction,
                   orgId: string,

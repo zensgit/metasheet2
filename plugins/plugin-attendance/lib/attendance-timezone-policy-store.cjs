@@ -70,7 +70,7 @@ async function lockAttendanceTimezoneOrg(query, orgId) {
   await query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [attendanceTimezoneOrgLockKey(orgId)])
 }
 
-function createAttendanceTimezonePolicyStore({ query, transaction, authorizeManage, prepareTripSourceChange }) {
+function createAttendanceTimezonePolicyStore({ query, transaction, authorizeManage, prepareTripSourceChange, authorizeReadSubject }) {
   if (![query, transaction, authorizeManage].every(item => typeof item === 'function')) {
     fail('INVALID_ADAPTER')
   }
@@ -152,7 +152,12 @@ function createAttendanceTimezonePolicyStore({ query, transaction, authorizeMana
       identifier(userId)
       instant(at)
       return protect(async () => {
-        await member(query, orgId, userId)
+        if (authorizeReadSubject === undefined) {
+          await member(query, orgId, userId)
+        } else if (typeof authorizeReadSubject !== 'function'
+          || await authorizeReadSubject({orgId,userId}) !== true) {
+          fail('MEMBER_REQUIRED',403)
+        }
         const found = await rows(query,
           'SELECT id, timezone, version, effective_from, effective_to FROM attendance_employee_timezone_overrides '
           + 'WHERE org_id = $1 AND user_id = $2 AND effective_from <= $3 '

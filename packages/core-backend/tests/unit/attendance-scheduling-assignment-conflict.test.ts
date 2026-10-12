@@ -1,9 +1,45 @@
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeAll, afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const require = createRequire(import.meta.url)
+// These unit seams exercise scheduling/RBAC, not timezone source resolution.
+// Supply the trusted guard collaborator; native runtime tests prove its SQL/locks.
+const runtimeModule = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+const originalRuntimeFactory = runtimeModule.createAttendanceTimezoneRuntime
+const verifyTimezoneSource = vi.fn(async () => {})
+const prepareTimezoneSource = vi.fn(async (_trx: unknown, input: { orgId: string }) => {
+  expect(input.orgId).toBeTruthy()
+  return verifyTimezoneSource
+})
+runtimeModule.createAttendanceTimezoneRuntime = (deps: unknown) => ({
+  ...originalRuntimeFactory(deps),
+  prepareSourceChange: prepareTimezoneSource,
+})
+delete require.cache[require.resolve('../../../../plugins/plugin-attendance/index.cjs')]
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
+runtimeModule.createAttendanceTimezoneRuntime = originalRuntimeFactory
+
+beforeAll(async () => {
+  await attendancePlugin.activate({
+    api: {
+      database: { query: async () => [] },
+      http: { addRoute: vi.fn() }, events: { emit: vi.fn() },
+    },
+    services: { attendanceW4SegmentCalculation: {} },
+    logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  })
+})
+afterAll(async () => {
+  try { await attendancePlugin.deactivate() }
+  finally {
+    const key = require.resolve('../../../../plugins/plugin-attendance/index.cjs')
+    if (require.cache[key]?.exports === attendancePlugin) delete require.cache[key]
+  }
+})
+beforeEach(() => { attendancePlugin.resetAttendanceSettingsCacheForTests() })
+
+
 const helpers = attendancePlugin.__attendanceReportFieldCatalogForTests
 
 function fixedScheduleConfigRow(overrides: Record<string, unknown> = {}) {
@@ -489,6 +525,7 @@ describe('attendance scheduling assignment conflict guard', () => {
     ]
     const db = {
       query: vi.fn(async (sql: string, params: any[] = []) => {
+        if (sql.includes('FROM system_configs')) return []
         if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
           return [
             {
@@ -580,6 +617,7 @@ describe('attendance scheduling assignment conflict guard', () => {
     ]
     const db = {
       query: vi.fn(async (sql: string, params: any[] = []) => {
+        if (sql.includes('FROM system_configs')) return []
         if (/\bINSERT INTO attendance_shift_assignments\b/i.test(String(sql))) {
           return [
             {
@@ -649,6 +687,7 @@ describe('attendance scheduling assignment conflict guard', () => {
         .mockResolvedValueOnce([{ id: 'shift-a', org_id: 'org-a', name: 'Day shift', timezone: 'UTC' }])
         .mockResolvedValueOnce([{ user_id: 'user-conflict' }])
         .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]) // Fresh settings read; no dependence on a prior test cache.
         .mockResolvedValueOnce([
           {
             id: 'assignment-conflict',

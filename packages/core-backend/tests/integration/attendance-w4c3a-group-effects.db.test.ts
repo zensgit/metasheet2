@@ -1,5 +1,5 @@
 import { Kysely, PostgresDialect } from 'kysely'
-import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012090000_create_attendance_timezone_policy'
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
 /**
  * P2-G: real SQL count legs for OD-W4C-60 group/batch result semantics.
  */

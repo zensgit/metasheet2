@@ -2,7 +2,7 @@ import { afterAll,beforeAll,beforeEach,describe,expect,it } from 'vitest'
 import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { randomUUID } from 'node:crypto'
-import { Kysely,PostgresDialect } from 'kysely'
+import { Kysely,PostgresDialect,sql } from 'kysely'
 import { up as applyTripMigration, down as rollbackTripMigration } from '../../src/db/migrations/zzzz20261013090000_create_attendance_business_trips'
 import { createOnlinePunchDbFixture,punchClock } from '../utils/attendance-online-punch-db'
 if (!process.env.ATTENDANCE_TEST_DATABASE_URL) throw new Error('ATTENDANCE_TRIP_REAL_DATABASE_REQUIRED')
@@ -12,14 +12,32 @@ const {createAttendanceTimezoneContextLoader}=require('../../../../plugins/plugi
 const {readApprovedTrips,setBusinessTripInstantForTests}=require('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs')
 const f=createOnlinePunchDbFixture({retainHistoryInIsolatedDatabase:true})
 describe('business trip empty migration roundtrip',()=>{
-  it('runs the actual down and up DDL before any business history exists',async()=>{
+  it('runs actual up, down and up DDL in an isolated schema without sibling business history',async()=>{
     const db=new Kysely<unknown>({dialect:new PostgresDialect({pool:f.pool})})
-    await db.transaction().execute(trx=>rollbackTripMigration(trx))
-    expect((await f.pool.query("SELECT to_regclass('attendance_business_trip_requests') IS NULL AS detail_absent, to_regclass('attendance_business_trip_arrangements') IS NULL AS arrangement_absent")).rows)
-      .toEqual([{detail_absent:true,arrangement_absent:true}])
-    await db.transaction().execute(trx=>applyTripMigration(trx))
-    expect((await f.pool.query("SELECT count(*)::int AS count FROM pg_constraint WHERE conrelid='attendance_business_trip_arrangements'::regclass AND contype='x'")).rows)
-      .toEqual([{count:1}])
+    const schema='trip_migration_'+randomUUID().replaceAll('-','')
+    // Sibling native suites retain immutable history in public. Exercise the
+    // real migration against empty copies of its actual prerequisite tables.
+    await db.transaction().execute(async trx=>{
+      await sql`CREATE SCHEMA ${sql.id(schema)}`.execute(trx)
+      await sql`SET LOCAL search_path TO ${sql.id(schema)},public`.execute(trx)
+      for (const table of ['users','approval_instances','attendance_requests']) {
+        await sql`CREATE TABLE ${sql.id(schema,table)} (LIKE ${sql.id('public',table)} INCLUDING ALL)`.execute(trx)
+      }
+      await applyTripMigration(trx)
+      await rollbackTripMigration(trx)
+      expect((await sql<{detail_absent:boolean;arrangement_absent:boolean}>`
+        SELECT to_regclass(${schema+'.attendance_business_trip_requests'}) IS NULL AS detail_absent,
+          to_regclass(${schema+'.attendance_business_trip_arrangements'}) IS NULL AS arrangement_absent
+      `.execute(trx)).rows).toEqual([{detail_absent:true,arrangement_absent:true}])
+      await applyTripMigration(trx)
+      expect((await sql<{count:number}>`
+        SELECT count(*)::int AS count FROM pg_constraint
+        WHERE conrelid=${schema+'.attendance_business_trip_arrangements'}::regclass AND contype='x'
+      `.execute(trx)).rows).toEqual([{count:1}])
+      await sql`DROP SCHEMA ${sql.id(schema)} CASCADE`.execute(trx)
+    })
+    expect((await f.pool.query('SELECT to_regnamespace($1) IS NULL AS removed',[schema])).rows)
+      .toEqual([{removed:true}])
   })
 })
 describe('business trip real request approval and destination arrangement',() => {

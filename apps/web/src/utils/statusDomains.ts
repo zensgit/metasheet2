@@ -72,6 +72,7 @@ const APPROVAL_INSTANCE_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
 const CANCEL_ROUND_STATUS_DOMAIN: Record<string, StatusDisplayEntry> = {
   cancellation_pending_approval: { tone: 'warning', zh: '撤销申请审批中', en: 'Cancellation pending approval' },
   leave_cancelled: { tone: 'success', zh: '请假已取消', en: 'Leave cancelled' },
+  business_trip_cancelled: { tone: 'success', zh: '出差已取消', en: 'Business trip cancelled' },
   cancellation_rejected: { tone: 'danger', zh: '撤销申请被驳回', en: 'Cancellation rejected' },
   cancellation_withdrawn: { tone: 'info', zh: '撤销申请已撤回', en: 'Cancellation withdrawn' },
   cancellation_window_closed: { tone: 'neutral', zh: '撤销窗口已过,申请自动关闭', en: 'Cancellation window closed' },

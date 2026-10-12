@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import http from 'node:http'
 import net from 'node:net'
 import path from 'node:path'
@@ -168,6 +169,79 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
       [userId, orgId],
     )
+  }
+
+  // Fixture configuration only: no fallback membership is added for timezone resolution.
+  async function seedStrictDefaultRule(orgId: string, timezone = 'UTC'): Promise<string> {
+    // This is fixture configuration, independent from the applicant's intentionally unnamed token.
+    // Preserve any legitimate existing default (the dispatch fixture uses the default org).
+    const existing = (await pool.query('SELECT id FROM attendance_rules WHERE org_id=$1 AND is_default=true', [orgId])).rows
+    expect(existing.length).toBeLessThanOrEqual(1)
+    if (existing.length === 0) {
+      await pool.query(`INSERT INTO attendance_rules
+        (id,org_id,name,timezone,is_default,work_start_time,work_end_time,late_grace_minutes,early_grace_minutes,rounding_minutes,working_days)
+        VALUES($1,$2,'W4 writer timezone fixture',$3,true,'09:00','18:00',0,0,1,'[0,1,2,3,4,5,6]'::jsonb)`,
+        [randomUUID(), orgId, timezone])
+    }
+    const rows = (await pool.query<{ id: string; timezone: string; timezone_version: number }>(
+      'SELECT id, timezone, timezone_version FROM attendance_rules WHERE org_id = $1 AND is_default = TRUE', [orgId],
+    )).rows
+    expect(rows).toEqual([{ id: expect.any(String), timezone, timezone_version: expect.any(Number) }])
+    expect(rows[0].timezone_version).toBeGreaterThan(0)
+    return rows[0].id
+  }
+
+  async function assertRequestTarget(requestId: string, orgId: string, userId: string, workDate: string, timezone = 'UTC') {
+    const rows = (await pool.query(
+      'SELECT org_id, user_id, work_date::text, metadata FROM attendance_requests WHERE id = $1', [requestId],
+    )).rows
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ org_id: orgId, user_id: userId, work_date: workDate,
+      metadata: { timezoneContextV1: { orgId, userId, workDate, timezone } } })
+    expect(rows[0].metadata.timezoneContextV1.rule.orgId).toBe(orgId)
+    expect(rows[0].metadata.timezoneContextV1.rule.timezone).toBe(timezone)
+    const snapshots = (await pool.query(
+      'SELECT org_id, subject_user_id FROM attendance_request_calculation_snapshots WHERE request_id = $1 ORDER BY version',
+      [requestId],
+    )).rows
+    // This suite's legacy rollout writes zero request-calculation snapshots.
+    expect(snapshots).toEqual([])
+    expect(await readInstanceOrg(await approvalInstanceIdForRequest(requestId))).toBe(orgId)
+  }
+
+  async function readPublicTarget(orgId: string, userId: string, workDate: string): Promise<unknown> {
+    const requireCjs = createRequire(import.meta.url)
+    const plugin = requireCjs('../../../../plugins/plugin-attendance/index.cjs') as {
+      readTargetTimezoneContext: (trx: { query: (text: string, values?: unknown[]) => Promise<unknown[]> }, input: {
+        orgId: string; userId: string; workDate: string
+      }) => Promise<unknown>
+    }
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      return await plugin.readTargetTimezoneContext({ query: async (text, values) => (await client.query(text, values)).rows },
+        { orgId, userId, workDate })
+    } finally { await client.query('ROLLBACK'); client.release() }
+  }
+
+  async function businessSnapshot(orgIds: string[]): Promise<Record<string, unknown[]>> {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      const rows: Record<string, unknown[]> = {}
+      for (const table of [
+        'attendance_requests', 'approval_instances', 'attendance_request_calculation_snapshots',
+        'attendance_result_operations', 'attendance_result_event_outbox', 'attendance_events', 'attendance_records',
+        'attendance_timezone_context_companions',
+      ]) {
+        rows[table] = (await client.query(`SELECT * FROM ${table} WHERE org_id = ANY($1::text[]) ORDER BY to_jsonb(${table})::text`, [orgIds])).rows
+      }
+      for (const table of ['approval_assignments', 'approval_records']) {
+        rows[table] = (await client.query(`SELECT child.* FROM ${table} child JOIN approval_instances parent
+          ON parent.id = child.instance_id WHERE parent.org_id = ANY($1::text[]) ORDER BY to_jsonb(child)::text`, [orgIds])).rows
+      }
+      return rows
+    } finally { await client.query('ROLLBACK'); client.release() }
   }
 
   async function activeMembershipCount(userId: string): Promise<number> {
@@ -376,6 +450,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const token = await mintTokenNoSeed(subjectId)
       const orgOne = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
 
       const res = await createGeneric(token, { operationId: randomUUID(), orgId: orgOne })
       expect(res.status, res.raw).toBe(201)
@@ -392,6 +467,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const token = await mintTokenNoSeed(subjectId)
       const orgOne = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
 
       const res = await createGeneric(token, { operationId: randomUUID(), orgId: orgOne })
       expect(res.status, res.raw).toBe(201)
@@ -412,6 +488,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const token = await mintTokenNoSeed(subjectId)
       const orgOne = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
       // Deactivate the user row itself (users.is_active=false) — the derivation and the reader
       // both consult ONLY user_orgs.is_active (D-9), never users.is_active, so this must not
       // change either side's answer.
@@ -430,6 +507,10 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       createdInstanceIds.push(instanceId)
       expect(await readInstanceOrg(instanceId)).toBe(orgOne)
 
+      await assertRequestTarget(requestId, orgOne, subjectId, '2049-05-01')
+      await expect(readPublicTarget(orgOne, subjectId, '2049-05-01')).rejects.toMatchObject({
+        status: 403, code: 'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED',
+      })
       const canRead = await withOrgPinEnabled(() => canReadApprovalInstance(pool as never, subjectId, instanceId))
       expect(canRead).toBe(true)
     })
@@ -461,6 +542,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
     }
 
     async function seedDispatchFlow(adminToken: string, prefix: string): Promise<string> {
+      await seedStrictDefaultRule('default')
       const flow = await requestJson(`${baseUrl}/api/attendance/approval-flows`, {
         method: 'POST',
         headers: authHeaders(adminToken),
@@ -523,6 +605,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const token = await mintTokenNoSeed(subjectId)
       const orgOne = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
 
       const res = await createGeneric(token, { operationId: randomUUID(), orgId: orgOne })
       expect(res.status, res.raw).toBe(201)
@@ -541,6 +624,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const token = await mintTokenNoSeed(subjectId)
       const orgTwo = randomUUID()
       await grantMembership(subjectId, orgTwo)
+      await seedStrictDefaultRule(orgTwo)
 
       const res = await createGeneric(token, {})
       expect(res.status, res.raw).toBe(201)
@@ -557,6 +641,110 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       // see PR body) makes this specific assertion diverge (requestOrg would read back
       // 'default' instead of orgTwo) — proving the equality gate is load-bearing, not vacuous.
       expect(requestOrg).not.toBe('default')
+      expect((await pool.query('SELECT org_id FROM user_orgs WHERE user_id = $1 AND is_active = TRUE', [subjectId])).rows)
+        .toEqual([{ org_id: orgTwo }])
+      expect((await pool.query("SELECT * FROM user_orgs WHERE user_id = $1 AND org_id = 'default'", [subjectId])).rows).toEqual([])
+      expect(res.body?.data?.request?.metadata?.timezoneContextV1).toMatchObject({ orgId: orgTwo, userId: subjectId, workDate: '2049-05-01', timezone: 'UTC' })
+      await assertRequestTarget(requestId, orgTwo, subjectId, '2049-05-01')
+    })
+  })
+
+  describe('timezone target authority follows the existing attendance writer', () => {
+    it('null-ID sole B suspended while fallback default is legacy: exact503 and zero business DML', async () => {
+      const subjectId = freshId('tz-writer-suspended')
+      const token = await mintTokenNoSeed(subjectId)
+      const orgB = randomUUID()
+      await grantMembership(subjectId, orgB)
+      await seedStrictDefaultRule(orgB)
+      expect((await pool.query('SELECT org_id FROM user_orgs WHERE user_id=$1 AND is_active=TRUE', [subjectId])).rows)
+        .toEqual([{ org_id: orgB }])
+      const fallback = (await pool.query("SELECT state FROM attendance_calculation_rollout_state WHERE org_id='default'")).rows
+      expect(fallback.every(row => row.state === 'legacy')).toBe(true)
+      await pool.query(`INSERT INTO attendance_calculation_rollout_state
+        (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
+        VALUES($1,'legacy','writer-timezone-test','TEST_FIXTURE',$2,1,NULL)`, [orgB, subjectId])
+      await pool.query("UPDATE attendance_calculation_rollout_state SET state='suspended',prior_state='legacy',version=2 WHERE org_id=$1", [orgB])
+      const before = await businessSnapshot([orgB, 'default'])
+      const res = await createGeneric(token, {})
+      expect(res.status, res.raw).toBe(503)
+      expect(res.body?.error?.code).toBe('SEGMENT_CALCULATION_SUSPENDED')
+      expect(res.raw).not.toContain(orgB)
+      expect(res.raw).not.toContain(subjectId)
+      expect(await businessSnapshot([orgB, 'default'])).toEqual(before)
+    })
+
+    it('stable named B exact completed replay ignores a newly missing strict default and preserves the original receipt', async () => {
+      const subjectId = freshId('tz-writer-replay')
+      const token = await mintTokenNoSeed(subjectId)
+      const orgB = randomUUID()
+      await grantMembership(subjectId, orgB)
+      const ruleId = await seedStrictDefaultRule(orgB)
+      const input = { operationId: randomUUID(), orgId: orgB }
+      const created = await createGeneric(token, input)
+      expect(created.status, created.raw).toBe(201)
+      const requestId = created.body?.data?.request?.id as string
+      await assertRequestTarget(requestId, orgB, subjectId, '2049-05-01')
+      await pool.query('UPDATE attendance_rules SET is_default=false WHERE id=$1', [ruleId])
+      try {
+        await expect(readPublicTarget(orgB, subjectId, '2049-05-01')).rejects.toMatchObject({
+          code: 'ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED',
+        })
+        const before = await businessSnapshot([orgB])
+        const replay = await createGeneric(token, input)
+        expect(replay.status).toBe(created.status)
+        expect(replay.body).toEqual(created.body)
+        expect(await businessSnapshot([orgB])).toEqual(before)
+      } finally { await pool.query('UPDATE attendance_rules SET is_default=true WHERE id=$1', [ruleId]) }
+    })
+
+    it('normal DB read/write actor can create their own request but cannot pending-edit another user: exact403 and zero DML', async () => {
+      const ownerId = freshId('tz-writer-owner')
+      const ownerToken = await mintTokenNoSeed(ownerId)
+      const orgId = randomUUID()
+      await grantMembership(ownerId, orgId)
+      await seedStrictDefaultRule(orgId)
+      const created = await createGeneric(ownerToken, { orgId })
+      expect(created.status, created.raw).toBe(201)
+      const requestId = created.body?.data?.request?.id as string
+      const strangerId = freshId('tz-writer-stranger')
+      const strangerToken = await mintTokenNoSeed(strangerId)
+      await grantMembership(strangerId, orgId)
+      const roleId = `attendance_qa_writer_${randomUUID()}`
+      await pool.query("INSERT INTO roles(id,name) VALUES($1,'W4 timezone request writer fixture')", [roleId])
+      for (const permission of ['attendance:read', 'attendance:write']) {
+        await pool.query('INSERT INTO role_permissions(role_id,permission_code) VALUES($1,$2)', [roleId, permission])
+      }
+      await pool.query('INSERT INTO user_roles(user_id,role_id) VALUES($1,$2)', [strangerId, roleId])
+      await pool.query("INSERT INTO user_namespace_admissions(user_id,namespace,enabled,source) VALUES($1,'attendance',true,'test_fixture')", [strangerId])
+      const priorBypass = process.env.RBAC_BYPASS
+      const priorTrust = process.env.RBAC_TOKEN_TRUST
+      process.env.RBAC_BYPASS = 'false'
+      process.env.RBAC_TOKEN_TRUST = 'false'
+      try {
+        const { userHasPermission } = await import('../../src/rbac/service')
+        expect(await userHasPermission(strangerId, 'attendance:write')).toBe(true)
+        expect(await userHasPermission(strangerId, 'attendance:admin')).toBe(false)
+        expect(await userHasPermission(strangerId, 'attendance:approve')).toBe(false)
+        const own = await createGeneric(strangerToken, { orgId })
+        expect(own.status, own.raw).toBe(201)
+        expect((await pool.query('SELECT is_admin,role,permissions FROM users WHERE id=$1', [strangerId])).rows)
+          .toEqual([{is_admin:false,role:'user',permissions:[]}])
+        expect(await userHasPermission(strangerId, 'attendance:write')).toBe(true)
+        expect(await userHasPermission(strangerId, 'attendance:admin')).toBe(false)
+        expect(await userHasPermission(strangerId, 'attendance:approve')).toBe(false)
+        const before = await businessSnapshot([orgId])
+        const refused = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+          method: 'PUT', headers: authHeaders(strangerToken), body: { orgId, reason: 'unauthorized fixture edit' },
+        })
+        expect(refused.status, refused.raw).toBe(403)
+        expect(refused.body?.error?.code).toBe('FORBIDDEN')
+        expect(await businessSnapshot([orgId])).toEqual(before)
+      } finally {
+        if (priorBypass === undefined) delete process.env.RBAC_BYPASS
+        else process.env.RBAC_BYPASS = priorBypass
+        if (priorTrust === undefined) delete process.env.RBAC_TOKEN_TRUST
+        else process.env.RBAC_TOKEN_TRUST = priorTrust
+      }
     })
   })
 
@@ -571,6 +759,14 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const orgOne = randomUUID()
       const orgTwo = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
+      const employeeOverrideId = randomUUID()
+      await pool.query(`INSERT INTO attendance_timezone_policies(org_id,enabled,version,updated_by)
+        VALUES($1,true,1,$2)`, [orgOne, subjectId])
+      await pool.query(`INSERT INTO attendance_employee_timezone_overrides
+        (id,org_id,user_id,timezone,effective_from,created_by,updated_by)
+        VALUES($1,$2,$3,'Asia/Singapore','2049-04-30T00:00:00.000Z',$3,$3)`,
+        [employeeOverrideId, orgOne, subjectId])
 
       const createRes = await createGeneric(token, { operationId: randomUUID(), orgId: orgOne })
       expect(createRes.status, createRes.raw).toBe(201)
@@ -584,12 +780,22 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
         [instanceId],
       )).rows[0].updated_at
 
+      await seedStrictDefaultRule(orgTwo, 'Asia/Tokyo')
       // MOVE (not add): the subject's single membership becomes O2.
       await pool.query(
         `UPDATE user_orgs SET org_id = $2 WHERE user_id = $1 AND org_id = $3`,
         [subjectId, orgTwo, orgOne],
       )
       expect(await activeMembershipCount(subjectId)).toBe(1)
+
+      const sameDay = await requestJson(`${baseUrl}/api/attendance/requests/${requestId}`, {
+        method: 'PUT', headers: authHeaders(token), body: {
+          orgId: orgTwo, workDate: '2049-05-01', requestType: 'missed_check_in',
+          requestedInAt: '2049-05-01T09:00:00.000Z', reason: 'G-L11-9 same-day pending edit',
+        },
+      })
+      expect(sameDay.status, sameDay.raw).toBe(200)
+      await assertRequestTarget(requestId, orgOne, subjectId, '2049-05-01', 'Asia/Singapore')
 
       // A SEPARATE HTTP call (separate transaction, so now() differs) — pending-edit NAMING O2,
       // a valid selector for the subject now.
@@ -615,6 +821,10 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       expect(new Date(afterRow.updated_at).getTime()).toBeGreaterThan(new Date(beforeUpdatedAt).getTime())
       // D-10-retired pin: DO UPDATE never re-derives org_id, even though EXCLUDED carried O2.
       expect(afterRow.org_id).toBe(orgOne)
+      await assertRequestTarget(requestId, orgOne, subjectId, '2049-05-02', 'Asia/Singapore')
+      expect(editRes.body?.data?.request?.metadata?.timezoneContextV1?.provenance).toMatchObject({
+        source: 'employee_override', referenceId: employeeOverrideId, mode: 'multi_timezone',
+      })
 
       // Who-can-read matrix under the pin, values-free.
       const priorPin = process.env.APPROVAL_S1_ORG_PIN_ENABLED
@@ -683,6 +893,7 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       const orgOne = randomUUID()
       const orgEvil = randomUUID()
       await grantMembership(subjectId, orgOne)
+      await seedStrictDefaultRule(orgOne)
 
       const createRes = await createGeneric(token, {})
       expect(createRes.status, createRes.raw).toBe(201)

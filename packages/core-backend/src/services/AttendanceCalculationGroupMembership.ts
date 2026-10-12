@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { query, transaction } from '../db/pg'
 import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../attendance/attendance-timezone-runtime-locks'
+import { AttendanceW4IdentityError, acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1 } from '../attendance/w4c0-identity'
 
 /**
  * g1 (W7-1b) — the canonical org key used for ADVISORY LOCK KEYS ONLY.
@@ -366,6 +367,20 @@ export async function transitionAttendanceCalculationGroupMembership(
       await acquireAttendanceTimezoneRuntimeLocksV1({ query: runQuery }, {
         orgId: input.orgId, userId: input.userId, mode: 'exclusive',
       })
+
+      // A fresh source guard may resolve the canonical segment posture. Take
+      // only its advisory prefix before the operation row; exact replay below
+      // still does not read mutable rollout/configuration facts.
+      let rolloutOrgKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+      try {
+        rolloutOrgKey = parseCanonicalAttendanceRolloutOrgKeyV1(canonicalLockOrgKeyV1(input.orgId))
+      } catch (error) {
+        if (!(error instanceof AttendanceW4IdentityError)
+          || error.code !== 'W4C0_ROLLOUT_ORG_KEY_INVALID') throw error
+      }
+      if (rolloutOrgKey !== null) {
+        await acquireAttendanceCalculationRolloutLock({ query: runQuery }, rolloutOrgKey, 'shared')
+      }
 
       // g1 (W7-1b): CANONICAL org key in the advisory-lock key. W7-1a's composite
       // helper keys off the canonical form, so a mixed-case spelling here derived

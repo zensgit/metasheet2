@@ -1614,27 +1614,26 @@ exec npx vitest run \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
+  attendanceBusinessTripRequestCard \
   attendanceCapabilityUnavailable \
+  attendanceCurrentTimeContext \
+  attendanceDayTimeContext \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
   attendanceEmployeeQuickActionIcons \
-  attendanceTimezonePolicyPanel \
-  attendanceWallTime \
-  attendanceTimezoneTarget \
-  attendanceCurrentTimeContext \
-  attendanceDayTimeContext \
-  useAttendanceRequestTimezone \
-  attendanceRequestTimezoneIntegration \
-  attendanceBusinessTripRequestCard \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
   attendanceOverviewRequestReveal \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
+  attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \
+  attendanceTimezonePolicyPanel \
+  attendanceTimezoneTarget \
   attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
+  attendanceWallTime \
   automation-action-summary \
   automation-condition-legacy-person-picker \
   automation-condition-typing-editor \
@@ -2001,6 +2000,7 @@ exec npx vitest run \
   useAttendanceAdminConfig \
   useAttendanceAdminProvisioning \
   useAttendanceAdminUsers \
+  useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
   userManagementView \

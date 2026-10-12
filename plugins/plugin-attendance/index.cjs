@@ -1,5 +1,5 @@
 const crypto = require('crypto')
-const {validateAttendanceRelatedAbsoluteInstantsV1} = require('./lib/attendance-timezone-request-instants.cjs')
+const {validateAttendanceRelatedAbsoluteInstantsV1,validateAttendanceLeaveTargetRangeV1} = require('./lib/attendance-timezone-request-instants.cjs')
 const { randomUUID } = crypto
 const fs = require('fs')
 const fsp = require('fs/promises')
@@ -15662,7 +15662,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate, strictSources
     const row = rows[0]
     const rotation = mapRotationRuleFromAssignmentRow(row)
     if (!rotation.shiftSequence.length) return null
-    const offset = diffDays(row.start_date, workDate)
+    const offset = diffDays(normalizeDateOnly(row.start_date), workDate)
     if (offset < 0) return null
     const index = offset % rotation.shiftSequence.length
     const shiftRef = rotation.shiftSequence[index]
@@ -15889,7 +15889,7 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
         const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
         if (start && start > workDate) continue
         if (end && end < workDate) continue
-        const offset = diffDays(row.start_date, workDate)
+        const offset = diffDays(start, workDate)
         if (offset < 0) continue
         const index = offset % rotation.shiftSequence.length
         const shiftRef = rotation.shiftSequence[index]
@@ -17613,10 +17613,16 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId, options = {}
   if (strict && (!orgId || !userId)) throw unavailable()
   if (!userId) return { userId: null, userName: undefined, attendanceGroups: [], roles: [], roleTags: [] }
   const targetOrg = strict ? orgId : (orgId || DEFAULT_ORG_ID)
+  let authorizedRequestSubject = false
+  if (options.authorizeRequestSubject !== undefined) {
+    if (typeof options.authorizeRequestSubject !== 'function'
+      || await options.authorizeRequestSubject({orgId:targetOrg,userId}) !== true) throw unavailable()
+    authorizedRequestSubject = true
+  }
   let userName
   const roleAccumulator = createAttendanceRoleContextAccumulator()
   try {
-    const rows = strict
+    const rows = strict && !authorizedRequestSubject
       ? await db.query(`SELECT u.name,u.role FROM users u JOIN user_orgs uo ON uo.user_id=u.id
           WHERE u.id=$1 AND uo.org_id=$2 AND u.is_active=true AND uo.is_active=true`,[userId,targetOrg])
       : await db.query('SELECT name, role FROM users WHERE id = $1', [userId])
@@ -25428,14 +25434,15 @@ module.exports = {
 	        }
 	      }
 	      const defaultRule = target?.rule ?? await loadDefaultRule(trx, args.orgId)
-	      const workContext = await resolveWorkContext({
+	      const targetFacts = target ? attendanceTimezoneRuntime.requestTargetFactsFor(trx) : null
+	      const workContext = target ? targetFacts?.window?.sourceContext ?? targetFacts?.frame?.context : await resolveWorkContext({
 	        db: trx,
 	        orgId: args.orgId,
 	        userId: args.userId,
 	        workDate: args.workDate,
 	        defaultRule,
-	        ...(target ? {timezoneContext:{timezone:target.timezone},strictSources:true} : {}),
 	      })
+	      if (!workContext) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED','ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED')
 	      const timezone =
 	        typeof workContext?.rule?.timezone === 'string' && workContext.rule.timezone
 	          ? workContext.rule.timezone
@@ -25845,8 +25852,19 @@ module.exports = {
             attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, orgId)
         : null
 
+    const authorizedRequestTimezoneSubjects = new WeakMap()
     attendanceTimezoneRuntime = createAttendanceTimezoneRuntime({
       HttpError,
+      authorizeRequestTarget: async (trx,{orgId,userId}) => {
+        const authorization = authorizedRequestTimezoneSubjects.get(trx)
+        if (!authorization || authorization.orgId !== orgId || authorization.userId !== userId) {
+          throw new HttpError(403,'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED','ATTENDANCE_TIMEZONE_MEMBER_REQUIRED')
+        }
+        return loadAttendanceScopeContextForUser(trx,orgId,userId,{
+          strictSources:true,
+          authorizeRequestSubject:subject => subject.orgId === authorization.orgId && subject.userId === authorization.userId,
+        })
+      },
       loadPublishedCandidates: loadPublishedCandidatesForWorkDateResolver,
       resolveLocalWallTime: (...args) => {
         if (typeof attendanceW4SegmentCalculationPort?.resolveLocalWallTime !== 'function') {
@@ -25855,7 +25873,30 @@ module.exports = {
         return attendanceW4SegmentCalculationPort.resolveLocalWallTime(...args)
       },
       validateIanaTimezone: zone => attendanceW4SegmentCalculationPort.validateIanaTimezone(zone),
-      addDaysToDateKey, normalizeTimeString, mapRuleRow, mapHolidayRow, resolveRuleContext: resolveWorkContext,
+      addDaysToDateKey, normalizeTimeString, mapRuleRow, mapHolidayRow,
+      resolveRuleContext: async input => {
+        const resolvePosture = attendanceW4SegmentCalculationPort?.resolveTimezoneSegmentReferencePosture
+        if (typeof resolvePosture !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        const posture = await resolvePosture(input.db,input.orgId)
+        return resolveWorkContext({...input,referenceSegments:posture.referenceSegments === true})
+      },
+      prepareRuleContextBatch: async (trx,orgId) => {
+        const resolvePosture = attendanceW4SegmentCalculationPort?.resolveTimezoneSegmentReferencePosture
+        if (typeof resolvePosture !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        // This closure belongs to one read-only batch, never to a transaction
+        // that may subsequently mutate posture or source facts.
+        const posture = await resolvePosture(trx,orgId)
+        return input => {
+          if (input.db !== trx || input.orgId !== orgId) {
+            throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+          }
+          return resolveWorkContext({...input,referenceSegments:posture.referenceSegments === true})
+        }
+      },
       loadShiftById:(trx,orgId,shiftId) => loadShiftById(trx,orgId,shiftId,true),
       toWorkDate, resolveOvernightFlag,
       loadAttributionTail: loadWorkDateAttributionTailMinutes,
@@ -34045,6 +34086,20 @@ module.exports = {
       return requestCreateIdentityFromRoute('shift_swap', route, { subjectUserId, actorPosture })
     }
 
+    const authoritativeGenericRequestRoutes = new WeakMap()
+    function genericRequestRoute(trx,rawInput) {
+      const stored = authoritativeGenericRequestRoutes.get(trx)
+      return stored?.rawInput === rawInput ? stored.route : requestBoundaryRouteInputSchema.parse(rawInput)
+    }
+    async function deriveGenericRequestRoute(trx,rawInput) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      const orgId = await deriveAttendanceApprovalOrgStampV1(trx,{
+        subjectUserId:route.actorId,requestNamedOrgId:route.requestNamedOrgId,
+      })
+      const authoritativeRoute = {...route,orgId}
+      authoritativeGenericRequestRoutes.set(trx,{rawInput,route:authoritativeRoute})
+      return authoritativeRoute
+    }
     async function prepareRequestCreateIdentity(trx, rawInput, operation) {
       const variant = operation?.routeVariant
       if (variant === 'generic') {
@@ -34052,7 +34107,11 @@ module.exports = {
         if (!route.orgId || route.requestId !== null) {
           throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
         }
-        return requestCreateIdentityFromRoute(variant, route)
+        // Null-ID has no stored registry scope; derive before posture/locks.
+        // Stable-ID replay must retain its original identity and scope.
+        const authoritativeRoute = operation.operationId === null
+          ? await deriveGenericRequestRoute(trx,rawInput) : route
+        return requestCreateIdentityFromRoute(variant, authoritativeRoute)
       }
       if (variant === 'outdoor') {
         return requestCreateIdentityFromRoute(variant, outdoorCreateRouteInputSchema.parse(rawInput))
@@ -34077,34 +34136,55 @@ module.exports = {
       const body = route.requestBody
       let date = firstDefinedValue(body.workDate,body.work_date,body.date)
       let requestType = firstDefinedValue(body.requestType,body.request_type,body.type)
+      let orgId, userId
       if (route.requestId) {
-        const rows = await trx.query('SELECT work_date::text,request_type FROM attendance_requests WHERE id=$1 AND org_id=$2',
+        const rows = await trx.query('SELECT * FROM attendance_requests WHERE id=$1 AND org_id=$2',
           [route.requestId,identity.orgId])
         if (rows.length !== 1) throw new HttpError(404,'NOT_FOUND','NOT_FOUND')
-        date = date ?? rows[0].work_date
-        requestType = requestType ?? rows[0].request_type
+        const existingRequest = rows[0]
+        await ensureAttendanceRequestAccess(existingRequest,route.actorId,'edit request')
+        if (existingRequest.status !== 'pending') throw new HttpError(400,'INVALID_STATUS','Only pending requests can be edited')
+        // D9/D10: validate today's writer selector without moving the old target.
+        await deriveAttendanceApprovalOrgStampV1(trx,{
+          subjectUserId:existingRequest.user_id,requestNamedOrgId:route.requestNamedOrgId,
+        })
+        orgId = existingRequest.org_id
+        userId = existingRequest.user_id
+        date = date ?? existingRequest.work_date
+        requestType = requestType ?? existingRequest.request_type
+      } else {
+        const authoritativeRoute = await deriveGenericRequestRoute(trx,rawInput)
+        orgId = authoritativeRoute.orgId
+        userId = authoritativeRoute.actorId
+      }
+      if (orgId !== identity.orgId || userId !== identity.subjectUserId) {
+        throw new HttpError(409,'W4C3B_REQUEST_IDENTITY_CHANGED','W4C3B_REQUEST_IDENTITY_CHANGED')
       }
       if (!['leave','overtime','missed_check_in','missed_check_out','time_correction'].includes(requestType)) return
       validateAttendanceRelatedAbsoluteInstantsV1(body,HttpError)
       const workDate = normalizeDateOnlyValue(date)
       if (!workDate) throw new HttpError(400,'ATTENDANCE_TIMEZONE_TARGET_INVALID','ATTENDANCE_TIMEZONE_TARGET_INVALID')
-      const target = await attendanceTimezoneRuntime.readTargetTimezoneContext(trx,{
-        orgId:identity.orgId,userId:identity.subjectUserId,workDate,
-      })
+      authorizedRequestTimezoneSubjects.set(trx,{orgId,userId})
+      let target
+      try {
+        target = await attendanceTimezoneRuntime.readRequestTimezoneContext(trx,{orgId,userId,workDate})
+      } finally {
+        authorizedRequestTimezoneSubjects.delete(trx)
+      }
       if (body.expectedTimezoneContextFingerprint !== undefined
         && body.expectedTimezoneContextFingerprint !== target.contextFingerprint) {
         throw new HttpError(409,'ATTENDANCE_TIMEZONE_CONTEXT_CHANGED','ATTENDANCE_TIMEZONE_CONTEXT_CHANGED')
       }
       freshRequestTimezoneTargets.set(trx,target)
       freshRequestTimezoneSnapshotMaterials.set(trx,await resolveRequestCreationSnapshotMaterial(trx,{
-        orgId:identity.orgId,userId:identity.subjectUserId,workDate,timezoneTarget:target,
+        orgId,userId,workDate,timezoneTarget:target,
       }))
     }
 
     async function prepareFrozenRequestTimezoneTarget(trx,identity,rawInput) {
       const requestId = rawInput?.requestId
       if (!requestId) return
-      const rows = await trx.query('SELECT user_id,work_date::text,request_type,metadata FROM attendance_requests WHERE id=$1 AND org_id=$2',
+      const rows = await trx.query('SELECT user_id,work_date::text,request_type,metadata,requested_in_at,requested_out_at FROM attendance_requests WHERE id=$1 AND org_id=$2',
         [requestId,identity.orgId])
       if (rows.length !== 1) throw new HttpError(404,'NOT_FOUND','NOT_FOUND')
       const row = rows[0]
@@ -34128,6 +34208,9 @@ module.exports = {
         throw new HttpError(409,'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID','ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID')
       }
       if (rawInput.action === 'approve') {
+        validateAttendanceLeaveTargetRangeV1({
+          requestType:row.request_type,requestedInAt:row.requested_in_at,requestedOutAt:row.requested_out_at,
+        },target,HttpError,toWorkDate)
         const current = await attendanceTimezoneRuntime.prepareRelatedRecordContext(trx,{
           orgId:identity.orgId,userId:String(row.user_id),workDate:row.work_date,
           expectedContextFingerprint:target.contextFingerprint,
@@ -34139,7 +34222,7 @@ module.exports = {
     }
 
     async function prepareGenericRequestCreate(trx, rawInput) {
-      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      const route = genericRequestRoute(trx,rawInput)
       if (!route.orgId || route.requestId !== null) {
         throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
       }
@@ -34149,6 +34232,7 @@ module.exports = {
         { org_id: route.orgId, user_id: route.actorId },
       )
       const timezoneTarget = freshRequestTimezoneTargets.get(trx)
+      validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
       if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
       let makeupPunchPolicy = null
       if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
@@ -34221,11 +34305,9 @@ module.exports = {
         })
         draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
       }
-      // G-L11-8 (D-11(ii)): the twin attendance_requests.org_id row carries the SAME stamped
-      // org the writer just derived — never route.orgId directly — so the same-transaction
-      // equality gate holds by construction. Every OTHER route.orgId use in this function
-      // (the lock above, findDuplicateAttendanceRequest, lifecycle events below) is
-      // deliberately left unrewritten (spec §3 disclosure (a)) — prod-inert under u1a=1.
+      // G-L11-8 (D-11(ii)): keep both rows bound to the same writer-derived org.
+      // The route was derived before boundary posture/locks and target preparation;
+      // the writer rechecks that authority in this transaction before stamping.
       const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
@@ -35333,6 +35415,7 @@ module.exports = {
         }
         const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
         const timezoneTarget = freshRequestTimezoneTargets.get(trx)
+        validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
         if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
 
         const makeupTypeInvolved =
@@ -37363,7 +37446,7 @@ module.exports = {
           if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
             const request = outcome.response?.data?.request
             emitEvent('attendance.requested', {
-              orgId,
+              orgId: request.org_id,
               userId,
               workDate: request?.workDate,
               requestType: request?.requestType,

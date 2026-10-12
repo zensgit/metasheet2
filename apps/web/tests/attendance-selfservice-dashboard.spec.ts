@@ -1266,6 +1266,57 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-overtime-request-card]')).toBeNull()
   })
 
+
+  it.each([
+    { locale: 'en', code: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT', message: 'This leave spans multiple attendance dates or shifts. Please split it into separate requests.', rangeConflict: true },
+    { locale: 'zh-CN', code: 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT', message: '该请假跨越多个考勤日期或班次，请拆分申请', rangeConflict: true },
+    { locale: 'en', code: 'DUPLICATE_REQUEST', message: 'A request for the same date and type already exists.', rangeConflict: false },
+    { locale: 'zh-CN', code: 'DUPLICATE_REQUEST', message: '同一天同类型的申请已存在。', rangeConflict: false },
+  ])('renders $locale leave-card $code copy without mixing range and duplicate conflicts', async ({ locale, code, message, rangeConflict }) => {
+    useLocale().setLocale(locale)
+    const baseMock = vi.mocked(apiFetch).getMockImplementation()!
+    const bodies: Array<Record<string, unknown>> = []
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      if (String(input) === '/api/attendance/requests' && init?.method === 'POST') {
+        bodies.push(JSON.parse(String(init.body)))
+        return jsonResponse(409, { ok: false, error: { code, message: code } })
+      }
+      return baseMock(input, init)
+    })
+    app = createApp(AttendanceView, { mode: 'overview' })
+    app.mount(container!)
+    await flushUi()
+    container!.querySelector<HTMLButtonElement>('[data-selfservice-action="leave"]')!.click()
+    await flushUi()
+    const card = container!.querySelector<HTMLElement>('[data-attendance-leave-request-card]')!
+    setFormValue(card, '[data-leave-card-type]', 'leave-annual')
+    setFormValue(card, '[data-leave-card-start]', '2026-04-15T09:00')
+    setFormValue(card, '[data-leave-card-end]', rangeConflict ? '2026-04-16T18:00' : '2026-04-15T11:00')
+    await flushUi()
+    const submit = card.querySelector<HTMLButtonElement>('[data-leave-card-submit]')!
+    expect(submit.disabled).toBe(false)
+    submit.click()
+    await flushUi()
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toEqual({
+      workDate: '2026-04-15', requestType: 'leave', requestedInAt: '2026-04-15T01:00:00.000Z',
+      requestedOutAt: rangeConflict ? '2026-04-16T10:00:00.000Z' : '2026-04-15T03:00:00.000Z',
+      expectedTimezoneContextFingerprint: 'c'.repeat(64), leaveTypeId: 'leave-annual',
+      minutes: rangeConflict ? 1980 : 120, orgId: 'default',
+    })
+    const banner = container!.querySelector<HTMLElement>('.attendance__status-block')!
+    expect(banner.querySelector('.attendance__status--error')?.textContent?.trim()).toBe(message)
+    expect(banner.textContent).toContain(code)
+    expect(container!.querySelector('[data-attendance-leave-request-card]')).toBe(card)
+    expect(submit.disabled).toBe(false)
+    if (rangeConflict) {
+      expect(banner.querySelector('button')).toBeNull()
+      expect(banner.textContent).not.toContain(locale === 'en' ? 'already exists' : '申请已存在')
+    }
+    await flushUi()
+    expect(bodies).toHaveLength(1)
+  })
+
   it('leave tile opens the dedicated leave card below 常用 and leaves the shared disclosure closed', async () => {
     app = createApp(AttendanceView, { mode: 'overview' })
     app.mount(container!)

@@ -214,3 +214,88 @@ describe('D2 authoritative timezone context loader', () => {
       .rejects.toMatchObject(error('SOURCE_UNAVAILABLE', 503))
   })
 })
+
+
+describe('request-only timezone target capability', () => {
+  const {createAttendanceTimezoneRuntime:createRuntime} = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+  class RequestScopeError extends Error {
+    constructor(public status:number,public code:string,message:string) { super(message) }
+  }
+  function requestScopeHarness() {
+    const input = {orgId:'org-a',userId:'user-a',workDate:'2026-10-12'}
+    const scopeContext = {userId:input.userId,attendanceGroups:[],roles:[],roleTags:[]}
+    const authorized = new WeakMap<object,{orgId:string,userId:string}>()
+    const prefixEvents:string[] = []
+    const rule = {id:'rule-a',timezone:'UTC',workStartTime:'09:00',workEndTime:'18:00',workingDays:[1,2,3,4,5],isOvernight:false}
+    const query = vi.fn(async (sql:string) => {
+      if (sql.includes('FROM users u JOIN user_orgs')) return [] // inactive or moved legacy applicant
+      if (sql.includes('FROM attendance_timezone_policies')) return [{enabled:true,version:1}]
+      if (sql.includes('FROM attendance_rules')) return [{id:'rule-a',timezone:'UTC',timezone_version:1}]
+      if (sql.includes('attendance_timezone_context_companions') || sql.includes('FROM attendance_records')
+        || sql.includes('attendance_employee_timezone_overrides') || sql.includes('attendance_calculation_group_memberships')) return []
+      throw new Error('UNEXPECTED_REQUEST_SCOPE_SQL')
+    })
+    const trx = {query}
+    const resolveRuleContext = vi.fn(async (value:Row) => {
+      expect(value.scopeContext).toBe(scopeContext)
+      return {rule,source:'rule',isWorkingDay:true,holiday:null}
+    })
+    const runtime = createRuntime({
+      HttpError:RequestScopeError,
+      acquireRuntimeLocks:vi.fn(async () => { prefixEvents.push('prefix') }),
+      authorizeRequestTarget:async (readTrx:object,subject:{orgId:string,userId:string}) => {
+        expect(prefixEvents[0]).toBe('prefix')
+        prefixEvents.push('scope')
+        const proof = authorized.get(readTrx)
+        if (!proof || proof.orgId !== subject.orgId || proof.userId !== subject.userId) {
+          throw new RequestScopeError(403,'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED','ATTENDANCE_TIMEZONE_MEMBER_REQUIRED')
+        }
+        return scopeContext
+      },
+      loadPublishedCandidates:async () => [],readApprovedTrips:async () => [],
+      loadCalendarOverrides:async () => [],mapRuleRow:() => rule,
+      resolveRuleContext,normalizeTimeString:(time:string) => time,
+      validateIanaTimezone:(zone:string) => zone,
+      addDaysToDateKey:(date:string,days:number) => new Date(Date.parse(date+'T00:00:00Z')+days*86400000).toISOString().slice(0,10),
+      toWorkDate:(date:Date) => date.toISOString().slice(0,10),
+      resolveLocalWallTime:(date:string,time:string) => ({posture:'unique',epochMs:Date.parse(date+'T'+time+':00Z')}),
+    })
+    return {input,scopeContext,authorized,trx,query,resolveRuleContext,runtime}
+  }
+  it('public target refuses inactive subjects even with request-shaped proof fields',async () => {
+    const h = requestScopeHarness()
+    h.authorized.set(h.trx,h.input)
+    await expect(h.runtime.readTargetTimezoneContext(h.trx,{
+      ...h.input,authorizedRequestSubject:true,authorizeReadSubject:() => true,
+    })).rejects.toMatchObject({status:403,code:'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'})
+    expect(h.query).toHaveBeenCalledTimes(1)
+    expect(h.query.mock.calls[0][0]).toContain('u.is_active=true AND uo.is_active=true')
+    expect(h.resolveRuleContext).not.toHaveBeenCalled()
+  })
+  it('internal target without server proof refuses before reading facts',async () => {
+    const h = requestScopeHarness()
+    await expect(h.runtime.readRequestTimezoneContext(h.trx,h.input))
+      .rejects.toMatchObject({status:403,code:'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'})
+    expect(h.query).not.toHaveBeenCalled()
+  })
+  it.each([{orgId:'org-b'},{userId:'user-b'}])('foreign internal scope %j refuses before reading facts',async change => {
+    const h = requestScopeHarness()
+    h.authorized.set(h.trx,h.input)
+    await expect(h.runtime.readRequestTimezoneContext(h.trx,{...h.input,...change}))
+      .rejects.toMatchObject({status:403,code:'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'})
+    expect(h.query).not.toHaveBeenCalled()
+  })
+  it('ON authorized target uses shared facts and returns its exact proof to the original transaction without public bypass',async () => {
+    const h = requestScopeHarness()
+    h.authorized.set(h.trx,h.input)
+    const target = await h.runtime.readRequestTimezoneContext(h.trx,h.input)
+    expect(target).toMatchObject({...h.input,timezone:'UTC',frozen:false,provenance:{source:'system_default',mode:'multi_timezone'}})
+    expect(h.runtime.requestTargetFactsFor(h.trx).window.contextFingerprint).toBe(target.contextFingerprint)
+    expect(h.resolveRuleContext).toHaveBeenCalled()
+    expect(h.query.mock.calls.some(([sql]) => sql.includes('FROM users u JOIN user_orgs'))).toBe(false)
+    expect(h.query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true)
+    h.authorized.delete(h.trx)
+    await expect(h.runtime.readTargetTimezoneContext(h.trx,h.input))
+      .rejects.toMatchObject({status:403,code:'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'})
+  })
+})
