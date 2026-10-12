@@ -10,6 +10,7 @@ import {
   withDataSourceReadExecution,
 } from '../../../src/data-adapters/data-source-read-execution'
 import type { DataSourceReadIOKind } from '../../../src/data-adapters/data-source-read-execution'
+import { createAutomationReadSourceExecution } from '../../../src/integration/automation-read-source-execution'
 
 vi.mock('../../../src/audit/audit', () => ({ auditLog: vi.fn(async () => {}) }))
 
@@ -397,6 +398,80 @@ describe.each(['sqlserver', 'postgres'] as const)('%s native adapter read guards
     expect(transaction.query).not.toHaveBeenCalled()
     expect(transaction.release).not.toHaveBeenCalled()
     expect(callback).not.toHaveBeenCalled()
+  })
+})
+
+describe.each(['sqlserver', 'postgres'] as const)('%s Automation native checkpoint wiring', type => {
+  // This is a boundary unit test, not another grant/revocation DB proof. Keep the
+  // production source-execution factory, AsyncLocalStorage and adapter methods;
+  // fake only the manager's stable registration and native driver. In particular,
+  // no plugin preview gate can mask a missing native checkpoint in this test.
+  function automationFixture() {
+    const f = fixture(type)
+    const manager = {
+      assertAccess: vi.fn((id: string, principal: string) => {
+        expect(id).toBe('synthetic-read-source')
+        expect(principal).toBe('synthetic-owner')
+      }),
+      getScope: vi.fn(() => ({ tenantId: 'synthetic-tenant', workspaceId: null, scopeKind: 'private' })),
+      getDataSource: vi.fn(() => f.adapter),
+      getLoadedValidationRevision: vi.fn(() => 'synthetic-revision'),
+    }
+    const run = createAutomationReadSourceExecution(() => manager as unknown as DataSourceManager)
+    const input: Parameters<typeof run>[0] = {
+      actor: { actorId: 'synthetic-owner', tenantId: 'synthetic-tenant', workspaceId: null },
+      sourceValidation: { connectionId: 'synthetic-read-source', connectionRevision: 'synthetic-revision', bindingRevision: 'synthetic-binding' },
+      budget: { maxRows: 10, maxPages: 2, maxReadCount: 4, timeoutMs: 10000 },
+      signal: new AbortController().signal,
+      checkpoint: vi.fn(async () => {}),
+    }
+    return { ...f, manager, input, run }
+  }
+
+  it('runs the real source factory checkpoint before and after every native schema query', async () => {
+    const { adapter, nativeQuery, run, input } = automationFixture()
+    const order: string[] = []
+    input.checkpoint = vi.fn(async () => { order.push('checkpoint') })
+    nativeQuery.mockImplementation(async () => {
+      order.push('native')
+      return { rows: [], recordset: [], rowCount: 0, rowsAffected: [0], fields: [] }
+    })
+    await run(input, () => adapter.getTableInfo('synthetic_table'))
+    expect(nativeQuery).toHaveBeenCalledTimes(4)
+    expect(input.checkpoint).toHaveBeenCalledTimes(8)
+    expect(order).toEqual(Array.from({ length: 4 }, () => ['checkpoint', 'native', 'checkpoint']).flat())
+  })
+
+  it.each([
+    ['before-first', 1, 0],
+    ['after-first', 2, 1],
+    ['before-second', 3, 1],
+  ] as const)('rejects at %s without outer preview guards or scope changes', async (phase, denyAt, expectedNative) => {
+    const { adapter, nativeQuery, run, input } = automationFixture()
+    const denied = new Error('SYNTHETIC_CHECKPOINT_DENIED')
+    const caught: unknown[] = []
+    const exposed: unknown[] = []
+    let checkpoints = 0
+    input.checkpoint = vi.fn(async () => {
+      if (++checkpoints === denyAt) throw denied
+    })
+    // A single-query operation is essential for the post-IO negative: a later
+    // query's beforeIO must not conceal a missing afterIO checkpoint.
+    const read = () => phase === 'after-first'
+      ? adapter.getColumns('synthetic_table') : adapter.getTableInfo('synthetic_table')
+    await expect(run(input, async () => {
+      // Deliberately catch and retry: neither a native result nor a successful
+      // scope return is allowed after the first checkpoint rejection.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { exposed.push(await read()) }
+        catch (error) { caught.push(error) }
+      }
+      return 'attempted-success'
+    })).rejects.toBe(denied)
+    expect(caught).toEqual([denied, denied])
+    expect(exposed).toEqual([])
+    expect(nativeQuery).toHaveBeenCalledTimes(expectedNative)
+    expect(input.checkpoint).toHaveBeenCalledTimes(denyAt)
   })
 })
 
