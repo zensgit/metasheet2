@@ -22,6 +22,17 @@
  *                                   out `spreadsheet:write` (fix round 1, S2); same fresh access
  *                                   snapshot (S3)
  *   auditLog                      → audit/audit.ts auditLog (the admin-users.ts writer)
+ *   boundGrantLockWaits           → services/stock-preparation-project-sheet-grants.ts
+ *                                   runWithStockPreparationProjectSheetGrantLockTimeout: the G1 call
+ *                                   sets a transaction-local lock_timeout as its first statement
+ *
+ * THE TRANSACTION'S OWN CONNECTION. Inside a write's transaction the port passes its transaction
+ * query to isPlatformAdmin / listEffectivePermissions / hasEffectiveNamespaceAdmission /
+ * resolveWritableSheetIds; each then runs EVERY statement on that connection (rbac/service.ts
+ * `isAdmin` and `listUserPermissions`, namespace-admission.ts `userHasEffectiveNamespaceAccess`, the
+ * grid's capability resolver), so the in-lock decision reads what the locks protect and the write
+ * never holds one pool connection while asking for another. `listUserPermissions` on a transaction
+ * query bypasses the permission memo both ways (nothing cached is used; nothing it reads is cached).
  */
 
 import { auditLog } from '../audit/audit'
@@ -34,6 +45,7 @@ import {
 } from '../multitable/permission-service'
 import { userHasEffectiveNamespaceAccess } from '../rbac/namespace-admission'
 import { invalidateUserPerms, isAdmin, listUserPermissions } from '../rbac/service'
+import { runWithStockPreparationProjectSheetGrantLockTimeout } from './stock-preparation-project-sheet-grants'
 import {
   createStockPrepMembersPort,
   type StockPrepMembersDeps,
@@ -47,11 +59,22 @@ function shapeResult(result: unknown): { rows: unknown[]; rowCount: number | nul
   return { rows, rowCount }
 }
 
+/** `isAdmin`'s executor shape, over the port's transaction query (one connection, the same statement). */
+function adminExecutorOn(txQuery: StockPrepMembersQueryFn): typeof poolQuery {
+  return (async (sql: string, params?: unknown[]) => txQuery(sql, params)) as unknown as typeof poolQuery
+}
+
 /**
  * The actor's access snapshot for a sheet decision, read FRESH: the permission memo is dropped first,
- * so a code revoked a moment ago is not still honoured from the 60 s cache.
+ * so a code revoked a moment ago is not still honoured from the 60 s cache. On a transaction query
+ * both reads run, one after the other, on that connection (and the memo is not consulted at all).
  */
-async function freshSheetAccess(userId: string): Promise<ResolvedRequestAccess> {
+async function freshSheetAccess(userId: string, txQuery?: StockPrepMembersQueryFn): Promise<ResolvedRequestAccess> {
+  if (txQuery) {
+    const permissions = await listUserPermissions(userId, txQuery)
+    const isAdminRole = await isAdmin(userId, adminExecutorOn(txQuery))
+    return { userId, permissions, isAdminRole }
+  }
   invalidateUserPerms(userId)
   const [permissions, isAdminRole] = await Promise.all([listUserPermissions(userId), isAdmin(userId)])
   return { userId, permissions, isAdminRole }
@@ -62,21 +85,25 @@ export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
   return {
     query,
     transaction: (fn) => poolTransaction(async (client) => fn(async (sql, params) => shapeResult(await client.query(sql, params)))),
-    isPlatformAdmin: (userId) => isAdmin(userId),
-    listEffectivePermissions: async (userId) => {
+    isPlatformAdmin: (userId, txQuery) => (txQuery ? isAdmin(userId, adminExecutorOn(txQuery)) : isAdmin(userId)),
+    listEffectivePermissions: async (userId, txQuery) => {
+      if (txQuery) return listUserPermissions(userId, txQuery)
       invalidateUserPerms(userId)
       return listUserPermissions(userId)
     },
-    hasEffectiveNamespaceAdmission: (userId, namespace) => userHasEffectiveNamespaceAccess(userId, namespace),
+    hasEffectiveNamespaceAdmission: (userId, namespace, txQuery) => (txQuery
+      ? userHasEffectiveNamespaceAccess(userId, namespace, txQuery)
+      : userHasEffectiveNamespaceAccess(userId, namespace)),
     resolveReadableSheetIds: async (userId, sheetIds) => {
       const access = await freshSheetAccess(userId)
       return resolveReadableSheetIds(undefined, query, sheetIds, access)
     },
-    resolveWritableSheetIds: async (userId, sheetIds) => {
-      const access = await freshSheetAccess(userId)
+    resolveWritableSheetIds: async (userId, sheetIds, txQuery) => {
+      const access = await freshSheetAccess(userId, txQuery)
+      const run = txQuery ?? query
       const writable = new Set<string>()
       for (const sheetId of Array.from(new Set(sheetIds))) {
-        const resolved = await resolveSheetCapabilitiesForAccess(query, sheetId, access)
+        const resolved = await resolveSheetCapabilitiesForAccess(run, sheetId, access)
         const { capabilities } = resolved
         // Everything a `spreadsheet:write` sheet grant confers (permission-service.ts
         // applyContextSheetSchemaWriteGrant): read, create / edit / delete ANY record (not write-own
@@ -99,6 +126,7 @@ export function createStockPrepMembersHostDeps(): StockPrepMembersDeps {
       }
       return writable
     },
+    boundGrantLockWaits: (lockTimeoutMs, fn) => runWithStockPreparationProjectSheetGrantLockTimeout(lockTimeoutMs, fn),
     auditLog,
     invalidateUserPerms,
   }

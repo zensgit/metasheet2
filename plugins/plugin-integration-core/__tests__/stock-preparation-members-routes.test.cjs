@@ -32,6 +32,10 @@
 //   MR-10 (S9) values-free failures: an untyped error (or any 5xx) from the port or from inside the
 //         target resolution answers a fixed message — untyped ones the fixed code
 //         STOCK_PREP_MEMBERS_INTERNAL — on all four routes; typed 4xx refusals pass unchanged.
+//   MR-11 (N5) THE CODE-SHAPE RULE that makes a 4xx "typed" (membersRouteFailure,
+//         /^[A-Z][A-Z0-9_]{2,80}$/): only an UPPER_SNAKE code of 3–81 characters passes; lower case, a
+//         digit / underscore / space / hyphen, too short, too long, a trailing newline or a
+//         value-bearing string answers the fixed 500 STOCK_PREP_MEMBERS_INTERNAL with no details.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -525,6 +529,43 @@ async function main() {
     assert.equal(errorCode(res), 'STOCK_PREP_MEMBERS_INTERNAL')
     assert.ok(!JSON.stringify(res.body).includes(SECRET), 'MR-10: a registry failure is values-free too')
     assert.deepEqual(h.provisioning.calls, [])
+  })
+
+  // MR-11 (N5) the code-shape rule of a typed refusal ─────────────────────────────────────────────
+  await withEnv(ON, async () => {
+    const SECRET = 's5bl-secret-value'
+    const LONGEST = `A${'B'.repeat(80)}`
+    const passes = ['ABC', 'A1_', 'STOCK_PREP_CUSTOM_ROLE_EXCEEDS_GRANTOR', LONGEST]
+    const wrapped = [
+      'AB', // too short
+      `${LONGEST}C`, // 82 characters
+      'stock_prep_refused', // lower case
+      'Stock_Prep', // mixed case
+      '1ABC', // a digit first
+      '_ABC', // an underscore first
+      'ABC DEF', // a space
+      'ABC-DEF', // a hyphen
+      'ABC\n', // a trailing newline (`$` is the end of the string, not of a line)
+      `\nABC`,
+      `ERR_${SECRET}`, // value-bearing
+      '',
+    ]
+    for (const [code, expectPass] of [...passes.map((code) => [code, true]), ...wrapped.map((code) => [code, false])]) {
+      const thrown = Object.assign(new Error('a typed refusal'), { status: 403, code, details: expectPass ? { field: 'x' } : { hint: SECRET } })
+      const h = mount({ port: makeMembersPort({ throwError: thrown }) })
+      const res = await call(h.routes, 'GET', READ_PATH, { query: {}, user: WORKBENCH_ADMIN })
+      if (expectPass) {
+        assert.equal(res.statusCode, 403, `MR-11: ${JSON.stringify(code)} is a typed refusal`)
+        assert.equal(errorCode(res), code, `MR-11: ${JSON.stringify(code)} passes unchanged`)
+        assert.equal(res.body.error.message, 'a typed refusal')
+      } else {
+        assert.equal(res.statusCode, 500, `MR-11: ${JSON.stringify(code)} is not code-shaped → 500`)
+        assert.equal(errorCode(res), 'STOCK_PREP_MEMBERS_INTERNAL', `MR-11: ${JSON.stringify(code)} → the fixed code`)
+        assert.equal(res.body.error.message, 'the stock-prep members request could not be completed')
+        assert.equal(res.body.error.details, undefined, `MR-11: ${JSON.stringify(code)} → no details`)
+        assert.ok(!JSON.stringify(res.body).includes(SECRET), `MR-11: ${JSON.stringify(code)} → values-free`)
+      }
+    }
   })
 
   // MR-08 SOURCE ORDER ─────────────────────────────────────────────────────────────────────────────

@@ -1158,7 +1158,6 @@ async function main() {
 // A second tenant-bound platform admin, used to prove the audit records WHO rebound.
 const WRITER_ADMIN = Object.freeze({ id: 'u_admin2', roles: ['admin'], tenantId: TENANT })
 
-main().catch((error) => {
-  console.error(error && error.stack ? error.stack : error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-source-binding-routes.test.cjs', main)
