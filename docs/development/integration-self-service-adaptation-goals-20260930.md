@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§207）**：#6337 已推送仅补原生检查点接线测试的 `5a439eff0`，本地整文件 61/61、两种单点变异和限定独立反驳完成；新 head CI 尚在运行，draft 保留。独立审查未发现限定范围内的新生产阻断，但不构成整 PR 或发布批准。§206 的 main `8bfeb5c91` 合流树证据保留；当前 main 已到 `c73d5aee6`，新候选只完成对象层合流预检，不能套用旧整链通过。固定 Chromium 的 run `38175124419` 失败继续阻断，Firefox/Canary 仅为交叉验证/诊断。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§207）**：#6337 已推送仅补原生检查点接线测试的 `5a439eff0`，本地整文件 61/61、两种单点变异和限定独立反驳完成；精确新 head 普通 PR 检查 47/47 success，draft 保留。独立审查未发现限定范围内的新生产阻断，但不构成整 PR 或发布批准。§206 的 main `8bfeb5c91` 合流树证据保留；当前 main 已到 `c73d5aee6`，新候选已冻结、待回归，不能套用旧整链通过。固定 Chromium 的 run `38175124419` 失败继续阻断，Firefox/Canary 仅为交叉验证/诊断。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2346,4 +2346,4 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 上述真实 DB 负例的双检查点删除变异**存活**：5 项仍绿，oracle 因此拒绝，receipt SHA `165b395626d7cdcfa14cbb7cbb6ca9191e384d384fd60c1dc8f138d0ad90bead`。独立读码确认 columns 投影只执行一次 SQL，随后 plugin preview 的外围 `guarded → gate → checkpoint` 仍会拒绝，故两负例不能独立证明 native beforeIO/afterIO；transform 命中也不独自证明变异函数被调用。这不是新增生产撤权漏洞，亦不删除外围守卫强求变异致红。
 - 针对归因缺口，提交 `5a439eff0cd120e84c03f1a8a604d6526c7a2ee9` 只修改既有 `data-source-read-execution.test.ts`，新增 PostgreSQL/SQL Server 各 4 案：调用真实 source-execution factory、ALS 与 adapter，精确检查每次原生查询前后顺序，并拒绝检查点失败后的结果泄露与捕获重试。after-first 使用单查询，避免后续 beforeIO 掩盖 afterIO 遗漏。管理器登记、checkpoint 和底层驱动为显式替身；这是边界接线单测，不宣称真实 ledger、客户 SQL Server 或租户授权证明。
 - 隔离副本按原 config 运行整文件，无按名过滤/重试：原实现 61/61；仅移除 before checkpoint 为 53 通过/8 失败，仅移除 after 为 55 通过/6 失败，原有 53 项三轮全通过。变异 oracle 要求 suite/hook/unhandled 为零、失败为新增用例中的断言，并覆盖两类 adapter 的对应拒绝点。receipt SHA `ee433a682048fe08e3903f0d655471055e742ae87d999f56b444134b415e70de`，新文件/提交 blob SHA `83dec86c35863dce9aff10c185251e84cdadb60440947f0c762194e11ce52267`；13,756 个基础源条目未改，仅内存测试 overlay/变异。独立复核源码与脱敏回执无 blocker。原存活变异不改判；既有 CI 已登记该整文件，无新增 workflow。
-- 新 head 已正常推到草稿 #6337，CI 待终态。当前 main `c73d5aee6aa19419081c0dd4c1486ab5a71996ff` 比 §206 多两提交，涉及角色权限收紧与共享入口；对象层合流树 `dff26a63d6879e8458690fd33956ff20449db72b` 无冲突，尚不是分支提交或已通过验收。客户交付记录正文继续排除，main 对齐、固定浏览器门和各批剩余退出条件仍待闭合。
+- 新 head 已正常推到草稿 #6337，精确 head 普通 PR 检查 47/47 success；不是完整 Chromium 验收通过。当前 main `c73d5aee6aa19419081c0dd4c1486ab5a71996ff` 比 §206 多两提交，涉及角色权限收紧与共享入口；对象层合流树 `dff26a63d6879e8458690fd33956ff20449db72b` 无冲突，尚不是分支提交或已通过验收。新树冻结 13,756 条目/207,371,232 字节、97 排除项，manifest SHA `5130b1e04ed6fc81ff8298a38e81ceeedfada53c2d4b24cf5e04ee6358bbd2d8`，原索引未变。客户交付记录正文继续排除，main 对齐、固定浏览器门和各批剩余退出条件仍待闭合。
