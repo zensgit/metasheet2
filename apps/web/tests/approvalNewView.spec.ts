@@ -289,7 +289,11 @@ const ElInput = defineComponent({
     return h('input', {
       'data-el-input': 'true',
       value: this.modelValue ?? '',
-      onInput: (e: Event) => this.$emit('update:modelValue', (e.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): no update when the typed text is unchanged.
+      onInput: (e: Event) => {
+        const text = (e.target as HTMLInputElement).value
+        if (text !== String(this.modelValue ?? '')) this.$emit('update:modelValue', text)
+      },
     })
   },
 })
