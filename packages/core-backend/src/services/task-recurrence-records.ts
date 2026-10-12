@@ -5,7 +5,7 @@
  * §3.8, §4.1, §4.7.
  *
  * This module writes no input of the pending predicate (no `tasks` insert or soft delete, no
- * `task_assignees` row): its one task write is the `recurrence` column. It is imported by the two
+ * `task_assignees` row): its task writes are the `recurrence` column and, with it, `updated_at`. It is imported by the two
  * writer files, so it keeps PR-3c's rule that no statement error is swallowed (design §4.1, closing
  * part): no `catch`, no promise handler, no settling combinator.
  *
@@ -191,8 +191,11 @@ export interface RecurrenceResponse {
  * (422 INVALID_RECURRENCE, then DUE_REQUIRED); clearing a task without a rule is a no-op, and on an
  * occurrence that is not the series' latest still-open one is 422 NOT_CURRENT_OCCURRENCE
  * (RULED(2026-10-09): [S17] (a)). An equal rule or a clear without a rule writes nothing.
- * ASSUMPTION(task-m5a): [a-10] `tasks.version` does not move. The event and `updated_at` take one
+ * ASSUMPTION(task-m5a): [a-10] `tasks.version` does not move. The event takes one
  * `clock_timestamp()` read after the lock (design §4.4).
+ * ASSUMPTION(task-m5a): the same reading is also written to `updated_at`, which moves the list sort
+ * key; the design does not say whether this write stamps `updated_at` (open owner question of the
+ * slice 3 record).
  */
 export async function setTaskRecurrence(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<RecurrenceResponse> {
   return withOrgStructure(input.orgId, async (db) => {

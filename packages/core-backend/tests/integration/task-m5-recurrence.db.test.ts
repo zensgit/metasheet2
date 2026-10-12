@@ -18,6 +18,7 @@ import {
   updateComment,
 } from '../../src/services/task-structure'
 import { computeDueAt } from '../../src/tasks/task-dates'
+import { computeDefaultRemindAt } from '../../src/tasks/task-reminders'
 import { dropTaskM4Fixtures, seedOrgDingTalkIntegration, seedTaskActor, type SeededTaskActor } from '../helpers/task-m4-fixtures'
 import { startTasksListener, tasksClient, type TasksClient, type TasksListener } from '../helpers/tasks-http-harness'
 
@@ -131,6 +132,8 @@ interface TaskOpts {
   startDate?: string | null
   startTime?: string | null
   remindAt?: string | null
+  /** Defaults to Asia/Shanghai when the task has a date. */
+  timeZone?: string
   /** The rule set through the service by C after the create; `null` leaves the task without one. */
   rule?: Record<string, unknown> | null
   followers?: SeededTaskActor[]
@@ -155,7 +158,7 @@ async function taskOf(w: World, opts: TaskOpts = {}): Promise<string> {
     dueTime: opts.dueTime ?? null,
     startDate,
     startTime: opts.startTime ?? null,
-    timeZone: dated ? ZONE : null,
+    timeZone: dated ? (opts.timeZone ?? ZONE) : null,
     remindAt: opts.remindAt === undefined ? undefined : opts.remindAt,
   })
   const db = poolManager.get()
@@ -237,6 +240,10 @@ interface TaskRow {
   created_by: string
   title: string
   is_milestone: boolean
+  completed_us: string | null
+  parent_id: string | null
+  depth: number
+  description: string | null
 }
 
 async function rowOf(taskId: string): Promise<TaskRow> {
@@ -248,7 +255,9 @@ async function rowOf(taskId: string): Promise<TaskRow> {
             (extract(epoch FROM created_at) * 1000000)::bigint::text AS created_us,
             (extract(epoch FROM updated_at) * 1000000)::bigint::text AS updated_us,
             deleted_at IS NOT NULL AS deleted, recurrence, recurrence_series_id, previous_occurrence_id,
-            created_by, title, is_milestone
+            created_by, title, is_milestone,
+            (extract(epoch FROM completed_at) * 1000000)::bigint::text AS completed_us,
+            parent_id, depth, description
        FROM tasks WHERE id = $1`,
     [taskId],
   )
@@ -556,6 +565,71 @@ describe('M5 PR-4a slice 3, M5-a: a flip to done spawns exactly one next occurre
     const row = await rowOf(next)
     expect([row.created_us, row.updated_us]).toEqual([completed[0].atUs, completed[0].atUs])
   })
+
+  it.each(FLIP_PATHS.slice(2).map((path) => [path.label, path] as const))(
+    'rec-instant-paths | %s: the flipped occurrence\'s completed_at, its recurrence_spawned, the new occurrence\'s created and the new row\'s created_at and updated_at are one instant ([a-37])',
+    async (label, path) => {
+      const w = await world('instp')
+      const src = await taskOf(w)
+      for (const status of await path.flip(w, src)) expect(status, label).toBe(200)
+      const next = await successorOf(src)
+      const flipped = await rowOf(src)
+      expect(flipped.status, label).toBe('done')
+      const spawned = (await eventsOf(src)).filter((event) => event.type === 'recurrence_spawned')
+      const created = (await eventsOf(next)).filter((event) => event.type === 'created')
+      expect([spawned.length, created.length], label).toEqual([1, 1])
+      const row = await rowOf(next)
+      expect([spawned[0].atUs, created[0].atUs, row.created_us, row.updated_us], label).toEqual(Array(4).fill(flipped.completed_us))
+    },
+  )
+
+  it('rec-monthly-anchor | a monthly rule from 01-31: every occurrence is stepped from the first one\'s due date, not the previous one\'s (02-28, 03-31, 04-30; [S14] no drift)', async () => {
+    const w = await world('mon')
+    let current = await taskOf(w, { dueDate: '2027-01-31', rule: { freq: 'monthly', interval: 1 } })
+    const dues: string[] = []
+    for (let i = 0; i < 3; i += 1) {
+      expect((await complete(w.c, current, { scope: 'all' })).status).toBe(200)
+      current = await successorOf(current)
+      dues.push(String((await rowOf(current)).due_date))
+    }
+    expect(dues).toEqual(['2027-02-28', '2027-03-31', '2027-04-30'])
+  })
+
+  it('rec-remind-policy | a source without a reminder: the new occurrence takes the series creator\'s default reminder policy, never the completer\'s ([S16])', async () => {
+    const w = await world('rpol')
+    const setPolicy = async (who: SeededTaskActor, mode: 'none' | 'default'): Promise<void> => {
+      await poolManager.get().query(
+        `INSERT INTO task_user_settings (user_id, org_id, default_remind_policy) VALUES ($1, $2, $3::jsonb)
+         ON CONFLICT (user_id, org_id) DO UPDATE SET default_remind_policy = EXCLUDED.default_remind_policy`,
+        [who.userId, w.orgId, JSON.stringify({ mode })],
+      )
+    }
+    const expected = computeDefaultRemindAt({ dueDate: '2026-11-03', dueTime: null, dueAt: null, timeZone: ZONE, policy: { mode: 'default' } })
+    expect(expected).not.toBeNull()
+    // The creator keeps the default policy, the completer has none: the new occurrence gets a reminder.
+    await setPolicy(w.a, 'none')
+    const first = await taskOf(w, { mode: 'any', assignees: [w.a], remindAt: null })
+    expect((await rowOf(first)).remind_us).toBeNull()
+    expect((await complete(w.a, first)).status).toBe(200)
+    expect((await rowOf(await successorOf(first))).remind_us).toBe(String((expected as Date).getTime() * 1000))
+    // The creator has none, the completer the default: the new occurrence gets no reminder.
+    await setPolicy(w.c, 'none')
+    await setPolicy(w.a, 'default')
+    const second = await taskOf(w, { mode: 'any', assignees: [w.a], remindAt: null })
+    expect((await complete(w.a, second)).status).toBe(200)
+    expect((await rowOf(await successorOf(second))).remind_us).toBeNull()
+  })
+
+  it('rec-subtask-carried | a recurring subtask: the new occurrence carries the parent, depth, description and milestone flag ([S16])', async () => {
+    const w = await world('sub')
+    const parent = await createTask({ orgId: w.orgId, creatorId: w.c.userId, title: '父任务', assignees: [w.a.userId] })
+    const src = await taskOf(w)
+    await setTaskParent({ orgId: w.orgId, actorId: w.c.userId, taskId: src, body: { parentId: parent.id } })
+    await poolManager.get().query(`UPDATE tasks SET description = '每周一次', is_milestone = true WHERE id = $1`, [src])
+    expect(await rowOf(src)).toMatchObject({ parent_id: parent.id, depth: 1, description: '每周一次', is_milestone: true })
+    expect((await complete(w.c, src, { scope: 'all' })).status).toBe(200)
+    expect(await rowOf(await successorOf(src))).toMatchObject({ parent_id: parent.id, depth: 1, description: '每周一次', is_milestone: true })
+  })
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -604,6 +678,42 @@ const NO_SPAWN_SHAPES: NoSpawnShape[] = [
   },
 ]
 
+/**
+ * Rules whose next occurrence reaches the end of the calendar (design §3.2 step 4, task E): the next
+ * due date itself past 9999-12-31, or a value derived from a next due date of 9999-12-31 outside the
+ * range the direct writes accept. Each is reached with the public writes only.
+ */
+const LAST_DAY_SHAPES: NoSpawnShape[] = [
+  {
+    label: 'due 9999-12-31 (Asia/Shanghai, all day)',
+    build: async (w) => taskOf(w, { dueDate: '9999-12-31' }),
+  },
+  {
+    label: 'due 9999-12-30 all day west of UTC (the next due instant falls in year 10000, [own-38])',
+    build: async (w) => {
+      const id = await taskOf(w, { dueDate: '9999-12-30', timeZone: 'America/New_York' })
+      expect(await rowOf(id)).toMatchObject({ due_date: '9999-12-30', time_zone: 'America/New_York' })
+      return id
+    },
+  },
+  {
+    label: 'due 9999-12-30 with a start date of 9999-12-31 ([own-07]: the start would shift past the calendar)',
+    build: async (w) => {
+      const id = await taskOf(w, { dueDate: '9999-12-30', startDate: '9999-12-31' })
+      expect(await rowOf(id)).toMatchObject({ due_date: '9999-12-30', start_date: '9999-12-31' })
+      return id
+    },
+  },
+  {
+    label: 'due 9999-12-30 09:00 with a reminder after it ([own-30]: the shifted reminder falls in year 10000)',
+    build: async (w) => {
+      const id = await taskOf(w, { dueDate: '9999-12-30', dueTime: '09:00', remindAt: '9999-12-31T20:00:00.000Z' })
+      expect((await rowOf(id)).remind_us).toBe(String(Date.parse('9999-12-31T20:00:00.000Z') * 1000))
+      return id
+    },
+  },
+]
+
 describe('M5 PR-4a slice 3, M5-a: no spawn, the write still 200 (design §3.2 steps 2–4)', () => {
   it.each(NO_SPAWN_SHAPES.flatMap((shape) => FLIP_PATHS.map((path) => [`${shape.label} | ${path.label}`, shape, path] as const)))(
     'rec-no-due | %s: 200, the task is done, no new occurrence, no recurrence_spawned',
@@ -614,11 +724,11 @@ describe('M5 PR-4a slice 3, M5-a: no spawn, the write still 200 (design §3.2 st
     },
   )
 
-  it.each(FLIP_PATHS.map((path) => [path.label, path] as const))(
-    'rec-9999 | %s: a rule on a task due 9999-12-31 completes with 200 and spawns nothing (series_ended, task E)',
-    async (label, path) => {
+  it.each(LAST_DAY_SHAPES.flatMap((shape) => FLIP_PATHS.map((path) => [`${shape.label} | ${path.label}`, shape, path] as const)))(
+    'rec-9999 | %s: 200, the task is done, no new occurrence, no recurrence_spawned (series_ended, task E)',
+    async (label, shape, path) => {
       const w = await world('last')
-      const taskId = await taskOf(w, { dueDate: '9999-12-31' })
+      const taskId = await shape.build(w)
       await expectFlippedWithoutSpawn(taskId, await path.flip(w, taskId), label)
     },
   )
@@ -821,6 +931,30 @@ describe('M5 PR-4a slice 3: PUT /api/tasks/:id/recurrence', () => {
     expect((await rowOf(first)).recurrence).toBeNull()
     expect((await eventsOf(first)).filter((event) => event.type === 'recurrence_cleared').map((event) => event.actor)).toEqual([w.c.userId])
   })
+
+  it('rec-clear-done-latest | the done last occurrence of an ended series (count, and the calendar end) keeps its rule and has no successor: clearing it is 422 NOT_CURRENT_OCCURRENCE with nothing written; after a reopen it is 200', async () => {
+    const w = await world('clrd')
+    const notCurrent = [422, { error: { code: 'NOT_CURRENT_OCCURRENCE' } }]
+    const first = await taskOf(w, { rule: { freq: 'daily', interval: 1, end: { count: 2 } } })
+    expect((await complete(w.c, first, { scope: 'all' })).status).toBe(200)
+    const second = await successorOf(first)
+    expect((await complete(w.c, second, { scope: 'all' })).status).toBe(200)
+    expect(await successorsOf(second)).toEqual([])
+    const last = await taskOf(w, { dueDate: '9999-12-31' })
+    expect((await complete(w.c, last, { scope: 'all' })).status).toBe(200)
+    expect(await successorsOf(last)).toEqual([])
+    for (const id of [second, last]) {
+      expect((await rowOf(id)).status, id).toBe('done')
+      const before = await snapshot(id)
+      const res = await putRecurrence(w.c, id, { recurrence: null })
+      expect([res.status, res.body], id).toEqual(notCurrent)
+      expect(await snapshot(id), id).toBe(before)
+    }
+    expect((await reopen(w.c, second, { scope: 'all' })).status).toBe(200)
+    const res = await putRecurrence(w.c, second, { recurrence: null })
+    expect([res.status, res.body.recurrence]).toEqual([200, null])
+    expect((await rowOf(second)).recurrence).toBeNull()
+  })
 })
 
 // ---------------------------------------------------------------------------------------------
@@ -978,6 +1112,57 @@ describe('M5 PR-4a slice 3: series delete', () => {
     await expect(comment).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
     expect(await q('SELECT id FROM task_comments WHERE task_id = $1', [second])).toEqual([])
     expect(await eventTypes(second)).not.toContain('commented')
+  })
+
+  it('rec-delete-first-target | a series delete that holds the target\'s own row first makes a comment on the target wait, then 404 without writing', async () => {
+    const w = await world('deldt')
+    const first = await taskOf(w)
+    expect((await complete(w.c, first, { scope: 'all' })).status).toBe(200)
+    const second = await successorOf(first)
+    const holder = await poolManager.get().getInternalPool().connect()
+    let pendingDelete: Promise<unknown> | undefined
+    let comment: Promise<unknown> | undefined
+    try {
+      if (!holder.processID) throw new Error('holder pid missing')
+      await holder.query('BEGIN')
+      // Blocks the delete's event insert, after its row locks and its soft-delete update.
+      await holder.query('LOCK TABLE task_events IN SHARE MODE')
+      pendingDelete = deleteTaskById({ orgId: w.orgId, actorId: w.c.userId, taskId: first })
+      pendingDelete.catch(() => undefined)
+      await waitUntilBlocked(holder.processID, 1)
+      comment = addComment({ orgId: w.orgId, actorId: w.c.userId, taskId: first, body: { body: '竞态评论' } })
+      comment.catch(() => undefined)
+      // The comment waits on the delete's row lock of the target, not on the holder.
+      await waitForLockWaiters(2, holder.processID)
+      await holder.query('COMMIT')
+    } finally {
+      try { await holder.query('ROLLBACK') } catch { /* committed */ }
+      holder.release()
+    }
+    await expect(pendingDelete).resolves.toEqual({ id: first, deleted: true, deletedIds: [first, second] })
+    await expect(comment).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(await q('SELECT id FROM task_comments WHERE task_id = $1', [first])).toEqual([])
+    expect(await eventTypes(first)).not.toContain('commented')
+  })
+
+  it('rec-delete-first-deleted | after a series delete of the first occurrence, its surviving done successor re-armed with a count of 3 still spawns: the anchor and the ordinal read the soft-deleted first occurrence (design §2.10)', async () => {
+    const w = await world('delfd')
+    const first = await taskOf(w, { rule: { freq: 'daily', interval: 1, end: { count: 2 } } })
+    expect((await complete(w.c, first, { scope: 'all' })).status).toBe(200)
+    const second = await successorOf(first)
+    expect((await complete(w.c, second, { scope: 'all' })).status).toBe(200)
+    expect(await successorsOf(second)).toEqual([])
+    const res = await deleteTask(w.c, first)
+    expect([res.status, res.body.deletedIds]).toEqual([200, [first]])
+    expect((await rowOf(second)).recurrence).toBeNull()
+    expect((await reopen(w.c, second, { scope: 'all' })).status).toBe(200)
+    const rule = { freq: 'daily', interval: 1, end: { count: 3 } }
+    expect((await putRecurrence(w.c, second, { recurrence: rule })).status).toBe(200)
+    expect((await complete(w.c, second, { scope: 'all' })).status).toBe(200)
+    const third = await successorOf(second)
+    expect(await rowOf(third)).toMatchObject({ due_date: '2026-11-04', recurrence_series_id: first, previous_occurrence_id: second, recurrence: rule })
+    // The ordinal counts the soft-deleted first occurrence: the third one ends the count.
+    await expectFlippedWithoutSpawn(third, [(await complete(w.c, third, { scope: 'all' })).status], 'first-deleted')
   })
 
   it('rec-delete-busy | a row lock held on the later occurrence past the bound: 409 TASK_BUSY, nothing deleted, no deleted event', async () => {

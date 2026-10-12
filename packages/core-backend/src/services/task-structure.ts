@@ -808,9 +808,13 @@ const DELETE_ROW_LOCK_TIMEOUT = '3s'
  * 57014 `query_canceled` (statement_timeout), 55P03 `lock_not_available`. */
 const DELETE_ROW_LOCK_BUSY_CODES = new Set(['57014', '55P03'])
 
-/** `FOR UPDATE` on the live task row, taken after the org structure lock and
- * before any read, so the reads below see the row as of the lock
- * (M3R2-CONC-1). Conflicts with the comment writes' `FOR KEY SHARE`; see
+/** `FOR UPDATE` on the live task row, taken after the org structure lock.
+ * On the single delete it comes before every read of the row except the
+ * series-facts read, which reads only series columns that change under the
+ * structure lock alone, so the reads after it see the row as of the lock
+ * (M3R2-CONC-1). The series delete calls it once per occurrence after
+ * reading the series under the structure lock (M5 PR-4a design §3.8 steps
+ * 1–2), so its worst-case wait is that many times the bound. Conflicts with the comment writes' `FOR KEY SHARE`; see
  * `lockLiveTaskForComment`. The statement runs under a transaction-local
  * `statement_timeout`; on success the prior value is restored for the rest
  * of the transaction. On failure the transaction is rolled back, which
@@ -932,13 +936,13 @@ async function lockAndPlanSeriesDelete(db: Db, input: { orgId: string; actorId: 
  */
 async function softDeleteSeriesOccurrences(db: Db, input: { actorId: string; plan: SeriesDeletePlan }): Promise<Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }>> {
   const targetIds = input.plan.targets.map((target) => target.taskId)
-  // One reading for every target, kept as text so its microseconds never pass through a JS Date: a
-  // `clock_timestamp()` in the UPDATE's FROM list is evaluated again for each joined row, which gave
-  // two occurrences of one delete two instants (found by rec-delete-later-open).
-  const clock = await db.query(`SELECT clock_timestamp()::text AS at`)
+  // One reading for every target, taken once in a materialized CTE and never leaving SQL (no JS Date,
+  // no text round trip): a `clock_timestamp()` in a plain subquery of the FROM list is evaluated again
+  // for each joined row.
   await db.query(
-    `UPDATE tasks SET deleted_at = $2::timestamptz, updated_at = $2::timestamptz WHERE id = ANY($1::text[])`,
-    [targetIds, String(clock.rows[0]?.at)],
+    `WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS at)
+     UPDATE tasks SET deleted_at = clock.at, updated_at = clock.at FROM clock WHERE tasks.id = ANY($1::text[])`,
+    [targetIds],
   )
   const written: Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }> = []
   for (const target of input.plan.targets) {
