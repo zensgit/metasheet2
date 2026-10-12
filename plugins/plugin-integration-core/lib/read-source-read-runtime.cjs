@@ -15,7 +15,7 @@
 // read build the same overlay and the same request, and classify errors identically, by construction.
 
 const { createHash } = require('node:crypto')
-const { isSafeRelativeReadPath } = require('./read-source-config.cjs')
+const { isSafeRelativeReadPath, validateReadSourceConfig } = require('./read-source-config.cjs')
 const {
   READ_SOURCE_PROBE_TIMEOUT_MS,
   ReadSourceProbeContractError,
@@ -39,7 +39,12 @@ const {
   K3WISE_BOM_LIST_BY_MATERIAL_PRESET,
   K3_WISE_BOM_LIST_BY_MATERIAL_RESOLVER_CODE_MAP,
 } = require('./read-source-bom-list-by-material-contract.cjs')
-const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
+const {
+  isB4ReadOperationProfile,
+  applyReadOperationProfileOverlay,
+  b4MaterialListResponseViolation,
+  projectB4MaterialListRow,
+} = require('./k3-read-operation-profiles.cjs')
 
 const CONFIGURED_READ_BODY_KEYS = Object.freeze(['config', 'inputs'])
 const TRUSTED_EXECUTION_MAX_ROW_CAP = 1000
@@ -90,7 +95,12 @@ function prepareConfiguredRead(body) {
   if (!CONFIGURED_READ_SUPPORTED_MODES.includes(plan.mode)) {
     throw new ReadSourceProbeContractError('mode_not_supported')
   }
-  const fieldMap = body.config && body.config.fieldMap
+  // A DB-restored approved config is a mutable plain object. Keep B4's reviewed mapping as an immutable
+  // prepare-time snapshot, not an alias an in-process caller can change after the plan was validated.
+  const preparedConfig = isB4ReadOperationProfile(plan.actionProfileVersion)
+    ? validateReadSourceConfig(body.config).normalized
+    : body.config
+  const fieldMap = preparedConfig && preparedConfig.fieldMap
   if (!Array.isArray(fieldMap) || fieldMap.length === 0) {
     throw new ReadSourceProbeContractError('field_map_required')
   }
@@ -101,7 +111,7 @@ function prepareConfiguredRead(body) {
     // S2-a contract's assertS1NormalizedConfig guarantees it) is threaded through for resolver_lookup, whose
     // evaluator consumes resolverRule / multiplicityRuleField / resolverSortDirection /
     // resolverDiscriminatorValue / containerPaths / fieldMap. The other modes ignore it.
-    config: body.config,
+    config: preparedConfig,
     inputs: normalizeReadSourceProbeInputs(plan, body.inputs),
   })
 }
@@ -208,7 +218,9 @@ function normalizeTrustedExecution(plan, input) {
     throw new ReadSourceProbeContractError('execution_row_source_mode_not_supported')
   }
   const rowCap = input.rowCap === undefined ? plan.rowCap : Number(input.rowCap)
-  if (!Number.isInteger(rowCap) || rowCap < 1 || rowCap > TRUSTED_EXECUTION_MAX_ROW_CAP) {
+  const maxRowCap = isB4ReadOperationProfile(plan.actionProfileVersion)
+    ? plan.rowCap : TRUSTED_EXECUTION_MAX_ROW_CAP
+  if (!Number.isInteger(rowCap) || rowCap < 1 || rowCap > maxRowCap) {
     throw new ReadSourceProbeContractError('execution_row_cap_invalid')
   }
   const cursor = input.cursor === undefined || input.cursor === null
@@ -216,6 +228,9 @@ function normalizeTrustedExecution(plan, input) {
     : (typeof input.cursor === 'string' && input.cursor.length <= 512 ? input.cursor : undefined)
   if (cursor === undefined) {
     throw new ReadSourceProbeContractError('execution_cursor_invalid')
+  }
+  if (isB4ReadOperationProfile(plan.actionProfileVersion) && cursor !== null) {
+    throw new ReadSourceProbeContractError('execution_cursor_not_allowed')
   }
   const pageIndex = input.pageIndex === undefined || input.pageIndex === null
     ? null
@@ -274,7 +289,7 @@ function safeCount(...values) {
   return null
 }
 
-function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCounts, rowPlane) {
+function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCounts, rowPlane, plan) {
   const metadata = isPlainObject(raced && raced.metadata) ? raced.metadata : {}
   return {
     nextCursor: typeof raced?.nextCursor === 'string' && raced.nextCursor.length <= 512
@@ -305,7 +320,9 @@ function buildInternalPage(raced, request, mappedRecordCount, rawContainerRowCou
     // Agent adapter silently clamps the request to config.maxLimit (default 20) and reports the applied
     // value here (bridge-agent-readonly-adapter.cjs metadata.limit). A paging feeder that judges "was this
     // page full?" against the REQUESTED size instead of this one can never detect a clamped source.
-    effectiveLimit: safeCount(metadata.limit, metadata.effectiveLimit),
+    effectiveLimit: isB4ReadOperationProfile(plan?.actionProfileVersion)
+      ? safeCount(metadata.dataPageSize)
+      : safeCount(metadata.limit, metadata.effectiveLimit),
     // Row counts of the RAW containers as the adapter returned them — i.e. BEFORE the plan.rowCap slice
     // below. Without this a caller cannot tell "the source has exactly rowCap rows" from "the source had
     // more and we silently truncated it": both leave exactly rowCap mapped records.
@@ -347,7 +364,9 @@ function executeFromAdapterRecords(plan, fieldMap, raced, request) {
     })
   }
   const fieldResolution = Object.create(null)
-  const mapped = rows.map((row) => mapRecord(row, fieldMap, fieldResolution))
+  const mapped = rows.map((row) => isB4ReadOperationProfile(plan.actionProfileVersion)
+    ? projectB4MaterialListRow(row, fieldMap, mapRecord, fieldResolution)
+    : mapRecord(row, fieldMap, fieldResolution))
   const shapes = { primary: { type: 'array', arrayLength: records.length } }
   const evidence = readSourceProbeEvidence(plan, {
     ok: true,
@@ -369,6 +388,7 @@ function executeFromAdapterRecords(plan, fieldMap, raced, request) {
       mapped.length,
       rawContainerRowCounts(plan, raced && raced.raw),
       { fieldResolution, rowFingerprints: { primary: fingerprintRows(rows) } },
+      plan,
     )),
     enumerable: false,
     writable: false,
@@ -397,7 +417,7 @@ async function executeConfiguredRead(
     throw new ReadSourceProbeRuntimeError('kind_mismatch')
   }
 
-  const adapterSystem = applyReadSmokePresetOverlay(system, buildReadSourceProbeOverlayPreset(plan))
+  const adapterSystem = applyReadOperationProfileOverlay(system, plan, buildReadSourceProbeOverlayPreset(plan))
   const adapter = createAdapter(adapterSystem)
   const request = buildExecutionRequest(plan, inputs, execution)
 
@@ -420,6 +440,13 @@ async function executeConfiguredRead(
     // rejection cannot become an unhandled rejection.
     readPromise.catch(() => {})
     return failureOutcome(plan, 'READ_SOURCE_PROBE_TIMEOUT', 'TimeoutError', { timeoutReached: true })
+  }
+
+  if (isB4ReadOperationProfile(plan.actionProfileVersion)) {
+    const violation = b4MaterialListResponseViolation(raced, request)
+    if (violation !== null) {
+      return failureOutcome(plan, violation, 'ReadSourceProbeRuntimeError')
+    }
   }
 
   const raw = raced && raced.raw
@@ -498,7 +525,9 @@ async function executeConfiguredRead(
       shapeOk = false
       continue
     }
-    const records = rows.map((row) => mapRecord(row, fieldMap, fieldResolution))
+    const records = rows.map((row) => isB4ReadOperationProfile(plan.actionProfileVersion)
+      ? projectB4MaterialListRow(row, fieldMap, mapRecord, fieldResolution)
+      : mapRecord(row, fieldMap, fieldResolution))
     rowFingerprints[container.alias] = fingerprintRows(rows)
     recordCount += records.length
     dataContainers[container.alias] = { records }
@@ -537,7 +566,7 @@ async function executeConfiguredRead(
     value: Object.freeze(buildInternalPage(raced, request, recordCount, rawRowCounts, {
       fieldResolution,
       rowFingerprints,
-    })),
+    }, plan)),
     enumerable: false,
     writable: false,
   })

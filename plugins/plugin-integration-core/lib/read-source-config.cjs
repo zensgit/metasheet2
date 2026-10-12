@@ -21,6 +21,7 @@ const { scrubSecretStringValue } = require('./payload-redaction.cjs')
 // bound this field needs and is untrimmed, matching this module's own untrimmed validate-then-trim
 // shape (see normalizeReadSourceConfig below) — see its definition for the exact semantics.
 const { isValidProfileId } = require('./gip-profile-certification-contracts.cjs')
+const { b4ReadOperationProfileViolation } = require('./k3-read-operation-profiles.cjs')
 
 // The four proven read modes (standard names from #3416); nothing else is accepted.
 const READ_SOURCE_MODES = Object.freeze(['single_record', 'list_page', 'detail_with_lines', 'resolver_lookup'])
@@ -349,7 +350,15 @@ function validateReadSourceConfig(config) {
   }
 
   if (errors.length > 0) return { valid: false, errors }
-  return { valid: true, normalized: normalizeReadSourceConfig(config) }
+  const normalized = normalizeReadSourceConfig(config)
+  if (b4ReadOperationProfileViolation(normalized) !== null) {
+    return { valid: false, errors: [{
+      code: 'READ_SOURCE_ACTION_PROFILE_CONFIG_DRIFT',
+      field: 'actionProfileVersion',
+      reason: 'profile_config_drift',
+    }] }
+  }
+  return { valid: true, normalized }
 }
 
 // Frozen, trimmed, read-only normalized view. Only reached after full validation. operations pinned to ['read'].

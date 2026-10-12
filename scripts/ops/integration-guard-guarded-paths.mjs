@@ -29,6 +29,7 @@
 
 export const GUARDED_PATH_ENTRIES = Object.freeze([
   // Owner-only YiDa: exact real files, paired with workflow push paths. No unsupported mid-globs.
+  'apps/web/scripts/run-required-web-tests.sh',
   'apps/web/scripts/run-required-web-tests.tokens',
   'apps/web/src/services/integration/yidaInitialization.ts',
   'apps/web/src/services/integration/yidaOwner.ts',
@@ -84,6 +85,15 @@ export const GUARDED_PATH_ENTRIES = Object.freeze([
   'scripts/ops/global-history-flag-manifest.test.mjs',
   'plugins/plugin-integration-core/**',
   'apps/web/src/services/integration/readSourceConfigs.ts',
+  'apps/web/src/services/integration/k3B4Runs.ts',
+  'apps/web/src/services/integration/k3Bl2Runs.ts',
+  'apps/web/src/components/integration/IntegrationK3B4RunPanel.vue',
+  'apps/web/src/components/integration/IntegrationK3Bl2RunPanel.vue',
+  'apps/web/tests/IntegrationK3B4RunPanel.spec.ts',
+  'apps/web/tests/IntegrationK3B4WorkbenchAccess.spec.ts',
+  'apps/web/tests/IntegrationK3Bl2RunPanel.spec.ts',
+  'apps/web/tests/IntegrationK3Bl2Services.spec.ts',
+  'apps/web/tests/IntegrationK3WorkbenchStartup.spec.ts',
   'apps/web/src/services/integration/readSourceCompositions.ts',
   'apps/web/src/services/integration/errorCodeLabels.ts',
   'apps/web/src/services/integration/fieldHints.ts',

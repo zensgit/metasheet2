@@ -19,7 +19,11 @@ const {
   normalizeReadSourceProbeContract,
   readSourceProbeEvidence,
 } = require('./read-source-probe-contract.cjs')
-const { applyReadSmokePresetOverlay } = require('./read-smoke.cjs')
+const {
+  isB4ReadOperationProfile,
+  applyReadOperationProfileOverlay,
+  b4MaterialListResponseViolation,
+} = require('./k3-read-operation-profiles.cjs')
 const {
   READ_SMOKE_LIST_REQUEST_MARKER,
   READ_SMOKE_BOM_REQUEST_MARKER,
@@ -273,7 +277,7 @@ async function executeReadSourceProbe(probe, { system, createAdapter, timeoutMs 
     throw new ReadSourceProbeRuntimeError('kind_mismatch')
   }
 
-  const adapterSystem = applyReadSmokePresetOverlay(system, buildReadSourceProbeOverlayPreset(plan))
+  const adapterSystem = applyReadOperationProfileOverlay(system, plan, buildReadSourceProbeOverlayPreset(plan))
   const adapter = createAdapter(adapterSystem)
   const request = buildReadSourceProbeRequest(plan, inputs)
 
@@ -296,6 +300,11 @@ async function executeReadSourceProbe(probe, { system, createAdapter, timeoutMs 
     // settlement so a late rejection cannot become an unhandled rejection.
     readPromise.catch(() => {})
     return probeFailure(plan, 'READ_SOURCE_PROBE_TIMEOUT', 'TimeoutError', { timeoutReached: true })
+  }
+
+  if (isB4ReadOperationProfile(plan.actionProfileVersion)) {
+    const violation = b4MaterialListResponseViolation(raced, request)
+    if (violation !== null) return probeFailure(plan, violation, 'ReadSourceProbeRuntimeError')
   }
 
   const raw = raced && raced.raw

@@ -50,6 +50,7 @@ export interface ReadSourceConfigPayload {
   readPath: string
   readMethod: ReadSourceMethod
   operations: ['read']
+  actionProfileVersion?: string
   keyField?: string
   keyEncoding?: ReadSourceKeyEncoding
   multiplicityRuleField?: string
@@ -71,6 +72,7 @@ export interface ReadSourceConfigDraft {
   mode: ReadSourceMode
   readPath: string
   readMethod: ReadSourceMethod
+  actionProfileVersion: string
   keyField: string
   keyEncoding: '' | ReadSourceKeyEncoding
   multiplicityRuleField: string
@@ -93,6 +95,10 @@ export interface ReadSourceConfigRow {
   contentKey: string
   createdBy: string | null
   updatedAt: string | null
+  /** Derived from the complete server config, never from a caller-supplied marker. */
+  k3B4Eligible?: boolean
+  /** Structural BL2 shortcut eligibility; approved status and active system are checked separately. */
+  k3Bl2Eligible?: boolean
 }
 
 export interface ReadSourceSaveResult {
@@ -240,6 +246,7 @@ export function createReadSourceConfigDraft(): ReadSourceConfigDraft {
     mode: 'single_record',
     readPath: '',
     readMethod: 'POST',
+    actionProfileVersion: '',
     keyField: '',
     keyEncoding: '',
     multiplicityRuleField: '',
@@ -251,6 +258,65 @@ export function createReadSourceConfigDraft(): ReadSourceConfigDraft {
     lineContainerPaths: '',
     fieldMap: [],
   }
+}
+
+// UI mirror of the owner-ratified B4 config. The component test compares the assembled payload
+// against the actual CJS contract builder; this is a fixed shortcut, never a free-form API mapper.
+export const K3_WISE_MATERIAL_LIST_B4_PROFILE_VERSION = 'k3wise.material_list.v1'
+
+export function createK3WiseMaterialListB4Draft(systemId = ''): ReadSourceConfigDraft {
+  return {
+    ...createReadSourceConfigDraft(),
+    systemId,
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material',
+    mode: 'list_page',
+    readPath: '/K3API/Material/GetList',
+    readMethod: 'POST',
+    actionProfileVersion: K3_WISE_MATERIAL_LIST_B4_PROFILE_VERSION,
+    containerPaths: 'Data.DATA',
+    fieldMap: [{ source: 'FUnitID', target: 'baseUnit' }],
+  }
+}
+
+export function isK3WiseMaterialListB4Draft(draft: ReadSourceConfigDraft): boolean {
+  // Compare the complete draft, including mode-irrelevant fields that the generic payload builder
+  // omits. A hidden leftover may not silently masquerade as this fixed, reviewed template.
+  return JSON.stringify(draft) === JSON.stringify(createK3WiseMaterialListB4Draft(draft.systemId))
+}
+
+// Mirror the existing BL2 preset, not a new action profile. The backend still owns its contract.
+export function createK3WiseBomListByMaterialDraft(
+  systemId = '',
+  readPath = '/K3API/BOM/GetList',
+): ReadSourceConfigDraft {
+  const path = readPath.trim()
+  return {
+    ...createReadSourceConfigDraft(),
+    systemId,
+    requiredKind: 'erp:k3-wise-webapi',
+    object: 'material-bom-list',
+    mode: 'resolver_lookup',
+    readPath: path.startsWith('/') || path === '' ? path : `/${path}`,
+    readMethod: 'POST',
+    keyField: 'FPercentItemID',
+    keyEncoding: 'numeric_id',
+    containerPaths: 'Data.DATA',
+    resolverRule: 'exactly_one',
+    fieldMap: [{ source: 'FBOMNumber', target: 'bom_number' }],
+  }
+}
+
+function isK3WiseBomListReadPath(value: unknown): value is string {
+  return typeof value === 'string' && isCoarseSafeRelativeReadPath(value)
+    && `/${value.trim().replace(/^\//, '')}`.endsWith('/BOM/GetList')
+}
+
+export function isK3WiseBomListByMaterialDraft(draft: ReadSourceConfigDraft): boolean {
+  if (!isK3WiseBomListReadPath(draft.readPath)) return false
+  const canonical = createK3WiseBomListByMaterialDraft(draft.systemId, draft.readPath)
+  // Include hidden/irrelevant draft fields: the generic builder intentionally drops some of them.
+  return sameConfigValue({ ...draft, readPath: canonical.readPath }, canonical)
 }
 
 export function parseContainerPathList(value: string): string[] {
@@ -328,6 +394,9 @@ export function validateReadSourceDraft(draft: ReadSourceConfigDraft): string[] 
     // exactly_one: multiplicityRuleField / sortDirection / discriminatorValue are all forbidden —
     // the form does not render them, so no forbidden-field problem is reachable here.
   }
+  if (draft.actionProfileVersion === K3_WISE_MATERIAL_LIST_B4_PROFILE_VERSION && !isK3WiseMaterialListB4Draft(draft)) {
+    problems.push('K3 B4 受审配置已变化，请重新选择模板')
+  }
   return problems
 }
 
@@ -347,6 +416,7 @@ export function buildReadSourceConfigPayload(draft: ReadSourceConfigDraft): Read
     readMethod: draft.readMethod,
     operations: ['read'],
   }
+  if (draft.actionProfileVersion.trim()) payload.actionProfileVersion = draft.actionProfileVersion.trim()
   const wantsKeyField = draft.mode === 'single_record' || draft.mode === 'resolver_lookup' || draft.mode === 'detail_with_lines'
   if (wantsKeyField && draft.keyField.trim()) payload.keyField = draft.keyField.trim()
   if (wantsKeyField && draft.keyEncoding) payload.keyEncoding = draft.keyEncoding
@@ -537,7 +607,44 @@ export function normalizeReadSourceConfigRow(value: unknown): ReadSourceConfigRo
     contentKey: typeof value.contentKey === 'string' ? value.contentKey : '',
     createdBy: typeof value.createdBy === 'string' ? value.createdBy : null,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : null,
+    k3B4Eligible: isSavedK3B4Config(value),
+    k3Bl2Eligible: isSavedK3Bl2Config(value),
   }
+}
+
+function sameConfigValue(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((entry, index) => sameConfigValue(entry, right[index]))
+  }
+  if (isPlainObject(left) && isPlainObject(right)) {
+    const keys = Object.keys(left)
+    return keys.length === Object.keys(right).length && keys.every((key) =>
+      Object.prototype.hasOwnProperty.call(right, key) && sameConfigValue(left[key], right[key]))
+  }
+  return left === right
+}
+
+function isSavedK3B4Config(row: Record<string, unknown>): boolean {
+  if (typeof row.version !== 'number' || !Number.isSafeInteger(row.version) || row.version < 1
+    || typeof row.systemId !== 'string' || !row.systemId.trim()
+    || typeof row.contentKey !== 'string' || !row.contentKey
+    || row.object !== 'material' || row.mode !== 'list_page' || !isPlainObject(row.config)) return false
+  // Store version differs from the canonical template version; it must still match the row.
+  const canonical = buildReadSourceConfigPayload(createK3WiseMaterialListB4Draft(row.systemId))
+  return sameConfigValue(row.config, { ...canonical, version: row.version })
+}
+
+function isSavedK3Bl2Config(row: Record<string, unknown>): boolean {
+  if (typeof row.version !== 'number' || !Number.isSafeInteger(row.version) || row.version < 1
+    || typeof row.systemId !== 'string' || !row.systemId || row.systemId !== row.systemId.trim()
+    || typeof row.contentKey !== 'string' || !row.contentKey.trim()
+    || !READ_SOURCE_STATUSES.includes(row.status as ReadSourceStatus)
+    || row.object !== 'material-bom-list' || row.mode !== 'resolver_lookup'
+    || !isPlainObject(row.config) || !isK3WiseBomListReadPath(row.config.readPath)) return false
+  const canonical = buildReadSourceConfigPayload(createK3WiseBomListByMaterialDraft(row.systemId, row.config.readPath))
+  // No optional profile, ordering or other hidden config may silently gain this shortcut's label.
+  return sameConfigValue(row.config, { ...canonical, version: row.version })
 }
 
 // --- API calls (consultant tier) --------------------------------------------
