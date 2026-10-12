@@ -347,6 +347,12 @@ jobs:
       - name: PB4-4 reactivation CI wiring contract
         run: node --test scripts/ops/pb4-4-reactivation-ci-wiring.test.mjs
 
+      # W1-6 CI two-point wiring contract (no DB): the anchor-in-transaction suite (per-writer rollback
+      # + unique-index barrier proofs) must stay wired into BOTH vitest.config.ts (exclude) AND
+      # plugin-tests.yml (directory real-DB step). Dropping either point silently disables the proof.
+      - name: W1-6 anchor-in-transaction CI wiring contract
+        run: node --test scripts/ops/w1-6-anchor-in-transaction-ci-wiring.test.mjs
+
       # B4 CI two-point wiring contract (no DB): the department-bindings FK-chain suite must stay
       # wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
       # Dropping either point silently disables the cross-org-FK-impossible proof.
@@ -854,6 +860,7 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
@@ -1751,6 +1758,7 @@ jobs:
             tests/integration/local-directory-org-archive-readonly.db.test.ts \
             tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-local-integration-reactivation.db.test.ts \
+            tests/integration/local-directory-anchor-in-transaction.db.test.ts \
             tests/integration/directory-department-bindings.db.test.ts \
             tests/integration/org-directory-routing-policy-schema.db.test.ts \
             tests/integration/org-directory-routing-policy-resolver.db.test.ts \
@@ -1866,6 +1874,18 @@ jobs:
         run: |
           pnpm --filter @metasheet/web build
 
+      - name: Rehearse attendance QA self-service fixtures in a disposable database
+        env:
+          NODE_ENV: test
+        run: |
+          attendance_qa_database="attendance_qa_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          createdb --host=localhost --username=postgres "$attendance_qa_database"
+          trap 'dropdb --host=localhost --username=postgres --if-exists "$attendance_qa_database"' EXIT
+          export DATABASE_URL="postgresql://postgres@localhost:5432/$attendance_qa_database"
+          export ATTENDANCE_TEST_DATABASE_URL="$DATABASE_URL"
+          pnpm --filter @metasheet/core-backend migrate
+          pnpm --filter @metasheet/core-backend exec tsx ../../scripts/ops/attendance-selfservice-fixture-verify.mts
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -1885,6 +1905,9 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
+            tests/integration/attendance-live-punch-order.db.test.ts \
+            tests/integration/attendance-online-punch-server-time.db.test.ts \
+            tests/integration/attendance-online-punch-replay.db.test.ts \
             tests/integration/attendance-approval-action-authorization.db.test.ts \
             tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \

@@ -1,4 +1,5 @@
 import { apiFetch } from '../../utils/api'
+import { STOCK_PREP_ERROR_PLAIN } from './stockPreparation/plainLanguage'
 
 export interface IntegrationApiEnvelope<T> {
   ok: boolean
@@ -713,6 +714,26 @@ function integrationEnvelopeErrorCode(payload: IntegrationApiEnvelope<unknown> |
   return undefined
 }
 
+// 值面无关的固定 500 码 → 人话（2026-10-10 集成层审计）。
+//
+// 备料 / table-actions 路由遇到非类型化错误时，服务端只答一个固定码 + 一句固定英文
+// （plugins/plugin-integration-core/lib/http-routes.cjs `VALUES_FREE_ROUTE_ERROR_MAPPERS`），
+// 不再回显驱动 / 宿主原文。这句英文是给日志读的，不该原样出现在工作台状态栏上：
+// 这里换成 plainLanguage.ts 里同一码的人话（不另写第二份文案），并把码本身带上，方便报给管理员。
+// 集成层线（切片 9）以后给自己的路由加固定码时，在这张表里加一行即可。
+export const INTEGRATION_VALUES_FREE_ROUTE_FAILURE_CODES: readonly string[] = Object.freeze([
+  'STOCK_PREPARATION_ROUTE_FAILED',
+  'STOCK_PREPARATION_PROJECT_ROUTE_FAILED',
+])
+
+/** 固定 500 码的人话（含码）；不是这几个码时返回 null，调用方照旧用服务端 message。 */
+export function integrationValuesFreeRouteFailureMessage(code: string | null | undefined): string | null {
+  if (typeof code !== 'string' || !INTEGRATION_VALUES_FREE_ROUTE_FAILURE_CODES.includes(code)) return null
+  const entry = Object.prototype.hasOwnProperty.call(STOCK_PREP_ERROR_PLAIN, code) ? STOCK_PREP_ERROR_PLAIN[code] : null
+  if (!entry) return null
+  return `${entry.zh}${entry.zhNext ?? ''}（${code}）`
+}
+
 export async function parseIntegrationResponse<T>(response: Response): Promise<T> {
   let payload: IntegrationApiEnvelope<T> | null = null
   try {
@@ -721,10 +742,11 @@ export async function parseIntegrationResponse<T>(response: Response): Promise<T
     payload = null
   }
   if (!response.ok || payload?.ok === false) {
-    const message = payload?.error?.message || `${response.status} ${response.statusText}`.trim()
+    const code = integrationEnvelopeErrorCode(payload)
+    const message = integrationValuesFreeRouteFailureMessage(code)
+      ?? (payload?.error?.message || `${response.status} ${response.statusText}`.trim())
     const rawDetails = payload?.error?.details
     const error = new Error(message || 'Integration API request failed') as IntegrationApiError
-    const code = integrationEnvelopeErrorCode(payload)
     if (code) error.code = code
     error.status = response.status
     if (rawDetails && typeof rawDetails === 'object' && !Array.isArray(rawDetails)) error.details = rawDetails

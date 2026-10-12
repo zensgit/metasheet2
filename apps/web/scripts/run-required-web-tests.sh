@@ -936,6 +936,14 @@ npx vitest run approvalNavTodoBadge approvalNavDelegationEntry approvalBatchTran
 # / `StockPreparationProjectQuery` diverge right after `StockPreparationProject`), it is not a substring
 # of any token, and it matches exactly one file on disk.
 #
+# 备料 values-free 500 (integration-layer audit, 2026-10-10): ONE token added, `StockPreparationRouteFailedPlain` —
+# the NEW spec (apps/web/tests/StockPreparationRouteFailedPlain.spec.ts) pinning that the fixed
+# STOCK_PREPARATION_ROUTE_FAILED 500 every stock-prep / table-action route now answers resolves to its own
+# plain-language entry (never the generic one) and that the admin workbench never shows its fixed English
+# sentence. Substring collision checked in BOTH directions: no existing token is a substring of
+# `StockPreparationRouteFailedPlain` (its neighbour `StockPreparationRail` diverges right after
+# `StockPreparationR`), it is not a substring of any token, and it matches exactly one file on disk.
+#
 # 一个项目一张备料表 S2 (ADR adr-stock-prep-project-sheets-20261008, register R-36, 2026-10-09): ONE
 # token added, `StockPreparationProjectTarget` — the NEW spec (apps/web/tests/
 # StockPreparationProjectTarget.spec.ts) for projectTarget.ts (the three S1 routes' client and the
@@ -1599,9 +1607,12 @@ exec npx vitest run \
   asyncStateBlock \
   attendance-approval-option-hint \
   attendance-approval-option-wiring \
+  attendance-record-timeline \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
+  attendance-server-clock-view.spec.ts \
+  attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
   attendanceCapabilityUnavailable \
   attendanceEmployeeLeaveRequestCard \
@@ -1611,8 +1622,10 @@ exec npx vitest run \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
   attendanceOverviewRequestReveal \
+  attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
   AttendanceScheduledFeatureStatus \
+  attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
   automation-action-summary \
   automation-condition-legacy-person-picker \
@@ -1932,6 +1945,7 @@ exec npx vitest run \
   StockPreparationProjectTarget \
   StockPreparationProjectWorkspaceView \
   StockPreparationRail \
+  StockPreparationRouteFailedPlain \
   StockPreparationScenarioBAcceptance \
   StockPreparationSnapshotDiffView \
   StockPreparationSourceBinding \
@@ -1943,16 +1957,26 @@ exec npx vitest run \
   StockPreparationWorkspace \
   stockPrepPermissionMatrix \
   tasks-api-m3.spec.ts \
+  tasks-api-m4.spec.ts \
   tasks-api.spec.ts \
+  tasks-badge-m4.spec.ts \
   tasks-badge.spec.ts \
   tasks-context.spec.ts \
+  tasks-counts-realtime.spec.ts \
   tasks-detail-m3.spec.ts \
+  tasks-detail-m4.spec.ts \
   tasks-detail-view.spec.ts \
+  tasks-groups.spec.ts \
+  tasks-labels.spec.ts \
+  tasks-list-detail.spec.ts \
+  tasks-list-members.spec.ts \
   tasks-list-view.spec.ts \
+  tasks-lists-sidebar.spec.ts \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
   tasks-routes.spec.ts \
+  tasks-settings-view.spec.ts \
   tasks-view-transitions.spec.ts \
   tasks-view.spec.ts \
   templateArchiveConfirm \

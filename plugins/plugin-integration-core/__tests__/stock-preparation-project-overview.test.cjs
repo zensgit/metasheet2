@@ -769,6 +769,7 @@ test('O-10 the projection end to end: one row per registry row, deep link, postu
     h.db.calls.length = 0
     const again = await refresh(h, FLOOR)
     assert.deepEqual([again.body.data.rowsCreated, again.body.data.rowsUpdated, again.body.data.rowsUnchanged], [0, 0, 2])
+    assert.deepEqual([again.body.data.projectCount, again.body.data.countedCount, again.body.data.unreadableCount, again.body.data.boundedCount], [2, 2, 0, 0], 'no drain: the full pass is counted exactly once')
     assert.ok(!h.records.calls.some((c) => c[0] === 'createRecord' || c[0] === 'patchRecord'), 'R7: nothing written when nothing changed')
     assert.ok(!h.db.calls.some((c) => c.startsWith('updateRow')), 'R7: the registry is not re-stamped either')
     assert.equal(registryRow(h).counts_at, countsAtBefore)
@@ -776,6 +777,8 @@ test('O-10 the projection end to end: one row per registry row, deep link, postu
     // A changed count re-stamps and patches exactly that row, with a new 「截至」.
     seedProjectRows(h, PROJECT, { total: 1, active: 1 })
     passCooldown()
+    // The cooldown's fake Date.now() does not advance new Date(), used for the measurement stamp.
+    await new Promise((resolve) => setTimeout(resolve, 2))
     const changed = await refresh(h, FLOOR)
     assert.deepEqual([changed.body.data.rowsUpdated, changed.body.data.rowsUnchanged], [1, 1])
     const aAfter = overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT)
@@ -1280,6 +1283,9 @@ test('O-20 (F4) a refresh in flight + events: in-process events take NO connecti
     const archived = await archive(h, PULLER, PROJECT)
     assert.equal(archived.statusCode, 200, JSON.stringify(archived.body))
     assert.equal(pool.opened, 1, 'the in-process event opened no overview-lock transaction')
+    const deferred = await overview.updateProjectOverviewRow({ provisioning: h.provisioning, recordsApi: h.records, store: h.projectTargetStore, tenantId: TENANT, projectId: STAGING, projectNo: PROJECT_B })
+    assert.equal(deferred.outcome, 'deferred', 'a second project with no changed projection is also drained once')
+    assert.equal(pool.opened, 1, 'the second deferred event opened no overview-lock transaction')
 
     // ANOTHER PROCESS: a second registry store over the same database (its own in-process state), five events.
     // Each answers WITHOUT waiting for the refresh — if any blocked on the lock this would time out.
@@ -1297,6 +1303,8 @@ test('O-20 (F4) a refresh in flight + events: in-process events take NO connecti
     releaseGate()
     const res = await refreshing
     assert.equal(res.statusCode, 200, JSON.stringify(res.body))
+    assert.deepEqual([res.body.data.projectCount, res.body.data.countedCount, res.body.data.unreadableCount, res.body.data.boundedCount, res.body.data.rowsCreated, res.body.data.rowsUpdated, res.body.data.rowsUnchanged], [2, 2, 0, 0, 2, 1, 1], 'the deferred events patch once and keep one row unchanged without recounting or adding registered projects')
+    assert.deepEqual(h.auditAppends.filter((e) => e.action === 'project_overview_refresh').at(-1).detail, { projectCount: 2, countedCount: 2, unreadableCount: 0, boundedCount: 0, rowsCreated: 2, rowsUpdated: 1, rowsUnchanged: 1, rowsRemovedDuplicate: 0, rowsRemovedOrphan: 0, truncated: false, ledgerReady: false })
     const rowOf = (no) => overviewRows(h).filter((row) => logical(row, 'projectNo') === no)
     assert.equal(rowOf(PROJECT).length, 1)
     assert.equal(logical(rowOf(PROJECT)[0], 'status'), 'archived', 'the in-flight refresh did not miss the archive')
@@ -1635,24 +1643,45 @@ test('O-26b (follow-up C) the S3 review\'s case: an event deferred INTO a runnin
     const realCreate = h.overviewPort.createRecord
     let gated = false
     h.overviewPort.createRecord = async (input) => {
+      const created = await realCreate(input)
       if (!gated) { gated = true; signalEntered(); await gate }
-      return realCreate(input)
+      return created
     }
     const refreshing = refresh(h, FLOOR)
     await entered
     // An in-process event while it runs: deferred to the running writer (marked dirty, no write of its own).
     assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200)
+    assert.equal((await archive(h, PULLER, PROJECT_B)).statusCode, 200)
+    // These rows appeared after the full pass read the overview. The drain alone removes them, including a
+    // duplicate it deletes BEFORE the following patch fails. Completed effects must still be audited.
+    h.rows.push({ id: 'rec_drain_duplicate', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: PROJECT } })
+    h.rows.push({ id: 'rec_drain_orphan', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: 'PRJ-S3-GONE' } })
+    const deferred = await overview.updateProjectOverviewRow({ provisioning: h.provisioning, recordsApi: h.records, store: h.projectTargetStore, tenantId: TENANT, projectId: STAGING, projectNo: 'PRJ-S3-GONE' })
+    assert.equal(deferred.outcome, 'deferred')
     // The drain's re-projection of that project is a PATCH (the full pass created its row) — and it fails.
-    h.overviewPort.patchRecord = async () => { throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' }) }
+    const realPatch = h.overviewPort.patchRecord
+    h.overviewPort.patchRecord = async (input) => {
+      if (logical(h.rows.find((row) => row.id === input.recordId), 'projectNo') === PROJECT) {
+        throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realPatch(input)
+    }
     releaseGate()
     const res = await refreshing
     assert.equal(res.statusCode, 503, `a failed deferred-event write is not a fresh refresh: ${JSON.stringify(res.body)}`)
     assert.equal(res.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
-    assert.equal(res.body.error.details.failedProjectCount, 1)
+    assert.deepEqual({ ...res.body.error.details }, { objectId: OVERVIEW_OBJECT, failedProjectCount: 1, projectCount: 2 })
+    assert.equal(h.records.calls.filter((c) => c[0] === 'overview.patchRecord').length, 1, 'the other deferred project was successfully patched')
+    assert.equal(h.records.calls.filter((c) => c[0] === 'overview.deleteRecord').length, 2, 'the drain completed both deletes despite a later patch failure')
+    const audits = h.auditAppends.filter((e) => e.action === 'project_overview_refresh' && e.mode !== 'sheet_created')
+    assert.deepEqual(audits.map((e) => e.mode), ['incomplete'])
+    assert.deepEqual(audits[0].detail, { projectCount: 2, countedCount: 2, unreadableCount: 0, boundedCount: 0, rowsCreated: 2, rowsUpdated: 1, rowsUnchanged: 0, rowsRemovedDuplicate: 1, rowsRemovedOrphan: 1, truncated: false, ledgerReady: false, failedProjectCount: 1 })
     assert.ok(!h.auditAppends.some((e) => e.action === 'project_overview_refresh' && e.mode === 'refreshed'), 'no success audit')
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.deepEqual([...state.dirty.keys()], [PROJECT], 'the project whose write failed is still dirty')
     assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'status'), 'active', 'its row is stale — which is why it stays dirty')
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT_B), 'status'), 'archived', 'the successful drain write stands')
+    assert.ok(!overviewRows(h).some((row) => ['rec_drain_duplicate', 'rec_drain_orphan'].includes(row.id)), 'both completed drain deletes stand')
   } finally { h.restore() }
 })
 
@@ -1711,14 +1740,27 @@ test('O-27 (follow-up D) more than one page of overview rows: orphans on page on
     for (let i = 0; i < beyond + 1; i += 1) pushRow(`rec_orphan2_${i}`, `PRJ-ORPHAN2-${i}`)
     pushRow('rec_far_a', PROJECT)
     pushRow('rec_far_b', PROJECT_B)
+    // Only the drain measures these projects: one reaches the sheet-count bound, the other is unreadable.
+    const realQuery = h.records.queryRecords
+    const full = Array.from({ length: PULL_TARGET_PAGE_LIMIT }, () => ({ data: { [phys(h.projectObjectId(), 'projectNo')]: PROJECT, [phys(h.projectObjectId(), 'active')]: true } }))
+    let countPages = 0
+    h.records.queryRecords = async (input = {}) => {
+      if (input.sheetId === h.provisioning.sheetIdOf(STAGING, h.projectObjectId(PROJECT))) { countPages += 1; return full }
+      if (input.sheetId === h.provisioning.sheetIdOf(STAGING, h.projectObjectId(PROJECT_B))) throw new Error('project sheet unreadable')
+      return realQuery(input)
+    }
     passCooldown()
     const far = await refresh(h, FLOOR)
     assert.equal(far.statusCode, 200, JSON.stringify(far.body))
     assert.equal(far.body.data.overflow, true)
     assert.equal(far.body.data.rowsCreated, 0, 'no blind create past the read bound')
+    assert.equal(countPages, PULL_TARGET_MAX_PAGES, 'one bounded measurement, not a second full-pass count')
+    assert.deepEqual([far.body.data.projectCount, far.body.data.countedCount, far.body.data.unreadableCount, far.body.data.boundedCount, far.body.data.rowsUpdated, far.body.data.rowsUnchanged, far.body.data.rowsRemovedDuplicate, far.body.data.rowsRemovedOrphan], [2, 1, 1, 1, 2, 0, 0, beyond], 'both registered projects were measured and patched only in the drain')
     const projectRows = overviewRows(h).filter((row) => [PROJECT, PROJECT_B].includes(logical(row, 'projectNo')))
     assert.deepEqual(projectRows.map((row) => row.id).sort(), ['rec_far_a', 'rec_far_b'], 'the rows past the bound were found by number and kept')
     assert.equal(logical(projectRows.find((row) => row.id === 'rec_far_a'), 'status'), 'active', 'and re-projected')
+    assert.equal(logical(projectRows.find((row) => row.id === 'rec_far_a'), 'countsBounded'), true)
+    h.records.queryRecords = realQuery
     // The next refresh sees the rest of the residue.
     passCooldown()
     const rest = await refresh(h, FLOOR)
@@ -1891,15 +1933,68 @@ test('O-29c (fix round 1) a later success in the same run clears an earlier fail
     const refreshing = refresh(h, FLOOR)
     await entered
     assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    const deferred = await overview.updateProjectOverviewRow({ provisioning: h.provisioning, recordsApi: h.records, store: h.projectTargetStore, tenantId: TENANT, projectId: STAGING, projectNo: PROJECT, recount: true })
+    assert.equal(deferred.outcome, 'deferred', 'a recount requested while the first create is in flight is absorbed by this run')
     releaseGate()
     const res = await refreshing
     assert.equal(res.statusCode, 200, `the drain's success cleared the full pass's failure: ${JSON.stringify(res.body)}`)
     assert.equal(res.body.data.fresh, true)
     assert.equal(projectCreates, 2, 'failed once in the full pass, written once by the drain')
+    assert.deepEqual([res.body.data.projectCount, res.body.data.countedCount, res.body.data.unreadableCount, res.body.data.boundedCount, res.body.data.rowsCreated, res.body.data.rowsUpdated, res.body.data.rowsUnchanged], [2, 3, 0, 0, 2, 0, 0], 'only successful creates count; the requested recount is a third measurement, not a third registered project')
+    assert.deepEqual(h.auditAppends.filter((e) => e.action === 'project_overview_refresh').at(-1).detail, { projectCount: 2, countedCount: 3, unreadableCount: 0, boundedCount: 0, rowsCreated: 2, rowsUpdated: 0, rowsUnchanged: 0, rowsRemovedDuplicate: 0, rowsRemovedOrphan: 0, truncated: false, ledgerReady: false })
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.equal(state.dirty.size, 0)
     assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'status'), 'archived')
   } finally { h.restore() }
+})
+
+test('O-29e count read failures are attempts: the same project can be unreadable twice or heal on its deferred recount', async () => {
+  for (const heals of [false, true]) {
+    const h = mount()
+    try {
+      h.seedRegistryRow(PROJECT)
+      seedProjectRows(h, PROJECT, { total: 3, active: 2 })
+      assert.equal((await ensure(h, PULLER)).statusCode, 200)
+      const realQuery = h.records.queryRecords
+      const projectSheetId = h.provisioning.sheetIdOf(STAGING, h.projectObjectId(PROJECT))
+      let measurements = 0
+      h.records.queryRecords = async (input = {}) => {
+        if (input.sheetId === projectSheetId) {
+          measurements += 1
+          if (!heals || measurements === 1) throw new Error('synthetic count read failure')
+        }
+        return realQuery(input)
+      }
+      let signalEntered
+      const entered = new Promise((resolve) => { signalEntered = resolve })
+      let releaseGate
+      const gate = new Promise((resolve) => { releaseGate = resolve })
+      const realCreate = h.overviewPort.createRecord
+      h.overviewPort.createRecord = async (input) => { signalEntered(); await gate; return realCreate(input) }
+      const refreshing = refresh(h, FLOOR)
+      await entered
+      const deferred = await overview.updateProjectOverviewRow({ provisioning: h.provisioning, recordsApi: h.records, store: h.projectTargetStore, tenantId: TENANT, projectId: STAGING, projectNo: PROJECT, recount: true })
+      assert.equal(deferred.outcome, 'deferred')
+      releaseGate()
+      const res = await refreshing
+      assert.equal(res.statusCode, 200)
+      assert.equal(measurements, 2, 'the full pass and the deferred recount each attempted this same project once')
+      const expectedCounts = { projectCount: 1, countedCount: heals ? 1 : 0, unreadableCount: heals ? 1 : 2, boundedCount: 0, rowsCreated: 1, rowsUpdated: heals ? 1 : 0, rowsUnchanged: heals ? 0 : 1, rowsRemovedDuplicate: 0, rowsRemovedOrphan: 0 }
+      const { sheetId, activeViewId, archivedViewId, countsAt, ...summary } = res.body.data
+      assert.equal(sheetId, overviewSheetId(h))
+      assert.ok(activeViewId && archivedViewId && !Number.isNaN(Date.parse(countsAt)))
+      assert.deepEqual(summary, { fresh: true, truncated: false, overflow: false, ledgerReady: false, ...expectedCounts })
+      const audits = h.auditAppends.filter((e) => e.action === 'project_overview_refresh' && e.mode !== 'sheet_created')
+      assert.deepEqual(audits.map((e) => e.mode), ['refreshed'])
+      assert.deepEqual(audits[0].detail, { ...expectedCounts, truncated: false, ledgerReady: false })
+      const rows = overviewRows(h)
+      assert.equal(rows.length, 1, 'recounting the same project does not create a second overview row')
+      assert.equal(logical(rows[0], 'rowCount'), heals ? 3 : null)
+      assert.equal(logical(rows[0], 'activeRowCount'), heals ? 2 : null)
+      assert.equal(logical(rows[0], 'countsAt'), heals ? registryRow(h).counts_at.toISOString() : null, 'a successful later recount updates the measurement stamp despite an earlier failed attempt')
+      assert.equal(overview.__internals.overviewWriterState(h.projectTargetStore, TENANT).dirty.size, 0)
+    } finally { h.restore() }
+  }
 })
 
 test('O-29d (fix round 1, log-noise control) a refresh that fails otherwise still logs the wrapper\'s generic line — only a failure its handler logged itself is spared it', async () => {

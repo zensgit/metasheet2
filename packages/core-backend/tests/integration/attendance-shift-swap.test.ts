@@ -392,13 +392,13 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
 
       await insertDetail(requestId, `${prefix}:source`)
       const detail = (await pool.query(
-        `SELECT counterparty_status, requester_work_date, counterparty_work_date
+        `SELECT counterparty_status, requester_work_date::text, counterparty_work_date::text
          FROM attendance_shift_swap_requests WHERE request_id = $1`,
         [requestId],
       )).rows[0]
       expect(detail.counterparty_status).toBe('pending')
-      expect(new Date(detail.requester_work_date).toISOString().slice(0, 10)).toBe('2049-06-14')
-      expect(new Date(detail.counterparty_work_date).toISOString().slice(0, 10)).toBe('2049-06-15')
+      expect(detail.requester_work_date).toBe('2049-06-14')
+      expect(detail.counterparty_work_date).toBe('2049-06-15')
 
       await expectPgReject(insertDetail(duplicateRequestId, `${prefix}:source`), '23505')
       await expectPgReject(insertDetail(multiDayRequestId, `${prefix}:multi`, '2049-06-16'), '23514')
@@ -510,7 +510,7 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
       expect(sourceRows.rows.map(row => row.is_active)).toEqual([false, false])
 
       const replacementRows = await pool.query(
-        `SELECT id, user_id, shift_id, slot_index, start_date, end_date, is_active,
+        `SELECT id, user_id, shift_id, slot_index, start_date::text, end_date::text, is_active,
                 publish_status, published_at, published_by, locked_at,
                 producer_type, producer_ref_id, producer_key, producer_run_id
            FROM attendance_shift_assignments
@@ -541,10 +541,10 @@ describeDb('shift-swap envelope and dedicated routes (real DB, route-level)', ()
         producer_ref_id: requestId,
         producer_run_id: requestId,
       })
-      expect(new Date(requesterReplacement.start_date).toISOString().slice(0, 10)).toBe(pair.counterpartyDate)
-      expect(new Date(requesterReplacement.end_date).toISOString().slice(0, 10)).toBe(pair.counterpartyDate)
-      expect(new Date(counterpartyReplacement.start_date).toISOString().slice(0, 10)).toBe(pair.requesterDate)
-      expect(new Date(counterpartyReplacement.end_date).toISOString().slice(0, 10)).toBe(pair.requesterDate)
+      expect(requesterReplacement.start_date).toBe(pair.counterpartyDate)
+      expect(requesterReplacement.end_date).toBe(pair.counterpartyDate)
+      expect(counterpartyReplacement.start_date).toBe(pair.requesterDate)
+      expect(counterpartyReplacement.end_date).toBe(pair.requesterDate)
       expect(requesterReplacement.locked_at).toBeTruthy()
       expect(counterpartyReplacement.locked_at).toBeTruthy()
       expect(requesterReplacement.producer_key).toBe(`shift_swap:${requestId}:${pair.requester}:${pair.counterpartyDate}:0`)

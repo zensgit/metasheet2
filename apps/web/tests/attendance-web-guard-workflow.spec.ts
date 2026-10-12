@@ -142,6 +142,19 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('carries both server clock wholefiles in the classifiers and both test lanes', () => {
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)
+    const targeted = targetedRunCommand(workflow).split(/\s+/)
+    for (const spec of ['attendance-server-clock.spec.ts', 'attendance-server-clock-view.spec.ts']) {
+      const path = `apps/web/tests/${spec}`
+      expect(doc.on.push.paths).toContain(path)
+      expect(workflow.split(path)).toHaveLength(3)
+      expect(required).toContain(spec)
+      expect(targeted).toContain(spec)
+    }
+  })
+
   it('parses the required lane as one exec logical line, not one physical line', () => {
     // Pins the parsing contract the assertion below depends on, and shows why it changed: the
     // physical-line form yields nothing usable against the current file.
@@ -376,6 +389,25 @@ describe('attendance web guard workflow contract', () => {
     ]) {
       expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
       expect(targetedRun).toMatch(new RegExp(`(?:^|\\s)${spec}(?:\\s|$)`))
+    }
+  })
+
+  it('runs today and record-timeline regressions in both attendance and required lanes', () => {
+    const targeted = targetedRunCommand(workflow).trim().split(/\s+/)
+    const required = requiredLaneExecCommand(
+      readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8'),
+    ).split(/\s+/)
+    for (const spec of [
+      'attendanceTodayWorkbench',
+      'attendanceRecordRequestPrefill',
+      'attendance-record-timeline',
+    ]) {
+      expect(workflow.match(new RegExp(`apps/web/tests/${spec}\\.spec\\.ts`, 'g'))).toHaveLength(2)
+      expect(targeted).toContain(spec)
+      expect(required).toContain(spec)
+    }
+    for (const module of ['attendanceTodayWorkbench', 'attendanceRecordRequestPrefill']) {
+      expect(workflow.match(new RegExp(`apps/web/src/views/attendance/${module}\\.ts`, 'g'))).toHaveLength(2)
     }
   })
 

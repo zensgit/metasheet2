@@ -59,7 +59,12 @@
       <div class="attendance__hero-punch" data-testid="attendance-hero-punch">
         <div class="attendance-ew__hero-top">
           <div class="attendance__hero-clock">
-            <span class="attendance__hero-time" data-testid="attendance-hero-time">{{ heroClockTime }}</span>
+            <p class="attendance-ew__hero-timezone" data-attendance-hero-timezone>{{ heroClockTimezone }}</p>
+            <span
+              class="attendance__hero-time"
+              :class="{ 'attendance__hero-time--unavailable': !/^\d{2}:\d{2}:\d{2}$/.test(heroClockTime) }"
+              data-testid="attendance-hero-time"
+            >{{ heroClockTime }}</span>
             <p class="attendance-ew__clock-status" :data-attendance-clock-state="punchEmphasis">
               <span
                 class="attendance-ew__clock-dot"
@@ -567,6 +572,7 @@ const props = defineProps<{
   // Today band
   heroClockTime: string
   heroClockDate: string
+  heroClockTimezone?: string
   punching: boolean
   // Punch button release (fix/attendance-punch-button-release, 2026-08-21):
   // display-only — never used to disable anything. `punching` alone still
@@ -575,6 +581,7 @@ const props = defineProps<{
   // (refreshAll() / loadRequests()) runs in the background.
   refreshingAfterPunch: boolean
   heroTimeline: { checkIn: string | null; checkOut: string | null } | null
+  todayStateHint?: string
   punchOutdoorNoteRequired: boolean
   punchOutdoorNoteDraft: string
   workbenchStatusDescription: string
@@ -715,7 +722,7 @@ const clockedIn = computed(() => isClockedIn(props.heroTimeline))
 
 const clockedOut = computed(() => Boolean(props.heroTimeline?.checkOut))
 
-const punchEmphasis = computed(() => resolveHeroPunchEmphasis(props.heroTimeline))
+const punchEmphasis = computed(() => props.todayStateHint ? 'unknown' : resolveHeroPunchEmphasis(props.heroTimeline))
 
 const todoMark = computed(() => resolveTodoMark(props.attentionItem.key))
 
@@ -732,6 +739,7 @@ const workbenchHoursLabel = computed(() => props.workbenchFocusDateLabel
   : props.tr('Hours', '工时'))
 
 const clockStatusLine = computed(() => {
+  if (props.todayStateHint) return props.todayStateHint
   if (clockedOut.value) return props.tr('Clocked out', '已下班')
   if (!clockedIn.value) return props.tr('Not clocked in yet', '尚未上班')
   const suggestAt = offDutySuggest.value
@@ -744,7 +752,7 @@ const clockStatusLine = computed(() => {
   return props.tr('Clocked in', '已上班')
 })
 
-const workDurationLabel = computed(() => formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
+const workDurationLabel = computed(() => props.todayStateHint ? '—' : formatWorkDurationMinutes(props.workbenchWorkMinutes, props.tr))
 
 const remainingBalanceLabel = computed(() =>
   formatLeaveBalanceMinutes(props.annualSelfBalanceSummary?.remainingMinutes, props.tr),
@@ -834,6 +842,7 @@ const hasRequestBody = computed(() =>
   min-width: 0;
 }
 
+.attendance-ew__hero-timezone,
 .attendance-ew__clock-status {
   display: inline-flex;
   align-items: center;
@@ -1529,6 +1538,12 @@ const hasRequestBody = computed(() =>
   color: var(--ms-text-1);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.03em;
+}
+
+.attendance__hero-time.attendance__hero-time--unavailable {
+  font-size: 20px;
+  line-height: 1.4;
+  letter-spacing: normal;
 }
 
 .attendance__hero-actions {

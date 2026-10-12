@@ -138,9 +138,11 @@
         :tr="tr"
         :hero-clock-time="heroClockTime"
         :hero-clock-date="heroClockDate"
+        :hero-clock-timezone="heroClockTimezone"
         :punching="punching"
         :refreshing-after-punch="refreshingAfterPunch"
         :hero-timeline="heroTodayTimeline"
+        :today-state-hint="todayStateHint"
         :punch-outdoor-note-required="punchOutdoorNoteRequired"
         :punch-outdoor-note-draft="punchOutdoorNoteDraft"
         :workbench-status-description="activeWorkbenchStatusDescription"
@@ -843,7 +845,11 @@
                 name="requestedInAt"
                 v-model="requestForm.requestedInAt"
                 type="datetime-local"
+                :step="recordRequestPrefill ? 0.001 : 60"
               />
+              <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
+                {{ recordRequestPrefill.inTimeZone }}
+              </small>
             </label>
             <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-out">
               <span>{{ isLeaveOrOvertimeRequest ? tr('End', '结束') : tr('Requested out', '申请打卡出') }}</span>
@@ -852,8 +858,15 @@
                 name="requestedOutAt"
                 v-model="requestForm.requestedOutAt"
                 type="datetime-local"
+                :step="recordRequestPrefill ? 0.001 : 60"
               />
+              <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
+                {{ recordRequestPrefill.outTimeZone }}
+              </small>
             </label>
+            <p v-if="recordRequestPrefill" class="attendance__field-hint attendance__field--full" data-record-request-time-policy>
+              {{ tr('Historical timezones are shown above. Unchanged times keep the original instant. Edited repeated times use the earlier occurrence.', '上方显示历史时区。未修改的时间保留原始时刻；修改后遇到重复时间时使用较早的一次。') }}
+            </p>
             <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
               <span>{{ tr('Duration (min)', '时长（分钟）') }}</span>
               <input
@@ -10230,6 +10243,14 @@
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { getAuthPrincipalKey } from '../composables/authPrincipal'
+import {
+  ATTENDANCE_RECORD_REQUEST_PREFILL_KEY,
+  formatRecordRequestTime,
+  resolveRecordRequestTime,
+  readAttendanceRecordRequestPrefill,
+  type AttendanceRecordRequestPrefill,
+} from './attendance/attendanceRecordRequestPrefill'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
 import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
@@ -10323,6 +10344,14 @@ import AttendanceEmployeeOvertimeRequestCard from './attendance/AttendanceEmploy
 import AttendanceEmployeeShiftSwapRequestCard from './attendance/AttendanceEmployeeShiftSwapRequestCard.vue'
 import AttendanceEmployeeQuickActionIconsField from './attendance/AttendanceEmployeeQuickActionIconsField.vue'
 import { resolveMakeupCardPrefill } from './attendance/makeupRequestCardPrefill'
+import {
+  alignDefaultHistoryRangeToRuleToday,
+  buildHeroTodayTimeline,
+  resolveDedicatedRequestWorkDate,
+  selectTodayAttendanceRecord,
+  canReuseAttendanceHistoryForToday,
+  type AttendanceHistoryScope,
+} from './attendance/attendanceTodayWorkbench'
 import {
   DEFAULT_EMPLOYEE_QUICK_ACTION_ICONS,
   resolveEmployeeQuickActionIcons,
@@ -10517,6 +10546,7 @@ import {
   formatAttendanceWeekday,
   normalizeAttendanceTimeZone,
 } from './attendance/attendanceDateTimePresentation'
+import { createAttendanceServerClock, ATTENDANCE_CLOCK_RESAMPLE_MS } from './attendance/attendanceServerClock'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -12079,23 +12109,54 @@ const refreshingAfterPunch = computed(() => refreshingAfterPunchCount.value > 0)
 
 // UI-P0′ hero punch card (attendance-ui-p0-hero-punch design-lock): live
 // clock, display-only — punch handlers/copy/classes above are untouched.
-const heroClockNow = ref(new Date())
+const serverClock = createAttendanceServerClock()
+const heroClockNow = ref<Date | null>(null)
 let heroClockTimer: ReturnType<typeof setInterval> | null = null
+let serverClockTimer: ReturnType<typeof setInterval> | null = null
+function updateHeroClock(): void {
+  heroClockNow.value = attendanceSessionGuard.isCurrent() && !document.hidden
+    ? serverClock.now(performance.now()) : null
+}
+function recoverServerClock(): void {
+  invalidateServerClock()
+  if (showOverview.value && attendancePluginActive.value && !document.hidden
+    && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules()
+}
+function onClockVisibility(): void {
+  if (document.hidden) invalidateServerClock()
+  else recoverServerClock()
+}
+function onClockPageShow(event: PageTransitionEvent): void {
+  if (event.persisted) recoverServerClock()
+}
 onMounted(() => {
-  heroClockTimer = setInterval(() => { heroClockNow.value = new Date() }, 1000)
+  heroClockTimer = setInterval(updateHeroClock, 1000)
+  serverClockTimer = setInterval(() => {
+    if (showOverview.value && attendancePluginActive.value && !document.hidden
+      && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+  }, ATTENDANCE_CLOCK_RESAMPLE_MS)
+  document.addEventListener('visibilitychange', onClockVisibility)
+  window.addEventListener('pageshow', onClockPageShow)
 })
 onUnmounted(() => {
   if (heroClockTimer) clearInterval(heroClockTimer)
+  if (serverClockTimer) clearInterval(serverClockTimer)
+  document.removeEventListener('visibilitychange', onClockVisibility)
+  window.removeEventListener('pageshow', onClockPageShow)
+  invalidateServerClock()
 })
+const heroClockTimezone = computed(() => resolvedAttendanceTimezone.value
+  ? tr(`Attendance timezone: ${resolvedAttendanceTimezone.value}`, `考勤时区：${resolvedAttendanceTimezone.value}`)
+  : tr('Attendance timezone unavailable', '考勤时区不可用'))
 const heroClockTime = computed(() => {
-  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? '--:--:--'
+  return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? tr('Server time unavailable', '服务器时间不可用')
 })
 const heroClockDate = computed(() => {
   const now = heroClockNow.value
   const weekdayLocale = isZh.value ? 'zh-CN' : 'en-US'
   const dateKey = formatAttendanceDateKey(now, resolvedAttendanceTimezone.value)
   const weekday = formatAttendanceWeekday(now, weekdayLocale, resolvedAttendanceTimezone.value)
-  return dateKey && weekday ? `${dateKey} · ${weekday}` : '--'
+  return dateKey && weekday ? `${dateKey} · ${weekday}` : tr('Server date unavailable', '服务器日期不可用')
 })
 // Punch outcome clarity (frontend-only, 2026-07-05 design-lock, G2): inline
 // outdoor-punch note retry state. See
@@ -12375,9 +12436,10 @@ const timezoneOptions = computed(() =>
   buildTimezoneOptions([defaultTimezone, 'UTC', 'Asia/Shanghai', 'America/Los_Angeles', 'America/New_York'])
 )
 function selfServiceRuleTimezone(): string | null {
-  return normalizeAttendanceTimeZone(
-    String(selfRulesData.value?.runtimeRule?.timezone ?? '').trim(),
-  )
+  const instant = serverClock.now(performance.now())
+  const zone = normalizeAttendanceTimeZone(selfRulesData.value?.runtimeRule?.timezone)
+  return instant && !document.hidden && attendanceSessionGuard.isCurrent()
+    && formatAttendanceDateKey(instant, zone) === selfRulesData.value?.resolvedForDate ? zone : null
 }
 const reportRecordTimezoneValues = computed(() => Array.from(new Set(
   records.value
@@ -13424,59 +13486,67 @@ const attendanceCaliberGuideItems = computed<AttendanceCaliberGuideItem[]>(() =>
   }))
 })
 
-const todayWorkDateKey = computed(() => formatAttendanceDateKey(new Date(), resolvedAttendanceTimezone.value) ?? '')
+const todayWorkDateKey = computed(() => formatAttendanceDateKey(heroClockNow.value, resolvedAttendanceTimezone.value) ?? '')
 
-const latestAttendanceRecord = computed<AttendanceRecord | null>(() => {
-  if (records.value.length === 0) return null
-  return [...records.value].sort((left, right) => right.work_date.localeCompare(left.work_date))[0] ?? null
+// Today's self state has its own date/session scope; history filters never own it.
+const todayRecord = ref<AttendanceRecord | null>(null)
+const loadedTodayDate = ref('')
+const todayRecordState = ref<'loading' | 'ready' | 'error'>('loading')
+let todayRecordLoadVersion = 0
+let loadedHistoryScope: AttendanceHistoryScope | null = null
+let historyRecordsLoadVersion = 0
+const todayStateHint = computed(() => {
+  if (attendanceSessionStale.value) return tr('Reload to load today’s status.', '请重新加载页面以获取今日状态。')
+  if (!todayWorkDateKey.value) return tr('Today’s status unavailable: rule timezone unavailable.', '今日状态不可用：规则时区不可用。')
+  if (todayRecordState.value === 'error') return tr('Unable to load today’s status. Refresh to retry.', '无法加载今日状态，请刷新重试。')
+  if (todayRecordState.value !== 'ready' || loadedTodayDate.value !== todayWorkDateKey.value) {
+    return tr('Loading today’s status…', '正在加载今日状态…')
+  }
+  return ''
 })
+const todayAttendanceRecord = computed(() => todayStateHint.value ? null : todayRecord.value)
 
-const activeWorkbenchRecord = computed<AttendanceRecord | null>(() =>
-  records.value.find(record => record.work_date === todayWorkDateKey.value) ?? latestAttendanceRecord.value
-)
-
-// UI-P1 (ui-p1-remainder design-lock D1): two-node punch timeline for the
-// workbench record. When there is no row for today the workbench intentionally
-// falls back to the latest row, so preserve both event polarities from that row
-// instead of collapsing its checkout into an untyped "latest punch" label.
 const heroTodayTimeline = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   if (!record) return null
-  const timeOf = (value: string | null | undefined) => {
-    return formatAttendanceClockTime(
-      value,
-      attendanceRecordTimezone(record),
-    )
-  }
-  return {
-    checkIn: timeOf(record.first_in_at),
-    checkOut: timeOf(record.last_out_at),
-  }
+  return buildHeroTodayTimeline(record, value => formatAttendanceClockTime(
+    value,
+    attendanceRecordTimezone(record),
+  ))
 })
 
-const activeWorkbenchStatusDescription = computed(() =>
-  selfServiceNeedsSetupHint.value
-    ? tr(
+const activeWorkbenchStatusDescription = computed(() => {
+  if (todayStateHint.value) return todayStateHint.value
+  if (selfServiceNeedsSetupHint.value) {
+    return tr(
       'No attendance data is available in this range yet.',
       '当前区间内还没有考勤数据。',
     )
-    : describeAttendanceStatus(activeWorkbenchRecord.value?.status)
-)
+  }
+  const record = todayAttendanceRecord.value
+  if (!record) {
+    return tr(
+      'No attendance record for today yet.',
+      '今天还没有考勤记录。',
+    )
+  }
+  return describeAttendanceStatus(record.status)
+})
 
 const activeWorkbenchHasLateEarly = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   return Boolean(record && ((record.late_minutes ?? 0) > 0 || (record.early_leave_minutes ?? 0) > 0))
 })
 
 const activeWorkbenchLateEarlyLabel = computed(() => {
-  const record = activeWorkbenchRecord.value
+  const record = todayAttendanceRecord.value
   if (!record) return '--'
   return `${record.late_minutes ?? 0} / ${record.early_leave_minutes ?? 0}`
 })
 
 const activeWorkbenchAttentionCount = computed(() => {
   if (anomalies.value.length === 0) return 0
-  const focusDate = activeWorkbenchRecord.value?.work_date
+  const focusDate = todayAttendanceRecord.value?.work_date
   if (!focusDate) return anomalies.value.length
   return anomalies.value.filter(item => item.workDate === focusDate).length
 })
@@ -13502,6 +13572,7 @@ function attendanceSummaryHasSignal(value: AttendanceSummary | null): boolean {
 }
 
 const selfServiceNeedsSetupHint = computed(() => {
+  if (todayStateHint.value || todayAttendanceRecord.value) return false
   if (!summary.value) return false
   if (records.value.length > 0 || requests.value.length > 0 || anomalies.value.length > 0) {
     return false
@@ -13658,14 +13729,15 @@ const attendanceStatusGuideItems = computed<AttendanceSelfServiceStatusGuideItem
 // Employee-overview task-first design-lock (RATIFIED 2026-07-21) §4.2: ONE
 // canonical "Needs attention" item, built from the same facts the retired
 // selfServiceFocusItems/selfServicePrimaryAction computeds used to derive
-// (activeWorkbenchRecord, anomalies, requests, the setup gate) plus the
+// (today's attendance row, anomalies, requests, the setup gate) plus the
 // shared status banner. See attendanceOverviewPriority.ts for the pure,
-// independently-tested first-match table.
-const workbenchRecordStatus = computed<string | null>(() => activeWorkbenchRecord.value?.status ?? null)
+// independently-tested first-match table. Historical rows do not supply
+// today's status (#5986).
+const workbenchRecordStatus = computed<string | null>(() => todayAttendanceRecord.value?.status ?? null)
 const workbenchFocusDateLabel = computed<string | null>(() =>
-  activeWorkbenchRecord.value ? formatDate(activeWorkbenchRecord.value.work_date) : null
+  todayAttendanceRecord.value ? formatDate(todayAttendanceRecord.value.work_date) : null
 )
-const workbenchWorkMinutes = computed(() => activeWorkbenchRecord.value?.work_minutes ?? 0)
+const workbenchWorkMinutes = computed(() => todayAttendanceRecord.value?.work_minutes ?? 0)
 
 const attendanceOverviewAttentionItem = computed(() => resolveAttendanceOverviewAttention(
   {
@@ -15301,6 +15373,7 @@ watch(setupTaskHomeVisible, (open) => {
 }, { immediate: true })
 
 watch(orgId, () => {
+  clearRecordRequestPrefill()
   if (setupSectionActive.value || setupTaskHomeVisible.value) void loadSetupReadiness(normalizedOrgId())
 })
 
@@ -16027,6 +16100,9 @@ const statusActionBusy = computed(() => {
 const today = new Date()
 const fromDate = ref(toDateInput(new Date(Date.now() - 1000 * 60 * 60 * 24 * 30)))
 const toDate = ref(toDateInput(today))
+const initialHistoryFromDate = fromDate.value
+const initialHistoryToDate = toDate.value
+let defaultHistoryRangeAligned = false
 const reportDateRangeInvalid = computed(() => !isAttendanceReportDateRangeValid(fromDate.value, toDate.value))
 
 const recordsPage = ref(1)
@@ -16224,7 +16300,6 @@ const calendarDays = computed<CalendarDay[]>(() => {
   const weekStartsOn = 1
   const startOffset = (firstDay.getDay() - weekStartsOn + 7) % 7
   const totalCells = Math.ceil((lastDay.getDate() + startOffset) / 7) * 7
-  const now = new Date()
 
   return Array.from({ length: totalCells }, (_, index) => {
     const date = new Date(year, month, index - startOffset + 1)
@@ -16259,7 +16334,7 @@ const calendarDays = computed<CalendarDay[]>(() => {
     return {
       key,
       day: date.getDate(),
-      isToday: date.toDateString() === now.toDateString(),
+      isToday: Boolean(todayWorkDateKey.value && key === todayWorkDateKey.value),
       isCurrentMonth: date.getMonth() === month,
       status,
       statusLabel,
@@ -16283,6 +16358,8 @@ const requestForm = reactive({
   minutes: '',
   attachmentUrl: '',
 })
+
+const recordRequestPrefill = ref<AttendanceRecordRequestPrefill | null>(null)
 
 const scheduleDispatchForm = reactive({
   userId: '',
@@ -17418,38 +17495,113 @@ function resolveRecordTimelineRequestDraft(record: AttendanceRecord): {
   requestType: string
   requestedInAt: string
   requestedOutAt: string
-} {
+  inTimeZone: string
+  outTimeZone: string
+} | null {
   const items = recordTimelineItems(record.id)
   const requestType = inferRequestTypeFromRecordTimeline(items)
   const checkIn = items.find(item => item.eventType === 'check_in')
   const checkOut = [...items].reverse().find(item => item.eventType === 'check_out')
+  const recordZone = attendanceRecordTimezone(record)
+  const inTimeZone = normalizeAttendanceTimeZone(checkIn?.timezone) ?? recordZone
+  const outTimeZone = normalizeAttendanceTimeZone(checkOut?.timezone) ?? recordZone
+  if (!inTimeZone || !outTimeZone) return null
   const requestedInAtSource = checkIn?.occurredAt
     ?? (requestType === 'missed_check_in' ? null : record.first_in_at)
     ?? null
   const requestedOutAtSource = checkOut?.occurredAt
     ?? (requestType === 'missed_check_out' ? null : record.last_out_at)
     ?? null
+  if ([requestedInAtSource, requestedOutAtSource].some(value => value && (
+    !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) || Number.isNaN(new Date(value).getTime())
+  ))) return null
   return {
     requestType,
-    requestedInAt: requestedInAtSource ? formatDateTimeLocal(new Date(requestedInAtSource)) : '',
-    requestedOutAt: requestedOutAtSource ? formatDateTimeLocal(new Date(requestedOutAtSource)) : '',
+    requestedInAt: requestedInAtSource ?? '',
+    requestedOutAt: requestedOutAtSource ?? '',
+    inTimeZone,
+    outTimeZone,
   }
 }
 
-async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
-  const draft = resolveRecordTimelineRequestDraft(record)
-  requestForm.workDate = record.work_date
+function clearRecordRequestPrefill(): void {
+  if (!recordRequestPrefill.value) return
+  recordRequestPrefill.value = null
+  requestForm.requestedInAt = ''
+  requestForm.requestedOutAt = ''
+}
+
+async function applyRecordRequestPrefill(draft: AttendanceRecordRequestPrefill): Promise<void> {
+  clearRequestSubmitStatus()
+  requestForm.workDate = draft.workDate
   requestForm.requestType = draft.requestType
-  requestForm.requestedInAt = draft.requestedInAt
-  requestForm.requestedOutAt = draft.requestedOutAt
-  setStatus(
-    appendStatusContext(
-      tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'),
-      requestTimezoneContextHint.value,
-    ),
-  )
+  requestForm.requestedInAt = formatRecordRequestTime(draft.requestedInAt, draft.inTimeZone)
+  requestForm.requestedOutAt = formatRecordRequestTime(draft.requestedOutAt, draft.outTimeZone)
+  recordRequestPrefill.value = draft
+  setStatus(tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'))
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
+
+function consumeRecordRequestPrefill(): void {
+  if (!showOverview.value || !router?.options?.history) return
+  const history = router.options.history
+  const value = history.state[ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]
+  if (value == null) return
+  // Clear before validation/application: reload and back must not replay a draft.
+  history.replace(router.currentRoute.value.fullPath, {
+    ...history.state,
+    [ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]: null,
+  })
+  const draft = readAttendanceRecordRequestPrefill(value, getAuthPrincipalKey(), attendanceSessionGuard.orgId)
+  if (draft && attendanceSessionGuard.isCurrent()) void applyRecordRequestPrefill(draft)
+}
+
+async function prefillRequestFromRecordTimeline(record: AttendanceRecord): Promise<void> {
+  if (!attendanceSessionGuard.isCurrent()) return
+  // Bind to the query that produced this row, never the editable filter draft.
+  const scope = loadedHistoryScope
+  const selfUserId = currentUserId.value
+  if (!scope || scope.orgId !== attendanceSessionGuard.orgId
+    || (scope.userId && scope.userId !== selfUserId)
+    || (record.user_id !== undefined && record.user_id !== selfUserId)
+    || recordTimelineItems(record.id).some(item => item.userId !== selfUserId)) {
+    setStatus(tr(
+      'Only your records in the current session organization can prefill a request.',
+      '仅可使用当前会话组织中您本人的记录预填申请。',
+    ), 'error')
+    return
+  }
+  const resolved = resolveRecordTimelineRequestDraft(record)
+  if (!resolved) {
+    setStatus(tr('Historical punch timezone or timestamp is unavailable.', '历史打卡时区或时间戳不可用。'), 'error')
+    return
+  }
+  const principalKey = getAuthPrincipalKey()
+  const draft = readAttendanceRecordRequestPrefill({
+    ...resolved,
+    workDate: record.work_date,
+    principalKey,
+    orgId: attendanceSessionGuard.orgId,
+  }, principalKey, attendanceSessionGuard.orgId)
+  if (!draft) return
+  if (showReports.value && router) {
+    await router.push({
+      path: '/attendance',
+      query: { section: ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies },
+      state: { [ATTENDANCE_RECORD_REQUEST_PREFILL_KEY]: { ...draft } },
+    })
+    return
+  }
+  await applyRecordRequestPrefill(draft)
+}
+
+watch(
+  () => [requestForm.workDate, requestForm.requestType, attendanceSessionStale.value] as const,
+  ([date, type, stale]) => {
+    const source = recordRequestPrefill.value
+    if (source && (stale || source.workDate !== date || source.requestType !== type)) clearRecordRequestPrefill()
+  },
+)
 
 // MP-5 stale-error gate: a fresh prefill must not keep showing a prior
 // request-submit policy rejection (e.g. a previous date's MAKEUP_PUNCH_* banner),
@@ -17480,6 +17632,7 @@ watch(
 )
 
 async function prefillRequestFromAnomaly(item: AttendanceAnomaly): Promise<void> {
+  clearRecordRequestPrefill()
   clearRequestSubmitStatus()
   if (item.state === 'pending') {
     setStatus(
@@ -17531,7 +17684,7 @@ async function runSelfServiceAction(action: AttendanceSelfServiceActionKey): Pro
 }
 
 async function openDedicatedLeaveRequestCard(): Promise<void> {
-  prepareRequestDraft('leave', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('leave', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
   shiftSwapRequestCardOpen.value = false
@@ -17564,6 +17717,7 @@ async function submitDedicatedLeaveRequestCard(): Promise<void> {
 }
 
 function prepareRequestDraft(requestType: AttendanceRequest['request_type'], workDate: string): void {
+  clearRecordRequestPrefill()
   const typeChanged = requestForm.requestType !== requestType
   const dateChanged = requestForm.workDate !== workDate
   requestForm.workDate = workDate
@@ -17584,7 +17738,7 @@ function prepareRequestDraft(requestType: AttendanceRequest['request_type'], wor
 
 async function openDedicatedMakeupRequestCard(): Promise<void> {
   clearRequestSubmitStatus()
-  const fallbackWorkDate = activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value
+  const fallbackWorkDate = resolveDedicatedRequestWorkDate(todayWorkDateKey.value)
   const draft = resolveMakeupCardPrefill(anomalies.value, fallbackWorkDate)
   prepareRequestDraft(draft.requestType, draft.workDate)
   leaveRequestCardOpen.value = false
@@ -17622,7 +17776,7 @@ async function submitDedicatedMakeupRequestCard(): Promise<void> {
 }
 
 async function openDedicatedOvertimeRequestCard(): Promise<void> {
-  prepareRequestDraft('overtime', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('overtime', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
   shiftSwapRequestCardOpen.value = false
@@ -17655,7 +17809,7 @@ async function submitDedicatedOvertimeRequestCard(): Promise<void> {
 }
 
 async function openDedicatedShiftSwapRequestCard(): Promise<void> {
-  prepareRequestDraft('shift_swap', activeWorkbenchRecord.value?.work_date || todayWorkDateKey.value)
+  prepareRequestDraft('shift_swap', resolveDedicatedRequestWorkDate(todayWorkDateKey.value))
   leaveRequestCardOpen.value = false
   makeupRequestCardOpen.value = false
   overtimeRequestCardOpen.value = false
@@ -22376,15 +22530,21 @@ async function loadSummary() {
 }
 
 async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
+  const scope = loadedHistoryScope
+  if (!scope) return
+  const version = historyRecordsLoadVersion
+  const isCurrentScope = () => scope === loadedHistoryScope && version === historyRecordsLoadVersion
   recordTimelineLoadingId.value = record.id
   try {
     const query = buildQuery({
       from: record.work_date,
       to: record.work_date,
-      userId: normalizedUserId(),
+      orgId: scope.orgId || undefined,
+      userId: scope.userId,
     })
     const response = await apiFetch(`/api/attendance/punch/events?${query.toString()}`)
     const data = await response.json().catch(() => null)
+    if (!isCurrentScope()) return
     if (response.status === 404 || response.status === 405) {
       recordTimelineSupported.value = false
       recordTimelineErrorById.value = {
@@ -22413,6 +22573,7 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
       recordTimelineErrorById.value = next
     }
   } catch (error: any) {
+    if (!isCurrentScope()) return
     recordTimelineErrorById.value = {
       ...recordTimelineErrorById.value,
       [record.id]: readErrorMessage(error, tr('Failed to load raw punch timeline', '加载原始打卡时间线失败')),
@@ -22425,24 +22586,75 @@ async function loadRecordTimeline(record: AttendanceRecord): Promise<void> {
 }
 
 async function loadRecords() {
-  const query = buildQuery({
+  const recordsStartedAt = heroClockNow.value
+  const version = ++historyRecordsLoadVersion
+  loadedHistoryScope = null
+  const scope = {
     from: fromDate.value,
     to: toDate.value,
-    page: String(recordsPage.value),
-    pageSize: String(recordsPageSize),
-    orgId: normalizedOrgId(),
+    page: recordsPage.value,
+    orgId: normalizedOrgId() ?? '',
     userId: normalizedUserId(),
+  }
+  const query = buildQuery({
+    ...scope,
+    page: String(scope.page),
+    pageSize: String(recordsPageSize),
+    orgId: scope.orgId || undefined,
   })
   const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw createApiError(response, data, tr('Failed to load records', '加载记录失败'))
   }
+  if (version !== historyRecordsLoadVersion) return
   resetRecordTimelineState()
   records.value = data.data.items
   recordsTotal.value = data.data.total
+  loadedHistoryScope = { ...scope, total: data.data.total }
   recordReportFields.value = Array.isArray(data.data.reportFields) ? data.data.reportFields : []
   recordReportFieldConfig.value = data.data.reportFieldConfig ?? null
+  if (showOverview.value && !loading.value) {
+    const reuseHistory = !recordsStartedAt || formatAttendanceDateKey(recordsStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    await loadTodayAttendanceRecord(reuseHistory)
+  }
+}
+
+
+async function loadTodayAttendanceRecord(reuseHistory = true): Promise<boolean> {
+  const version = ++todayRecordLoadVersion
+  const date = todayWorkDateKey.value
+  todayRecordState.value = 'loading'
+  todayRecord.value = null
+  loadedTodayDate.value = ''
+  if (!showOverview.value || !date || !attendanceSessionGuard.isCurrent()) return false
+  const isCurrent = () => version === todayRecordLoadVersion
+    && date === todayWorkDateKey.value && attendanceSessionGuard.isCurrent()
+  try {
+    const fromHistory = selectTodayAttendanceRecord(records.value, date)
+    let record = fromHistory
+    if (!reuseHistory || !canReuseAttendanceHistoryForToday(
+      loadedHistoryScope, date, attendanceSessionGuard.orgId, currentUserId.value,
+      records.value.length, Boolean(fromHistory),
+    )) {
+      const query = buildQuery({
+        from: date, to: date, page: '1', pageSize: '1',
+        orgId: attendanceSessionGuard.orgId || undefined,
+      })
+      const response = await apiFetch(`/api/attendance/records?${query.toString()}`)
+      const data = await response.json()
+      if (!response.ok || !data.ok) throw createApiError(response, data, 'TODAY_RECORD_UNAVAILABLE')
+      record = selectTodayAttendanceRecord(data.data.items, date)
+    }
+    if (!isCurrent()) return false
+    todayRecord.value = record
+    loadedTodayDate.value = date
+    todayRecordState.value = 'ready'
+    return true
+  } catch {
+    if (isCurrent()) todayRecordState.value = 'error'
+    return false
+  }
 }
 
 async function toggleRecordTimeline(record: AttendanceRecord): Promise<void> {
@@ -22914,9 +23126,33 @@ function validateReportDateRange(): boolean {
   return false
 }
 
+function consumeDefaultHistoryRangeAlignment(): boolean {
+  if (defaultHistoryRangeAligned) return false
+  const todayKey = todayWorkDateKey.value
+  if (!todayKey) return false
+  defaultHistoryRangeAligned = true
+  const aligned = alignDefaultHistoryRangeToRuleToday({
+    fromDate: fromDate.value,
+    toDate: toDate.value,
+    todayKey,
+    initialFromDate: initialHistoryFromDate,
+    initialToDate: initialHistoryToDate,
+  })
+  if (!aligned.changed) return false
+  fromDate.value = aligned.fromDate
+  toDate.value = aligned.toDate
+  if (lastCalendarEffectiveRange.value) {
+    lastCalendarEffectiveRange.value = { from: aligned.fromDate, to: aligned.toDate }
+  }
+  return true
+}
+
 async function refreshAll(): Promise<boolean> {
   if (!attendancePluginActive.value) return false
+  const refreshStartedAt = heroClockNow.value
   loading.value = true
+  todayRecordLoadVersion += 1
+  todayRecordState.value = 'loading'
   recordsPage.value = 1
   calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
   // PR2 review fix (Codex Blocking #1): commit the userId for the overview
@@ -22943,6 +23179,18 @@ async function refreshAll(): Promise<boolean> {
     const results = await Promise.allSettled(tasks)
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
     if (failed) throw failed.reason
+    if (consumeDefaultHistoryRangeAlignment()) {
+      calendarMonth.value = new Date(`${toDate.value}T00:00:00`)
+      const reloaded = await Promise.allSettled([
+        loadSummary(),
+        loadRecords(),
+        loadAnomalies(),
+        loadRequestReport(),
+        loadHolidays(),
+      ])
+      const reloadFailed = reloaded.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+      if (reloadFailed) throw reloadFailed.reason
+    }
     if (showReports.value) {
       markReportsDatasetLoaded()
     }
@@ -22956,6 +23204,8 @@ async function refreshAll(): Promise<boolean> {
     }
     setStatusFromError(error, tr('Refresh failed', '刷新失败'), 'refresh')
   } finally {
+    const reuseHistory = !refreshStartedAt || formatAttendanceDateKey(refreshStartedAt, resolvedAttendanceTimezone.value) === todayWorkDateKey.value
+    if (showOverview.value && !await loadTodayAttendanceRecord(reuseHistory)) success = false
     loading.value = false
   }
   return success
@@ -23115,9 +23365,11 @@ function validateRequestForm(): string | null {
   const hasIn = Boolean(requestForm.requestedInAt)
   const hasOut = Boolean(requestForm.requestedOutAt)
 
+  const times = recordRequestTimes()
+  if (!times) return tr('Enter a valid time in the historical timezone; skipped daylight-saving times are unavailable.', '请输入历史时区中的有效时间；夏令时跳过的时间不可用。')
   if (hasIn && hasOut) {
-    const inTime = new Date(requestForm.requestedInAt).getTime()
-    const outTime = new Date(requestForm.requestedOutAt).getTime()
+    const inTime = new Date(times.requestedInAt).getTime()
+    const outTime = new Date(times.requestedOutAt).getTime()
     if (Number.isFinite(inTime) && Number.isFinite(outTime) && outTime <= inTime) {
       return tr('End time must be after start time', '结束时间必须晚于开始时间')
     }
@@ -23164,6 +23416,15 @@ function validateRequestForm(): string | null {
   return null
 }
 
+function recordRequestTimes(): { requestedInAt: string; requestedOutAt: string } | null {
+  const source = recordRequestPrefill.value
+  if (!source) return { requestedInAt: requestForm.requestedInAt, requestedOutAt: requestForm.requestedOutAt }
+  if (!attendanceSessionGuard.isCurrent() || !readAttendanceRecordRequestPrefill(source, getAuthPrincipalKey(), attendanceSessionGuard.orgId)) return null
+  const requestedInAt = resolveRecordRequestTime(requestForm.requestedInAt, source.requestedInAt, source.inTimeZone)
+  const requestedOutAt = resolveRecordRequestTime(requestForm.requestedOutAt, source.requestedOutAt, source.outTimeZone)
+  return requestedInAt === null || requestedOutAt === null ? null : { requestedInAt, requestedOutAt }
+}
+
 async function submitRequest() {
   if (requestSubmitting.value) return
   requestSubmitting.value = true
@@ -23196,11 +23457,13 @@ async function submitRequest() {
     }
     const minutesValue = String(requestForm.minutes ?? '').trim()
     const minutes = minutesValue.length > 0 ? Number(minutesValue) : undefined
+    const times = recordRequestTimes()
+    if (!times) return
     const payload = {
       workDate: requestForm.workDate,
       requestType: requestForm.requestType,
-      requestedInAt: requestForm.requestedInAt || undefined,
-      requestedOutAt: requestForm.requestedOutAt || undefined,
+      requestedInAt: times.requestedInAt || undefined,
+      requestedOutAt: times.requestedOutAt || undefined,
       reason: requestForm.reason || undefined,
       leaveTypeId: requestForm.leaveTypeId || undefined,
       overtimeRuleId: requestForm.overtimeRuleId || undefined,
@@ -25217,6 +25480,7 @@ interface AttendanceSelfRulesData {
   userId?: string
   orgId?: string
   resolvedForDate?: string
+  resolvedAt?: string
   assignment?: {
     attendanceGroups?: AttendanceSelfRulesGroupSummary[]
     scheduleGroups?: AttendanceSelfRulesGroupSummary[]
@@ -25254,7 +25518,15 @@ const annualBalanceUserId = ref('')
 const annualBalanceLoading = ref(false)
 const annualBalanceData = ref<AnnualLeaveBalanceData | null>(null)
 
-const selfRulesData = ref<AttendanceSelfRulesData | null>(null)
+const selfRulesSnapshot = ref<AttendanceSelfRulesData | null>(null)
+const lastAlignedRuleZone = ref<string | null>(null)
+let selfRulesRoundVersion = 0
+const selfRulesData = computed(() => {
+  const snapshot = selfRulesSnapshot.value
+  const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+  const date = formatAttendanceDateKey(heroClockNow.value, zone)
+  return snapshot && date && date === snapshot.resolvedForDate ? snapshot : null
+})
 const selfRulesLoading = ref(false)
 const selfRulesError = ref<string | null>(null)
 const selfRulesHasData = computed(() => selfRulesData.value !== null)
@@ -25496,31 +25768,67 @@ async function loadEmployeeQuickActionIcons(): Promise<void> {
   }
 }
 
-async function loadSelfAttendanceRules(): Promise<void> {
-  selfRulesData.value = null
+function invalidateServerClock(): void {
+  selfRulesRoundVersion += 1
+  serverClock.invalidate()
+  heroClockNow.value = null
+  selfRulesSnapshot.value = null
+  selfRulesLoading.value = false
+}
+
+async function loadSelfAttendanceRules(background = false): Promise<void> {
+  const round = ++selfRulesRoundVersion
+  const current = () => round === selfRulesRoundVersion && !document.hidden
+    && attendanceSessionGuard.isCurrent()
+  if (!current()) return
+  const initialDate = formatAttendanceDateKey(serverClock.now(performance.now()), lastAlignedRuleZone.value)
+  if (!background) {
+    selfRulesSnapshot.value = null
+    serverClock.invalidate()
+    heroClockNow.value = null
+  }
   selfRulesLoading.value = true
   selfRulesError.value = null
+  let asOf = initialDate
   try {
-    // SR-1 self-service contract: rules/me REJECTS subject-override headers (including
-    // the globally injected x-tenant-id) instead of ignoring them — subject and org come
-    // from the token alone. Human-tail finding 2026-08-19: real browsers with a tenant
-    // hint got a 400 banner here; synthetic traffic never sends the header.
-    const response = await apiFetch('/api/attendance/rules/me', {
-      // The COMPLETE server forbidden set, via the ONE shared contract mirror — the
-      // required-lane fixture-sync spec pins it against the server source (#5012).
-      omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
-    })
-    const data = await response.json().catch(() => null)
-    if (!response.ok || !data?.ok) {
-      throw createApiError(response, data, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+    for (let leg = 0; leg < 2; leg += 1) {
+      const sample = serverClock.beginSample()
+      const sent = performance.now()
+      const response = await apiFetch(`/api/attendance/rules/me${asOf ? `?asOf=${asOf}` : ''}`, {
+        // Self subject/org come from the token, including on the corrective read.
+        omitHeaders: ATTENDANCE_RULES_ME_OMIT_HEADERS,
+      })
+      const received = performance.now()
+      const data = await response.json().catch(() => null)
+      if (!current()) return
+      if (!response.ok || !data?.ok) {
+        serverClock.fail(sample)
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      const snapshot = data.data as AttendanceSelfRulesData | null
+      if (!serverClock.accept(sample, snapshot?.resolvedAt, sent, received)) {
+        throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
+      }
+      updateHeroClock()
+      const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+      const target = formatAttendanceDateKey(heroClockNow.value, zone)
+      if (target && snapshot?.resolvedForDate === target) {
+        lastAlignedRuleZone.value = zone
+        selfRulesSnapshot.value = snapshot
+        return
+      }
+      selfRulesSnapshot.value = null
+      if (!target || leg === 1) throw new Error('ATTENDANCE_RULES_DATE_UNAVAILABLE')
+      asOf = target
     }
-    selfRulesData.value = data.data && typeof data.data === 'object'
-      ? data.data as AttendanceSelfRulesData
-      : null
-  } catch (error: any) {
-    selfRulesError.value = readErrorMessage(error, tr('Failed to load your attendance rules', '加载您的考勤规则失败'))
+  } catch (error) {
+    if (!current()) return
+    if (!(error instanceof Error) || error.message !== 'ATTENDANCE_RULES_DATE_UNAVAILABLE') serverClock.invalidate()
+    updateHeroClock()
+    selfRulesSnapshot.value = null
+    selfRulesError.value = tr('Server time or today’s attendance rules unavailable. You can still punch.', '服务器时间或今日考勤规则不可用，仍可打卡。')
   } finally {
-    selfRulesLoading.value = false
+    if (current()) selfRulesLoading.value = false
   }
 }
 
@@ -30036,6 +30344,7 @@ onMounted(() => {
       if (!attendanceSessionGuard.isCurrent()) return
       pluginsLoaded.value = true
       if (attendancePluginActive.value) {
+        consumeRecordRequestPrefill()
         refreshAll()
         if (showAdmin.value) {
           loadAdminData()
@@ -30050,6 +30359,29 @@ onMounted(() => {
       pluginsLoaded.value = true
     })
 })
+
+watch(attendanceSessionStale, (stale) => { if (stale) invalidateServerClock() }, { flush: 'sync' })
+const serverCalendarDate = computed(() => formatAttendanceDateKey(heroClockNow.value, lastAlignedRuleZone.value))
+watch(serverCalendarDate, (date, previous) => {
+  if (date && previous && date !== previous && !selfRulesLoading.value
+    && showOverview.value && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
+}, { flush: 'sync' })
+
+let lastAvailableTodayDate = ''
+watch([todayWorkDateKey, attendanceSessionStale, showOverview], ([date]) => {
+  const dayChanged = Boolean(date && lastAvailableTodayDate && date !== lastAvailableTodayDate)
+  if (date) lastAvailableTodayDate = date
+  todayRecordLoadVersion += 1
+  todayRecordState.value = 'loading'
+  todayRecord.value = null
+  loadedTodayDate.value = ''
+  // Refresh already waits for rules and history. Midnight needs a fresh self read,
+  // even when an older history response happened to include the new date range.
+  if (showOverview.value && date && attendanceSessionGuard.isCurrent()
+    && (!loading.value || dayChanged)) {
+    void loadTodayAttendanceRecord(false)
+  }
+}, { flush: 'sync' })
 
 watch(orgId, () => {
   resetAttendanceResultEditCapability()
