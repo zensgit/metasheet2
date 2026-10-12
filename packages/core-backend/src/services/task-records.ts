@@ -3,7 +3,7 @@
  * This module only executes them.
  */
 import { query, transaction } from '../db/pg'
-import { acquireTaskStructureLock, type TaskAdvisoryQuery } from '../db/task-advisory-locks'
+import { withTaskLockOrder, type TaskAdvisoryQuery } from '../db/task-advisory-locks'
 import {
   buildTaskByIdCondition,
   buildTaskPendingCondition,
@@ -88,6 +88,7 @@ export function assigneeIds(rows: readonly { userId: string }[]): string[] {
 
 // The structure lock is transaction-scoped. Reads of the task, the caller's
 // row role, and assignee rows must happen after it is held, on this client.
+// RULED(2026-10-09): [S09] it is taken through the lock-order wrapper (rank 1).
 export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): Promise<T> {
   return transaction(async (client) => {
     const db: Db = {
@@ -98,7 +99,7 @@ export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promis
     }
     // First statement, so a REPEATABLE READ database default cannot freeze the snapshot.
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await acquireTaskStructureLock(asQuery(client), orgId)
+    await withTaskLockOrder(asQuery(client)).structure(orgId)
     return run(db)
   })
 }
@@ -133,7 +134,8 @@ export async function createTask(input: {
     const q = asQuery(client)
     const db: Db = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows as Row[] }) }
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await acquireTaskStructureLock(q, input.orgId)
+    // RULED(2026-10-09): [S09] through the lock-order wrapper, like withOrgStructure.
+    await withTaskLockOrder(q).structure(input.orgId)
     // RULED(2026-10-07): [R17] [N2] every assignee other than
     // the creator must be an active member of the org, the login test (task-org-members.ts); any
     // other id is 422 INACTIVE_ORG_MEMBER and nothing is written. Inside the transaction, after the

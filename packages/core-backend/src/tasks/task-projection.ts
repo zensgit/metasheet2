@@ -22,7 +22,7 @@ import {
   type TaskNumberFieldConfig,
   type TaskOptionFieldConfig,
 } from './task-fields'
-import { isValidPrintableAsciiId, isValidTaskDomainId } from './task-ids'
+import { isValidPrintableAsciiId, isValidTaskDomainId, TASK_ID_PREFIXES } from './task-ids'
 
 export const TASK_PROJECTION_SYSTEM_KIND = 'task_projection' as const
 // RULED(2026-10-09): [S03] provisioning re-checks that the base and sheet rows it finds are owned by
@@ -37,10 +37,9 @@ const RECORD_ID_PREFIX = 'rec_tsk_'
 const BASE_ID_CANDIDATE_RE = /^base_tsk_proj_[a-f0-9]{32}$/
 const SHEET_ID_CANDIDATE_RE = /^sht_tsk_proj_tlst_[A-Za-z0-9]+$/
 const LIST_ID_RE = /^tlst_[A-Za-z0-9]+$/
-// RULED(2026-10-09): [S30] custom field ids carry the `tfld_` prefix.
-// ASSUMPTION(task-e): [D13] written here until PR-4a S0 adds `field: 'tfld'` to `TASK_ID_PREFIXES`;
-// then this should derive from there.
-const CUSTOM_FIELD_KEY_RE = /^tfld_[A-Za-z0-9]+$/
+// RULED(2026-10-09): [S30] custom field ids carry the `tfld_` prefix, derived from
+// `TASK_ID_PREFIXES.field`.
+const CUSTOM_FIELD_KEY_RE = new RegExp(`^${TASK_ID_PREFIXES.field}_[A-Za-z0-9]+$`)
 const SHA256_HEX_RE = /^[a-f0-9]{64}$/
 
 /** Caller-supplied sha256: UTF-8 input, 64 lower-case hex characters out. */

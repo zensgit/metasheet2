@@ -1200,6 +1200,8 @@ describe('tasks M3 comments and deletion real db', () => {
       expect(names.rows.map((r) => r.conname)).toEqual([
         'task_comments_author_printable_chk',
         'task_comments_id_generated_chk',
+        // M5 (design task-m5-pr4a-backend-design-20261010.md §2.7): target of the attachment comment FK.
+        'task_comments_id_task_id_key',
         'task_comments_pkey',
         'task_comments_task_fk',
         'task_comments_tombstone_body_cleared_chk',
