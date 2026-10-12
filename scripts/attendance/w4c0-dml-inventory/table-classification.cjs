@@ -113,6 +113,11 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_leave_types: 'reference',
   attendance_calculation_group_memberships: 'reference',
   attendance_calculation_group_membership_operations: 'reference',
+  // Governed timezone settings are rule inputs, not frozen calculation/result truth.
+  attendance_timezone_policies: 'reference',
+  attendance_employee_timezone_overrides: 'reference',
+  // Append-only configuration audit cannot mint attendance evidence or claim an operation.
+  attendance_timezone_policy_audit: 'operational',
 
   // --- w4_canonical: Stage A durable-storage tables, canonical-boundary-only ---------------
   attendance_record_calculations: 'w4_canonical',

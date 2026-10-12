@@ -107,6 +107,21 @@ test('exact-head HEAD scan: zero new/unclassified/out-of-boundary attendance DML
   )
 })
 
+test('timezone configuration tables have explicit buckets without a prefix-wide exception', () => {
+  assert.equal(TABLE_BUCKETS.attendance_timezone_policies, 'reference')
+  assert.equal(TABLE_BUCKETS.attendance_employee_timezone_overrides, 'reference')
+  assert.equal(TABLE_BUCKETS.attendance_timezone_policy_audit, 'operational')
+  const future = scanFileForDmlSites(
+    'plugins/plugin-attendance/lib/unreviewed-timezone-future.cjs',
+    'async function unreviewedWriter(db) { await db.query("INSERT INTO attendance_timezone_unreviewed (org_id) VALUES ($1)") }',
+  )
+  assert.equal(future.length, 1)
+  assert.deepEqual(
+    classifyCensus(future).unclassifiedTableSites.map(site => site.table),
+    ['attendance_timezone_unreviewed'],
+  )
+})
+
 test('ACP canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
   const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
   const raw = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
