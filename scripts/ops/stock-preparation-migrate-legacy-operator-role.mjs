@@ -112,13 +112,27 @@
  *
  * COUNTED, NOT CHANGED (resolve by hand before `--apply`):
  *   - approval template versions (`approval_template_versions.approval_graph`) and published
- *     definitions (`approval_published_definitions.runtime_graph`) that name the old role (id or
- *     trimmed display name) as a role approver / handler (`assigneeType = 'role'` + `assigneeIds`,
- *     `assigneeSources[kind = static_role].roleIds`, `emptyAssigneeFallback.roleIds`) or a role CC
- *     target (`targetType = 'role'` + `targetIds`): future instances started from them would still
- *     seat or CC the old role, which has nobody in it after the move. Every run prints both counts
- *     (a census line, never a refusal); re-point them in the approval designer.
+ *     definitions (`approval_published_definitions.runtime_graph`) whose graph names the old role
+ *     (id or trimmed display name) in exactly these five places: a role approver / handler
+ *     (`assigneeType = 'role'` + `assigneeIds`, `assigneeSources[kind = static_role].roleIds`), an
+ *     empty-assignee fallback (`emptyAssigneeFallback.roleIds`), a role CC target (`targetType =
+ *     'role'` + `targetIds`), or a 提交人自选 role scope (`assigneeSources[kind = requester_choice]
+ *     .scope` with `type = 'role'` + `roleIds` — checked at submit against `user_roles` by role id,
+ *     ApprovalProductService requester-choice validation, so after the move nobody can be chosen and
+ *     submit answers 422). Future instances started from them would still seat, CC or scope the old
+ *     role, which has nobody in it after the move. Re-point them in the approval designer;
+ *   - approval templates whose visibility scope is role-typed (`approval_templates.visibility_scope`,
+ *     `type = 'role'` + `ids`), matched like the server matches it — a user's role ids AND trimmed
+ *     display names (automation-approval-template-access.ts `loadApprovalTemplateReader`) — so it
+ *     gates 记录送审 and the approval.completed automation creator path: templates visible through the
+ *     old role but not through the role(s) the members end up in (LOSS: moved members stop seeing
+ *     them, 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN), and templates visible through the target role —
+ *     and, with the split, the split role — but not through the old role (GAIN: moved members newly
+ *     see them). Widen or narrow those visibility lists by hand.
+ *   Every run prints these counts as census lines; none of them is a refusal.
  * NOT CHECKED, NOT CHANGED:
+ *   - the `requester.role` ROUTING predicate of approval graphs (conditions on the requester's
+ *     `approval_usable` roles) and any graph shape other than the five above are not read;
  *   - pending `user_invites` rows naming the old role are not re-pointed (the membership itself is a
  *     `user_roles` row written when the user is created, and moves like any other). They block only
  *     `--delete-empty-old-role`;
@@ -347,15 +361,20 @@ const ROLE_KEYS = `role_keys AS (
    WHERE k.role_key <> ''
 )`
 
-// Whether the graph in `column` names `k.role_key` as a ROLE target, in each shape the approval graph
-// types allow (types/approval-product.ts): an approval node's legacy `assigneeType = 'role'` +
-// `assigneeIds`; an approval / handler node's `assigneeSources[kind = static_role].roleIds`; an
-// approval node's `emptyAssigneeFallback.roleIds`; a cc node's `targetType = 'role'` + `targetIds`.
+// Whether the graph in `column` names `k.role_key` in one of exactly FIVE role-reference shapes of the
+// approval graph types (types/approval-product.ts): an approval node's legacy `assigneeType = 'role'`
+// + `assigneeIds`; an approval / handler node's `assigneeSources[kind = static_role].roleIds`; an
+// approval node's `emptyAssigneeFallback.roleIds`; a cc node's `targetType = 'role'` + `targetIds`;
+// a 提交人自选 source's `assigneeSources[kind = requester_choice].scope` with `type = 'role'` +
+// `roleIds` (the server checks that scope by role id only; the census also counts a display-name
+// match — over-counting is the safe side of a census). The `requester.role` routing predicate and any
+// other shape are NOT read.
 const GRAPH_NAMES_ROLE = (column) => `(
        jsonb_path_exists(${column}, '$.nodes[*].config ? (@.assigneeType == "role").assigneeIds[*] ? (@ == $k)', jsonb_build_object('k', k.role_key))
     OR jsonb_path_exists(${column}, '$.nodes[*].config.assigneeSources[*] ? (@.kind == "static_role").roleIds[*] ? (@ == $k)', jsonb_build_object('k', k.role_key))
     OR jsonb_path_exists(${column}, '$.nodes[*].config.emptyAssigneeFallback.roleIds[*] ? (@ == $k)', jsonb_build_object('k', k.role_key))
     OR jsonb_path_exists(${column}, '$.nodes[*].config ? (@.targetType == "role").targetIds[*] ? (@ == $k)', jsonb_build_object('k', k.role_key))
+    OR jsonb_path_exists(${column}, '$.nodes[*].config.assigneeSources[*] ? (@.kind == "requester_choice").scope ? (@.type == "role").roleIds[*] ? (@ == $k)', jsonb_build_object('k', k.role_key))
   )`
 
 // Every statement this script can issue. Parameters: $1 is OLD_ROLE_ID and $2, where present, is
@@ -365,7 +384,9 @@ const GRAPH_NAMES_ROLE = (column) => `(
 // The split step (only with --split-extra-codes-to-role) also binds the validated split role id, its
 // display name and the extra-code array, as each statement's comment says, and runs `oldMembers`,
 // `oldSheetGrants`, `unmovedRoleRows` and `activeRoleApprovals` with the split role id as $1 and
-// `sharedMembers` with ($1 OLD_ROLE_ID, $2 split role id). Nothing else is ever bound.
+// `sharedMembers` with ($1 OLD_ROLE_ID, $2 split role id). `approvalTemplatesVisibleThrough` binds
+// four text arrays built from those same role ids and the split role's intended display name.
+// Nothing else is ever bound.
 export const SQL = Object.freeze({
   begin: 'BEGIN',
   readOnly: 'SET TRANSACTION READ ONLY',
@@ -481,6 +502,34 @@ SELECT count(*)::int AS count, count(DISTINCT v.template_id)::int AS templates
 SELECT count(*)::int AS count, count(*) FILTER (WHERE d.is_active)::int AS active
   FROM approval_published_definitions d
  WHERE EXISTS (SELECT 1 FROM role_keys k WHERE ${GRAPH_NAMES_ROLE('d.runtime_graph')})`,
+  // ── template visibility census (read-only): templates whose ROLE-typed visibility list names a key
+  // of the "in" roles — role ids $1 plus their trimmed display names, plus extra names $2 — and no key
+  // of the "out" roles ($3 / $4 likewise). The visibility arm compares each list entry exactly against
+  // a user's trimmed role ids and names (ApprovalProductService visibility condition). Never a refusal.
+  approvalTemplatesVisibleThrough: `WITH keys_in AS (
+  SELECT btrim(k) AS role_key FROM unnest($1::text[]) AS k
+  UNION
+  SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL
+  UNION
+  SELECT btrim(n) FROM unnest($2::text[]) AS n
+), keys_out AS (
+  SELECT btrim(k) AS role_key FROM unnest($3::text[]) AS k
+  UNION
+  SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL
+  UNION
+  SELECT btrim(n) FROM unnest($4::text[]) AS n
+)
+SELECT count(*)::int AS count
+  FROM approval_templates t
+ WHERE t.visibility_scope->>'type' = 'role'
+   AND EXISTS (
+     SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id)
+      WHERE v.id IN (SELECT role_key FROM keys_in WHERE role_key <> '')
+   )
+   AND NOT EXISTS (
+     SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id)
+      WHERE v.id IN (SELECT role_key FROM keys_out WHERE role_key <> '')
+   )`,
   // ── the split step (option ①). $1 is the split role id unless stated.
   lockTimeout: `SET LOCAL lock_timeout = '5s'`,
   lockRoleTables: 'LOCK TABLE user_roles, role_permissions IN SHARE MODE',
@@ -668,6 +717,19 @@ export async function readCensus(client, { lock, split = null }) {
     census.approvalDesigner.activePublishedDefinitions = Number(row.active ?? 0)
   }
   if (split) census.split = await readSplitCensus(client, split, { lock })
+  // Template visibility: before the move a member sees templates through the old role; after it,
+  // through the target and — when the split step will run (decideSplit: both roles exist and the old
+  // role holds a code the target lacks) — the split role. A split role not yet created contributes
+  // the display name it would be created with.
+  census.templateVisibility = { lost: 0, gained: 0 }
+  if (await tableExists(client, 'approval_templates')) {
+    const splitRuns = split !== null && census.oldRoleExists && census.targetRoleExists && census.oldCodesMissingOnTarget.length > 0
+    const afterIds = splitRuns ? [TARGET_ROLE_ID, split.roleId] : [TARGET_ROLE_ID]
+    const afterNames = splitRuns && !census.split.exists ? [split.roleName] : []
+    census.templateVisibility.afterRoles = afterIds
+    census.templateVisibility.lost = await count(client, SQL.approvalTemplatesVisibleThrough, [[OLD_ROLE_ID], [], afterIds, afterNames])
+    census.templateVisibility.gained = await count(client, SQL.approvalTemplatesVisibleThrough, [afterIds, afterNames, [OLD_ROLE_ID], []])
+  }
   return census
 }
 
@@ -967,6 +1029,11 @@ function describeCensus(census, write) {
     + `${designer.templateVersions} (templates: ${designer.templates}); NOT changed by this script`)
   write(`approval designer — published definitions naming ${OLD_ROLE_ID} the same way: ${designer.publishedDefinitions} `
     + `(active: ${designer.activePublishedDefinitions}); NOT changed by this script — re-point them in the approval designer`)
+  const afterRoles = (census.templateVisibility.afterRoles ?? [TARGET_ROLE_ID]).join(' or ')
+  write(`approval template visibility — role-scoped templates visible through ${OLD_ROLE_ID} but not through ${afterRoles} `
+    + `(by role id or display name): ${census.templateVisibility.lost}; moved members would stop seeing them (记录送审); NOT changed by this script`)
+  write(`approval template visibility — role-scoped templates visible through ${afterRoles} but not through ${OLD_ROLE_ID} `
+    + `(by role id or display name): ${census.templateVisibility.gained}; moved members would newly see them; NOT changed by this script`)
 }
 
 /**

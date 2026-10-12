@@ -26,9 +26,14 @@ import { checkTableExists } from './_patterns'
  *      display name (approval-instance-readability.ts `viewerRoles` / `canReadApprovalInstance`), so
  *      the role's members would silently GAIN read access to those instances;
  *   3. such seats or CC records name the OLD name while the role has members — those members would
- *      LOSE read access to them.
+ *      LOSE read access to them;
+ *   4. approval templates whose visibility scope is role-typed (`visibility_scope.type = 'role'`)
+ *      list the new name (members would GAIN the template — 记录送审 and the automation creator path
+ *      match a user's roles by id AND trimmed display name, automation-approval-template-access.ts
+ *      `loadApprovalTemplateReader` → ApprovalProductService visibility condition), or list the old
+ *      name while the role has members (they would LOSE it).
  * Checks 1 and the compare-and-set itself are ONE UPDATE statement — the only decision; a read
- * after it merely words the log line. 2 and 3 are counted just before it in the same migration
+ * after it merely words the log line. 2, 3 and 4 are counted just before it in the same migration
  * transaction.
  *
  * VALUES-FREE LOG: the role id (this file's literal), the direction, counts. Never a member, never a
@@ -74,6 +79,19 @@ function approvalCcRecordsNaming(name: string) {
   `
 }
 
+/** Approval templates whose role-typed visibility scope lists `name` (the visibility arm compares the exact list entry). */
+function approvalTemplatesVisibleTo(name: string) {
+  return sql<{ count: number }>`
+    SELECT count(*)::int AS count
+      FROM approval_templates t
+     WHERE t.visibility_scope->>'type' = 'role'
+       AND EXISTS (
+         SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS visible(id)
+          WHERE visible.id = ${name}
+       )
+  `
+}
+
 export async function renameFrontlineDisplayName(
   db: Kysely<unknown>,
   from: string,
@@ -99,11 +117,13 @@ export async function renameFrontlineDisplayName(
   `.execute(db)).rows[0]?.count ?? 0)
   const seatsFrom = members > 0 ? await countRows(db, 'approval_assignments', approvalSeatsNaming(from)) : 0
   const ccFrom = members > 0 ? await countRows(db, 'approval_records', approvalCcRecordsNaming(from)) : 0
-  if (seatsTo + ccTo > 0 || seatsFrom + ccFrom > 0) {
+  const templatesTo = await countRows(db, 'approval_templates', approvalTemplatesVisibleTo(to))
+  const templatesFrom = members > 0 ? await countRows(db, 'approval_templates', approvalTemplatesVisibleTo(from)) : 0
+  if (seatsTo + ccTo + templatesTo > 0 || seatsFrom + ccFrom + templatesFrom > 0) {
     log(
-      `${direction}: role ${STOCK_PREP_FRONTLINE_ROLE_ID} NOT renamed — approval read access matches roles by display name: `
-      + `${seatsTo} role-typed seat(s) and ${ccTo} role-targeted CC record(s) already name the new name (its ${members} member(s) would gain read access); `
-      + `${seatsFrom} seat(s) and ${ccFrom} CC record(s) name the current name while it has members (they would lose it); `
+      `${direction}: role ${STOCK_PREP_FRONTLINE_ROLE_ID} NOT renamed — approval read access and template visibility match roles by display name: `
+      + `${seatsTo} role-typed seat(s), ${ccTo} role-targeted CC record(s) and ${templatesTo} role-scoped template visibility list(s) already name the new name (its ${members} member(s) would gain them); `
+      + `${seatsFrom} seat(s), ${ccFrom} CC record(s) and ${templatesFrom} template visibility list(s) name the current name while it has members (they would lose them); `
       + 'left as found — rename it by hand in 角色管理 once the site has decided',
     )
     return 'approval-keys'

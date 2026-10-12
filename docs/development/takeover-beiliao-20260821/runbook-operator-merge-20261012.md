@@ -8,13 +8,23 @@
 - 内置角色 `stock-prep_frontline` 的显示名随 R65 迁移 `zzzz20261012090000` 从「一线填写」改为「操作人员」，**角色 id 不变**。
 - 旧一线角色 `stock-prep-operator` 的成员和以它为主体的表级授权行，用脚本 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 搬到 `stock-prep_frontline`。
 - 旧角色上手工加的平台码（预计 `approvals:read`、`approvals:write`、`multitable:submit-approval`，以库里实际为准）**不进内置角色**；脚本的 `--split-extra-codes-to-role` 把它们放到单独的平台角色（推荐 id `approvals_operator`，默认显示名「审批与提交」），授给同一批成员（ADR §8 第 3 步方案 ①）。合并前后每个成员的有效权限不变。
-- 脚本**不改**审批模板；它只打印有多少模板版本 / 已发布定义按 id 或显示名把旧角色写成审批人、办理人、兜底审批人或抄送对象。
+- 脚本**不改**审批模板；它只打印计数：有多少模板版本 / 已发布定义按 id 或显示名把旧角色写成审批人、办理人、兜底审批人、抄送对象或「提交人自选」的角色范围；有多少模板的「可见范围」是角色范围、搬迁后成员会看不到（失）或新看到（得）。这几类之外的引用（例如审批图里按发起人 `approval_usable` 角色走的 `requester.role` 条件分支）脚本**不清点**。
+
+## 0.5 取得脚本（安装包里没有它）
+
+R65 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs`（打包脚本 `scripts/ops/multitable-onprem-package-build.sh` 的必含文件清单里没有它）。上机前：
+
+1. 从 R65 对应提交（或合入本手册所在 PR 修复轮之后的提交）取出这一个文件，例如在开发机上 `git show <提交>:scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs > stock-preparation-migrate-legacy-operator-role.mjs`；
+2. 拷到服务器上**任意目录**（不必放进安装根目录）；
+3. 之后各步的命令都用这个拷贝的路径，并带上 `--root <安装根目录>`。`--root` 只做两件事：从 `<安装根目录>/packages/core-backend` 加载 `pg`；`DATABASE_URL` 没设时从 `<安装根目录>/docker/app.env` 读取（不打印）。脚本本身只依赖 Node 内置模块和这个 `pg`。
+
+下文命令里的 `node scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 一律换成 `node <拷贝路径>`。
 
 ## 1. R65 升级之后：只读预检
 
 1. 看升级日志里两条迁移行：
    - `zzzz20261010124500_seed_stock_prep_role_templates`（R64 已跑，本次不再出现属正常）；
-   - `zzzz20261012090000_rename_stock_prep_frontline_display_name`：应为 `up: role stock-prep_frontline display name updated (1 row)`。如果是 `NOT renamed …` 或 `does not carry the expected display name; left as found`，记下原因（计数），合并照常可做，改名由现场在「角色管理」里手工处理（先确认日志里说的审批席位 / 抄送 / 同名角色）。
+   - `zzzz20261012090000_rename_stock_prep_frontline_display_name`：应为 `up: role stock-prep_frontline display name updated (1 row)`。如果是 `NOT renamed …` 或 `does not carry the expected display name; left as found`，记下原因（计数），合并照常可做，改名由现场在「角色管理」里手工处理（先确认日志里说的审批席位 / 抄送 / 角色范围的模板可见范围 / 同名角色）。
 2. 在「角色管理」里确认 `stock-prep_frontline` 存在、只持有 `stock-prep:read` + `stock-prep:operate`，且**还没有**写进 G1 角色清单（`MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS`）——G1 一旦给它写了表级授权，脚本的「凭空多得」检查会拒绝。
 3. 确认没有人正在编辑角色、任命成员或改审批模板；约好维护窗口。
 
@@ -31,7 +41,10 @@ node scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs --root <安�
 - `dry run: --apply first does the split: create role approvals_operator with N code(s) …, add M member(s) …, remove those N code(s) …`；
 - `dry run: --apply would move M membership(s) and K table grant(s)`；
 - 审批席位 / 抄送、待接受邀请、`gains — …` 各行；
-- 两行 `approval designer — …`：模板版本数与已发布定义数（第 5 步要用）。
+- 两行 `approval designer — …`：模板版本数与已发布定义数（第 5 步要用）。现在也数「提交人自选」节点里角色范围指名旧角色的情形——服务端按角色 id 校验这种范围，搬迁后旧角色没人，提交会被 422 拒绝；
+- 两行 `approval template visibility — …`（只计数，不拒绝，脚本不改）：
+  - `… visible through stock-prep-operator but not through stock-prep_frontline[ or approvals_operator] …: N; moved members would stop seeing them (记录送审)`：可见范围按角色 id 或显示名只指名了旧角色的模板。N 大于 0 时，**搬迁前**在审批模板的「可见范围」里把 `stock-prep_frontline`（或 `approvals_operator`）加进去，否则搬完后这些成员对这些模板发起记录送审会被拒绝（403）；
+  - `… visible through stock-prep_frontline[ or approvals_operator] but not through stock-prep-operator …: N; moved members would newly see them`：可见范围指名了内置角色或拆出角色（按 id 或显示名，含「操作人员」「审批与提交」）的模板，搬迁后原旧角色成员会新看到。N 大于 0 时由 owner 判断是否可接受；不可接受就先收窄这些模板的可见范围再执行。
 
 出现 `--apply would refuse: …` 就**停**，按提示处理后重跑 dry-run。常见的：
 - `split: N of the extra code(s) are admin-level …`：旧角色上有管理级码，由平台管理员手工处理，不自动化；
@@ -63,5 +76,5 @@ node scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs --root <安�
 1. 「角色管理」：`stock-prep_frontline` 显示为「操作人员」，成员是原两个角色成员的并集；`approvals_operator`（「审批与提交」）持有拆出的码、成员是原旧角色成员；`stock-prep-operator` 已无成员（或已删除）。
 2. 备料工作台「成员与权限」页：内置角色显示「操作人员」。
 3. 用一个原旧角色成员登录：备料页面、确认队列、记录送审与搬迁前一致。
-4. 第 2 步的 `approval designer — …` 计数大于 0 时：在审批设计器里把这些模板的审批人 / 抄送对象从旧角色改指向 `stock-prep_frontline`（或 `approvals_operator`，视该节点需要的权限），再重新发布；脚本不改审批模板。
+4. 第 2 步的 `approval designer — …` 计数大于 0 时：在审批设计器里把这些模板的审批人 / 抄送对象 / 「提交人自选」角色范围从旧角色改指向 `stock-prep_frontline`（或 `approvals_operator`，视该节点需要的权限），再重新发布；脚本不改审批模板。第 2 步的 `approval template visibility — …` 计数在搬迁前已处理（见第 2 步）。
 5. 之后再按 ADR §8 第 6 步把 `stock-prep_frontline` 写进 G1 角色清单。

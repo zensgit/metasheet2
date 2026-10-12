@@ -38,6 +38,7 @@ const GRAPH_PATHS_GOLDEN = [
   '$.nodes[*].config.assigneeSources[*] ? (@.kind == "static_role").roleIds[*] ? (@ == $k)',
   '$.nodes[*].config.emptyAssigneeFallback.roleIds[*] ? (@ == $k)',
   '$.nodes[*].config ? (@.targetType == "role").targetIds[*] ? (@ == $k)',
+  '$.nodes[*].config.assigneeSources[*] ? (@.kind == "requester_choice").scope ? (@.type == "role").roleIds[*] ? (@ == $k)',
 ]
 const graphGolden = (column) => `( ${GRAPH_PATHS_GOLDEN.map((p) => `jsonb_path_exists(${column}, '${p}', jsonb_build_object('k', k.role_key))`).join(' OR ')} )`
 const G = {
@@ -70,6 +71,8 @@ const G = {
   // ── approval designer census (owner 2026-10-12) ──
   approvalTemplateVersionsNamingRole: `${ROLE_KEYS_GOLDEN} SELECT count(*)::int AS count, count(DISTINCT v.template_id)::int AS templates FROM approval_template_versions v WHERE EXISTS (SELECT 1 FROM role_keys k WHERE ${graphGolden('v.approval_graph')})`,
   approvalPublishedDefinitionsNamingRole: `${ROLE_KEYS_GOLDEN} SELECT count(*)::int AS count, count(*) FILTER (WHERE d.is_active)::int AS active FROM approval_published_definitions d WHERE EXISTS (SELECT 1 FROM role_keys k WHERE ${graphGolden('d.runtime_graph')})`,
+  // ── template visibility census (fix round 1): role-scoped visibility lists, keys in / keys out ──
+  approvalTemplatesVisibleThrough: "WITH keys_in AS ( SELECT btrim(k) AS role_key FROM unnest($1::text[]) AS k UNION SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n) FROM unnest($2::text[]) AS n ), keys_out AS ( SELECT btrim(k) AS role_key FROM unnest($3::text[]) AS k UNION SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n) FROM unnest($4::text[]) AS n ) SELECT count(*)::int AS count FROM approval_templates t WHERE t.visibility_scope->>'type' = 'role' AND EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_in WHERE role_key <> '') ) AND NOT EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_out WHERE role_key <> '') )",
   // ── the option ① split step ──
   lockTimeout: "SET LOCAL lock_timeout = '5s'",
   lockRoleTables: 'LOCK TABLE user_roles, role_permissions IN SHARE MODE',
@@ -101,7 +104,7 @@ const LOCK_KEYS = new Set(['lockTimeout', 'lockRoleTables'])
 // task), so moving the old role's members gains them nothing; the gains tests widen it.
 function baseState() {
   return {
-    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'approval_records', 'user_invites', 'permissions', 'user_permissions', 'approval_template_versions', 'approval_published_definitions']),
+    tables: new Set(['roles', 'user_roles', 'role_permissions', 'spreadsheet_permissions', ...UNMOVED_TABLES, 'approval_assignments', 'approval_records', 'user_invites', 'permissions', 'user_permissions', 'approval_template_versions', 'approval_published_definitions', 'approval_templates']),
     roles: [
       { id: OLD, name: 'legacy floor' },
       { id: TARGET, name: '一线填写' },
@@ -162,6 +165,14 @@ function baseState() {
     ],
     publishedDefinitions: [
       { is_active: true, runtime_graph: { nodes: [{ key: 'n', type: 'approval', config: { assigneeSources: [{ kind: 'static_user', userIds: [OLD] }] } }] } },
+    ],
+    // Approval templates' visibility scopes (census only). None is a ROLE-typed list naming the old
+    // role, the target or the split role: 'all', a dept / user list carrying the old id, another role.
+    templates: [
+      { visibility_scope: { type: 'all', ids: [] } },
+      { visibility_scope: { type: 'dept', ids: [OLD, TARGET] } },
+      { visibility_scope: { type: 'user', ids: [OLD] } },
+      { visibility_scope: { type: 'role', ids: [OTHER] } },
     ],
   }
 }
@@ -263,6 +274,7 @@ function makeFakeClient(state, { failOn = null, afterWrite = null } = {}) {
       || (Array.isArray(c.assigneeSources) && c.assigneeSources.some((source) => source?.kind === 'static_role' && has(source.roleIds)))
       || has(c.emptyAssigneeFallback?.roleIds)
       || (c.targetType === 'role' && has(c.targetIds))
+      || (Array.isArray(c.assigneeSources) && c.assigneeSources.some((source) => source?.kind === 'requester_choice' && source.scope?.type === 'role' && has(source.scope.roleIds)))
   })
   on(G.approvalTemplateVersionsNamingRole, ([roleId]) => {
     const keys = roleKeys(roleId)
@@ -273,6 +285,20 @@ function makeFakeClient(state, { failOn = null, afterWrite = null } = {}) {
     const keys = roleKeys(roleId)
     const hits = state.publishedDefinitions.filter((d) => graphNamesRole(d.runtime_graph, keys))
     return { rows: [{ count: hits.length, active: hits.filter((d) => d.is_active).length }] }
+  })
+
+  // keys: the given role ids, the trimmed display names of the roles under them, the extra names.
+  const visibilityKeys = (ids, names) => {
+    const keys = new Set([...ids.map((id) => id.trim()), ...names.map((name) => name.trim())])
+    for (const role of state.roles) if (ids.includes(role.id) && role.name != null) keys.add(role.name.trim())
+    return [...keys].filter((k) => k !== '')
+  }
+  on(G.approvalTemplatesVisibleThrough, ([idsIn, namesIn, idsOut, namesOut]) => {
+    const keysIn = visibilityKeys(idsIn, namesIn)
+    const keysOut = visibilityKeys(idsOut, namesOut)
+    return countRows(state.templates.filter((t) => t.visibility_scope?.type === 'role'
+      && (t.visibility_scope.ids ?? []).some((id) => keysIn.includes(id))
+      && !(t.visibility_scope.ids ?? []).some((id) => keysOut.includes(id))).length)
   })
 
   // ── the split step ──
@@ -1148,6 +1174,25 @@ test('split with nothing to split (the old role holds no code the target lacks):
 test('the approval designer census counts template versions / published definitions naming the old role as a ROLE target (id or display name), never refuses, never writes', async () => {
   const state = baseState()
   const graph = (type, config) => ({ nodes: [{ key: 'n', type, config }] })
+  // Template visibility (fix round 1): role-typed lists, matched exactly against role ids and trimmed
+  // display names. Lost = through the old role, not through the role(s) members end up in.
+  const visibilityTemplates = () => [
+    { visibility_scope: { type: 'role', ids: [OLD] } }, // lost
+    { visibility_scope: { type: 'role', ids: ['x', 'legacy floor'] } }, // lost: by display name
+    { visibility_scope: { type: 'role', ids: [' legacy floor'] } }, // neither: the entry is compared exactly
+    { visibility_scope: { type: 'role', ids: [OLD, TARGET] } }, // neither: seen before and after
+    { visibility_scope: { type: 'role', ids: [OLD, SPLIT] } }, // lost without the split; kept with it
+    { visibility_scope: { type: 'role', ids: ['一线填写'] } }, // gained: the target's display name
+    { visibility_scope: { type: 'role', ids: [TARGET] } }, // gained
+    { visibility_scope: { type: 'role', ids: [SPLIT] } }, // gained only with the split
+    { visibility_scope: { type: 'role', ids: ['审批与提交'] } }, // gained only with the split (the name it would be created with)
+  ]
+  state.templates.push(...visibilityTemplates())
+  state.templateVersions.push(
+    { template_id: 'tpl-6', approval_graph: graph('approval', { assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'role', roleIds: [OLD] } }] }) },
+    { template_id: 'tpl-6', approval_graph: graph('approval', { assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: [OLD] } }] }) },
+    { template_id: 'tpl-7', approval_graph: graph('approval', { assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }] }) },
+  )
   state.templateVersions.push(
     { template_id: 'tpl-3', approval_graph: graph('approval', { assigneeType: 'role', assigneeIds: [OLD] }) },
     { template_id: 'tpl-3', approval_graph: graph('approval', { assigneeSources: [{ kind: 'static_role', roleIds: ['legacy floor'] }] }) },
@@ -1165,10 +1210,29 @@ test('the approval designer census counts template versions / published definiti
     if (argv.length > 0) s.tables = new Set(state.tables)
     const { code, out, writes } = await runMain(argv, s)
     assert.equal(code, EXIT_OK, argv.join(' '))
-    assert.ok(out.includes(`approval designer — template versions naming ${OLD} as a role approver / handler / CC target (by role id or display name): 5 (templates: 3); NOT changed by this script`), argv.join(' '))
+    assert.ok(out.includes(`approval designer — template versions naming ${OLD} as a role approver / handler / CC target (by role id or display name): 6 (templates: 4); NOT changed by this script`), argv.join(' '))
     assert.ok(out.includes(`approval designer — published definitions naming ${OLD} the same way: 2 (active: 1); NOT changed by this script — re-point them in the approval designer`), argv.join(' '))
+    assert.ok(out.includes(`approval template visibility — role-scoped templates visible through ${OLD} but not through ${TARGET} (by role id or display name): 3; moved members would stop seeing them (记录送审); NOT changed by this script`), argv.join(' '))
+    assert.ok(out.includes(`approval template visibility — role-scoped templates visible through ${TARGET} but not through ${OLD} (by role id or display name): 2; moved members would newly see them; NOT changed by this script`), argv.join(' '))
     assert.ok(!writes.some((w) => !['moveMembers', 'moveSheetGrants'].includes(w.key)))
     assertValuesFree(out)
   }
   assert.equal(snapshot(state), before, 'the dry run wrote nothing')
+
+  // With the split step the members also end up in the split role: its id and the name it would be
+  // created with count on the "after" side. With nothing to split (no extra code) they do not.
+  const lostLine = (after, n) => `approval template visibility — role-scoped templates visible through ${OLD} but not through ${after} (by role id or display name): ${n}; moved members would stop seeing them (记录送审); NOT changed by this script`
+  const gainedLine = (after, n) => `approval template visibility — role-scoped templates visible through ${after} but not through ${OLD} (by role id or display name): ${n}; moved members would newly see them; NOT changed by this script`
+  const withSplit = splitState()
+  withSplit.templates.push(...visibilityTemplates())
+  const split = await runMain(['--split-extra-codes-to-role', SPLIT], withSplit)
+  assert.equal(split.code, EXIT_OK)
+  assert.ok(split.out.includes(lostLine(`${TARGET} or ${SPLIT}`, 2)), split.out.join('\n'))
+  assert.ok(split.out.includes(gainedLine(`${TARGET} or ${SPLIT}`, 4)), split.out.join('\n'))
+  const nothingToSplit = baseState()
+  nothingToSplit.templates.push(...visibilityTemplates())
+  const idle = await runMain(['--split-extra-codes-to-role', SPLIT], nothingToSplit)
+  assert.equal(idle.code, EXIT_OK)
+  assert.ok(idle.out.includes(lostLine(TARGET, 3)) && idle.out.includes(gainedLine(TARGET, 2)), idle.out.join('\n'))
+  assertValuesFree([...split.out, ...idle.out])
 })

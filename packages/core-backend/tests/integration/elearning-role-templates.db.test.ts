@@ -1088,6 +1088,7 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
         await sql`UPDATE approval_assignments SET assignee_id = assignee_id || ' (opm)' WHERE assignment_type = 'role' AND assignee_id IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
         await sql`UPDATE approval_records SET metadata = jsonb_set(metadata, '{targetId}', to_jsonb((metadata->>'targetId') || ' (opm)')) WHERE action = 'cc' AND metadata->>'targetType' = 'role' AND metadata->>'targetId' IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
         await sql`UPDATE roles SET name = name || ' (opm)' WHERE btrim(name) IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
+        await sql`UPDATE approval_templates SET visibility_scope = '{"type":"all","ids":[]}'::jsonb WHERE visibility_scope->>'type' = 'role' AND visibility_scope->'ids' ?| ARRAY[${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME}]`.execute(trx)
         await sql`INSERT INTO approval_instances (id, status, requester_snapshot) VALUES (${instanceId}, 'pending', ${JSON.stringify({ id: member })}::jsonb)`.execute(trx)
 
         await stockPrepTemplatesUp(trx)
@@ -1108,10 +1109,24 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
           await frontlineRenameDown(trx)
           expect(await nameOf()).toEqual(['OPM 现场手改的名字'])
         })
-        await step('seed clash suffix', async () => {
+        // The case S5a's clash rule produces: the built-in role carries the `（内置）` suffix because
+        // a role the SITE owns (another id) is named exactly 一线填写. Only the built-in id may ever
+        // be renamed — the site's role keeps its name in both directions.
+        const siteRole = `opm-site-${suffix}`
+        const siteName = async () => (await sql<{ name: string }>`SELECT name FROM roles WHERE id = ${siteRole}`.execute(trx)).rows.map((row) => row.name)
+        await step('seed clash suffix, a site role (another id) named exactly 一线填写', async () => {
           await sql`UPDATE roles SET name = '一线填写（内置）' WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await sql`INSERT INTO roles (id, name) VALUES (${siteRole}, '一线填写')`.execute(trx)
           await frontlineRenameUp(trx)
           expect(await nameOf()).toEqual(['一线填写（内置）'])
+          expect(await siteName(), 'a role under another id is never renamed by up()').toEqual(['一线填写'])
+        })
+        await step('down(): built-in renamed by hand, a site role (another id) named exactly 操作人员', async () => {
+          await sql`UPDATE roles SET name = 'OPM 现场手改的名字' WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await sql`INSERT INTO roles (id, name) VALUES (${siteRole}, '操作人员')`.execute(trx)
+          await frontlineRenameDown(trx)
+          expect(await nameOf()).toEqual(['OPM 现场手改的名字'])
+          expect(await siteName(), 'a role under another id is never renamed by down()').toEqual(['操作人员'])
         })
         await step('absent', async () => {
           await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep_frontline'`.execute(trx)
@@ -1139,6 +1154,31 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
         })
         await step('a seat names 一线填写 while the role has a member (they would lose read access); without the member it renames', async () => {
           await sql`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES (${instanceId}, 'role', '一线填写', FALSE)`.execute(trx)
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        // Template visibility (记录送审 / automation creator) also matches a member's roles by trimmed
+        // display name: a role-scoped visibility list naming the new name would be gained, one naming
+        // the old name lost while the role has members. A dept-scoped list carrying the same string is
+        // not a role reference and does not block.
+        const template = async (type: string, ids: string[]) => {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-vis-${randomUUID()}`}, 'OPM visibility template', ${JSON.stringify({ type, ids })}::jsonb)`.execute(trx)
+        }
+        await step('a role-scoped template visibility list already names 操作人员 (members would gain the template)', async () => {
+          await template('dept', ['操作人员'])
+          await frontlineRenameUp(trx)
+          expect(await nameOf(), 'a dept-scoped list is not a role reference').toEqual(['操作人员'])
+          await frontlineRenameDown(trx)
+          await template('role', ['OPM other', '操作人员'])
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a role-scoped template visibility list names 一线填写 while the role has a member (they would lose it); without the member it renames', async () => {
+          await template('role', ['一线填写'])
           await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
           await frontlineRenameUp(trx)
           expect(await nameOf()).toEqual(['一线填写'])
@@ -1391,7 +1431,7 @@ describe('2026-10-12 option ① split step of the legacy floor-role move (real P
     }
   })
 
-  it('the approval designer census counts template versions / published definitions naming the old role as a role approver, handler, fallback or CC target, by id or display name — and nothing else — rolled back', async () => {
+  it('the approval designer census counts template versions / published definitions naming the old role as a role approver, handler, fallback, CC target or 提交人自选 role scope, by id or display name — and nothing else; the template visibility census counts role-scoped lists lost / gained by the move — rolled back', async () => {
     const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
     const rollback = new Error('rollback approval designer census test')
     const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
@@ -1408,7 +1448,45 @@ describe('2026-10-12 option ① split step of the legacy floor-role move (real P
           await script.run({ client, apply: false, manageTransaction: false, write: (line) => lines.push(line) })
           return lines.filter((line) => line.startsWith('approval designer'))
         }
+        const visibility = async (split: null | { roleId: string; roleName: string; roleNameGiven: boolean }) => {
+          const lines: string[] = []
+          await script.run({ client, apply: false, split, manageTransaction: false, write: (line) => lines.push(line) })
+          const visible = lines.filter((line) => line.startsWith('approval template visibility'))
+          return { lost: Number(/: (\d+); moved members would stop/.exec(visible[0] ?? '')?.[1] ?? NaN), gained: Number(/: (\d+); moved members would newly/.exec(visible[1] ?? '')?.[1] ?? NaN), lines: visible }
+        }
+        const splitRequest = { roleId: script.RECOMMENDED_SPLIT_ROLE_ID, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }
         const baseline = await census()
+        const visibilityBaseline = await visibility(null)
+        // the old role holds codes the target lacks, so the split step would run (no member: no refusal)
+        for (const code of OPM_EXTRA_CODES) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        const splitBaseline = await visibility(splitRequest)
+        const targetName = (await sql<{ name: string }>`SELECT btrim(name) AS name FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)).rows[0]!.name
+        const visibilityLists: Array<[string, string[]]> = [
+          ['role', ['stock-prep-operator']], // lost
+          ['role', ['OPM other', 'OPM legacy floor']], // lost: by trimmed display name
+          ['role', [' OPM legacy floor ']], // neither: the list entry is compared exactly
+          ['role', ['stock-prep-operator', 'stock-prep_frontline']], // neither: seen before and after
+          ['role', ['stock-prep-operator', script.RECOMMENDED_SPLIT_ROLE_ID]], // lost without the split, kept with it
+          ['role', [targetName]], // gained: the target's display name
+          ['role', ['stock-prep_frontline']], // gained
+          ['role', [script.RECOMMENDED_SPLIT_ROLE_ID]], // gained only with the split
+          ['role', [script.DEFAULT_SPLIT_ROLE_NAME]], // gained only with the split
+          ['dept', ['stock-prep-operator']], // neither: not a role list
+          ['user', ['stock-prep_frontline']], // neither
+        ]
+        for (const [index, [type, ids]] of visibilityLists.entries()) {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-vis-${index}-${suffix}`}, 'OPM visibility template', ${JSON.stringify({ type, ids })}::jsonb)`.execute(trx)
+        }
+        const visibilityAfter = await visibility(null)
+        expect(visibilityAfter.lost - visibilityBaseline.lost).toBe(3)
+        expect(visibilityAfter.gained - visibilityBaseline.gained).toBe(2)
+        const splitAfter = await visibility(splitRequest)
+        expect(splitAfter.lines[0]).toContain('but not through stock-prep_frontline or approvals_operator')
+        expect(splitAfter.lost - splitBaseline.lost).toBe(2)
+        expect(splitAfter.gained - splitBaseline.gained).toBe(4)
+        for (const line of [...visibilityAfter.lines, ...splitAfter.lines]) expect(line).not.toContain(suffix)
 
         const template = (await sql<{ id: string }>`INSERT INTO approval_templates (key, name) VALUES (${`opm-tpl-${suffix}`}, 'OPM template') RETURNING id`.execute(trx)).rows[0]!.id
         const graphs = [
@@ -1421,6 +1499,8 @@ describe('2026-10-12 option ① split step of the legacy floor-role move (real P
           graph({ assigneeSources: [{ kind: 'static_user', userIds: ['stock-prep-operator'] }] }), // NOT
           graph({ targetType: 'group', targetIds: ['stock-prep-operator'] }, 'cc'), // NOT: a member group
           graph({ assigneeType: 'role', assigneeIds: ['stock-prep_frontline'] }), // NOT: another role
+          graph({ assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'role', roleIds: ['stock-prep-operator'] } }] }), // counted: 提交人自选 role scope
+          graph({ assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: ['stock-prep-operator'] } }] }), // NOT: a member list
         ]
         const versionIds: string[] = []
         for (const [index, approvalGraph] of graphs.entries()) {
@@ -1443,7 +1523,7 @@ describe('2026-10-12 option ① split step of the legacy floor-role move (real P
 
         const after = await census()
         const count = (lines: string[], index: number, re: RegExp) => Number(re.exec(lines[index] ?? '')?.[1] ?? NaN)
-        expect(count(after, 0, /: (\d+) \(templates/) - count(baseline, 0, /: (\d+) \(templates/)).toBe(5)
+        expect(count(after, 0, /: (\d+) \(templates/) - count(baseline, 0, /: (\d+) \(templates/)).toBe(6)
         expect(count(after, 0, /\(templates: (\d+)\)/) - count(baseline, 0, /\(templates: (\d+)\)/)).toBe(1)
         expect(count(after, 1, /the same way: (\d+) /) - count(baseline, 1, /the same way: (\d+) /)).toBe(2)
         expect(count(after, 1, /\(active: (\d+)\)/) - count(baseline, 1, /\(active: (\d+)\)/)).toBe(1)
