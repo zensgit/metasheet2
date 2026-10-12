@@ -16,8 +16,8 @@
  * emits; a payload-carried count would also bypass `fetchPendingCount`'s `badgeScope` reading and
  * the badge's own generation guard.
  *
- * Socket lifecycle: at most one socket per mount. `ensureSocket()` returns the open socket, or the
- * attempt still in flight (`connectionPromise`), before it opens another. Without a token, or
+ * Socket lifecycle: `ensureSocket()` reuses the open socket. The synchronous factory assigns it
+ * before the next call; a failed construction keeps no attempt, so reconnect can retry. Without a token, or
  * after teardown, it returns null and keeps nothing, so a later `reconnect()` that has a token
  * opens the socket. It opens with `auth: { token }` on the default `path: '/socket.io'`,
  * transports `['websocket', 'polling']`, against the API base with a trailing `/api` segment
@@ -91,50 +91,40 @@ export function useTasksCountsRealtime(options: UseTasksCountsRealtimeOptions) {
   const auth = useAuth()
   let socket: Socket | null = null
   let disconnected = false
-  let connectionPromise: Promise<Socket | null> | null = null
 
   function cleanupSocket() {
     socket?.disconnect()
     socket = null
-    connectionPromise = null
   }
 
   async function ensureSocket(): Promise<Socket | null> {
     if (socket) return socket
-    if (connectionPromise) return connectionPromise
     // No token, or torn down: return before an attempt exists, so nothing is kept and the next
     // call that has a token opens the socket.
     const token = auth.getToken()
     if (disconnected || !token) return null
+    // io is a synchronous factory, so there is no in-flight attempt to share here. Avoid
+    // caching a rejected promise if URL resolution or socket construction throws synchronously.
+    const nextSocket = io(resolveTasksCountsRealtimeBaseUrl(), {
+      path: '/socket.io',
+      transports: ['websocket', 'polling'],
+      auth: { token },
+    })
 
-    connectionPromise = (async () => {
-      try {
-        const nextSocket = io(resolveTasksCountsRealtimeBaseUrl(), {
-          path: '/socket.io',
-          transports: ['websocket', 'polling'],
-          auth: { token },
-        })
+    nextSocket.on(TASKS_COUNTS_UPDATED_EVENT, (payload: unknown) => {
+      // A real client delivers nothing after `disconnect()`, but the rule must not depend on
+      // the transport: an event that lands after teardown must not re-read for a badge that is
+      // gone.
+      if (disconnected) return
+      if (isCountsInvalidation(payload)) options.onCountsUpdated()
+    })
 
-        nextSocket.on(TASKS_COUNTS_UPDATED_EVENT, (payload: unknown) => {
-          // A real client delivers nothing after `disconnect()`, but the rule must not depend on
-          // the transport: an event that lands after teardown must not re-read for a badge that is
-          // gone.
-          if (disconnected) return
-          if (isCountsInvalidation(payload)) options.onCountsUpdated()
-        })
-
-        socket = nextSocket
-        return nextSocket
-      } finally {
-        connectionPromise = null
-      }
-    })()
-
-    return connectionPromise
+    socket = nextSocket
+    return nextSocket
   }
 
   onMounted(() => {
-    if (shouldAutoConnectRealtime()) void ensureSocket()
+    if (shouldAutoConnectRealtime()) void ensureSocket().catch(() => null)
   })
 
   onBeforeUnmount(() => {
