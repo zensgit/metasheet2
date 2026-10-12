@@ -35,7 +35,7 @@ import {
   visibilityDraftWithScalarText,
   type FieldVisibilityDraft,
 } from '../src/approvals/templateAuthoring'
-import { CONDITION_VALUE_COPY_EN, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
+import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -197,7 +197,11 @@ const ElInputNumber = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', Number((event.target as HTMLInputElement).value)),
+      // Gate r1 P3-8 stub fidelity: a cleared real el-input-number emits null (not Number('') = 0).
+      onInput: (event: Event) => {
+        const raw = (event.target as HTMLInputElement).value
+        this.$emit('update:modelValue', raw.trim() === '' ? null : Number(raw))
+      },
     })
   },
 })
@@ -6183,6 +6187,10 @@ describe('TemplateAuthoringView', () => {
         { fieldId: 'amount', operator: 'eq', value: '5000' },
         { fieldId: 'reason', operator: 'in', value: 'a' },
         { fieldId: 'amount', operator: 'gt', value: '5000' },
+        // Gate r1 F1: a LIST under a single-value operator (eq never matches, neq always matches).
+        { fieldId: 'kind', operator: 'eq', value: ['opt_trip'] },
+        { fieldId: 'reason', operator: 'neq', value: ['a', 'b'] },
+        { fieldId: 'amount', operator: 'gte', value: [1, 2] },
       ]
       const scope = await mountTyped(rules)
       const issue = (index: number) => inRule(scope, index, 'approval-condition-rule-issue')?.textContent ?? ''
@@ -6198,6 +6206,11 @@ describe('TemplateAuthoringView', () => {
       const eqChoice = Array.from(tagOperator.options).find((option) => option.value === 'eq')
       expect(eqChoice?.disabled).toBe(true)
       expect(eqChoice?.textContent).toContain(CONDITION_VALUE_COPY_EN.notApplicableSuffix.trim())
+      for (const index of [5, 6, 7]) expect(issue(index)).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      // The single-option picker shows the invalid placeholder for the list (never an option picked).
+      const listPicker = inRule(scope, 5, 'approval-condition-rule-option-value')!
+      expect(listPicker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(Array.from(listPicker.options).find((option) => option.value === STALE_OPTION_KEY)?.disabled).toBe(true)
       expect(await saveRules()).toStrictEqual(rules)
     })
 
@@ -6234,6 +6247,31 @@ describe('TemplateAuthoringView', () => {
         expect(await saveRules()).toStrictEqual([
           { fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] },
           { fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] },
+        ])
+      })
+
+      it(`${host}: in → isEmpty → eq/gt keeps the FIRST entry (never a list under a single-value operator)`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+          { fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] },
+          { fieldId: 'amount', operator: 'in', value: [1, 2] },
+          { fieldId: 'amount', operator: 'in', value: [3, 4] },
+        ], canvas)
+        for (const [index, next] of [[0, 'eq'], [1, 'eq'], [2, 'eq'], [3, 'gt']] as const) {
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'isEmpty')
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), next)
+        }
+        expect((inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('a')
+        expect(inRule(scope, 1, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('"opt_trip"')
+        expect((inRule(scope, 2, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('1')
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+        expect(branchHead(scope)).toContain('事由 = 「a」 且 类型 = 「出差」 且 金额 = 1 且 金额 > 3')
+        expect(branchHead(scope)).not.toContain('、')
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'reason', operator: 'eq', value: 'a' },
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+          { fieldId: 'amount', operator: 'eq', value: 1 },
+          { fieldId: 'amount', operator: 'gt', value: 3 },
         ])
       })
 
@@ -6372,6 +6410,26 @@ describe('TemplateAuthoringView', () => {
       expect(inRow(numberRow(), 'approval-field-visibility-values')!.value).toBe('1\n2')
       fields = await saveFields()
       expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+    })
+
+    it('legacy designer: a non-string value on a select dependency shows the invalid placeholder (not the look-alike option); re-picking fixes it', async () => {
+      const LEVEL = { id: 'level', type: 'select', label: '级别', options: [{ label: '一级', value: '1' }, { label: '二级', value: '2' }] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [LEVEL, { ...NOTE, visibilityRule: { fieldId: 'level', operator: 'eq', value: 1 } }])
+      const picker = inNote('approval-field-visibility-option-value')!
+      expect(picker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['value-not-option'], false))
+      await choose(picker, '1')
+      expect(inNote('approval-field-visibility-option-value')!.getAttribute('data-model-value')).toBe('"1"')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'level', operator: 'eq', value: '1' })
+    })
+
+    it('legacy designer: in → isEmpty → eq on a text dependency keeps the first line (never the joined list)', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule: { fieldId: 'reason', operator: 'in', values: ['a', 'b'] } }])
+      await choose(inNote('approval-field-visibility-operator'), 'isEmpty')
+      await choose(inNote('approval-field-visibility-operator'), 'eq')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'reason', operator: 'eq', value: 'a' })
     })
 
     it('legacy designer: a stored multi-select eq rule is marked (operator shown disabled) and saved unchanged; retyping the dependency marks instead of clearing', async () => {
@@ -6594,6 +6652,26 @@ describe('R-43 (B) typed visibility drafts', () => {
     const toEmpty = visibilityDraftWithOperator(eqOption, 'isEmpty')
     expect(toEmpty.valueText).toBe('opt_a')
     expect(buildVisibilityRule(toEmpty)).toStrictEqual({ fieldId: 'kind', operator: 'isEmpty' })
+
+    // Gate r1 P3-1: coming BACK from isEmpty/notEmpty shapes the kept value for the new operator —
+    // `in → isEmpty → eq` keeps the first entry (never the newline-joined list `===` cannot match).
+    const via = (draft: FieldVisibilityDraft, ...ops: FieldVisibilityDraft['operator'][]) =>
+      ops.reduce((acc, op) => visibilityDraftWithOperator(acc, op), draft)
+    const inText: FieldVisibilityDraft = { dependsOnFieldId: 'reason', operator: 'in', valueText: 'a\nb' }
+    expect(buildVisibilityRule(via(inText, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'reason', operator: 'eq', value: 'a' })
+    expect(buildVisibilityRule(via(inText, 'notEmpty', 'neq'))).toStrictEqual({ fieldId: 'reason', operator: 'neq', value: 'a' })
+    expect(buildVisibilityRule(via(inNumbers, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1 })
+    const inOptions: FieldVisibilityDraft = { dependsOnFieldId: 'kind', operator: 'in', valueText: 'opt_a\nopt_b' }
+    expect(buildVisibilityRule(via(inOptions, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'opt_a' })
+    // …while a single value is untouched (a padded text keeps its padding; a number stays a number)…
+    const padded = visibilityDraftWithScalar({ dependsOnFieldId: 'reason', operator: 'neq', valueText: '' }, ' a')
+    expect(buildVisibilityRule(via(padded, 'isEmpty', 'neq'))).toStrictEqual({ fieldId: 'reason', operator: 'neq', value: ' a' })
+    const eqNumber = visibilityDraftWithScalar({ dependsOnFieldId: 'amount', operator: 'eq', valueText: '' }, 5)
+    expect(buildVisibilityRule(via(eqNumber, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 5 })
+    // …and `eq → isEmpty → in` wraps the kept value (a number carrier is no longer dropped).
+    expect(buildVisibilityRule(via(eqNumber, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [5] })
+    expect(buildVisibilityRule(via(eqOption, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'kind', operator: 'in', values: ['opt_a'] })
+    expect(buildVisibilityRule(via(inText, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'reason', operator: 'in', values: ['a', 'b'] })
 
     const text = { type: 'text' as const, options: [] }
     const select = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }] }

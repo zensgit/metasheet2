@@ -697,6 +697,7 @@ import {
   conditionValueKind,
   isCurrentOptionValue,
   isOptionKind,
+  STALE_OPTION_KEY,
   visibilityOperatorsFor,
   visibilityRuleValueIssues,
   type ConditionValueField,
@@ -823,13 +824,20 @@ function visibilityIssueText(field: FieldAuthoringDraft): string {
     isZh.value,
   )
 }
+/**
+ * Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
+ * option '1') never matches `===`, so it shows as the invalid placeholder — never as that option
+ * selected — and re-picking the option is a real change that fixes it.
+ */
+function visibilityOptionScalarStale(field: FieldAuthoringDraft): boolean {
+  const scalar = visibilityDraftScalar(field.visibility)
+  if (scalar === undefined || scalar === null || scalar === '' || (Array.isArray(scalar) && scalar.length === 0)) return false
+  return !isCurrentOptionValue(visibilityDependency(field), scalar)
+}
 function visibilityOptionScalar(field: FieldAuthoringDraft): string {
   const scalar = visibilityDraftScalar(field.visibility)
-  return scalar === undefined || scalar === null ? '' : String(scalar)
-}
-function visibilityOptionScalarStale(field: FieldAuthoringDraft): boolean {
-  const value = visibilityOptionScalar(field)
-  return value !== '' && !isCurrentOptionValue(visibilityDependency(field), value)
+  if (visibilityOptionScalarStale(field)) return typeof scalar === 'string' ? scalar : STALE_OPTION_KEY
+  return typeof scalar === 'string' ? scalar : ''
 }
 /** Only current option values enter the multi-select model (a stale one would render raw). */
 function visibilityOptionList(field: FieldAuthoringDraft): string[] {

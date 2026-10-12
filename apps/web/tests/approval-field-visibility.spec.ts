@@ -154,6 +154,11 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     expect(visibilityRuleValueIssues({ operator: 'eq', value: 'anything' }, text)).toEqual([])
     expect(visibilityRuleValueIssues({ operator: 'eq', value: 'opt_gone' }, null)).toEqual([])
     expect(visibilityRuleValueIssues({ operator: 'notEmpty' }, multi)).toEqual([])
+    // Gate r1 F1: eq/neq compare ONE value — a stored list never (eq) / always (neq) matches.
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: ['a', 'b'] }, text)).toEqual(['list-not-scalar'])
+    expect(visibilityRuleValueIssues({ operator: 'neq', value: [1] }, number)).toEqual(['list-not-scalar'])
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: ['opt_a'] }, single)).toEqual(['list-not-scalar'])
+    expect(visibilityRuleValueIssues({ operator: 'in', values: ['opt_a'] }, single)).toEqual([])
   })
 
   it('parseConditionNumber / parseConditionListText / sameConditionList', () => {
@@ -176,10 +181,13 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
       expect(CJK.test(rendered), key).toBe(false)
       expect(rendered).not.toContain('opt_')
     }
-    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'not-number'] as const) {
+    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number'] as const) {
       expect(CJK.test(conditionValueIssueMessage(issue, true))).toBe(true)
       expect(CJK.test(conditionValueIssueMessage(issue, false))).toBe(false)
     }
     expect(CONDITION_VALUE_COPY_ZH.staleListHint(2)).toContain('2')
+    // Gate r1 P3-4: a multi-select eq never matches but neq ALWAYS matches — the copy says both.
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorNotEffective).toContain('永远成立')
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorNotEffective).toContain('always matches')
   })
 })

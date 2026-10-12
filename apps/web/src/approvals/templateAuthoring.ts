@@ -631,7 +631,9 @@ export function visibilityDraftWithListText(
 /**
  * Operator change. eq/neq ↔ eq/neq keeps the value; scalar → `in` wraps a non-empty value in a
  * one-entry list; `in` → scalar keeps the first entry; → isEmpty/notEmpty keeps the value (ignored
- * by build), exactly as before.
+ * by build). Coming back from isEmpty/notEmpty the kept value is shaped for the NEW operator by
+ * what the draft actually holds, so `in → isEmpty → eq` keeps the first entry instead of saving the
+ * whole list as one newline-joined value (which `===` never matches).
  */
 export function visibilityDraftWithOperator(
   visibility: FieldVisibilityDraft,
@@ -641,6 +643,23 @@ export function visibilityDraftWithOperator(
   const renamed: FieldVisibilityDraft = { ...visibility, operator: next }
   if (Array.isArray(visibility.values)) renamed.values = [...visibility.values]
   const isScalar = (op: FormFieldVisibilityOperator) => op === 'eq' || op === 'neq'
+  const isEmptiness = (op: FormFieldVisibilityOperator) => op === 'isEmpty' || op === 'notEmpty'
+  if (isEmptiness(current) && isScalar(next)) {
+    const holdsList = Array.isArray(visibility.values) ||
+      Array.isArray(visibility.value) ||
+      (visibility.value === undefined && visibility.valueText.includes('\n'))
+    if (!holdsList) return renamed
+    const list = Array.isArray(visibility.value) ? [...visibility.value] : visibilityDraftList(visibility)
+    return visibilityDraftWithScalar(renamed, list.length > 0 ? list[0] : '')
+  }
+  if (isEmptiness(current) && next === 'in') {
+    // A kept scalar carrier (e.g. a number) would otherwise be dropped by the list reader.
+    if (visibility.value === undefined || Array.isArray(visibility.values)) return renamed
+    const scalar = visibility.value
+    const empty = scalar === null || (typeof scalar === 'string' && scalar.trim() === '')
+    if (empty) return visibilityDraftWithList(renamed, [])
+    return visibilityDraftWithList(renamed, Array.isArray(scalar) ? scalar : [typeof scalar === 'string' ? scalar.trim() : scalar])
+  }
   if (isScalar(current) && next === 'in') {
     const scalar = visibilityDraftScalar(visibility)
     const empty = scalar === undefined || scalar === null || (typeof scalar === 'string' && scalar.trim() === '')

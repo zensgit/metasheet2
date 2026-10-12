@@ -628,6 +628,14 @@ describe('R-43 (B) typed branch condition values', () => {
     expect(conditionRuleValueIssues({ operator: 'isEmpty' }, single)).toEqual([])
     expect(conditionRuleValueIssues({ operator: 'eq', value: undefined }, number)).toEqual([])
     expect(conditionRuleValueIssues({ operator: 'eq', value: 'x' }, null)).toEqual([])
+    // Gate r1 F1: a LIST under a single-value operator is marked (alone — no stacked option/number note).
+    for (const operator of ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: [1, 2] }, number)).toEqual(['list-not-scalar'])
+      expect(conditionRuleValueIssues({ operator, value: ['a'] }, text)).toEqual(['list-not-scalar'])
+    }
+    expect(conditionRuleValueIssues({ operator: 'eq', value: ['opt_gone'] }, single)).toEqual(['list-not-scalar'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: [] }, single)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty', value: ['a'] }, text)).toEqual([])
   })
 
   function editsWith(rules: Array<{ fieldId: string; operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'isEmpty'; value: unknown }>): ConditionEdits {

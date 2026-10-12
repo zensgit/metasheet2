@@ -14,8 +14,11 @@ import { CONDITION_RULE_OPERATORS } from './conditionEdit'
 //   - multi select  → visibility `in` values / branch `in` value as an ARRAY of option values;
 //   - number        → a JS number (a numeric STRING never matches `===`);
 //   - `in`          → always an array.
-// The issue helpers below mirror the same evaluators, so an editor can MARK a stored rule that can
-// never take effect. Marking is display-only: never a save/publish blocker, never a rewrite.
+// The issue helpers below mirror the same evaluators, so an editor can MARK a stored rule that cannot
+// work as intended: a value no current option carries, a non-number on a number field, an `in` that
+// holds a single value, a LIST under a single-value operator (eq/neq/gt/gte/lt/lte — eq never
+// matches, neq always matches), or an operator a multi-select cannot use. Marking is display-only:
+// never a save/publish blocker, never a rewrite.
 
 export type ConditionValueKind = 'option-single' | 'option-multi' | 'number' | 'text'
 
@@ -101,7 +104,19 @@ export function isCurrentOptionValue(field: ConditionValueField | null | undefin
   return typeof value === 'string' && (field?.options ?? []).some((option) => option.value === value)
 }
 
-export type ConditionValueIssue = 'operator-not-effective' | 'value-not-option' | 'in-not-list' | 'not-number'
+/**
+ * Picker key for a stored single-option value that is not a STRING (option values always are), so
+ * the picker shows the invalid-value placeholder instead of an option whose text happens to match.
+ * Never saved: the placeholder entry is disabled.
+ */
+export const STALE_OPTION_KEY = '\u0000condition-value-not-an-option'
+
+export type ConditionValueIssue =
+  | 'operator-not-effective'
+  | 'value-not-option'
+  | 'in-not-list'
+  | 'list-not-scalar'
+  | 'not-number'
 
 function isBlankValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
@@ -140,6 +155,8 @@ export function visibilityRuleValueIssues(
   const kind = conditionValueKind(field)
   if (!visibilityOperatorsFor(kind).includes(rule.operator)) return ['operator-not-effective']
   if (rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return []
+  // eq/neq compare one value with `===` / `!==`: a stored LIST never / always matches.
+  if (rule.operator !== 'in' && Array.isArray(rule.value) && rule.value.length > 0) return ['list-not-scalar']
   const values = rule.operator === 'in'
     ? (Array.isArray(rule.values) ? rule.values : [])
     : [rule.value]
@@ -161,6 +178,8 @@ export function conditionRuleValueIssues(
   if (rule.operator === 'isEmpty') return []
   const value = rule.value
   if (isBlankValue(value) || (Array.isArray(value) && value.length === 0)) return []
+  // eq/neq/gt/gte/lt/lte compare ONE value: a stored list never matches (neq: always matches).
+  if (rule.operator !== 'in' && Array.isArray(value)) return ['list-not-scalar']
   const issues: ConditionValueIssue[] = []
   if (rule.operator === 'in' && !Array.isArray(value) && kind !== 'option-multi') {
     issues.push('in-not-list')
@@ -182,6 +201,7 @@ export interface ConditionValueCopy {
   issueOperatorNotEffective: string
   issueValueNotOption: string
   issueInNotList: string
+  issueListNotScalar: string
   issueNotNumber: string
   chooseOption: string
   chooseOptions: string
@@ -199,9 +219,10 @@ export interface ConditionValueCopy {
 
 export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
   issueTitle: '条件已失效：',
-  issueOperatorNotEffective: '多选字段不能使用这个条件类型，此条件永远不会生效，请重新选择条件类型。',
+  issueOperatorNotEffective: '多选字段不能使用这个条件类型（「等于」类永远不成立，「不等于」永远成立），无法按预期生效，请重新选择条件类型。',
   issueValueNotOption: '已保存的值不在当前选项中（选项可能已被删除），此条件不会生效，请重新选择。',
   issueInNotList: '「包含于」需要一组值，当前只保存了单个值，此条件不会生效，请重新填写或选择。',
+  issueListNotScalar: '这个条件类型只能比较单个值，当前保存的是一组值，无法按预期生效，请重新填写或选择。',
   issueNotNumber: '数值字段的比较值不是数字，此条件不会生效，请重新填写。',
   chooseOption: '请选择选项',
   chooseOptions: '请选择一个或多个选项',
@@ -219,9 +240,10 @@ export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
 
 export const CONDITION_VALUE_COPY_EN: ConditionValueCopy = {
   issueTitle: 'Condition not in effect: ',
-  issueOperatorNotEffective: 'This condition type never takes effect on a multi-select field. Choose another condition type.',
+  issueOperatorNotEffective: 'This condition type does not work on a multi-select field ("equals"-type conditions never match, "not equals" always matches). Choose another condition type.',
   issueValueNotOption: 'The saved value is not one of the current options (it may have been deleted), so this condition never takes effect. Choose again.',
   issueInNotList: 'The "in" condition needs a list of values; it holds a single value and never takes effect. Enter or choose the values again.',
+  issueListNotScalar: 'This condition type compares a single value, but a list of values is saved, so it does not work as intended. Enter or choose the value again.',
   issueNotNumber: 'The value for a number field is not a number, so this condition never takes effect. Enter it again.',
   chooseOption: 'Choose an option',
   chooseOptions: 'Choose one or more options',
@@ -250,6 +272,8 @@ export function conditionValueIssueMessage(issue: ConditionValueIssue, isZh: boo
       return copy.issueValueNotOption
     case 'in-not-list':
       return copy.issueInNotList
+    case 'list-not-scalar':
+      return copy.issueListNotScalar
     case 'not-number':
       return copy.issueNotNumber
   }

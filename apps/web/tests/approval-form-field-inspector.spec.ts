@@ -1679,4 +1679,56 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     await nextTick()
     expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
   })
+
+  it('gate r1 P3-2: leftover number text under isEmpty (value box hidden) neither blocks a switch nor overwrites the kept value', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '42')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'abc')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'isEmpty')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-number-value"]')).toBeNull()
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    await nextTick()
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'isEmpty' })
+    expect(visibilityOf(inspector, 1).value).toBe(42) // the kept value is untouched by the hidden box's text
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'eq')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 42 })
+  })
+
+  it('gate r1 P3-6: a non-string value on a select dependency shows the invalid placeholder, not the look-alike option; re-picking fixes it', async () => {
+    const inspector = await mountInspector(
+      [
+        field(1, { type: 'select', optionsText: '一级:1\n二级:2' }),
+        field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: 1 } }),
+      ],
+      { selected: 'local_2' },
+    )
+    const select = inspector.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(issueText(inspector)).toContain(conditionValueIssueMessage('value-not-option', false))
+    await inspector.changeSelect('approval-form-field-inspector-visibility-option-value', '1')
+    expect(issueText(inspector)).toBe('')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: '1' })
+  })
+
+  it('gate r1 F1/P3-1: in → isEmpty → eq keeps the first entry; a stored eq LIST is marked', async () => {
+    const inspector = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: 'a\nb' } })],
+      { selected: 'local_2' },
+    )
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'isEmpty')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'eq')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 'a' })
+    expect(issueText(inspector)).toBe('')
+
+    const listed = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'neq', valueText: '', value: ['a', 'b'] } })],
+      { selected: 'local_2' },
+    )
+    expect(issueText(listed)).toContain(conditionValueIssueMessage('list-not-scalar', false))
+  })
 })

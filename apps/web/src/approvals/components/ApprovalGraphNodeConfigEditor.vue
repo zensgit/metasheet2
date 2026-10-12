@@ -1495,6 +1495,7 @@ import {
   parseConditionListText,
   parseConditionNumber,
   sameConditionList,
+  STALE_OPTION_KEY,
   type ConditionValueField,
   type ConditionValueKind,
 } from '../conditionValueTyping'
@@ -1693,22 +1694,29 @@ function onRuleFieldChange(rule: ConditionRuleEdit, fieldId: string | null | und
   if (!allowed.includes(rule.operator)) rule.operator = allowed[0]!
   ruleListTextBuffers.delete(rule)
 }
+/**
+ * Shape the value for the NEW operator (never by the previous one: `in → isEmpty → eq` must not
+ * leave a list under a single-value operator, which the executor never / always matches).
+ * `in` wraps a scalar in a one-entry list; eq/neq/gt/gte/lt/lte keep a list's first entry;
+ * `isEmpty` keeps the value untouched (ignored there, restored by the next operator).
+ */
 function onRuleOperatorChange(rule: ConditionRuleEdit, operator: ConditionRuleOperator): void {
-  const previous = rule.operator
-  if (operator === 'in' && previous !== 'in' && !isBlankRuleValue(rule.value) && !Array.isArray(rule.value)) {
-    rule.value = [rule.value]
-  } else if (previous === 'in' && operator !== 'in' && operator !== 'isEmpty' && Array.isArray(rule.value)) {
+  if (operator === 'in') {
+    if (!isBlankRuleValue(rule.value) && !Array.isArray(rule.value)) rule.value = [rule.value]
+  } else if (operator !== 'isEmpty' && Array.isArray(rule.value)) {
     rule.value = rule.value.length > 0 ? rule.value[0] : undefined
   }
   rule.operator = operator
   ruleListTextBuffers.delete(rule)
 }
-function ruleOptionScalar(rule: ConditionRuleEdit): string {
-  return typeof rule.value === 'string' ? rule.value : ''
-}
+/** A stored value no current option carries (a non-string one included) shows as the invalid placeholder. */
 function ruleOptionScalarStale(rule: ConditionRuleEdit): boolean {
-  const value = ruleOptionScalar(rule)
-  return value !== '' && !isCurrentOptionValue(ruleField(rule), value)
+  if (isBlankRuleValue(rule.value) || (Array.isArray(rule.value) && rule.value.length === 0)) return false
+  return !isCurrentOptionValue(ruleField(rule), rule.value)
+}
+function ruleOptionScalar(rule: ConditionRuleEdit): string {
+  if (ruleOptionScalarStale(rule)) return typeof rule.value === 'string' ? rule.value : STALE_OPTION_KEY
+  return typeof rule.value === 'string' ? rule.value : ''
 }
 function setRuleOptionScalar(rule: ConditionRuleEdit, value: string | null | undefined): void {
   rule.value = value ? value : undefined

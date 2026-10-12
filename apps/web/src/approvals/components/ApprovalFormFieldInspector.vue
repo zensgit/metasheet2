@@ -940,6 +940,7 @@ import {
   conditionValueKind,
   isCurrentOptionValue,
   isOptionKind,
+  STALE_OPTION_KEY,
   parseConditionListText,
   parseConditionNumber,
   visibilityOperatorsFor,
@@ -1065,16 +1066,23 @@ const visibilityIssueText = computed(() => {
   )
 })
 
-const optionScalarValue = computed(() => {
+// Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
+// option '1') never matches `===`, so it shows as the invalid placeholder — never as that option
+// selected — and re-picking the option is a real change that fixes it.
+const optionScalarRaw = computed(() => {
   const current = props.field
-  if (!current) return ''
-  const scalar = visibilityDraftScalar(current.visibility)
-  return scalar === undefined || scalar === null ? '' : String(scalar)
+  return current ? visibilityDraftScalar(current.visibility) : undefined
 })
-const optionScalarStale = computed(() =>
-  optionScalarValue.value !== '' &&
-  !isCurrentOptionValue(visibilityDependency.value, optionScalarValue.value),
-)
+const optionScalarStale = computed(() => {
+  const raw = optionScalarRaw.value
+  if (raw === undefined || raw === null || raw === '' || (Array.isArray(raw) && raw.length === 0)) return false
+  return !isCurrentOptionValue(visibilityDependency.value, raw)
+})
+const optionScalarValue = computed(() => {
+  const raw = optionScalarRaw.value
+  if (optionScalarStale.value) return typeof raw === 'string' ? raw : STALE_OPTION_KEY
+  return typeof raw === 'string' ? raw : ''
+})
 const optionListSelected = computed<string[]>(() => {
   const current = props.field
   if (!current) return []
@@ -1460,8 +1468,10 @@ function bufferValidationError(): string | null {
     }
   }
   const valueText = buffer.text.valueText
-  if (valueText !== undefined && visibilityKind.value === 'number') {
-    // R-43 (B): a number dependency only accepts numbers (one per line for `in`).
+  // R-43 (B): a number dependency only accepts numbers (one per line for `in`). Only while the
+  // operator still takes a value: under isEmpty/notEmpty the value box is hidden, so its leftover
+  // text must not block (an error pointing at an invisible control).
+  if (valueText !== undefined && visibilityKind.value === 'number' && visibilityNeedsValue.value) {
     const entries = current.visibility.operator === 'in'
       ? parseConditionListText(valueText, 'number')
       : valueText.trim() === '' ? [] : [parseConditionNumber(valueText) ?? valueText]
@@ -2067,8 +2077,11 @@ function settlePendingEdits(): boolean {
   }
   if (
     buffer.text.valueText !== undefined &&
+    visibilityNeedsValue.value &&
     buffer.text.valueText !== committedText('valueText')
   ) {
+    // (A hidden value box's leftover text is dropped with the buffer, never folded in: it would
+    // overwrite the kept value as a side effect.)
     patch.visibility = visibilityPatchForText(buffer.text.valueText, current)
   }
   if (Object.keys(buffer.optionLabels).length > 0) {
