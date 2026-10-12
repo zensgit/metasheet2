@@ -134,8 +134,12 @@ const topics: GuideTopic[] = [
         '先保存考勤组，再添加人员。成员是考勤名单。负责人是另一份名单，不计入考勤人员。维护负责人仅限管理员；本组 owner 或 sub_owner 可以增删成员。',
       ],
       [
-        'Group type locks after creation. The optional code is an identifier, not the name shown in the list.',
-        '考勤组类型创建后锁定。编码是可选标识，列表上显示的是名称。',
+        'Search a name to add a person. Paste user IDs stays closed until you already have ids. Members and owners are still stored as user ids.',
+        '按姓名搜索添加人员。「粘贴用户 ID」默认收起，已有 ID 时再打开。成员和负责人保存的仍是用户 ID。',
+      ],
+      [
+        'Group type locks after creation. The list title is the group name. A code, when set, is under Technical info on the detail header.',
+        '考勤组类型创建后锁定。列表标题是组名。编码若有，在详情标题旁的「技术信息」里。',
       ],
     ],
   },

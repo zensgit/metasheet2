@@ -16,6 +16,7 @@
         </div>
       </div>
       <div class="attendance__admin-actions">
+        <AttendanceReportFieldsHelp :tr="tr" />
         <a
           v-if="multitableHref"
           class="attendance__btn"
@@ -1146,7 +1147,7 @@
                       class="attendance__field-hint attendance-report-fields__formula-editor-help"
                       :data-report-field-formula-editor-help="field.code"
                     >
-                      {{ tr('See the function reference panel above for syntax, allowed functions, and disabled functions. Preview before saving.', '上方公式参考面板列出可用函数与禁用函数,保存前请先预览。') }}
+                      {{ tr('Open the function reference panel above for allowed and disabled functions. Preview before saving.', '展开上方公式参考面板，查看可用函数与禁用函数。保存前请先预览。') }}
                     </div>
                     <label class="attendance-report-fields__formula-editor-field">
                       <span>{{ tr('Expression', '表达式') }}</span>
@@ -1246,6 +1247,7 @@
 
 <script setup lang="ts">
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceReportFieldsHelp from './AttendanceReportFieldsHelp.vue'
 import { computed, ref, watch } from 'vue'
 import { apiFetch as sendApiFetch } from '../../utils/api'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
@@ -3049,6 +3051,11 @@ watch(
   gap: 6px;
 }
 
+.attendance-report-fields__formula-reference-chips {
+  max-height: 96px;
+  overflow: auto;
+}
+
 .attendance-report-fields__formula-reference-group {
   display: flex;
   align-items: center;
@@ -3134,13 +3141,18 @@ watch(
 
 .attendance-report-fields__formula-create-grid {
   display: grid;
-  grid-template-columns: minmax(150px, 0.8fr) minmax(150px, 1fr) minmax(140px, 0.8fr) minmax(150px, 0.8fr) minmax(260px, 1.6fr) auto;
-  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
   align-items: end;
 }
 
 .attendance-report-fields__formula-create-expression {
-  min-width: 260px;
+  grid-column: 1 / 5;
+  min-width: 0;
+}
+
+.attendance-report-fields__formula-create-grid > button {
+  grid-column: 5;
 }
 
 .attendance-report-fields__formula-dependency-edges {
@@ -3377,6 +3389,11 @@ watch(
 
   .attendance-report-fields__formula-create-grid {
     grid-template-columns: 1fr;
+  }
+
+  .attendance-report-fields__formula-create-expression,
+  .attendance-report-fields__formula-create-grid > button {
+    grid-column: auto;
   }
 }
 </style>

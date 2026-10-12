@@ -4881,7 +4881,7 @@
                       <button class="attendance__group-list-main" type="button" @click="selectAttendanceGroup(item)">
                         <span class="attendance__group-list-name">
                           <strong>{{ item.name }}</strong>
-                          <small>{{ item.code || item.id }}</small>
+                          <small class="attendance__id-clip">{{ item.code || item.id }}</small>
                         </span>
                         <span class="attendance__group-list-meta">
                           <span data-attendance-group-list-member-count>{{ attendanceGroupListMemberCountLabel(item) }}</span>
@@ -4930,7 +4930,10 @@
                     </div>
                     <div v-if="attendanceGroupEditingId" class="attendance__group-detail-actions">
                       <div class="attendance__admin-meta">
-                        <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        <details class="attendance__tech-details">
+                          <summary>{{ tr('Technical info', '技术信息') }}</summary>
+                          <span>{{ tr('Code', '编码') }}: {{ attendanceGroupForm.code || '-' }}</span>
+                        </details>
                         <span>{{ tr('People', '考勤人员') }}: {{ attendanceGroupListMemberCountLabel(selectedAttendanceGroup) }}</span>
                         <span>{{ tr('Type', '类型') }}: {{ attendanceGroupTypeLabel(attendanceGroupForm.attendanceType) }}</span>
                         <span>{{ tr('Timezone', '时区') }}: {{ displayTimezone(attendanceGroupForm.timezone) }}</span>
@@ -5119,25 +5122,30 @@
                         <AttendanceUserPickerField
                           v-model="attendanceGroupMemberSelectedUserId"
                           :tr="tr"
+                          typeahead
                           :label="tr('User picker', '用户选择器')"
                           name="attendanceGroupMemberUserPicker"
-                          :help-text="tr('Pick one user and add them directly, or stage several users / paste multiple IDs for bulk changes.', '选择一个用户可直接添加；也可以暂存多个用户或粘贴多个 ID 批量处理。')"
-                          :search-placeholder="tr('Search users to append', '搜索要追加的用户')"
+                          :help-text="tr('Search by name and add that person. Paste ids only when you already have them.', '按姓名搜索后添加。已有 ID 时再粘贴。')"
+                          :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                           input-id="attendance-group-member-user-picker"
                           endpoint="/api/attendance-admin/users/search"
                           :org-id="orgId"
                           :global-scope="attendanceAdminGlobalUserScope"
+                          @update:display-name="rememberAttendanceGroupMemberPickerLabel"
                         />
-                        <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
-                          <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
-                          <textarea
-                            id="attendance-group-member-user-ids"
-                            v-model="attendanceGroupMemberUserIds"
-                            rows="2"
-                            :placeholder="tr('userId1, userId2', 'userId1, userId2')"
-                          ></textarea>
-                          <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas, spaces, or new lines. They will be staged with the chips before submit.', '多个 ID 请用逗号、空格或换行分隔。提交前会与标签一起暂存。') }}</small>
-                        </label>
+                        <details class="attendance__tech-details attendance__field attendance__field--full">
+                          <summary>{{ tr('Paste user IDs', '粘贴用户 ID') }}</summary>
+                          <label class="attendance__field attendance__field--full" for="attendance-group-member-user-ids">
+                            <span>{{ tr('User IDs (bulk)', '用户 ID（批量）') }}</span>
+                            <textarea
+                              id="attendance-group-member-user-ids"
+                              v-model="attendanceGroupMemberUserIds"
+                              rows="2"
+                              :placeholder="tr('userId1, userId2', 'userId1, userId2')"
+                            ></textarea>
+                            <small class="attendance__field-hint">{{ tr('Separate multiple IDs with commas, spaces, or new lines. They will be staged with the chips before submit.', '多个 ID 请用逗号、空格或换行分隔。提交前会与标签一起暂存。') }}</small>
+                          </label>
+                        </details>
                       </div>
                       <div
                         v-if="attendanceGroupPendingMemberIds.length > 0"
@@ -5151,10 +5159,11 @@
                           class="attendance__group-pending-member"
                           data-attendance-group-pending-member
                         >
-                          <span>{{ userId }}</span>
+                          <span>{{ attendanceGroupPendingMemberLabel(userId) }}</span>
+                          <span v-if="attendanceGroupPendingMemberLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
                           <button
                             type="button"
-                            :aria-label="tr(`Remove ${userId}`, `移除 ${userId}`)"
+                            :aria-label="tr(`Remove ${attendanceGroupPendingMemberLabel(userId)}`, `移除 ${attendanceGroupPendingMemberLabel(userId)}`)"
                             data-attendance-group-pending-remove
                             @click="removeAttendanceGroupPendingMember(userId)"
                           >
@@ -5207,7 +5216,10 @@
                                   >
                                     {{ attendanceGroupMemberPrimaryLabel(member.userId) }}
                                   </strong>
-                                  <span data-attendance-group-member-user-id>{{ member.userId }}</span>
+                                  <span
+                                    data-attendance-group-member-user-id
+                                    :class="{ 'attendance__id-clip': Boolean(attendanceGroupMemberPrimaryLabel(member.userId)) }"
+                                  >{{ member.userId }}</span>
                                   <small
                                     v-if="attendanceGroupMemberSecondaryLabel(member.userId)"
                                     class="attendance__field-hint"
@@ -5265,10 +5277,11 @@
                         <AttendanceUserPickerField
                           v-model="attendanceGroupManagerSelectedUserId"
                           :tr="tr"
+                          typeahead
                           :label="tr('Owner user', '负责人用户')"
                           name="attendanceGroupManagerUserPicker"
-                          :help-text="tr('Pick a user to maintain the owner roster. This does not change group membership.', '选择用户维护负责人名单；不会改变考勤人员名单。')"
-                          :search-placeholder="tr('Search users to add as owner', '搜索要添加为负责人的用户')"
+                          :help-text="tr('Search by name. This does not change group membership.', '按姓名搜索。不会改变考勤人员名单。')"
+                          :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                           input-id="attendance-group-manager-user-picker"
                           endpoint="/api/attendance-admin/users/search"
                           :org-id="orgId"
@@ -5327,7 +5340,10 @@
                                   >
                                     {{ attendanceGroupManagerPrimaryLabel(manager.userId) }}
                                   </strong>
-                                  <span data-attendance-group-manager-user-id>{{ manager.userId }}</span>
+                                  <span
+                                    data-attendance-group-manager-user-id
+                                    :class="{ 'attendance__id-clip': Boolean(attendanceGroupManagerPrimaryLabel(manager.userId)) }"
+                                  >{{ manager.userId }}</span>
                                   <small
                                     v-if="attendanceGroupManagerSecondaryLabel(manager.userId)"
                                     class="attendance__field-hint"
@@ -7409,6 +7425,7 @@
             >
               <div class="attendance__admin-section-header">
                 <h4>{{ tr('Annual leave operations', '年假操作') }}</h4>
+                <AttendanceAnnualOpsHelp :tr="tr" />
               </div>
               <p v-if="!annualOpsPolicyEnabled" class="attendance__hint" data-annual-ops-policy-off>
                 {{ tr('The annual leave engine is disabled — accrual is blocked until you enable it in', '年假引擎未启用——发放将被拦截，请先在') }}
@@ -7418,9 +7435,32 @@
               <div class="attendance__admin-subsection" data-annual-ops-card="adjust">
                 <h5>{{ tr('Manual adjustment', '手工调整') }}</h5>
                 <div class="attendance__admin-grid">
-                  <label class="attendance__field"><span>{{ tr('User ID', '用户 ID') }}</span><input v-model="annualAdjustForm.userId" type="text" /></label>
+                  <label class="attendance__field attendance__person-field">
+                    <span>{{ tr('Person', '人员') }}</span>
+                    <input
+                      :value="annualAdjustPersonText"
+                      type="search"
+                      autocomplete="off"
+                      :placeholder="tr('Name or email', '姓名或邮箱')"
+                      data-annual-ops-adjust-person
+                      @input="onAnnualAdjustPersonInput"
+                    />
+                    <ul v-if="annualAdjustPersonHits.length > 0" class="attendance__typeahead-menu">
+                      <li v-for="person in annualAdjustPersonHits" :key="person.id">
+                        <button type="button" @click="chooseAnnualAdjustPerson(person)">
+                          {{ annualAdjustPersonLabel(person) }}
+                        </button>
+                      </li>
+                    </ul>
+                  </label>
                   <label class="attendance__field"><span>{{ tr('Delta (minutes, ±)', '变动(分钟,±)') }}</span><input v-model.number="annualAdjustForm.deltaMinutes" type="number" /></label>
-                  <label class="attendance__field"><span>{{ tr('Reason', '原因') }}</span><input v-model="annualAdjustForm.reason" type="text" maxlength="500" /></label>
+                  <label class="attendance__field">
+                    <span>{{ tr('Reason', '原因') }}</span>
+                    <input v-model="annualAdjustForm.reason" type="text" maxlength="500" list="annual-adjust-reason-presets" />
+                    <datalist id="annual-adjust-reason-presets">
+                      <option v-for="preset in annualAdjustReasonPresets" :key="preset" :value="preset" />
+                    </datalist>
+                  </label>
                 </div>
                 <div class="attendance__admin-actions">
                   <button class="attendance__btn" @click="() => previewAnnualAdjust()">{{ tr('Preview', '预览') }}</button>
@@ -7448,15 +7488,17 @@
                   <AttendanceUserPickerField
                     v-model="annualBulkAdjustUserPickerValue"
                     :tr="tr"
+                    typeahead
                     :label="tr('Add user', '添加用户')"
                     name="annualBulkAdjustUserPicker"
-                    :help-text="tr('Search and pick a user, then click Add.', '搜索并选择用户，然后点击添加。')"
-                    :search-placeholder="tr('Search users for bulk adjustment', '搜索批量调整用户')"
+                    :help-text="tr('Search by name, then add. The chip shows the name; the request still sends the user id.', '按姓名搜索后添加。标签显示姓名，请求仍提交用户 ID。')"
+                    :search-placeholder="tr('Search by name or email', '按姓名或邮箱搜索')"
                     :full-width="false"
                     input-id="attendance-annual-bulk-adjust-user-picker"
                     endpoint="/api/attendance-admin/users/search"
                     :org-id="orgId"
                     :global-scope="attendanceAdminGlobalUserScope"
+                    @update:display-name="rememberAnnualBulkAdjustLabel"
                   />
                   <div class="attendance__field">
                     <span>&nbsp;</span>
@@ -7470,7 +7512,13 @@
                     </button>
                   </div>
                   <label class="attendance__field"><span>{{ tr('Delta (minutes, ±, shared)', '变动(分钟,±,共享)') }}</span><input v-model.number="annualBulkAdjustForm.deltaMinutes" type="number" data-attendance-annual-bulk-adjust-delta /></label>
-                  <label class="attendance__field"><span>{{ tr('Reason (shared)', '原因(共享)') }}</span><input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" data-attendance-annual-bulk-adjust-reason /></label>
+                  <label class="attendance__field">
+                    <span>{{ tr('Reason (shared)', '原因(共享)') }}</span>
+                    <input v-model="annualBulkAdjustForm.reason" type="text" maxlength="500" list="annual-bulk-adjust-reason-presets" data-attendance-annual-bulk-adjust-reason />
+                    <datalist id="annual-bulk-adjust-reason-presets">
+                      <option v-for="preset in annualAdjustReasonPresets" :key="preset" :value="preset" />
+                    </datalist>
+                  </label>
                 </div>
                 <div
                   v-if="annualBulkAdjustUserIds.length > 0"
@@ -7483,7 +7531,8 @@
                     class="attendance__scheduler-scope-chip"
                     data-attendance-annual-bulk-adjust-user-chip
                   >
-                    {{ userId }}
+                    <span>{{ annualBulkAdjustUserLabel(userId) }}</span>
+                    <span v-if="annualBulkAdjustUserLabel(userId) !== userId" class="attendance__id-clip">{{ userId }}</span>
                     <button
                       class="attendance__btn attendance__btn--inline"
                       type="button"
@@ -10438,6 +10487,7 @@ import AttendanceHolidayIndexHelp from './attendance/AttendanceHolidayIndexHelp.
 import AttendanceAnnualPolicyHelp from './attendance/AttendanceAnnualPolicyHelp.vue'
 import AttendancePayrollTemplateHelp from './attendance/AttendancePayrollTemplateHelp.vue'
 import AttendancePayrollCycleHelp from './attendance/AttendancePayrollCycleHelp.vue'
+import AttendanceAnnualOpsHelp from './attendance/AttendanceAnnualOpsHelp.vue'
 import AttendanceAdminGuide from './attendance/AttendanceAdminGuide.vue'
 import AttendanceOverrideAudienceFields from './attendance/AttendanceOverrideAudienceFields.vue'
 import { formatAnnualBalanceSubject } from './attendance/annualBalanceSubject'
@@ -13928,6 +13978,8 @@ const attendanceGroupEditingId = ref<string | null>(null)
 const attendanceGroupActiveStage = ref<AttendanceGroupWorkflowStage>('basics')
 const attendanceGroupMemberGroupId = ref('')
 const attendanceGroupMemberSelectedUserId = ref('')
+const attendanceGroupMemberPickerLabel = ref('')
+const attendanceGroupPendingMemberLabels = ref<Record<string, string>>({})
 const attendanceGroupMemberUserIds = ref('')
 const attendanceGroupPendingMemberIds = ref<string[]>([])
 const attendanceGroupMemberDuplicateNotice = ref('')
@@ -14176,6 +14228,16 @@ function attendanceGroupMemberResolverUserIds(members: AttendanceGroupMember[]):
     userIds.push(userId)
   }
   return userIds
+}
+
+function rememberAttendanceGroupMemberPickerLabel(name: string): void {
+  attendanceGroupMemberPickerLabel.value = name
+}
+
+function attendanceGroupPendingMemberLabel(userId: string): string {
+  return attendanceGroupPendingMemberLabels.value[userId]
+    || attendanceGroupMemberPrimaryLabel(userId)
+    || userId
 }
 
 function attendanceGroupMemberPrimaryLabel(userId: string): string {
@@ -26163,13 +26225,69 @@ function annualOpsIdempotencyKey(): string {
 }
 
 // -- Card 1: manual adjustment (client preview; backend 422 final; returns {id,delta,applied,alreadyApplied}) --
+interface AnnualAdjustPersonHit { id: string; email: string; name: string | null }
 interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alreadyApplied: boolean }
 const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
+const annualAdjustPersonText = ref('')
+const annualAdjustPersonHits = ref<AnnualAdjustPersonHit[]>([])
+const annualAdjustReasonPresets = computed(() => [
+  tr('Grant', '补发'),
+  tr('Reversal', '冲正'),
+  tr('Manual correction', '手工更正'),
+])
 const annualAdjustSubmitting = ref(false)
 const annualAdjustResult = ref<AnnualAdjustResult | null>(null)
 const annualAdjustError = ref<string | null>(null)
 const annualAdjustPreview = ref<{ user: string; before: number; after: number } | null>(null)
 const annualAdjustIdemKey = ref('')
+
+function annualAdjustPersonLabel(person: AnnualAdjustPersonHit): string {
+  const name = person.name?.trim() || ''
+  const email = person.email.trim()
+  if (name && email && email !== name) return `${name}（${email}）`
+  return name || email || person.id
+}
+
+function onAnnualAdjustPersonInput(event: Event): void {
+  const value = (event.target as HTMLInputElement).value
+  annualAdjustPersonText.value = value
+  annualAdjustForm.userId = value.trim()
+  annualAdjustPersonHits.value = []
+  if ((event as InputEvent).isTrusted) void searchAnnualAdjustPeople(value)
+}
+
+function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
+  annualAdjustForm.userId = person.id
+  annualAdjustPersonText.value = person.name?.trim() || person.email.trim() || person.id
+  annualAdjustPersonHits.value = []
+}
+
+async function searchAnnualAdjustPeople(query: string): Promise<void> {
+  const q = query.trim()
+  if (!q) {
+    annualAdjustPersonHits.value = []
+    return
+  }
+  try {
+    const params = new URLSearchParams({ q, ...attendanceAdminUserScopePayload() })
+    const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (!response.ok) {
+      annualAdjustPersonHits.value = []
+      return
+    }
+    const data = await response.json()
+    const items = data?.data?.items
+    annualAdjustPersonHits.value = Array.isArray(items)
+      ? items.slice(0, 8).map((item: { id?: string; email?: string | null; name?: string | null }) => ({
+        id: String(item?.id || '').trim(),
+        email: typeof item?.email === 'string' ? item.email.trim() : '',
+        name: typeof item?.name === 'string' ? item.name : null,
+      })).filter((item: AnnualAdjustPersonHit) => item.id)
+      : []
+  } catch {
+    annualAdjustPersonHits.value = []
+  }
+}
 
 // OD-W5-7 leaveTypeCode parameterization (see loadAnnualSelfBalance above) — default 'annual' is
 // byte identical to the prior hardcoded literal for every existing (arg-less) caller.
@@ -26178,7 +26296,7 @@ async function previewAnnualAdjust(leaveTypeCode: string = 'annual'): Promise<vo
   annualAdjustError.value = null
   annualAdjustPreview.value = null
   if (!userId) {
-    annualAdjustError.value = tr('Enter a user ID first', '请先输入用户 ID')
+    annualAdjustError.value = tr('Choose a person first', '请先选择人员')
     return
   }
   try {
@@ -26266,6 +26384,8 @@ async function submitAnnualAdjust(snapshot: { userId: string; deltaMinutes: numb
 // shape for the confirm step; the actual network loop only runs from onConfirm, mirroring
 // the bulk-apply-schedule / batch-anomaly two-step precedent.
 const annualBulkAdjustUserPickerValue = ref('')
+const annualBulkAdjustPendingLabel = ref('')
+const annualBulkAdjustUserLabels = ref<Record<string, string>>({})
 const annualBulkAdjustUserIds = ref<string[]>([])
 const annualBulkAdjustForm = reactive<{ deltaMinutes: number; reason: string }>({ deltaMinutes: 0, reason: '' })
 const annualBulkAdjustError = ref<string | null>(null)
@@ -26275,17 +26395,33 @@ const annualBulkAdjust = reactive<{
   results: Record<string, BulkBalanceAdjustRowResult>
 }>({ submitting: false, rows: [], results: {} })
 
+function rememberAnnualBulkAdjustLabel(name: string): void {
+  annualBulkAdjustPendingLabel.value = name
+}
+
+function annualBulkAdjustUserLabel(userId: string): string {
+  return annualBulkAdjustUserLabels.value[userId] || userId
+}
+
 function addAnnualBulkAdjustUser(): void {
   const userId = annualBulkAdjustUserPickerValue.value.trim()
   if (!userId) return
   if (!annualBulkAdjustUserIds.value.includes(userId)) {
     annualBulkAdjustUserIds.value = [...annualBulkAdjustUserIds.value, userId]
+    const label = annualBulkAdjustPendingLabel.value.trim()
+    if (label && label !== userId) {
+      annualBulkAdjustUserLabels.value = { ...annualBulkAdjustUserLabels.value, [userId]: label }
+    }
   }
   annualBulkAdjustUserPickerValue.value = ''
+  annualBulkAdjustPendingLabel.value = ''
 }
 
 function removeAnnualBulkAdjustUser(userId: string): void {
   annualBulkAdjustUserIds.value = annualBulkAdjustUserIds.value.filter(id => id !== userId)
+  const labels = { ...annualBulkAdjustUserLabels.value }
+  delete labels[userId]
+  annualBulkAdjustUserLabels.value = labels
 }
 
 const annualBulkAdjustSubmitDisabledReason = computed(() => {
@@ -29173,6 +29309,7 @@ async function addAttendanceGroupMembers() {
     }
     adminForbidden.value = false
     attendanceGroupPendingMemberIds.value = []
+    attendanceGroupPendingMemberLabels.value = {}
     attendanceGroupMemberDuplicateNotice.value = ''
     await loadAttendanceGroupMembers()
     setStatus(tr('Group members added.', '分组成员已添加。'))
@@ -29186,14 +29323,24 @@ async function addAttendanceGroupMembers() {
 function appendAttendanceGroupMemberSelectedUser() {
   const userId = attendanceGroupMemberSelectedUserId.value.trim()
   if (!userId) return
+  const label = attendanceGroupMemberPickerLabel.value.trim()
+  if (label && label !== userId) {
+    attendanceGroupPendingMemberLabels.value = {
+      ...attendanceGroupPendingMemberLabels.value,
+      [userId]: label,
+    }
+  }
   stageAttendanceGroupMemberIds([userId])
   attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberPickerLabel.value = ''
 }
 
 function resetAttendanceGroupMemberDraft() {
   attendanceGroupMemberSelectedUserId.value = ''
+  attendanceGroupMemberPickerLabel.value = ''
   attendanceGroupMemberUserIds.value = ''
   attendanceGroupPendingMemberIds.value = []
+  attendanceGroupPendingMemberLabels.value = {}
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
@@ -29226,6 +29373,9 @@ function stageAttendanceGroupMemberIds(userIds: string[]) {
 
 function removeAttendanceGroupPendingMember(userId: string) {
   attendanceGroupPendingMemberIds.value = attendanceGroupPendingMemberIds.value.filter(item => item !== userId)
+  const labels = { ...attendanceGroupPendingMemberLabels.value }
+  delete labels[userId]
+  attendanceGroupPendingMemberLabels.value = labels
   attendanceGroupMemberDuplicateNotice.value = ''
 }
 
@@ -32819,6 +32969,53 @@ defineExpose({
 .attendance__group-member-identity strong {
   color: var(--ms-text-1);
   font-size: 13px;
+}
+
+.attendance__id-clip {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.attendance__tech-details {
+  font-size: 12px;
+  color: #667085;
+}
+
+.attendance__tech-details summary {
+  cursor: pointer;
+  color: #475569;
+}
+
+.attendance__person-field {
+  position: relative;
+}
+
+.attendance__typeahead-menu {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 2px;
+}
+
+.attendance__typeahead-menu button {
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
 }
 
 .attendance__group-role-badge {

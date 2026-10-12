@@ -1,7 +1,7 @@
 <template>
   <label class="attendance__field" :class="{ 'attendance__field--full': fullWidth }" :for="inputId">
     <span>{{ label }}</span>
-    <div class="attendance__user-picker">
+    <div class="attendance__user-picker" :class="{ 'attendance__user-picker--typeahead': typeahead }">
       <div class="attendance__user-picker-controls">
         <input
           :id="inputId"
@@ -10,12 +10,23 @@
           :placeholder="searchPlaceholderText"
           :name="name"
           type="search"
+          autocomplete="off"
           @keyup.enter="void loadUsers()"
         />
         <button class="attendance__btn" type="button" :disabled="disabled || loading" @click="void loadUsers()">
           {{ loading ? tr('Loading...', '加载中...') : tr('Search users', '搜索用户') }}
         </button>
       </div>
+      <ul v-if="typeahead && menuUsers.length > 0" class="attendance__user-picker-menu">
+        <li v-for="user in menuUsers" :key="user.id">
+          <button type="button" :disabled="disabled" @click="selectUser(user.id)">
+            {{ formatUserLabel(user) }}
+          </button>
+        </li>
+      </ul>
+      <small v-if="typeahead && modelValue" class="attendance__field-hint">
+        {{ tr('Selected', '已选') }}: {{ primaryLabel(modelValue) || modelValue }}
+      </small>
       <select :value="modelValue" :disabled="disabled || loading" @change="handleChange">
         <option value="">{{ tr('Select user', '选择用户') }}</option>
         <option v-for="user in displayUsers" :key="user.id" :value="user.id">
@@ -45,6 +56,7 @@ const props = withDefaults(defineProps<{
   searchPlaceholder?: string
   disabled?: boolean
   fullWidth?: boolean
+  typeahead?: boolean
   inputId?: string
   endpoint?: string
   orgId?: string
@@ -52,6 +64,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   disabled: false,
   fullWidth: false,
+  typeahead: false,
   inputId: undefined,
   name: '',
   searchPlaceholder: '',
@@ -101,6 +114,16 @@ const displayUsers = computed(() => {
   ]
 })
 
+const menuUsers = computed(() => {
+  if (!props.typeahead) return []
+  const query = searchQuery.value.trim().toLowerCase()
+  if (!query) return []
+  return displayUsers.value.filter((user) => {
+    const label = formatUserLabel(user).toLowerCase()
+    return label.includes(query) || user.id.toLowerCase().includes(query)
+  }).slice(0, 8)
+})
+
 const inputId = computed(() => props.inputId || `${props.name || 'attendance-user-picker'}-${props.label.replace(/\s+/g, '-').toLowerCase()}`)
 const searchPlaceholderText = computed(() => props.searchPlaceholder || props.tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索'))
 
@@ -116,10 +139,14 @@ function primaryLabel(userId: string): string {
   return ''
 }
 
+function selectUser(userId: string) {
+  emit('update:modelValue', userId)
+  emit('update:displayName', primaryLabel(userId))
+  if (props.typeahead) searchQuery.value = ''
+}
+
 function handleChange(event: Event) {
-  const value = (event.target as HTMLSelectElement).value
-  emit('update:modelValue', value)
-  emit('update:displayName', primaryLabel(value))
+  selectUser((event.target as HTMLSelectElement).value)
 }
 
 watch(users, () => {
@@ -151,6 +178,45 @@ onMounted(() => {
 
 .attendance__user-picker select {
   width: 100%;
+}
+
+.attendance__user-picker--typeahead {
+  position: relative;
+}
+
+.attendance__user-picker--typeahead .attendance__user-picker-controls button,
+.attendance__user-picker--typeahead select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.attendance__user-picker-menu {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 4px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #fff;
+  display: grid;
+  gap: 2px;
+}
+
+.attendance__user-picker-menu button {
+  width: 100%;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #1f2937;
+  text-align: left;
+  cursor: pointer;
 }
 
 .attendance__field-hint {
