@@ -2266,13 +2266,14 @@ orgfix_assert_staging_postgres() {
 
 # orgfix_psql_ro <pg_user> <pg_db> [psql -v args...] < sql
 #   Runs stdin inside ONE read-only transaction that is rolled back, with the session also
-#   defaulting to read-only (PGOPTIONS), terse errors, and no psqlrc.
+#   defaulting to read-only (PGOPTIONS), terse errors (on the command line AND first in stdin, so
+#   no DETAIL line can print a row value), and no psqlrc.
 orgfix_psql_ro() {
   local pg_user="$1" pg_db="$2"
   shift 2
   org_membership_read_only_wrap \
     | docker exec -i -e 'PGOPTIONS=-c default_transaction_read_only=on' "$POSTGRES_CONTAINER" \
-        psql -X -q -tA -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" "$@"
+        psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse -U "$pg_user" -d "$pg_db" "$@"
 }
 
 # orgfix_org_null_predicate <pg_user> <pg_db>
@@ -2320,7 +2321,19 @@ action_org_membership_inspect() {
   org_membership_probe_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-probe.txt"
   users_sql="$(org_membership_inspect_users_sql "${OUTPUT_DIR}/org-membership-probe.txt" "$predicate")" \
     || fail "could not build the inspect SQL"
-  orgfix_psql_ro "$pg_user" "$pg_db" <<< "$users_sql" > "${OUTPUT_DIR}/org-membership-users.txt"
+  orgfix_psql_ro "$pg_user" "$pg_db" <<< "$users_sql" > "${OUTPUT_DIR}/org-membership-users-raw.txt"
+  # Per user, action=migrate's precheck verdict projected for each repair mode (assuming the
+  # Recovery09 migrations are already applied): add-membership moves recovery09_repairable_user_count
+  # by -1 and class6_candidate_count by -k; deactivate moves only the former.
+  local line k
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    k="$(sed -n 's/.* class6_shaped_requested=\([^ ]*\).*/\1/p' <<< "$line")"
+    printf '%s migrate_gate_after_add=%s migrate_gate_after_deactivate=%s\n' "$line" \
+      "$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" -1 "-${k}")" \
+      "$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" -1 0)"
+  done < "${OUTPUT_DIR}/org-membership-users-raw.txt" > "${OUTPUT_DIR}/org-membership-users.txt"
+  rm -f "${OUTPUT_DIR}/org-membership-users-raw.txt"
   org_membership_inspect_orgs_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-orgs.txt"
 
   n_users="$(grep -c '^user fp=' "${OUTPUT_DIR}/org-membership-users.txt" || true)"
@@ -2334,9 +2347,10 @@ action_org_membership_inspect() {
     echo "predicate=active user with no user_orgs row"
     echo "matched_users=${n_users}"
     echo "orgs_with_active_members=${n_orgs}"
+    echo "migrate_gate_now=$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters.txt" 0 0) (assumes the Recovery09 migrations are already applied)"
     echo "--- counters (same SQL as the migrate prechecks)"
     cat "${OUTPUT_DIR}/org-membership-counters.txt"
-    echo "--- users (fp = left(md5(id),16); class6_shaped_requested = class6_candidate_count delta on add-membership, recovery09_unsupported_class6_count delta on deactivate)"
+    echo "--- users (fp = left(md5(id),16); class6_shaped_requested = class6_candidate_count delta on add-membership, recovery09_unsupported_class6_count delta on deactivate; applied_deprovision_evidence > 0 = the repair refuses this user)"
     cat "${OUTPUT_DIR}/org-membership-users.txt"
     echo "--- orgs with active members"
     cat "${OUTPUT_DIR}/org-membership-orgs.txt"
@@ -2360,21 +2374,29 @@ action_org_membership_repair() {
 
   # 1. Counters BEFORE + read-only preconditions. Any refusal here happens before the backup and
   #    before any write.
+  local precheck_sql
   orgfix_counters "$pg_user" "$pg_db" "$predicate" "${OUTPUT_DIR}/org-membership-counters-before.txt"
-  org_membership_repair_precheck_sql \
-    | orgfix_psql_ro "$pg_user" "$pg_db" -v "fp=${fp}" -v "org=${org}" \
+  org_membership_probe_sql | orgfix_psql_ro "$pg_user" "$pg_db" > "${OUTPUT_DIR}/org-membership-probe.txt"
+  precheck_sql="$(org_membership_repair_precheck_sql "${OUTPUT_DIR}/org-membership-probe.txt")" \
+    || fail "could not build the repair precheck SQL"
+  orgfix_psql_ro "$pg_user" "$pg_db" -v "fp=${fp}" -v "org=${org}" <<< "$precheck_sql" \
     > "${OUTPUT_DIR}/org-membership-repair-precheck.txt"
-  local match_count predicate_count org_members
+  local match_count predicate_count org_members evidence
   match_count="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" match_count)"
   predicate_count="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" predicate_count)"
   org_members="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" org_active_member_count)"
+  evidence="$(orgfix_counter "${OUTPUT_DIR}/org-membership-repair-precheck.txt" applied_deprovision_evidence)"
   [[ "$match_count" =~ ^[0-9]+$ && "$predicate_count" =~ ^[0-9]+$ && "$org_members" =~ ^[0-9]+$ ]] \
     || fail "repair precheck returned a non-numeric count"
   [[ "$match_count" == "1" ]] \
     || fail "repair refused: ${match_count} active no-row user(s) match fp=${fp} (exactly 1 required); no backup taken, nothing written"
+  [[ "$evidence" == "0" || "$evidence" == "n/a" ]] \
+    || fail "repair refused: the user with fp=${fp} has applied directory deprovision evidence (count ${evidence//[^0-9]/}); this runner does not supersede it — owner call; no backup taken, nothing written"
   if [[ "$mode" == "add-membership" ]]; then
+    # The org value is not echoed: one that did not resolve to an org with active members may be a
+    # pasted identifier rather than an org id.
     [[ "$org_members" -gt 0 ]] \
-      || fail "repair refused: org ${org} has no active members (add-membership only joins an org that already has active members); no backup taken, nothing written"
+      || fail "repair refused: the named org has no active members (add-membership only joins an org that already has active members; copy the org id from action=org-membership-inspect); no backup taken, nothing written"
   fi
 
   # 2. Full DB backup (the migrate backup's own pg_dump), BEFORE the write.
@@ -2394,13 +2416,28 @@ action_org_membership_repair() {
   # 3. The single write transaction (re-checks, writes one row, asserts the delta vector).
   write_sql="$(org_membership_repair_write_sql "$predicate")" || fail "could not build the repair SQL"
   if ! docker exec -i "$POSTGRES_CONTAINER" \
-      psql -X -q -tA -v ON_ERROR_STOP=1 -U "$pg_user" -d "$pg_db" \
+      psql -X -q -tA -v ON_ERROR_STOP=1 -v VERBOSITY=terse -U "$pg_user" -d "$pg_db" \
       -v "mode=${mode}" -v "fp=${fp}" -v "org=${org}" \
       <<< "$write_sql" > "${OUTPUT_DIR}/org-membership-repair-write.txt"; then
-    fail "repair transaction did not commit (rolled back; nothing changed) — see ssh.log for the terse ORGFIX_ABORT reason; backup ${dump_name} is untouched"
+    {
+      echo "action=org-membership-repair"
+      echo "mode=${mode}"
+      echo "fp=${fp}"
+      echo "backup_file=${dump_name}"
+      echo "result=commit_unconfirmed"
+    } > "${OUTPUT_DIR}/summary.txt"
+    fail "repair transaction did not report a commit (normally an abort, which rolls everything back; the terse error in ssh.log is ORGFIX_ABORT ..., METASHEET_RECOVERY_AUTHORITY_BUSY, or a lock/deadlock/statement timeout). Re-run action=org-membership-inspect before retrying; backup ${dump_name} is untouched"
   fi
-  grep -qx 'write_committed=yes' "${OUTPUT_DIR}/org-membership-repair-write.txt" \
-    || fail "repair transaction did not report a commit; inspect before retrying (backup ${dump_name})"
+  if ! grep -qx 'write_committed=yes' "${OUTPUT_DIR}/org-membership-repair-write.txt"; then
+    {
+      echo "action=org-membership-repair"
+      echo "mode=${mode}"
+      echo "fp=${fp}"
+      echo "backup_file=${dump_name}"
+      echo "result=commit_unconfirmed"
+    } > "${OUTPUT_DIR}/summary.txt"
+    fail "repair transaction did not report a commit; re-run action=org-membership-inspect before retrying (backup ${dump_name})"
+  fi
 
   # 4. Counters AFTER (read-only, after COMMIT).
   orgfix_counters "$pg_user" "$pg_db" "$predicate" "${OUTPUT_DIR}/org-membership-counters-after.txt"
@@ -2417,6 +2454,7 @@ action_org_membership_repair() {
     echo "backup_sha256=${STAGING_DUMP_SHA256}"
     echo "zero_membership_no_row_count_before=${no_row_before}"
     echo "zero_membership_no_row_count_after=${no_row_after}"
+    echo "migrate_gate_after=$(org_membership_migrate_gate_from_counters "${OUTPUT_DIR}/org-membership-counters-after.txt" 0 0) (assumes the Recovery09 migrations are already applied)"
     echo "--- in-transaction counters (delta vector asserted before COMMIT)"
     grep -E '^(in_txn_before|in_txn_after) |^class6_shaped_requested=' "${OUTPUT_DIR}/org-membership-repair-write.txt"
     echo "--- counters after COMMIT (read-only)"

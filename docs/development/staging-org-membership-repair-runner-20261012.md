@@ -16,16 +16,17 @@
 
 | File | Change |
 |---|---|
-| `.github/workflows/attendance-staging-window-runner.yml` | Two new `action` choices.<br>One new input `repair_spec`, bringing workflow_dispatch to exactly 10 inputs.<br>The validation step checks: single line, then the strict regex, then scoping (required for repair, empty for every other action), with exit 2.<br>`REPAIR_SPEC` is passed to the remote prelude.<br>The step summary re-validates the spec before printing it. |
-| `scripts/ops/attendance-window-runner-pipeline.lib.sh` | Pure text helpers:<br>• spec parser (returns 2 on a malformed spec)<br>• read-only transaction wrapper<br>• the precheck counter generator `target_precheck_counters_query` / `_sql`, now the ONE source for the migrate precheck and both new actions<br>• inspect / precheck / write SQL generators<br>• synthetic class list |
+| `.github/workflows/attendance-staging-window-runner.yml` | Two new `action` choices.<br>One new input `repair_spec`, bringing workflow_dispatch to exactly 10 inputs.<br>The validation step (`id: validate`) reads `repair_spec` from the event payload (`GITHUB_EVENT_PATH`), never from a step env. It checks: single line, then the strict regex, then scoping (required for repair, empty for every other action), with exit 2. It writes the validated value, or empty, to its step output as the last thing it does.<br>The remote step and the summary step receive only `steps.validate.outputs.repair_spec`.<br>`deploy_sha` must be empty or a full lower-case SHA for every action. |
+| `scripts/ops/attendance-window-runner-pipeline.lib.sh` | Pure text helpers:<br>• spec parser (returns 2 on a malformed spec)<br>• read-only transaction wrapper<br>• the precheck counter generator `target_precheck_counters_query` / `_sql`, now the ONE source for the migrate precheck and both new actions<br>• inspect / precheck / write SQL generators<br>• the applied-deprovision-evidence expression<br>• the migrate-gate rule and its projection<br>• synthetic class list |
 | `scripts/ops/attendance-staging-window-runner-remote.sh` | `REPAIR_SPEC` is re-validated at top level, before the staging guard and before any docker call (exit 2).<br>`staging_db_dump`, the single `pg_dump`, is now shared by the migrate backup and the repair backup.<br>The migrate precheck uses the shared counter generator; its output was proven identical in both predicate shapes.<br>New functions `action_org_membership_inspect` and `action_org_membership_repair`, plus their dispatcher arms. |
-| `scripts/ops/attendance-window-runner-pipeline.test.mjs` | Two pinned action lists updated.<br>`runWorkflowValidation` passes `REPAIR_SPEC`.<br>15 new cells (listed under Verification). |
+| `scripts/ops/attendance-window-runner-pipeline.test.mjs` | Two pinned action lists updated.<br>`runWorkflowValidation` synthesizes the event payload and `GITHUB_OUTPUT`.<br>New cells, listed under Verification, including one opt-in real-PostgreSQL cell. |
 
 ## Rules: `action=org-membership-inspect` (read-only)
 
 - Every query runs inside `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY` and is
   followed by `ROLLBACK`. The session also sets
-  `PGOPTIONS=-c default_transaction_read_only=on`, and psql runs with `\set VERBOSITY terse`.
+  `PGOPTIONS=-c default_transaction_read_only=on`. Terse errors are set both on the psql command
+  line (`-v VERBOSITY=terse`) and as the first stdin line.
 - Optional tables and columns are probed first through `information_schema`. A fact whose
   table or column is absent prints `n/a`. A query never names a relation the probe did not find.
 - Output for each matching user (values-free):
@@ -36,12 +37,15 @@
   - counts: `inactive_memberships` (0 by predicate), `user_roles`, `admin_role_rows`,
     `approvals_as_requester`, `class6_shaped_requested`, `tasks_created`,
     `task_assignee_rows`, `multitable_records_created`, `external_identity_rows`,
-    `directory_account_links`;
-  - yes/no facts: `is_admin_flag`, `role_column_admin`, `has_logged_in`.
+    `directory_account_links`, `applied_deprovision_evidence`;
+  - yes/no facts: `is_admin_flag`, `role_column_admin`, `has_logged_in`;
+  - `migrate_gate_after_add` and `migrate_gate_after_deactivate`: `pass`, `blocked` or `unknown`
+    (see "Effect on the migrate gate").
 - The output also lists one line per org with active members: the org id, `spec_nameable`,
   and `active_members`. An org id that the repair spec could not name is withheld, and only its
   fingerprint is shown.
-- It prints the full migrate precheck counter vector, using the same generator as migrate.
+- It prints the full migrate precheck counter vector, using the same generator as migrate, and
+  `migrate_gate_now`.
 - Synthetic classes come from the runner's own prefixes: the smoke `stamp_prefix` values
   (ae4, rd45, otbank-v18, mp6, hmr5, tasks; these match on id) and `SOAK_USER_PREFIX` (matches
   on username or email). Matching uses `starts_with`, never `LIKE`.
@@ -53,26 +57,40 @@
   - `deactivate:<fp16>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR`
   - `add-membership:<fp16>:<org_id>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR`, where `org_id`
     matches `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`.
-  - Anything else exits 2, in both the workflow and the remote script, and the value is never
-    echoed back.
+  - Anything else exits 2, in both the workflow and the remote script.
+- What reaches the public job log:
+  - The raw input is read only from the event payload, inside the validation step. No step env
+    carries it, and no workflow expression names it (the self-test pins both). GitHub prints
+    each step's env values in the log header, so a refused value is not published there. The
+    validation messages do not print it either.
+  - A **validated** spec is passed to the remote step and the summary step through the step
+    output. Their env headers therefore show it, including the org slot. Copy the fp and the org
+    id only from the inspect output, never from anywhere else.
+  - The summary step prints mode and fp only. The remote summary names the org only after it
+    resolved to an org with active members. A refusal does not echo the org value.
 - Order of operations (each step must pass before the next):
   1. Spec validation.
-  2. Read-only counters and preconditions:
+  2. Read-only counters, column probe and preconditions:
      - exactly one active no-row user has this fp (0 or more than 1 aborts);
+     - that user has no `applied` rows in `directory_deprovision_events` or
+       `directory_deprovision_effects` (when those tables exist);
      - for add-membership, the org must already have active members. There is no orgs table, so
        "exists" means "has active `user_orgs` members".
 
      Any refusal here happens before the backup and before any write.
   3. Full `pg_dump` (the migrate backup's own dump) to the runner backup directory on the host.
-     The artifact records only the file name, size and sha256.
+     The artifact records only the file name, size and sha256. A failed or empty dump stops the
+     run before the write.
   4. ONE transaction:
-     - `LOCK TABLE user_orgs IN SHARE ROW EXCLUSIVE MODE`;
+     - `FOR UPDATE` on the user row(s) with this fp, then
+       `LOCK TABLE user_orgs IN SHARE ROW EXCLUSIVE MODE`. This is the app's lock order: user row
+       first, then the membership table;
      - counter snapshot;
-     - `FOR UPDATE` on the matching user row;
-     - re-check that exactly one user matches;
+     - re-check that exactly one user matches, by population and fp in one statement;
+     - re-check that the user has no applied deprovision evidence;
      - write exactly one row:
-       - deactivate: `UPDATE users SET is_active = FALSE` (plus `updated_at` when that column
-         exists);
+       - deactivate: `UPDATE users SET is_active = FALSE`, plus `updated_at = now()` and
+         `access_generation = COALESCE(access_generation, 0) + 1` when those columns exist;
        - add-membership: `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES (…, TRUE)`.
          These are the same minimal columns Recovery09 and the provisioning migration write;
          `created_at` defaults.
@@ -81,9 +99,14 @@
      - full delta-vector check;
      - `COMMIT`.
 
-     Any mismatch raises `ORGFIX_ABORT …`, which carries only counts, labels or the fp, and
-     rolls the whole transaction back.
-  5. Read-only counters after the COMMIT. `zero_membership_no_row_count` must fall by exactly 1.
+     Any mismatch raises `ORGFIX_ABORT …` and rolls the whole transaction back. Every RAISE
+     argument is a count or a label (the self-test pins an allowlist).
+  5. Read-only counters after the COMMIT. `zero_membership_no_row_count` must fall by exactly 1,
+     or the result is `post_commit_mismatch`.
+- If the write call does not report `write_committed=yes`, the result is `commit_unconfirmed`.
+  This is normally an abort, which rolls everything back. The terse error in `ssh.log` is one of:
+  `ORGFIX_ABORT …`, `METASHEET_RECOVERY_AUTHORITY_BUSY`, or a lock, deadlock or statement
+  timeout. Re-run inspect before retrying. A retry takes a new backup.
 - Expected delta vector. k = the user's `class6_shaped_requested`. Every other counter must stay
   unchanged.
 
@@ -96,16 +119,43 @@
   | recovery09_unsupported_class6_count | +k | 0 |
   | legacy_anchor_active_membership_witness_count | 0 | +1 only when org_id = `default` |
 
-- Effect on the migrate gate:
-  - Deactivate unblocks the multi-org precheck only when that user's `class6_shaped_requested`
-    is 0. When it is above 0, the user's class-6-shaped requests stay in
-    `class6_candidate_count` and become `recovery09_unsupported_class6_count`.
-  - add-membership removes them from `class6_candidate_count`.
-  - Inspect prints k for each user so that the owner can see this before choosing.
+- Deliberate differences from the platform's own user-status and membership writers. Those
+  writers lock the user, write, supersede applied deprovision evidence, advance
+  `access_generation`, revoke sessions and write an audit row. This runner:
+  - refuses a user with applied deprovision evidence instead of superseding it;
+  - advances `access_generation` on deactivate only. On add-membership that would be a second
+    row write;
+  - writes no session-revocation row and no audit row. Access is still denied after deactivate,
+    because token verification re-reads `users.is_active`.
 - `UPDATE OF is_active` on `users` fires the recovery-authority try-lock trigger. If that lock is
-  busy, the transaction aborts with nothing written and is safe to retry. A retry takes a new
-  backup.
+  busy, the transaction aborts with nothing written and is safe to retry.
 - Restoring from the host dump is an owner call. The runner never restores on its own.
+
+## Effect on the migrate gate
+
+`action_migrate_read_only_prechecks` enters its multi-org branch when
+`recovery09_repairable_user_count > 0` or `class6_candidate_count > 0` and
+`distinct_active_org_count != 1`. With the Recovery09 migrations already applied, that branch
+always fails. `invalid_approval_action_count` and `attachment_org_conflict_count` must be 0 in
+every case.
+
+So, after one repair of a user with k class-6-shaped requests, the gate passes only if both of
+these are 0:
+- `recovery09_repairable_user_count − 1`. Users with only inactive memberships count too.
+- `class6_candidate_count − k` for add-membership, or `class6_candidate_count` unchanged for
+  deactivate.
+
+Requesters other than this user can keep `class6_candidate_count` above 0. These include
+requesters missing from `users` and requesters with two or more active memberships. In that case
+neither mode unblocks migrate.
+
+Inspect prints this projection for each user (`migrate_gate_after_add`,
+`migrate_gate_after_deactivate`). The repair summary prints `migrate_gate_after`, computed with
+the same rule from the counters measured after the COMMIT.
+
+The population is also created by design: self-registration writes no `user_orgs` row, and a
+partial smoke cleanup can leave an active user with no row. A later migrate can therefore stop
+at the same precheck again. Re-running inspect before migrate is the check.
 
 ## Rules: containment and values-free output
 
@@ -118,6 +168,10 @@
 - No identity column (id, username, email, name) reaches any SELECT list except inside `md5()`
   or a comparison. No echo/printf/log/fail line prints an identity variable. Both are
   static-scanned, with positive controls.
+- Residuals the task text asks for, which the owner should accept knowingly before dispatch:
+  - the inspect org list publishes the raw org ids that the spec can name, with member counts;
+  - fp is an unsalted md5 prefix of the id. It is pseudonymous: anyone holding a candidate id
+    can confirm it.
 
 ## Dispatch
 
@@ -142,68 +196,81 @@ After a repair, re-run `action=org-membership-inspect` and then `action=migrate`
 
 ## Verification
 
-RAN (local, 2026-10-12):
+RAN (local, 2026-10-12, fixer round 1):
 
-- `node --test scripts/ops/attendance-window-runner-pipeline.test.mjs`: 213/213 pass. This is
-  198 existing cells plus 15 new ones.
+- `node --test scripts/ops/attendance-window-runner-pipeline.test.mjs`: 225 cells, 224 pass and
+  1 skipped (the opt-in real-PostgreSQL cell). With
+  `WINDOW_RUNNER_ORGFIX_PG_BIN` pointing at a PostgreSQL 15 bin directory: 225/225 pass.
 - The workflow's own self-test invocation (`… pipeline.test.mjs scripts/ops/staging-tasks-smoke.test.mjs`):
-  404/404.
+  415 pass, 1 skipped, 0 fail.
 - Sibling contracts that read the runner files:
   - `staging-tasks-smoke.test.mjs` 191/191
   - `dingtalk-lifecycle-staging-canary-contract.test.mjs` 213/213
   - `dingtalk-interactive-card-stream-staging-uat-contract.test.mjs` 50/50
   - `dingtalk-oauth-staging-config-contract.test.mjs` 8/8
-- New cells:
+- Cells for this change:
   - wiring and the 10-input cap;
+  - no workflow expression names the raw input, and no step env carries it, with positive
+    controls. Validate writes its output only after every refusal;
   - regex parity between the lib and both workflow checks;
-  - spec parser: 4 accepted shapes and 27 rejected shapes. The rejected shapes cover missing
-    confirm, extra fields, metacharacters, newline/CR, quotes and length;
-  - workflow validation exits 2;
+  - spec parser: 4 accepted shapes and 27 rejected shapes;
+  - workflow validation, reading a synthesized event payload: exits 2 on every rejected shape, on
+    a missing, unparsable or non-string payload value, and on a spec for another action. Only a
+    validated value reaches `GITHUB_OUTPUT`;
+  - `deploy_sha` must be empty or a full SHA for every action;
+  - the summary step, run as extracted: mode + fp only, a withheld marker otherwise;
   - remote top-level exits 2 with zero docker calls;
-  - a positive control for the read-only scan;
   - inspect executable: every query is READ ONLY with ROLLBACK and PGOPTIONS, with no dump and no
-    write;
-  - repair executable: aborts on 0 and on 2 matches with no backup and no write;
-  - repair refuses an org that has no active members;
-  - repair executable: precheck, then backup, then exactly one write, then the re-measure. The
-    backup metadata is file name, size and sha256 only;
-  - write-transaction guards: the exact-one-row writes and the delta vector;
-  - values-free static scans, with positive controls;
-  - containment (staging postgres only);
-  - the shared counter generator and the single `pg_dump`;
-  - synthetic-class coverage.
-- Mutation checks (7/7 caught):
-  - backup moved after the write;
-  - READ ONLY dropped;
-  - ROW_COUNT guard dropped;
-  - remote spec validation dead-wrapped;
-  - `== 1` relaxed to `>= 1`;
-  - read-only PGOPTIONS dropped;
-  - an echoed id added.
-- Real PostgreSQL 15, throwaway local cluster, synthetic rows only. The real remote script ran
-  unmodified, with a docker shim that maps `docker exec` onto that cluster:
-  - The refactored precheck counter SQL gave output identical to the previous inline SQL, with
-    and without the `org_id` predicate.
-  - inspect worked end to end.
-  - deactivate committed with the exact predicted vector, including
-    `recovery09_unsupported_class6_count +k`.
-  - add-membership to a non-default org committed with `class6 −k`.
-  - add-membership to `default` committed with anchor `+1`.
-  - These were refused before backup and before any write: fp with 0 matches, an org with only
-    inactive members, an unknown org. No new dump file appeared.
-  - A malformed spec exited 2 with zero docker calls. A spec on inspect exited 2.
-  - A side-effect trigger forced a delta mismatch. The result was `ORGFIX_ABORT counter_delta_mismatch`,
-    the whole transaction rolled back, and no row changed.
-  - Run directly, the in-transaction guards raised `match_count=0`,
-    `org_has_no_active_members`, `malformed_org` and `deactivate_takes_no_org`.
-  - The read-only wrapper refused an `UPDATE`.
-- actionlint and shellcheck: no findings beyond the origin/main baseline.
+    write; the migrate-gate projection per mode; the gate rule itself;
+  - repair executable, against an fp-aware stub:
+    - refused on 0 and on 2 matches;
+    - refused on an fp that names no user, with a positive control;
+    - refused on an org without active members, without echoing the org;
+    - refused on applied deprovision evidence;
+    - a failed or empty dump stops it before the write;
+    - an unconfirmed commit or an after-COMMIT mismatch is a failure;
+    - order: precheck, backup, one write, re-measure;
+  - per-statement pins of the population predicate and the fp clause (precheck, evidence,
+    inspect, in-transaction re-check);
+  - write-transaction guards: lock order, the exact writes and dynamic statements, and the delta
+    vector;
+  - RAISE argument allowlist, and terse on both psql command lines;
+  - values-free static scans, containment, the shared counter generator and the single
+    `pg_dump`, synthetic-class coverage.
+- Opt-in real-PostgreSQL cell (PostgreSQL 15.17, throwaway local cluster, synthetic rows only).
+  It runs the generated SQL through psql and covers:
+  - inspect through the read-only wrapper;
+  - the wrapper refusing a write;
+  - deactivate: exact vector and `access_generation` advanced;
+  - add-membership to a non-default org and to `default`;
+  - an fp of a user outside the population, of a member and of nobody: each aborts with
+    `match_count=0` and changes nothing;
+  - a side-effect trigger: aborts with a delta mismatch and rolls back;
+  - applied evidence: refused in the precheck and in the transaction.
+- Mutation checks, each applied alone to the committed files and run against the default suite.
+  All are killed:
+  - from the review: A3, A4, A5 (fp clause dropped in the precheck, in the re-check, in both);
+    E1 (`LOCK TABLE` removed); E2 (post-commit check disabled); E3 (commit-marker check
+    disabled); E4 (delta check disabled); B4 (empty-dump `fail` → `log`); B6 (pg_dump under
+    `set +e`); E10, E11 (`uo.is_active` added to the inspect or re-check population); F9 (the
+    summary prints the env value);
+  - new: the raw input put back into the Validate env; a RAISE printing `v_ids[1]`; the org
+    echoed in the refusal; the evidence gate removed; the `access_generation` fragment removed;
+    the lock order reversed; the step output removed; the gate rule's multi-org arm removed;
+    terse removed from the psql command line.
+  - E4 first survived the default suite; the delta, missing-counter, histogram and counter-set
+    checks are now pinned as text, and E4 is killed. With the opt-in real-PostgreSQL cell
+    enabled, A4, E4 and E11 are also killed semantically by that cell.
+- The independent gate ran these on PostgreSQL 15.17 (the major version the staging compose
+  file pins), with the recovery-authority trigger enabled:
+  - a normal deactivate committed;
+  - while another session held the exclusive authority lock, the run aborted with
+    `METASHEET_RECOVERY_AUTHORITY_BUSY`, wrote nothing and left one extra dump.
 
 NOT RUN:
 
 - Any dispatch against staging. Inspect waits for the independent gate. Repair waits for the
   owner to name the mode.
 - Anything against production (out of scope by ruling).
-- The SQL against the staging PostgreSQL major version itself. Locally it ran on 15 only.
-- The users-table recovery-authority trigger. The local schema did not carry it, so the BUSY
-  path is covered only by the reasoning above.
+- The live staging schema itself (out-of-band triggers or RLS). The live container's
+  PostgreSQL version was not checked; the compose file pins 15.
