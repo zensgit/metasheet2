@@ -22,8 +22,11 @@
   stream (and rotate-<yyyyMMdd>.log beyond -Keep) are deleted, oldest first by the name's timestamp.
 
   Exit codes: 0 ok / dry run / nothing to do; 2 usage or configuration error (nothing changed);
-  3 -Register refused (nothing registered); 4 reloadLogs failed, renames rolled back;
-  5 a file operation failed (read the rotate log; a live file may need attention).
+  3 -Register refused (nothing registered); 4 reloadLogs failed or not confirmed within
+  -ReopenTimeoutSec (each renamed file is either moved back, or kept when its live file came back
+  late -- the log says which); 5 a file operation failed (read the rotate log);
+  1 unexpected PowerShell error (e.g. Register-ScheduledTask in a non-elevated session).
+  The pm2 call itself has no timeout (see the runbook).
 #>
 param(
   [string]$InstallRoot = '',
@@ -42,7 +45,6 @@ param(
   [string]$TaskName = 'MetaSheet-LogRotate'
 )
 $ErrorActionPreference = 'Stop'
-try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
 $script:LogFile = ''
 
 function Write-Step([string]$Message) {
@@ -70,6 +72,18 @@ function Invoke-Pm2ReloadLogs([string]$Command, [string]$Pm2HomeDir) {
   $text = (@($raw) | ForEach-Object { [string]$_ }) -join ' | '
   return [pscustomobject]@{ Ok = (($code -eq 0) -and ($text -notmatch 'Spawning PM2 daemon')); Code = $code; Text = $text }
 }
+
+function Find-StrayPm2Daemon([datetime]$Since) {
+  # pm2-runtime never runs pm2\lib\Daemon.js; a node process running it was spawned by a pm2 CLI call.
+  if (-not (Test-IsWindowsHost)) { return @() }
+  try {
+    return @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object {
+        [string]$_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' -and $_.CreationDate -ge $Since
+      } | ForEach-Object { [int]$_.ProcessId })
+  } catch { return @() }
+}
+
+function Get-RotateStamp { return (Get-Date -Format 'yyyyMMdd-HHmmss') }
 
 function Get-LiveLogs([string]$LogsDir) {
   # pm2 inserts the pm_id before the extension: metasheet-backend.out-0.log / .err-0.log.
@@ -116,6 +130,11 @@ function Get-HostTaskPrincipal([string]$Name) {
 }
 
 function Invoke-RegisterTask($Cfg) {
+  # Register-ScheduledTask -Force below would silently replace the pm2-runtime host task itself.
+  if ([string]::IsNullOrWhiteSpace($Cfg.TaskName) -or ([string]$Cfg.TaskName).Trim() -ieq ([string]$Cfg.HostTaskName).Trim()) {
+    Write-Step ("REFUSED: -TaskName '" + $Cfg.TaskName + "' is empty or names the host task '" + $Cfg.HostTaskName + "'; nothing registered.")
+    return 3
+  }
   $principal = Get-HostTaskPrincipal $Cfg.HostTaskName
   if ($null -eq $principal -or [string]::IsNullOrWhiteSpace($principal.UserId)) {
     Write-Step ("REFUSED: scheduled task '" + $Cfg.HostTaskName + "' not found (or has no user principal); nothing registered. The rotate task must run as the account that hosts pm2-runtime.")
@@ -184,7 +203,7 @@ function Invoke-Main {
     Write-Step 'FALLBACK: no pm2 RPC endpoint (rpc.sock) on this host, so pm2 is not called (it would spawn a stray daemon); using CopyTruncate for this run'
   }
   Write-Step ("{0}rotate: logs={1} archive={2} mode={3} keep={4} minSizeMB={5} pm2Home={6} pm2={7}" -f $label, $logsDir, $archive, $effectiveMode, $Keep, $MinSizeMB, $pm2HomeDir, $cmd)
-  $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+  $stamp = Get-RotateStamp
   $renamed = @()
   $failed = $false
   foreach ($f in (Get-LiveLogs $logsDir)) {
@@ -202,9 +221,15 @@ function Invoke-Main {
   }
   $code = 0
   if ($renamed.Count -gt 0) {
+    $callStart = (Get-Date).AddSeconds(-2)
     $reload = Invoke-Pm2ReloadLogs $cmd $pm2HomeDir
     Write-Step ("pm2 reloadLogs exit={0}: {1}" -f $reload.Code, $reload.Text)
-    if ($reload.Text -match 'Spawning PM2 daemon') { Write-Step 'WARNING: pm2 spawned a new pm2 daemon (it could not reach pm2-runtime). Do NOT run pm2 kill here (the pipe is machine-wide); report it and check the MetaSheet-PM2 task.' }
+    if ($reload.Text -match 'Spawning PM2 daemon') {
+      $stray = @(Find-StrayPm2Daemon $callStart)
+      $where = 'its pid was not found (look for a node process whose command line ends in pm2\lib\Daemon.js)'
+      if ($stray.Count -gt 0) { $where = 'stray daemon pid ' + ($stray -join ', ') }
+      Write-Step ("WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; " + $where + ". Do NOT run pm2 kill (the pipe is machine-wide). Stop that pid by hand BEFORE the next MetaSheet-PM2 start (runbook section 3, stray daemon).")
+    }
     $missing = @($renamed)
     if ($reload.Ok) {
       # God.reloadLogs answers before it reopens the files, so wait for every live file to come back.
@@ -216,6 +241,7 @@ function Invoke-Main {
       foreach ($r in $missing) {
         try {
           if (-not (Test-Path -LiteralPath $r.Live)) { [System.IO.File]::Move($r.Archive, $r.Live); Write-Step ("ROLLED BACK: {0} moved back to {1}; the backend keeps writing to it" -f $r.Archive, $r.Live) }
+          else { Write-Step ("LATE REOPEN: {0} came back after the wait; archive {1} kept (this file did rotate)" -f $r.Live, $r.Archive) }
         } catch { Write-Step ("FAILED: rollback of {0}: {1}" -f $r.Archive, $_.Exception.Message); $code = 5 }
       }
       Write-Step 'pm2 did not reopen the live log(s); check -Pm2Home, that this runs as the pm2-runtime account, and that the MetaSheet-PM2 task is running'
@@ -228,4 +254,7 @@ function Invoke-Main {
 }
 
 if ($MyInvocation.InvocationName -eq '.') { return }
-exit (Invoke-Main)
+$previousEncoding = $null
+try { $previousEncoding = [Console]::OutputEncoding; [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+try { $rc = Invoke-Main } finally { if ($null -ne $previousEncoding) { try { [Console]::OutputEncoding = $previousEncoding } catch { } } }
+exit $rc

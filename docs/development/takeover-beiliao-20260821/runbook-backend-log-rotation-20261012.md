@@ -21,7 +21,7 @@
 
 - 手工执行用**与 `MetaSheet-PM2` 相同的账号**，在同样提权的会话里执行（与升级脚本同一个会话即可）。
 - 计划任务由脚本的 `-Register` 自动读取 `MetaSheet-PM2` 的账号与运行级别，照抄（见 §2）。
-- 为什么：脚本要对 pm2-runtime 的管道发 `reloadLogs`。账号或提权级别不同，可能连不上管道；pm2 CLI 连不上时会**自己拉起一个新 daemon** 并照样打印 `All logs reloaded`、退出码 0（§5 (b) 第 [6] 步）。脚本对此有两道防线：管道不存在时根本不调用 pm2；调用后看到 `Spawning PM2 daemon` 或活动日志文件没有重新出现，就把改名撤回（退出码 4）。**出现这种情况不要执行 `pm2 kill`**：管道全机唯一，kill 可能打到 pm2-runtime 本身，后端随之退出。
+- 为什么：脚本要对 pm2-runtime 的管道发 `reloadLogs`。账号或提权级别不同，可能连不上管道；pm2 CLI 连不上时会**自己拉起一个新 daemon** 并照样打印 `All logs reloaded`、退出码 0（§5 (b) 第 [6] 步）。脚本对此有两道防线：管道不存在时根本不调用 pm2；调用后看到 `Spawning PM2 daemon`、pm2 退出码非 0、或活动日志文件没有按时重新出现，就退出码 4，并对每个改了名的文件二选一：原名仍不存在 → 移回原名（`ROLLED BACK`）；原名已由 pm2 晚到地重建 → 保留归档（`LATE REOPEN`，这个文件其实已轮转成功）。**出现 `Spawning PM2 daemon` 时不要执行 `pm2 kill`**：管道全机唯一，kill 可能打到 pm2-runtime 本身，后端随之退出；那个多余的 daemon 要按 §3 第 8 项手工去掉。
 
 ### 0.4 取得脚本（安装包里没有它）
 
@@ -60,19 +60,26 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
 | `-InstallRoot` | 必填 | 安装根目录；日志目录 = `<安装根目录>\output\logs` |
 | `-Pm2Home` | 环境变量 `PM2_HOME`，都没有就停 | 见 0.2 |
 | `-ArchiveDir` | `<安装根目录>\output\logs\archive` | `Rename` 模式要求与日志目录同一个卷，否则退出码 2 |
-| `-Keep` | 14 | 每个日志流保留的归档个数；`rotate-*.log` 也保留 14 个 |
-| `-MinSizeMB` | 64 | 活动日志小于这个大小就跳过（不轮转） |
+| `-Keep` | 14 | 每个日志流保留的归档个数，必须 ≥ 1（`0` 退出码 2）；`rotate-*.log` 也保留同样个数 |
+| `-MinSizeMB` | 64 | 活动日志小于这个大小就跳过（不轮转）；必须 ≥ 0 |
 | `-Mode` | `Rename` | 或 `CopyTruncate`，见 §5 (c) |
 | `-Pm2Command` | `<安装根目录>\node_modules\.bin\pm2.cmd`，没有就用 PATH 上的 `pm2` | 与升级脚本相同的查找顺序 |
-| `-Register` / `-At` | 不注册 / `03:30` | 见 §2 |
+| `-ReopenTimeoutSec` | 10 | `reloadLogs` 之后等活动日志重新出现的秒数 |
+| `-DryRun` / `-Apply` | 都不给 = dry-run | 两个同时给是用法错误（退出码 2） |
+| `-Register` / `-At` | 不注册 / `03:30` | 见 §2；`-At` 必须是 `HH:mm` |
+| `-HostTaskName` | `MetaSheet-PM2` | 托管 pm2-runtime 的计划任务；`-Register` 从它读账号与运行级别 |
+| `-TaskName` | `MetaSheet-LogRotate` | 要注册的任务名；**不得为空、不得等于 `-HostTaskName`**（忽略大小写和首尾空格，否则退出码 3，否则 `-Force` 会把宿主任务覆盖掉） |
 
 | 退出码 | 含义 |
 |---|---|
 | 0 | 成功；或 dry-run；或没有需要轮转的文件 |
-| 2 | 用法或配置错误（缺 `-InstallRoot` / `-Pm2Home`、目录不存在、`-DryRun` 与 `-Apply` 同时给、跨卷的 `Rename`）。**什么都没改** |
-| 3 | `-Register` 被拒绝（找不到 `MetaSheet-PM2`、`-At` 不是 `HH:mm`、没有 ScheduledTasks 模块）。**什么都没注册** |
-| 4 | `reloadLogs` 失败或活动日志没有重新出现：已把改了名的文件**移回原名**，后端继续写它原来的文件，什么都没丢 |
-| 5 | 某个文件操作失败（看 `rotate-<日期>.log` 里的 `FAILED:` 行） |
+| 1 | 未预料的 PowerShell 错误（例如在**未提权**的会话里 `-Register -Apply`，`Register-ScheduledTask` 报拒绝访问）。看屏幕上的错误；已做到哪一步看 `rotate-<日期>.log` |
+| 2 | 用法或配置错误（缺 `-InstallRoot` / `-Pm2Home`、目录不存在、`-DryRun` 与 `-Apply` 同时给、`-Keep` < 1、`-MinSizeMB` < 0、跨卷的 `Rename`）。**什么都没改** |
+| 3 | `-Register` 被拒绝（`-TaskName` 为空或等于宿主任务名、找不到 `MetaSheet-PM2`、`-At` 不是 `HH:mm`、没有 ScheduledTasks 模块）。**什么都没注册** |
+| 4 | `reloadLogs` 失败（退出码非 0 或输出含 `Spawning PM2 daemon`）或活动日志没在 `-ReopenTimeoutSec` 内重新出现。逐个文件看日志：`ROLLED BACK` = 已移回原名，后端继续写原文件，什么都没丢；`LATE REOPEN` = pm2 在等待结束后才重建了活动日志，归档保留，这个文件实际已轮转 |
+| 5 | 某个文件操作失败（看 `rotate-<日期>.log` 里的 `FAILED:` 行；例如同名归档已存在） |
+
+**已知限制：pm2 调用本身不设超时。** 有界等待在 PowerShell 5.1 里要另起进程并把输出重定向到文件（否则 pm2 拉起的 daemon 会继承输出管道，读输出永远不结束），还要单独处理 `.cmd`，复杂度与收益不相称，这里不做。若 pm2-runtime 卡死、`reloadLogs` 不返回：手工执行时按 Ctrl+C；计划任务会在 2 小时上限时被结束。两种情况下活动日志都停在改名后的归档名下，pm2 继续往这个归档名里写，不丢日志；但此后每天的运行都找不到活动日志、不再轮转。恢复：先让 pm2-runtime 恢复正常，再把这个归档 `Move-Item` 回原名（对打开着的文件改名是可以的，写入跟着文件走，见 §5 (a)），或者在 pm2-runtime 正常后再手工执行一次 `pm2 reloadLogs`。
 
 ## 1. 首次手工归档（活动日志约 1.4 GB）
 
@@ -88,7 +95,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    - `pm2 reloadLogs exit=0: Reloading all logs... | All logs reloaded`；
    - `live log(s) reopened by pm2`；
    - `done, exit 0`。
-3. 退出码 4：日志里有 `ROLLED BACK: … moved back to …`，后端照常写原文件，什么都没丢。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行；有 `WARNING: pm2 spawned a new pm2 daemon` 时**不要 `pm2 kill`**，把这一段日志报给开发机。
+3. 退出码 4：逐个文件看日志。`ROLLED BACK: … moved back to …` = 已移回原名，后端照常写原文件，什么都没丢；`LATE REOPEN: … came back after the wait; archive … kept` = pm2 晚到地重建了活动日志，这个文件已轮转，不用处理。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行。有 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; …` 时**不要 `pm2 kill`**，按 §3 第 8 项去掉那个 daemon（必须在下一次 `MetaSheet-PM2` 启动之前），再把这一段日志报给开发机。
 4. 退出码 5：把 `FAILED:` 那几行报给开发机；活动日志不会被删除（脚本从不删活动日志）。
 5. 不停服务、不挂维护标志、不碰数据库。pm2 换文件的那一瞬间（毫秒级）到达的输出会被丢弃（§5 源码第 4 条），其余不丢。
 
@@ -99,7 +106,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    - `task action: powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<脚本目录>\…" -InstallRoot "…" -ArchiveDir "…" -Pm2Home "…" -Pm2Command "…" -Keep 14 -MinSizeMB 64 -Mode Rename -Apply`；
    - `[dry-run] nothing registered; add -Apply to register`。
    找不到 `MetaSheet-PM2`（或同名任务读不出账号）时是 `REFUSED: scheduled task 'MetaSheet-PM2' not found …`，退出码 3，什么都不注册。
-2. **注册**：`-Register -Apply`，末行 `registered 'MetaSheet-LogRotate'`。重复执行会覆盖同名任务（用来改时间或参数）。
+2. **注册**：`-Register -Apply`，末行 `registered 'MetaSheet-LogRotate'`。重复执行会覆盖同名任务（用来改时间或参数）。必须在**提权**的会话里执行（否则 `Register-ScheduledTask` 拒绝访问，退出码 1）。不要传 `-TaskName MetaSheet-PM2`：脚本会拒绝（退出码 3），因为覆盖注册会把宿主任务换成本任务。注册后按 §3 第 4 项实跑一次；日志里出现 stray daemon 警告时按 §3 第 8 项处理。
 3. 任务属性：
    - 每天 `-At`（默认 03:30）；错过（关机）后开机补跑；同一时间只跑一个实例；2 小时超时。
    - 账号与 `MetaSheet-PM2` 相同；运行级别照抄（`HighestAvailable` → 最高权限）。登录方式：宿主任务是「不管用户是否登录都运行」（存了口令）时，本任务用 **S4U**（同样不管是否登录都运行，但**不保存口令**，只能访问本机资源——本任务只碰本机文件和本机管道）；宿主是 SYSTEM 等服务账号时用服务账号；宿主是「只在用户登录时运行」时照抄。
@@ -123,13 +130,23 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    只看两行的账号与运行级别是否一致，不抄进 issue。
 4. **建议：在维护窗口里把计划任务的整条路径实跑一次**（证明计划任务的登录方式能连上 pm2-runtime 的管道——这一点开发机没法验证）：用 `-Register -Apply -MinSizeMB 0` 注册一次，`Start-ScheduledTask -TaskName 'MetaSheet-LogRotate'`，等 `(Get-ScheduledTaskInfo -TaskName 'MetaSheet-LogRotate').LastTaskResult` 变为 0，读 `rotate-<今天>.log` 的最后一段：应有 `mode=Rename`、`renamed …`、`live log(s) reopened by pm2`、`done, exit 0`。然后**用默认参数重新 `-Register -Apply`**（恢复 `-MinSizeMB 64`）。
    - 是 `FALLBACK: no pm2 RPC endpoint` 而后端明明在跑：任务看不到管道，停下报开发机；
-   - 是 `ROLLED BACK` 或 `WARNING: pm2 spawned a new pm2 daemon`（`LastTaskResult` 为 4）：任务的账号或提权与 pm2-runtime 不一致，**不要 `pm2 kill`**；删掉任务（§4），报开发机。
+   - 是 `ROLLED BACK` 或 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon`（`LastTaskResult` 为 4）：任务的账号或提权与 pm2-runtime 不一致，**不要 `pm2 kill`**；有 stray 警告时先按第 8 项去掉那个 daemon，再删掉任务（§4），报开发机。
 5. **第二天**：`(Get-ScheduledTaskInfo -TaskName 'MetaSheet-LogRotate').LastTaskResult` 为 0；有 `rotate-<当天>.log`；不到 64 MB 的那天日志里是 `skip …`。
 6. **清理生效**：每个流的归档个数不超过 14：
    ```
    (Get-ChildItem <安装根目录>\output\logs\archive -Filter 'metasheet-backend.out-0.*.log').Count
    ```
-7. （可选）后端仍挂在 pm2-runtime 下：做法见 `handoff-r59-two-machine-20260924.md` 第 3 节第 5 步（`Win32_Process` 的 `ParentProcessId`）。
+7. 后端仍挂在 pm2-runtime 下：做法见 `handoff-r59-two-machine-20260924.md` 第 3 节第 5 步（`Win32_Process` 的 `ParentProcessId`）。这一项也是第 8 项的**探测手段**：后端 node 进程的父进程应是命令行含 `pm2-runtime` 的进程；若是命令行以 `pm2\lib\Daemon.js` 结尾的进程，说明后端已经跑在多余的 daemon 里。
+8. **多余的 pm2 daemon（stray）：识别与去除。** 何时要做：脚本日志里出现 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; stray daemon pid <pid>`（或 `its pid was not found`），或第 7 项看到 `Daemon.js` 进程。pm2-runtime 自己从不运行 `pm2\lib\Daemon.js`，所以**命令行以 `pm2\lib\Daemon.js` 结尾的 node 进程，按定义就是某次 pm2 命令（本脚本的 `reloadLogs`、手工 `pm2 list` 等）连不上 pm2-runtime 时拉起的多余 daemon**。它不会自己退出，并占着全机唯一的管道 `\\.\pipe\rpc.sock`。之后 `MetaSheet-PM2` 再启动 pm2-runtime 时（升级后的重启、机器重启）**不会报错**：pm2-runtime 作为客户端连上它，后端就跑在这个 daemon 里；`pm2 list` / `restart` / `reloadLogs` 也都对它成功，一直悄无声息，直到有人把它去掉。所以必须在**下一次 `MetaSheet-PM2` 启动之前**处理：
+   1. 找到它：
+      ```
+      Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' } | Select-Object ProcessId, ParentProcessId, CreationDate
+      ```
+      脚本 WARNING 行给出的 pid 应在其中。
+   2. 确认 `Get-ScheduledTask -TaskName 'MetaSheet-PM2'` 的 `State` 是 `Running`，后端 health 正常，并按第 7 项确认后端的父进程是 pm2-runtime、**不是**这个 daemon。
+   3. `Stop-Process -Id <pid>`：只停这一个 pid，**不要 `pm2 kill`**（kill 走全机唯一的管道，停到谁说不准，可能把 pm2-runtime 和后端一起停掉）。
+   4. 重跑第 1 步，应为空；再看一次 health。
+   若第 2 步发现后端已经跑在这个 daemon 下（父进程是 `Daemon.js` 进程），**不要 Stop-Process**（会把后端一起停掉），停下报开发机。开发机实测：停掉 stray daemon 后管道随即关闭（§5 (d)）。
 
 ## 4. 回退
 
@@ -185,7 +202,23 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
 - 默认 **`Rename` + `pm2 reloadLogs`**：大文件瞬时完成、不占额外磁盘、归档内容完整；只丢 pm2 换文件那一瞬间的输出。
 - 改名抛异常（写的进程打开时没带 `FILE_SHARE_DELETE`）→ 该文件改用 `CopyTruncate`（测试里用不带 Delete 共享的句柄复现）。
 - 本机没有 pm2 管道 → 本次全部改用 `CopyTruncate`，**不调用 pm2**。
-- 已改名但 `reloadLogs` 失败、输出含 `Spawning PM2 daemon`、或 `-ReopenTimeoutSec`（默认 10 秒）内活动日志没有重新出现 → 把仍缺原名的文件**移回原名**（God 的句柄跟着文件走，所以移回后后端仍在写同一个文件），退出码 4。活动日志因此不会「消失」。
+- 已改名但 `reloadLogs` 失败、输出含 `Spawning PM2 daemon`、或 `-ReopenTimeoutSec`（默认 10 秒）内活动日志没有重新出现 → 退出码 4；此时原名仍不存在的文件**移回原名**（God 的句柄跟着文件走，所以移回后后端仍在写同一个文件，`ROLLED BACK`），原名已被 pm2 晚到地重建的文件保留归档（`LATE REOPEN`）。活动日志因此不会「消失」。看到 `Spawning PM2 daemon` 时，脚本在 WARNING 行里给出那个多余 daemon 的 pid（按命令行以 `pm2\lib\Daemon.js` 结尾、且在本次调用之后启动来找），但不去停它（见 §3 第 8 项）。
+
+### (d) 多余 daemon 的识别与去除（开发机，pm2 7.0.4，PS 5.1）
+
+没有任何 pm2 在运行时执行一次 `pm2 ping`（输出重定向到文件），再用脚本里的同一个查找函数找它，然后 `Stop-Process`：
+
+```
+pm2 ping output: [PM2] Spawning PM2 daemon with pm2_home=<lab>\.pm2-stray
+pipe present after ping=True
+  node pid=25324 cmd=...ab\pm2lab\node_modules\pm2\lib\Daemon.js
+Find-StrayPm2Daemon (since before the call) -> 25324
+Find-StrayPm2Daemon (since in the future) -> count 0
+Stop-Process 25324
+pipe present after Stop-Process=False
+```
+
+「pm2-runtime 再启动时作为客户端连上多余 daemon、后端跑在它里面」这一点，见 `handoff-r59-two-machine-20260924.md` 第 2 节的实测（pm2 7.0.4），这里没有重做。
 
 用真 pm2-runtime 7.0.4 跑脚本本身（PS 5.1，`-Apply -MinSizeMB 0`，pm2 从 `<安装根目录>\node_modules\.bin\pm2.cmd` 自动找到）：
 

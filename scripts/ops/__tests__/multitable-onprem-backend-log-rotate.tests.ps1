@@ -82,6 +82,10 @@ Check 'dry run does not create the archive dir or touch the live file' ((-not (T
 Check 'dry run never calls pm2' ($r.Calls.Count -eq 0)
 $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; DryRun = $true; Apply = $true } $null
 Check '-DryRun with -Apply is a usage error (2)' ($r.Code -eq 2)
+New-Item -ItemType Directory -Force -Path $lab.Archive | Out-Null
+for ($d = 1; $d -le 4; $d++) { Set-Content -LiteralPath (Join-Path $lab.Archive ('metasheet-backend.out-0.2026090{0}-033000.log' -f $d)) -Value 'old' }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Keep = 2 } { function Test-Pm2PipePresent { $true } }
+Check 'dry run with archives beyond -Keep lists them and deletes nothing' ($r.Code -eq 0 -and $r.Out -match '\[dry-run\] would prune metasheet-backend\.out-0\.20260901-033000\.log' -and $r.Out -match '\[dry-run\] would prune metasheet-backend\.out-0\.20260902-033000\.log' -and @(Get-ChildItem -LiteralPath $lab.Archive).Count -eq 4)
 
 Write-Host '== -Apply -Mode CopyTruncate rotates and prunes to -Keep'
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb; 'metasheet-backend.err-0.log' = 2 * $mb; 'metasheet-backend.out.log' = 2 * $mb }
@@ -148,12 +152,28 @@ $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB
   function Stub-Pm2 { [System.IO.File]::WriteAllText((Join-Path $lab.Logs 'metasheet-backend.out-0.log'), ''); $global:LASTEXITCODE = 1; 'error' }
 }
 Check 'reloadLogs exits non-zero even though a live file exists -> exit 4 (not reported as rotated)' ($r.Code -eq 4 -and $r.Out -notmatch 'live log\(s\) reopened')
-$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2' } {
+Check 'live file back after the wait -> LATE REOPEN logged, archive kept, nothing moved back' ($r.Out -match 'LATE REOPEN: .*metasheet-backend\.out-0\.log came back' -and $r.Out -notmatch 'ROLLED BACK' -and @(Get-ChildItem -LiteralPath $lab.Archive -Filter 'metasheet-backend.out-0.*.log').Count -eq 1)
+$spawnStub = {
   function Test-Pm2PipePresent { $true }
   function Stub-Pm2 { [System.IO.File]::WriteAllText((Join-Path $lab.Logs 'metasheet-backend.out-0.log'), ''); $global:LASTEXITCODE = 0; 'Spawning PM2 daemon with pm2_home=x'; 'All logs reloaded' }
 }
-Check 'reloadLogs printed "Spawning PM2 daemon" (exit 0, live file exists) -> exit 4 with the stray-daemon warning' ($r.Code -eq 4 -and $r.Out -match 'spawned a new pm2 daemon' -and $r.Out -notmatch 'live log\(s\) reopened')
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2' } ([scriptblock]::Create($spawnStub.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) [void]`$calls.Add(`$Since); 4242 }"))
+Check 'reloadLogs printed "Spawning PM2 daemon" (exit 0, live file exists) -> exit 4, warning names the stray pid, never pm2 kill' ($r.Code -eq 4 -and $r.Out -match 'spawned a stray pm2 daemon; stray daemon pid 4242\. Do NOT run pm2 kill' -and $r.Out -notmatch 'live log\(s\) reopened' -and $r.Calls.Count -eq 1)
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2' } ([scriptblock]::Create($spawnStub.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) @() }"))
+Check 'stray daemon pid not found -> the warning says so' ($r.Code -eq 4 -and $r.Out -match 'its pid was not found')
+
+Write-Host '== archive name collision, -Keep 0'
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+New-Item -ItemType Directory -Force -Path $lab.Archive | Out-Null
+$existing = Join-Path $lab.Archive 'metasheet-backend.out-0.20261012-033000.log'
+Set-Content -LiteralPath $existing -Value 'earlier archive'
+$before = Get-Sha $existing
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Mode = 'CopyTruncate' } { function Get-RotateStamp { '20261012-033000' } }
+Check 'archive name already taken -> exit 5, existing archive and live file untouched' ($r.Code -eq 5 -and $r.Out -match 'FAILED: archive already exists' -and (Get-Sha $existing) -eq $before -and (Get-Item (Join-Path $lab.Logs 'metasheet-backend.out-0.log')).Length -eq 2 * $mb)
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Keep = 0; Apply = $true; Mode = 'CopyTruncate' } $null
+Check '-Keep 0 -> exit 2, nothing pruned' ($r.Code -eq 2 -and (Test-Path -LiteralPath $existing))
 
 if ($isWin) {
   $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
@@ -204,6 +224,11 @@ if ($r.Calls.Count -eq 1) { $reg = $r.Calls[0] }
 Check '-Register -Apply registers MetaSheet-LogRotate as the host task user (S4U, Highest), daily 03:30, running -Apply' ($r.Code -eq 0 -and $null -ne $reg -and $reg.TaskName -eq 'MetaSheet-LogRotate' -and $reg.Task.Principal.UserId -eq 'svc-user' -and $reg.Task.Principal.LogonType -eq 'S4U' -and $reg.Task.Principal.RunLevel -eq 'Highest' -and $reg.Task.Trigger.At -eq '03:30' -and $reg.Task.Action.Argument -match ' -Apply$' -and $reg.Task.Action.Argument -match [regex]::Escape('-Pm2Home "' + $lab.Pm2Home + '"'))
 $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; At = '3pm' } $withHost
 Check 'bad -At -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Calls.Count -eq 0)
+$withHostCounted = [scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { [void]`$calls.Add('schtasks'); `$global:LASTEXITCODE = 0; '$taskXml' }")
+foreach ($name in @('MetaSheet-PM2', ' metasheet-pm2 ', '')) {
+  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; TaskName = $name } $withHostCounted
+  Check ("-TaskName '$name' (the host task, or empty) -> exit 3 before any schtasks / Register call") ($r.Code -eq 3 -and $r.Out -match 'REFUSED: -TaskName' -and $r.Calls.Count -eq 0)
+}
 
 Get-ChildItem -LiteralPath $WorkRoot -Directory -Filter 'logrot-test-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ("multitable-onprem-backend-log-rotate tests: {0} passed, {1} failed (PowerShell {2})" -f $pass, $fail, $PSVersionTable.PSVersion)
