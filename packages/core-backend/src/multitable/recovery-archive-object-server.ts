@@ -52,12 +52,17 @@ export function createRecoveryArchiveObjectServer(options: {
         chunks.push(Buffer.from(chunk))
       }
       if (req.aborted || res.destroyed) return
-      const input: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      const envelope: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+      if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
+        || Object.keys(envelope).sort().join(',') !== 'request,storeId'
+        || !('storeId' in envelope) || envelope.storeId !== storeId || !('request' in envelope)) refuseRecoveryResourceIo()
+      const input = envelope.request
       let result: unknown
       switch (verb) {
         case 'put': {
           if (!input || typeof input !== 'object' || Array.isArray(input) || !('bytes' in input)) refuseRecoveryResourceIo()
-          result = await object.put(validateRecoveryArchiveObjectPutRequest({ ...input, bytes: decodeRecoveryResourceBase64(input.bytes, maxObjectBytes) }))
+          const bytes = input.bytes === '' ? Buffer.alloc(0) : decodeRecoveryResourceBase64(input.bytes, maxObjectBytes)
+          result = await object.put(validateRecoveryArchiveObjectPutRequest({ ...input, bytes }))
           break
         }
         case 'get': {

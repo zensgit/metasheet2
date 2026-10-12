@@ -883,7 +883,8 @@ jobs:
             tests/unit/multitable-recovery-archive-remote-object-store.test.ts \
             tests/unit/multitable-recovery-remote-composition.test.ts \
             tests/unit/multitable-recovery-resource-config.test.ts \
-            tests/unit/multitable-recovery-resource-launchers.test.ts
+            tests/unit/multitable-recovery-resource-launchers.test.ts \
+            tests/unit/multitable-recovery-archive-object-wire-contract.test.ts
           pnpm --filter @metasheet/core-backend exec tsc --noEmit -p scripts/tsconfig.recovery-resources.json
           pnpm --filter @metasheet/core-backend exec tsc --noEmit -p scripts/tsconfig.recovery-resource-transport.json
 
