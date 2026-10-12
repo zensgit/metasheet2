@@ -1,7 +1,10 @@
 import { isIP } from 'node:net'
-import { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } from '../src/multitable/recovery-archive-file-store'
-import { createRecoveryArchiveObjectServer } from '../src/multitable/recovery-archive-object-server'
-import { exactRecoveryResourceConfig, readRecoveryResourceJson, readRecoveryResourcePrivateFile } from '../src/multitable/recovery-resource-config'
+import { createRequire } from 'node:module'
+
+const require = createRequire(import.meta.url)
+const { createRecoveryArchiveFileStoreProvider, provisionRecoveryArchiveFileRoot } = require('../src/multitable/recovery-archive-file-store.ts') as typeof import('../src/multitable/recovery-archive-file-store')
+const { createRecoveryArchiveObjectServer } = require('../src/multitable/recovery-archive-object-server.ts') as typeof import('../src/multitable/recovery-archive-object-server')
+const { exactRecoveryResourceConfig, readRecoveryResourceJson, readRecoveryResourcePrivateFile } = require('../src/multitable/recovery-resource-config.ts') as typeof import('../src/multitable/recovery-resource-config')
 
 // Explicit resource command; never imported or started by the default application.
 let service: ReturnType<typeof createRecoveryArchiveObjectServer> | undefined
