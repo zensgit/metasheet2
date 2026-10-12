@@ -71,6 +71,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
   issueElearningCertificate,
@@ -110,9 +111,7 @@ function text(en: string, zh: string): string {
 }
 
 function newRequestId(): string {
-  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : ''
+  return randomUuid()
 }
 
 function errorText(value: unknown): string {

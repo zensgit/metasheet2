@@ -2004,6 +2004,7 @@ exec npx vitest run \
   useAutoSumTotal \
   usePlmExportActions \
   userManagementView \
+  uuid-no-bare-randomuuid \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
