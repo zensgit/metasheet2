@@ -654,8 +654,9 @@ export function normalizePendingCancelRoundList(payload: unknown): PendingCancel
 }
 
 /** `GET /api/attendance/cancel-rounds/pending` (attendance:approve). Throws on any non-2xx or malformed body. */
-export async function fetchPendingCancelRounds(): Promise<PendingCancelRoundList> {
-  const response = await apiFetch(CANCEL_ROUND_PENDING_LIST_PATH)
+export async function fetchPendingCancelRounds(orgId?: string): Promise<PendingCancelRoundList> {
+  const query = orgId ? '?' + new URLSearchParams({ orgId }).toString() : ''
+  const response = await apiFetch(CANCEL_ROUND_PENDING_LIST_PATH + query)
   const payload = await readCancelRoundResponse(response)
   return normalizePendingCancelRoundList(payload)
 }

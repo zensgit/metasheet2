@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, ref, type App as VueApp } from 'vue'
 
 const apiFetchMock = vi.fn()
 vi.mock('../src/utils/api', async (importOriginal) => {
@@ -631,7 +631,81 @@ describe('AttendanceView wiring', () => {
     expect(tagIndex).toBeGreaterThan(recentHeader)
     expect(tagIndex).toBeLessThan(shiftSwapBlock)
     const tag = source.slice(tagIndex, source.indexOf('/>', tagIndex))
-    expect(tag).toContain('v-if="item.request_type === \'leave\'"')
+    expect(tag).toContain('v-if="item.request_type === \'leave\' || item.request_type === \'business_trip\'"')
     expect(tag).toContain(':current-user-id="currentUserId"')
+  })
+})
+
+describe('approved business trip cancellation entry', () => {
+  const trip = { ...LEAVE, request_type: 'business_trip' }
+  it('allows the owner to explicitly submit the existing cancellation route with trip wording', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    const root = await mountPanel(trip)
+    $(root, 'data-cancel-round-launch')!.click()
+    await flushUi()
+    expect(root.textContent).toContain('申请撤销这条出差')
+    expect(root.textContent).toContain('保留过去记录')
+    $(root, 'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect(calls().filter(call => call[0] === 'POST')).toEqual([
+      ['POST', '/api/attendance/requests/req-1/cancel-round', '{}'],
+    ])
+  })
+  it('does not launch for flag-off or a different owner', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: false }))]
+    expect($(await mountPanel(trip), 'data-cancel-round-launch')).toBeNull()
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    expect($(await mountPanel(trip, 'someone_else'), 'data-cancel-round-launch')).toBeNull()
+    expect(calls().filter(call => call[0] === 'POST')).toEqual([])
+  })
+  it('does not read unknown request types', async () => {
+    await mountPanel({ ...trip, request_type: 'business_trip_unknown' })
+    expect(apiFetchMock).not.toHaveBeenCalled()
+  })
+  it('shows applied trip cancellation without leave balance claims', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true,
+      round: round({ outcome: 'applied', status: 'business_trip_cancelled', canWithdraw: false }),
+    }))]
+    const root = await mountPanel(trip)
+    expect(root.textContent).toContain('出差已取消')
+    expect(root.textContent).not.toContain('请假')
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect($(root, 'data-cancel-round-launch')).toBeNull()
+  })
+})
+
+
+describe('cancel round async scope', () => {
+  it('a late launch after unmount sends no follow-up summary read', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({entryEnabled:true}))]
+    const root = await mountPanel({...LEAVE,request_type:'business_trip'})
+    let finish!: (response: Response) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+    $(root,'data-cancel-round-launch')!.click()
+    await flushUi()
+    $(root,'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    apps.pop()!.unmount()
+    finish(jsonResponse(201,{ok:true}))
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a late summary cannot overwrite the newly selected document', async () => {
+    let finish!: (response: Response) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse(200,summaryBody({entryEnabled:false})))
+    const request = ref({...LEAVE})
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({render:()=>h(AttendanceCancelRoundPanel,{request:request.value,currentUserId:'emp_1'})})
+    app.mount(root);apps.push(app)
+    request.value = {...LEAVE,id:'req-2'}
+    await flushUi()
+    finish(jsonResponse(200,summaryBody({entryEnabled:true})))
+    await flushUi()
+    expect($(root,'data-cancel-round-launch')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
   })
 })

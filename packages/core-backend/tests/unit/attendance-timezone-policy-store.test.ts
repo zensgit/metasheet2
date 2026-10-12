@@ -11,6 +11,7 @@ const { createAttendanceTimezonePolicyStore: create, attendanceTimezoneOrgLockKe
   createAttendanceTimezonePolicyStore: (adapter: {
     query: Query, transaction: (work: (query: Query) => Promise<unknown>) => Promise<unknown>,
     authorizeManage: (input: Input) => Promise<boolean>,
+    prepareTripSourceChange?: (input: Input) => Promise<() => Promise<void>>,
   }) => Store,
   attendanceTimezoneOrgLockKey: (orgId: string) => string,
 }
@@ -20,7 +21,7 @@ function setup(responses: Input[][] = []) {
   query.mockResolvedValue({ rows: [] })
   const authorizeManage = vi.fn().mockResolvedValue(true)
   const transaction = vi.fn(async (work: (q: Query) => Promise<unknown>) => work(query))
-  return { query, authorizeManage, transaction, store: create({ query, transaction, authorizeManage }) }
+  return { query, authorizeManage, transaction, store: create({ query, transaction, authorizeManage, prepareTripSourceChange: async () => async () => {} }) }
 }
 const expectedError = (code: string, status = 422) => ({
   code: 'ATTENDANCE_TIMEZONE_' + code, message: 'ATTENDANCE_TIMEZONE_' + code, status,
@@ -151,4 +152,33 @@ describe('D1 timezone policy persistence contracts', () => {
       .toThrow('ATTENDANCE_TIMEZONE_INVALID_ZONE')
     expect(query).not.toHaveBeenCalled()
   })
+  it('requires the trip reader before mutable row locks when D3 has an affected arrangement',async()=>{
+    const query=vi.fn<Parameters<Query>,ReturnType<Query>>()
+      .mockResolvedValueOnce({rows:[]}).mockResolvedValueOnce({rows:[{present:true}]})
+      .mockResolvedValueOnce({rows:[{request_id:'trip'}]})
+    const store=create({query,transaction:async work=>work(query),authorizeManage:async()=>true})
+    await expect(store.setPolicy({...actor,enabled:true,expectedVersion:0}))
+      .rejects.toMatchObject(expectedError('TRIP_GUARD_UNAVAILABLE',503))
+    expect(query.mock.calls.some(([sql])=>sql.includes('FOR UPDATE'))).toBe(false)
+    expect(query.mock.calls.some(([sql])=>sql.startsWith('INSERT'))).toBe(false)
+  })
+  it('captures and verifies trip boundaries around source DML inside the same transaction',async()=>{
+    const sequence:string[]=[]
+    const query:Query=async(sql)=>{
+      sequence.push(sql.startsWith('SELECT pg_advisory')?'prefix':sql.startsWith('INSERT INTO attendance_timezone_policies')?'write':'query')
+      if(sql.includes('FROM users')) return {rows:[{id:'actor-a'}]}
+      if(sql.startsWith('INSERT INTO attendance_timezone_policies')) return {rows:[{enabled:true,version:1}]}
+      return {rows:[]}
+    }
+    const store=create({query,transaction:async work=>work(query),authorizeManage:async()=>true,
+      prepareTripSourceChange:async input=>{
+        expect(input).toEqual({query,orgId:actor.orgId,userIds:null})
+        sequence.push('capture')
+        return async()=>{sequence.push('verify');throw Object.assign(new Error('ATTENDANCE_TRIP_PARTIAL_SHIFT'),{code:'ATTENDANCE_TRIP_PARTIAL_SHIFT'})}
+      }})
+    await expect(store.setPolicy({...actor,enabled:true,expectedVersion:0})).rejects.toMatchObject({code:'ATTENDANCE_TRIP_PARTIAL_SHIFT',status:409})
+    expect(sequence[0]).toBe('prefix');expect(sequence[1]).toBe('capture')
+    expect(sequence.indexOf('write')).toBeGreaterThan(sequence.indexOf('capture'));expect(sequence.at(-1)).toBe('verify')
+  })
+
 })

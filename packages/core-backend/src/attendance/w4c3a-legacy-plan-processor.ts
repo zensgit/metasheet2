@@ -1,3 +1,4 @@
+import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a core-owned canonical legacy-plan processor (P07/P08 recovery).
  *
@@ -190,6 +191,7 @@ function assembleCallbacks(
       return runAttendanceResultOperationTransactionV1(connection, work)
     },
     async acquireClass00(trx, orgId) {
+      await acquireAttendanceImportTimezonePrefixV1(trx, orgId)
       const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
       await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
     },
@@ -264,6 +266,7 @@ function assembleCallbacks(
       return deriveAttendanceLegacyPlanTargetIdentitiesV1(plan)
     },
     async acquireClass11(trx, plan, identities) {
+      if (plan.groupEffects.length > 0) await prepareAttendanceImportTimezoneSourceV1(trx, plan.manifest.orgId)
       await acquireAttendanceLegacyPlanClass11V1(trx, plan, identities)
     },
     async recheckPreconditions(trx, plan) {

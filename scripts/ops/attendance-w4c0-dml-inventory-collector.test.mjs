@@ -124,11 +124,20 @@ test('timezone configuration tables have explicit buckets without a prefix-wide 
 
 test('ACP canonical grants bind exact site identity and multiplicity, never a path-wide exception', () => {
   const relPath = 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts'
-  const raw = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
-  assert.equal(raw.length, 2)
-  assert.equal(W4_EXACT_CANONICAL_SITES.length, 2)
+  const original = scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
+  assert.equal(original.length, 2)
+  const reviewedPaths = [
+    relPath,
+    'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
+    'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+    'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+  ]
+  const raw = reviewedPaths.flatMap(file => scanFileForDmlSites(file, fs.readFileSync(path.join(rootDir, file), 'utf8')))
+    .filter(site => TABLE_BUCKETS[site.table] === 'w4_canonical')
+  assert.equal(raw.length, 6)
+  assert.equal(W4_EXACT_CANONICAL_SITES.length, 6)
   const positive = classifyCensus(raw)
-  assert.equal(positive.canonicalSites.length, 2)
+  assert.equal(positive.canonicalSites.length, 6)
   assert.deepEqual(positive.exactCanonicalCountDrift, [])
   assert.deepEqual(positive.outsideBoundarySites, [])
   for (const site of raw) {
@@ -139,7 +148,7 @@ test('ACP canonical grants bind exact site identity and multiplicity, never a pa
     assert.equal(missing.exactCanonicalCountDrift.length, 1)
     assert.equal(missing.exactCanonicalCountDrift[0].actual, 0)
     for (const change of [
-      { table: 'attendance_result_operations' }, { verb: 'update' },
+      { table: 'attendance_result_operations' }, { verb: site.verb === 'update' ? 'delete' : 'update' },
       { enclosingSymbol: 'unreviewedWriter' }, { relPath: relPath + '.extra.ts' },
       { relPath: 'packages/core-backend/src/attendance/w4c0-unreviewed.ts' },
     ]) {
@@ -689,6 +698,8 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       // event log, structurally the same kind of object as the W4 rollout pair
       // below and written only by the single transition boundary named in
       // W4_CANONICAL_PATH_PREFIXES.
+      'attendance_business_trip_arrangements',
+      'attendance_business_trip_requests',
       'attendance_calculation_context_source_events',
       'attendance_calculation_context_source_state',
       'attendance_calculation_rollout_events',
@@ -711,6 +722,7 @@ test('the three scheduled-run tables are w4_canonical, and the bucket is the exa
       'attendance_scheduled_run_target_outcomes',
       'attendance_scheduled_run_targets',
       'attendance_scheduled_runs',
+      'attendance_timezone_context_companions',
     ],
     'the w4_canonical bucket is an exact closed set — a demotion OR a smuggled addition both redden here',
   )
@@ -1504,4 +1516,42 @@ test('W4C-3c mutation: reintroducing live second UPDATE after result edit is cau
   const classified = classifyCensus(sites)
   const { unclaimed } = classifyTrackedSites(classified.trackedSites)
   assert.equal(unclaimed.length, 1, 'reintroduced post-write UPDATE must be unclaimed open debt')
+})
+
+
+test('D3 trip authority curated claims match four live exact DML sites and reject neighboring writers', () => {
+  const entry = CURATED_DEBT_ENTRIES.find(candidate => candidate.id === 'X09')
+  assert.equal(entry?.canonicalizedBy, 'attendance-multitimezone-D3')
+  const paths = [
+    'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+    'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+  ]
+  const sites = paths.flatMap(relPath =>
+    scanFileForDmlSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8')),
+  )
+  const keys = sites.map(site =>
+    [site.relPath, site.enclosingSymbol, site.table, site.verb].join('::'),
+  ).sort()
+  assert.deepEqual(keys, [
+    'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_business_trip_requests::insert',
+    'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_requests::insert',
+    'plugins/plugin-attendance/lib/attendance-business-trip.cjs::cancel::attendance_business_trip_arrangements::update',
+    'plugins/plugin-attendance/lib/attendance-business-trip.cjs::publish::attendance_business_trip_arrangements::insert',
+  ].sort())
+  for (const site of sites) {
+    assert.equal(entry.claims(site), true, 'each reviewed live site must retain its explicit claim')
+    for (const change of [
+      { relPath: 'plugins/plugin-attendance/lib/unreviewed-trip.cjs' },
+      { enclosingSymbol: 'unreviewedWriter' },
+      { table: 'attendance_records' },
+      { verb: 'delete' },
+    ]) {
+      assert.equal(entry.claims({ ...site, ...change }), false,
+        'changing any exact identity component must not inherit the D3 claim')
+    }
+  }
+  const parent = sites.find(site => site.table === 'attendance_requests')
+  const classified = classifyTrackedSites([parent])
+  assert.deepEqual(classified.unclaimed, [])
+  assert.deepEqual(classified.claimsByEntryId.get('X09'), [parent])
 })

@@ -17,6 +17,12 @@ function entry(relPath, enclosingSymbol, table, count, posture, role, requiredPr
 }
 
 const ATTENDANCE_CALCULATION_READ_CLASSIFICATIONS = Object.freeze([
+  // Exact current-pointer FrozenV2 continuation evidence; the active parent and organization are required.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 'attendance_record_calculations', 1, 'history', 'original_frozen_v2_continuation_precondition', 'visibility_state=active'),
+  // Bind the exact same-transaction calculation to the new companion; never derive mutable policy.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'bindFirst', 'attendance_record_calculations', 1, 'history', 'frozen_binding_write_precondition'),
+  // Active-parent scoped frozen evidence for internal source-change guards, not a public projection.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs', 'readFrozenTimezoneWindows', 'attendance_record_calculations', 1, 'history', 'frozen_source_change_precondition', 'visibility_state=active'),
   // Immutable operation/prior-calculation recovery and posture-selected write CAS, not public current reads.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningCompletedOperations', 'attendance_record_calculations', 2, 'history', 'cleanup_recovery_precondition'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadSelectedCalculation', 'attendance_record_calculations', 2, 'history', 'posture_selected_write_precondition'),

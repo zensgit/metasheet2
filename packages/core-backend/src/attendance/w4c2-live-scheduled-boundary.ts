@@ -105,6 +105,7 @@ import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   createVerifiedAttendanceCalculationTargetIdentityV1,
+  createVerifiedAttendanceOrgIdentityV1,
   parseCanonicalAttendanceOrgKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   parseCanonicalAttendanceWorkDateV1,
@@ -144,6 +145,7 @@ import {
   ATTENDANCE_DAILY_STATUSES_V1,
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   calculateAttendanceSegmentsV1,
+  isSupportedFrozenAttributionSnapshotV1,
   type AttendanceCalculatedSegmentV1,
   type AttendanceDailyStatusV1,
   type AttendanceSegmentCalculationResultV1,
@@ -312,6 +314,8 @@ export interface AttendanceW4ResolvedCandidateV1 {
   readonly workDate?: string
   readonly shiftId?: string
   readonly reasonCode?: string
+  /** Server-read immutable historical freeze; never accepted from HTTP input. */
+  readonly frozenAttribution?: AttendanceAttributionSnapshotV1
   readonly fullWinner?: {
     readonly workDate: string
     readonly shiftId: string
@@ -375,6 +379,11 @@ export interface AttendanceLivePunchLegacyArgsV1 {
 }
 
 export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
+  /** Trusted activation adapters: fresh reads after replay, before source DML/parent locks. */
+  prepareLiveTimezoneContext?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1, lockMode: 'shared' | 'exclusive'): Promise<void>
+  assertLiveTimezoneTarget?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1): Promise<void>
+  bindLiveTimezoneContext?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1, proof: { calculationId: string | null }): Promise<void>
+
   /** Captured once by activation; ordinary HTTP cannot provide an adapter. */
   executeOnlineOutdoorInTransaction?(trx: AttendanceW4TransactionClientV1, input: AttendanceRequestOperationBoundaryInputV1): Promise<AttendanceRequestOperationExternalTransactionResultV1>
 
@@ -612,6 +621,9 @@ export interface AttendanceLivePunchBoundaryInputV1 {
    * that the one theoretical carve-out (a >3-segment winning shift making
    * BOTH sides' frozen context null) is unreachable via a real DB fixture.
    */
+  /** Server-only independent outer authority comparison; never operation/client identity. */
+  readonly timezoneContextFingerprint?: string
+  readonly clientTimezone?: string | null
   readonly outerSourceDefinitionFingerprint: string | null
   readonly isWorkday: boolean
   readonly holidayKind: string | null
@@ -1642,6 +1654,15 @@ function attributionFromResolution(
     nowIso: string
   },
 ): AttendanceAttributionSnapshotV1 {
+  if (resolution.frozenAttribution !== undefined) {
+    const frozen = resolution.frozenAttribution
+    if (!isSupportedFrozenAttributionSnapshotV1(frozen) || frozen.posture !== 'resolved_v2'
+      || frozen.value.orgId !== args.orgId || frozen.value.userId !== args.userId
+      || frozen.value.workDate !== resolution.workDate || frozen.value.shiftId !== resolution.shiftId) {
+      boundaryFail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID',409)
+    }
+    return frozen
+  }
   if (resolution.kind === 'ambiguous') {
     return unsupportedAttribution('ambiguous', null)
   }
@@ -1850,6 +1871,22 @@ function buildLegacyPunchArgs(input: AttendanceLivePunchBoundaryInputV1): Attend
 // Factory.
 // ---------------------------------------------------------------------------
 
+async function prepareAttendanceLiveTimezoneContextV1(
+  trx: AttendanceW4TransactionClientV1,
+  pluginTrx: AttendancePluginShapedTrxV1,
+  adapters: AttendanceW4LiveScheduledLegacyAdaptersV1,
+  input: AttendanceLivePunchBoundaryInputV1,
+  org: VerifiedAttendanceOrgIdentityV1 | null,
+): Promise<void> {
+  if (!adapters.prepareLiveTimezoneContext) return
+  if (!adapters.assertLiveTimezoneTarget || !adapters.bindLiveTimezoneContext) {
+    boundaryFail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
+  }
+  await adapters.prepareLiveTimezoneContext(pluginTrx,input,org === null ? 'exclusive' : 'shared')
+  if (org !== null) await lockShadowParentRecord(trx,org,input.userId,input.workDate)
+  await adapters.assertLiveTimezoneTarget(pluginTrx,input)
+}
+
 export function createAttendanceLiveScheduledBoundaryV1(
   deps: AttendanceW4LiveScheduledBoundaryDepsV1,
 ): AttendanceW4LiveScheduledBoundaryV1 {
@@ -2005,7 +2042,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
   async function executeLivePunch(input: AttendanceLivePunchBoundaryInputV1): Promise<AttendanceLivePunchBoundaryResultV1> {
     return withConnection(client => runAttendanceResultOperationTransactionV1(client,
-      trx => executeLivePunchInTransaction(trx, input)))
+      trx => executeLivePunchWithTimezoneContextV1(trx, input)))
   }
 
   function onlineAuthorization(request: OnlinePunchRequestV1) {
@@ -2035,7 +2072,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         if (prepared.kind === 'normal') {
           if (prepared.input.orgId !== request.orgId || prepared.input.userId !== request.userId
             || prepared.input.operationId !== request.operationId || prepared.input.occurredAtRaw !== null) boundaryFail('W4C2_ONLINE_INPUT_INVALID')
-          const outcome = await executeLivePunchInTransaction(trx, prepared.input, { request, preflight, authorization })
+          const outcome = await executeLivePunchWithTimezoneContextV1(trx, prepared.input, { request, preflight, authorization })
           return { kind: outcome.kind, receipt: makeOnlinePunchReceiptV1(200, { ok: true, data: wireJson(outcome.response) }) }
         }
         if (prepared.input.kind !== 'request_create' || prepared.input.routeVariant !== 'outdoor'
@@ -2049,9 +2086,22 @@ export function createAttendanceLiveScheduledBoundaryV1(
       })))
   }
 
+  async function executeLivePunchWithTimezoneContextV1(
+    trx: AttendanceW4TransactionClientV1, input: AttendanceLivePunchBoundaryInputV1,
+    online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
+  ): Promise<AttendanceLivePunchBoundaryResultV1> {
+    const pluginTrx = pluginShapedTrx(trx)
+    const outcome = await executeLivePunchInTransaction(trx, input, online, pluginTrx)
+    if (outcome.kind !== 'replay' && adapters.bindLiveTimezoneContext) {
+      await adapters.bindLiveTimezoneContext(pluginTrx, input, { calculationId: outcome.kind === 'w4' ? outcome.shadow.calculationId : null })
+    }
+    return outcome
+  }
+
   async function executeLivePunchInTransaction(
     trx: AttendanceW4TransactionClientV1, input: AttendanceLivePunchBoundaryInputV1,
     online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
+    pluginTrx: AttendancePluginShapedTrxV1 = pluginShapedTrx(trx),
   ): Promise<AttendanceLivePunchBoundaryResultV1> {
     // Org-key pre-classification. The rollout domain is canonical UUIDs plus the
     // exact 'default' sentinel; a legacy org key OUTSIDE that lexical domain can
@@ -2067,7 +2117,6 @@ export function createAttendanceLiveScheduledBoundaryV1(
       rolloutKey = null
     }
 
-    const pluginTrx = pluginShapedTrx(trx)
     const legacyPunchArgs = buildLegacyPunchArgs(input)
 
     if (rolloutKey === null) {
@@ -2075,6 +2124,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         // A stable-ID command requires a canonical org key (values-free).
         boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
       }
+      await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,null)
       const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
       return { kind: 'legacy' as const, response: result }
     }
@@ -2092,6 +2142,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         // Null-ID legacy command: same closed adapter, no operation row, no
         // outbox, no calculation, NO strict envelope/witness surface; the
         // route keeps its existing synchronous best-effort emit.
+        await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,createVerifiedAttendanceOrgIdentityV1({ orgKey: rolloutKey, posture }))
         const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
         return { kind: 'legacy' as const, response: result }
       }
@@ -2150,12 +2201,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (preflight.kind === 'legacy_no_operation') {
       // Posture raced to legacy between the probe and the registry re-read:
       // the null-ID legacy contract applies (no operation row).
+      await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,createVerifiedAttendanceOrgIdentityV1({ orgKey: rolloutKey, posture }))
       const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
       return { kind: 'legacy' as const, response: result }
     }
 
     // preflight.kind === 'claimed'
     const org = preflight.org
+    await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,org)
     const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
     const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
 

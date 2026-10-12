@@ -57,11 +57,47 @@ function jsonResponse(status: number, payload: unknown): Response {
 
 // The fixture server follows this legacy suite's fake timer, not production wall time.
 function rulesClockFixture(url = '') {
+  const resolvedAt = new Date().toISOString()
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US-u-ca-iso8601-nu-latn', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(resolvedAt)).map(part => [part.type, part.value]))
+  const currentLocalDate = parts.year + '-' + parts.month + '-' + parts.day
   return {
-    resolvedAt: new Date().toISOString(),
+    resolvedAt,
     resolvedForDate: new URL(url || '/api/attendance/rules/me', 'http://fixture.invalid').searchParams.get('asOf')
-      ?? new Date().toISOString().slice(0, 10),
+      ?? currentLocalDate,
+    attendanceTimeContext: {
+      resolvedForInstant: resolvedAt,
+      effectiveTimezone: 'Asia/Shanghai',
+      timezoneSource: 'system_default',
+      mode: 'default_only',
+      policyVersion: 0,
+      referenceId: 'fixture-current-time-context',
+      version: 1,
+      currentLocalDate,
+      nextEffectiveBoundary: null,
+    },
   }
+}
+
+function requestTimezoneFixture(url: string) {
+  const workDate = new URL(url, 'http://fixture.invalid').searchParams.get('workDate') ?? ''
+  return jsonResponse(200, {
+    ok: true,
+    data: {
+      orgId: authMockState.sessionOrgId,
+      userId: authMockState.currentUserId,
+      workDate,
+      timezone: 'Asia/Shanghai',
+      contextFingerprint: 'c'.repeat(64),
+      frozen: false,
+      referenceId: null,
+      provenance: null,
+      window: { startAt: workDate + 'T01:00:00.000Z', endAt: workDate + 'T10:00:00.000Z' },
+      rule: { workStartTime: '09:00', workEndTime: '18:00' },
+      isWorkingDay: true,
+    },
+  })
 }
 
 async function flushUi(cycles = 16): Promise<void> {
@@ -76,6 +112,14 @@ function findButton(container: HTMLElement, label: string): HTMLButtonElement {
     candidate => candidate.textContent?.trim() === label
   )
   expect(button, `expected button "${label}"`).toBeTruthy()
+  return button as HTMLButtonElement
+}
+
+function findAnomalyCreateRequestButton(container: HTMLElement): HTMLButtonElement {
+  const button = Array.from(container.querySelectorAll('.attendance__table-actions button')).find(
+    candidate => candidate.textContent?.trim() === 'Create request',
+  )
+  expect(button, 'expected anomaly-row Create request button').toBeTruthy()
   return button as HTMLButtonElement
 }
 
@@ -154,7 +198,7 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
         },
       })
     }
-    if (url.endsWith('/api/attendance/requests/request-focused')) {
+    if (url.endsWith(`/api/attendance/requests/request-focused?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
       return jsonResponse(200, {
         ok: true,
         data: {
@@ -171,7 +215,7 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
         },
       })
     }
-    if (url.endsWith('/api/attendance/requests/request-missing')) {
+    if (url.endsWith(`/api/attendance/requests/request-missing?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
       return jsonResponse(404, {
         ok: false,
         error: { message: 'Focused request is no longer available.' },
@@ -272,6 +316,9 @@ function installOverviewMock(options?: { anomalyItems?: Array<Record<string, unk
         ok: true,
         data: { makeup: 'clock-plus', leave: 'calendar', overtime: 'moon', swap: 'swap' },
       })
+    }
+    if (url.includes('/api/attendance/timezone-context/me?')) {
+      return requestTimezoneFixture(url)
     }
     if (url.includes('/api/attendance/rules/me')) {
       return jsonResponse(200, {
@@ -759,7 +806,7 @@ describe('Attendance self-service dashboard', () => {
     // Legacy midnight fixtures advance both server sample and monotonic time with the fake timer.
     vi.spyOn(performance, 'now').mockImplementation(() => Date.now())
     authMockState.currentUserId = 'swap-user-a'
-    authMockState.sessionOrgId = ''
+    authMockState.sessionOrgId = 'default'
     authMockState.identityPending = null
     authMockState.pluginsPending = null
     authMockState.accessSnapshot = null
@@ -827,7 +874,7 @@ describe('Attendance self-service dashboard', () => {
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('09:00-18:00 · Asia/Shanghai')
     expect(container?.textContent).toContain('Summary timezone context: UTC+08:00 · Asia/Shanghai')
     expect(container?.textContent).toContain('Calendar timezone context: UTC+08:00 · Asia/Shanghai')
-    expect(container?.textContent).toContain('Request timezone context: UTC+08:00 · Asia/Shanghai')
+    expect(container?.textContent).toContain('Request timezone context: Asia/Shanghai')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Mon, Tue, Wed, Thu, Fri')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Late 5m / Early 5m')
     expect(container?.querySelector('[data-selfservice-card="rules"]')?.textContent).toContain('Severe 30m / Absence 60m')
@@ -1943,7 +1990,7 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(12)
 
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]).endsWith('/api/attendance/requests/request-focused'),
+      String(call[0]).endsWith(`/api/attendance/requests/request-focused?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`),
     )).toBe(true)
 
     const focusedItem = container!.querySelector<HTMLElement>('[data-attendance-request-id="request-focused"]')
@@ -1973,7 +2020,7 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(12)
 
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]).endsWith('/api/attendance/requests/request-missing'),
+      String(call[0]).endsWith(`/api/attendance/requests/request-missing?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`),
     )).toBe(true)
 
     expect(container!.textContent).toContain('Focused request is no longer available.')
@@ -1989,7 +2036,7 @@ describe('Attendance self-service dashboard', () => {
     const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
-      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+      if (url.endsWith(`/api/attendance/requests/request-leave-focused?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -2100,7 +2147,7 @@ describe('Attendance self-service dashboard', () => {
           },
         })
       }
-      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+      if (url.endsWith(`/api/attendance/requests/request-leave-focused?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -2161,7 +2208,7 @@ describe('Attendance self-service dashboard', () => {
           },
         })
       }
-      if (url.endsWith('/api/attendance/requests/request-leave-focused')) {
+      if (url.endsWith(`/api/attendance/requests/request-leave-focused?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -2296,10 +2343,10 @@ describe('Attendance self-service dashboard', () => {
     await flushUi()
 
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]) === '/api/attendance/leave-types?isActive=true'
+      String(call[0]) === '/api/attendance/leave-types?orgId=default&isActive=true'
     )).toBe(true)
     expect(vi.mocked(apiFetch).mock.calls.some(call =>
-      String(call[0]) === '/api/attendance/overtime-rules?isActive=true'
+      String(call[0]) === '/api/attendance/overtime-rules?orgId=default&isActive=true'
     )).toBe(true)
 
     const requestType = container!.querySelector<HTMLSelectElement>('#attendance-request-type')
@@ -2442,6 +2489,7 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies).toEqual([
       {
         requesterAssignmentId: 'assignment-a',
+        orgId: 'default',
         counterpartyAssignmentId: 'assignment-b',
         reason: 'Need to swap with evening shift',
       },
@@ -2635,8 +2683,8 @@ describe('Attendance self-service dashboard', () => {
     await flushUi()
 
     // Anomaly quick action = per-anomaly "Create request" button → prefill only, no POST.
-    findButton(container!, 'Create request').click()
-    await flushUi(3)
+    findAnomalyCreateRequestButton(container!).click()
+    await flushUi(12)
     expect(container!.querySelector<HTMLSelectElement>('#attendance-request-type')?.value).toBe('missed_check_in')
     expect(requestPostCount()).toBe(0)
 
@@ -2664,6 +2712,7 @@ describe('Attendance self-service dashboard', () => {
     setFormValue(container!, '#attendance-request-type', 'missed_check_in')
     await flushUi(2)
     setFormValue(container!, '#attendance-request-work-date', '2026-04-01')
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-01T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2683,6 +2732,7 @@ describe('Attendance self-service dashboard', () => {
     setFormValue(container!, '#attendance-request-type', 'missed_check_in')
     await flushUi(2)
     setFormValue(container!, '#attendance-request-work-date', '2026-05-01')
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-05-01T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2699,8 +2749,8 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    findButton(container!, 'Create request').click()
-    await flushUi(3)
+    findAnomalyCreateRequestButton(container!).click()
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2722,6 +2772,7 @@ describe('Attendance self-service dashboard', () => {
     setFormValue(container!, '#attendance-request-type', 'missed_check_in')
     await flushUi(2)
     setFormValue(container!, '#attendance-request-work-date', '2026-04-13')
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-13T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2749,6 +2800,7 @@ describe('Attendance self-service dashboard', () => {
     const attachments = container!.querySelectorAll('#attendance-request-attachment')
     expect(attachments).toHaveLength(1) // no duplicate DOM id
     setFormValue(container!, '#attendance-request-work-date', '2026-04-13')
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-13T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2787,7 +2839,7 @@ describe('Attendance self-service dashboard', () => {
     expect(requestTools.open).toBe(false)
 
     container!.querySelector<HTMLButtonElement>('[data-selfservice-action="missing-punch"]')!.click()
-    await flushUi(3)
+    await flushUi(12)
 
     const card = container!.querySelector<HTMLElement>('[data-attendance-makeup-request-card]')
     expect(card).toBeTruthy()
@@ -2810,8 +2862,10 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies).toEqual([
       {
         workDate: '2026-04-15',
+        orgId: 'default',
         requestType: 'missed_check_in',
-        requestedInAt: '2026-04-15T09:00',
+        requestedInAt: '2026-04-15T01:00:00.000Z',
+        expectedTimezoneContextFingerprint: 'c'.repeat(64),
         leaveTypeId: 'leave-annual',
         overtimeRuleId: 'ot-default',
       },
@@ -2824,15 +2878,19 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies).toEqual([
       {
         workDate: '2026-04-15',
+        orgId: 'default',
         requestType: 'missed_check_in',
-        requestedInAt: '2026-04-15T09:00',
+        requestedInAt: '2026-04-15T01:00:00.000Z',
+        expectedTimezoneContextFingerprint: 'c'.repeat(64),
         leaveTypeId: 'leave-annual',
         overtimeRuleId: 'ot-default',
       },
       {
         workDate: '2026-04-15',
+        orgId: 'default',
         requestType: 'missed_check_in',
-        requestedInAt: '2026-04-15T09:00',
+        requestedInAt: '2026-04-15T01:00:00.000Z',
+        expectedTimezoneContextFingerprint: 'c'.repeat(64),
         leaveTypeId: 'leave-annual',
         overtimeRuleId: 'ot-default',
         attachmentUrl: 'https://example.com/proof.png',
@@ -2863,7 +2921,7 @@ describe('Attendance self-service dashboard', () => {
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
     expect(createBodies[0].requestType).toBe('missed_check_in')
-    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T01:00:00.000Z')
     expect(createBodies[0].workDate).toBe('2026-04-15')
     await vi.waitFor(() => expect(container!.querySelector('[data-attendance-makeup-request-card]')).toBeNull())
   })
@@ -2903,7 +2961,7 @@ describe('Attendance self-service dashboard', () => {
     expect(requestPostCount()).toBe(1)
     expect(createBodies).toHaveLength(1)
     expect(createBodies[0].requestType).toBe('missed_check_in')
-    expect(createBodies[0].requestedInAt).toBe('2026-04-15T09:00')
+    expect(createBodies[0].requestedInAt).toBe('2026-04-15T01:00:00.000Z')
   })
 
   it('MP-5 no settings leak: the employee MP-5 flow makes no GET /api/attendance/settings', async () => {
@@ -2912,7 +2970,7 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    findButton(container!, 'Create request').click()
+    findAnomalyCreateRequestButton(container!).click()
     await flushUi(3)
     setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
     findButton(container!, 'Submit request').click()
@@ -2929,8 +2987,8 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    findButton(container!, 'Create request').click()
-    await flushUi(3)
+    findAnomalyCreateRequestButton(container!).click()
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -2952,7 +3010,7 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    findButton(container!, 'Create request').click()
+    findAnomalyCreateRequestButton(container!).click()
     await flushUi(3)
     setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
     findButton(container!, 'Submit request').click()
@@ -2973,8 +3031,8 @@ describe('Attendance self-service dashboard', () => {
     app.mount(container!)
     await flushUi()
 
-    findButton(container!, 'Create request').click()
-    await flushUi(3)
+    findAnomalyCreateRequestButton(container!).click()
+    await flushUi(12)
     setFormValue(container!, '#attendance-request-in', '2026-04-15T09:00')
     findButton(container!, 'Submit request').click()
     await flushUi(4)
@@ -3207,11 +3265,16 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
   })
 
-  it('#5986: malformed rule timezone leaves today unknown without guessing or querying a day', async () => {
+  it('#5986: malformed current timezone context leaves today unknown without guessing or querying a day', async () => {
     const baseMock = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       if (String(input).includes('/api/attendance/rules/me')) {
-        return jsonResponse(200, { ok: true, data: { ...rulesClockFixture(), runtimeRule: { timezone: 'Mars/Olympus' } } })
+        const clock = rulesClockFixture()
+        return jsonResponse(200, { ok: true, data: {
+          ...clock,
+          attendanceTimeContext: { ...clock.attendanceTimeContext, effectiveTimezone: 'Mars/Olympus' },
+          runtimeRule: { timezone: 'Asia/Shanghai' },
+        } })
       }
       return baseMock(input, init)
     })
@@ -3400,7 +3463,7 @@ describe('Attendance self-service dashboard', () => {
     container!.querySelector<HTMLButtonElement>('[data-overtime-card-submit]')!.click()
     await flushUi(8)
     expect(latestRequestPostBody()?.workDate).toBe('2026-04-15')
-    expect(String(latestRequestPostBody()?.requestedInAt)).toMatch(/^2026-04-15T/)
+    expect(latestRequestPostBody()?.requestedInAt).toBe('2026-04-15T01:00:00.000Z')
   })
 
   it('#5990: makeup without a qualifying anomaly falls back to today, not the historical work_date', async () => {
@@ -3716,6 +3779,7 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies).toEqual([
       {
         requesterAssignmentId: 'assignment-a',
+        orgId: 'default',
         counterpartyAssignmentId: 'assignment-b',
         reason: 'Need to swap with evening shift',
       },
@@ -3756,9 +3820,11 @@ describe('Attendance self-service dashboard', () => {
     expect(createBodies).toEqual([
       {
         workDate: '2026-04-15',
+        orgId: 'default',
         requestType: 'overtime',
-        requestedInAt: '2026-04-15T18:00',
-        requestedOutAt: '2026-04-15T20:30',
+        requestedInAt: '2026-04-15T10:00:00.000Z',
+        expectedTimezoneContextFingerprint: 'c'.repeat(64),
+        requestedOutAt: '2026-04-15T12:30:00.000Z',
         reason: '项目赶工',
         overtimeRuleId: 'ot-default',
         minutes: 150,

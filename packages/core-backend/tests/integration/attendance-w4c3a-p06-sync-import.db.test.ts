@@ -1,3 +1,5 @@
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012090000_create_attendance_timezone_policy'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 /**
  * Fresh-PostgreSQL integration lane for W4C-3a P06 modern synchronous import.
  */
@@ -342,9 +344,14 @@ describeIfDatabase('W4C-3a P06 sync import host (fresh PostgreSQL)', () => {
     await w4c0Up(db)
     await w4c3aUp(db)
     await rollbackUp(db)
+    await pool.query("CREATE TABLE attendance_rules (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), timezone text NOT NULL DEFAULT 'UTC')")
+    await timezonePolicyUp(db)
+    // This fixture proves import/rollback semantics; runtime guards have their own real-server lane.
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
   }, 120000)
 
   afterAll(async () => {
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
     __setW4C3aSyncImportAfterPreconditionsForTests(null)
     __setW4C3aImportRollbackBeforeDmlForTests(null)
     for (const current of [pool, kyselyPool]) {

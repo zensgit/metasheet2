@@ -11,6 +11,216 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    AttendanceTimezoneTarget:
+      type: object
+      additionalProperties: false
+      required: [orgId, userId, workDate, timezone, contextFingerprint, frozen, referenceId, provenance, window, rule, isWorkingDay]
+      properties:
+        orgId: { type: string }
+        userId: { type: string }
+        workDate: { type: string, format: date }
+        timezone: { type: string, description: Actual IANA timezone of the selected target shift. }
+        contextFingerprint:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          description: Target context identity to compare again on fresh submission. Preview does not reserve the target.
+        frozen: { type: boolean }
+        referenceId: { type: string, nullable: true }
+        provenance:
+          type: object
+          nullable: true
+          description: Existing source identity. Null only for a complete historical freeze that predates timezone provenance; no source revision is invented.
+          additionalProperties: false
+          required: [timezone, source, mode, referenceId, version, policyVersion, calculationGroupMembership]
+          properties:
+            timezone: { type: string }
+            source: { type: string, enum: [system_default, trip, employee_override, calculation_group] }
+            mode: { type: string, enum: [default_only, multi_timezone] }
+            referenceId: { type: string }
+            version: { type: integer, minimum: 1 }
+            policyVersion: { type: integer, minimum: 0 }
+            calculationGroupMembership:
+              type: object
+              nullable: true
+              description: Actual effective membership identity retained by the selected context.
+        window:
+          type: object
+          additionalProperties: false
+          required: [startAt, endAt]
+          properties:
+            startAt: { type: string, format: date-time }
+            endAt: { type: string, format: date-time }
+        rule:
+          type: object
+          description: Target calculation rule snapshot returned by the trusted runtime, not client-selected rule input.
+        isWorkingDay: { type: boolean }
+    AttendanceTimezoneTargetResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/AttendanceTimezoneTarget' }
+    AttendanceTimezonePolicyImpact:
+      type: object
+      additionalProperties: false
+      required: [currentVersion, proposedEnabled, evaluatedUsers, affectedUsers, conflictingUsers, conflictCounts]
+      properties:
+        currentVersion: { type: integer, minimum: 0 }
+        proposedEnabled: { type: boolean }
+        evaluatedUsers: { type: integer, minimum: 0 }
+        affectedUsers: { type: integer, minimum: 0 }
+        conflictingUsers: { type: integer, minimum: 0 }
+        conflictCounts:
+          type: object
+          additionalProperties: false
+          required: [startedContext, tripContext, invalidTargetContext]
+          properties:
+            startedContext: { type: integer, minimum: 0 }
+            tripContext: { type: integer, minimum: 0 }
+            invalidTargetContext: { type: integer, minimum: 0 }
+    AttendanceTimezonePolicyImpactResponse:
+      type: object
+      additionalProperties: false
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        data: { $ref: '#/components/schemas/AttendanceTimezonePolicyImpact' }
+    AttendanceTimezonePolicyWrite:
+      type: object
+      additionalProperties: false
+      required: [enabled, expectedVersion]
+      properties:
+        enabled: { type: boolean }
+        expectedVersion:
+          type: integer
+          minimum: 0
+          description: Current policy revision. Zero only for an absent disabled policy.
+    AttendanceEmployeeTimezoneOverrideCreate:
+      type: object
+      additionalProperties: false
+      required: [timezone, effectiveFrom, effectiveTo, expectedPolicyVersion]
+      properties:
+        timezone:
+          type: string
+          description: Valid IANA attendance timezone; no device fallback.
+        effectiveFrom:
+          type: string
+          format: date-time
+          description: Explicit RFC3339 instant with seconds, optional millisecond precision, and Z or UTC offset.
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
+          description: Exclusive end instant after effectiveFrom, or null for an open interval.
+        expectedPolicyVersion: { type: integer, minimum: 0 }
+    AttendanceEmployeeTimezoneOverrideClose:
+      type: object
+      additionalProperties: false
+      required: [endAt, expectedVersion]
+      properties:
+        endAt:
+          type: string
+          format: date-time
+          description: Explicit RFC3339 exclusive end with seconds and Z or UTC offset. May shorten, never extend, an existing interval.
+        expectedVersion: { type: integer, minimum: 1 }
+    AttendanceTimezonePolicyWriteResponse:
+      type: object
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        data:
+          type: object
+          additionalProperties: false
+          required: [enabled, version]
+          properties:
+            enabled: { type: boolean }
+            version: { type: integer, minimum: 1 }
+    AttendanceEmployeeTimezoneOverrideWriteResponse:
+      type: object
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        data:
+          type: object
+          additionalProperties: false
+          required: [orgId, userId, referenceId, timezone, version, effectiveFrom, effectiveTo]
+          properties:
+            orgId: { type: string }
+            userId: { type: string }
+            referenceId: { type: string }
+            timezone: { type: string }
+            version: { type: integer, minimum: 1 }
+            effectiveFrom: { type: string, format: date-time }
+            effectiveTo: { type: string, format: date-time, nullable: true }
+    AttendanceBusinessTripCreate:
+      type: object
+      additionalProperties: false
+      required: [destinationTimezone, startAt, endAt]
+      properties:
+        userId:
+          type: string
+          minLength: 1
+          description: Defaults to the authenticated employee. Another employee requires attendance administrator access and active same-organization membership.
+        destinationTimezone:
+          type: string
+          minLength: 1
+          description: Valid IANA destination timezone. No browser timezone fallback.
+        startAt:
+          type: string
+          format: date-time
+          description: Explicit RFC3339 instant with seconds and Z or UTC offset. Zone-free local values are rejected.
+        endAt:
+          type: string
+          format: date-time
+          description: Explicit RFC3339 instant after startAt.
+        reason:
+          type: string
+          maxLength: 2000
+        approvalFlowId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          format: uuid
+          description: Reuse the same identity and payload after an uncertain submission.
+    AttendanceBusinessTripDetail:
+      type: object
+      additionalProperties: false
+      required: [requestId, orgId, userId, destinationTimezone, startAt, endAt, arrangement]
+      properties:
+        requestId: { type: string, format: uuid }
+        orgId: { type: string }
+        userId: { type: string }
+        destinationTimezone: { type: string }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        arrangement:
+          type: object
+          nullable: true
+          additionalProperties: false
+          required: [effectiveEndAt, version, publishedAt, cancelledAt]
+          properties:
+            effectiveEndAt: { type: string, format: date-time }
+            version: { type: integer, minimum: 1 }
+            publishedAt: { type: string, format: date-time }
+            cancelledAt: { type: string, format: date-time, nullable: true }
+    AttendanceBusinessTripResponse:
+      type: object
+      required: [ok, data]
+      properties:
+        ok: { type: boolean, enum: [true] }
+        data:
+          type: object
+          required: [request, businessTrip]
+          properties:
+            request:
+              $ref: '#/components/schemas/AttendanceRequest'
+            businessTrip:
+              $ref: '#/components/schemas/AttendanceBusinessTripDetail'
+            requestSnapshot:
+              type: object
+              description: Existing versioned attendance request snapshot, when issued by the canonical boundary.
     AttendanceTimezonePolicyRead:
       type: object
       additionalProperties: false
@@ -523,9 +733,71 @@ components:
     AttendancePunchEvent:
       allOf:
         - $ref: '#/components/schemas/AttendanceEvent'
+    AttendanceCurrentTimeContext:
+      type: object
+      additionalProperties: false
+      required: [resolvedForInstant, effectiveTimezone, timezoneSource, mode, policyVersion, referenceId, version, currentLocalDate, nextEffectiveBoundary]
+      description: Current server-instant attendance timezone, independent of the requested asOf schedule date.
+      properties:
+        resolvedForInstant: { type: string, format: date-time }
+        effectiveTimezone: { type: string }
+        timezoneSource: { type: string, enum: [system_default, trip, employee_override, calculation_group] }
+        mode: { type: string, enum: [default_only, multi_timezone] }
+        policyVersion: { type: integer, minimum: 0 }
+        referenceId: { type: string, minLength: 1 }
+        version: { type: integer, minimum: 0 }
+        currentLocalDate: { type: string, format: date }
+        nextEffectiveBoundary:
+          type: string
+          format: date-time
+          nullable: true
+          description: Earliest future governed source boundary. Refresh the current context at this instant; default-only mode has no optional-source boundary.
+    AttendanceEffectiveCalendarDay:
+      type: object
+      required: [date, base, effective, layers, overlays]
+      properties:
+        date: { type: string, format: date }
+        base:
+          type: object
+          required: [isWorkingDay, source]
+          properties:
+            isWorkingDay: { type: boolean }
+            source: { type: string, enum: [rule, shift, rotation, national, manual, org, group, role, user, stored_record] }
+            holidayId: { type: string }
+            dayIndex: { type: integer }
+            name: { type: string, nullable: true }
+        effective:
+          type: object
+          required: [isWorkingDay, source]
+          properties:
+            isWorkingDay: { type: boolean }
+            source: { type: string, enum: [rule, shift, rotation, national, manual, org, group, role, user, stored_record] }
+            label: { type: string }
+            policyId: { type: string }
+            plannedMinutes: { type: number }
+            slots: { type: array, items: { type: object } }
+        layers: { type: array, items: { type: object } }
+        overlays: { type: array, items: { type: object } }
+        attendanceTimeContext:
+          $ref: '#/components/schemas/AttendanceStoredTimeContext'
+          description: Present in userId mode. Future dates use their target context; persisted dates use stored identity, including legacy null provenance.
+    AttendanceStoredTimeContext:
+      type: object
+      additionalProperties: false
+      required: [targetWorkDate, effectiveTimezone, timezoneSource, mode, policyVersion, contextFingerprint, frozen]
+      properties:
+        targetWorkDate: { type: string, format: date }
+        effectiveTimezone: { type: string }
+        timezoneSource: { type: string, enum: [system_default, trip, employee_override, calculation_group, legacy_record] }
+        mode: { type: string, enum: [default_only, multi_timezone, null], nullable: true }
+        policyVersion: { type: integer, minimum: 0, nullable: true }
+        contextFingerprint: { type: string, pattern: '^[a-f0-9]{64}$', nullable: true }
+        frozen: { type: boolean }
     AttendanceRecord:
       type: object
       properties:
+        attendanceTimeContext: { $ref: '#/components/schemas/AttendanceStoredTimeContext' }
+        timezone_source: { type: string, enum: [system_default, trip, employee_override, calculation_group, legacy_record] }
         id:
           type: string
         user_id:
@@ -687,7 +959,7 @@ components:
           format: date
         request_type:
           type: string
-          enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch, shift_swap, schedule_dispatch]
+          enum: [missed_check_in, missed_check_out, time_correction, leave, overtime, outdoor_punch, shift_swap, schedule_dispatch, business_trip]
         requested_in_at:
           type: string
           format: date-time

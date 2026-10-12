@@ -796,6 +796,13 @@ jobs:
             tests/unit/attendance-timezone-policy-store.test.ts \
             tests/unit/attendance-timezone-context-loader.test.ts \
             tests/unit/attendance-timezone-policy-routes.test.ts \
+            tests/unit/attendance-timezone-target-routes.test.ts \
+            tests/unit/attendance-timezone-read-context.test.ts \
+            tests/unit/attendance-timezone-request-instants.test.ts \
+            tests/unit/attendance-business-trip.test.ts \
+            tests/unit/attendance-calendar-settings-writer.test.ts \
+            tests/unit/attendance-timezone-runtime-locks.test.ts \
+            tests/unit/attendance-trip-context-transition-dates.test.ts \
             --reporter=dot
 
       # #4561 W1 P2: the service-level read/transition matrix bypasses the DB
@@ -1896,6 +1903,11 @@ jobs:
           pnpm --filter @metasheet/core-backend migrate
           pnpm --filter @metasheet/core-backend exec tsx ../../scripts/ops/attendance-selfservice-fixture-verify.mts
 
+      - name: Prepare real attendance browser qualification
+        run: |
+          mkdir -p "$RUNNER_TEMP/attendance-browser-empty-env"
+          pnpm exec playwright install --with-deps chromium
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -1907,6 +1919,8 @@ jobs:
         # own pin is loosened to match (see that file's comment).
         id: attendance-real-db-integration
         env:
+          METASHEET_ENV_DIR: ${{ runner.temp }}/attendance-browser-empty-env
+          ATTENDANCE_BROWSER_OUTPUT_DIR: ${{ runner.temp }}/attendance-browser-evidence
           DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
           ATTENDANCE_TEST_DATABASE_URL: postgresql://postgres@localhost:5432/metasheet_test
         run: |
@@ -1915,6 +1929,15 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-timezone-policy-routes.db.test.ts \
+            tests/integration/attendance-business-trip.db.test.ts \
+            tests/integration/attendance-multitimezone-browser.db.test.ts \
+            tests/integration/attendance-timezone-policy-write-routes.db.test.ts \
+            tests/integration/attendance-timezone-target-routes.db.test.ts \
+            tests/integration/attendance-timezone-read-context.db.test.ts \
+            tests/integration/attendance-timezone-policy-preview.db.test.ts \
+            tests/integration/attendance-timezone-runtime-locks.db.test.ts \
+            tests/integration/attendance-timezone-runtime.db.test.ts \
+            tests/integration/attendance-trip-context-transition-dates.db.test.ts \
             tests/integration/attendance-timezone-policy-store.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
             tests/integration/attendance-live-punch-order.db.test.ts \

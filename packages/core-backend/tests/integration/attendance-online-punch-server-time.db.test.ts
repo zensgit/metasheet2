@@ -31,6 +31,13 @@ describe('ordinary online punch server time (whole-file real HTTP/PostgreSQL)', 
     expect(await fixture.counts(actor.userId)).toEqual(before)
   })
   it('persists the captured server instant and its timezone day with a direct NULL business snapshot', async () => {
+    // The source change is before Singapore's next shift and after UTC's prior shift.
+    punchClock.setOnlinePunchInstantForTests(instant)
+    const configured = await fixture.request('/api/attendance/rules/default', admin.token, {
+      orgId: fixture.orgId, timezone: 'Asia/Singapore', workStartTime: '09:00', workEndTime: '18:00',
+      workingDays: [0,1,2,3,4,5,6],
+    }, 'PUT')
+    expect(configured.status).toBe(200)
     const actor = await fixture.user()
     punchClock.setOnlinePunchInstantForTests(instant)
     const id = randomUUID()
@@ -42,6 +49,11 @@ describe('ordinary online punch server time (whole-file real HTTP/PostgreSQL)', 
     const op = (await fixture.pool.query('SELECT response_snapshot,normalized_business_input_snapshot,state FROM attendance_result_operations WHERE org_id=$1 AND operation_id=$2', [fixture.orgId,id])).rows
     expect(op).toEqual([{ state: 'completed', normalized_business_input_snapshot: null, response_snapshot: { version: 'attendance-online-punch-v1', status: 200, body: response.body } }])
     expect(await fixture.counts(actor.userId)).toEqual({ events: 1, records: 1, requests: 0, operations: 1 })
+    const restored = await fixture.request('/api/attendance/rules/default', admin.token, {
+      orgId: fixture.orgId, timezone: 'UTC', workStartTime: '09:00', workEndTime: '18:00',
+      workingDays: [0,1,2,3,4,5,6],
+    }, 'PUT')
+    expect(restored.status).toBe(200)
   })
   it('null ID legacy still stamps server time and writes zero canonical operation rows', async () => {
     const actor = await fixture.user()

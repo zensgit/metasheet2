@@ -50,6 +50,9 @@ function override(row, orgId, userId) {
 async function protect(work) {
   try { return await work() } catch (error) {
     if (error instanceof AttendanceTimezonePolicyError) throw error
+    if (['ATTENDANCE_TRIP_PARTIAL_SHIFT','ATTENDANCE_TRIP_STARTED_SHIFT_CHANGED','ATTENDANCE_TRIP_WORK_DATE_CONTEXT_CONFLICT'].includes(error?.code)) {
+      throw new AttendanceTimezonePolicyError(error.code,409)
+    }
     if (error && error.code === '23503') fail('MEMBER_REQUIRED', 403)
     if (error && ['23P01', '23505', '40001', '40P01'].includes(error.code)) fail('CONFIG_CONFLICT', 409)
     if (error && error.code === '23514') fail('INVALID_CONFIGURATION')
@@ -67,7 +70,7 @@ async function lockAttendanceTimezoneOrg(query, orgId) {
   await query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [attendanceTimezoneOrgLockKey(orgId)])
 }
 
-function createAttendanceTimezonePolicyStore({ query, transaction, authorizeManage }) {
+function createAttendanceTimezonePolicyStore({ query, transaction, authorizeManage, prepareTripSourceChange }) {
   if (![query, transaction, authorizeManage].every(item => typeof item === 'function')) {
     fail('INVALID_ADAPTER')
   }
@@ -101,8 +104,27 @@ function createAttendanceTimezonePolicyStore({ query, transaction, authorizeMana
       if (await authorizeManage({ orgId: input.orgId, actorId: input.actorId, query: q }) !== true) {
         fail('FORBIDDEN', 403)
       }
+      let verifyTripChange = async () => {}
+      if (typeof prepareTripSourceChange === 'function') {
+        verifyTripChange = await prepareTripSourceChange({query:q,orgId:input.orgId,userIds:input.userId ? [input.userId] : null})
+        if (typeof verifyTripChange !== 'function') fail('TRIP_GUARD_UNAVAILABLE',503)
+      } else {
+        // D1-only schema installations have no trip authority yet. Once D3 is
+        // present an affected trip requires the trusted runtime boundary reader.
+        const schema = await rows(q,"SELECT to_regclass('attendance_business_trip_arrangements') IS NOT NULL AS present",[])
+        if (schema.length !== 1 || typeof schema[0].present !== 'boolean') fail('STORE_UNAVAILABLE',503)
+        if (schema[0].present === true) {
+          const trips = await rows(q,`SELECT request_id FROM attendance_business_trip_arrangements
+            WHERE org_id=$1 AND effective_end_at > now() AND start_at < effective_end_at
+            AND ($2::text[] IS NULL OR user_id::text=ANY($2::text[])) LIMIT 1`,
+          [input.orgId,input.userId ? [input.userId] : null])
+          if (trips.length) fail('TRIP_GUARD_UNAVAILABLE',503)
+        }
+      }
       await member(q, input.orgId, input.actorId, true)
-      return work(q)
+      const result = await work(q)
+      await verifyTripChange()
+      return result
     }))
   }
   return {

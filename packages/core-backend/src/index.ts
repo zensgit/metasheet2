@@ -151,7 +151,11 @@ import { tenantContext } from './db/sharding/tenant-context'
 import { attendanceAuditMiddleware, attendanceSecurityMiddleware } from './middleware/attendance-production'
 // W4C-2 (#4556): the single strict IANA validator behind the plugin-attendance
 // `attendanceW4SegmentCalculation` service port (lock 12.2 last sentence).
-import { validateAttendanceIanaTimezoneV1 } from './attendance/w4c1-strict-time'
+import { validateAttendanceIanaTimezoneV1, resolveAttendanceLocalWallTimeV1 } from './attendance/w4c1-strict-time'
+import { acquireAttendanceTimezoneRuntimeLocksV1 } from './attendance/attendance-timezone-runtime-locks'
+import { isSupportedFrozenAttendanceContextV1, isSupportedFrozenAttributionSnapshotV1 } from './attendance/w4c1-segment-calculator'
+import { registerAttendanceCalculationGroupTimezoneSourceGuard } from './services/AttendanceCalculationGroupMembership'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from './attendance/attendance-business-trip-locks'
 import { applyAttendanceInOutMergePolicyPureV1 } from './attendance/w4c1-merge-policy'
 import {
   refreshAttendanceReportProjectionAnchor,
@@ -2943,6 +2947,28 @@ export class MetaSheetServer {
           manifest.name === 'plugin-attendance'
             ? {
                 validateIanaTimezone: (zone: unknown) => validateAttendanceIanaTimezoneV1(zone),
+                resolveLocalWallTime: resolveAttendanceLocalWallTimeV1,
+                validateFrozenTimezoneContext:isSupportedFrozenAttendanceContextV1,
+                validateFrozenTimezoneAttribution:isSupportedFrozenAttributionSnapshotV1,
+                registerTimezoneSourceGuard: (
+                  guard: ((trx: Pick<import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,'query'>,
+                    input:{orgId:string;userIds:string[]|null}) => Promise<() => Promise<void>>) | null,
+                ) => {
+                  registerAttendanceCalculationGroupTimezoneSourceGuard(guard && (async (query,input) => {
+                    const trx = {query:async (text:string,values?:unknown[]) => (await query(text,values)).rows}
+                    return guard(trx,input)
+                  }))
+                  registerAttendanceRequestTimezoneSourceGuardV1(guard && (async (client,input) => {
+                    const trx = {query:async (text:string,values?:unknown[]) => (await client.query(text,values)).rows}
+                    return guard(trx,input)
+                  }))
+                },
+                acquireTimezoneRuntimeLocks: (
+                  trx: import('./attendance/w4c2-live-scheduled-boundary').AttendancePluginShapedTrxV1,
+                  input: Parameters<typeof acquireAttendanceTimezoneRuntimeLocksV1>[1],
+                ) => acquireAttendanceTimezoneRuntimeLocksV1({
+                  query: async (text, values) => ({ rows: await trx.query(text, values) }),
+                }, input),
                 // W4C-2 (lock 4.4): the ONE pure frozen in/out merge-policy
                 // decision. The plugin's canonical live adapter consumes this
                 // instead of the removed second mutable post-upsert pass — the

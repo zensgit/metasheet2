@@ -51,9 +51,10 @@
         data-cancel-round-progress
       >
         <div class="attendance-cancel-round__line">
-          <StatusTag domain="cancelRound" :status="statusKey" size="sm" data-cancel-round-status />
+          <span v-if="isBusinessTrip && round.outcome === 'applied'" data-cancel-round-status>{{ tr('Business trip cancelled', '出差已取消') }}</span>
+          <StatusTag v-else domain="cancelRound" :status="statusKey" size="sm" data-cancel-round-status />
           <span v-if="leaveStillValid" class="attendance-cancel-round__note" data-cancel-round-leave-valid>
-            {{ tr('The leave is still valid.', '请假仍然有效') }}
+            {{ isBusinessTrip ? tr('The business trip is still valid.', '出差仍然有效') : tr('The leave is still valid.', '请假仍然有效') }}
           </span>
         </div>
 
@@ -65,7 +66,7 @@
           </details>
         </div>
 
-        <ul v-if="statusKey === 'leave_cancelled'" class="attendance-cancel-round__result" data-cancel-round-result>
+        <ul v-if="!isBusinessTrip && statusKey === 'leave_cancelled'" class="attendance-cancel-round__result" data-cancel-round-result>
           <li v-for="line in resultLines" :key="line">{{ line }}</li>
         </ul>
 
@@ -133,7 +134,7 @@
           {{ tr('Request cancellation', '申请撤销') }}
         </button>
         <span v-if="launchBlocked" :id="blockedReasonId" class="attendance-cancel-round__note" data-cancel-round-launch-blocked>
-          {{ tr('This leave already has a cancellation request pending approval.', '这条请假已有一个撤销申请在审批中') }}
+          {{ isBusinessTrip ? tr('This business trip already has a cancellation request pending approval.', '这条出差已有一个撤销申请在审批中') : tr('This leave already has a cancellation request pending approval.', '这条请假已有一个撤销申请在审批中') }}
           <a :href="`#${progressAnchorId}`" data-cancel-round-progress-link @click.prevent="focusProgress">
             {{ tr('View its progress', '查看撤销进度') }}
           </a>
@@ -152,10 +153,10 @@
     >
       <div class="attendance-cancel-round__modal-body">
         <h5 :id="dialogTitleId" class="attendance-cancel-round__title">
-          {{ tr('Request to cancel this leave', '申请撤销这条请假') }}
+          {{ isBusinessTrip ? tr('Request to cancel this business trip', '申请撤销这条出差') : tr('Request to cancel this leave', '申请撤销这条请假') }}
         </h5>
         <p class="attendance-cancel-round__note">
-          {{ tr(
+          {{ isBusinessTrip ? tr('Cancellation requires approval. Until approved, the trip remains valid. Approval ends future timezone eligibility and keeps past records.', '撤销申请需要审批。审批通过前出差仍然有效；通过后终止未来时区安排，保留过去记录。') : tr(
             'The cancellation request goes to approval. Until it is approved the leave stays valid; once it is approved the leave is cancelled.',
             '撤销申请需要审批。审批通过前请假仍然有效;通过后请假将被取消。',
           ) }}
@@ -194,8 +195,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, useId, watch } from 'vue'
+import { computed, nextTick, onMounted, onScopeDispose, ref, useId, watch } from 'vue'
 import StatusTag from '../../components/status/StatusTag.vue'
+import { createAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useLocale } from '../../composables/useLocale'
 import { ApprovalApiError } from '../../approvals/api'
 import {
@@ -217,6 +220,7 @@ import { cancelRoundResultLines } from './attendanceCancelRoundPresentation'
 
 const props = defineProps<{
   request: { id: string; request_type: string; status: string; user_id?: string | null }
+  orgId?: string
   currentUserId: string | null
   /** The attendance page's own date-time formatter (attendance timezone); a locale fallback otherwise. */
   formatDateTime?: (value: string | null | undefined) => string
@@ -237,6 +241,24 @@ const progressRef = ref<HTMLElement | null>(null)
 const reasonRef = ref<HTMLTextAreaElement | null>(null)
 const launchButtonRef = ref<HTMLButtonElement | null>(null)
 
+const session = createAttendanceSessionGuard(props.orgId ?? '')
+let disposed = false
+let epoch = 0
+let generation = 0
+const current = (mine = epoch): boolean => !disposed && mine === epoch && session.isCurrent()
+function reset(): void {
+  epoch += 1
+  generation += 1
+  summary.value = null
+  loadState.value = 'idle'
+  busy.value = null
+  dialogOpen.value = false
+  dialogError.value = null
+  progressError.value = null
+}
+const unsubscribe = onAuthPrincipalChange(() => { session.invalidate(); reset() })
+onScopeDispose(() => { disposed = true; reset(); unsubscribe() })
+
 const uid = useId()
 const progressAnchorId = computed(() => `attendance-cancel-round-${props.request.id}`)
 const blockedReasonId = `${uid}-blocked`
@@ -244,8 +266,9 @@ const dialogTitleId = `${uid}-title`
 
 /** Only a leave that is approved — or already cancelled, possibly by a round — can carry a round. */
 const readable = computed(() =>
-  props.request.request_type === 'leave' && (props.request.status === 'approved' || props.request.status === 'cancelled'),
+  (props.request.request_type === 'leave' || props.request.request_type === 'business_trip') && (props.request.status === 'approved' || props.request.status === 'cancelled'),
 )
+const isBusinessTrip = computed(() => props.request.request_type === 'business_trip')
 const round = computed(() => summary.value?.round ?? null)
 const isOwnLeave = computed(() => Boolean(props.currentUserId) && props.request.user_id === props.currentUserId)
 
@@ -311,13 +334,18 @@ const visible = computed(() => {
 })
 
 async function load(): Promise<void> {
-  if (!readable.value) return
+  if (!readable.value || !current()) return
+  const mine = ++generation
+  const scope = epoch
   // A re-read after a write keeps the current view until the answer lands (no flicker).
   if (!summary.value) loadState.value = 'loading'
   try {
-    summary.value = await fetchCancelRoundSummary(props.request.id)
+    const loaded = await fetchCancelRoundSummary(props.request.id)
+    if (!current(scope) || mine !== generation) return
+    summary.value = loaded
     loadState.value = 'ready'
   } catch (error) {
+    if (!current(scope) || mine !== generation) return
     summary.value = null
     loadState.value = error instanceof ApprovalApiError && error.status === 404 ? 'hidden' : 'error'
   }
@@ -328,7 +356,7 @@ function describe(error: unknown, fallbackEn: string, fallbackZh: string): Cance
 }
 
 async function openDialog(): Promise<void> {
-  if (launchBlocked.value) return
+  if (!readable.value || !showEntry.value || launchBlocked.value || busy.value) return
   reason.value = ''
   dialogError.value = null
   dialogOpen.value = true
@@ -344,20 +372,23 @@ async function closeDialog(): Promise<void> {
 }
 
 async function confirmLaunch(): Promise<void> {
-  if (busy.value) return
+  if (!current() || busy.value || !dialogOpen.value || !readable.value || !showEntry.value || launchBlocked.value) return
+  const scope = epoch
   busy.value = 'launch'
   dialogError.value = null
   try {
     await launchCancelRound(props.request.id, reason.value)
+    if (!current(scope)) return
     dialogOpen.value = false
     progressError.value = null
     await load()
   } catch (error) {
+    if (!current(scope)) return
     dialogError.value = describe(error, 'The cancellation request could not be submitted.', '撤销申请未能提交')
     // e.g. ALREADY_PENDING raced in from another tab: re-read so the page shows the real state.
     void load()
   } finally {
-    busy.value = null
+    if (current(scope)) busy.value = null
   }
 }
 
@@ -376,16 +407,21 @@ function clientRefusal(code: string): CancelRoundErrorDescription {
  */
 async function withdraw(): Promise<void> {
   const shownRoundId = round.value?.roundId ?? null
-  if (busy.value || !shownRoundId) return
+  if (!current() || busy.value || !shownRoundId) return
+  const scope = epoch
   busy.value = 'withdraw'
   progressError.value = null
   try {
     const withdrawnRoundId = await withdrawCancelRound(props.request.id, null, shownRoundId)
+    if (!current(scope)) return
     await load()
+    if (!current(scope)) return
     // Accepted, but not (provably) for the round on screen: never a silent success.
     if (withdrawnRoundId !== shownRoundId) progressError.value = clientRefusal(CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED)
   } catch (error) {
+    if (!current(scope)) return
     await load()
+    if (!current(scope)) return
     const replaced = (error as { code?: unknown } | null)?.code === 'INVALID_STATUS_TRANSITION'
       && loadState.value === 'ready'
       && round.value !== null
@@ -394,7 +430,7 @@ async function withdraw(): Promise<void> {
       ? clientRefusal(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT)
       : describe(error, 'The cancellation request could not be withdrawn.', '撤销申请未能撤回')
   } finally {
-    busy.value = null
+    if (current(scope)) busy.value = null
   }
 }
 
@@ -405,7 +441,7 @@ async function focusProgress(): Promise<void> {
 }
 
 onMounted(() => { void load() })
-watch(() => [props.request.id, props.request.status] as const, () => { void load() })
+watch(() => [props.orgId, props.currentUserId, props.request.id, props.request.user_id, props.request.request_type, props.request.status] as const, () => { reset(); void load() }, { flush: 'sync' })
 </script>
 
 <style scoped>

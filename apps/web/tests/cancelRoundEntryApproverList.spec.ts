@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, reactive, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, ref, reactive, type App as VueApp } from 'vue'
 
 const apiFetchMock = vi.fn()
 vi.mock('../src/utils/api', async (importOriginal) => {
@@ -17,6 +17,7 @@ vi.mock('../src/utils/api', async (importOriginal) => {
   return { ...actual, apiFetch: (...args: unknown[]) => apiFetchMock(...args) }
 })
 
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import AttendanceCancelRoundApproverPanel from '../src/views/attendance/AttendanceCancelRoundApproverPanel.vue'
 import { useLocale } from '../src/composables/useLocale'
 
@@ -396,4 +397,52 @@ describe('AttendanceView wiring', () => {
     expect(decl).toContain("typeof auth.getAccessSnapshot === 'function'")
     expect(decl).toContain('canDecideCancelRoundWith(auth.getAccessSnapshot())')
   })
+})
+
+describe('current organization list routing', () => {
+  it('passes the explicit organization selector without creating a second seat predicate', async () => {
+    apiFetchMock.mockImplementation(async (path: string) => {
+      expect(path).toBe('/api/attendance/cancel-rounds/pending?orgId=org-current')
+      return jsonResponse(200, listBody([]))
+    })
+    await mountPanel({ orgId: 'org-current' })
+    expect(calls()).toEqual([['GET', '/api/attendance/cancel-rounds/pending?orgId=org-current', null]])
+    expect(posts()).toEqual([])
+  })
+})
+
+
+describe('pending cancellation async scope', () => {
+  it('an obsolete organization response cannot replace the new empty list', async () => {
+    let finish!: (response: Response) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse(200,{ok:true,data:{items:[],total:0}}))
+    const orgId = ref('org-one')
+    const root = document.createElement('div');document.body.appendChild(root)
+    const app = createApp({render:()=>h(AttendanceCancelRoundApproverPanel,{canDecide:true,orgId:orgId.value})})
+    app.mount(root);apps.push(app)
+    orgId.value = 'org-two'
+    await flushUi()
+    finish(jsonResponse(503,{ok:false,error:{code:'SYNTHETIC_OLD_FAILURE'}}))
+    await flushUi()
+    expect($(root,'data-cancel-round-pending-unavailable')).toBeNull()
+    expect(root.textContent).toBe('')
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  })
+})
+
+
+it('a decision completing after a principal switch sends no follow-up list read', async () => {
+  const root = await mountPanel()
+  await click(root,'data-cancel-round-pending-approve')
+  let finish!: (response: Response) => void
+  apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+  $(root,'data-cancel-round-pending-confirm-submit')!.click()
+  await flushUi()
+  expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  notifyAuthPrincipalChange()
+  finish(jsonResponse(200,{ok:true,data:{roundId:'round-1'}}))
+  await flushUi()
+  expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  expect($(root,'data-cancel-round-pending-notice')).toBeNull()
 })

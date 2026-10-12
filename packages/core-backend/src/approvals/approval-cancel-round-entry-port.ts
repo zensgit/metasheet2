@@ -253,6 +253,7 @@ export type CancelRoundOutcomeV1 = 'pending' | 'applied' | 'rejected' | 'withdra
 export type CancelRoundSummaryStatusV1 =
   | 'cancellation_pending_approval' // V1: round pending
   | 'leave_cancelled' // V2: round applied ⇒ the leave itself is cancelled
+  | 'business_trip_cancelled' // D3: trip arrangement cancelled; no leave entitlement is implied
   | 'cancellation_rejected' // V3: an approver rejected the cancellation (leave still valid)
   | 'cancellation_withdrawn' // V4: the requester withdrew the cancellation (leave still valid)
   | 'cancellation_window_closed' // V5: system close, `round_expired` (leave still valid)
@@ -555,6 +556,7 @@ export interface ApprovalCancelRoundEntryPort {
 
 type RoundRow = {
   round_id: string
+  document_request_type?: string
   engine_instance_id: string | null
   outcome: string
   started_at: Date | string
@@ -576,12 +578,12 @@ function toIso(value: Date | string | null | undefined): string | null {
   return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toISOString()
 }
 
-function statusTokenFor(outcome: CancelRoundOutcomeV1): CancelRoundSummaryStatusV1 {
+function statusTokenFor(outcome: CancelRoundOutcomeV1, documentRequestType?: string): CancelRoundSummaryStatusV1 {
   switch (outcome) {
     case 'pending':
       return 'cancellation_pending_approval'
     case 'applied':
-      return 'leave_cancelled'
+      return documentRequestType === 'business_trip' ? 'business_trip_cancelled' : 'leave_cancelled'
     case 'rejected':
       return 'cancellation_rejected'
     case 'withdrawn':
@@ -727,6 +729,9 @@ export async function readCancelRoundSummaryForDocumentV1(
 async function selectLatestCancelRoundRow(query: Queryable, documentInstanceId: string): Promise<RoundRow | undefined> {
   const result = await query.query(
     `SELECT r.id AS round_id,
+            (SELECT ar.request_type FROM attendance_requests ar
+              JOIN approval_instances original ON original.id=r.document_id AND original.org_id=ar.org_id
+              WHERE ar.approval_instance_id=r.document_id AND ar.request_type='business_trip') AS document_request_type,
             r.engine_instance_id,
             r.outcome,
             r.started_at,
@@ -775,7 +780,7 @@ async function summarizeRoundRow(
       roundId: row.round_id,
       engineInstanceId: row.engine_instance_id,
       outcome: row.outcome,
-      status: statusTokenFor(row.outcome),
+      status: statusTokenFor(row.outcome,row.document_request_type),
       startedAt: toIso(row.started_at) ?? '',
       endedAt: toIso(row.ended_at),
       closeReason,
@@ -897,7 +902,7 @@ export async function dispatchOnLatestCancelRound(
     }
     throw error
   }
-  const round = await readActedRoundOutcome(query, row.round_id)
+  const round = await readActedRoundOutcome(query, row.round_id,row.document_request_type)
   if (publishCounts) {
     const seatsAfter = await listActiveUserSeatIds(query, row.engine_instance_id).catch(() => [] as string[])
     await publishCancelRoundCounts(publishCounts, actor, [...seatsBefore, ...seatsAfter], `cancel-round:${action}`)
@@ -910,13 +915,13 @@ export async function dispatchOnLatestCancelRound(
  * 「latest」 pick, which a relaunch racing in could move), its outcome and the P-2 status token. An
  * outcome outside the ratified six fails loudly, exactly as the summary reader does.
  */
-async function readActedRoundOutcome(query: Queryable, roundId: string): Promise<CancelRoundActionOutcomeV1> {
+async function readActedRoundOutcome(query: Queryable, roundId: string, documentRequestType?: string): Promise<CancelRoundActionOutcomeV1> {
   const result = await query.query('SELECT outcome FROM approval_rounds WHERE id = $1', [roundId])
   const outcome = result.rows[0]?.outcome
   if (!isRoundOutcome(outcome)) {
     throw new Error(`cancel-round entry: unrecognised round outcome ${JSON.stringify(outcome)} on round ${roundId}`)
   }
-  return { roundId, outcome, status: statusTokenFor(outcome) }
+  return { roundId, outcome, status: statusTokenFor(outcome,documentRequestType) }
 }
 
 /** C2 — one round the viewer could decide now, keyed back to its ORIGINAL document. */

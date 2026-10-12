@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { QueryResult, QueryResultRow } from 'pg'
 import { query, transaction } from '../db/pg'
+import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../attendance/attendance-timezone-runtime-locks'
 
 /**
  * g1 (W7-1b) — the canonical org key used for ADVISORY LOCK KEYS ONLY.
@@ -31,6 +32,20 @@ type QueryExecutor = (
   statement: string,
   params?: unknown[],
 ) => Promise<QueryResult<QueryResultRow>>
+
+export type AttendanceCalculationGroupTimezoneSourceGuard = (
+  query: QueryExecutor,
+  input: { orgId: string; userIds: string[] },
+) => Promise<() => Promise<void>>
+
+let timezoneSourceGuard: AttendanceCalculationGroupTimezoneSourceGuard | null = null
+
+/** Registered only by the trusted attendance host activation, never HTTP input. */
+export function registerAttendanceCalculationGroupTimezoneSourceGuard(
+  guard: AttendanceCalculationGroupTimezoneSourceGuard | null,
+): void {
+  timezoneSourceGuard = guard
+}
 
 type MembershipRow = {
   id: string
@@ -346,6 +361,11 @@ export async function transitionAttendanceCalculationGroupMembership(
   try {
     return await transaction(async (client) => {
       const runQuery = client.query as QueryExecutor
+      // The prefix contains only advisory locks; completed operation replay
+      // remains independent of mutable timezone sources and schema presence.
+      await acquireAttendanceTimezoneRuntimeLocksV1({ query: runQuery }, {
+        orgId: input.orgId, userId: input.userId, mode: 'exclusive',
+      })
 
       // g1 (W7-1b): CANONICAL org key in the advisory-lock key. W7-1a's composite
       // helper keys off the canonical form, so a mixed-case spelling here derived
@@ -394,6 +414,42 @@ export async function transitionAttendanceCalculationGroupMembership(
           correlationId: input.correlationId,
           outcome: existingOperation.outcome,
           membership: readOperationSnapshot(existingOperation.result_snapshot),
+        }
+      }
+
+      const timezoneSchema = await runQuery(
+        "SELECT to_regclass('attendance_timezone_context_companions') IS NOT NULL AS present",
+      )
+      if (timezoneSchema.rows.length !== 1 || timezoneSchema.rows[0].present !== true) {
+        throw new AttendanceCalculationGroupMembershipError(
+          'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE', 503, 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+        )
+      }
+      let verifyTimezone = async (): Promise<void> => {}
+      if (timezoneSchema.rows[0].present === true) {
+        if (!timezoneSourceGuard) {
+          throw new AttendanceCalculationGroupMembershipError(
+            'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',
+          )
+        }
+        try {
+          const verify = await timezoneSourceGuard(runQuery,{orgId:input.orgId,userIds:[input.userId]})
+          verifyTimezone = async () => {
+            try { await verify() }
+            catch (error) {
+              const guarded = error as {code?:string;status?:number}
+              throw new AttendanceCalculationGroupMembershipError(
+                guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+                guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+              )
+            }
+          }
+        } catch (error) {
+          const guarded = error as {code?:string;status?:number}
+          throw new AttendanceCalculationGroupMembershipError(
+            guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+            guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+          )
         }
       }
 
@@ -483,6 +539,7 @@ export async function transitionAttendanceCalculationGroupMembership(
             JSON.stringify(membership),
           ],
         )
+        await verifyTimezone()
         return {
           correlationId: input.correlationId,
           outcome: 'unchanged',
@@ -563,6 +620,7 @@ export async function transitionAttendanceCalculationGroupMembership(
         ],
       )
 
+      await verifyTimezone()
       return {
         correlationId: input.correlationId,
         outcome: 'transitioned',

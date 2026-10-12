@@ -1618,6 +1618,14 @@ exec npx vitest run \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
   attendanceEmployeeQuickActionIcons \
+  attendanceTimezonePolicyPanel \
+  attendanceWallTime \
+  attendanceTimezoneTarget \
+  attendanceCurrentTimeContext \
+  attendanceDayTimeContext \
+  useAttendanceRequestTimezone \
+  attendanceRequestTimezoneIntegration \
+  attendanceBusinessTripRequestCard \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \

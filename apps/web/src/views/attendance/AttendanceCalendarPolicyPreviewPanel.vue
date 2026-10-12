@@ -153,6 +153,7 @@ const SOURCE_LABELS: Record<CalendarEffectiveSource, [string, string]> = {
   group: ['Group policy', '考勤组规则'],
   role: ['Role policy', '角色规则'],
   user: ['User policy', '用户规则'],
+  stored_record: ['Historical record', '历史记录'],
 }
 
 const MODE_LABELS: Record<PreviewMode, [string, string]> = {

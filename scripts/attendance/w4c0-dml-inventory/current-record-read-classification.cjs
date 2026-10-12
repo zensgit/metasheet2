@@ -10,6 +10,18 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // Exact internal frozen-context and source-change preconditions; no public record listing.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDates', 1, 'batch_frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'readTargetTimezoneContexts', 1, 'batch_original_freeze_migration_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 1, 'original_frozen_v2_continuation_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs', 'readStoredContexts', 1, 'stored_timezone_identity_active_parent_join'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readEligibleOpen', 1, 'frozen_checkout_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDate', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'assertTarget', 1, 'frozen_binding_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'bindFirst', 1, 'frozen_binding_write_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs', 'readFrozenTimezoneWindows', 1, 'frozen_source_change_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'target', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-business-trip.cjs', 'dateKey', 1, 'trip_work_date_conflict_precondition'),
   // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),
