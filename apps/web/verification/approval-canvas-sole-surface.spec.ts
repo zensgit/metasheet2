@@ -722,3 +722,299 @@ test('T5c: opening and closing a tall inspector does not ratchet the page taller
   // D0 §5: closing returns focus to the node that was being edited.
   await expect(canvasNodeSelector(page, 'approval_1')).toBeFocused()
 })
+
+// ── R-43 (B) gate r3 (F3-1 / F3-2 / NIT-c / P3-f): typed condition values in the REAL editors (real
+// Element Plus, real TemplateAuthoringView). Element Plus's `el-input` emits nothing when the typed
+// text equals the text it already shows, so a marked saved value must be shown EMPTY (with the saved
+// value as a read-only note) — then re-entering it exactly as it was saved is a real edit that stores
+// the working shape. Covers: flag OFF (legacy designer + structured list, a referenced number field
+// retyped to text), flag ON (Designer 2.0 inspector + Canvas inspector, API-seeded values), and the
+// pre-R-43 scalar `in` shape in both branch-editor hosts. Loading never rewrites a rule.
+type R43Json = Record<string, any>
+
+function r43Template(fields: R43Json[], rules: R43Json[]): R43Json {
+  return {
+    ...COMPLEX_TEMPLATE,
+    key: 'canvas_r43_condition_values',
+    name: 'Canvas 验收条件值类型模板',
+    description: '条件值按字段类型填写浏览器验收',
+    latestVersionId: 'ver_canvas_r43_1',
+    formSchema: { fields },
+    approvalGraph: {
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules }], defaultEdgeKey: 'e-b' } },
+        {
+          key: 'app_a',
+          type: 'approval',
+          name: 'A',
+          config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' },
+        },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e-start-c', source: 'start', target: 'cond_1' },
+        { key: 'e-a', source: 'cond_1', target: 'app_a' },
+        { key: 'e-b', source: 'cond_1', target: 'end' },
+        { key: 'e-a-end', source: 'app_a', target: 'end' },
+      ],
+    },
+  }
+}
+
+const R43_TEMPLATE_URL = /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/
+
+/** Mounts with a stateful PATCH echo (form schema AND graph), so a save never reverts a retype. */
+async function r43Mount(page: Page, initial: R43Json, canvasV2: boolean): Promise<void> {
+  let current = initial
+  await page.setViewportSize({ width: 1440, height: 900 })
+  await page.route(R43_TEMPLATE_URL, (route) => {
+    const request = route.request()
+    if (request.method() === 'PATCH') {
+      const body = request.postDataJSON() as R43Json
+      current = {
+        ...current,
+        ...(body.formSchema ? { formSchema: body.formSchema } : {}),
+        ...(body.approvalGraph ? { approvalGraph: body.approvalGraph } : {}),
+      }
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(current) })
+  })
+  for (const pattern of ['**/api/approval-templates/directory/**', '**/api/approvals/directory/**']) {
+    await page.route(pattern, (route) => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ users: [], roles: [], groups: [] }),
+    }))
+  }
+  await page.route('**/api/plugins', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ plugins: [] }),
+  }))
+  await page.goto(
+    `/verification/approval-form-builder-mounted-harness.html?canvasV2=${canvasV2 ? 'on' : 'off'}&route=edit&networkTemplate=on`,
+  )
+  await page.waitForFunction(() => (
+    window as unknown as { __AFB_MOUNT_READY__?: boolean }
+  ).__AFB_MOUNT_READY__ === true)
+  await page.waitForLoadState('networkidle')
+  await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(initial.name)
+}
+
+async function r43Save(page: Page): Promise<R43Json> {
+  const pending = page.waitForRequest((request) => request.method() === 'PATCH' && R43_TEMPLATE_URL.test(request.url()))
+  await page.click('[data-testid="approval-template-save-button"]')
+  const payload = (await pending).postDataJSON() as R43Json
+  await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
+  return payload
+}
+
+const r43Rules = (payload: R43Json) =>
+  payload.approvalGraph.nodes.find((node: R43Json) => node.key === 'cond_1').config.branches[0].rules
+const r43Field = (payload: R43Json, id: string) =>
+  payload.formSchema.fields.find((field: R43Json) => field.id === id)
+
+function r43Rule(scope: Locator, index: number) {
+  const row = scope.locator('[data-testid="approval-condition-rule"]').nth(index)
+  return {
+    issue: row.locator('[data-testid="approval-condition-rule-issue"]'),
+    text: row.locator('input[data-testid="approval-condition-rule-value"]'),
+    list: row.locator('textarea[data-testid="approval-condition-rule-values"]'),
+    stored: row.locator('[data-testid="approval-condition-rule-stored-value-text"]'),
+  }
+}
+
+const R43_NOT_TEXT = '比较值的类型与字段类型不一致'
+const R43_IN_NOT_LIST = '「包含于」需要一组值'
+const R43_LIST_NOT_SCALAR = '这个条件类型只能比较单个值'
+
+test('R-43 gate r3 (flag OFF): retyping a referenced number field to text marks its values; re-entering them as saved corrects them', async ({ page }) => {
+  const fields = [
+    { id: 'amount', type: 'number', label: '金额', required: true },
+    { id: 'note', type: 'text', label: '备注', visibilityRule: { fieldId: 'amount', operator: 'eq', value: 5 } },
+    { id: 'note2', type: 'text', label: '备注二', visibilityRule: { fieldId: 'amount', operator: 'in', values: [1, 2] } },
+    { id: 'approvers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 5 } },
+  ]
+  const rules = [
+    { fieldId: 'amount', operator: 'eq', value: 5 },
+    { fieldId: 'amount', operator: 'in', value: [1, 2] },
+    { fieldId: 'amount', operator: 'gt', value: 3 },
+    { fieldId: 'approvers', operator: 'in', value: 'u1' },
+  ]
+  await r43Mount(page, r43Template(fields, rules), false)
+  await page.click('[data-testid="approval-template-section-fields"]')
+  const fieldRows = page.locator('[data-testid="approval-template-field-row"]')
+  await expect(fieldRows).toHaveCount(4)
+  const noteRow = fieldRows.nth(1)
+  const note2Row = fieldRows.nth(2)
+  const previews = page.locator('.template-authoring__form-preview-row')
+
+  await fieldRows.nth(0).locator('[data-testid="approval-field-type"]').click()
+  await page.getByRole('option', { name: '文本', exact: true }).click()
+
+  // Visibility (legacy designer): marked, box EMPTY, saved value shown read-only, no 「留空=等于空值」.
+  await previews.nth(1).click()
+  await expect(noteRow.locator('[data-testid="approval-field-visibility-issue"]')).toContainText(R43_NOT_TEXT)
+  await expect(noteRow.locator('input[data-testid="approval-field-visibility-value"]')).toHaveValue('')
+  await expect(noteRow.locator('[data-testid="approval-field-visibility-stored-value-text"]')).toHaveText('5')
+  await expect(noteRow).not.toContainText('比较值留空表示')
+  await previews.nth(2).click()
+  await expect(note2Row.locator('[data-testid="approval-field-visibility-issue"]')).toContainText(R43_NOT_TEXT)
+  await expect(note2Row.locator('textarea[data-testid="approval-field-visibility-values"]')).toHaveValue('')
+  await expect(note2Row.locator('[data-testid="approval-field-visibility-stored-value-text"]')).toHaveText('[1,2]')
+
+  // Branch (structured list): the same, aligned; gt still in effect; scalar `in` on a multi-person field
+  // is in effect too (its form value is a list the executor `includes` into).
+  await page.click('[data-testid="approval-template-section-flow"]')
+  const body = page.locator('body')
+  await expect(body.locator('[data-testid="approval-condition-rule"]')).toHaveCount(4)
+  await expect(r43Rule(body, 0).issue).toContainText(R43_NOT_TEXT)
+  await expect(r43Rule(body, 0).text).toHaveValue('')
+  await expect(r43Rule(body, 0).stored).toHaveText('5')
+  await expect(r43Rule(body, 1).issue).toContainText(R43_NOT_TEXT)
+  await expect(r43Rule(body, 1).list).toHaveValue('')
+  await expect(r43Rule(body, 1).stored).toHaveText('[1,2]')
+  await expect(r43Rule(body, 2).issue).toHaveCount(0)
+  await expect(r43Rule(body, 2).text).toHaveValue('3')
+  await expect(r43Rule(body, 2).stored).toHaveCount(0)
+  await expect(r43Rule(body, 3).issue).toHaveCount(0)
+  await expect(r43Rule(body, 3).list).toHaveValue('u1')
+  await expectNoDocumentOverflow(page)
+  await page.screenshot({ path: `${OUT}/p7-canvas-r43-marked-values-flag-off.png`, fullPage: true })
+
+  // First save: no rewrite on load, no blocker — every value byte-identical.
+  const first = await r43Save(page)
+  expect(r43Field(first, 'amount').type).toBe('text')
+  expect(r43Field(first, 'note').visibilityRule).toEqual({ fieldId: 'amount', operator: 'eq', value: 5 })
+  expect(r43Field(first, 'note2').visibilityRule).toEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+  expect(r43Rules(first)).toEqual(rules)
+
+  // Re-enter every marked value exactly as it was saved (`fill` = select-all + type).
+  await page.click('[data-testid="approval-template-section-fields"]')
+  await previews.nth(1).click()
+  await noteRow.locator('input[data-testid="approval-field-visibility-value"]').fill('5')
+  await previews.nth(2).click()
+  await note2Row.locator('textarea[data-testid="approval-field-visibility-values"]').fill('1\n2')
+  await expect(noteRow.locator('[data-testid="approval-field-visibility-issue"]')).toHaveCount(0)
+  await expect(note2Row.locator('[data-testid="approval-field-visibility-issue"]')).toHaveCount(0)
+  await expect(noteRow.locator('[data-testid="approval-field-visibility-stored-value"]')).toHaveCount(0)
+  await page.click('[data-testid="approval-template-section-flow"]')
+  await r43Rule(body, 0).text.fill('5')
+  await r43Rule(body, 1).list.fill('1\n2')
+  await expect(body.locator('[data-testid="approval-condition-rule-issue"]')).toHaveCount(0)
+  await expect(body.locator('[data-testid="approval-condition-rule-stored-value"]')).toHaveCount(0)
+
+  const second = await r43Save(page)
+  expect(r43Field(second, 'note').visibilityRule).toEqual({ fieldId: 'amount', operator: 'eq', value: '5' })
+  expect(r43Field(second, 'note2').visibilityRule).toEqual({ fieldId: 'amount', operator: 'in', values: ['1', '2'] })
+  expect(r43Rules(second)).toEqual([
+    { fieldId: 'amount', operator: 'eq', value: '5' },
+    { fieldId: 'amount', operator: 'in', value: ['1', '2'] },
+    { fieldId: 'amount', operator: 'gt', value: 3 },
+    { fieldId: 'approvers', operator: 'in', value: 'u1' },
+  ])
+})
+
+test('R-43 gate r3 (flag ON): Designer 2.0 + Canvas inspector show API-seeded marked values empty; re-entering them as saved corrects them', async ({ page }) => {
+  const fields = [
+    { id: 'reason', type: 'text', label: '事由' },
+    { id: 'note', type: 'text', label: '备注', visibilityRule: { fieldId: 'reason', operator: 'eq', value: 5 } },
+    { id: 'note2', type: 'text', label: '备注二', visibilityRule: { fieldId: 'reason', operator: 'in', values: [1, 2] } },
+  ]
+  const rules = [
+    { fieldId: 'reason', operator: 'eq', value: 5 },
+    { fieldId: 'reason', operator: 'in', value: [1, 2] },
+  ]
+  await r43Mount(page, r43Template(fields, rules), true)
+  await page.click('[data-testid="approval-template-section-fields"]')
+  const cards = page.locator('[data-testid="approval-form-builder-card"]')
+  await expect(cards).toHaveCount(3)
+  const issue = page.locator('[data-testid="approval-form-field-inspector-visibility-issue"]')
+  const stored = page.locator('[data-testid="approval-form-field-inspector-visibility-stored-value-text"]')
+
+  await cards.nth(1).click()
+  const valueBox = page.locator('[data-testid="approval-form-field-inspector-visibility-value"]')
+  await expect(valueBox).toHaveValue('')
+  await expect(issue).toContainText(R43_NOT_TEXT)
+  await expect(stored).toHaveText('5')
+  await valueBox.fill('5')
+  await valueBox.press('Tab')
+  await expect(issue).toHaveCount(0)
+  await expect(stored).toHaveCount(0)
+
+  await cards.nth(2).click()
+  const listBox = page.locator('[data-testid="approval-form-field-inspector-visibility-values"]')
+  await expect(listBox).toHaveValue('')
+  await expect(stored).toHaveText('[1,2]')
+  await listBox.fill('1\n2')
+  await listBox.press('Tab')
+  await expect(issue).toHaveCount(0)
+
+  await page.click('[data-testid="approval-template-section-flow"]')
+  await canvasNodeSelector(page, 'cond_1').click()
+  const inspector = page.locator('[data-testid="approval-canvas-inspector"]')
+  await expect(inspector).toBeVisible()
+  await expect(r43Rule(inspector, 0).issue).toContainText(R43_NOT_TEXT)
+  await expect(r43Rule(inspector, 0).text).toHaveValue('')
+  await expect(r43Rule(inspector, 0).stored).toHaveText('5')
+  await expect(r43Rule(inspector, 1).list).toHaveValue('')
+  await expect(r43Rule(inspector, 1).stored).toHaveText('[1,2]')
+  await page.screenshot({ path: `${OUT}/p7-canvas-r43-marked-values-flag-on.png`, fullPage: true })
+  await r43Rule(inspector, 0).text.fill('5')
+  await r43Rule(inspector, 1).list.fill('1\n2')
+  await expect(inspector.locator('[data-testid="approval-condition-rule-issue"]')).toHaveCount(0)
+  await expect(inspector.locator('[data-testid="approval-condition-rule-stored-value"]')).toHaveCount(0)
+
+  const payload = await r43Save(page)
+  expect(r43Field(payload, 'note').visibilityRule).toEqual({ fieldId: 'reason', operator: 'eq', value: '5' })
+  expect(r43Field(payload, 'note2').visibilityRule).toEqual({ fieldId: 'reason', operator: 'in', values: ['1', '2'] })
+  expect(r43Rules(payload)).toEqual([
+    { fieldId: 'reason', operator: 'eq', value: '5' },
+    { fieldId: 'reason', operator: 'in', value: ['1', '2'] },
+  ])
+})
+
+for (const canvasV2 of [false, true]) {
+  const host = canvasV2 ? 'flag ON Canvas inspector' : 'flag OFF structured list'
+  test(`R-43 gate r3 (${host}): the pre-R-43 scalar \`in\` and a one-entry list under eq are corrected by re-entering them as saved`, async ({ page }) => {
+    const fields = [{ id: 'reason', type: 'text', label: '事由' }]
+    const rules = [
+      { fieldId: 'reason', operator: 'in', value: 'a' },
+      { fieldId: 'reason', operator: 'in', value: 'b' },
+      { fieldId: 'reason', operator: 'eq', value: ['c'] },
+    ]
+    await r43Mount(page, r43Template(fields, rules), canvasV2)
+    await page.click('[data-testid="approval-template-section-flow"]')
+    let scope = page.locator('body')
+    if (canvasV2) {
+      await canvasNodeSelector(page, 'cond_1').click()
+      scope = page.locator('[data-testid="approval-canvas-inspector"]')
+      await expect(scope).toBeVisible()
+    }
+    await expect(r43Rule(scope, 0).issue).toContainText(R43_IN_NOT_LIST)
+    await expect(r43Rule(scope, 0).list).toHaveValue('')
+    await expect(r43Rule(scope, 0).stored).toHaveText('a')
+    await expect(r43Rule(scope, 1).stored).toHaveText('b')
+    await expect(r43Rule(scope, 2).issue).toContainText(R43_LIST_NOT_SCALAR)
+    await expect(r43Rule(scope, 2).text).toHaveValue('')
+    await expect(r43Rule(scope, 2).stored).toHaveText('["c"]')
+
+    // An untouched save keeps the old shapes (no rewrite on load).
+    expect(r43Rules(await r43Save(page))).toEqual(rules)
+
+    // `fill` (select-all + type) for one rule; a click + select-all + typed key for the other.
+    await r43Rule(scope, 0).list.fill('a')
+    await r43Rule(scope, 1).list.click()
+    await page.keyboard.press('ControlOrMeta+A')
+    await page.keyboard.type('b')
+    await r43Rule(scope, 2).text.fill('c')
+    await expect(scope.locator('[data-testid="approval-condition-rule-issue"]')).toHaveCount(0)
+    await expect(scope.locator('[data-testid="approval-condition-rule-stored-value"]')).toHaveCount(0)
+    expect(r43Rules(await r43Save(page))).toEqual([
+      { fieldId: 'reason', operator: 'in', value: ['a'] },
+      { fieldId: 'reason', operator: 'in', value: ['b'] },
+      { fieldId: 'reason', operator: 'eq', value: 'c' },
+    ])
+  })
+}
