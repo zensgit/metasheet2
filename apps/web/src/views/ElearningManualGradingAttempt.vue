@@ -152,6 +152,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
   ELEARNING_MANUAL_GRADE_COMMENT_MAX,
@@ -266,10 +267,7 @@ function validateDraft(question: ElearningManualGradingQuestionDetail, draft: Dr
 }
 
 function freshRequestId(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new Error('crypto.randomUUID unavailable')
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 function resolveSubmissionIntent(

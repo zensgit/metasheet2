@@ -48,6 +48,8 @@
 //      new `requestWriteToken()` call, which mints a brand new nonce and posts a brand new request.
 //      A spent/failed token is never re-sent because there is no code path that re-sends anything.
 
+import { randomUuid } from '../../utils/uuid'
+
 /** Inbound/outbound message `type` discriminators -- exact strings per the locked contract. */
 const TOKEN_REQUEST_TYPE = 'plm-embed:token-request' as const
 const TOKEN_RESPONSE_TYPE = 'plm-embed:token-response' as const
@@ -132,18 +134,17 @@ interface TokenErrorFactory {
 }
 
 function randomNonce(): string | null {
-  const cryptoApi = globalThis.crypto as { randomUUID?: () => string; getRandomValues?: <T extends ArrayBufferView>(a: T) => T } | undefined
-  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
-  if (typeof cryptoApi?.getRandomValues === 'function') {
-    const bytes = new Uint8Array(16)
-    cryptoApi.getRandomValues(bytes)
-    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+  // CSPRNG only (utils/uuid.ts: native UUID, else a getRandomValues-built v4 -- the latter is what a
+  // plain-HTTP, non-secure-context deployment gets). randomUuid() never falls back to Math.random.
+  try {
+    return randomUuid()
+  } catch {
+    // FAIL CLOSED (adversarial-verify P2): with no CSPRNG, return null so requestWriteToken() rejects
+    // and posts NOTHING. A predictable Date.now()+Math.random() nonce would weaken the correlation
+    // lock; a write channel must not silently degrade. Every supported runtime (browser + jsdom test
+    // env) provides Web Crypto, so this is a fail-closed guard, not an expected path.
+    return null
   }
-  // FAIL CLOSED (adversarial-verify P2): with no CSPRNG, return null so requestWriteToken() rejects
-  // and posts NOTHING. A predictable Date.now()+Math.random() nonce would weaken the correlation
-  // lock; a write channel must not silently degrade. Every supported runtime (browser + jsdom test
-  // env) provides Web Crypto, so this is a fail-closed guard, not an expected path.
-  return null
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

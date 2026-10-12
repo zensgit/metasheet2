@@ -153,6 +153,10 @@
 # apps/web/tests/delete-fallback.spec.ts, is deliberately NOT listed: it already runs in the
 # always-on required-web-tests lane (apps/web/scripts/run-required-web-tests.sh), and a spec-only
 # change cannot alter this lane's module graph.
+# UUID helper (2026-10-12): apps/web/src/utils/uuid.ts is imported by utils/explicitSessionOrg.ts
+# (itself imported by utils/api.ts) and by AttendanceView.vue, so it joins the same module graph;
+# listed at both wiring points for the same reason as delete-fallback.ts. Its spec
+# (apps/web/tests/uuid-no-bare-randomuuid.spec.ts) runs in the always-on required-web-tests lane.
 # A1 "hints and actual status" (2026-10-09, gate r1 P3-2): the slice's five attendance specs -
 # attendance-approval-option-hint.spec.ts, attendance-approval-option-wiring.spec.ts,
 # attendance-scheduled-feature-status.spec.ts, attendance-scheduled-feature-status-wiring.spec.ts and
@@ -186,6 +190,7 @@ on:
       - 'apps/web/src/utils/api.ts'
       - 'apps/web/src/utils/delete-fallback.ts'
       - 'apps/web/src/utils/explicitSessionOrg.ts'
+      - 'apps/web/src/utils/uuid.ts'
       - 'apps/web/src/services/attendance/effectiveCalendar.ts'
       - 'apps/web/src/services/attendance/teamAvailability.ts'
       - 'apps/web/tests/useAuth.spec.ts'
@@ -337,6 +342,7 @@ jobs:
               apps/web/src/utils/api.ts|\
               apps/web/src/utils/delete-fallback.ts|\
               apps/web/src/utils/explicitSessionOrg.ts|\
+              apps/web/src/utils/uuid.ts|\
               apps/web/src/services/attendance/effectiveCalendar.ts|\
               apps/web/src/services/attendance/teamAvailability.ts|\
               apps/web/tests/useAuth.spec.ts|\

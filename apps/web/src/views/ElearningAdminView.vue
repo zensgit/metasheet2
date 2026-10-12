@@ -269,6 +269,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import {
   assignElearningDirect,
   ElearningApiError,
@@ -359,10 +360,7 @@ const publishButtonLabel = computed(() => {
 })
 
 function newLocalId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID()
-  }
-  return `local-${Date.now()}`
+  return randomUuid()
 }
 
 function newQuestion(): QuestionDraft {
@@ -624,12 +622,8 @@ async function retryAssign(): Promise<void> {
 }
 
 onMounted(() => {
-  requestId.value = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : ''
-  sourceKey.value = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : ''
+  requestId.value = randomUuid()
+  sourceKey.value = randomUuid()
   busy.value = true
   void ensureV01Ready()
     .catch((error) => {
