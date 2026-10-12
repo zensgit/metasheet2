@@ -357,6 +357,15 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
 
   // ── SMW-PAGE ──────────────────────────────────────────────────────────────────────────────────
 
+  it('SMW-PAGE: the built-in floor role is labelled "Operator" in English (owner 2026-10-12, R-39)', async () => {
+    h.locale = 'en-US'
+    answer(() => ok(membersPayload()))
+    const root = await mountPage({ kind: 'ready', view: clampStockPrepMembersView(membersPayload())! })
+    const frontline = root.querySelector('[data-testid="stock-prep-members-role-stock-prep_frontline"]')!
+    expect(frontline.querySelector('.sp-members__role-title strong')?.textContent).toBe('Operator')
+    expect(frontline.textContent).not.toContain('Floor operator')
+  })
+
   it('SMW-PAGE: built-ins read-only, the main administrator never appointable, custom roles editable, tables add-only', async () => {
     answer(() => ok(membersPayload()))
     const root = await mountPage({ kind: 'ready', view: clampStockPrepMembersView(membersPayload())! })
@@ -374,6 +383,9 @@ describe('备料「成员与权限」(S5b, R-39)', () => {
     const frontline = root.querySelector('[data-testid="stock-prep-members-role-stock-prep_frontline"]')!
     expect(frontline.querySelector('[data-testid="stock-prep-members-admit"]')).not.toBeNull()
     expect(frontline.querySelector('[data-testid="stock-prep-members-out-of-scope"]')?.textContent).toContain('2')
+    // owner 2026-10-12 (R-39): the built-in floor role is labelled 「操作人员」 (id unchanged).
+    expect(frontline.querySelector('.sp-members__role-title strong')?.textContent).toBe('操作人员')
+    expect(frontline.textContent).not.toContain('一线填写')
     const custom = root.querySelector(`[data-testid="stock-prep-members-role-${CUSTOM}"]`)!
     expect(custom.querySelector('[data-testid="stock-prep-members-custom-role-save"]')).not.toBeNull()
     expect(custom.querySelector('[data-testid="stock-prep-members-custom-role-sheets"]')?.textContent).toContain('PRJ-SYN-A')
