@@ -2,6 +2,7 @@ import { chromium } from '@playwright/test'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { pathToFileURL } from 'node:url'
 import { selectAttendanceAdminWorkspaceSection } from './ops/attendance-admin-navigation.mjs'
 import { AcceptanceTenantError, verifyAcceptanceTokenTenant } from './ops/attendance-acceptance-preflight.mjs'
 import { randomUUID } from 'node:crypto'
@@ -231,6 +232,19 @@ async function ensureAttendanceLoaded(page) {
       return
     }
     throw error
+  }
+}
+
+export async function ensureAttendanceHistoryFiltersOpen(page) {
+  const details = page.locator('details[data-attendance-history-filters]')
+  await details.waitFor({ state: 'visible', timeout: timeoutMs })
+  if (await details.evaluate((element) => element.open)) return
+
+  const summary = details.locator('summary')
+  await summary.waitFor({ state: 'visible', timeout: timeoutMs })
+  await summary.click()
+  if (!await details.evaluate((element) => element.open)) {
+    throw new Error('ATTENDANCE_HISTORY_FILTERS_NOT_OPEN')
   }
 }
 
@@ -722,6 +736,7 @@ async function run() {
   logInfo('Returning to Overview')
   await buttonByNames(page, uiText.overview).click()
   await ensureAttendanceLoaded(page)
+  await ensureAttendanceHistoryFiltersOpen(page)
   await page.locator('#attendance-from-date').fill(workDate)
   await page.locator('#attendance-to-date').fill(workDate)
   if (userId) {
@@ -737,7 +752,9 @@ async function run() {
   logInfo('Production flow verification complete')
 }
 
-run().catch((error) => {
-  console.error('[attendance-production-flow] Failed:', error)
-  process.exit(1)
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  run().catch((error) => {
+    console.error('[attendance-production-flow] Failed:', error)
+    process.exit(1)
+  })
+}
