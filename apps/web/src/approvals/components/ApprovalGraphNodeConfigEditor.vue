@@ -1493,6 +1493,7 @@ import {
   isCurrentOptionValue,
   isOptionKind,
   parseConditionListText,
+  parseConditionNumber,
   sameConditionList,
   type ConditionValueField,
   type ConditionValueKind,
@@ -1737,7 +1738,11 @@ function setRuleOptionList(rule: ConditionRuleEdit, values: string[] | null | un
 }
 function ruleNumberValue(rule: ConditionRuleEdit): number | undefined {
   // Never hand a non-number to el-input-number: it coerces on mount and would rewrite an untouched rule.
-  return typeof rule.value === 'number' && Number.isFinite(rule.value) ? rule.value : undefined
+  if (typeof rule.value === 'number' && Number.isFinite(rule.value)) return rule.value
+  // gt/gte/lt/lte normalise a numeric string in the executor (it works today): show its number
+  // without rewriting the stored value. eq/neq compare strictly, so a string shows empty + the mark.
+  const comparesNormalised = rule.operator === 'gt' || rule.operator === 'gte' || rule.operator === 'lt' || rule.operator === 'lte'
+  return comparesNormalised ? parseConditionNumber(rule.value) ?? undefined : undefined
 }
 function setRuleNumberValue(rule: ConditionRuleEdit, value: number | null | undefined): void {
   rule.value = typeof value === 'number' && Number.isFinite(value) ? value : undefined

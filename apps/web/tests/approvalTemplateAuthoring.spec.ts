@@ -6191,6 +6191,9 @@ describe('TemplateAuthoringView', () => {
       expect(issue(2)).toBe(conditionValueIssueText(['not-number'], false))
       expect(issue(3)).toBe(conditionValueIssueText(['in-not-list'], false))
       expect(inRule(scope, 4, 'approval-condition-rule-issue')).toBeNull() // gt normalises '5000': in effect today
+      // …and its number box shows that number (display only), while eq's ineffective string shows empty.
+      expect((inRule(scope, 4, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('5000')
+      expect((inRule(scope, 2, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('')
       const tagOperator = inRule(scope, 1, 'approval-condition-rule-operator')!
       const eqChoice = Array.from(tagOperator.options).find((option) => option.value === 'eq')
       expect(eqChoice?.disabled).toBe(true)
