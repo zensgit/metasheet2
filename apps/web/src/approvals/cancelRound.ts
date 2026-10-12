@@ -687,8 +687,8 @@ export function canDecideCancelRoundWith(
 // generic `/api/approvals/:id/actions` route.
 
 export const CANCEL_ROUND_LEAVE_UNRESOLVED_COPY = {
-  zh: '无法定位这条撤销申请对应的请假,请到考勤页面办理或联系管理员',
-  en: 'The leave behind this cancellation could not be located — please act on it from Attendance or contact an administrator',
+  zh: '无法定位这条撤销申请对应的原申请,请到考勤页面办理或联系管理员',
+  en: 'The original request behind this cancellation could not be located — please act on it from Attendance or contact an administrator',
 } as const
 
 /**
