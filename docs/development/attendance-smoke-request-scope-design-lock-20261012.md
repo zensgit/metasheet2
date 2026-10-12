@@ -1,8 +1,8 @@
 # Attendance smoke request and record organization scope
 
-Baseline: 1dd42d08761039c9937dae06c712fadd10092ab6. Scope: existing acceptance URL helper and existing behavior spec only. Public publication, merge and deployment remain separate decisions.
+Finding baseline: 1dd42d08761039c9937dae06c712fadd10092ab6. Implementation parent: 8fb388f0a71b42cffc9f16b6494994e4327ad10a (the intervening change is a decision-register note). Scope: existing acceptance URL helper and existing behavior spec only. Public publication, merge and deployment remain separate decisions.
 
-In the owned fully synthetic runtime, non-default organization import, group membership and approval writes succeed, but the approved request list defaults to another organization. The smoke's import URL helper currently binds only import endpoints; request creation carries orgId in JSON while approval/list/record verification may omit the selector. Existing mock responses ignored this distinction.
+In the owned fully synthetic runtime, non-default organization import, group membership and approval writes succeed, but the approved request list defaults to another organization. The smoke's import URL helper currently binds only import endpoints; request creation carries orgId in JSON while approval/list/record verification may omit the selector. Existing mock responses ignored this distinction. Real record reads already derive authenticated identity; explicit record selectors make the consumer's intended scope consistent rather than changing that backend policy.
 
 Bind the same explicit organization on import endpoints, request collection/actions and record collection/readback, preserving other query fields. Reject contradictory or duplicate contradictory org selectors; leave auth, global directory/audit, rules/me, leave-balances/me and lookalike paths untouched. Preserve the existing helper export and fixed mismatch code. No backend tenancy rewrite, policy weakening, new flag, environment mutation, or global settings changes.
 
