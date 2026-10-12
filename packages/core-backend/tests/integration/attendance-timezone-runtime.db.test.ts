@@ -294,7 +294,7 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       const row = rules[0]
       expect(row.id).toBe(ruleId)
       expect((await client.query('SELECT user_id,org_id,is_active FROM user_orgs WHERE user_id=$1 AND org_id=$2', [actor.userId, orgId])).rows)
-        .toEqual([{user_id:actor.userId,org_id,is_active:true}])
+        .toEqual([{user_id:actor.userId,org_id:orgId,is_active:true}])
       const observed: Array<{text: string; values: unknown[]}> = []
       const trx = {query:async (text: string,values?: unknown[]) => {
         observed.push({text,values:values ?? []})

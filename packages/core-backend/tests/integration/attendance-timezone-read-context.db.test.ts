@@ -610,20 +610,24 @@ describe('readonly current, target-date calendar and stored export actual HTTP/P
     expect(await live.counts(fixture.subject.userId)).toEqual({ events: 0, records: 0, requests: 0, operations: 0 })
   }, 60000)
 
-  it('rejects a normalized crossday pending edit and preserves the original request and approval audit', async () => {
+  it('rejects a normalized crossday legacy pending edit and preserves the original request and approval audit', async () => {
     const fixture = await leaveRangeFixture(203)
     const created = await live.request('/api/attendance/requests', fixture.subject.token, fixture.body)
     expect(created.status, created.body.error?.code).toBe(201)
     const pending = await get('/api/attendance/requests/' + created.body.data.request.id + '?orgId=' + live.orgId, fixture.subject.token)
     expect(pending.status, pending.body.error?.code).toBe(200)
     expect(pending.body.data.request).toMatchObject({ id: created.body.data.request.id, status: 'pending' })
-    const cursor = pending.body.data.requestSnapshot
-    expect(cursor).toEqual({ version: expect.any(Number), fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/) })
-    expect(cursor.version).toBeGreaterThan(0)
+    // Legacy creation does not append a W4 request snapshot; use its supported
+    // null-operation-id edit route while keeping the trusted timezone freeze.
+    expect(pending.body.data.requestSnapshot).toBeUndefined()
+    expect(pending.body.data.request.metadata.timezoneContextV1).toEqual(created.body.data.request.metadata.timezoneContextV1)
+    expect(pending.body.data.request.metadata.timezoneContextV1).toMatchObject({
+      orgId: live.orgId, userId: fixture.subject.userId, workDate: fixture.workDate,
+      timezone: fixture.target.timezone, contextFingerprint: fixture.target.contextFingerprint, window: fixture.target.window,
+    })
     const before = await leaveRangeDurableState()
     const rejected = await live.request('/api/attendance/requests/' + created.body.data.request.id, fixture.subject.token, {
-      orgId: live.orgId, operationId: randomUUID(), clockOut: instant(204, 18),
-      expectedSnapshotVersion: cursor.version, expectedSnapshotFingerprint: cursor.fingerprint,
+      orgId: live.orgId, clockOut: instant(204, 18),
       expectedTimezoneContextFingerprint: fixture.target.contextFingerprint,
     }, 'PUT')
     expect(rejected.status, rejected.body.error?.code).toBe(409)

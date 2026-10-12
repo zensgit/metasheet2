@@ -663,7 +663,15 @@ describeIfDatabase('Lock-11 §10 W-4 attendance writer org stamping — real-DB 
       await pool.query(`INSERT INTO attendance_calculation_rollout_state
         (org_id,state,engine_version,reason_code,actor_id,version,prior_state)
         VALUES($1,'legacy','writer-timezone-test','TEST_FIXTURE',$2,1,NULL)`, [orgB, subjectId])
-      await pool.query("UPDATE attendance_calculation_rollout_state SET state='suspended',prior_state='legacy',version=2 WHERE org_id=$1", [orgB])
+      for (const [state, priorState, version] of [
+        ['shadow', 'legacy', 2], ['eligible', 'shadow', 3],
+        ['authoritative', 'eligible', 4], ['suspended', 'authoritative', 5],
+      ] as const) {
+        await pool.query('UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',
+          [orgB, state, priorState, version])
+      }
+      expect((await pool.query('SELECT state,prior_state,version FROM attendance_calculation_rollout_state WHERE org_id=$1', [orgB])).rows)
+        .toEqual([{state:'suspended',prior_state:'authoritative',version:5}])
       const before = await businessSnapshot([orgB, 'default'])
       const res = await createGeneric(token, {})
       expect(res.status, res.raw).toBe(503)

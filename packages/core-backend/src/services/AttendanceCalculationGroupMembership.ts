@@ -432,42 +432,6 @@ export async function transitionAttendanceCalculationGroupMembership(
         }
       }
 
-      const timezoneSchema = await runQuery(
-        "SELECT to_regclass('attendance_timezone_context_companions') IS NOT NULL AS present",
-      )
-      if (timezoneSchema.rows.length !== 1 || timezoneSchema.rows[0].present !== true) {
-        throw new AttendanceCalculationGroupMembershipError(
-          'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE', 503, 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
-        )
-      }
-      let verifyTimezone = async (): Promise<void> => {}
-      if (timezoneSchema.rows[0].present === true) {
-        if (!timezoneSourceGuard) {
-          throw new AttendanceCalculationGroupMembershipError(
-            'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',
-          )
-        }
-        try {
-          const verify = await timezoneSourceGuard(runQuery,{orgId:input.orgId,userIds:[input.userId]})
-          verifyTimezone = async () => {
-            try { await verify() }
-            catch (error) {
-              const guarded = error as {code?:string;status?:number}
-              throw new AttendanceCalculationGroupMembershipError(
-                guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
-                guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
-              )
-            }
-          }
-        } catch (error) {
-          const guarded = error as {code?:string;status?:number}
-          throw new AttendanceCalculationGroupMembershipError(
-            guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
-            guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
-          )
-        }
-      }
-
       // g1 (W7-1b): the TIMELINE key — the one W7-1a's
       // `buildAttendanceW7MembershipTimelineLockKeyV1` mirrors. This is the pair
       // that must agree, or a W7 group resolution and a W1 timeline write can run
@@ -527,6 +491,43 @@ export async function transitionAttendanceCalculationGroupMembership(
           422,
           'Target user must be active in the requested organization',
         )
+      }
+
+      // Preserve the existing target/lifecycle refusal and timeline -> lifecycle lock order.
+      const timezoneSchema = await runQuery(
+        "SELECT to_regclass('attendance_timezone_context_companions') IS NOT NULL AS present",
+      )
+      if (timezoneSchema.rows.length !== 1 || timezoneSchema.rows[0].present !== true) {
+        throw new AttendanceCalculationGroupMembershipError(
+          'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE', 503, 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+        )
+      }
+      let verifyTimezone = async (): Promise<void> => {}
+      if (timezoneSchema.rows[0].present === true) {
+        if (!timezoneSourceGuard) {
+          throw new AttendanceCalculationGroupMembershipError(
+            'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',
+          )
+        }
+        try {
+          const verify = await timezoneSourceGuard(runQuery,{orgId:input.orgId,userIds:[input.userId]})
+          verifyTimezone = async () => {
+            try { await verify() }
+            catch (error) {
+              const guarded = error as {code?:string;status?:number}
+              throw new AttendanceCalculationGroupMembershipError(
+                guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+                guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+              )
+            }
+          }
+        } catch (error) {
+          const guarded = error as {code?:string;status?:number}
+          throw new AttendanceCalculationGroupMembershipError(
+            guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+            guarded.status ?? 503,guarded.code ?? 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE',
+          )
+        }
       }
 
       const current = timeline.find((row) => {
