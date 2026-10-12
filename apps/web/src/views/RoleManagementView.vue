@@ -239,7 +239,7 @@ async function saveRole(): Promise<void> {
   const wasEditing = isEditing.value
   try {
     const payload: Record<string, unknown> = {
-      id: draftRoleId.value.trim(),
+      id: wasEditing ? selectedRoleId.value : draftRoleId.value.trim(),
       name: draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
@@ -258,7 +258,10 @@ async function saveRole(): Promise<void> {
     }
     const submittedPermissions = [...selectedPermissions.value]
 
-    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(draftRoleId.value.trim())}` : '/api/roles', {
+    // An EXISTING role is addressed by the id it was LOADED with, never a trimmed copy: a
+    // stored id that differs only by invisible padding would otherwise address its
+    // look-alike — e.g. the real `<ns>_admin` instead of the padded duplicate.
+    const response = await apiFetch(isEditing.value ? `/api/roles/${encodeURIComponent(selectedRoleId.value)}` : '/api/roles', {
       method: isEditing.value ? 'PUT' : 'POST',
       body: JSON.stringify(payload),
     })
@@ -311,7 +314,10 @@ async function deleteRole(): Promise<void> {
 
   busy.value = true
   try {
-    const response = await apiFetch(`/api/roles/${encodeURIComponent(draftRoleId.value.trim())}`, {
+    // The id as LOADED (see saveRole): a trimmed id would delete the real `<ns>_admin` — and
+    // with it every membership and delegated audience — when the admin meant to remove a
+    // padded look-alike of it.
+    const response = await apiFetch(`/api/roles/${encodeURIComponent(selectedRoleId.value)}`, {
       method: 'DELETE',
     })
     const body = await readJson(response)

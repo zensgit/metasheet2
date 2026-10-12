@@ -34,8 +34,6 @@
  *     tag field invented here would parse but never reach the server:
  *       eventType:    'check_in' | 'check_out'   (required)
  *       operationId:  string (uuid, optional)     — IDEMPOTENCY KEY, not a tag (see below)
- *       occurredAt:   string (optional; ISO datetime)
- *       occurred_at:  string (optional; snake_case alias, same semantics)
  *       timezone:     string (optional)
  *       source:       string (optional)           — see TAGGING DECISION below
  *       location:     record<string, unknown> (optional)
