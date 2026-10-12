@@ -30,6 +30,9 @@ import {
   type FormAuthoringSession,
 } from '../src/approvals/approvalFormAuthoringAdapter'
 import {
+  buildFormSchema,
+  buildVisibilityRule,
+  conditionValueFieldFromDraft,
   createEmptyFieldDraft,
   createEmptyStepDraft,
   createEmptyTemplateDraft,
@@ -38,6 +41,8 @@ import {
   type TemplateAuthoringDraft,
 } from '../src/approvals/templateAuthoring'
 import type { DetailColumnDraft } from '../src/approvals/detailField'
+import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
+import { CONDITION_VALUE_COPY_EN, conditionValueIssueMessage } from '../src/approvals/conditionValueTyping'
 import {
   RECORD_LINK_TARGET_UNAVAILABLE,
   validateRecordLinkPinAgainstLoadedCatalog,
@@ -212,7 +217,12 @@ async function mountInspector(
           candidate.type !== 'record-link' &&
           candidate.type !== 'detail',
       )
-      .map((candidate) => ({ id: candidate.id.trim(), label: candidate.label }))
+      .map((candidate) => ({
+        id: candidate.id.trim(),
+        label: candidate.label,
+        // R-43 (B): same derivation as the production builder (ApprovalFormBuilder.vue).
+        ...conditionValueFieldFromDraft(candidate),
+      }))
   })
 
   const app = createApp({
@@ -1475,5 +1485,198 @@ describe('ApprovalFormFieldInspector — record-link target pickers (delta §3.4
     })
     expect(readOnly.root.querySelector(`[data-testid="${BASE_SELECT}"]`)).toBeNull()
     expect(readOnly.root.querySelector('select')).toBeNull()
+  })
+})
+
+// R-43 (B) — condition values by the dependency field's type (Designer 2.0 inspector). The test
+// locale is en (jsdom navigator), so new copy renders from the EN table.
+describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () => {
+  const OPT_A = 'opt_aaaaaaaaaaaaaaaa'
+  const OPT_B = 'opt_bbbbbbbbbbbbbbbb'
+  const selectField = (index: number, extra: Partial<FieldAuthoringDraft> = {}) =>
+    field(index, { type: 'select', optionsText: `出差:${OPT_A}\n其他:${OPT_B}`, ...extra })
+  const visibilityOf = (inspector: InspectorHarness, index: number) =>
+    inspector.session().draft.fields[index].visibility
+  const issueText = (inspector: InspectorHarness) =>
+    inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-issue"]')?.textContent ?? ''
+
+  it('new options → pick the NAME → the saved rule holds the opaque option value and the evaluator matches it', async () => {
+    const values = [OPT_A, OPT_B]
+    const inspector = await mountInspector(
+      [field(1, { type: 'select', optionsText: '' }), field(2)],
+      { optionValueFactory: () => values.shift()! },
+    )
+    inspector.q('[data-testid="approval-form-field-inspector-option-add"]').click()
+    await nextTick()
+    inspector.q('[data-testid="approval-form-field-inspector-option-add"]').click()
+    await nextTick()
+    await inspector.typeText('approval-form-field-inspector-option-label-0', '出差')
+    await inspector.blur('approval-form-field-inspector-option-label-0')
+    await inspector.selectField('local_2')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    const select = inspector.select('approval-form-field-inspector-visibility-option-value')
+    const optionTexts = Array.from(select.options).map((option) => option.textContent?.trim())
+    expect(optionTexts).toContain('出差')
+    expect(inspector.root.textContent).not.toContain('opt_')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-value"]')).toBeNull()
+
+    const historyBefore = inspector.session().history.undoStack.length
+    await inspector.changeSelect('approval-form-field-inspector-visibility-option-value', OPT_A)
+    expect(inspector.session().history.undoStack).toHaveLength(historyBefore + 1)
+    expect(visibilityOf(inspector, 1)).toStrictEqual({ dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A })
+    const schema = buildFormSchema(inspector.session().draft)
+    expect(schema.fields[1].visibilityRule).toEqual({ fieldId: 'field_1', operator: 'eq', value: OPT_A })
+    expect(getVisibleFormFields(schema, { field_1: OPT_A }).map((f) => f.id)).toContain('field_2')
+    expect(getVisibleFormFields(schema, { field_1: '出差' }).map((f) => f.id)).not.toContain('field_2')
+  })
+
+  it('in over options: ticking two options saves a list that round-trips through reselection', async () => {
+    const inspector = await mountInspector([selectField(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    expect(inspector.root.querySelector('[data-testid="approval-form-field-inspector-visibility-option-values"]')).not.toBeNull()
+    await inspector.toggle('approval-form-field-inspector-visibility-option-0')
+    await inspector.toggle('approval-form-field-inspector-visibility-option-1')
+    const rule = buildVisibilityRule(visibilityOf(inspector, 1))
+    expect(rule).toEqual({ fieldId: 'field_1', operator: 'in', values: [OPT_A, OPT_B] })
+    const schema = buildFormSchema(inspector.session().draft)
+    expect(getVisibleFormFields(schema, { field_1: OPT_B }).map((f) => f.id)).toContain('field_2')
+    expect(getVisibleFormFields(schema, { field_1: 'opt_c' }).map((f) => f.id)).not.toContain('field_2')
+
+    await inspector.selectField('local_1')
+    await inspector.selectField('local_2')
+    expect(inspector.input('approval-form-field-inspector-visibility-option-0').checked).toBe(true)
+    expect(inspector.input('approval-form-field-inspector-visibility-option-1').checked).toBe(true)
+  })
+
+  it('in over text: a textarea keeps one value per line (no Enter commit, no collapse) and untouched values commit nothing', async () => {
+    const inspector = await mountInspector([field(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    const box = inspector.q('[data-testid="approval-form-field-inspector-visibility-values"]')
+    expect(box.tagName).toBe('TEXTAREA')
+    const before = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-values', 'a\nb\nc')
+    await inspector.pressEnter('approval-form-field-inspector-visibility-values')
+    expect(inspector.commands).toHaveLength(before)
+    await inspector.blur('approval-form-field-inspector-visibility-values')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toEqual({ fieldId: 'field_1', operator: 'in', values: ['a', 'b', 'c'] })
+
+    const seeded = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: 'a\nb' } })],
+      { selected: 'local_2' },
+    )
+    expect((seeded.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement).value).toBe('a\nb')
+    await seeded.blur('approval-form-field-inspector-visibility-values')
+    expect(seeded.commands).toHaveLength(0)
+  })
+
+  it('number dependency: eq saves a NUMBER, rejects non-numbers, and a stored numeric string is marked and fixed by re-entering it', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '1500')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    const rule = buildVisibilityRule(visibilityOf(inspector, 1))
+    expect(rule).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 1500 })
+    expect(getVisibleFormFields(buildFormSchema(inspector.session().draft), { field_1: 1500 }).map((f) => f.id)).toContain('field_2')
+
+    const commandsBefore = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'abc')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
+    expect(inspector.commands).toHaveLength(commandsBefore)
+
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '1500')
+    await inspector.blur('approval-form-field-inspector-visibility-number-value')
+    await inspector.changeSelect('approval-form-field-inspector-visibility-operator', 'in')
+    await inspector.typeText('approval-form-field-inspector-visibility-values', '1\n2')
+    await inspector.blur('approval-form-field-inspector-visibility-values')
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'in', values: [1, 2] })
+
+    const stale = await mountInspector(
+      [field(1, { type: 'number' }), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '5000' } })],
+      { selected: 'local_2' },
+    )
+    expect(stale.input('approval-form-field-inspector-visibility-number-value').value).toBe('')
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('not-number', false))
+    await stale.typeText('approval-form-field-inspector-visibility-number-value', '5000')
+    await stale.blur('approval-form-field-inspector-visibility-number-value')
+    expect(stale.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 5000 })
+    expect(issueText(stale)).toBe('')
+  })
+
+  it('multi-select dependency offers only effective operators; a stored eq is shown disabled and marked', async () => {
+    const multi = (index: number, extra: Partial<FieldAuthoringDraft> = {}) => selectField(index, { type: 'multi-select', ...extra })
+    const inspector = await mountInspector([multi(1), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    expect(visibilityOf(inspector, 1).operator).toBe('in')
+    const enabled = Array.from(inspector.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(enabled).toEqual(['in', 'isEmpty', 'notEmpty'])
+
+    const legacy = await mountInspector(
+      [multi(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A } })],
+      { selected: 'local_2' },
+    )
+    const operator = legacy.select('approval-form-field-inspector-visibility-operator')
+    expect(operator.value).toBe('eq')
+    expect(operator.selectedOptions[0]?.disabled).toBe(true)
+    expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-not-effective', false))
+  })
+
+  it('stale / renamed / deleted options: marked, re-picking fixes it; a rename shows the new name with the value unchanged', async () => {
+    const stale = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'opt_gone' } })],
+      { selected: 'local_2' },
+    )
+    const select = stale.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('value-not-option', false))
+    await stale.changeSelect('approval-form-field-inspector-visibility-option-value', OPT_B)
+    expect(issueText(stale)).toBe('')
+
+    const inspector = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: OPT_A } })],
+      { selected: 'local_1' },
+    )
+    await inspector.typeText('approval-form-field-inspector-option-label-0', '差旅')
+    await inspector.blur('approval-form-field-inspector-option-label-0')
+    await inspector.selectField('local_2')
+    const renamed = inspector.select('approval-form-field-inspector-visibility-option-value')
+    expect(renamed.selectedOptions[0]?.textContent?.trim()).toBe('差旅')
+    expect(visibilityOf(inspector, 1).valueText).toBe(OPT_A)
+    expect(issueText(inspector)).toBe('')
+    await inspector.selectField('local_1')
+    inspector.q('[data-testid="approval-form-field-inspector-option-remove-0"]').click()
+    await nextTick()
+    await inspector.selectField('local_2')
+    expect(issueText(inspector)).toContain(conditionValueIssueMessage('value-not-option', false))
+
+    const list = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: `${OPT_A}\nopt_gone` } })],
+      { selected: 'local_2' },
+    )
+    expect(list.q('[data-testid="approval-form-field-inspector-visibility-stale-count"]').textContent).toContain('1')
+    await list.toggle('approval-form-field-inspector-visibility-option-1')
+    expect(buildVisibilityRule(visibilityOf(list, 1))).toEqual({ fieldId: 'field_1', operator: 'in', values: [OPT_A, OPT_B] })
+    expect(list.root.querySelector('[data-testid="approval-form-field-inspector-visibility-stale-count"]')).toBeNull()
+  })
+
+  it('settlePendingEdits commits a valid number buffer as ONE typed command, and blocks an invalid one', async () => {
+    const inspector = await mountInspector([field(1, { type: 'number' }), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    const before = inspector.commands.length
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', '42')
+    expect(inspector.vm.settlePendingEdits()).toBe(true)
+    expect(inspector.commands).toHaveLength(before + 1)
+    expect(buildVisibilityRule(visibilityOf(inspector, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: 42 })
+
+    await inspector.typeText('approval-form-field-inspector-visibility-number-value', 'x1')
+    expect(inspector.vm.settlePendingEdits()).toBe(false)
+    await nextTick()
+    expect(inspector.status()).toContain(CONDITION_VALUE_COPY_EN.invalidNumber)
   })
 })
