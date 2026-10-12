@@ -9,14 +9,19 @@
  *
  * HOW IT RUNS THE MIGRATION. The real `up()` / `down()` execute against a Kysely instance whose driver is
  * a small CLOSED-WORLD fake of the RBAC tables: it recognises exactly the statement shapes this migration
- * is allowed to emit (the `information_schema` existence probe, `INSERT INTO permissions (code, name,
- * description) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING`, and the two statements of `down()`:
- * the single guarded `DELETE FROM permissions p WHERE p.code IN (...) AND NOT EXISTS (role_permissions
- * ...) AND NOT EXISTS (user_permissions ...)` and the `SELECT code FROM permissions WHERE code IN (...)`
- * read-back of the kept codes) and THROWS on anything else. So a later edit that adds a
- * `role_permissions` insert, an `ON CONFLICT DO UPDATE`, ANY `role_permissions` / `user_permissions`
- * write (including the old cascading `down()` deletes) or any other statement fails here instead of
- * passing a text-only assertion. Either NOT EXISTS clause may be absent (the migration omits it when its
+ * is allowed to emit (the `information_schema` existence probe, matched as the WHOLE statement
+ * `checkTableExists` sends, not as any statement that mentions `information_schema.tables`;
+ * `INSERT INTO permissions (code, name, description) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING`;
+ * and the three statements of `down()`: the `SELECT code FROM permissions WHERE code IN (...) FOR UPDATE`
+ * row lock, the single guarded `DELETE FROM permissions p WHERE p.code IN (...) AND NOT EXISTS
+ * (role_permissions ...) AND NOT EXISTS (user_permissions ...)` and the `SELECT code FROM permissions
+ * WHERE code IN (...)` read-back of the kept codes) and THROWS on anything else. Independently of that
+ * list, any statement that writes `role_permissions` / `user_permissions` ANYWHERE in its text (a
+ * `DELETE FROM` / `UPDATE` / `TRUNCATE` / `INSERT INTO` on either table, schema-qualified or not, also
+ * inside a CTE) is refused with GRANT_TABLE_WRITE. So a later edit that adds a `role_permissions`
+ * insert, an `ON CONFLICT DO UPDATE`, ANY grant-table write (including the old cascading `down()`
+ * deletes) or any other statement fails here instead of passing a text-only assertion. Either NOT
+ * EXISTS clause may be absent (the migration omits it when its
  * table does not exist); the fake applies exactly the clauses it sees, and a `permissions` row it does
  * delete takes its grant rows with it, as the real `ON DELETE CASCADE` foreign keys would, so dropping a
  * guard shows up as lost grants, not just as different SQL text.
@@ -35,6 +40,7 @@ import {
   type DatabaseConnection,
   type Driver,
   type QueryResult,
+  sql,
 } from 'kysely'
 import * as migration from '../../src/db/migrations/zzzz20261010120000_add_approval_write_act_template_manage_permissions'
 import * as approvalsReadMigration from '../../src/db/migrations/zzzz20260920130000_add_approval_product_permissions'
@@ -115,6 +121,14 @@ const DELETE_UNBOUND = new RegExp(
 )
 /** down(): read-back of the codes still in the catalogue (the kept, still-bound ones). */
 const SELECT_CATALOGUE = /^SELECT code FROM permissions WHERE code IN \((\$\d+(?:, \$\d+)*)\)$/
+/** down(): row lock on the three catalogue rows, taken BEFORE the DELETE (blocks concurrent grant INSERTs). */
+const LOCK_CATALOGUE = /^SELECT code FROM permissions WHERE code IN \((\$\d+(?:, \$\d+)*)\) FOR UPDATE$/
+/** `checkTableExists` (`_patterns.ts`), the whole normalised statement — nothing else counts as a probe. */
+const TABLE_PROBE =
+  /^SELECT count\(\*\)::int as count FROM information_schema\.tables WHERE table_name = \$1 AND table_schema = current_schema\(\)$/
+/** Any write to a grant table, anywhere in the statement (CTEs, schema-qualified names included). */
+const GRANT_TABLE_WRITE =
+  /\b(?:DELETE\s+FROM|UPDATE|TRUNCATE(?:\s+TABLE)?|INSERT\s+INTO)\s+(?:ONLY\s+)?(?:public\.)?"?(?:role_permissions|user_permissions)\b/i
 
 const codesOf = (placeholders: string, parameters: readonly unknown[]): string[] =>
   placeholders.split(', ').map((placeholder) => String(parameters[Number(placeholder.slice(1)) - 1]))
@@ -128,9 +142,20 @@ function createFakeRbacDb(state: FakeState): Kysely<unknown> {
       const text = normalise(compiled.sql)
       state.statements.push(text)
 
-      if (/\binformation_schema\.tables\b/i.test(text)) {
+      if (GRANT_TABLE_WRITE.test(text)) throw new Error(`GRANT_TABLE_WRITE: ${text}`)
+
+      if (TABLE_PROBE.test(text)) {
         const table = String(compiled.parameters[0])
         return { rows: [{ count: state.tables.has(table) ? 1 : 0 }] as unknown as R[] }
+      }
+
+      const lock = text.match(LOCK_CATALOGUE)
+      if (lock) {
+        requireTable('permissions')
+        const rows = codesOf(lock[1], compiled.parameters)
+          .filter((code) => state.permissions.has(code))
+          .map((code) => ({ code }))
+        return { rows: rows as unknown as R[] }
       }
 
       if (INSERT_PERMISSION.test(text)) {
@@ -200,8 +225,8 @@ const snapshot = (state: FakeState) => ({
   userPermissions: [...state.userPermissions],
 })
 
-/** Statements that are not the `information_schema` existence probe. */
-const writesOf = (state: FakeState): string[] => state.statements.filter((text) => !/information_schema/i.test(text))
+/** Statements that are not the exact `checkTableExists` existence probe. */
+const writesOf = (state: FakeState): string[] => state.statements.filter((text) => !TABLE_PROBE.test(text))
 
 describe('approval write/act/manage permission catalogue migration', () => {
   afterEach(() => {
@@ -326,15 +351,14 @@ describe('approval write/act/manage permission catalogue migration', () => {
 
     expect(state.rolePermissions).toEqual(grantsBefore.role)
     expect(state.userPermissions).toEqual(grantsBefore.user)
-    for (const text of state.statements) {
-      expect(text).not.toMatch(/^(DELETE FROM|INSERT INTO|UPDATE|TRUNCATE) (role_permissions|user_permissions)\b/i)
-    }
-    // Exactly one guarded catalogue DELETE (both guards present: both tables exist) and one read-back.
-    expect(writesOf(state)).toHaveLength(2)
-    expect(writesOf(state)[0]).toMatch(DELETE_UNBOUND)
-    expect(writesOf(state)[0]).toContain(ROLE_UNBOUND)
-    expect(writesOf(state)[0]).toContain(USER_UNBOUND)
-    expect(writesOf(state)[1]).toMatch(SELECT_CATALOGUE)
+    for (const text of state.statements) expect(text).not.toMatch(GRANT_TABLE_WRITE)
+    // Exactly: the row lock, one guarded catalogue DELETE (both guards: both tables exist), one read-back.
+    expect(writesOf(state)).toHaveLength(3)
+    expect(writesOf(state)[0]).toMatch(LOCK_CATALOGUE)
+    expect(writesOf(state)[1]).toMatch(DELETE_UNBOUND)
+    expect(writesOf(state)[1]).toContain(ROLE_UNBOUND)
+    expect(writesOf(state)[1]).toContain(USER_UNBOUND)
+    expect(writesOf(state)[2]).toMatch(SELECT_CATALOGUE)
     // Every code is bound here, so the catalogue keeps all three.
     for (const code of NEW_CODES) expect(state.permissions.has(code)).toBe(true)
   })
@@ -421,6 +445,57 @@ describe('approval write/act/manage permission catalogue migration', () => {
     expect(state.permissions.has('approvals:act')).toBe(true)
     expect(state.userPermissions).toEqual([{ userId: 'user-c', code: 'approvals:act' }])
     expect(state.permissions.has('approvals:write')).toBe(false)
+  })
+
+  it('down() locks the three catalogue rows FOR UPDATE before the DELETE (so a grant cannot commit between the NOT EXISTS check and the delete)', async () => {
+    const state = deployedState()
+    const db = createFakeRbacDb(state)
+    await migration.up(db)
+    state.statements.length = 0
+    silenceWarn()
+
+    await migration.down(db)
+
+    const lockIndex = state.statements.findIndex((text) => LOCK_CATALOGUE.test(text))
+    const deleteIndex = state.statements.findIndex((text) => DELETE_UNBOUND.test(text))
+    expect(lockIndex).toBeGreaterThanOrEqual(0)
+    expect(deleteIndex).toBeGreaterThan(lockIndex)
+    // Exactly one lock, on exactly the three codes.
+    expect(state.statements.filter((text) => LOCK_CATALOGUE.test(text))).toHaveLength(1)
+    const lockText = state.statements[lockIndex]
+    expect(lockText.match(/\$\d+/g)).toHaveLength(NEW_CODES.length)
+  })
+
+  it('down() with role_permissions present and user_permissions missing emits only the role guard', async () => {
+    const state = freshState({ tables: new Set(['permissions', 'role_permissions']) })
+    const db = createFakeRbacDb(state)
+    await migration.up(db)
+    state.rolePermissions.push({ roleId: 'role-live', code: 'approvals:write' })
+    silenceWarn()
+
+    await migration.down(db)
+
+    const deletes = writesOf(state).filter((text) => text.startsWith('DELETE'))
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]).toContain(ROLE_UNBOUND)
+    expect(deletes[0]).not.toContain('user_permissions')
+    expect(state.permissions.has('approvals:write')).toBe(true)
+    expect(state.rolePermissions).toEqual([{ roleId: 'role-live', code: 'approvals:write' }])
+    expect(state.permissions.has('approvals:act')).toBe(false)
+    expect(state.permissions.has('approval-templates:manage')).toBe(false)
+  })
+
+  it('the fake refuses a grant-table write hidden in a CTE that also mentions information_schema.tables (closed world holds)', async () => {
+    const state = deployedState()
+    const db = createFakeRbacDb(state)
+    const cte = sql`
+      WITH probe AS (SELECT count(*)::int AS count FROM information_schema.tables WHERE table_name = ${'permissions'}),
+           gone AS (DELETE FROM public.role_permissions WHERE permission_code = ${'approvals:read'} RETURNING 1)
+      SELECT count FROM probe
+    `
+    await expect(cte.execute(db)).rejects.toThrow(/GRANT_TABLE_WRITE/)
+    expect(writesOf(state)).toHaveLength(1)
+    expect(state.rolePermissions).toEqual(deployedState().rolePermissions)
   })
 
   it('down() then up(): the bound code and its grant survive the round trip, the removed codes come back with pinned names', async () => {

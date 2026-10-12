@@ -71,11 +71,21 @@
  * `DELETE FROM permissions p WHERE p.code IN (<the three codes>) AND NOT EXISTS (a role_permissions
  * row for p.code) AND NOT EXISTS (a user_permissions row for p.code)`; each NOT EXISTS clause is
  * emitted when its table exists (a missing grant table cannot hold a binding). The NOT EXISTS guards
- * are what keep the `ON DELETE CASCADE` foreign keys both grant tables carry to `permissions(code)`
- * from ever firing: a bound row is not deleted, so there is nothing to cascade. A code that is still
- * bound is left in the catalogue exactly as it is, together with every grant that references it, and
- * `down()` logs one `console.warn` line per kept code (read back with a `SELECT` after the DELETE).
- * Without a `permissions` table `down()` does nothing.
+ * keep the `ON DELETE CASCADE` foreign keys both grant tables carry to `permissions(code)` from
+ * firing on a row that is bound when the DELETE runs. On their own they do NOT cover a grant that a
+ * concurrent transaction commits while the DELETE waits for that row: under READ COMMITTED the
+ * re-check after the wait does not re-run the NOT EXISTS subqueries, so the row would be deleted and
+ * the fresh grant cascaded away. So `down()` first takes `SELECT code FROM permissions WHERE code IN
+ * (...) FOR UPDATE` on the three rows. A grant INSERT's foreign-key check needs a KEY SHARE lock on the
+ * referenced row, which conflicts with FOR UPDATE, so after the lock is held no new grant for these
+ * codes can commit until `down()`'s transaction ends, and the DELETE (a new statement, so a fresh
+ * snapshot) sees every grant committed before the lock. That guarantee holds because the migrator
+ * runs `down()` in one transaction (Kysely's `Migrator` on PostgreSQL, transactional DDL, and
+ * `src/db/migrate.ts` does not disable it); calling `down()` outside a transaction releases the
+ * lock straight after the SELECT and reopens the window. A code that is still bound is left in the
+ * catalogue exactly as it is, together with every grant that references it, and `down()` logs one
+ * `console.warn` line per kept code (read back with a `SELECT` after the DELETE). Without a
+ * `permissions` table `down()` does nothing.
  *
  * DISCLOSURE: this `down()` is deliberately narrower than "undo `up()`". `up()` is
  * `ON CONFLICT DO NOTHING`, so a catalogue row for any of these codes may predate it (a plugin's
@@ -146,8 +156,16 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   if (!(await checkTableExists(db, 'permissions'))) return
 
   // Never a DELETE on role_permissions / user_permissions — see file header. A code is removed from
-  // the catalogue only when no grant row references it, so the ON DELETE CASCADE foreign keys from
-  // both grant tables never fire and no grant this migration did not write is ever lost.
+  // the catalogue only when no grant row references it. The NOT EXISTS guards alone miss a grant
+  // committed while the DELETE waits on the row; the FOR UPDATE lock below (held until the
+  // migrator's transaction ends) is what blocks such grants, so the ON DELETE CASCADE foreign keys
+  // from both grant tables never fire on a bound row.
+  await sql`
+    SELECT code FROM permissions
+    WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+    FOR UPDATE
+  `.execute(db)
+
   const unboundByRole = (await checkTableExists(db, 'role_permissions'))
     ? sql`AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.permission_code = p.code)`
     : sql``

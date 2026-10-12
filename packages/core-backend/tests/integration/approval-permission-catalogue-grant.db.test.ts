@@ -231,62 +231,87 @@ describeIfDatabase('approval-product permission catalogue registration — grant
   /**
    * Placed right after the zero-grant test ON PURPOSE: the cases below grant approvals:write / act /
    * manage to throwaway users and those rows live until afterAll, so this is the last point in the file
-   * where approvals:act and approval-templates:manage are known to be unbound. Same EXCLUSIVE-DATABASE
-   * requirement as the two tests above (it deletes and re-inserts global catalogue rows); the finally
-   * block re-runs up() so every later case sees all three codes registered again.
+   * where all three codes are known to be unbound. Same EXCLUSIVE-DATABASE requirement as the two tests
+   * above (it deletes and re-inserts global catalogue rows); the finally block re-runs up() so every later
+   * case sees all three codes registered again. It registers NO user (the lane's AUTH_REGISTER_MAX_PER_IP
+   * count is unchanged): the user binding uses a synthetic user id, which `user_permissions` accepts
+   * because its only foreign key is `permission_code -> permissions(code)`. down() runs inside a
+   * transaction, as the migrator runs it, so its FOR UPDATE row lock is held until the DELETE is done.
    */
-  it('ROLLBACK SAFETY: down() keeps a code that a role holds (catalogue row AND binding survive), removes only the two unbound codes, and up() re-registers them', async () => {
+  it('ROLLBACK SAFETY: down() keeps a code a role holds and a code a user holds (catalogue rows AND bindings survive), removes only the unbound code, and up() re-registers it', async () => {
     const roleId = `permcat-down-role-${TS}`
+    const userId = `permcat-down-user-${TS}`
     const migrationPool = new Pool({ connectionString: process.env.DATABASE_URL })
     const migrationDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const catalogueRows = async () =>
+      (
+        await pool().query<{ code: string; name: string | null; description: string | null }>(
+          `SELECT code, name, description FROM permissions WHERE code = ANY($1::text[])`,
+          [['approvals:write', 'approvals:act', 'approval-templates:manage']],
+        )
+      ).rows.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+    let bodyCompleted = false
     try {
       const unbound = await pool().query<{ n: number }>(
         `SELECT (SELECT count(*) FROM role_permissions WHERE permission_code = ANY($1::text[]))::int
               + (SELECT count(*) FROM user_permissions WHERE permission_code = ANY($1::text[]))::int AS n`,
-        [['approvals:act', 'approval-templates:manage']],
+        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
       )
       expect(unbound.rows[0]?.n).toBe(0)
 
-      // The deployed shape that motivated narrowing down(): approvals:write bound to a live role.
+      // The deployed shape that motivated narrowing down(): approvals:write bound to a live role, plus a
+      // direct per-user grant of approvals:act.
       await pool().query(`INSERT INTO roles (id, name) VALUES ($1, 'Permcat Down Probe Role')`, [roleId])
       await pool().query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'approvals:write')`, [roleId])
-      const writeRowBefore = await pool().query(`SELECT code, name, description FROM permissions WHERE code = 'approvals:write'`)
-      expect(writeRowBefore.rows).toHaveLength(1)
+      await pool().query(`INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'approvals:act')`, [userId])
+      const keptBefore = (await catalogueRows()).filter((row) => row.code !== 'approval-templates:manage')
+      expect(keptBefore.map((row) => row.code)).toEqual(['approvals:act', 'approvals:write'])
 
-      await writeActManageMigration.down(migrationDb)
+      await migrationDb.transaction().execute((trx) => writeActManageMigration.down(trx))
 
-      const binding = await pool().query(
-        `SELECT role_id, permission_code FROM role_permissions WHERE role_id = $1`,
-        [roleId],
-      )
-      expect(binding.rows).toEqual([{ role_id: roleId, permission_code: 'approvals:write' }])
-      const writeRowAfter = await pool().query(`SELECT code, name, description FROM permissions WHERE code = 'approvals:write'`)
-      expect(writeRowAfter.rows).toEqual(writeRowBefore.rows)
-      const remaining = await pool().query<{ code: string }>(
-        `SELECT code FROM permissions WHERE code = ANY($1::text[])`,
-        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
-      )
-      expect(remaining.rows.map((row) => row.code)).toEqual(['approvals:write'])
-      expect(warn).toHaveBeenCalledTimes(1)
-      expect(String(warn.mock.calls[0]?.[0])).toContain('approvals:write')
+      const roleBinding = await pool().query(`SELECT role_id, permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
+      expect(roleBinding.rows).toEqual([{ role_id: roleId, permission_code: 'approvals:write' }])
+      const userBinding = await pool().query(`SELECT user_id, permission_code FROM user_permissions WHERE user_id = $1`, [userId])
+      expect(userBinding.rows).toEqual([{ user_id: userId, permission_code: 'approvals:act' }])
+      // Both bound rows survive byte-for-byte; the unbound code is gone.
+      expect(await catalogueRows()).toEqual(keptBefore)
+      expect(warn).toHaveBeenCalledTimes(2)
+      const warned = warn.mock.calls.map((call) => String(call[0]))
+      expect(warned.some((line) => line.includes('approvals:write'))).toBe(true)
+      expect(warned.some((line) => line.includes('approvals:act'))).toBe(true)
 
       await writeActManageMigration.up(migrationDb)
 
-      const restored = await pool().query<{ code: string }>(
-        `SELECT code FROM permissions WHERE code = ANY($1::text[])`,
-        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
-      )
-      expect(restored.rows.map((row) => row.code).sort()).toEqual(['approval-templates:manage', 'approvals:act', 'approvals:write'])
-      const bindingAfterUp = await pool().query(`SELECT permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
-      expect(bindingAfterUp.rows).toEqual([{ permission_code: 'approvals:write' }])
+      expect((await catalogueRows()).map((row) => row.code)).toEqual(['approval-templates:manage', 'approvals:act', 'approvals:write'])
+      const roleBindingAfterUp = await pool().query(`SELECT permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
+      expect(roleBindingAfterUp.rows).toEqual([{ permission_code: 'approvals:write' }])
+      const userBindingAfterUp = await pool().query(`SELECT permission_code FROM user_permissions WHERE user_id = $1`, [userId])
+      expect(userBindingAfterUp.rows).toEqual([{ permission_code: 'approvals:act' }])
+      bodyCompleted = true
     } finally {
       warn.mockRestore()
-      // Whatever happened above, later cases need all three codes registered and no binding of ours.
-      await writeActManageMigration.up(migrationDb)
-      await pool().query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId])
-      await pool().query(`DELETE FROM roles WHERE id = $1`, [roleId])
-      await migrationDb.destroy()
+      // Every step runs even if an earlier one throws: later cases need all three codes registered and
+      // none of this case's bindings left behind, and the pool must always be closed.
+      const cleanupErrors: unknown[] = []
+      const attempt = async (step: () => Promise<unknown>) => {
+        try {
+          await step()
+        } catch (error) {
+          cleanupErrors.push(error)
+        }
+      }
+      await attempt(() => writeActManageMigration.up(migrationDb))
+      await attempt(() => pool().query(`DELETE FROM user_permissions WHERE user_id = $1`, [userId]))
+      await attempt(() => pool().query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId]))
+      await attempt(() => pool().query(`DELETE FROM roles WHERE id = $1`, [roleId]))
+      await attempt(() => migrationDb.destroy())
+      if (cleanupErrors.length > 0) {
+        // Surface cleanup failures without masking an assertion failure from the body above.
+        if (bodyCompleted) throw new AggregateError(cleanupErrors, 'ROLLBACK SAFETY cleanup failed')
+        // eslint-disable-next-line no-console
+        console.error('[permcat rollback-safety] cleanup errors after a failed body:', cleanupErrors)
+      }
     }
   })
 
