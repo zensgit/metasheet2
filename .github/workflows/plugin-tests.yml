@@ -868,6 +868,7 @@ jobs:
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
           node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
+          node --test scripts/verify-attendance-production-flow.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
