@@ -7,7 +7,7 @@
 
 - 内置角色 `stock-prep_frontline` 的显示名随 R65 迁移 `zzzz20261012090000` 从「一线填写」改为「操作人员」，**角色 id 不变**。
 - 旧一线角色 `stock-prep-operator` 的成员和以它为主体的表级授权行，用脚本 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 搬到 `stock-prep_frontline`。
-- 旧角色上手工加的平台码（预计 `approvals:read`、`approvals:write`、`multitable:submit-approval`，以库里实际为准）**不进内置角色**；脚本的 `--split-extra-codes-to-role` 把它们放到单独的平台角色（推荐 id `approvals_operator`，默认显示名「审批与提交」），授给同一批成员（ADR §8 第 3 步方案 ①）。合并前后每个成员的有效权限不变。
+- 旧角色上手工加的平台码（预计 `approvals:read`、`approvals:write`、`multitable:submit-approval`，以库里实际为准）**不进内置角色**；脚本的 `--split-extra-codes-to-role` 把它们放到单独的平台角色（推荐 id `approvals_operator`，默认显示名「审批与提交」），授给同一批成员（ADR §8 第 3 步方案 ①）。合并前后每个成员的**平台权限码**（RBAC 角色码、直授码、旧版码之并集）不变。**按角色 id 或显示名匹配人的其它配置不在脚本清点范围内**——考勤的调度权限（排班管理范围）、日历 / 节假日覆盖规则，钉钉同步的「成员组默认业务角色」等；这些在第 1 步由 owner 人工预检，合并后在第 5 步核对。
 - 脚本**不改**审批模板；它只打印计数：有多少模板版本 / 已发布定义按 id 或显示名把旧角色写成审批人、办理人、兜底审批人、抄送对象或「提交人自选」的角色范围；有多少模板的「可见范围」是角色范围、搬迁后成员会看不到（失）或新看到（得）。这几类之外的引用（例如审批图里按发起人 `approval_usable` 角色走的 `requester.role` 条件分支）脚本**不清点**。
 
 ## 0.5 取得脚本（安装包里没有它）
@@ -24,9 +24,14 @@ R65 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-r
 
 1. 看升级日志里两条迁移行：
    - `zzzz20261010124500_seed_stock_prep_role_templates`（R64 已跑，本次不再出现属正常）；
-   - `zzzz20261012090000_rename_stock_prep_frontline_display_name`：应为 `up: role stock-prep_frontline display name updated (1 row)`。如果是 `NOT renamed …` 或 `does not carry the expected display name; left as found`，记下原因（计数），合并照常可做，改名由现场在「角色管理」里手工处理（先确认日志里说的审批席位 / 抄送 / 角色范围的模板可见范围 / 同名角色）。
+   - `zzzz20261012090000_rename_stock_prep_frontline_display_name`：应为 `up: role stock-prep_frontline display name updated (1 row)`。如果是 `NOT renamed …` 或 `does not carry the expected display name; left as found`，记下原因（计数），合并照常可做，改名由现场在「角色管理」里手工处理（先确认日志里说的审批席位 / 抄送 / 角色范围的模板可见范围 / 审批模板版本或已发布定义里的角色引用 / 考勤调度权限或日历、节假日覆盖规则里的角色引用 / 同名角色）。改名迁移只查「一线填写」「操作人员」这两个名字；下面第 4 项的人工预检范围更大。
 2. 在「角色管理」里确认 `stock-prep_frontline` 存在、只持有 `stock-prep:read` + `stock-prep:operate`，且**还没有**写进 G1 角色清单（`MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS`）——G1 一旦给它写了表级授权，脚本的「凭空多得」检查会拒绝。
 3. 确认没有人正在编辑角色、任命成员或改审批模板；约好维护窗口。
+4. **owner 人工预检：按角色 id / 显示名匹配人的其它配置**（脚本不读这些，搬迁会让一线成员悄悄得到或失去它们）。要搜的值：旧角色 id `stock-prep-operator` 及它在「角色管理」里的显示名、`stock-prep_frontline`、「操作人员」、「一线填写」、`approvals_operator`、「审批与提交」（若用 `--split-role-name` 另起了名字，也搜那个名字）。考勤侧把角色 id 和显示名都当作角色和角色标签来匹配，比较时忽略首尾空格（日历 / 节假日覆盖规则还忽略大小写）。
+   - 考勤「调度权限」（排班管理范围）：主体类型为角色 / 角色标签的记录的主体；以及每条记录的目标范围里的「角色」「角色标签」列表。命中意味着搬迁后一线成员会得到或失去对某批人的排班、导出他人考勤、审批他人考勤等权限，或者变成别人调度权限的目标。停用的记录也要看（重新启用就生效）。
+   - 考勤「节假日覆盖规则」和「有效日历覆盖规则」：每条规则的角色 / 角色标签筛选。命中意味着一线成员会换一套工作日历。
+   - 钉钉同步（目录管理）：每个集成的「成员组默认业务角色」。若含 `stock-prep-operator`，以后新同步进来的一线人员只会拿到旧角色——搬迁后旧角色没有码，他们拿不到审批与提交的码；先改成 `stock-prep_frontline` 加 `approvals_operator`（由 owner 定），再执行。
+   命中任一项：先由 owner 决定改配置还是接受变化，再执行第 3 步。
 
 ## 2. dry-run（只读，不写任何东西）
 
@@ -75,6 +80,6 @@ node scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs --root <安�
 
 1. 「角色管理」：`stock-prep_frontline` 显示为「操作人员」，成员是原两个角色成员的并集；`approvals_operator`（「审批与提交」）持有拆出的码、成员是原旧角色成员；`stock-prep-operator` 已无成员（或已删除）。
 2. 备料工作台「成员与权限」页：内置角色显示「操作人员」。
-3. 用一个原旧角色成员登录：备料页面、确认队列、记录送审与搬迁前一致。
+3. 用一个原旧角色成员登录：备料页面、确认队列、记录送审与搬迁前一致；考勤侧（能看到 / 能排班 / 能导出 / 能审批的人员范围、自己的工作日历）与搬迁前一致。第 1 步第 4 项若有命中且 owner 决定改配置，这里核对改后的结果；钉钉同步的「成员组默认业务角色」已不含 `stock-prep-operator`（或 owner 已决定保留）。
 4. 第 2 步的 `approval designer — …` 计数大于 0 时：在审批设计器里把这些模板的审批人 / 抄送对象 / 「提交人自选」角色范围从旧角色改指向 `stock-prep_frontline`（或 `approvals_operator`，视该节点需要的权限），再重新发布；脚本不改审批模板。第 2 步的 `approval template visibility — …` 计数在搬迁前已处理（见第 2 步）。
 5. 之后再按 ADR §8 第 6 步把 `stock-prep_frontline` 写进 G1 角色清单。

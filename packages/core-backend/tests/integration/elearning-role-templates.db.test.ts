@@ -1065,7 +1065,7 @@ async function s5aResetLegacyAndSplit(trx: Transaction<unknown>, splitRoleId: st
 const OPM_EXTRA_CODES = ['approvals:read', 'approvals:write', 'multitable:submit-approval']
 
 describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => {
-  it('compare-and-set up / down; a hand-renamed or absent role, a taken name and approval read keys leave it as found — rolled back', async () => {
+  it('compare-and-set up / down; a hand-renamed or absent role, a taken name, approval read keys, approval graphs and attendance role references leave it as found — rolled back', async () => {
     const rollback = new Error('rollback frontline rename test')
     const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
     const member = `opm-rename-member-${suffix}`
@@ -1089,6 +1089,10 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
         await sql`UPDATE approval_records SET metadata = jsonb_set(metadata, '{targetId}', to_jsonb((metadata->>'targetId') || ' (opm)')) WHERE action = 'cc' AND metadata->>'targetType' = 'role' AND metadata->>'targetId' IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
         await sql`UPDATE roles SET name = name || ' (opm)' WHERE btrim(name) IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
         await sql`UPDATE approval_templates SET visibility_scope = '{"type":"all","ids":[]}'::jsonb WHERE visibility_scope->>'type' = 'role' AND visibility_scope->'ids' ?| ARRAY[${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME}]`.execute(trx)
+        await sql`UPDATE approval_template_versions SET approval_graph = '{}'::jsonb WHERE approval_graph::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`UPDATE approval_published_definitions SET runtime_graph = '{}'::jsonb WHERE runtime_graph::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`DELETE FROM attendance_scheduler_scopes WHERE subject_ref LIKE ANY (ARRAY['%操作人员%', '%一线填写%']) OR scope::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`DELETE FROM system_configs WHERE key = 'attendance.settings'`.execute(trx)
         await sql`INSERT INTO approval_instances (id, status, requester_snapshot) VALUES (${instanceId}, 'pending', ${JSON.stringify({ id: member })}::jsonb)`.execute(trx)
 
         await stockPrepTemplatesUp(trx)
@@ -1161,6 +1165,18 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
           await frontlineRenameUp(trx)
           expect(await nameOf()).toEqual(['操作人员'])
         })
+        await step('a role CC record names 一线填写 while the role has a member (they would lose read access); without the member it renames', async () => {
+          await sql`
+            INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+            VALUES (${instanceId}, 'cc', ${member}, 'OPM requester', 'pending', 1, ${JSON.stringify({ targetType: 'role', targetId: '一线填写' })}::jsonb)
+          `.execute(trx)
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
         // Template visibility (记录送审 / automation creator) also matches a member's roles by trimmed
         // display name: a role-scoped visibility list naming the new name would be gained, one naming
         // the old name lost while the role has members. A dept-scoped list carrying the same string is
@@ -1185,6 +1201,100 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
           await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
           await frontlineRenameUp(trx)
           expect(await nameOf()).toEqual(['操作人员'])
+        })
+
+        // Approval graphs: a seat / CC record created from a graph carries the graph's entry as its key,
+        // and the read arm matches it by display name — a graph naming the new name would be gained by
+        // future instances, one naming the old name lost while the role has members. Shapes outside the
+        // five role-reference shapes (a user assignee that reads like the name) do not block.
+        const graphOf = (config: Record<string, unknown>, type = 'approval') => JSON.stringify({ nodes: [{ key: 'start', type: 'start', config: {} }, { key: 'n1', type, config }], edges: [] })
+        const graphTemplate = async () => (await sql<{ id: string }>`INSERT INTO approval_templates (key, name) VALUES (${`opm-graph-${randomUUID()}`}, 'OPM graph template') RETURNING id`.execute(trx)).rows[0]!.id
+        const version = async (approvalGraph: string) => {
+          const templateId = await graphTemplate()
+          const versionId = (await sql<{ id: string }>`INSERT INTO approval_template_versions (template_id, version, approval_graph) VALUES (${templateId}, 1, ${approvalGraph}::jsonb) RETURNING id`.execute(trx)).rows[0]!.id
+          return { templateId, versionId }
+        }
+        await step('graphs outside the five role-reference shapes do not block', async () => {
+          await version(graphOf({ assigneeType: 'user', assigneeIds: ['操作人员'] }))
+          await version(graphOf({ targetType: 'group', targetIds: ['操作人员'] }, 'cc'))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('a template version graph names 操作人员 as a static role approver (members would gain future instances)', async () => {
+          await version(graphOf({ assigneeSources: [{ kind: 'static_role', roleIds: ['操作人员'] }] }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a published definition alone names 操作人员 as a role CC target (its version names nobody)', async () => {
+          const { templateId, versionId } = await version(graphOf({ assigneeType: 'user', assigneeIds: ['OPM nobody'] }))
+          await sql`INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active) VALUES (${templateId}, ${versionId}, ${graphOf({ targetType: 'role', targetIds: ['操作人员'] }, 'cc')}::jsonb, FALSE)`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a graph names 一线填写 (empty-assignee fallback) while the role has a member; without the member it renames', async () => {
+          await version(graphOf({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { roleIds: ['一线填写'] } }))
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+
+        // Attendance puts a user's role ids AND display names into both its role and role-tag context:
+        // scheduler scopes (subject or target lists) and the settings' holiday / calendar overrides
+        // naming a name would be gained or lost by the role's members.
+        const scope = async (subjectType: string, subjectRef: string, body: Record<string, unknown>, isActive = true) => {
+          await sql`INSERT INTO attendance_scheduler_scopes (subject_type, subject_ref, actions, scope, is_active) VALUES (${subjectType}, ${subjectRef}, ARRAY['view']::text[], ${JSON.stringify(body)}::jsonb, ${isActive})`.execute(trx)
+        }
+        const settings = async (value: string) => {
+          await sql`INSERT INTO system_configs (key, value) VALUES ('attendance.settings', ${value})`.execute(trx)
+        }
+        await step('attendance rows naming the names elsewhere (a user subject, a department list, other settings keys) do not block', async () => {
+          await scope('user', '操作人员', { departments: ['操作人员'] })
+          await settings(JSON.stringify({ holidayPolicy: { overrides: [{ name: '操作人员', userNames: ['操作人员'] }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('an INACTIVE attendance scheduler scope has 操作人员 as its role subject', async () => {
+          await scope('role', ' 操作人员 ', { userIds: ['OPM target'] }, false)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('an attendance scheduler scope lists 操作人员 in its roleTags target list', async () => {
+          await scope('user', 'OPM scheduler', { roleTags: ['OPM other', '操作人员'] })
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a calendar override filters on roles: [操作人员]', async () => {
+          await settings(JSON.stringify({ calendarPolicy: { overrides: [{ source: 'role', filters: { roles: ['操作人员'] } }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a holiday override names 操作人员 in a comma-separated role_tags string', async () => {
+          await settings(JSON.stringify({ holidayPolicy: { overrides: [{ name: 'OPM holiday', role_tags: 'OPM other, 操作人员' }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('attendance settings that are not JSON count nothing (the plugin runs on its defaults)', async () => {
+          await settings('{"calendarPolicy": 操作人员')
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('an attendance scope subject and a calendar override name 一线填写 while the role has a member; without the member it renames', async () => {
+          await scope('role_tag', '一线填写', { userIds: ['OPM target'] })
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('a calendar override names 一线填写 while the role has a member', async () => {
+          await settings(JSON.stringify({ calendarPolicy: { overrides: [{ source: 'role', filters: { roleTags: ['一线填写'] } }] } }))
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
         })
 
         const logged = logSpy.mock.calls.map((args) => args.join(' ')).filter((line) => line.includes('zzzz20261012090000'))
