@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import AttendanceAdminTaskHome from '../src/views/attendance/AttendanceAdminTaskHome.vue'
@@ -231,6 +233,16 @@ describe('AttendanceAdminTaskHome', () => {
     ])
     expect(container!.querySelector('.attendance__admin-task-status--ok')).toBeTruthy()
     expect(container!.querySelector('.attendance__admin-task-status--needs_attention')).toBeTruthy()
+  })
+
+  it('shares the calm card surface and keeps the four-column task grid', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceAdminTaskHome.vue'), 'utf8')
+    expect(css).toMatch(/\.attendance__admin-task-group\s*\{[^}]*border:\s*1px solid var\(--ms-border-light\)/)
+    expect(css).toMatch(/\.attendance__admin-task-group\s*\{[^}]*box-shadow:\s*var\(--ms-shadow-card\)/)
+    expect(css).toMatch(/\.attendance__btn--primary\s*\{[^}]*background:\s*var\(--ms-color-primary\)/)
+    expect(css).toMatch(/\.attendance__admin-task-grid\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(0,\s*1fr\)\)/)
+    expect(css).toMatch(/@media \(max-width:\s*768px\)\s*\{[\s\S]*\.attendance__admin-task-grid\s*\{[^}]*grid-template-columns:\s*1fr/)
+    expect(css).not.toMatch(/#1976d2/)
   })
 
   it('does not render OK copy or ok style when status is missing or unrecognized', async () => {

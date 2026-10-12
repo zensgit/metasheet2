@@ -83,7 +83,7 @@ function select(key: EmployeeQuickActionKey, iconId: CommonIconId): void {
 .attendance-ew-admin-icons__hint {
   margin: 0;
   font-size: 12px;
-  color: #8f959e;
+  color: var(--ms-text-3);
 }
 
 .attendance-ew-admin-icons__row {
@@ -101,17 +101,18 @@ function select(key: EmployeeQuickActionKey, iconId: CommonIconId): void {
 .attendance-ew-admin-icons__preview {
   width: 40px;
   height: 40px;
-  border-radius: 12px;
+  border-radius: var(--ms-radius-lg);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
 }
 
-.attendance-ew-admin-icons__preview--makeup { background: linear-gradient(180deg, #5b8cff 0%, #3370ff 100%); }
-.attendance-ew-admin-icons__preview--leave { background: linear-gradient(180deg, #34c759 0%, #00b42a 100%); }
-.attendance-ew-admin-icons__preview--overtime { background: linear-gradient(180deg, #ff9a2e 0%, #ff7d00 100%); }
-.attendance-ew-admin-icons__preview--swap { background: linear-gradient(180deg, #9b8af0 0%, #7b67ee 100%); }
+.attendance-ew-admin-icons__preview--makeup { background: var(--el-color-primary-light-9); color: var(--ms-color-primary); }
+.attendance-ew-admin-icons__preview--leave { background: var(--el-color-success-light-9); color: var(--ms-color-success); }
+.attendance-ew-admin-icons__preview--overtime { background: var(--el-color-warning-light-9); color: var(--ms-color-warning); }
+.attendance-ew-admin-icons__preview--swap { background: var(--el-color-info-light-9); color: var(--ms-color-info); }
 
 .attendance-ew-admin-icons__preview :deep(svg),
 .attendance-ew-admin-icons__choice :deep(svg) {
@@ -128,10 +129,10 @@ function select(key: EmployeeQuickActionKey, iconId: CommonIconId): void {
 .attendance-ew-admin-icons__choice {
   width: 32px;
   height: 32px;
-  border: none;
-  border-radius: 8px;
-  background: #3d4450;
-  color: #fff;
+  border: 1px solid var(--ms-border-light);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-page);
+  color: var(--ms-text-2);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -140,6 +141,7 @@ function select(key: EmployeeQuickActionKey, iconId: CommonIconId): void {
 }
 
 .attendance-ew-admin-icons__choice--active {
-  box-shadow: 0 0 0 2px #3370ff;
+  box-shadow: 0 0 0 2px var(--ms-color-primary);
+  color: var(--ms-color-primary);
 }
 </style>

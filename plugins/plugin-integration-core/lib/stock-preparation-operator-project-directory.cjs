@@ -424,6 +424,14 @@ async function listOperatorProjectDirectory({
   boundTarget = null,
   audit = null,
   pullTargetScanCache = null,
+  // S3 (ADR §5 「首页与项目查询」, register R-37): the tenant's project-sheet REGISTRY rows, read by the
+  // route from the registry store while the project-sheets switch is on (and only under the union
+  // opt-in). With the switch on the union scan reads NO bound sheet (Q3: the old mixed sheet is never
+  // read), so the registry is what enumerates the projects the floor pulled: one directory row per
+  // registry row, merged by project number with the 「平台登记」 (mvp) rows, carrying the registry's
+  // own bounded counts and its archived flag. `null` (the default, and the switch-off value) leaves
+  // every response below byte-identical to S2.
+  projectTargets = null,
 } = {}) {
   if (!scope || !optionalString(scope.tenantId)) {
     throw new StockPreparationOperatorDirectoryError(500, 'OPERATOR_DIRECTORY_SCOPE_REQUIRED', 'operator project directory requires a resolved operator value scope')
@@ -511,6 +519,19 @@ async function listOperatorProjectDirectory({
   // four union flags below are built on. VALUES-FREE: two ids, no customer row content.
   const fillTarget = unioned ? await resolveFillTarget(provisioning, ownSheet, stagingProjectId) : null
 
+  // S3: the registry rows by project number — only under the union opt-in and only when the route
+  // handed them over (switch on). A registry row is a project that HAS a sheet, whether or not it
+  // was pulled yet; its counts are the ones the overview refresh stamped (null until the first
+  // refresh), and `status` is the archive state (ADR §6).
+  const registryByProjectNo = new Map()
+  if (unioned && Array.isArray(projectTargets)) {
+    for (const row of projectTargets) {
+      const no = row && optionalString(row.projectNo)
+      if (no && !registryByProjectNo.has(no)) registryByProjectNo.set(no, row)
+    }
+  }
+  const registryEnumerated = unioned && Array.isArray(projectTargets)
+
   /**
    * ONE ROW, BUILT KEY BY KEY. Never a spread of a stored record — that is what S-02b pins, and it
    * is the reason a column no template declares cannot reach this surface.
@@ -562,6 +583,17 @@ async function listOperatorProjectDirectory({
     // Same three-state shape, one level up: the window this came from is bounded, so a null here
     // means 「从未导出」 only when `lastExportAtMayBeIncomplete` is false.
     row.lastExportAt = rowProjectNo ? (exportTimes.byProjectNo.get(rowProjectNo) || null) : null
+    // S3 (R-37): THREE MORE KEYS, PRESENT ONLY WHEN THE REGISTRY WAS ENUMERATED (switch on) — the
+    // switch-off union response is byte-identical to S2. `archived` is null for a row the registry
+    // does not know (a 「平台登记」-only project), true/false for a registered one; the two counts are
+    // the registry's own bounded numbers (null until the overview refresh first stamped them), so a
+    // card can show a real posture instead of 「看不到进度」 (ADR §5: no more `progressUnknown`).
+    if (registryEnumerated) {
+      const registry = rowProjectNo ? registryByProjectNo.get(rowProjectNo) : undefined
+      row.archived = registry ? registry.status === 'archived' : null
+      row.pulledRowCount = registry && Number.isInteger(registry.rowCount) ? registry.rowCount : null
+      row.missingComponentsCount = registry && Number.isInteger(registry.missingComponentsCount) ? registry.missingComponentsCount : null
+    }
     return row
   }
 
@@ -590,7 +622,9 @@ async function listOperatorProjectDirectory({
       projectNo: rowProjectNo,
       // BOTH tokens when the same number is also in the pull target — that is the dedupe: one row,
       // two sources, never two rows for one project number.
-      sources: rowProjectNo && pullScan.byProjectNo.has(rowProjectNo)
+      // S3: a registry row (the project HAS its own sheet) is the pull target of that project, so it
+      // contributes the same second token — the source vocabulary does not grow.
+      sources: rowProjectNo && (pullScan.byProjectNo.has(rowProjectNo) || registryByProjectNo.has(rowProjectNo))
         ? [OPERATOR_PROJECT_SOURCE_MVP, OPERATOR_PROJECT_SOURCE_PULL_TARGET]
         : [OPERATOR_PROJECT_SOURCE_MVP],
       counts: {
@@ -609,7 +643,9 @@ async function listOperatorProjectDirectory({
   // reader that those zeros mean 「还没归档」 rather than 「归档里是零」.
   //
   // SORTED, so the response is stable across calls: page order out of the records API is not.
-  const pullOnlyProjectNos = [...pullScan.byProjectNo.keys()].filter((no) => !seenProjectNos.has(no)).sort()
+  // S3: the registry's project numbers join the pull-target-only set (de-duplicated, sorted) — with
+  // the switch on the scan read nothing, so these ARE the floor's own projects.
+  const pullOnlyProjectNos = [...new Set([...pullScan.byProjectNo.keys(), ...registryByProjectNo.keys()])].filter((no) => !seenProjectNos.has(no)).sort()
   let mergeTruncated = false
   for (const rowProjectNo of pullOnlyProjectNos) {
     if (projects.length >= MAX_LIST_ROWS) {
@@ -674,7 +710,9 @@ async function listOperatorProjectDirectory({
       // is true in all four; 「外接源还没绑好」 is a confident falsehood in the fourth. Splitting it
       // into a closed enum is a new top-level key and therefore a new S-02a contract review; it is
       // named in the PR body as the follow-up rather than smuggled in here.
-      pullTargetReady: pullScan.ready,
+      // S3: with the registry enumerated (switch on) the floor's own store IS readable — the registry
+      // answered — even though no bound sheet was scanned (Q3: none may be).
+      pullTargetReady: pullScan.ready || registryEnumerated,
       // THE DEEP-LINK HANDLE, `{ sheetId, viewId }` or null — see its own note above the computation.
       // It is NOT a permission decision and this module cannot make one: multitable enforces access
       // when the operator lands. Null means "no bound sheet this caller is proved to own", which the

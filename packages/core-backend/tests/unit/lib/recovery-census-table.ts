@@ -37,6 +37,7 @@ export const ADMUSR = 'admin-users-routes.test.ts'
 export const ACT = 'recovery-conflict-activate-mapping.test.ts'
 export const UNIVER = 'recovery-conflict-surfaces-routes-univer-meta.test.ts'
 export const AUTHSVC = 'AuthService.test.ts'
+export const STOCKPREP_MEMBERS = 'stock-preparation-members.test.ts'
 
 /**
  * The census table. The first 11 rows are the O2-S2 taskbook's enumerated write
@@ -117,6 +118,10 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
         { site: 'roles:create', testFile: RBAC },
         { site: 'roles:update', testFile: RBAC },
         { site: 'roles:delete', testFile: RBAC },
+        // DELETE of a namespace main-admin / admin-equivalent role also removes the role's
+        // user_roles rows (rbac/role-assignment.ts unassignUserRoles) in the same transaction: a
+        // distinct write set reaching a triggered table, hence its own call site and leg.
+        { site: 'roles:delete-admin-role', testFile: RBAC },
       ],
     }],
   },
@@ -252,6 +257,18 @@ export const WIRING_CENSUS: readonly WiringRequirement[] = [
         { site: 'auth-service:self-service-backfill', testFile: AUTHSVC },
         { site: 'auth-service:register-user-roles', testFile: AUTHSVC },
       ],
+    }],
+  },
+  {
+    // 备料「成员与权限」S5b (R-39). The members port writes `roles` / `role_permissions` (a
+    // recovery-authority table) inside one transaction; its single write runner classifies the
+    // marker 40001 and re-raises the uniform retryable 409 RECOVERY_AUTHORITY_BUSY as a typed
+    // StockPrepMembersError, which the plugin route answers with its own status — the same mapping
+    // routes/roles.ts gives the platform role editor.
+    file: 'services/stock-preparation-members.ts',
+    calls: [{
+      token: 'classifyRecoveryConflict',
+      legs: [{ site: 'stock-prep-members:role-write', testFile: STOCKPREP_MEMBERS }],
     }],
   },
 ] as const

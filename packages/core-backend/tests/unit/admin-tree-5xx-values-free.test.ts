@@ -1533,13 +1533,14 @@ describe('structural guard: no 5xx response in the /api/admin tree carries caugh
     expect(offenders).toEqual([])
   })
 
-  it('is not vacuous: it sees the 5xx sinks and all 49 responder calls (13 + 22 + 4 sync in admin-routes.ts, 4, 6)', () => {
+  // 14 reads = #5903's 13 + GET /security/encrypted-stores (#6164 step 1).
+  it('is not vacuous: it sees the 5xx sinks and all 50 responder calls (14 + 22 + 4 sync in admin-routes.ts, 4, 6)', () => {
     const scans = treeFiles().map((rel) => scanResponseErrorEcho(rel, readRoute(rel)))
     const sinks = scans.flatMap((s) => s.sinks)
     const calls = scans.flatMap((s) => s.responderCalls)
     // The 503 "service not available" bodies and the envelope's own 500 are real sinks it inspects.
     expect(sinks.filter((s) => s.kind === 'status-chain').length).toBeGreaterThan(0)
-    expect(calls.filter((c) => c.file === 'admin-routes.ts').length).toBeGreaterThanOrEqual(39)
+    expect(calls.filter((c) => c.file === 'admin-routes.ts').length).toBeGreaterThanOrEqual(40)
     expect(calls.filter((c) => c.file === 'snapshot-labels.ts').length).toBeGreaterThanOrEqual(4)
     expect(calls.filter((c) => c.file === 'protection-rules.ts').length).toBeGreaterThanOrEqual(6)
     // Every responder call sits in a catch, so every mutation below has a caught binding to echo.
@@ -2043,11 +2044,11 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     expect(nonLiteralSentenceSites(readRoute(ADMIN_USERS))).toEqual([])
   })
 
-  it('is not vacuous: 45 helper calls, each inside a catch and handing it the caught value; the helper itself is a 500 sink', () => {
+  it('is not vacuous: 46 helper calls, each inside a catch and handing it the caught value; the helper itself is a 500 sink', () => {
     const source = readRoute(ADMIN_USERS)
     const sf = parseSource(ADMIN_USERS, source)
     const calls = failureHelperCalls(sf)
-    expect(calls).toHaveLength(45)
+    expect(calls).toHaveLength(46)
     for (const { call, errorText } of calls) {
       let clause: ts.CatchClause | undefined
       for (let p: ts.Node | undefined = call.parent; p && !clause; p = p.parent) if (ts.isCatchClause(p)) clause = p
@@ -2124,6 +2125,6 @@ describe('structural guard: routes/admin-users.ts (mounted at the root, outside 
     }
 
     expect(missed).toEqual([])
-    expect(calls.length * rawShapes.length).toBe(180)
+    expect(calls.length * rawShapes.length).toBe(184)
   })
 })

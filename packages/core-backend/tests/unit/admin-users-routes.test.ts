@@ -122,6 +122,13 @@ vi.mock('../../src/rbac/namespace-admission', async () => ({
       '../../src/rbac/namespace-admission',
     )
   ).deriveGrantNamespaces,
+  // Same reasoning: the delegated platform-code refusal classifies each permission code with the
+  // SHIPPED derivation, so a stub cannot agree with a wrong classification.
+  derivePermissionNamespace: (
+    await vi.importActual<typeof import('../../src/rbac/namespace-admission')>(
+      '../../src/rbac/namespace-admission',
+    )
+  ).derivePermissionNamespace,
   grantNamespaceAdmissions: namespaceAdmissionMocks.grantNamespaceAdmissions,
   deriveDelegatedAdminNamespace: namespaceAdmissionMocks.deriveDelegatedAdminNamespace,
   disableNamespaceAdmissionsWithoutRoles: namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles,
@@ -1087,6 +1094,25 @@ describe('admin-users routes', () => {
     })
   })
 
+  it('answers a fixed 500 when the delegated role read fails before the handler, instead of leaving the request unanswered', async () => {
+    state.authUser = {
+      id: 'crm-admin-1',
+      role: 'user',
+    }
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    pgMocks.query.mockRejectedValueOnce(new Error('MARKER_rd_f3q7 connect ECONNREFUSED'))
+
+    const response = await invokeRoute('get', '/api/admin/role-delegation/summary')
+
+    expect(response.statusCode).toBe(500)
+    expect(response.body).toEqual({
+      ok: false,
+      error: { code: 'ROLE_DELEGATION_CHECK_FAILED', message: 'Failed to verify delegated role-admin access' },
+    })
+    expect(JSON.stringify(response.body)).not.toContain('MARKER_rd_f3q7')
+    expect(JSON.stringify(response.body)).not.toContain('ECONNREFUSED')
+  })
+
   it('returns delegated role summary for a plugin admin', async () => {
     state.authUser = {
       id: 'crm-admin-1',
@@ -1134,8 +1160,9 @@ describe('admin-users routes', () => {
     expect((response.body as Record<string, any>).data).toMatchObject({
       isPlatformAdmin: false,
       delegableNamespaces: ['crm'],
+      // Owner ruling 2026-10-10: the namespace main-admin role `crm_admin` is platform-only, so
+      // a delegate's assignable list no longer offers it.
       roleCatalog: [
-        { id: 'crm_admin' },
         { id: 'crm_operator' },
       ],
       scopeAssignments: [
@@ -1580,6 +1607,12 @@ describe('admin-users routes', () => {
       })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      // in-transaction role lock + the role's codes (delegated platform-code check)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }, { permission_code: 'crm:write' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{
@@ -1677,6 +1710,12 @@ describe('admin-users routes', () => {
         }],
       })
       .mockResolvedValueOnce({ rows: [{ allowed: true }] })
+      // in-transaction role lock + the role's codes (delegated platform-code check)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
+      // the write boundary's own lock + code read (delegated `namespaces` scope backstop)
+      .mockResolvedValueOnce({ rows: [{ id: 'crm_operator' }] })
+      .mockResolvedValueOnce({ rows: [{ permission_code: 'crm:read' }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({
         rows: [{

@@ -30,8 +30,12 @@ import {
 } from '../rbac/namespace-admission'
 import {
   assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
+  delegatedRoleCodeRefusal,
+  reviewDelegatedRoleCodes,
   sendIfRoleAssignmentRefused,
   unassignUserRoles,
+  type RoleAssignmentResult,
   type RoleAssignmentScope,
 } from '../rbac/role-assignment'
 import { getBcryptSaltRounds } from '../security/auth-runtime-config'
@@ -991,7 +995,159 @@ function roleIdMatchesNamespaces(roleId: string, namespaces: string[]): boolean 
   return matchRoleIdToNamespaces(roleId, namespaces)
 }
 
+/**
+ * Owner ruling 2026-10-10 「只有平台管理员能任命 *_admin」: a role whose id derives a
+ * delegated-admin namespace makes its holders delegated admins of that namespace, so only a
+ * platform administrator may assign or revoke it — for EVERY namespace, not one product's.
+ *
+ * Deliberately `deriveDelegatedAdminNamespace` itself, the predicate `deriveDelegableNamespaces`
+ * (and so `ensureRoleDelegationAdmin`) uses to GRANT delegated-admin identity: the refusal and
+ * the identity it protects are measured by one function, so a role id cannot be "not an admin
+ * role" here and "an admin role" there.
+ */
+function isNamespaceMainAdminRoleId(roleId: string): boolean {
+  return deriveDelegatedAdminNamespace(roleId) !== null
+}
+
+/**
+ * The delegated-admin code rule for one role and one direction, as a typed route refusal (or
+ * null). The classification and the rule are the write boundary's own pure functions
+ * (`reviewDelegatedRoleCodes` / `delegatedRoleCodeRefusal` in rbac/role-assignment.ts), so the
+ * typed 403 answered here and the boundary's backstop refusal cannot disagree:
+ *  - an admin-level code of the namespace the role id matched (`<ns>:admin`, `<ns>:*`) makes
+ *    the role admin-equivalent → ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN, both directions;
+ *  - assign: any code outside the matched namespaces (non-admission-controlled resources such as
+ *    `multitable:*` / `approvals:*` / `roles:*` / `workflow:*` / `admin:*`, the `*:*` wildcard,
+ *    malformed codes, another namespace's codes) → ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN;
+ *  - unassign: only an ADMIN-LEVEL code outside them refuses (removing an ordinary role only
+ *    lowers privilege).
+ */
+function delegatedRoleCodeRefusalFor(
+  roleId: string,
+  permissionCodes: readonly unknown[],
+  delegableNamespaces: string[],
+  action: 'assign' | 'unassign',
+): DelegatedRoleRefusal | null {
+  const refusal = delegatedRoleCodeRefusal(reviewDelegatedRoleCodes(roleId, permissionCodes, delegableNamespaces), action)
+  if (!refusal) return null
+  return new DelegatedRoleRefusal(
+    refusal.reason === 'admin_equivalent_role'
+      ? 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'
+      : 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN',
+    refusal.count,
+  )
+}
+
+/**
+ * Whether a delegated (non-platform) admin may assign — or, with `action: 'unassign'`, revoke —
+ * this role: the route's own role-id match plus the SAME predicates its refusals use
+ * (`isNamespaceMainAdminRoleId`, `delegatedRoleCodeRefusalFor`). The assignable catalog and the
+ * "current delegable roles" a delegate is shown are filtered by it, so the UI never offers a role
+ * the route refuses in that direction.
+ */
+function isRoleManageableByDelegatedAdmin(
+  role: { id: string; permissions: readonly string[] },
+  delegableNamespaces: string[],
+  action: 'assign' | 'unassign',
+): boolean {
+  if (!roleIdMatchesNamespaces(role.id, delegableNamespaces)) return false
+  if (isNamespaceMainAdminRoleId(role.id)) return false
+  return delegatedRoleCodeRefusalFor(role.id, role.permissions, delegableNamespaces, action) === null
+}
+
+type DelegatedRoleRefusalCode =
+  | 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN'
+  | 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN'
+  | 'ROLE_NOT_FOUND'
+
+/**
+ * A delegated-role request refused by a rule that only a platform administrator may cross (or,
+ * for ROLE_NOT_FOUND, a role deleted between the existence check and the row lock). Thrown from
+ * inside the assignment transaction (the platform-code read lives there) and answered — and, for
+ * the two policy refusals, audited — by the route; the response carries the code and a fixed
+ * sentence, never the role's codes.
+ */
+class DelegatedRoleRefusal extends Error {
+  readonly code: DelegatedRoleRefusalCode
+  readonly offendingCount?: number
+
+  constructor(code: DelegatedRoleRefusalCode, offendingCount?: number) {
+    super(code)
+    this.name = 'DelegatedRoleRefusal'
+    this.code = code
+    this.offendingCount = offendingCount
+  }
+}
+
+/** Fixed status and sentence per refusal; nothing from the refused role reaches the body. */
+function sendDelegatedRoleRefusal(res: Response, refusal: DelegatedRoleRefusal): void {
+  switch (refusal.code) {
+    case 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN':
+      return jsonError(res, 403, 'ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN', 'Only a platform administrator can assign or revoke a namespace admin role')
+    case 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN':
+      return jsonError(res, 403, 'ROLE_DELEGATION_PLATFORM_PERMISSION_FORBIDDEN', 'Only a platform administrator can assign or revoke a role that carries permissions outside your delegated namespace')
+    default:
+      return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
+  }
+}
+
+async function auditDelegatedRoleRefusal(options: {
+  actorId: string
+  userId: string
+  roleId: string
+  action: string
+  delegableNamespaces: string[]
+  refusal: DelegatedRoleRefusal
+}): Promise<void> {
+  await auditLog({
+    actorId: options.actorId,
+    actorType: 'user',
+    action: options.action === 'assign' ? 'grant_denied' : 'revoke_denied',
+    resourceType: 'user-role',
+    resourceId: `${options.userId}:${options.roleId}`,
+    meta: {
+      adminUserId: options.actorId,
+      userId: options.userId,
+      roleId: options.roleId,
+      delegated: true,
+      delegableNamespaces: options.delegableNamespaces,
+      refusalCode: options.refusal.code,
+      ...(options.refusal.offendingCount !== undefined ? { offendingCount: options.refusal.offendingCount } : {}),
+    },
+  })
+}
+
+/**
+ * The target user's roles a delegate may act on: exactly those present in the given (already
+ * filtered) catalog. Fed the REVOCABLE catalog, so the "current delegable roles" a delegate sees
+ * are exactly the target's roles the route lets it revoke.
+ */
+function filterRoleIdsToCatalog(roleIds: string[], roleCatalog: Array<{ id: string }>): string[] {
+  const manageable = new Set(roleCatalog.map((role) => role.id))
+  return roleIds.filter((roleId) => manageable.has(roleId))
+}
+
+/**
+ * A delegate's two views of its namespaces' roles: what it may ASSIGN (the catalog it picks
+ * from) and what it may REVOKE (which the target's "current delegable roles" are cut to). They
+ * differ only by the unassign relaxation — a role carrying non-admin codes outside the namespace
+ * may be revoked but not granted. A platform admin (`namespaces` undefined) gets the unfiltered
+ * catalog for both.
+ */
+async function fetchDelegatedRoleCatalogs(namespaces?: string[]) {
+  const catalog = await fetchDelegatedRoleCatalogRows(namespaces)
+  if (!Array.isArray(namespaces)) return { assignable: catalog, revocable: catalog }
+  return {
+    assignable: catalog.filter((role) => isRoleManageableByDelegatedAdmin(role, namespaces, 'assign')),
+    revocable: catalog.filter((role) => isRoleManageableByDelegatedAdmin(role, namespaces, 'unassign')),
+  }
+}
+
 async function fetchDelegatedRoleCatalog(namespaces?: string[]) {
+  return (await fetchDelegatedRoleCatalogs(namespaces)).assignable
+}
+
+async function fetchDelegatedRoleCatalogRows(namespaces?: string[]) {
   if (Array.isArray(namespaces) && namespaces.length === 0) return []
 
   const result = Array.isArray(namespaces)
@@ -1819,7 +1975,16 @@ async function ensureRoleDelegationAdmin(req: Request, res: Response): Promise<{
     }
   }
 
-  const roleIds = await fetchUserRoleIds(actorId)
+  // This pre-check runs BEFORE the handler's own try/catch and Express 4 does not await handlers: a rejected
+  // role read here used to leave the request unanswered (no 5xx, the client waits for its own timeout).
+  // Answer the fixed 500 through the same helper as every other 500 of this file; the error text goes to the log.
+  let roleIds: string[]
+  try {
+    roleIds = await fetchUserRoleIds(actorId)
+  } catch (error) {
+    sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_CHECK_FAILED', 'Failed to verify delegated role-admin access', error)
+    return null as never
+  }
   const delegableNamespaces = deriveDelegableNamespaces(roleIds)
   if (delegableNamespaces.length === 0) {
     jsonError(res, 403, 'FORBIDDEN', 'Delegated role-admin access required')
@@ -3037,7 +3202,7 @@ export function adminUsersRouter(): Router {
       ])
       if (!snapshot) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      const roleCatalog = await fetchDelegatedRoleCatalog(
+      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
       )
 
@@ -3052,9 +3217,10 @@ export function adminUsersRouter(): Router {
         roles: snapshot.roles,
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot.roles
-          : snapshot.roles.filter((roleId) => roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot.roles, revocable),
       })
     } catch (error) {
       return sendAdminUsersServerFailure(req, res, 'ROLE_DELEGATION_ACCESS_FAILED', 'Failed to load delegated user access', error)
@@ -3159,6 +3325,22 @@ export function adminUsersRouter(): Router {
       if (!delegation.isPlatformAdmin && !roleIdMatchesNamespaces(roleId, delegation.delegableNamespaces)) {
         return jsonError(res, 403, 'ROLE_DELEGATION_FORBIDDEN', 'Role is outside your delegated namespaces')
       }
+      // After body validation and the existence checks, so an empty or invalid body still
+      // answers its 400 and an unknown id its 404; before the audience reads, because the
+      // answer does not depend on the target user. Both directions: a delegate must not
+      // appoint a peer main admin, and must not demote one.
+      if (!delegation.isPlatformAdmin && isNamespaceMainAdminRoleId(roleId)) {
+        const refusal = new DelegatedRoleRefusal('ROLE_DELEGATION_ADMIN_ROLE_FORBIDDEN')
+        await auditDelegatedRoleRefusal({
+          actorId: delegation.actorId,
+          userId,
+          roleId,
+          action,
+          delegableNamespaces: delegation.delegableNamespaces,
+          refusal,
+        })
+        return sendDelegatedRoleRefusal(res, refusal)
+      }
 
       const [scopeAssignments, groupAssignments] = delegation.isPlatformAdmin
         ? await Promise.all([Promise.resolve([]), Promise.resolve([])])
@@ -3185,11 +3367,59 @@ export function adminUsersRouter(): Router {
       const delegationScope: RoleAssignmentScope = delegation.isPlatformAdmin
         ? { kind: 'platform-admin' }
         : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
-      if (action === 'assign') {
-        await assignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
-      } else {
-        await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope })
+      let membership: RoleAssignmentResult
+      try {
+        membership = await transaction(async (client) => {
+          if (!delegation.isPlatformAdmin) {
+            // The role's codes are read INSIDE the transaction that writes the membership, with
+            // the role row held FOR SHARE: the role editor (`PUT`/`POST /api/roles`) takes the
+            // same row FOR UPDATE before it touches `role_permissions`, so a platform code cannot
+            // be added between this check and the write. Two statements on purpose — the code
+            // read runs after the lock is granted and therefore sees what a just-committed editor
+            // wrote, which a single joined statement locking `roles` would not.
+            const locked = await client.query('SELECT id FROM roles WHERE id = $1 FOR SHARE', [roleId])
+            if (!locked.rows.length) throw new DelegatedRoleRefusal('ROLE_NOT_FOUND')
+            const codes = await client.query(
+              'SELECT permission_code FROM role_permissions WHERE role_id = $1',
+              [roleId],
+            )
+            const permissionCodes = (codes.rows as Array<{ permission_code: string | null }>)
+              .map((row) => (typeof row.permission_code === 'string' ? row.permission_code : ''))
+            // Admin-equivalent (an admin-level code of its own namespace) → refused both ways;
+            // codes outside the namespace → refused on assign, and on unassign only when
+            // admin-level (see `delegatedRoleCodeRefusalFor`).
+            const refusal = delegatedRoleCodeRefusalFor(
+              roleId,
+              permissionCodes,
+              delegation.delegableNamespaces,
+              action === 'assign' ? 'assign' : 'unassign',
+            )
+            if (refusal) throw refusal
+          }
+          return action === 'assign'
+            ? assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+            : unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+        })
+      } catch (error) {
+        if (!(error instanceof DelegatedRoleRefusal)) throw error
+        if (error.code !== 'ROLE_NOT_FOUND') {
+          await auditDelegatedRoleRefusal({
+            actorId: delegation.actorId,
+            userId,
+            roleId,
+            action,
+            delegableNamespaces: delegation.delegableNamespaces,
+            refusal: error,
+          })
+        }
+        return sendDelegatedRoleRefusal(res, error)
       }
+      await auditDelegatedAdminScopeCleanup({
+        actorId: delegation.actorId,
+        roleId,
+        trigger: action === 'assign' ? 'role_appointed' : 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
       }
@@ -3227,7 +3457,7 @@ export function adminUsersRouter(): Router {
           delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
         ),
       ])
-      const roleCatalog = await fetchDelegatedRoleCatalog(
+      const { assignable: roleCatalog, revocable } = await fetchDelegatedRoleCatalogs(
         delegation.isPlatformAdmin ? undefined : delegation.delegableNamespaces,
       )
 
@@ -3242,9 +3472,10 @@ export function adminUsersRouter(): Router {
         roles: snapshot?.roles ?? [],
         memberGroups,
         namespaceAdmissions,
-        delegableRoles: delegation.isPlatformAdmin
-          ? snapshot?.roles ?? []
-          : (snapshot?.roles ?? []).filter((candidateRoleId) => roleIdMatchesNamespaces(candidateRoleId, delegation.delegableNamespaces)),
+        // Both arms are cut to the revocable catalog. For a platform admin that catalog is every
+        // EXISTING role, so a membership whose role row is gone (no user_roles -> roles FK on the
+        // migrated schema) is not offered for a revoke the unassign route answers 404 ROLE_NOT_FOUND.
+        delegableRoles: filterRoleIdsToCatalog(snapshot?.roles ?? [], revocable),
       })
     } catch (error) {
       // A boundary refusal is a permission outcome, so it answers with its own status and code
@@ -4631,7 +4862,20 @@ export function adminUsersRouter(): Router {
       if (!roleRow.rows.length) return jsonError(res, 404, 'ROLE_NOT_FOUND', 'Role not found')
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await assignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
+      // One transaction so that a fresh main-admin appointment and the removal of any audience
+      // left over from an earlier tenure land together (see `assignUserRoles`).
+      const membership = await transaction((client) => assignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'platform-admin' },
+        executor: client,
+      }))
+      await auditDelegatedAdminScopeCleanup({
+        actorId: adminUserId,
+        roleId,
+        trigger: 'role_appointed',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, true)
       }
@@ -4677,7 +4921,20 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      await unassignUserRoles({ userIds: [userId], roleId, scope: { kind: 'platform-admin' } })
+      // One transaction so that losing a main-admin role and losing the audience it was scoped
+      // to land together (see `unassignUserRoles`).
+      const membership = await transaction((client) => unassignUserRoles({
+        userIds: [userId],
+        roleId,
+        scope: { kind: 'platform-admin' },
+        executor: client,
+      }))
+      await auditDelegatedAdminScopeCleanup({
+        actorId: adminUserId,
+        roleId,
+        trigger: 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
+      })
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }

@@ -52,6 +52,7 @@ import {
 } from 'kysely'
 import { listAccessPresets } from '../../src/auth/access-presets'
 import { listPermissionTemplates } from '../../src/auth/permission-templates'
+import { APPROVAL_PRODUCT_PERMISSIONS } from '../../src/types/approval-product'
 
 const MIGRATIONS_DIR = path.join(__dirname, '../../src/db/migrations')
 
@@ -310,5 +311,39 @@ describe('access presets only grant registered permission codes (#6185)', () => 
       sql: "INSERT INTO role_permissions (role_id, permission_code) VALUES ('admin', 'q:r')",
       parameters: [],
     })).toEqual([])
+  })
+})
+
+/**
+ * The same catalogue, read the other way round: every code the approval product DECLARES
+ * (`APPROVAL_PRODUCT_PERMISSIONS`, the roster its guards and the web client are written against) must be
+ * inserted into `permissions` by some migration. Before the write/act/manage registration, three of the
+ * seven declared codes had no catalogue row, so the product's own grant entries refused them (400) while
+ * the routes already guarded on them; global admins bypass the guards, which hid it. A new declared code
+ * without a registering migration now reds here.
+ */
+describe('every approval-product permission code is registered by a migration', () => {
+  it('APPROVAL_PRODUCT_PERMISSIONS is fully covered by the migration-derived catalogue', async () => {
+    const { codes } = await readMigrationPermissionCatalogue()
+    expect(APPROVAL_PRODUCT_PERMISSIONS.length).toBeGreaterThan(0)
+    expect(
+      findUnregisteredCodes(
+        [{ id: 'APPROVAL_PRODUCT_PERMISSIONS', permissions: [...APPROVAL_PRODUCT_PERMISSIONS] }],
+        codes,
+      ),
+    ).toEqual([])
+  })
+
+  it('NEGATIVE CONTROL — a declared code no migration inserts is reported', async () => {
+    const { codes } = await readMigrationPermissionCatalogue()
+    const probe = [
+      {
+        id: 'APPROVAL_PRODUCT_PERMISSIONS',
+        permissions: [...APPROVAL_PRODUCT_PERMISSIONS, 'approvals:never-registered-probe'],
+      },
+    ]
+    expect(findUnregisteredCodes(probe, codes)).toEqual([
+      'APPROVAL_PRODUCT_PERMISSIONS -> approvals:never-registered-probe',
+    ])
   })
 })

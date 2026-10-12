@@ -2328,6 +2328,111 @@ describe('ApprovalNewView — Lock-1 §K2 requester_choice submit-time chooser',
     expect(container!.querySelector('[data-testid="approval-requester-choice"]')).toBeNull()
   })
 
+  // ── W1-1d — Lock-3 §1.5 forward row (RATIFIED): "`requester_choice` (K2) … ADMIT" on a HANDLER ──
+  // The chooser is graph-selected over approval AND handler nodes. The backend collector keys a
+  // handler's choice under its node key and REQUIRES it at create (422
+  // APPROVAL_REQUESTER_CHOICE_REQUIRED), so a submit page that skipped handler nodes would leave the
+  // requester unable to satisfy the node. Fixture discipline: the kind ONLY on the handler node — an
+  // approval carrier in the same graph would mask a handler gap.
+  const HANDLER_RC_GRAPH: ApprovalGraph = {
+    nodes: [
+      { key: 'start', type: 'start', name: '发起', config: {} },
+      {
+        key: 'handler_1',
+        type: 'handler',
+        name: '自选办理人',
+        config: {
+          assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }],
+          handlerMode: 'all',
+        },
+      },
+      { key: 'end', type: 'end', name: '结束', config: {} },
+    ],
+    edges: [
+      { key: 'e1', source: 'start', target: 'handler_1' },
+      { key: 'e2', source: 'handler_1', target: 'end' },
+    ],
+  }
+  function mountWithGraph(graph: ApprovalGraph) {
+    mockActiveTemplate.value = mockPublishedTemplate({
+      id: 'tpl_numfields',
+      formSchema: {
+        fields: [{ id: 'reason', type: 'text', label: '事由', required: true, defaultValue: '出差' } as FormField],
+      },
+      approvalGraph: graph,
+    })
+    return mountView()
+  }
+
+  it('W1-1d: a requester_choice source carried ONLY by a HANDLER node renders a 办理人-tagged chooser row under the handler key; the card header reads 选择办理人', async () => {
+    await mountWithGraph(HANDLER_RC_GRAPH)
+    const card = container!.querySelector('[data-testid="approval-requester-choice"]')
+    expect(card).not.toBeNull()
+    expect(card?.textContent).toContain('选择办理人')
+    expect(card?.textContent).not.toContain('选择审批人')
+    const items = container!.querySelectorAll('[data-testid="approval-requester-choice-item"]')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('自选办理人')
+    expect(items[0].textContent).toContain('办理人 · 选一人')
+    expect(items[0].textContent).toContain('全公司可选')
+    expect(container!.querySelector('[data-testid="approval-requester-choice-picker-handler_1"]')).not.toBeNull()
+  })
+
+  it('W1-1d: submit is blocked with 办理人 wording until the handler choice is made, then requesterChoices is keyed by the HANDLER node key', async () => {
+    await mountWithGraph(HANDLER_RC_GRAPH)
+
+    submitButton().click()
+    await flushUi()
+    expect(messageWarningSpy).toHaveBeenCalledWith('请为「自选办理人」选择办理人')
+    expect(submitApprovalSpy).not.toHaveBeenCalled()
+
+    const picker = container!.querySelector('[data-testid="approval-requester-choice-picker-handler_1"]') as HTMLSelectElement
+    expect(picker).not.toBeNull()
+    picker.dispatchEvent(new Event('focus'))
+    await flushUi()
+    expect(searchApprovalDirectoryUsersSpy).toHaveBeenCalled()
+    picker.value = 'u_alpha'
+    picker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    submitButton().click()
+    await flushUi()
+    expect(submitApprovalSpy).toHaveBeenCalledTimes(1)
+    expect(submitApprovalSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        templateId: 'tpl_numfields',
+        requesterChoices: { handler_1: ['u_alpha'] },
+      }),
+    )
+  })
+
+  it('W1-1d: a route carrying BOTH an approval and a handler requester_choice node renders one row per node key; the header names both roles and only the handler row carries the 办理人 tag', async () => {
+    const mixed: ApprovalGraph = {
+      nodes: [
+        RC_GRAPH.nodes[0],
+        RC_GRAPH.nodes[1],
+        HANDLER_RC_GRAPH.nodes[1],
+        RC_GRAPH.nodes[2],
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'handler_1' },
+        { key: 'e3', source: 'handler_1', target: 'end' },
+      ],
+    }
+    await mountWithGraph(mixed)
+    const card = container!.querySelector('[data-testid="approval-requester-choice"]')
+    expect(card?.textContent).toContain('选择审批人 / 办理人')
+    const items = Array.from(container!.querySelectorAll('[data-testid="approval-requester-choice-item"]'))
+    expect(items).toHaveLength(2)
+    const approvalRow = items.find((item) => item.textContent?.includes('自选审批人'))
+    const handlerRow = items.find((item) => item.textContent?.includes('自选办理人'))
+    expect(approvalRow?.textContent).not.toContain('办理人')
+    expect(handlerRow?.textContent).toContain('办理人 · 选一人')
+    expect(container!.querySelector('[data-testid="approval-requester-choice-picker-approval_1"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-requester-choice-picker-handler_1"]')).not.toBeNull()
+  })
+
   it('opening the picker runs a scope-filtered directory search (role scope → roleIds param)', async () => {
     await mountView()
     chooserPicker().dispatchEvent(new Event('focus'))

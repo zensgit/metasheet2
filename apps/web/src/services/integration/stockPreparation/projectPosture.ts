@@ -33,6 +33,7 @@ export type StockPrepPostureKey =
   | 'not_pulled' // ⚪ 还没拉过
   | 'unknown' // ? 看不到 — 这一屏拿不到判断依据(§4.4 第三态,G4)
   | 'not_yours' // ⊘ 不归您做 — stepper 第④步(存档),对一线恒为此
+  | 'archived' // 已归档 — 项目表的登记行已归档(ADR adr-stock-prep-project-sheets-20261008 §5 「状态」,S3)
 
 export type StockPrepPostureTone = 'warning' | 'danger' | 'primary' | 'success' | 'neutral' | 'info'
 
@@ -46,6 +47,15 @@ export interface StockPrepPosture {
 }
 
 export interface StockPrepPostureInput {
+  /**
+   * S3 (ADR §5 「状态」, register R-37): the project's sheet is ARCHIVED in the server's registry.
+   * Checked FIRST, before every other input — 「已归档」 wins over a pending count, a missing part
+   * and even a run in flight, exactly as the server-side mirror (`projectOverviewPosture` in
+   * plugins/plugin-integration-core/lib/stock-preparation-project-overview.cjs) ranks it; the
+   * cross-language mirror block in StockPreparationProjectOverview.spec.ts drives both with the same
+   * inputs. Only a registry row can set it (the directory's `archived`); nothing remembers it.
+   */
+  archived?: boolean
   /** A sync run is in flight right now — takes priority over every count below. */
   busy?: boolean
   /** Rows in the confirmation ledger still waiting on a human, for this project. */
@@ -100,6 +110,13 @@ const READY: StockPrepPosture = Object.freeze({
   tone: 'success',
 })
 
+const ARCHIVED: StockPrepPosture = Object.freeze({
+  key: 'archived',
+  zh: '已归档',
+  en: 'Archived',
+  tone: 'neutral',
+})
+
 /**
  * THE one function every posture badge on the P0 surfaces calls.
  *
@@ -111,8 +128,12 @@ const READY: StockPrepPosture = Object.freeze({
  * is not. `notYours` is checked first because it is a hard override, not a state. Below `busy` the
  * branches are mutually exclusive by construction (ready requires `pulledRowCount > 0`), so their
  * relative order is documentation rather than behaviour.
+ *
+ * S3: `archived` comes before ALL of it (ADR §5: 「已归档」优先) — an archived project is not waiting on
+ * anyone, whatever its ledger still holds, and the overview's 「状态」 column says the same word.
  */
 export function stockPrepPosture(input: StockPrepPostureInput): StockPrepPosture {
+  if (input.archived === true) return ARCHIVED
   if (input.notYours) return NOT_YOURS
   if (input.busy) return RUNNING
   const pending = input.pendingDecisionCount ?? 0

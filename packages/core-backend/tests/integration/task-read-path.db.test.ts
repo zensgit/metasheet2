@@ -12,12 +12,18 @@ import { completeTask, countPending, createTask, listPending, listTasks } from '
 import { tasksRouter } from '../../src/routes/tasks'
 import { isOverdueOrToday, resolveViewerTimeZone } from '../../src/tasks/task-dates'
 import { taskMatchesView, type TaskView } from '../../src/tasks/task-access'
+import { orgMemberSeeds } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-read-path.db.test.ts requires EXPECT_DB=1')
 }
 
 const ORG_PREFIX = 'org_tasks_read_'
+
+// RULED(2026-10-07): [N2] an assignee other than the creator must be an active member of the
+// org (design §4.6), so a cell that names one seeds it here; the two afterAll hooks drop exactly
+// those rows.
+const orgMembers = orgMemberSeeds()
 
 function ids(label: string): { orgId: string; creator: string; me: string; other: string } {
   const stamp = randomUUID()
@@ -44,10 +50,12 @@ async function seedPastDue(taskId: string): Promise<void> {
 describe('tasks read path', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', [`${ORG_PREFIX}%`])
+    await orgMembers.drop()
   })
 
   it('gate 4 negative: a completed assignee stays in assigned and leaves pending and the overdue count', async () => {
     const { orgId, creator, me, other } = ids('g4neg')
+    await orgMembers.seed(orgId, [me, other])
     const created = await createTask({
       orgId,
       creatorId: creator,
@@ -72,6 +80,7 @@ describe('tasks read path', () => {
 
   it('gate 4 positive: an overdue open assignment is pending and counts as 1', async () => {
     const { orgId, creator, me, other } = ids('g4pos')
+    await orgMembers.seed(orgId, [me, other])
     const created = await createTask({
       orgId,
       creatorId: creator,
@@ -90,6 +99,7 @@ describe('tasks read path', () => {
     // Lock §13-4: /pending passes all_open; /pending-count uses default badge_scope overdue.
     // Gate 4's two cells are both already overdue, so they do not collapse those parameters.
     const { orgId, creator, me } = ids('split')
+    await orgMembers.seed(orgId, [me])
     const created = await createTask({
       orgId,
       creatorId: creator,
@@ -105,6 +115,7 @@ describe('tasks read path', () => {
 
   it('gate 5: one all-day task has the same dueAt bytes for UTC+14 and UTC-11 viewers', async () => {
     const { orgId, creator, me } = ids('g5')
+    await orgMembers.seed(orgId, [me])
     const created = await createTask({
       orgId,
       creatorId: creator,
@@ -171,6 +182,7 @@ function parseCell(name: string): { roles: string[]; view: TaskView; suffix: str
 describe('gate 19 view grid', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', ['org_g19_%'])
+    await orgMembers.drop()
   })
 
   const cells = [
@@ -242,6 +254,9 @@ describe('gate 19 view grid', () => {
       const assignees: string[] = []
       if (meInAssignees) assignees.push(me)
       if (othersAssigned) assignees.push(createdByMe ? other : `usrA_${stamp}`)
+      // [N2]: only the assignees the creator names besides themselves are looked up.
+      const named = assignees.filter((userId) => userId !== creator)
+      if (named.length > 0) await orgMembers.seed(orgId, named)
       const created = await createTask({
         orgId, creatorId: creator, title: '备料复核', assignees, completionMode: 'all',
       })
@@ -458,7 +473,7 @@ describe('gate 19 probes', () => {
         .set('Authorization', `Bearer ${actor.bearer}`)
         .send({})
       expect(completed.status).toBe(200)
-      expect(completed.body).toEqual({ done: true })
+      expect(completed.body).toEqual({ done: true, version: 2 })
     } finally {
       await dropProbeActor(actor)
     }

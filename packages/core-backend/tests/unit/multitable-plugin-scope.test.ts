@@ -806,7 +806,12 @@ describe('multitable plugin scope helper', () => {
     expect(hooks.length).toBeGreaterThanOrEqual(2)
     for (const hook of hooks) {
       expect(hook[1]).toContain('overwriteMode')
+      // S3: the host-owned overview stamp rides the same two destructures — dropping it from either
+      // would provision the overview as an ordinary, writable, deletable sheet.
+      expect(hook[1]).toMatch(/\bsystemKind\b/)
     }
+    // Both hooks are among the matches (the scoped one is the shipped plugin path, the bare one its fallback).
+    expect(new Set(hooks.map((hook) => hook[0].slice(0, hook[0].indexOf(':'))))).toEqual(new Set(['ensureObject', 'ensureObjectInScope']))
 
     // …and each forwards it on to the provisioning primitive rather than
     // destructuring it into oblivion.
@@ -814,6 +819,7 @@ describe('multitable plugin scope helper', () => {
     expect(forwards.length).toBeGreaterThanOrEqual(1)
     for (const call of forwards) {
       expect(call[0]).toContain('overwriteMode')
+      expect(call[0]).toMatch(/\bsystemKind\b/)
     }
   })
 

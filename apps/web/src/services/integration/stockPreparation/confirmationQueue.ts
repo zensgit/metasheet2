@@ -202,6 +202,16 @@ export interface StockPreparationOperatorProject {
    *  the system via 导出物料清单, from the values-free audit trail; see the directory's own
    *  `lastExportAtMayBeIncomplete` for whether a `null` here means "never" or "unknown". */
   lastExportAt?: string | null
+  /**
+   * S3 (ADR adr-stock-prep-project-sheets-20261008 §5 「首页与项目查询」, register R-37) — PRESENT ONLY
+   * when the server enumerated its project-sheet REGISTRY for this read (switch on, union opt-in).
+   * `archived`: true / false for a registered project, `null` for a row the registry does not know (a
+   * 「平台登记」-only project). The two counts are the registry's own bounded numbers — `null` until
+   * the overview refresh first stamped them, which a reader must not turn into 0.
+   */
+  archived?: boolean | null
+  pulledRowCount?: number | null
+  missingComponentsCount?: number | null
 }
 
 /**

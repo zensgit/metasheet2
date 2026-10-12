@@ -13,7 +13,7 @@
         font-size: 14px;
         line-height: 1.5;
         color: #333;
-        background-color: #f4f6fa;
+        background: var(--ms-bg-page, #f5f6f8);
       }
       #app, .harness-app {
         min-height: 100%;
@@ -73,8 +73,7 @@
       .attendance--overview {
         gap: 16px;
         padding: 16px 20px 24px;
-        background-color: #f4f6fa;
-        background-image: radial-gradient(ellipse 80% 46% at 50% -8%, rgba(51, 112, 255, 0.12), transparent 58%);
+        background: var(--ms-bg-page, #f5f6f8);
       }
       .attendance__header {
         display: flex;
@@ -92,15 +91,17 @@
         min-width: 0;
       }
       .attendance__title {
-        font-size: 18px;
+        font-size: var(--ms-font-size-page-title, 20px);
+        font-weight: var(--ms-font-weight-title, 600);
         line-height: 1.25;
-        margin: 0 0 2px;
+        margin: 0 0 4px;
+        color: var(--ms-text-1, #111827);
       }
       .attendance__subtitle {
         margin: 0;
-        color: #666;
-        font-size: 12px;
-        line-height: 1.35;
+        color: var(--ms-text-2, #4b5563);
+        font-size: 14px;
+        line-height: 1.45;
       }
       .harness-state-row {
         position: fixed;

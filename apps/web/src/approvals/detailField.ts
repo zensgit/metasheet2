@@ -2,6 +2,7 @@ import type { FormField, FormFieldType, FormOption, FormSchema } from '../types/
 import { getVisibleFormFields, isEmptyValue, pruneHiddenFormData } from './fieldVisibility'
 import { isRowDerivationActive } from './lineDerivation'
 import { formatRecordLinkDisplay } from './recordLinkField'
+import { unknownUserLabel } from './components/approvalPickerLabels'
 
 /**
  * Pure (Element-Plus-free) helpers for the `detail` / sub-form (明细/子表单) field type.
@@ -483,6 +484,80 @@ function displayListSeparator(isZh: boolean): string {
 }
 
 /**
+ * Test report 2026-10-08, T4b — the member ids a `user` (人员 / 联系人) snapshot value holds: a bare
+ * id (the picker's single value), an array of ids (Lock-2B multi), or a historical object carrying
+ * `id`. The Lock-2B development report (§3) keeps such enriched values readable but states that
+ * "display metadata is not authoritative", so ONLY `id` is read from an object — a stored name is
+ * never displayed. Same shapes as the server's `resolveFormUserValues` (ApprovalAssigneeResolver.ts).
+ */
+export function userFieldValueIds(value: unknown): string[] {
+  const entries = Array.isArray(value) ? value : [value]
+  const ids: string[] = []
+  for (const entry of entries) {
+    const raw = entry && typeof entry === 'object' && !Array.isArray(entry)
+      ? (entry as { id?: unknown }).id
+      : entry
+    if (typeof raw !== 'string') continue
+    const id = raw.trim()
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+  return ids
+}
+
+/**
+ * T4b — a `user` value rendered as display names, each id looked up through `resolveUserName` (the
+ * member surfaces pass the shared directory cache's `getResolvedUserName`). An id with no
+ * resolvable name — an inactive or nameless account, or a lookup still in flight — renders as the
+ * values-free unknown-user label, one label per id, so the names that DO resolve stay readable.
+ * A raw id, a stored display name, or "[object Object]" never renders; an empty selection is '-'.
+ */
+export function formatUserFieldValue(
+  value: unknown,
+  resolveUserName: ((id: string) => string | null) | undefined,
+  isZh = true,
+): string {
+  if (value === null || value === undefined || value === '') return '-'
+  if (Array.isArray(value) && value.length === 0) return '-'
+  const ids = userFieldValueIds(value)
+  if (ids.length === 0) return unknownUserLabel(isZh)
+  return ids
+    .map((id) => resolveUserName?.(id) || unknownUserLabel(isZh))
+    .join(displayListSeparator(isZh))
+}
+
+/**
+ * T4b — every member id held by `user` values in a snapshot, deduplicated: top-level `user` fields,
+ * plus (unless `includeDetailColumns` is false) the `user` columns of `detail` (明细) rows. Callers
+ * hand the result to `ensureUserNamesResolved` from a watch — never from a computed.
+ */
+export function collectFormUserIds(
+  formSchema: FormSchema | null | undefined,
+  formSnapshot: Record<string, unknown> | null | undefined,
+  options: { includeDetailColumns?: boolean } = {},
+): string[] {
+  const snapshot = formSnapshot ?? {}
+  const ids = new Set<string>()
+  for (const field of formSchema?.fields ?? []) {
+    if (!Object.prototype.hasOwnProperty.call(snapshot, field.id)) continue
+    const value = snapshot[field.id]
+    if (field.type === 'user') {
+      for (const id of userFieldValueIds(value)) ids.add(id)
+      continue
+    }
+    if (field.type !== 'detail' || options.includeDetailColumns === false) continue
+    if (!Array.isArray(field.columns) || !Array.isArray(value)) continue
+    const userColumns = field.columns.filter((column) => column.type === 'user')
+    for (const row of value) {
+      if (!row || typeof row !== 'object' || Array.isArray(row)) continue
+      for (const column of userColumns) {
+        for (const id of userFieldValueIds((row as Record<string, unknown>)[column.id])) ids.add(id)
+      }
+    }
+  }
+  return [...ids]
+}
+
+/**
  * Flag-OFF / legacy attachment display: when the new attachment pipeline is OFF, frozen snapshot
  * values may still be plain strings (B2-28 era notes) or objects `{ name | fileName | filename }`.
  * Render those without calling the attachment refs endpoint. Opaque id arrays from the new pipeline
@@ -518,13 +593,21 @@ export function formatLegacyAttachmentValue(value: unknown, isZh = true): string
  * same way and joins with '、'; `date` renders a strict `YYYY-MM-DD` civil string date-only via
  * `formatCivilDate` (timezone-independent) and anything else via `formatDisplayDate`, which
  * `datetime` always uses (pass-through on unparsable);
- * `number` localizes finite values via zh-CN grouping. Everything else (text/textarea/user)
- * stringifies as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
+ * `number` localizes finite values via zh-CN grouping. `user` renders display names through
+ * `formatUserFieldValue` (T4b — never the stored ids). Everything else (text/textarea) stringifies
+ * as-is. `attachment` uses `formatLegacyAttachmentValue` so flag-OFF legacy
  * string/object snapshots remain readable without the new refs endpoint.
  */
-function formatDisplayValue(field: FormField, value: unknown, isZh: boolean): string {
+function formatDisplayValue(
+  field: FormField,
+  value: unknown,
+  isZh: boolean,
+  resolveUserName?: (id: string) => string | null,
+): string {
   if (value === null || value === undefined || value === '') return '-'
   switch (field.type) {
+    case 'user':
+      return formatUserFieldValue(value, resolveUserName, isZh)
     case 'select':
       return matchOptionLabel(field.options, value)
     case 'multi-select': {
@@ -609,6 +692,12 @@ export interface BuildDisplayFieldsOptions {
    * keep today's output; the member surfaces pass `useLocale().isZh`.
    */
   isZh?: boolean
+  /**
+   * Test report 2026-10-08, T4b: the display-name lookup for `user` values (the member surfaces pass
+   * the shared directory cache's `getResolvedUserName`). Absent, every `user` value renders the
+   * values-free unknown-user label — never the stored id.
+   */
+  resolveUserName?: (id: string) => string | null
 }
 
 export function buildDisplayFields(
@@ -649,7 +738,7 @@ export function buildDisplayFields(
     result.push({
       key: field.id,
       label: field.label || field.id,
-      value: formatDisplayValue(field, snapshot[field.id], isZh),
+      value: formatDisplayValue(field, snapshot[field.id], isZh, options.resolveUserName),
     })
   }
 
@@ -678,6 +767,7 @@ export function summaryFields(
   formSnapshot: Record<string, unknown> | null | undefined,
   limit = 3,
   isZh = true,
+  resolveUserName?: (id: string) => string | null,
 ): DisplayField[] {
   const fields = formSchema?.fields
   if (!Array.isArray(fields) || fields.length === 0) return []
@@ -691,7 +781,7 @@ export function summaryFields(
   )
   if (eligibleFieldIds.size === 0) return []
 
-  return buildDisplayFields(formSchema, formSnapshot, { isZh })
+  return buildDisplayFields(formSchema, formSnapshot, { isZh, resolveUserName })
     .filter((field) => eligibleFieldIds.has(field.key))
     .slice(0, limit)
 }

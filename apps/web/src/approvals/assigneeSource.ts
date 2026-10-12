@@ -140,8 +140,10 @@ export function nodeAssigneeSourceSummary(node: ApprovalNode, schema?: FormSchem
   }
   if (node.type === 'cc') {
     const cfg = node.config as CcNodeConfig
-    if (!isZh) return cfg.targetType === 'role' ? 'CC roles' : 'CC members'
-    return `抄送${cfg.targetType === 'role' ? '角色' : '成员'}`
+    // Lock-1 OD-L1-7(a): 'group' (用户组) joins user/role as a cc target kind; the roster label is
+    // the lock's own "`user_group` (cc) | 用户组" row.
+    if (!isZh) return cfg.targetType === 'role' ? 'CC roles' : cfg.targetType === 'group' ? 'CC groups' : 'CC members'
+    return `抄送${cfg.targetType === 'role' ? '角色' : cfg.targetType === 'group' ? '用户组' : '成员'}`
   }
   if (node.type === 'condition') {
     // G-B2-19: with a schema in hand, the honest generic line gains the readable branch

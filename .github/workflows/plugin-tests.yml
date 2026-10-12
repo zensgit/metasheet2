@@ -125,13 +125,10 @@ jobs:
             scripts/ops/dingtalk-oauth-stability-workflow-contract.test.mjs
 
   test:
-    # Runner routing pilot (same shape as PR #4449 for web-tests). Set the repository variable
-    # MS2_PLUGIN_RUNNER to a self-hosted runner label to move this job off GitHub-hosted runners;
-    # unset it for instant fallback to ubuntu-latest. This job is the repository's biggest Actions
-    # consumer (~56 runner-minutes per run on the 20.x leg; ~62% of a busy day's minutes), which
-    # started to bill when the repository went private on 2026-10-07. Default behaviour is
-    # unchanged while the variable is unset.
-    runs-on: ${{ vars.MS2_PLUGIN_RUNNER || 'ubuntu-latest' }}
+    # Public-repository CI runs on an isolated GitHub-hosted VM, not a persistent development host.
+    runs-on: ubuntu-latest
+    # Leave headroom for the full integration suite without using the six-hour default timeout.
+    timeout-minutes: 150
 
     strategy:
       fail-fast: false
@@ -153,6 +150,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+
+      - name: GitHub-hosted runner routing contract
+        run: node --test scripts/ops/github-hosted-runner-routing.test.mjs
 
       # R12-C: the Global History flag manifest is an operator contract — the status helper reads it to
       # decide safe flag combinations. This node:test (no deps, no DB) is source-derived: it fails if a
@@ -346,6 +346,12 @@ jobs:
       # (directory real-DB step). Dropping either point silently disables the reactivation proof.
       - name: PB4-4 reactivation CI wiring contract
         run: node --test scripts/ops/pb4-4-reactivation-ci-wiring.test.mjs
+
+      # W1-6 CI two-point wiring contract (no DB): the anchor-in-transaction suite (per-writer rollback
+      # + unique-index barrier proofs) must stay wired into BOTH vitest.config.ts (exclude) AND
+      # plugin-tests.yml (directory real-DB step). Dropping either point silently disables the proof.
+      - name: W1-6 anchor-in-transaction CI wiring contract
+        run: node --test scripts/ops/w1-6-anchor-in-transaction-ci-wiring.test.mjs
 
       # B4 CI two-point wiring contract (no DB): the department-bindings FK-chain suite must stay
       # wired into BOTH vitest.config.ts (exclude) AND plugin-tests.yml (directory real-DB step).
@@ -854,6 +860,7 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'
@@ -896,15 +903,16 @@ jobs:
       # reporter emits ANSI colour codes even when stdout is not a TTY, which is fragile to grep.
       # Bump EXPECTED_OPS_TESTS_COUNT in the SAME PR that adds or removes a test in this directory —
       # it is the SUM across every *.test.mjs file the glob currently matches, not just the one your
-      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (31) +
+      # PR touches. As of this count: stock-preparation-scheduled-pull.test.mjs (34) +
       # stock-preparation-synth-large-bom.test.mjs (11) + attendance-window-runner-mint-token.test.mjs
-      # (6) = 48. Get each file's own count locally with
+      # (6) + stock-preparation-migrate-legacy-operator-role.test.mjs (44) = 95. Get each file's own
+      # count locally with
       # `node --test --test-reporter=tap scripts/ops/__tests__/<file>.test.mjs 2>&1 | grep '^# tests'`.
       - name: Run scripts/ops/__tests__ node:test suites
         shell: bash
         run: |
           set -euo pipefail
-          EXPECTED_OPS_TESTS_COUNT=48
+          EXPECTED_OPS_TESTS_COUNT=95
           if ! ops_out="$(node --test --test-reporter=tap scripts/ops/__tests__/*.test.mjs 2>&1)"; then
             printf '%s\n' "$ops_out"
             echo "scripts/ops/__tests__ suites: node --test exited non-zero (output above)" >&2
@@ -1085,6 +1093,9 @@ jobs:
           user: postgres
       - name: Create test database
         run: |
+          # A self-hosted runner keeps its PostgreSQL service and databases between jobs (a GitHub-hosted
+          # runner is a fresh VM). Recreate the test database so every run migrates from empty.
+          dropdb -U postgres --if-exists metasheet_test
           createdb -U postgres metasheet_test || true
 
       - name: Run private-db backend drain proof
@@ -1148,6 +1159,12 @@ jobs:
       # Migrations above must already have applied the zzzz20260824*,
       # zzzz20260825120000, and zzzz20260826150000 files; these suites do not
       # mutate kysely_migration.
+      # elearning-role-templates.db.test.ts also carries the S5a stock-prep role-template
+      # migration (zzzz20261010124500) and legacy floor-role move-script cases (R-39), and the
+      # owner-2026-10-12 cases: the frontline display-name migration (zzzz20261012090000) and the
+      # move script's option-1 split step (effective permissions through rbac/service.ts, routed
+      # to the test transaction by a db/pg mock local to that file); every one of them runs inside
+      # a transaction it rolls back.
       # DATABASE_URL is required (bash :? and each suite throws).
       - name: Run elearning V0.1 content/assessment schema gate
         id: elearning-v01-content-assessment-schema-gate
@@ -1414,10 +1431,12 @@ jobs:
             tests/integration/multitable-crossbase-mirror-writethrough-concurrency-realdb.test.ts \
             tests/integration/multitable-fieldperm-write-gate-patch-realdb.test.ts \
             tests/integration/multitable-patch-batchid-echo-realdb.test.ts \
+            tests/integration/multitable-range-fill-realdb.test.ts \
             tests/integration/stock-prep-substrate-p1a-realdb.test.ts \
             tests/integration/stock-prep-w2-additive-fields-realdb.test.ts \
             tests/integration/stock-prep-w2-scoped-repair-realdb.test.ts \
             tests/integration/stock-preparation-fieldperm-write-gate-realdb.test.ts \
+            tests/integration/stock-preparation-prep-line-export-tenant-wall-realdb.test.ts \
             tests/integration/multitable-lock12-partialsuccess-shared-batch-realdb.test.ts \
             tests/integration/multitable-permmatrix-b3-mgmt-403-matrix-realdb.test.ts \
             tests/integration/multitable-w13-fieldperm-writegate-bridge-realdb.test.ts \
@@ -1742,6 +1761,7 @@ jobs:
             tests/integration/local-directory-org-archive-readonly.db.test.ts \
             tests/integration/local-directory-org-cycle-detection.db.test.ts \
             tests/integration/directory-local-integration-reactivation.db.test.ts \
+            tests/integration/local-directory-anchor-in-transaction.db.test.ts \
             tests/integration/directory-department-bindings.db.test.ts \
             tests/integration/org-directory-routing-policy-schema.db.test.ts \
             tests/integration/org-directory-routing-policy-resolver.db.test.ts \
@@ -1857,6 +1877,18 @@ jobs:
         run: |
           pnpm --filter @metasheet/web build
 
+      - name: Rehearse attendance QA self-service fixtures in a disposable database
+        env:
+          NODE_ENV: test
+        run: |
+          attendance_qa_database="attendance_qa_ci_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          createdb --host=localhost --username=postgres "$attendance_qa_database"
+          trap 'dropdb --host=localhost --username=postgres --if-exists "$attendance_qa_database"' EXIT
+          export DATABASE_URL="postgresql://postgres@localhost:5432/$attendance_qa_database"
+          export ATTENDANCE_TEST_DATABASE_URL="$DATABASE_URL"
+          pnpm --filter @metasheet/core-backend migrate
+          pnpm --filter @metasheet/core-backend exec tsx ../../scripts/ops/attendance-selfservice-fixture-verify.mts
+
       - name: Run attendance integration tests
         # id added #4612 gate4 round 4 (P3-4): a stable id lets the new
         # attendance-w4c2-ci-wiring.test.mjs guard locate this step without
@@ -1876,6 +1908,9 @@ jobs:
           pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run \
             tests/integration/attendance-report-cleaning-proposal.db.test.ts \
             tests/integration/attendance-plugin.test.ts \
+            tests/integration/attendance-live-punch-order.db.test.ts \
+            tests/integration/attendance-online-punch-server-time.db.test.ts \
+            tests/integration/attendance-online-punch-replay.db.test.ts \
             tests/integration/attendance-approval-action-authorization.db.test.ts \
             tests/integration/attendance-approval-flow-dynamic-kind-s7-1.db.test.ts \
             tests/integration/attendance-approval-direct-manager-s7-2.db.test.ts \

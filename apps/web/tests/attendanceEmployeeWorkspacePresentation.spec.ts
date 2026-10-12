@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createApp, nextTick } from 'vue'
 import { describe, expect, it } from 'vitest'
 import AttendanceEmployeeWorkspace from '../src/views/attendance/AttendanceEmployeeWorkspace.vue'
@@ -96,6 +98,48 @@ describe('attendanceEmployeeWorkspacePresentation', () => {
     expect(resolveHeroPunchEmphasis({ checkIn: null, checkOut: null })).toBe('check_in')
     expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: null })).toBe('check_out')
     expect(resolveHeroPunchEmphasis({ checkIn: '09:18', checkOut: '18:02' })).toBe('complete')
+  })
+
+  it('shows not-clocked-in and emphasizes check-in when today has no timeline', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'),
+      tr: en,
+      heroTimeline: null,
+      workbenchRecordStatus: null,
+      workbenchStatusDescription: 'No attendance record for today yet.',
+      selfServiceNeedsSetupHint: false,
+    })
+    app.mount(container)
+    await nextTick()
+
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Not clocked in yet')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('check_in')
+    expect(container.querySelector('[data-attendance-hero-cta="check_in"]')?.getAttribute('data-attendance-hero-next')).toBe('true')
+    expect(container.querySelector('[data-attendance-hero-cta="check_out"]')?.getAttribute('data-attendance-hero-next')).toBeNull()
+    expect(container.querySelector('[data-testid="attendance-hero-timeline"]')).toBeNull()
+    expect(container.textContent).toContain('No attendance record for today yet.')
+    expect(container.textContent).not.toContain('Clocked out')
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows unknown today status without suggesting a punch or fabricating zero hours', async () => {
+    const container = document.createElement('div')
+    const app = createApp(AttendanceEmployeeWorkspace, {
+      ...buildEmployeeWorkspaceProps('empty'), tr: en, heroTimeline: null,
+      todayStateHint: 'Loading today’s status…',
+    })
+    app.mount(container)
+    await nextTick()
+    expect(container.querySelector('.attendance-ew__clock-status')?.textContent).toContain('Loading today’s status…')
+    expect(container.querySelector('[data-attendance-clock-state]')?.getAttribute('data-attendance-clock-state')).toBe('unknown')
+    expect(container.querySelector('[data-attendance-hero-next="true"]')).toBeNull()
+    expect(container.querySelector('[data-selfservice-card="status"]')?.textContent).not.toContain('0m')
+    expect(container.querySelector<HTMLButtonElement>('[data-attendance-hero-cta="check_in"]')?.disabled).toBe(false)
+    app.unmount()
   })
 
   it('keeps the makeup 面性 icon on 缺卡 / anomaly rows and varies other todo marks', () => {
@@ -304,6 +348,17 @@ describe('employee self-balance card copy', () => {
     expect(text).toContain('已过期 0天')
     expect(text).not.toContain('分钟剩余')
     unmount()
+  })
+
+  it('uses the shared calm surface tokens without a decorative page wash', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/views/attendance/AttendanceEmployeeWorkspace.vue'), 'utf8')
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*border:\s*1px solid var\(--ms-border-light\)/)
+    expect(css).toMatch(/\.attendance__hero-punch\s*\{[^}]*box-shadow:\s*var\(--ms-shadow-card\)/)
+    expect(css).toMatch(/\.attendance__btn--primary\s*\{[^}]*background:\s*var\(--ms-color-primary\)/)
+    expect(css).toMatch(/\.attendance-ew__primary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1\.6fr\) minmax\(0,\s*1fr\)/)
+    expect(css).not.toMatch(/radial-gradient/)
+    expect(css).not.toMatch(/#3370ff/)
+    expect(css).toMatch(/\.attendance-ew__history-filters-panel\s*\{[^}]*minmax\(140px,\s*1fr\)/)
   })
 
   it('keeps the empty-copy path when no summary is loaded', async () => {

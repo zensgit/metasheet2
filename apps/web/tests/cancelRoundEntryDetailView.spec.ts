@@ -376,7 +376,8 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     await flushUi()
     expect(executeActionSpy).not.toHaveBeenCalled()
     expect(getApprovalMock).toHaveBeenCalledWith('apv_orig')
-    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-77/cancel-round/actions', { action: 'approve' }]])
+    // F1: the decision names the round the pre-read confirmed
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-77/cancel-round/actions', { action: 'approve', expectedRoundId: 'apr_1' }]])
     // minimal success body ⇒ nothing published from it; the detail is re-read instead
     expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
     expect(elSuccessSpy).toHaveBeenCalledWith('审批已通过')
@@ -442,6 +443,26 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     expect(attendanceCalls()).toHaveLength(0)
     expect(executeActionSpy).not.toHaveBeenCalled()
     expect(dialogErrors().join('|')).toContain('这条撤销申请已不在审批中,或已有更新的撤销申请;未执行任何操作')
+    expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
+    expect(loadHistorySpy).toHaveBeenCalledWith('cr_1')
+  })
+
+  it('the pre-read matched, but the SERVER refuses the named round as no longer current (409): the dialog says nothing was done (not the withdraw copy) and the page re-reads', async () => {
+    mockAccess.value = { isAdmin: false, permissions: ['attendance:approve'] }
+    actionResponse = () =>
+      jsonResponse(409, { ok: false, error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' } })
+    await mountView()
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    q(container!, 'approval-approve-button')!.click()
+    await flushUi()
+    q(container!, 'approval-action-dialog-confirm')!.click()
+    await flushUi()
+    expect(attendanceCalls()).toEqual([['/api/attendance/requests/req-77/cancel-round/actions', { action: 'approve', expectedRoundId: 'apr_1' }]])
+    expect(executeActionSpy).not.toHaveBeenCalled()
+    expect(dialogErrors().join('|')).toContain('这条撤销申请已不在审批中,或已有更新的撤销申请;未执行任何操作')
+    expect(dialogErrors().join('|')).not.toContain('已有审批人处理过')
+    expect(elSuccessSpy).not.toHaveBeenCalled()
     expect(loadDetailSpy).toHaveBeenCalledWith('cr_1')
     expect(loadHistorySpy).toHaveBeenCalledWith('cr_1')
   })

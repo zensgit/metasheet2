@@ -688,6 +688,98 @@ async function ensureStockPreparationFillView({ provisioning, projectId, objectI
   }
 }
 
+// ---------------------------------------------------------------------------
+// 待填写视图 — S1 (ADR adr-stock-prep-project-sheets-20261008 §2 O1): the view a PROJECT SHEET gets
+// beside its fill view, and the one the (S3) overview deep-links to per project.
+//
+// WHAT IT SHOWS: live rows (`active` is true) on which the human band is still open — 采购完成 is not
+// true OR 仓库完成 is not true (`templates.cjs` `procurementDone` / `warehouseDone`, the two boolean
+// human_preserved columns the ADR names). It is DISPLAY, NOT PERMISSION, exactly like the fill view
+// above; and like it, it is the plugin's OWN view id and refuses the host default-view id.
+//
+// WHY A NESTED GROUP. "live AND (a OR b)" is not expressible as one flat conjunction; the host filter
+// model is a recursive AND/OR tree (`apps/web/src/multitable/composables/useMultitableGrid.ts`
+// FilterGroup, mirrored from the backend), so the inner OR rides as a sub-group of the root AND.
+//
+// ONLY CALLED FROM THE PROJECT-SHEET CREATE PATH (stock-preparation-project-targets.cjs). It is not
+// wired into `ensureStockPreparationTarget`, so the canonical and sandbox create legs are byte-
+// identical to what they were before S1.
+// ---------------------------------------------------------------------------
+const STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID = 'prep-todo'
+const STOCK_PREPARATION_TODO_VIEW_LABEL = Object.freeze({ label: 'Stock Preparation To Fill', labelZh: '待填写' })
+const STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS = Object.freeze(['procurementDone', 'warehouseDone'])
+
+function pickTodoViewName({ locale } = {}) {
+  const resolved = locale === undefined ? resolveTemplateLabelLocale() : locale
+  return String(resolved).toLowerCase().startsWith('zh') ? STOCK_PREPARATION_TODO_VIEW_LABEL.labelZh : STOCK_PREPARATION_TODO_VIEW_LABEL.label
+}
+
+function buildStockPreparationTodoViewDescriptor({ provisioning, projectId, objectId, locale } = {}) {
+  const physical = (fieldId) => provisioning.getFieldId(projectId, objectId, fieldId)
+  return {
+    id: STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+    objectId,
+    name: pickTodoViewName({ locale }),
+    type: 'grid',
+    hiddenFieldIds: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.map(physical),
+    sortInfo: { rules: STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS.map((fieldId) => ({ fieldId: physical(fieldId), desc: false })) },
+    filterInfo: {
+      conjunction: 'and',
+      conditions: [
+        { fieldId: physical(STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID), operator: 'is', value: true },
+        {
+          conjunction: 'or',
+          conditions: STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS.map((fieldId) => ({
+            fieldId: physical(fieldId),
+            operator: 'isNot',
+            value: true,
+          })),
+        },
+      ],
+    },
+    // Values-free provenance: ids and counts only.
+    config: {
+      stockPreparation: {
+        todoView: {
+          logicalId: STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+          hiddenFieldCount: STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS.length,
+          openFlagFieldCount: STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS.length,
+          filtersActiveOnly: true,
+        },
+      },
+    },
+  }
+}
+
+async function ensureStockPreparationTodoView({ provisioning, projectId, objectId, sheetId, locale, template } = {}) {
+  if (!provisioning || typeof provisioning.ensureView !== 'function' || typeof provisioning.getFieldId !== 'function') {
+    return { created: false, skipped: 'api_unavailable', viewId: null }
+  }
+  if (!sheetId) return { created: false, skipped: 'sheet_unknown', viewId: null }
+  const resolvedTemplate = template || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+  const templateIds = new Set((resolvedTemplate.fields || []).map((field) => field.id))
+  const requiredIds = [
+    ...STOCK_PREPARATION_FILL_VIEW_HIDDEN_FIELD_IDS,
+    ...STOCK_PREPARATION_FILL_VIEW_SORT_FIELD_IDS,
+    STOCK_PREPARATION_FILL_VIEW_ACTIVE_FILTER_FIELD_ID,
+    ...STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS,
+  ]
+  if (requiredIds.some((fieldId) => !templateIds.has(fieldId))) {
+    return { created: false, skipped: 'template_mismatch', viewId: null }
+  }
+  const descriptor = buildStockPreparationTodoViewDescriptor({ provisioning, projectId, objectId, locale })
+  if (descriptor.id === STOCK_PREPARATION_DEFAULT_VIEW_LOGICAL_ID || descriptor.id === STOCK_PREPARATION_FILL_VIEW_LOGICAL_ID) {
+    throw new StockPreparationTargetProvisioningError(
+      409,
+      'TODO_VIEW_MUST_NOT_OVERWRITE_SIBLING',
+      'the stock-preparation to-fill view may never be upserted onto the default or fill view id',
+      { objectId },
+    )
+  }
+  const view = await provisioning.ensureView({ projectId, sheetId, descriptor })
+  return { created: true, skipped: null, viewId: view && view.id ? String(view.id) : null }
+}
+
 // ONE CLASSIFIER FOR A FILL-VIEW FAILURE, shared by the create leg and the repair leg so the two
 // cannot drift on the question "is a failed display view worth failing a committed schema write?".
 //
@@ -1243,6 +1335,11 @@ module.exports = {
   ensureManagedTableDefaultView,
   ensureStockPreparationFillView,
   buildStockPreparationFillViewDescriptor,
+  // S1 待填写视图 (project sheets only; see its header).
+  STOCK_PREPARATION_TODO_VIEW_LOGICAL_ID,
+  STOCK_PREPARATION_TODO_VIEW_OPEN_FLAG_FIELD_IDS,
+  ensureStockPreparationTodoView,
+  buildStockPreparationTodoViewDescriptor,
   summarizeStockPreparationTargetReadiness,
   // THE ONE field-existence probe (db / computed / computed_scope_unavailable), exported so the
   // dry-run/apply plan layer runs the SAME probe readiness runs instead of growing a second "does

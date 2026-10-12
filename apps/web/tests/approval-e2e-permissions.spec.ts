@@ -1260,7 +1260,9 @@ describe('Approval E2E Permissions', () => {
     it('clicking return opens dialog and submits with targetNodeKey', async () => {
       setMockPermissions(['approvals:read', 'approvals:act'])
       routeParams = { id: 'apv_pending_1' }
-      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2' })
+      // The instance belongs to the template loaded below: since test report 2026-10-08 T4cd only an
+      // instance's OWN template may name its nodes (a different one left in the store would not).
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_2', templateId: 'tpl_modes' })
       mockHistoryRef.value = mockReturnHistory()
       mockActiveTemplate.value = mockTemplateWithModes()
       executeActionSpy.mockResolvedValue(mockPendingApproval())
@@ -1346,7 +1348,8 @@ describe('Approval E2E Permissions', () => {
     it('renders return event in timeline with metadata', async () => {
       setMockPermissions(['approvals:read'])
       routeParams = { id: 'apv_pending_1' }
-      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1' })
+      // Own template (see the note in 'clicking return opens dialog…' above).
+      mockActiveApproval.value = mockPendingApproval({ currentNodeKey: 'approval_1', templateId: 'tpl_modes' })
       mockHistoryRef.value = mockReturnHistory()
       mockActiveTemplate.value = mockTemplateWithModes()
       await mountDetailView()

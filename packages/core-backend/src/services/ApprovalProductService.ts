@@ -75,6 +75,7 @@ import {
   isApprovalAddSignMode,
   type ApprovalAddSignAggregation,
   type ApprovalAddSignMode,
+  isApprovalCcTargetType,
 } from '../types/approval-product'
 import {
   ADD_SIGN_APPENDED_ROUND_METADATA_KEY,
@@ -83,6 +84,8 @@ import {
 } from './approval-add-sign-after'
 import {
   ApprovalGraphExecutor,
+  type ApprovalCcEvent,
+  readGroupMemberIdsSnapshot,
   type ApprovalGraphAssignment,
   type ApprovalGraphAssignmentResolver,
   type ApprovalGraphAutoApprovalEvent,
@@ -109,6 +112,7 @@ import {
   serializeApprovalDesignatedFallbackEligibility,
   type ApprovalDesignatedFallbackEligibilitySnapshot,
 } from './approval-designated-fallback-eligibility'
+import { computeReturnableNodeKeys } from './approval-return-targets'
 import {
   inheritSequentialQueueMetadata,
   isSequentialQueueActive,
@@ -4045,7 +4049,13 @@ function normalizeApprovalGraph(
         }
         break
       case 'cc':
-        if ((node.config.targetType !== 'user' && node.config.targetType !== 'role')
+        // Lock-1 §K1 / OD-L1-7(a) — the cc half's OWN normalize path ("cc is a second contract,
+        // not a rider"): the accepted set is exactly APPROVAL_CC_TARGET_TYPES ('user' | 'role' |
+        // 'group'), enumerated, never permissive (G-4). Whether a 'group' id is a REAL group bound
+        // to the publishing org is the PUBLISH gate's job (`assertUserGroupSourcesBoundToOrg`,
+        // same split as the approver `user_group` source) — normalize stays a shape check so a
+        // stored draft remains readable/re-saveable while being fixed.
+        if (!isApprovalCcTargetType(node.config.targetType)
           || !Array.isArray(node.config.targetIds)
           || node.config.targetIds.some((entry) => !isNonEmptyString(entry))) {
           failValidation(context, `approvalGraph.nodes[${index}].config must define targetType and targetIds`)
@@ -4184,11 +4194,12 @@ function normalizeApprovalGraph(
             context,
             `${handlerPath}.assigneeSources`,
           )!
-          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the SEVEN kinds
-          // in HANDLER_ASSIGNEE_SOURCE_KINDS. `continuous_managers` (corpus C-2 approver-only) and every
-          // forward Lock-1 kind (requester_choice, user_group, …) are rejected until their own slice
-          // admits them (§1.5 "each row lands in the same slice as its kind"). Rejecting on the KIND, not
-          // silently dropping it, is the fail-closed gate G-13 tests.
+          // §1.5 / OD-L3-6(a) / M4: the per-node-type registry — a handler admits exactly the kinds in
+          // HANDLER_ASSIGNEE_SOURCE_KINDS (base seven + Lock-2's two contact rows + Lock-3 §1.5's three
+          // forward rows `user_group` / `requester_choice` / `dept_head_at_level`, landed by W1-1d).
+          // `continuous_managers` (corpus C-2 approver-only), `prior_node_approver` (K3) and
+          // `continuous_dept_heads` (K4) stay rejected — §1.5 names them "do NOT". Rejecting on the
+          // KIND, not silently dropping it, is the fail-closed gate G-13 tests.
           for (const source of assigneeSources) {
             if (!(HANDLER_ASSIGNEE_SOURCE_KINDS as readonly string[]).includes(source.kind)) {
               throw new ServiceError(
@@ -4780,11 +4791,29 @@ function toApprovalTemplateVersionDetailDTO(bundle: TemplateBundle): ApprovalTem
   }
 }
 
-function toUnifiedApprovalDTO(
+// Exported ONLY as a no-DB test seam (approval-return-targets-carriers.test.ts proves the
+// action-response carrier below); `getApproval` in this module remains its caller.
+export function toUnifiedApprovalDTO(
   row: ApprovalInstanceRow,
   assignments: ApprovalAssignmentDTO[],
   frozenFormSchema?: FormSchema | null,
+  // The instance's OWN frozen runtime graph (`approval_published_definitions.runtime_graph`, the raw
+  // stored blob), when the caller has it — the one input `returnableNodeKeys` needs beyond the row.
+  runtimeGraph: unknown = null,
 ): UnifiedApprovalDTO {
+  // The server-computed 退回 target list (see `computeReturnableNodeKeys` for the contract) — shipped
+  // on the ACTION response too, not only the detail read, because the FE store publishes an action
+  // response into the slot the detail read fills: a builder that omitted it would flip the field to
+  // `undefined` (the client's own fallback) the moment an approver acts. Spread only when computed.
+  const returnableNodeKeys = computeReturnableNodeKeys({
+    runtimeGraph,
+    formSnapshot: row.form_snapshot,
+    requesterSnapshot: row.requester_snapshot,
+    workflowKey: row.workflow_key,
+    currentNodeKey: row.current_node_key,
+    status: row.status,
+    metadata: row.metadata,
+  })
   // Surface `currentNodeKeys` when the instance is inside a parallel region so
   // consumers (frontend timeline, callers checking `.length > 1`) can detect
   // parallel state without peeking at metadata. When there's no parallel
@@ -4820,6 +4849,7 @@ function toUnifiedApprovalDTO(
     ...(frozenFormSchema ? { formSchema: frozenFormSchema } : {}),
     currentNodeKey: row.current_node_key,
     ...(currentNodeKeys ? { currentNodeKeys } : {}),
+    ...(returnableNodeKeys ? { returnableNodeKeys } : {}),
     assignments,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -5449,15 +5479,19 @@ export function runtimeGraphUsesManagerChain(runtimeGraph: RuntimeGraph): boolea
  * class R-13 names: a graph using ONLY `dept_head_at_level` would never bake `deptHeadChainIds`,
  * so the resolver's positional read would see `undefined` and resolve empty — indistinguishable
  * from "no head at that level" and liable to silently auto-approve under
- * `emptyAssigneePolicy:'auto-approve'`. Node-type is `approval`-only (§2.3 registry row: neither
- * kind is admitted on a `handler` node in this slice — Lock-3 §1.5's forward ADMIT for K5-b on
- * handler is deliberately NOT landed here; see the `dept_head_at_level` resolver arm comment).
+ * `emptyAssigneePolicy:'auto-approve'`. Node types `approval` AND `handler` (Lock-3 §1.5 forward
+ * row, landed by W1-1d: "`dept_head_at_level` (K5-b) ADMIT" on a handler) — a handler using ONLY
+ * `dept_head_at_level` must bake `deptHeadChainIds` too, else its positional read sees `undefined`,
+ * resolves EMPTY and the handler fails `APPROVAL_ASSIGNEE_EMPTY` at dispatch (the R-13 silent-skip
+ * class; a handler has no empty-assignee policy to fall to). `continuous_dept_heads` is NOT
+ * admitted on a handler (rejected at authoring), so reading it here for a handler is unreachable
+ * and merely keeps the predicate node-type-symmetric like `runtimeGraphUsesManagerChain`.
  * `kind` is read structurally so this works before the kind is added to the typed union (same
  * posture as `runtimeGraphUsesManagerChain`).
  */
 export function runtimeGraphUsesDeptHeadChain(runtimeGraph: RuntimeGraph): boolean {
   return runtimeGraph.nodes.some((node) => {
-    if (node.type !== 'approval') return false
+    if (node.type !== 'approval' && node.type !== 'handler') return false
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) return false
@@ -5579,23 +5613,44 @@ export function collectRuntimeGraphPriorNodeApproverTargets(runtimeGraph: Runtim
 }
 
 /**
- * Lock-1 §K1: every group id referenced by a `user_group` source, over ANY graph — typed on the
- * plain `ApprovalGraph` shape (not `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors
- * above: the publish HARD GATE (`assertUserGroupSourcesBoundToOrg`) must run BEFORE
- * `buildRuntimeGraph` (on the same `approvalGraph` the other publish-time authoring gates read),
- * while the create-time freeze runs AFTER (`asRuntimeGraph`'s published/frozen graph) —
- * `RuntimeGraph extends ApprovalGraph`, so one function structurally serves both call sites. This
- * is the ONE opt-in gate in the `runtimeGraphUsesManagerChain` family that is keyed to
- * `node.type === 'approval'` (§2.3 registry: `user_group` is admitted on `approval` only this
- * slice — cc-as-recipient, OD-L1-7, is a SEPARATE contract deferred to its own slice, so there is
- * no cc-node group shape to scan for yet; extending this collector to `cc` nodes is that
- * follow-up's job, not this one's — the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s own
- * doc comment names: keep detector scope in exact lockstep with what is actually admitted).
+ * Lock-1 OD-L1-7(a) — the group ids ONE cc node references: its `targetIds` when (and only when)
+ * `targetType === 'group'`; `[]` for a user / role cc node. Trimmed exactly as the approver
+ * collector below trims a `user_group` source's `groupIds`, so the create-time freeze
+ * (`fetchMemberGroupSnapshot`) and the publish gate read the same normalized id set.
+ */
+function ccNodeGroupTargetIds(config: unknown): string[] {
+  if (!isRecord(config) || config.targetType !== 'group' || !Array.isArray(config.targetIds)) return []
+  return config.targetIds
+    .map((groupId: unknown) => (typeof groupId === 'string' ? groupId.trim() : ''))
+    .filter((groupId: string) => groupId.length > 0)
+}
+
+/**
+ * Lock-1 §K1: every group id referenced by a `user_group` source OR (OD-L1-7(a)) by a cc node's
+ * `targetType:'group'` target, over ANY graph — typed on the plain `ApprovalGraph` shape (not
+ * `RuntimeGraph`) DELIBERATELY, unlike the sibling detectors above: the publish HARD GATE
+ * (`assertUserGroupSourcesBoundToOrg`) must run BEFORE `buildRuntimeGraph` (on the same
+ * `approvalGraph` the other publish-time authoring gates read), while the create-time freeze runs
+ * AFTER (`asRuntimeGraph`'s published/frozen graph) — `RuntimeGraph extends ApprovalGraph`, so one
+ * function structurally serves both call sites. Detector scope stays in exact lockstep with what is
+ * actually admitted (the ":2922 lesson" `runtimeGraphUsesOrgAssigneeSource`'s doc comment names):
+ * the approver arm reads `approval` AND `handler` nodes — the §2.3 registry row plus Lock-3 §1.5's
+ * forward row ("`user_group` (K1) … ADMIT" on a handler) landed by W1-1d: a group id referenced
+ * ONLY by a handler node must be frozen too, else the handler's `groupMemberIds` lookup finds
+ * nothing, resolves EMPTY and fails `APPROVAL_ASSIGNEE_EMPTY` at dispatch (R-13 silent-skip class)
+ * — and the cc arm — the separate "`user_group` (cc)" registry row, landed by the OD-L1-7 slice —
+ * reads `cc` nodes only. The cc arm is what lets a group cc target be FROZEN into `groupMemberIds`
+ * at create, which is the only membership source the executor's cc arm reads (never a live read
+ * at dispatch).
  */
 export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph): Set<string> {
   const groupIds = new Set<string>()
   for (const node of approvalGraph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type === 'cc') {
+      for (const groupId of ccNodeGroupTargetIds(node.config)) groupIds.add(groupId)
+      continue
+    }
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) continue
@@ -5616,14 +5671,38 @@ export function collectApprovalGraphMemberGroupIds(approvalGraph: ApprovalGraph)
  * to a DIFFERENT org only) — fails publish, values-free (the group id itself is template-authored,
  * like `prior_node_approver`'s `nodeKey`, and is permitted per §2.6; the rejection never touches
  * group MEMBERSHIP). UNCONDITIONAL like the K3 dominance gate: no policy exemption makes a
- * foreign/dangling group reference resolvable.
+ * foreign/dangling group reference resolvable. Node types `approval` AND `handler` (Lock-3 §1.5
+ * forward row, W1-1d) — the node loop must stay in lockstep with `collectApprovalGraphMemberGroupIds`
+ * above: a handler-carried group id that the collector freezes but this gate never checked would be
+ * the one way a foreign/dangling group reaches an instance.
+ *
+ * OD-L1-7(a) — a cc node's `targetType:'group'` targets pass through the SAME gate (same curated
+ * set, same code, same fail-closed-at-publish-never-at-dispatch posture — §K1 "a group id that does
+ * not exist or is outside the org binding is … fail-closed at publish"); the details name the node
+ * key and the offending `targetIndex` (a cc node has no source array, so no `sourceIndex`).
  */
 export function assertUserGroupSourcesBoundToOrg(
   approvalGraph: ApprovalGraph,
   curatedGroupIds: ReadonlySet<string>,
 ): void {
   for (const node of approvalGraph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type === 'cc') {
+      const ccConfig: unknown = node.config
+      if (!isRecord(ccConfig) || ccConfig.targetType !== 'group' || !Array.isArray(ccConfig.targetIds)) continue
+      ccConfig.targetIds.forEach((rawGroupId: unknown, targetIndex: number) => {
+        const groupId = typeof rawGroupId === 'string' ? rawGroupId.trim() : ''
+        if (!groupId || !curatedGroupIds.has(groupId)) {
+          throw new ServiceError(
+            `approvalGraph node ${node.key} cc targetIds[${targetIndex}] references a group not bound to this organization`,
+            400,
+            'APPROVAL_ASSIGNEE_GROUP_NOT_BOUND',
+            { nodeKey: node.key, targetIndex, groupId, reason: 'not-bound' },
+          )
+        }
+      })
+      continue
+    }
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     // NIT (fix-round): guarded the same way collectApprovalGraphMemberGroupIds is — unreachable
     // post-normalize today (normalizeApprovalAssigneeSources rejects a non-array `groupIds`
     // before any graph reaches publish), but the two functions read the SAME field and should not
@@ -5654,15 +5733,21 @@ export function assertUserGroupSourcesBoundToOrg(
 
 /**
  * Lock-1 §K2: every `requester_choice` source in the published runtime graph, grouped by the
- * carrying approval node's key. Drives the create-time choice validation + snapshot freeze —
+ * carrying node's key. Drives the create-time choice validation + snapshot freeze —
  * OPT-IN like `includeManagerChain`: an empty map means the create path does no K2 work at all.
+ * Node types `approval` AND `handler` (Lock-3 §1.5 forward row "`requester_choice` (K2) … ADMIT",
+ * W1-1d): a handler carrying the kind is keyed here exactly like an approval node, so a submitted
+ * choice for it is scope-validated and frozen under its node key (instead of 422
+ * `APPROVAL_REQUESTER_CHOICE_UNKNOWN_NODE`), and an OMITTED choice is a create-time 422
+ * `APPROVAL_REQUESTER_CHOICE_REQUIRED` (instead of an EMPTY resolution that fails the handler
+ * `APPROVAL_ASSIGNEE_EMPTY` at dispatch — the R-13 silent-skip class).
  */
 export function collectRuntimeGraphRequesterChoiceSources(
   runtimeGraph: RuntimeGraph,
 ): Map<string, RequesterChoiceAssigneeSource[]> {
   const byNodeKey = new Map<string, RequesterChoiceAssigneeSource[]>()
   for (const node of runtimeGraph.nodes) {
-    if (node.type !== 'approval') continue
+    if (node.type !== 'approval' && node.type !== 'handler') continue
     const config: unknown = node.config
     const sources = isRecord(config) ? config.assigneeSources : undefined
     if (!Array.isArray(sources)) continue
@@ -7677,6 +7762,7 @@ export class ApprovalProductService {
     requireComplete: boolean,
   ): Promise<Record<string, string[]>> {
     if (!pool) throw new Error('Database not available')
+    // The user-facing messages below are shared by approval AND handler carriers (W1-1d) — keep them node-type-agnostic.
     // Payload shape: a plain record of node key → non-empty-string arrays. Anything else is a
     // values-free 422 (the offending VALUE is never echoed — only the node key).
     const normalized = new Map<string, string[]>()
@@ -7735,7 +7821,7 @@ export class ApprovalProductService {
           `Failed to resolve requester-choice candidates: ${error instanceof Error ? error.message : 'unknown error'}`,
         )
         throw new ServiceError(
-          'Could not verify the chosen approvers for this approval template. Please retry.',
+          'Could not verify the chosen users for this approval template. Please retry.',
           503,
           'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
         )
@@ -7749,7 +7835,7 @@ export class ApprovalProductService {
           // §K2: the requester was REQUIRED to choose and did not — a create-time 422, never an
           // empty resolution (only a made-then-unusable choice reaches emptyAssigneePolicy).
           throw new ServiceError(
-            `A requester choice is required for this approval node`,
+            `A requester choice is required for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_REQUIRED',
             { nodeKey },
@@ -7762,8 +7848,8 @@ export class ApprovalProductService {
         if ((source.mode === 'single' && ids.length !== 1) || (source.mode === 'multi' && ids.length === 0)) {
           throw new ServiceError(
             source.mode === 'single'
-              ? `This approval node requires exactly one chosen approver`
-              : `This approval node requires at least one chosen approver`,
+              ? `This node requires exactly one chosen user`
+              : `This node requires at least one chosen user`,
             422,
             'APPROVAL_REQUESTER_CHOICE_CARDINALITY',
             { nodeKey, mode: source.mode },
@@ -7771,7 +7857,7 @@ export class ApprovalProductService {
         }
         const outOfScope = (scopeType: RequesterChoiceAssigneeSource['scope']['type']): never => {
           throw new ServiceError(
-            `A chosen approver is outside the scope configured for this approval node`,
+            `A chosen user is outside the scope configured for this node`,
             422,
             'APPROVAL_REQUESTER_CHOICE_OUT_OF_SCOPE',
             { nodeKey, scopeType },
@@ -7798,7 +7884,7 @@ export class ApprovalProductService {
               `Failed to resolve requester-choice role membership: ${error instanceof Error ? error.message : 'unknown error'}`,
             )
             throw new ServiceError(
-              'Could not verify the chosen approvers for this approval template. Please retry.',
+              'Could not verify the chosen users for this approval template. Please retry.',
               503,
               'APPROVAL_REQUESTER_CHOICE_UNRESOLVED',
             )
@@ -8411,6 +8497,9 @@ export class ApprovalProductService {
         // RA-1b: thread `[]` (not null) — genuine-empty curated roles → membership false → DEFAULT route.
         roles: requesterSnapshot.directoryRoles ?? [],
       },
+      // Lock-1 OD-L1-7(a): the frozen group member map baked above — the cc arm expands a 'group'
+      // cc target from it (per member), exactly as the resolver expands an approver `user_group`.
+      groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
     })
     return {
       bundle,
@@ -10352,6 +10441,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
       const jumpResolution = executor.resolveReturnToNode(targetNodeKey)
       const requesterId = requesterSnapshot?.id
@@ -11367,6 +11460,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
 
       if (scannedEffect === 'transfer') {
@@ -11716,6 +11813,10 @@ export class ApprovalProductService {
           title: typeof t === 'string' && t ? t : null,
           roles: Array.isArray(r) ? r.filter((role): role is string => typeof role === 'string') : [],
         }))(requesterSnapshot?.directoryDepartment, requesterSnapshot?.directoryTitle, requesterSnapshot?.directoryRoles),
+        // Lock-1 OD-L1-7(a): re-thread the FROZEN group member map (loaded requester_snapshot
+        // record) so a 'group' cc node reached by this walk expands per member from the
+        // create-time snapshot — never a live read (same purity as the approver `user_group` arm).
+        groupMemberIds: readGroupMemberIdsSnapshot(requesterSnapshot),
       })
       const storedCurrentNodeKey = instance.current_node_key
       const actorRoles = actor.roles || []
@@ -13890,6 +13991,20 @@ export class ApprovalProductService {
       if (versionResult.rows[0]) frozenFormSchema = asFormSchema(versionResult.rows[0].form_schema)
     }
 
+    // The instance's OWN frozen runtime graph, read ONCE for the two carriers that walk it: the
+    // builder's `returnableNodeKeys` (viewer-independent, so no longer behind the viewer check the
+    // `nodeOperations` read below used to sit behind — every HTTP caller passes the viewer anyway)
+    // and the viewer-scoped `nodeOperations` further down. Null for an instance with no published
+    // definition (a legacy row), which then carries neither.
+    let frozenRuntimeGraph: unknown = null
+    if (row.published_definition_id) {
+      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
+        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
+        [row.published_definition_id],
+      )
+      frozenRuntimeGraph = runtimeResult.rows[0]?.runtime_graph ?? null
+    }
+
     const dto = toUnifiedApprovalDTO(
       row,
       assignmentsResult.rows.map((assignment) => ({
@@ -13902,6 +14017,7 @@ export class ApprovalProductService {
         metadata: assignment.metadata || {},
       })),
       frozenFormSchema,
+      frozenRuntimeGraph,
     )
 
     // FWB-0 Layer 2 P1-1: no viewer is a deny-all viewer. Every current HTTP path passes the
@@ -13924,11 +14040,7 @@ export class ApprovalProductService {
     // after the action (they approved and the node advanced past them), the honest value is exactly
     // what a fresh GET would now return: no carrier — there is no bar to mirror.
     if (viewerUserId && row.published_definition_id) {
-      const runtimeResult = await pool.query<{ runtime_graph: unknown }>(
-        `SELECT runtime_graph FROM approval_published_definitions WHERE id = $1`,
-        [row.published_definition_id],
-      )
-      const runtimeGraphView = (runtimeResult.rows[0]?.runtime_graph ?? null) as NodeOperationGraphView | null
+      const runtimeGraphView = frozenRuntimeGraph as NodeOperationGraphView | null
       if (runtimeGraphView) {
         const nodeOperations = resolveEffectiveNodeOperations(
           runtimeGraphView,
@@ -14772,7 +14884,7 @@ export class ApprovalProductService {
     instanceId: string,
     version: number,
     status: string,
-    ccEvents: Array<{ nodeKey: string; targetType: 'user' | 'role'; targetId: string }>,
+    ccEvents: ApprovalCcEvent[],
   ): Promise<void> {
     for (const event of ccEvents) {
       await this.insertApprovalRecord(client, instanceId, {
@@ -14786,8 +14898,13 @@ export class ApprovalProductService {
         toVersion: version,
         metadata: {
           nodeKey: event.nodeKey,
+          // The persisted row shape stays `user` / `role`: a 'group' cc target (OD-L1-7(a)) is
+          // expanded per member by the executor, and each member row carries the expanding
+          // `groupId` for audit ("why was I cc'd") — additive, so every reader matching on
+          // targetType/targetId (cc tab, unread badge, comment candidates, readability) is unchanged.
           targetType: event.targetType,
           targetId: event.targetId,
+          ...(event.groupId ? { groupId: event.groupId } : {}),
         },
       })
     }

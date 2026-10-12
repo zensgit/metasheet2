@@ -186,6 +186,29 @@ const REGRESSION_GUARDS: RegressionGuard[] = [
       mustNotContain: ['item.actorName ?? item.actorId', 'item.actorName || item.actorId'],
     }],
   },
+  // Test report 2026-10-08 T4b: the 表单信息 「人员」 (user) value — the site the 2026-08-19 sweep missed,
+  // because it rendered through a helper (`formatDisplayValue`'s `default: String(value)`), the
+  // census's documented KNOWN EVASION shape. Every surface that formats a form `user` value (the
+  // detail page's top-level fields and 明细 columns, and the list summary line) now goes through
+  // `formatUserFieldValue` with the directory lookup.
+  {
+    site: 'detailField.ts / ApprovalDetailView.vue / useApprovalListFieldSummary.ts — form user (人员) values (formatUserFieldValue)',
+    coverage: ['src/approvals/detailField.ts', 'approval-detail-record-table.spec.ts', 'the 表单信息 人员 field shows the directory-resolved name, and the stored id appears nowhere on the page'],
+    sourceChecks: [
+      {
+        file: 'src/approvals/detailField.ts',
+        mustContain: ['export function formatUserFieldValue', "case 'user':", 'return formatUserFieldValue(value, resolveUserName, isZh)'],
+      },
+      {
+        file: 'src/views/approval/ApprovalDetailView.vue',
+        mustContain: ['resolveUserName: getResolvedUserName', "if (column?.type === 'user') return formatUserFieldValue(value, getResolvedUserName, isZh.value)"],
+      },
+      {
+        file: 'src/approvals/useApprovalListFieldSummary.ts',
+        mustContain: ['summaryFields(schema, row.formSnapshot, limit, isZh, getResolvedUserName)'],
+      },
+    ],
+  },
   // raw-id-render fix (2026-08-19; census 3rd missed site) — the requester-choice submit-time
   // approver picker (Lock-1 §K2). The site the hand-list had NO entry for at all. Fixed to the
   // same contract as ApprovalUserPicker (values-free ordinal + disabled-when-unidentifiable), plus
@@ -454,6 +477,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     // the lookup arguments; the rendered text is a fixed business-language sentence
     // (graphTopologyEdit.ts CONDITION_BRANCH_REMOVAL_REASONS), never a key or a member identity.
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ branchRemovalBlocker(node.key, branch.edgeKey) }}'],
+    // Lock-1 OD-L1-7(a) (cc 用户组 target), G-16 unknown-value line: the mustaches render the
+    // persisted `targetType` STRING and an id COUNT (`.targetIds.length`); `node.key` is only the
+    // lookup argument to `ccEditFor`, never rendered — same disposition as the entry above.
+    ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', '{{ ccEditFor(node.key)!.targetType }}'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'graphEdgeTargetLabel(node.key, edgeKey)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'approvalSourceKind(node.key, sourceIndex)'],
     ['src/approvals/components/ApprovalGraphNodeConfigEditor.vue', 'configuredSourceSummaryLine(node.key, sourceIndex)'],
@@ -479,6 +506,11 @@ const ALLOWLIST: AllowlistEntry[] = [
     // Same file, the per-item move-to-group `<select>`'s test hook — same TEMPLATE id, same
     // reasoning (the visible option text is `target.label`, never a raw id).
     ['src/views/approval/TemplateGroupSections.vue', ':data-testid="`template-group-section-move-${item.id}`"'],
+  ]),
+  // A1 (2026-10-09): the central leave-preset note on the preset cards. `preset.id` is the closed built-in preset key
+  // ('leave', ...); the mustache renders the static note text the lookup returns, never the key.
+  ...group('OUT-OF-SCOPE', 'a static built-in PRESET key used only to look up a copy string (presetBoundaryNote) -- the mustache renders the returned note text, never the key, and the key is not a member identity', [
+    ['src/views/approval/TemplateAuthoringView.vue', '{{ presetBoundaryNote(preset.id) }}'],
   ]),
 
   // ---- OUT-OF-SCOPE: non-person entity ids (approval instance / template / version row) in a data-testid, route path, or a function-call argument (not a rendered id -- the FUNCTION'S RETURN is what renders) ----

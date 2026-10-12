@@ -198,3 +198,74 @@ const statusMessage = computed(() => {
     : tr('Fill a holiday name, attendance group, and valid day counts before adding a rule.', '请先填写节假日名称、考勤组和有效天数。')
 })
 </script>
+
+<style scoped>
+.attendance__admin-subsection {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.attendance__admin-subsection-header h5 {
+  margin: 0 0 4px;
+  color: var(--ms-text-1);
+  font-size: 15px;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__admin-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+}
+
+.attendance__field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.attendance__field input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.attendance__field-hint {
+  margin: 0;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.attendance__admin-actions {
+  display: flex;
+}
+
+.attendance__btn {
+  min-height: 36px;
+  padding: 8px 14px;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-1);
+  cursor: pointer;
+}
+
+.attendance__btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+</style>

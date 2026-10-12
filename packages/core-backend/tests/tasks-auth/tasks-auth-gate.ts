@@ -13,6 +13,7 @@ import {
   type TasksClient,
   type TasksListener,
 } from '../helpers/tasks-http-harness'
+import { seedOrgMembers } from '../helpers/task-m4-fixtures'
 
 if (process.env.TASKS_AUTH_GATE_SETUP !== '1') {
   throw new Error('tasks auth gate must load dedicated setup before this file')
@@ -85,6 +86,10 @@ describe('tasks auth gate', () => {
        VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
       [userId],
     )
+    // RULED(2026-10-07): [N2] the M3 routes' add target, and the M4 routes' member and owner target,
+    // must be active members of the org the 200 controls run in (design §4.6); `users` +
+    // `user_orgs` only, swept with everything else.
+    await seedOrgMembers(orgId, [M3_TARGET, M4_TARGET])
   })
 
   // Every id this file creates (users, roles, orgs, tasks) contains `stamp`,
@@ -97,10 +102,16 @@ describe('tasks auth gate', () => {
     const likeCompact = `%${stamp.replace(/-/g, '')}%`
     const sweep: Array<[string, unknown[]]> = [
       ['DELETE FROM tasks WHERE org_id LIKE $1 OR created_by LIKE $1 OR id LIKE $2', [like, likeCompact]],
+      ['DELETE FROM task_lists WHERE org_id LIKE $1 OR id LIKE $2', [like, likeCompact]],
+      ['DELETE FROM task_groups WHERE org_id LIKE $1', [like]],
+      ['DELETE FROM task_user_settings WHERE org_id LIKE $1', [like]],
       ['DELETE FROM user_namespace_admissions WHERE user_id LIKE $1', [like]],
       ['DELETE FROM user_roles WHERE user_id LIKE $1 OR role_id LIKE $1', [like]],
       ['DELETE FROM user_orgs WHERE user_id LIKE $1 OR org_id LIKE $1', [like]],
       ['DELETE FROM users WHERE id LIKE $1', [like]],
+      // [N2]: the admission cell's follow target has a fixed id (no stamp).
+      ['DELETE FROM user_orgs WHERE user_id = $1', ['usr_follow_target']],
+      ['DELETE FROM users WHERE id = $1', ['usr_follow_target']],
       ['DELETE FROM role_permissions WHERE role_id LIKE $1', [like]],
       ['DELETE FROM roles WHERE id LIKE $1', [like]],
     ]
@@ -145,7 +156,8 @@ describe('tasks auth gate', () => {
     body?: Record<string, unknown>
     needs?: 'follower' | 'comment'
   }
-  const M3_TARGET = 'usr_m3_gate_target'
+  // Stamped so the afterAll sweep removes the users row seeded for it ([N2]).
+  const M3_TARGET = `usr_m3_gate_target_${stamp}`
   const M3_PLACEHOLDER: M3Ctx = { taskId: 'tsk_missing', commentId: 'tcmt_missing', actor: 'usr_missing' }
   const M3_ROUTES: M3Route[] = [
     { label: 'PATCH /api/tasks/:id/parent', code: 'write', method: 'patch', path: (c) => `/api/tasks/${c.taskId}/parent`, body: { parentId: null } },
@@ -201,6 +213,145 @@ describe('tasks auth gate', () => {
       ctx.commentId = String(commented.body.id)
     }
     return ctx
+  }
+
+  // The 8 P0-A (M2) routes, contract §2, as literals: the route-population cell below compares
+  // `tasksRouter()` with this table, M3_ROUTES and M4_ROUTES (design §10.7).
+  const P0A_ROUTES: readonly string[] = [
+    'GET /api/tasks/context',
+    'GET /api/tasks/pending',
+    'GET /api/tasks/pending-count',
+    'GET /api/tasks/:id',
+    'GET /api/tasks',
+    'POST /api/tasks',
+    'POST /api/tasks/:id/complete',
+    'POST /api/tasks/:id/reopen',
+  ]
+
+  // The 30 M4 (PR-3a) routes, design §3 and §10.7: PATCH /api/tasks/:id (S4), task settings (S3),
+  // lists (S5), list members (S6), list items (S7), groups in both scopes (S8). Writes take
+  // tasks:write and answer 422 ORG_MISSING without an org; reads take tasks:read and answer 404
+  // without an org, except the three collections marked `collection`, which answer the degraded
+  // body without `total` (design §3, RULED(2026-10-07): [R18] no route here takes tasks:admin).
+  // `needs` names the rows a 200 control seeds first, in this order: task, list, archived, member,
+  // item, group, userGroup. Cells that stop before the handler reads a row (403, no org) use
+  // M4_PLACEHOLDER ids.
+  type M4Ctx = { taskId: string; version: number; listId: string; groupId: string; userGroupId: string; target: string }
+  type M4Need = 'task' | 'list' | 'archived' | 'member' | 'item' | 'group' | 'userGroup'
+  type M4Route = {
+    label: string
+    code: 'read' | 'write'
+    method: 'get' | 'post' | 'patch' | 'put' | 'delete'
+    path: (ctx: M4Ctx) => string
+    body?: (ctx: M4Ctx) => Record<string, unknown>
+    needs?: M4Need[]
+    collection?: true
+  }
+  // Stamped so the afterAll sweep removes the users row seeded for it (RULED(2026-10-07): [R17]
+  // [N2]: a new list member or owner must be an active member of the org).
+  const M4_TARGET = `usr_m4_gate_target_${stamp}`
+  const M4_PLACEHOLDER: M4Ctx = {
+    taskId: 'tsk_missing',
+    version: 1,
+    listId: 'tlst_missing',
+    groupId: 'tgrp_missing',
+    userGroupId: 'tgrp_missing',
+    target: M4_TARGET,
+  }
+  const M4_ROUTES: M4Route[] = [
+    { label: 'PATCH /api/tasks/:id', code: 'write', method: 'patch', path: (c) => `/api/tasks/${c.taskId}`, body: (c) => ({ expectedVersion: c.version, title: '备料复核(改)' }), needs: ['task'] },
+    { label: 'GET /api/task-settings', code: 'read', method: 'get', path: () => '/api/task-settings' },
+    { label: 'PATCH /api/task-settings', code: 'write', method: 'patch', path: () => '/api/task-settings', body: () => ({ badgeScope: 'overdue' }) },
+    { label: 'GET /api/task-lists', code: 'read', method: 'get', path: () => '/api/task-lists', collection: true },
+    { label: 'POST /api/task-lists', code: 'write', method: 'post', path: () => '/api/task-lists', body: () => ({ name: '备料复核' }) },
+    { label: 'GET /api/task-lists/:id/events', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}/events`, needs: ['list'] },
+    { label: 'POST /api/task-lists/:id/archive', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/archive`, needs: ['list'] },
+    { label: 'POST /api/task-lists/:id/unarchive', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/unarchive`, needs: ['list', 'archived'] },
+    { label: 'GET /api/task-lists/:id/members', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}/members`, needs: ['list'] },
+    { label: 'POST /api/task-lists/:id/members', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/members`, body: (c) => ({ userId: c.target, role: 'edit' }), needs: ['list'] },
+    { label: 'PATCH /api/task-lists/:id/members/:userId', code: 'write', method: 'patch', path: (c) => `/api/task-lists/${c.listId}/members/${c.target}`, body: () => ({ role: 'read' }), needs: ['list', 'member'] },
+    { label: 'DELETE /api/task-lists/:id/members/:userId', code: 'write', method: 'delete', path: (c) => `/api/task-lists/${c.listId}/members/${c.target}`, needs: ['list', 'member'] },
+    { label: 'POST /api/task-lists/:id/transfer-owner', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/transfer-owner`, body: (c) => ({ userId: c.target }), needs: ['list', 'member'] },
+    { label: 'GET /api/task-lists/:id/items', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}/items`, needs: ['list'] },
+    { label: 'POST /api/task-lists/:id/items', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/items`, body: (c) => ({ taskId: c.taskId }), needs: ['task', 'list'] },
+    { label: 'DELETE /api/task-lists/:id/items/:taskId', code: 'write', method: 'delete', path: (c) => `/api/task-lists/${c.listId}/items/${c.taskId}`, needs: ['task', 'list', 'item'] },
+    { label: 'GET /api/task-lists/:id/groups', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}/groups`, needs: ['list'] },
+    { label: 'POST /api/task-lists/:id/groups', code: 'write', method: 'post', path: (c) => `/api/task-lists/${c.listId}/groups`, body: () => ({ name: '新组' }), needs: ['list'] },
+    { label: 'PATCH /api/task-lists/:id/groups/:groupId', code: 'write', method: 'patch', path: (c) => `/api/task-lists/${c.listId}/groups/${c.groupId}`, body: () => ({ name: '改名' }), needs: ['list', 'group'] },
+    { label: 'DELETE /api/task-lists/:id/groups/:groupId', code: 'write', method: 'delete', path: (c) => `/api/task-lists/${c.listId}/groups/${c.groupId}`, needs: ['list', 'group'] },
+    { label: 'GET /api/task-lists/:id/group-items', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}/group-items`, needs: ['list'] },
+    { label: 'PUT /api/task-lists/:id/group-items/:taskId', code: 'write', method: 'put', path: (c) => `/api/task-lists/${c.listId}/group-items/${c.taskId}`, body: () => ({ groupId: null, position: 0 }), needs: ['task', 'list', 'item'] },
+    { label: 'GET /api/task-lists/:id', code: 'read', method: 'get', path: (c) => `/api/task-lists/${c.listId}`, needs: ['list'] },
+    { label: 'PATCH /api/task-lists/:id', code: 'write', method: 'patch', path: (c) => `/api/task-lists/${c.listId}`, body: () => ({ name: '改名' }), needs: ['list'] },
+    { label: 'GET /api/task-groups', code: 'read', method: 'get', path: () => '/api/task-groups', collection: true },
+    { label: 'POST /api/task-groups', code: 'write', method: 'post', path: () => '/api/task-groups', body: () => ({ name: '新组' }) },
+    { label: 'GET /api/task-groups/items', code: 'read', method: 'get', path: () => '/api/task-groups/items', collection: true },
+    { label: 'PUT /api/task-groups/items/:taskId', code: 'write', method: 'put', path: (c) => `/api/task-groups/items/${c.taskId}`, body: () => ({ groupId: null, position: 0 }), needs: ['task'] },
+    { label: 'PATCH /api/task-groups/:groupId', code: 'write', method: 'patch', path: (c) => `/api/task-groups/${c.userGroupId}`, body: () => ({ name: '改名' }), needs: ['userGroup'] },
+    { label: 'DELETE /api/task-groups/:groupId', code: 'write', method: 'delete', path: (c) => `/api/task-groups/${c.userGroupId}`, needs: ['userGroup'] },
+  ]
+
+  /** The no-org answer of an M4 route, as the exact response text (design §3, [own-19]). */
+  function m4NoOrgText(route: M4Route): { status: number; text: string } {
+    if (route.code === 'write') return { status: 422, text: JSON.stringify({ error: { code: 'ORG_MISSING' } }) }
+    if (route.collection) return { status: 200, text: JSON.stringify({ items: [], degraded: true, reason: 'org_missing' }) }
+    return { status: 404, text: JSON.stringify({ error: { code: 'NOT_FOUND' } }) }
+  }
+
+  function m4Request(server: TasksClient, route: M4Route, ctx: M4Ctx, bearer: string): supertest.Test {
+    const req = server[route.method](route.path(ctx)).set('Authorization', `Bearer ${bearer}`)
+    return route.body ? req.send(route.body(ctx)) : req
+  }
+
+  /** The rows `route.needs` names, written over HTTP by `actor` (who holds both codes in the org of
+   * `bearer`); `target` must be an active member of that org. */
+  async function seedM4(server: TasksClient, route: M4Route, bearer: string, actor: string, target: string): Promise<M4Ctx> {
+    const ctx: M4Ctx = { ...M4_PLACEHOLDER, target }
+    const needs = new Set(route.needs ?? [])
+    const call = async (test: supertest.Test, what: string, body?: Record<string, unknown>): Promise<Record<string, unknown>> => {
+      const authed = test.set('Authorization', `Bearer ${bearer}`)
+      const response = await (body ? authed.send(body) : authed)
+      expect(response.status, `${route.label}: seed ${what}`).toBe(200)
+      return response.body as Record<string, unknown>
+    }
+    if (needs.has('task')) {
+      const created = await call(server.post('/api/tasks'), 'task', { title: '备料复核', assignees: [actor] })
+      ctx.taskId = String(created.id)
+      ctx.version = Number(created.version)
+    }
+    if (needs.has('list')) ctx.listId = String((await call(server.post('/api/task-lists'), 'list', { name: '备料复核' })).id)
+    if (needs.has('archived')) await call(server.post(`/api/task-lists/${ctx.listId}/archive`), 'archive')
+    if (needs.has('member')) await call(server.post(`/api/task-lists/${ctx.listId}/members`), 'member', { userId: target, role: 'edit' })
+    if (needs.has('item')) await call(server.post(`/api/task-lists/${ctx.listId}/items`), 'item', { taskId: ctx.taskId })
+    if (needs.has('group')) ctx.groupId = String((await call(server.post(`/api/task-lists/${ctx.listId}/groups`), 'group', { name: '组' })).id)
+    if (needs.has('userGroup')) ctx.userGroupId = String((await call(server.post('/api/task-groups'), 'user group', { name: '我的' })).id)
+    return ctx
+  }
+
+  /** Every task-domain row of `org` (the M2/M3 tables and the eight M4 tables), as one text. */
+  async function m4OrgState(org: string): Promise<string> {
+    const result = await poolManager.get().query(
+      `SELECT jsonb_build_object(
+         'tasks', (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY t.id), '[]') FROM tasks t WHERE t.org_id = $1),
+         'assignees', (SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY a.task_id, a.user_id), '[]')
+                       FROM task_assignees a JOIN tasks t ON t.id = a.task_id WHERE t.org_id = $1),
+         'followers', (SELECT coalesce(jsonb_agg(to_jsonb(f) ORDER BY f.task_id, f.user_id), '[]')
+                       FROM task_followers f JOIN tasks t ON t.id = f.task_id WHERE t.org_id = $1),
+         'events', (SELECT coalesce(jsonb_agg(to_jsonb(e) ORDER BY e.id), '[]')
+                    FROM task_events e JOIN tasks t ON t.id = e.task_id WHERE t.org_id = $1),
+         'lists', (SELECT coalesce(jsonb_agg(to_jsonb(l) ORDER BY l.id), '[]') FROM task_lists l WHERE l.org_id = $1),
+         'members', (SELECT coalesce(jsonb_agg(to_jsonb(m) ORDER BY m.list_id, m.user_id), '[]')
+                     FROM task_list_members m JOIN task_lists l ON l.id = m.list_id WHERE l.org_id = $1),
+         'items', (SELECT coalesce(jsonb_agg(to_jsonb(i) ORDER BY i.list_id, i.task_id), '[]') FROM task_list_items i WHERE i.org_id = $1),
+         'listEvents', (SELECT coalesce(jsonb_agg(to_jsonb(v) ORDER BY v.id), '[]')
+                        FROM task_list_events v JOIN task_lists l ON l.id = v.list_id WHERE l.org_id = $1),
+         'groups', (SELECT coalesce(jsonb_agg(to_jsonb(g) ORDER BY g.id), '[]') FROM task_groups g WHERE g.org_id = $1),
+         'groupItems', (SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY p.group_id, p.task_id), '[]') FROM task_group_items p WHERE p.org_id = $1),
+         'settings', (SELECT coalesce(jsonb_agg(to_jsonb(s) ORDER BY s.user_id), '[]') FROM task_user_settings s WHERE s.org_id = $1)
+       )::text AS state`,
+      [org],
+    )
+    return String(result.rows[0]?.state)
   }
 
   // Gate 16 diagnostic ①, not a gate 1 cell. No token: a–e, h, i 不适用; f, g 适用 (else 404, not 401).
@@ -376,13 +527,17 @@ describe('tasks auth gate', () => {
        ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
       [bare],
     )
+    // RULED(2026-10-07): [N2] `bare` deliberately has no user_orgs row (b 刻意取反), and POST
+    // /api/tasks names only active members of the org as assignees (design §4.6): its assignee row
+    // is written with SQL, like its follower and comment rows below.
     const created = await app()
       .post('/api/tasks')
       .set('Authorization', `Bearer ${token()}`)
-      .send({ title: '备料复核', assignees: [userId, bare] })
+      .send({ title: '备料复核', assignees: [userId] })
     expect(created.status).toBe(200)
     const taskId = String(created.body.id)
     const commentId = `tcmt_hdrtenant_${stamp.replace(/-/g, '')}`
+    await db.query('INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)', [taskId, bare, userId])
     await db.query('INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2)', [taskId, bare])
     await db.query('INSERT INTO task_comments (id, task_id, author_id, body) VALUES ($1, $2, $3, $4)', [commentId, taskId, bare, '备料复核'])
     const before = await db.query(
@@ -563,6 +718,12 @@ describe('tasks auth gate', () => {
        ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
       [bare],
     )
+    // RULED(2026-10-07): [N2] a new follower must be an active member of the org (design §4.6).
+    // The target keeps its fixed id: rows a killed earlier run may have left are removed by exact
+    // id first, and again at the end of this cell and in the afterAll sweep.
+    await db.query('DELETE FROM user_orgs WHERE user_id = $1', ['usr_follow_target'])
+    await db.query('DELETE FROM users WHERE id = $1', ['usr_follow_target'])
+    await seedOrgMembers(orgId, ['usr_follow_target'])
     const allowed = await app()
       .post(`/api/tasks/${created.body.id}/followers`)
       .set('Authorization', `Bearer ${bareToken}`)
@@ -571,6 +732,8 @@ describe('tasks auth gate', () => {
     expect(allowed.body).toEqual({ id: created.body.id, followers: ['usr_follow_target'] })
 
     await db.query('DELETE FROM tasks WHERE id = $1', [created.body.id])
+    await db.query('DELETE FROM user_orgs WHERE user_id = $1', ['usr_follow_target'])
+    await db.query('DELETE FROM users WHERE id = $1', ['usr_follow_target'])
     await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [bare])
     await db.query('DELETE FROM user_orgs WHERE user_id = $1', [bare])
     await db.query('DELETE FROM user_roles WHERE user_id = $1', [bare])
@@ -663,12 +826,15 @@ describe('tasks auth gate', () => {
   })
 
   // Gate 1 cross-org write. §12.0: a 适用; b 刻意取反 (user_orgs is home, tenantId is other); c, d, f–i 适用; e 适用.
+  // The same write with tenantId naming an org where the user's user_orgs row is inactive: b 刻意取反
+  // (that row has is_active = false); the same 422, byte for byte, and nothing in that org.
   // The following write with tenantId=home is the control: a–i 适用, including e.
-  it('gate 1: a write whose tenant claim is a different org is 422', async () => {
+  it('gate 1: a write whose tenant claim is a different org, or an org whose membership is inactive, is 422', async () => {
     const user = `usr_tasks_xorg_${stamp}`
     const role = `tasks_xorg_${stamp}`
     const home = `org_home_${stamp}`
     const other = `org_other_${stamp}`
+    const inactiveOrg = `org_inactive_${stamp}`
     const db = poolManager.get()
     await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [role, role])
     await db.query(
@@ -690,6 +856,10 @@ describe('tasks auth gate', () => {
       [user, home],
     )
     await db.query(
+      'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, FALSE)',
+      [user, inactiveOrg],
+    )
+    await db.query(
       `INSERT INTO user_namespace_admissions (
          user_id, namespace, enabled, source, created_at, updated_at
        ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
@@ -705,6 +875,18 @@ describe('tasks auth gate', () => {
       .send({ title: '备料复核' })
     expect(denied.status).toBe(422)
     expect(denied.body).toEqual({ error: { code: 'ORG_MISSING' } })
+    const orgMissingText = JSON.stringify({ error: { code: 'ORG_MISSING' } })
+    expect(denied.text).toBe(orgMissingText)
+    const inactiveClaim = jwt.sign({
+      userId: user, sub: user, email: `${user}@tasks-auth-gate.test`,
+      role: 'user', roles: [role], perms: ['tasks:write'], tenantId: inactiveOrg,
+    }, JWT_SECRET, { expiresIn: '1h' })
+    const deniedInactive = await app()
+      .post('/api/tasks')
+      .set('Authorization', `Bearer ${inactiveClaim}`)
+      .send({ title: '备料复核' })
+    expect(deniedInactive.status).toBe(422)
+    expect(deniedInactive.text).toBe(orgMissingText)
     const member = jwt.sign({
       userId: user, sub: user, email: `${user}@tasks-auth-gate.test`,
       role: 'user', roles: [role], perms: ['tasks:write'], tenantId: home,
@@ -721,6 +903,15 @@ describe('tasks auth gate', () => {
       .send({ completionMode: 'any' })
     expect(m3Denied.status).toBe(422)
     expect(m3Denied.body).toEqual({ error: { code: 'ORG_MISSING' } })
+    const m3DeniedInactive = await app()
+      .patch(`/api/tasks/${allowed.body.id}/completion-mode`)
+      .set('Authorization', `Bearer ${inactiveClaim}`)
+      .send({ completionMode: 'any' })
+    expect(m3DeniedInactive.status).toBe(422)
+    expect(m3DeniedInactive.text).toBe(orgMissingText)
+    // Nothing reached the org whose membership is inactive.
+    const inInactiveOrg = await db.query('SELECT count(*)::int AS n FROM tasks WHERE org_id = $1', [inactiveOrg])
+    expect(inInactiveOrg.rows[0]?.n).toBe(0)
     const m3Allowed = await app()
       .patch(`/api/tasks/${allowed.body.id}/completion-mode`)
       .set('Authorization', `Bearer ${member}`)
@@ -852,6 +1043,414 @@ describe('tasks auth gate', () => {
       await db.query('DELETE FROM roles WHERE id = $1', [role])
     }
   }, 180000)
+
+  // M4 PR-3a design §10.7 `M4|1|清单第二租户` (candidate row, not scored until the lock names it).
+  // Gate 1 org-isolation read for task lists. §12.0: a–d, f–i 适用; e 不适用 (read cell).
+  // b 适用: user_orgs has one row, org A, is_active; token tenantId = org A, checked against the
+  // database under RBAC_TOKEN_TRUST=false. The token carries no perms claim. LB and its member row
+  // exist only through SQL here.
+  it('gate 1 (M4 lists): a list read stays inside the caller org until the list org predicate is removed', async () => {
+    const compact = stamp.replace(/-/g, '')
+    const user = `usr_tasks_liso_${stamp}`
+    const role = `tasks_liso_${stamp}`
+    const orgA = `orgLA_${stamp}`
+    const orgB = `orgLB_${stamp}`
+    const listA = `tlst_A${compact}`
+    const listB = `tlst_B${compact}`
+    const taskA = `tskLA${compact}`
+    const taskB = `tskLB${compact}`
+    const creator = `usr_tasks_liso_creator_${stamp}`
+    const db = poolManager.get()
+    await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [role, role])
+    await db.query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'tasks:read')`, [role])
+    await db.query(
+      `INSERT INTO users (
+         id, email, name, password_hash, role, permissions,
+         is_active, activation_status, local_password_set, must_change_password
+       ) VALUES (
+         $1, $2, $3, 'x', 'user', '[]'::jsonb, TRUE, 'activated', TRUE, FALSE
+       )`,
+      [user, `${user}@tasks-auth-gate.test`, 'tasks-list-isolation'],
+    )
+    await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [user, role])
+    await db.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [user, orgA])
+    await db.query(
+      `INSERT INTO user_namespace_admissions (
+         user_id, namespace, enabled, source, created_at, updated_at
+       ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
+      [user],
+    )
+    for (const [listId, taskId, org] of [[listA, taskA, orgA], [listB, taskB, orgB]] as const) {
+      await db.query(`INSERT INTO task_lists (id, org_id, name, created_by) VALUES ($1, $2, '备料复核', $3)`, [listId, org, creator])
+      await db.query(`INSERT INTO task_list_members (list_id, user_id, role) VALUES ($1, $2, 'owner'), ($1, $3, 'edit')`, [listId, creator, user])
+      await db.query(
+        `INSERT INTO tasks (id, org_id, title, status, completion_mode, created_by) VALUES ($1, $2, '备料复核', 'open', 'all', $3)`,
+        [taskId, org, creator],
+      )
+      await db.query(`INSERT INTO task_list_items (list_id, task_id, org_id) VALUES ($1, $2, $3)`, [listId, taskId, org])
+    }
+    const bearer = jwt.sign({
+      userId: user, sub: user, email: `${user}@tasks-auth-gate.test`,
+      role: 'user', roles: [role], tenantId: orgA,
+    }, JWT_SECRET, { expiresIn: '1h' })
+    const accessFile = new URL('../../src/tasks/task-list-access.ts', import.meta.url).pathname
+    const listRecordsFile = new URL('../../src/services/task-list-records.ts', import.meta.url).pathname
+    const needle = '(task_lists.org_id = ${ORG_PLACEHOLDER}) AND '
+    const original = readFileSync(accessFile, 'utf8')
+    const backup = `/tmp/task-list-access-org-${stamp}.bak`
+    const script = `/tmp/task-list-org-mutant-${stamp}.mts`
+    try {
+      // Positive control first.
+      const mine = await app().get('/api/task-lists').set('Authorization', `Bearer ${bearer}`)
+      expect(mine.status).toBe(200)
+      expect((mine.body.items as { id: string }[]).map((item) => item.id)).toEqual([listA])
+      const readA = await app().get(`/api/task-lists/${listA}`).set('Authorization', `Bearer ${bearer}`)
+      expect(readA.status).toBe(200)
+      expect(readA.body.id).toBe(listA)
+      const missing = await app().get(`/api/task-lists/tlst_missing${compact}`).set('Authorization', `Bearer ${bearer}`)
+      expect(missing.status).toBe(404)
+      // S7: the item read of the caller's own list lists its task.
+      const itemsA = await app().get(`/api/task-lists/${listA}/items`).set('Authorization', `Bearer ${bearer}`)
+      expect(itemsA.status).toBe(200)
+      expect((itemsA.body.items as { id: string }[]).map((item) => item.id)).toEqual([taskA])
+      // Every read under one list id (S5–S8): the list, its events, members, items, groups and
+      // group placements. Each is 200 on LA and, on LB, the 404 of a list id that does not exist.
+      for (const suffix of ['', '/events', '/members', '/items', '/groups', '/group-items']) {
+        const own = await app().get(`/api/task-lists/${listA}${suffix}`).set('Authorization', `Bearer ${bearer}`)
+        expect(own.status, `LA${suffix}`).toBe(200)
+        const hidden = await app().get(`/api/task-lists/${listB}${suffix}`).set('Authorization', `Bearer ${bearer}`)
+        expect(hidden.status, `LB${suffix}`).toBe(404)
+        expect(hidden.text, `LB${suffix}`).toBe(missing.text)
+      }
+
+      expect(original.split(needle).length - 1).toBe(1)
+      copyFileSync(accessFile, backup)
+      writeFileSync(accessFile, original.replace(needle, '(${ORG_PLACEHOLDER}::text IS NOT NULL) AND '))
+      writeFileSync(script, `
+        const { listTaskLists, getTaskList } = await import(${JSON.stringify(listRecordsFile)})
+        const mine = await listTaskLists({ orgId: ${JSON.stringify(orgA)}, actorId: ${JSON.stringify(user)}, query: {} })
+        const listed = mine.items.map((item) => item.id).includes(${JSON.stringify(listB)})
+        let byId = false
+        try {
+          const list = await getTaskList({ orgId: ${JSON.stringify(orgA)}, actorId: ${JSON.stringify(user)}, listId: ${JSON.stringify(listB)} })
+          byId = list.id === ${JSON.stringify(listB)}
+        } catch { byId = false }
+        console.log(JSON.stringify({ gate1lists: 'red', listed, byId }))
+        process.exit(listed && byId ? 0 : 1)
+      `)
+      const tsx = createRequire(import.meta.url).resolve('tsx/cli')
+      execFileSync(process.execPath, [tsx, script], {
+        cwd: accessFile.slice(0, accessFile.indexOf('/src/tasks/')),
+        env: process.env,
+        stdio: 'inherit',
+        timeout: 120000,
+      })
+    } finally {
+      try { copyFileSync(backup, accessFile) } catch { /* backup was not written */ }
+      try { unlinkSync(script) } catch { /* script was not written */ }
+      try { unlinkSync(backup) } catch { /* backup was not written */ }
+      expect(readFileSync(accessFile, 'utf8')).toBe(original)
+      await db.query('DELETE FROM tasks WHERE id = ANY($1::text[])', [[taskA, taskB]])
+      await db.query('DELETE FROM task_lists WHERE id = ANY($1::text[])', [[listA, listB]])
+      await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [user])
+      await db.query('DELETE FROM user_roles WHERE user_id = $1', [user])
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [user])
+      await db.query('DELETE FROM users WHERE id = $1', [user])
+      await db.query('DELETE FROM role_permissions WHERE role_id = $1', [role])
+      await db.query('DELETE FROM roles WHERE id = $1', [role])
+    }
+  }, 180000)
+
+  // ---------------------------------------------------------------------------------------------
+  // M4 PR-3a S10 (design §10.7): the 30 M4 routes under RBAC_TOKEN_TRUST=false.
+  // ---------------------------------------------------------------------------------------------
+
+  type M4GateUser = { userId: string; roleId: string }
+
+  /** A user whose grants stay fixed for every cell that uses it (so the RBAC permission cache
+   * cannot mask a cell): a role carrying `codes`, an active `user_orgs` row in `org`, and the tasks
+   * namespace admission when `admission` is true. */
+  async function seedGateUser(label: string, codes: string[], admission: boolean, org: string): Promise<M4GateUser> {
+    const user = `usr_tasks_${label}_${stamp}`
+    const role = `tasks_${label}_${stamp}`
+    const db = poolManager.get()
+    await db.query('INSERT INTO roles (id, name) VALUES ($1, $2)', [role, role])
+    for (const code of codes) {
+      await db.query('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [role, code])
+    }
+    await db.query(
+      `INSERT INTO users (
+         id, email, name, password_hash, role, permissions,
+         is_active, activation_status, local_password_set, must_change_password
+       ) VALUES ($1, $2, $3, 'x', 'user', '[]'::jsonb, TRUE, 'activated', TRUE, FALSE)`,
+      [user, `${user}@tasks-auth-gate.test`, `tasks-${label}`],
+    )
+    await db.query('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [user, role])
+    await db.query('INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)', [user, org])
+    if (admission) {
+      await db.query(
+        `INSERT INTO user_namespace_admissions (
+           user_id, namespace, enabled, source, created_at, updated_at
+         ) VALUES ($1, 'tasks', TRUE, 'test', now(), now())`,
+        [user],
+      )
+    }
+    return { userId: user, roleId: role }
+  }
+
+  /** A bearer for `who`; `tenant` null signs a token with no tenant claim. */
+  function gateToken(who: M4GateUser, tenant: string | null): string {
+    return jwt.sign({
+      userId: who.userId, sub: who.userId, email: `${who.userId}@tasks-auth-gate.test`,
+      role: 'user', roles: [who.roleId], perms: ['tasks:read', 'tasks:write'],
+      ...(tenant === null ? {} : { tenantId: tenant }),
+    }, JWT_SECRET, { expiresIn: '1h' })
+  }
+
+  async function dropGateUsers(who: M4GateUser[]): Promise<void> {
+    const db = poolManager.get()
+    for (const { userId: user, roleId: role } of who) {
+      await db.query('DELETE FROM tasks WHERE created_by = $1', [user])
+      await db.query('DELETE FROM task_lists WHERE created_by = $1', [user])
+      await db.query('DELETE FROM task_groups WHERE user_id = $1', [user])
+      await db.query('DELETE FROM task_user_settings WHERE user_id = $1', [user])
+      await db.query('DELETE FROM user_namespace_admissions WHERE user_id = $1', [user])
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [user])
+      await db.query('DELETE FROM user_roles WHERE user_id = $1', [user])
+      await db.query('DELETE FROM users WHERE id = $1', [user])
+      await db.query('DELETE FROM role_permissions WHERE role_id = $1', [role])
+      await db.query('DELETE FROM roles WHERE id = $1', [role])
+    }
+  }
+
+  // Gates 1 / 2 / 16, route population (design §10.7). The routes `tasksRouter()` registers, as
+  // "METHOD path", equal the union of P0A_ROUTES, M3_ROUTES and M4_ROUTES: 8 + 13 + 30 = 51 at the
+  // end of PR-3a. Every route is registered directly on the factory's router, so each stack layer
+  // carries one route; any other layer (a nested router, a middleware) fails the comparison.
+  // Each M3 and M4 row is also bound to its label through the request the per-route cells send:
+  // the row's method and its path with the placeholder ids are resolved the way Express
+  // dispatches them (the first stack layer whose route has that method and whose path matches),
+  // and that layer's "METHOD path" must be the row's label. A row whose method or path drifted to
+  // a sibling route fails here even though its label still matches the router.
+  it('gates 1/2/16 (M4): tasksRouter() registers exactly the P0-A, M3 and M4 route tables, no table repeats a route, and every M3 / M4 row requests the route its label names', () => {
+    const router = tasksRouter()
+    expect(router).not.toBeNull()
+    type StackLayer = { route?: { path: unknown; methods: Record<string, boolean> }; match: (path: string) => boolean }
+    const stack = (router as unknown as { stack: StackLayer[] }).stack
+    const registered: string[] = []
+    for (const layer of stack) {
+      if (!layer.route) {
+        registered.push('(a layer without a route)')
+        continue
+      }
+      for (const method of Object.keys(layer.route.methods)) registered.push(`${method.toUpperCase()} ${String(layer.route.path)}`)
+    }
+    const tables = [...P0A_ROUTES, ...M3_ROUTES.map((route) => route.label), ...M4_ROUTES.map((route) => route.label)]
+    expect(new Set(tables).size, 'a route appears twice in the tables').toBe(tables.length)
+    expect(new Set(registered).size, 'the router registers a route twice').toBe(registered.length)
+    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length]).toEqual([8, 13, 30])
+    expect([...registered].sort()).toEqual([...tables].sort())
+    const dispatchedTo = (method: string, url: string): string => {
+      const layer = stack.find((candidate) => candidate.route?.methods[method] === true && candidate.match(url))
+      return layer?.route ? `${method.toUpperCase()} ${String(layer.route.path)}` : `(no route for ${method.toUpperCase()} ${url})`
+    }
+    for (const route of M3_ROUTES) {
+      expect(dispatchedTo(route.method, route.path(M3_PLACEHOLDER)), route.label).toBe(route.label)
+    }
+    for (const route of M4_ROUTES) {
+      expect(dispatchedTo(route.method, route.path(M4_PLACEHOLDER)), route.label).toBe(route.label)
+    }
+  })
+
+  // Gate 1 for every M4 route (design §10.7 ①; candidate subset rows of gate 1, not scored until
+  // the lock carries them). One user with both codes, the admission and an active user_orgs row in
+  // its home org. Four tokens:
+  // - no tenant claim, sent with x-tenant-id / x-org-id headers that name the home org:
+  //   a, c, d, f–i 适用; b 刻意取反 (no tenantId claim); e 适用 on write routes;
+  // - a tenant claim for an org the user has no user_orgs row in:
+  //   a, c, d, f–i 适用; b 刻意取反 (tenantId ≠ every user_orgs.org_id); e 适用 on write routes;
+  // - a tenant claim for an org where the user's user_orgs row is inactive:
+  //   a, c, d, f–i 适用; b 刻意取反 (that row has is_active = false); e 适用 on write routes;
+  // - the home org as tenant claim, for the rows a cell seeds first and for its 200 control:
+  //   a–i 适用, including e.
+  // Without an org a write is 422 ORG_MISSING, a collection read the degraded body without
+  // `total`, a read under one id 404, byte for byte; no row of the home org or of the inactive
+  // org changes.
+  describe('gate 1: every M4 route without an org', () => {
+    const home = `org_tasks_auth_m4home_${stamp}`
+    const foreignOrg = `org_tasks_auth_m4foreign_${stamp}`
+    const inactiveOrg = `org_tasks_auth_m4inactive_${stamp}`
+    const target = `usr_m4_noorg_target_${stamp}`
+    let user: M4GateUser
+    let tokens: { member: string; noClaim: string; foreign: string; inactive: string }
+
+    beforeAll(async () => {
+      user = await seedGateUser('m4noorg', ['tasks:read', 'tasks:write'], true, home)
+      // The user's relation to `inactiveOrg` exists but is deactivated (a user who left that org).
+      await poolManager.get().query(
+        'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, FALSE)',
+        [user.userId, inactiveOrg],
+      )
+      tokens = {
+        member: gateToken(user, home),
+        noClaim: gateToken(user, null),
+        foreign: gateToken(user, foreignOrg),
+        inactive: gateToken(user, inactiveOrg),
+      }
+      // RULED(2026-10-07): [R17] [N2] the member and owner target of the 200 controls.
+      await seedOrgMembers(home, [target])
+    })
+
+    afterAll(async () => {
+      await dropGateUsers([user])
+      const db = poolManager.get()
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [target])
+      await db.query('DELETE FROM users WHERE id = $1', [target])
+    })
+
+    it.each(M4_ROUTES)('$label: no tenant claim, a claim without membership and a claim with an inactive membership all get the no-org answer; nothing is written; the member control is 200', async (route) => {
+      const server = app()
+      const ctx = await seedM4(server, route, tokens.member, user.userId, target)
+      const expected = m4NoOrgText(route)
+      const before = await m4OrgState(home)
+      const beforeInactive = await m4OrgState(inactiveOrg)
+
+      const noClaim = await m4Request(server, route, ctx, tokens.noClaim)
+        .set('x-tenant-id', home)
+        .set('x-org-id', home)
+      expect(noClaim.status, route.label).toBe(expected.status)
+      expect(noClaim.text, route.label).toBe(expected.text)
+
+      const foreign = await m4Request(server, route, ctx, tokens.foreign)
+      expect(foreign.status, route.label).toBe(expected.status)
+      expect(foreign.text, route.label).toBe(expected.text)
+
+      const inactive = await m4Request(server, route, ctx, tokens.inactive)
+      expect(inactive.status, `${route.label} (inactive membership)`).toBe(expected.status)
+      expect(inactive.text, `${route.label} (inactive membership)`).toBe(expected.text)
+
+      expect(await m4OrgState(home), route.label).toBe(before)
+      expect(await m4OrgState(inactiveOrg), `${route.label} (inactive membership)`).toBe(beforeInactive)
+
+      const allowed = await m4Request(server, route, ctx, tokens.member)
+      expect(allowed.status, route.label).toBe(200)
+    })
+  })
+
+  // Gate 2/16 for every M4 route, one it() per route (design §10.7; candidate subset rows of gates
+  // 2 / 16, not scored until the lock carries them). §12.0: a–d, f–i 适用; e 适用 on write routes.
+  // Each user's grants are fixed for the whole block:
+  // - noAdmit: both codes and user_orgs, no namespace admission ⇒ 403;
+  // - wrongCode: admission and user_orgs, but only the other code ⇒ 403;
+  // - adminOnly: admission and user_orgs, and only tasks:admin ⇒ 403 (RULED(2026-10-07): [R18] no
+  //   route here takes tasks:admin, so that code alone opens none of them);
+  // - control: both codes, admission, user_orgs ⇒ 200 on rows it created.
+  // The 403 cells use placeholder ids and bodies the handler would answer 404 or 422 to, or a route
+  // whose handler answers 200; a 403 can only come from the route's rbacGuard carrying its code.
+  describe('gate 2/16: every M4 route', () => {
+    const users = {} as Record<'noAdmit' | 'readOnly' | 'writeOnly' | 'adminOnly' | 'control', M4GateUser>
+    const bearer = (who: M4GateUser): string => gateToken(who, orgId)
+
+    beforeAll(async () => {
+      users.noAdmit = await seedGateUser('m4gate_noadmit', ['tasks:read', 'tasks:write'], false, orgId)
+      users.readOnly = await seedGateUser('m4gate_readonly', ['tasks:read'], true, orgId)
+      users.writeOnly = await seedGateUser('m4gate_writeonly', ['tasks:write'], true, orgId)
+      users.adminOnly = await seedGateUser('m4gate_adminonly', ['tasks:admin'], true, orgId)
+      users.control = await seedGateUser('m4gate_control', ['tasks:read', 'tasks:write'], true, orgId)
+    })
+
+    afterAll(async () => {
+      await dropGateUsers(Object.values(users))
+    })
+
+    it.each(M4_ROUTES)('$label: 403 without admission, 403 with only the other code, 403 with only tasks:admin, 200 for the control', async (route) => {
+      const server = app()
+      const noAdmit = await m4Request(server, route, M4_PLACEHOLDER, bearer(users.noAdmit))
+      expect(noAdmit.status, route.label).toBe(403)
+      expect(noAdmit.body, route.label).toEqual({ error: 'Insufficient permissions' })
+
+      const wrongCode = route.code === 'write' ? users.readOnly : users.writeOnly
+      const denied = await m4Request(server, route, M4_PLACEHOLDER, bearer(wrongCode))
+      expect(denied.status, route.label).toBe(403)
+      expect(denied.body, route.label).toEqual({ error: 'Insufficient permissions' })
+
+      const adminOnly = await m4Request(server, route, M4_PLACEHOLDER, bearer(users.adminOnly))
+      expect(adminOnly.status, `${route.label} (tasks:admin only)`).toBe(403)
+      expect(adminOnly.body, `${route.label} (tasks:admin only)`).toEqual({ error: 'Insufficient permissions' })
+
+      const ctx = await seedM4(server, route, bearer(users.control), users.control.userId, M4_TARGET)
+      const allowed = await m4Request(server, route, ctx, bearer(users.control))
+      expect(allowed.status, route.label).toBe(200)
+    })
+  })
+
+  // RULED(2026-10-07): [own-53] under RBAC_TOKEN_TRUST=false (design §3.4, §6.3; the realdb files
+  // hold the full grid under token trust). Adding or removing an assignee or a follower takes a
+  // direct role on the task, creator or assignee. A caller whose `edit` comes from a list role is
+  // answered like a task that does not exist, before the body and the path user id are read, and
+  // keeps PATCH. §12.0: a–i 适用, including e, for both users (b: user_orgs.org_id = token tenantId,
+  // checked against the database).
+  it('[own-53] (M4, trust-off): the four assignee and follower writes take a direct role on the task; a list edit member gets the missing-task 404, the creator 200', async () => {
+    const org = `org_tasks_auth_own53_${stamp}`
+    const follower = `usr_own53_target_${stamp}`
+    const creator = await seedGateUser('own53creator', ['tasks:read', 'tasks:write'], true, org)
+    const editor = await seedGateUser('own53editor', ['tasks:read', 'tasks:write'], true, org)
+    await seedOrgMembers(org, [follower])
+    const asCreator = gateToken(creator, org)
+    const asEditor = gateToken(editor, org)
+    try {
+      const server = app()
+      const send = async (test: supertest.Test, bearerToken: string, body?: Record<string, unknown>) => {
+        const authed = test.set('Authorization', `Bearer ${bearerToken}`)
+        return body ? authed.send(body) : authed
+      }
+      const created = await send(server.post('/api/tasks'), asCreator, { title: '备料复核', assignees: [creator.userId] })
+      expect(created.status).toBe(200)
+      const taskId = String(created.body.id)
+      expect((await send(server.post(`/api/tasks/${taskId}/followers`), asCreator, { userId: follower })).status).toBe(200)
+      const list = await send(server.post('/api/task-lists'), asCreator, { name: '备料复核' })
+      expect(list.status).toBe(200)
+      const listId = String(list.body.id)
+      expect((await send(server.post(`/api/task-lists/${listId}/members`), asCreator, { userId: editor.userId, role: 'edit' })).status).toBe(200)
+      expect((await send(server.post(`/api/task-lists/${listId}/items`), asCreator, { taskId })).status).toBe(200)
+
+      const detail = await send(server.get(`/api/tasks/${taskId}`), asEditor)
+      expect(detail.status).toBe(200)
+      expect(detail.body).toMatchObject({ canEdit: true, canManageMembers: false })
+
+      const missingTask = `tsk_missing_${stamp.replace(/-/g, '')}`
+      const writes: Array<{ method: 'post' | 'delete'; path: (id: string) => string; body?: Record<string, unknown> }> = [
+        { method: 'post', path: (id) => `/api/tasks/${id}/assignees`, body: { userId: editor.userId } },
+        { method: 'delete', path: (id) => `/api/tasks/${id}/assignees/${creator.userId}` },
+        { method: 'post', path: (id) => `/api/tasks/${id}/followers`, body: { userId: editor.userId } },
+        { method: 'delete', path: (id) => `/api/tasks/${id}/followers/${follower}` },
+      ]
+      const before = await m4OrgState(org)
+      for (const write of writes) {
+        const missing = await send(server[write.method](write.path(missingTask)), asEditor, write.body)
+        expect(missing.status).toBe(404)
+        const refused = await send(server[write.method](write.path(taskId)), asEditor, write.body)
+        expect(refused.status, write.path(taskId)).toBe(404)
+        expect(refused.text, write.path(taskId)).toBe(missing.text)
+      }
+      expect(await m4OrgState(org)).toBe(before)
+
+      // The list edit member keeps PATCH.
+      const patched = await send(server.patch(`/api/tasks/${taskId}`), asEditor, { expectedVersion: Number(detail.body.version), title: '备料复核(改)' })
+      expect(patched.status).toBe(200)
+
+      // The creator holds a direct role: the same four writes are 200.
+      for (const write of writes) {
+        const response = await send(server[write.method](write.path(taskId)), asCreator, write.body)
+        expect(response.status, write.path(taskId)).toBe(200)
+      }
+    } finally {
+      await dropGateUsers([creator, editor])
+      const db = poolManager.get()
+      await db.query('DELETE FROM user_orgs WHERE user_id = $1', [follower])
+      await db.query('DELETE FROM users WHERE id = $1', [follower])
+    }
+  })
 
   // Gate 1 and gate 16 control, write 200. §12.0: a–i 适用, including e. Fixture is beforeAll and token().
   it('allows POST /api/tasks when the database grants tasks:write', async () => {

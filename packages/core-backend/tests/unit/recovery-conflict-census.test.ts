@@ -399,7 +399,7 @@ function auditCensusLegLinkage(testContents: ReadonlyMap<string, string>): strin
     // property of the file's CONTENT (how many times this literal string appears), not
     // of which lines are recognised as declarations, so no enumeration of calling forms
     // can evade it. A well-formed leg's tag appears exactly once — inside its own test
-    // name — and nowhere else (verified over all 55 currently-registered legs).
+    // name — and nowhere else (verified over all 56 currently-registered legs).
     //
     // Disclosed residual, in the same spirit as the `MEMBER_SEGMENT_RE` comment above
     // ("the fully-dynamic form is a disclosed residual, not a gap this regex claims to
@@ -656,9 +656,9 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     const contents = loadRealContents()
     const target = 'routes/roles.ts'
     const original = contents.get(target) as string
-    expect(countCalls(stripComments(original), 'sendIfRecoveryConflict')).toBe(3)
+    expect(countCalls(stripComments(original), 'sendIfRecoveryConflict')).toBe(4)
 
-    // A hypothetical new handler adds a 4th call site but nobody registers a leg.
+    // A hypothetical new handler adds a 5th call site but nobody registers a leg.
     const mutated = `${original}\nexport function newHandlerHook(res: never, error: never) { if (sendIfRecoveryConflict(res, error)) return }\n`
     contents.set(target, mutated)
 
@@ -666,7 +666,7 @@ describe('O2-S2/O2-A1 recovery-conflict wiring census', () => {
     expect(
       violations.some((entry) =>
         entry.startsWith(`${target}:`)
-        && entry.includes('found 4')
+        && entry.includes('found 5')
         && entry.includes('behaviour leg'),
       ),
     ).toBe(true)
@@ -1115,11 +1115,13 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
       expect([...(sites as ReadonlySet<string>)].sort()).toEqual([...(byFile.get(testFile) as ReadonlySet<string>)].sort())
       total += (sites as ReadonlySet<string>).size
     }
-    // The whole enumerated surface: 55 call sites ⇒ 55 registered legs, no duplicates.
-    // (48 until the O2-D1 denominator slice added univer-meta's 5 and AuthService's 2.)
+    // The whole enumerated surface: 57 call sites ⇒ 57 registered legs, no duplicates.
+    // (48 until the O2-D1 denominator slice added univer-meta's 5 and AuthService's 2; 55 → 56 is the
+    // S5b members port's role write, R-39; 56 → 57 is roles.ts DELETE of a namespace-admin /
+    // admin-equivalent role, whose membership removal reaches user_roles.)
     expect(total).toBe(allCensusLegs().length)
     expect(new Set(allCensusLegs().map((leg) => leg.site)).size).toBe(total)
-    expect(total).toBe(55)
+    expect(total).toBe(57)
   })
 
   it('a COMPLETE executed set is clean (positive control for the coverage predicate)', () => {
@@ -1158,7 +1160,7 @@ describe('P3-1 runtime census recorder — the execution-proof mechanism', () =>
         checked += 1
       }
     }
-    expect(checked).toBe(55)
+    expect(checked).toBe(57)
   })
 
   it('an EXTRA / foreign recorded site reds too (the set comparison is exact, not a subset test)', () => {

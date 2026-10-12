@@ -1031,7 +1031,7 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
 
     it('a node key absent from the live template renders a values-free fallback, never the raw key', async () => {
       mockHistory.value = historyWithNodeKey('ghost_node_removed_9f2')
-      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
+      mockDetailActiveTemplate.value = { id: 'tpl_1', approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
       mockDetailActiveVersion.value = null
       await mountView()
 
@@ -1051,7 +1051,7 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
     it('does NOT consult a pinned/admin-only activeVersion on drift — values-free fallback fires regardless (P2-1 fix)', async () => {
       mockHistory.value = historyWithNodeKey('approval_1')
       // Live template: node renamed/removed since this history row's node ran.
-      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
+      mockDetailActiveTemplate.value = { id: 'tpl_1', approvalGraph: { nodes: [{ key: 'start', type: 'start', name: '开始', config: {} }], edges: [] } }
       // Even if some future/admin code path populated activeVersion with the historical name,
       // nodeLabel must not reach for it — this shape must never leak through.
       mockDetailActiveVersion.value = { approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批（历史）', config: {} }], edges: [] } }
@@ -1064,7 +1064,8 @@ describe('ApprovalDetailView — P7-R2 values-free candidates', () => {
 
     it('a node key present in the live template resolves to its live name (unaffected, still the common case)', async () => {
       mockHistory.value = historyWithNodeKey('approval_1')
-      mockDetailActiveTemplate.value = { approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批', config: {} }], edges: [] } }
+      // The instance's own template (baseInstance's templateId) — T4cd: only that one may name nodes.
+      mockDetailActiveTemplate.value = { id: 'tpl_1', approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '部门主管审批', config: {} }], edges: [] } }
       await mountView()
 
       expect(container!.textContent).toContain('部门主管审批')
@@ -1298,5 +1299,229 @@ describe('ApprovalDetailView — T4cd platform /history rows (snake_case + camel
     await flushUi(12)
     expect(timelineItems()[0].querySelector('.approval-detail__timeline-header strong')?.textContent?.trim()).toBe('赵六')
     expect(container!.textContent).not.toContain('user_secret_77')
+  })
+
+  // T4cd node half (owner approval pending under the 2026-09-20 whitelist ruling): the server now
+  // projects each row's `nodeKey` and `autoApproved`, so a platform row names its node and an
+  // engine approval reads as one.
+  describe('node half — metadata.nodeKey / metadata.autoApproved on platform rows', () => {
+    const OWN_TEMPLATE = {
+      id: 'tpl_1',
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '部门主管审批', config: {} },
+          { key: 'cc_1', type: 'cc', name: '抄送财务', config: {} },
+        ],
+        edges: [],
+      },
+    }
+
+    function withMetadata(row: Record<string, unknown>, metadata: Record<string, unknown>): Record<string, unknown> {
+      return { ...row, metadata }
+    }
+
+    it('timeline badges and the table node column name each row\'s node from the instance\'s own template', async () => {
+      const [approve, cc, created] = testerInstanceRows()
+      mockHistory.value = await historyFromWire([
+        withMetadata(approve, { nodeKey: 'approval_1' }),
+        withMetadata(cc, { nodeKey: 'cc_1' }),
+        withMetadata(created, { nodeKey: 'start' }),
+      ])
+      mockDetailActiveTemplate.value = OWN_TEMPLATE
+      await mountView()
+
+      const badges = timelineItems().map((item) => Array.from(item.querySelectorAll('.approval-detail__meta-badge')).map((b) => b.textContent?.trim()))
+      expect(badges).toEqual([['节点: 部门主管审批'], ['节点: 抄送财务'], ['节点: 发起']])
+
+      q(container!, 'approval-detail-record-view-table')!.click()
+      await flushUi()
+      expect(recordTableRows(container!).map((row) => row.querySelector('[data-el-cell="节点名称"]')?.textContent?.trim()))
+        .toEqual(['部门主管审批', '抄送财务', '发起'])
+      expect(container!.textContent).not.toContain('approval_1')
+    })
+
+    it('an engine auto-approval row reads 系统自动审批 with the 自动审批 badge', async () => {
+      mockHistory.value = await historyFromWire([
+        withMetadata(
+          wireRow('rec_auto', 'approve', 'system:auto-approval', 'System Auto Approval', APPROVED_AT, 'pending', 'approved'),
+          { nodeKey: 'approval_1', autoApproved: true },
+        ),
+      ])
+      mockDetailActiveTemplate.value = OWN_TEMPLATE
+      await mountView()
+
+      const item = timelineItems()[0]
+      expect(item.querySelector('.approval-detail__timeline-header strong')?.textContent?.trim()).toBe('系统自动审批')
+      const badges = Array.from(item.querySelectorAll('.approval-detail__meta-badge')).map((b) => b.textContent?.trim())
+      expect(badges).toContain('自动审批')
+      expect(badges).toContain('节点: 部门主管审批')
+    })
+
+    // T4cd-verify E1: projecting nodeKey is what first turns the parallel-branch grouping on for a
+    // platform instance (before, every platform row fell into one 「其他」 bucket).
+    it('a pending platform instance in a parallel region groups each branch\'s rows under its node name; 发起 and 抄送 land in 其他', async () => {
+      mockActiveApproval.value = baseInstance({ currentNodeKey: null, currentNodeKeys: ['branch_a', 'branch_b'] })
+      mockDetailActiveTemplate.value = {
+        id: 'tpl_1',
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'cc_1', type: 'cc', name: '抄送财务', config: {} },
+            { key: 'branch_a', type: 'approval', name: '财务审批', config: {} },
+            { key: 'branch_b', type: 'approval', name: '法务审批', config: {} },
+          ],
+          edges: [],
+        },
+      }
+      mockHistory.value = await historyFromWire([
+        withMetadata(wireRow('rec_4', 'approve', 'user_201', '王五', APPROVED_AT, 'pending', 'pending'), { nodeKey: 'branch_b' }),
+        withMetadata(wireRow('rec_3', 'approve', 'user_200', '赵六', APPROVED_AT, 'pending', 'pending'), { nodeKey: 'branch_a' }),
+        withMetadata(wireRow('rec_2', 'cc', 'system', 'System', CC_AT, 'pending', 'pending'), { nodeKey: 'cc_1' }),
+        withMetadata(wireRow('rec_1', 'created', 'user_99', '张三', CREATED_AT, null, 'pending'), { nodeKey: 'start' }),
+      ])
+      await mountView()
+
+      const groups = Array.from(container!.querySelectorAll('.approval-detail__timeline-group'))
+      expect(groups.map((group) => group.querySelector('.approval-detail__timeline-group-label')?.textContent?.trim()))
+        .toEqual(['法务审批', '财务审批', '其他'])
+      expect(groups.map((group) => Array.from(group.querySelectorAll('.approval-detail__timeline-header strong')).map((el) => el.textContent?.trim())))
+        .toEqual([['王五'], ['赵六'], ['系统', '张三']])
+    })
+
+    it('a template store still holding ANOTHER template (this one failed to load) never names this instance\'s nodes', async () => {
+      mockHistory.value = await historyFromWire([
+        withMetadata(testerInstanceRows()[0], { nodeKey: 'approval_1' }),
+      ])
+      // Same default node key, different template: its name must not leak onto this instance.
+      mockDetailActiveTemplate.value = { ...OWN_TEMPLATE, id: 'tpl_other', approvalGraph: { nodes: [{ key: 'approval_1', type: 'approval', name: '别的模板的节点', config: {} }], edges: [] } }
+      await mountView()
+
+      const badges = Array.from(timelineItems()[0].querySelectorAll('.approval-detail__meta-badge')).map((b) => b.textContent?.trim())
+      expect(badges).toEqual(['节点: 节点已变更'])
+      expect(container!.textContent).not.toContain('别的模板的节点')
+    })
+  })
+})
+
+// -----------------------------------------------------------------------------------------------
+// Test report 2026-10-08 T4b — the 表单信息 「人员」 (user) field. Its value is stored as member ids,
+// and the detail page printed them verbatim. UUID-shaped fixtures, so the discriminating negative
+// ("the id never appears anywhere in the page") has a matching positive control (the same id renders
+// the resolved name once the directory resolver returns one).
+// -----------------------------------------------------------------------------------------------
+describe('ApprovalDetailView — T4b form user (人员) values render names, never ids', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const OWNER = '5b9e2d47-8c13-4f6a-9b20-7e1d3c5a8f42'
+  const MEMBER = 'c41f7a92-3d58-4b6e-a017-2f9d8e6b3c15'
+
+  beforeEach(() => {
+    mockRouteParams.id = 'apv_1'
+    createApprovalCommentsClientSpy.mockClear()
+    mockHistory.value = []
+    mockLoading.value = false
+    mockCanAct.value = false
+    mockApprovalMobileFlag.value = false
+    mockDetailActiveTemplate.value = null
+    mockDetailActiveVersion.value = null
+    setViewport(false)
+    executeActionSpy.mockReset()
+    executeActionSpy.mockResolvedValue({})
+    loadDetailSpy.mockClear()
+    loadHistorySpy.mockClear()
+    pushSpy.mockClear()
+    mockCurrentUserId.value = null
+    resolveApprovalDirectoryUsersSpy.mockReset().mockResolvedValue([])
+    __resetResolvedDirectoryNamesForTests()
+    container = document.createElement('div')
+    document.body.appendChild(container)
+  })
+
+  afterEach(() => {
+    if (app) app.unmount()
+    if (container) container.remove()
+    app = null
+    container = null
+    vi.clearAllMocks()
+  })
+
+  async function mountView() {
+    const { default: ApprovalDetailView } = await import('../src/views/approval/ApprovalDetailView.vue')
+    const Host = defineComponent({ setup() { return () => h(ApprovalDetailView as any) } })
+    app = createApp(Host)
+    for (const name of ['ElDivider', 'ElEmpty', 'ElTimeline', 'ElTimelineItem', 'ElForm', 'ElFormItem', 'ElSelect', 'ElOption', 'ElRadioGroup', 'ElRadio', 'ElIcon', 'ElInput', 'ElTag']) {
+      app.component(name, stub(name))
+    }
+    app.component('ElDialog', ElDialog)
+    app.component('ElTable', ElTable)
+    app.component('ElTableColumn', ElTableColumn)
+    app.component('ElButton', ElButton)
+    app.component('ElAlert', ElAlert)
+    app.component('ElPopconfirm', ElPopconfirm)
+    app.directive('loading', stubDirective)
+    app.mount(container!)
+    await flushUi(12)
+  }
+
+  function userFieldInstance(formSnapshot: Record<string, unknown>): any {
+    return baseInstance({
+      formSchema: {
+        fields: [
+          { id: 'fld_owner', type: 'user', label: '人员' },
+          { id: 'fld_members', type: 'user', label: '参与人', props: { selection: 'multi' } },
+          { id: 'items', type: 'detail', label: '明细', columns: [{ id: 'who', type: 'user', label: '负责人' }] },
+        ],
+      },
+      formSnapshot,
+    })
+  }
+
+  function formValue(label: string): string | undefined {
+    const row = Array.from(container!.querySelectorAll('.approval-detail__field'))
+      .find((el) => el.querySelector('.approval-detail__label')?.textContent?.trim() === label)
+    return row?.querySelectorAll('span')[1]?.textContent?.trim()
+  }
+
+  it('the 表单信息 人员 field shows the directory-resolved name, and the stored id appears nowhere on the page', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: OWNER, name: '王五' }])
+    mockActiveApproval.value = userFieldInstance({ fld_owner: OWNER })
+    await mountView()
+
+    expect(formValue('人员')).toBe('王五')
+    expect(resolveApprovalDirectoryUsersSpy.mock.calls.flatMap((call) => call[0] as string[])).toContain(OWNER)
+    expect(container!.textContent).not.toContain(OWNER)
+  })
+
+  it('an id the directory cannot name (inactive or nameless account) shows 未知用户 — still never the id', async () => {
+    mockActiveApproval.value = userFieldInstance({ fld_owner: OWNER })
+    await mountView()
+
+    expect(formValue('人员')).toBe('未知用户')
+    expect(container!.textContent).not.toContain(OWNER)
+  })
+
+  it('a multi-person value and a 明细 person column resolve the same way; a historical {id, name} value is named by id, not by its stored name', async () => {
+    resolveApprovalDirectoryUsersSpy.mockResolvedValue([{ id: OWNER, name: '王五' }])
+    mockActiveApproval.value = userFieldInstance({
+      fld_owner: { id: OWNER, name: '旧名字' },
+      fld_members: [OWNER, MEMBER],
+      // Lock-2B report §3: display metadata stored with a value is not authoritative — in a 明细
+      // cell too, whatever display keys the stored object carries.
+      items: [{ who: OWNER }, { who: MEMBER }, { who: { id: OWNER, name: '旧名字', displayValue: '旧显示名' } }],
+    })
+    await mountView()
+
+    expect(formValue('人员')).toBe('王五')
+    expect(formValue('参与人')).toBe('王五、未知用户')
+    const cells = Array.from(container!.querySelectorAll('table.approval-detail__detail-table td[data-el-cell="负责人"]'))
+      .map((cell) => cell.textContent?.trim())
+    expect(cells).toEqual(['王五', '未知用户', '王五'])
+    const text = container!.textContent ?? ''
+    expect(text).not.toContain(OWNER)
+    expect(text).not.toContain(MEMBER)
+    expect(text).not.toContain('旧名字')
+    expect(text).not.toContain('旧显示名')
+    expect(text).not.toContain('[object Object]')
   })
 })

@@ -88,6 +88,7 @@ const crypto = require('node:crypto')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   pickOwnBaseName,
 } = require('./stock-preparation-templates.cjs')
 
@@ -119,6 +120,34 @@ const STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS = Object.freeze([
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId,
 ])
+// S1 (ADR adr-stock-prep-project-sheets-20261008 §2): ONE PROJECT = ONE SHEET. Every per-project
+// sheet's objectId is `plm_stock_preparation_sandbox_p_<24 hex>` — inside the sandbox namespace (so
+// `assertSandboxObjectId` and the preflight filter accept it) and distinguishable from a hand-named
+// sandbox twin by the fixed `_p_` segment plus the exact digest length. The rule lives HERE, beside
+// the pair, because the anchor below is its first consumer and the project-targets module requires
+// this one (a require in the other direction would be a load cycle).
+const STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX = 'plm_stock_preparation_sandbox_p_'
+const STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN = /^plm_stock_preparation_sandbox_p_[0-9a-f]{24}$/
+
+function isStockPreparationProjectSheetObjectId(value) {
+  return typeof value === 'string' && STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN.test(value)
+}
+
+const STOCK_PREPARATION_PROJECT_SHEET_DIGEST_LENGTH = 24
+
+/**
+ * THE per-project objectId: the prefix + the first 24 hex of sha256(`${tenantId}:${projectNo}`), both
+ * trimmed. Pure; `null` for a blank input (the caller decides how to refuse). Moved here in S2 fix
+ * round 1 so the customer-pack module can BIND a re-placed pack to one (tenant, project) without a
+ * load cycle — project-targets.cjs delegates to it, so there is one derivation, not two.
+ */
+function deriveStockPreparationProjectSheetObjectId(tenantId, projectNo) {
+  const tenant = typeof tenantId === 'string' ? tenantId.trim() : ''
+  const project = typeof projectNo === 'string' ? projectNo.trim() : ''
+  if (!tenant || !project) return null
+  const digest = crypto.createHash('sha256').update(`${tenant}:${project}`, 'utf8').digest('hex')
+  return `${STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX}${digest.slice(0, STOCK_PREPARATION_PROJECT_SHEET_DIGEST_LENGTH)}`
+}
 
 const OWN_BASE_SOURCES = Object.freeze(['disabled', 'explicit', 'anchor', 'api_unavailable', 'derived'])
 
@@ -162,9 +191,24 @@ function deriveStockPreparationBaseId(tenantId) {
 
 // The pair partners of `objectId`: the other member(s) of the pair, or nothing when the objectId
 // is not a pair member (so sandbox / MVP / staging tables never anchor to anything).
+// S1: a PROJECT SHEET is a ONE-WAY anchor partner of the pair (ADR §2 「放在哪个 base」): it follows
+// the ledger (and the main table) into their base, so every project's sheet sits beside the
+// confirmation ledger it is confirmed against — but neither pair member ever follows a project sheet,
+// so an existing install's pair resolution is byte-identical. The ledger is listed FIRST because it
+// is the half every operator-facing deployment has (the main table is only ensured on a production
+// apply path); whichever exists decides.
 function stockPreparationOwnBasePairPartners(objectId) {
   const self = optionalString(objectId)
-  if (!self || !STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.includes(self)) return []
+  if (!self) return []
+  // S3 (ADR §5): the PROJECT OVERVIEW is a one-way anchor partner too, exactly like a project sheet —
+  // it follows the ledger / main table into their base and nothing ever follows it.
+  if (isStockPreparationProjectSheetObjectId(self) || self === STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE.objectId) {
+    return [
+      STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE.objectId,
+      STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId,
+    ]
+  }
+  if (!STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.includes(self)) return []
   return STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS.filter((candidate) => candidate !== self)
 }
 
@@ -258,6 +302,10 @@ module.exports = {
   STOCK_PREPARATION_LEGACY_BASE_ID,
   STOCK_PREPARATION_SYSTEM_BASE_ID_PATTERN,
   STOCK_PREPARATION_OWN_BASE_PAIR_OBJECT_IDS,
+  STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PREFIX,
+  STOCK_PREPARATION_PROJECT_SHEET_OBJECT_ID_PATTERN,
+  isStockPreparationProjectSheetObjectId,
+  deriveStockPreparationProjectSheetObjectId,
   OWN_BASE_SOURCES,
   stockPreparationOwnBaseEnabled,
   deriveStockPreparationBaseId,

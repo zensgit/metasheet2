@@ -12,7 +12,9 @@
  */
 import { query, transaction } from '../db/pg'
 import {
+  buildTaskByIdCondition,
   can,
+  canChangeTaskMembers,
   resolveTaskRoles,
   type TaskRole,
 } from '../tasks/task-access'
@@ -45,18 +47,25 @@ import {
   type TaskTreeNodes,
 } from '../tasks/task-tree'
 import { isPrintableId, isStorableText, isValidMemberId } from './task-create'
+import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
+import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
+import { assertActiveOrgMembers } from './task-org-members'
 import {
   assertRowAbility,
+  assigneeIds,
   fail,
   groupUserIdsByTask,
+  loadActorListMemberships,
   loadAssignees,
+  loadRowRoles,
   loadTask,
   plainDb,
   withOrgStructure,
   writeChangedAssignees,
   writeTaskDoneState,
   type Db,
+  type LoadedTask,
   type Row,
 } from './task-records'
 
@@ -80,14 +89,32 @@ async function loadFollowerIds(db: Db, taskId: string): Promise<string[]> {
   return result.rows.map((row) => String(row.user_id))
 }
 
+/** Role set including list identity (`loadRowRoles`, RULED(2026-10-07): [R04]). */
 async function loadRoles(db: Db, taskId: string, createdBy: string, actorId: string): Promise<TaskRole[]> {
-  const assignees = await loadAssignees(db, taskId)
-  const followers = await db.query(`SELECT user_id FROM task_followers WHERE task_id = $1`, [taskId])
-  return resolveTaskRoles({
-    createdBy,
-    assigneeIds: assignees.map((row) => row.userId),
-    followerIds: followers.rows.map((row) => String(row.user_id)),
-  }, actorId)
+  const { roles } = await loadRowRoles(db, { taskId, createdBy, actorId })
+  return roles
+}
+
+/**
+ * RULED(2026-10-07): [own-53]: the assignee and follower rows of `taskId`, read on
+ * the locked client, after `canChangeTaskMembers` (a direct role: creator or assignee) has allowed
+ * `actorId` to change them. Otherwise the same 404 as a missing task (ASSUMPTION(task-m4):
+ * [own-09]), before the request body or the path user id is looked at. The rows are the input of
+ * the pure transition that follows.
+ */
+async function loadMembersForChange(
+  db: Db,
+  task: LoadedTask,
+  input: { taskId: string; actorId: string },
+): Promise<{ assignees: TaskAssigneeRow[]; followers: string[] }> {
+  const assignees = await loadAssignees(db, input.taskId)
+  const followers = await loadFollowerIds(db, input.taskId)
+  const allowed = canChangeTaskMembers({
+    task: { createdBy: task.createdBy, assigneeIds: assignees.map((row) => row.userId), followerIds: followers },
+    me: input.actorId,
+  })
+  if (!allowed) fail(404, 'NOT_FOUND')
+  return { assignees, followers }
 }
 
 interface MembershipEventLike {
@@ -101,16 +128,23 @@ interface MembershipEventLike {
  * Membership events carry `targetUserId` (the assignee/follower the change is
  * about) that the tree/deletion events do not — written into `task_events
  * .payload` (PR #6126 second-round review, P2 item 6). Tree/deletion events
- * have no `targetUserId` and keep the column's `{}` default.
+ * have no `targetUserId` and keep the column's `{}` default. Returns the
+ * events as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: each id
+ * is generated before its INSERT, for the notification producer).
  */
-async function writeMembershipEvents(db: Db, taskId: string, events: MembershipEventLike[], fallbackAt: Date): Promise<void> {
+async function writeMembershipEvents(db: Db, taskId: string, events: MembershipEventLike[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
+  const written: WrittenTaskEvent[] = []
   for (const event of events) {
+    const id = newTaskEventId()
+    const occurredAt = event.occurredAt ?? fallbackAt
     const payload = event.targetUserId !== undefined ? JSON.stringify({ targetUserId: event.targetUserId }) : '{}'
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, payload, occurred_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-      [newTaskEventId(), taskId, event.userId, event.type, payload, event.occurredAt ?? fallbackAt],
+      [id, taskId, event.userId, event.type, payload, occurredAt],
     )
+    written.push({ id, type: event.type, actorId: event.userId, occurredAt })
   }
+  return written
 }
 
 interface MembershipResponse {
@@ -263,9 +297,10 @@ export async function getParentCandidates(input: {
     titleById.set(id, String(row.title))
     createdByById.set(id, String(row.created_by))
   }
-  const [assigneeRows, followerRows] = await Promise.all([
+  const [assigneeRows, followerRows, membershipsByTask] = await Promise.all([
     query<Row>(`SELECT task_id, user_id FROM task_assignees WHERE task_id = ANY($1)`, [ids]),
     query<Row>(`SELECT task_id, user_id FROM task_followers WHERE task_id = ANY($1)`, [ids]),
+    loadActorListMemberships(plainDb, ids, input.actorId),
   ])
   const assigneesByTask = groupUserIdsByTask(assigneeRows.rows)
   const followersByTask = groupUserIdsByTask(followerRows.rows)
@@ -276,7 +311,7 @@ export async function getParentCandidates(input: {
       createdBy: createdByById.get(id) ?? '',
       assigneeIds: assigneesByTask.get(id) ?? [],
       followerIds: followersByTask.get(id) ?? [],
-    }, input.actorId), 'edit'))
+    }, input.actorId, membershipsByTask.get(id) ?? []), 'edit'))
     .map((id) => ({ id, title: titleById.get(id) ?? '' }))
   return { items }
 }
@@ -286,11 +321,11 @@ export async function getParentCandidates(input: {
 // ---------------------------------------------------------------------------
 
 export async function addAssignee(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<MembershipResponse> {
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const response = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { assignees: rows } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(bodyField(input.body, 'userId'))
-    const rows = await loadAssignees(db, input.taskId)
     const now = new Date()
     const result = applyAddAssignee({
       mode: task.mode,
@@ -302,6 +337,12 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
     })
     if (result.ok === false) fail(422, 'LIMIT')
     if (result.events.length > 0) {
+      // RULED(2026-10-07): [R17] [N2] a new assignee must be an active member of the
+      // org (task-org-members.ts), else 422 INACTIVE_ORG_MEMBER and nothing is written. Only for an
+      // addition the pure function made, so a re-add stays a no-op without a lookup; after the
+      // direct-role check ([own-53]) and the id check above. ASSUMPTION(task-m4): [own-16] never for
+      // the caller adding themselves.
+      if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
       await db.query(
         `INSERT INTO task_assignees (task_id, user_id, completed_at, assigned_by) VALUES ($1, $2, NULL, $3)
          ON CONFLICT (task_id, user_id) DO NOTHING`,
@@ -309,17 +350,27 @@ export async function addAssignee(input: { orgId: string; actorId: string; taskI
       )
     }
     if (result.status !== task.status) await writeTaskDoneState(db, input.taskId, result.status === 'done', now)
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // RULED(2026-10-07): [R16] a real addition (or a status change): the assignees before it and
+    // after it; never the followers.
+    if (result.events.length > 0 || result.status !== task.status) {
+      counts.note({ before: assigneeIds(rows), after: assigneeIds(result.rows) })
+    }
     return membershipResponse(input.taskId, result.status, task.mode, result.rows)
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return response
 }
 
 export async function removeAssignee(input: { orgId: string; actorId: string; taskId: string; userId: string }): Promise<MembershipResponse> {
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const response = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { assignees: rows } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(input.userId)
-    const rows = await loadAssignees(db, input.taskId)
     const now = new Date()
     const result = applyRemoveAssignee({
       mode: task.mode,
@@ -333,9 +384,19 @@ export async function removeAssignee(input: { orgId: string; actorId: string; ta
       await db.query(`DELETE FROM task_assignees WHERE task_id = $1 AND user_id = $2`, [input.taskId, userId])
     }
     if (result.status !== task.status) await writeTaskDoneState(db, input.taskId, result.status === 'done', now)
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // RULED(2026-10-07): [R16] a real removal (or a status change): the removed assignee is in the
+    // set before it; never the followers.
+    if (result.events.length > 0 || result.status !== task.status) {
+      counts.note({ before: assigneeIds(rows), after: assigneeIds(result.rows) })
+    }
     return membershipResponse(input.taskId, result.status, task.mode, result.rows)
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return response
 }
 
 function parseCompletionMode(value: unknown): TaskCompletionMode {
@@ -375,7 +436,8 @@ async function writeCompletionModeState(db: Db, taskId: string, opts: { mode: Ta
  * `UPDATE` and one version bump cover both — never two.
  */
 export async function switchCompletionMode(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<MembershipResponse> {
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const response = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
     await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
     const to = parseCompletionMode(bodyField(input.body, 'completionMode'))
@@ -394,9 +456,17 @@ export async function switchCompletionMode(input: { orgId: string; actorId: stri
       const statusChanged = result.status !== task.status
       await writeCompletionModeState(db, input.taskId, { mode: to, statusChanged, done: result.status === 'done', now })
     }
-    await writeMembershipEvents(db, input.taskId, result.events, now)
+    const written = await writeMembershipEvents(db, input.taskId, result.events, now)
+    // M4 PR-3b: outbox rows for the events that notify, in this transaction.
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // RULED(2026-10-07): [R16] ASSUMPTION(task-m4): [own-3c-02] every real mode change, whether or
+    // not it moved the status or a completion; the same mode is a no-op and sends nothing.
+    if (to !== task.mode) counts.note({ before: assigneeIds(rows), after: assigneeIds(result.rows) })
     return membershipResponse(input.taskId, result.status, to, result.rows)
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return response
 }
 
 // ---------------------------------------------------------------------------
@@ -406,12 +476,14 @@ export async function switchCompletionMode(input: { orgId: string; actorId: stri
 export async function addFollower(input: { orgId: string; actorId: string; taskId: string; body: unknown }): Promise<{ id: string; followers: string[] }> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { followers } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(bodyField(input.body, 'userId'))
-    const followers = await loadFollowerIds(db, input.taskId)
     const result = applyAddFollower({ followers, userId, actorId: input.actorId })
     if (result.ok === false) fail(422, 'LIMIT')
     if (result.events.length > 0) {
+      // RULED(2026-10-07): [R17] [N2] the same check for a new follower, at the same point and,
+      // ASSUMPTION(task-m4): [own-16], with the same exemption as addAssignee.
+      if (userId !== input.actorId) await assertActiveOrgMembers(db, input.orgId, [userId])
       await db.query(
         `INSERT INTO task_followers (task_id, user_id) VALUES ($1, $2) ON CONFLICT (task_id, user_id) DO NOTHING`,
         [input.taskId, userId],
@@ -425,9 +497,8 @@ export async function addFollower(input: { orgId: string; actorId: string; taskI
 export async function removeFollower(input: { orgId: string; actorId: string; taskId: string; userId: string }): Promise<{ id: string; followers: string[] }> {
   return withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    await assertRowAbility(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy, ability: 'edit' })
+    const { followers } = await loadMembersForChange(db, task, input)
     const userId = requireMemberUserId(input.userId)
-    const followers = await loadFollowerIds(db, input.taskId)
     const result = applyRemoveFollower({ followers, userId, actorId: input.actorId })
     if (result.events.length > 0) {
       await db.query(`DELETE FROM task_followers WHERE task_id = $1 AND user_id = $2`, [input.taskId, userId])
@@ -584,10 +655,8 @@ export async function listComments(input: {
  * the one checked just before the transaction.
  */
 async function lockLiveTaskForComment(db: Db, taskId: string, orgId: string): Promise<void> {
-  const result = await db.query(
-    `SELECT 1 FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR KEY SHARE`,
-    [taskId, orgId],
-  )
+  const cond = buildTaskByIdCondition({ taskIdParam: taskId, orgParam: orgId })
+  const result = await db.query(`SELECT 1 FROM tasks WHERE ${cond.sql} FOR KEY SHARE`, cond.params)
   if (result.rows.length === 0) fail(404, 'NOT_FOUND')
 }
 
@@ -627,10 +696,18 @@ export async function addComment(input: { orgId: string; actorId: string; taskId
     )
     const createdAtRaw = insertResult.rows[0]?.created_at
     const createdAt = createdAtRaw instanceof Date ? createdAtRaw : new Date(String(createdAtRaw))
+    const eventId = newTaskEventId()
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type) VALUES ($1, $2, $3, 'commented')`,
-      [newTaskEventId(), input.taskId, input.actorId],
+      [eventId, input.taskId, input.actorId],
     )
+    // M4 PR-3b: outbox rows for the comment, on this transaction's client.
+    await enqueueTaskEventNotifications(db, {
+      orgId: input.orgId,
+      taskId: input.taskId,
+      createdBy: task.createdBy,
+      events: [{ id: eventId, type: 'commented', actorId: input.actorId, occurredAt: null }],
+    })
     return commentJson(toCommentView({
       id, taskId: input.taskId, authorId: input.actorId, body, deleted: false, createdAt,
     }))
@@ -729,10 +806,8 @@ async function lockTaskRowForDelete(db: Db, taskId: string, orgId: string): Prom
   await db.query(`SELECT set_config('statement_timeout', $1, true)`, [DELETE_ROW_LOCK_TIMEOUT])
   let rows: Row[]
   try {
-    const result = await db.query(
-      `SELECT 1 FROM tasks WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL FOR UPDATE`,
-      [taskId, orgId],
-    )
+    const cond = buildTaskByIdCondition({ taskIdParam: taskId, orgParam: orgId })
+    const result = await db.query(`SELECT 1 FROM tasks WHERE ${cond.sql} FOR UPDATE`, cond.params)
     rows = result.rows
   } catch (err) {
     const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined
@@ -764,16 +839,14 @@ async function precheckDeleteAbility(input: { orgId: string; actorId: string; ta
 
 export async function deleteTaskById(input: { orgId: string; actorId: string; taskId: string }): Promise<{ id: string; deleted: true }> {
   await precheckDeleteAbility(input)
-  return withOrgStructure(input.orgId, async (db) => {
+  const counts = taskCountsSignal()
+  const response = await withOrgStructure<{ id: string; deleted: true }>(input.orgId, async (db) => {
     await lockTaskRowForDelete(db, input.taskId, input.orgId)
     const task = await loadTask(db, input.taskId, input.orgId)
-    const assignees = await loadAssignees(db, input.taskId)
-    const followers = await db.query(`SELECT user_id FROM task_followers WHERE task_id = $1`, [input.taskId])
-    const roles = resolveTaskRoles({
-      createdBy: task.createdBy,
-      assigneeIds: assignees.map((row) => row.userId),
-      followerIds: followers.rows.map((row) => String(row.user_id)),
-    }, input.actorId)
+    // List roles never grant `delete`; resolved the same way as every other site so the role set
+    // here cannot drift from the detail's `canDelete`. The assignee rows come from the same reads
+    // (`loadRoles` is this call keeping only the roles).
+    const { roles, assignees } = await loadRowRoles(db, { taskId: input.taskId, createdBy: task.createdBy, actorId: input.actorId })
     const childrenResult = await db.query(
       `SELECT id FROM tasks WHERE parent_id = $1 AND org_id = $2 AND deleted_at IS NULL`,
       [input.taskId, input.orgId],
@@ -802,11 +875,25 @@ export async function deleteTaskById(input: { orgId: string; actorId: string; ta
        WHERE t.id = $1`,
       [input.taskId],
     )
+    const eventId = newTaskEventId()
     await db.query(
       `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at)
        SELECT $1, $2, $3, 'deleted', deleted_at FROM tasks WHERE id = $2`,
-      [newTaskEventId(), input.taskId, input.actorId],
+      [eventId, input.taskId, input.actorId],
     )
+    // M4 PR-3b: outbox rows for the deletion, in this transaction. The producer does not read the
+    // task row again, so the soft-deleted task is still notified.
+    await enqueueTaskEventNotifications(db, {
+      orgId: input.orgId,
+      taskId: input.taskId,
+      createdBy: task.createdBy,
+      events: [{ id: eventId, type: 'deleted', actorId: input.actorId, occurredAt: null }],
+    })
+    // RULED(2026-10-07): [R16] a deleted task leaves every assignee's badge.
+    counts.note({ before: assigneeIds(assignees), after: assigneeIds(assignees) })
     return { id: input.taskId, deleted: true }
   })
+  // RULED(2026-10-07): [R16] sent only once the transaction above committed.
+  counts.publish()
+  return response
 }

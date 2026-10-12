@@ -26,8 +26,9 @@ const UNDEFINED_TABLE_SQLSTATE = '42P01'
 
 // Credential fields that hold secrets and are encrypted at rest. Identifiers
 // like `username` are left as-is (matching the codebase's encrypt-secrets-only
-// convention).
-const SENSITIVE_CREDENTIAL_KEYS = ['password', 'apiKey', 'token']
+// convention). Exported (read-only) so the encrypted-store probe's catalog can be held to exactly
+// this list (tests/unit/encrypted-store-probe.test.ts): a new key here needs a catalog entry there.
+export const SENSITIVE_CREDENTIAL_KEYS: readonly string[] = Object.freeze(['password', 'apiKey', 'token'])
 export const DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_QUERY_DISABLED'
 export const DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED_CODE = 'DATA_SOURCE_C6_WRITE_TARGET_DELETE_UNSUPPORTED'
 // Referential delete guard (see countExternalSystemReferences): a source referenced by an

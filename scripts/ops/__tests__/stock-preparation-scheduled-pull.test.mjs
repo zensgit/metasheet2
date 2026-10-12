@@ -795,3 +795,49 @@ test('a real subprocess run against a real (separate-process) HTTP 200/not_found
   assert.equal(lines[0].action, 'skipped_not_found')
   assert.equal(lines[1].summary.failed, 0)
 })
+
+// ---------------------------------------------------------------------------
+// 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 §3 定时试拉 row): with per-project
+// sheets enabled on the server, a project nobody has created a sheet for is 409 ABSENT and an
+// archived one is 409 ARCHIVED. Both are SKIPS — the script never creates a sheet and never
+// un-archives one — so neither flips the exit code, and both are counted in the summary.
+// ---------------------------------------------------------------------------
+
+test('409 STOCK_PREPARATION_PROJECT_ABSENT is a skip, not a failure, and the script never POSTs anything but dry-run', async () => {
+  const { requests, result } = await withMockFetch(
+    () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREPARATION_PROJECT_ABSENT', message: 'no sheet yet' } } }),
+    () => runMain(['--apply'], BASE_ENV),
+  )
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  assert.equal(requests.length, 1, 'exactly one request: the dry-run — no create, no apply')
+  assert.ok(requests[0].url.includes('/dry-run'))
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].action, 'skipped_project_sheet_absent')
+  assert.equal(lines[0].failed, undefined)
+  assert.equal(lines[1].summary.skippedProjectSheetAbsent, 1)
+  assert.equal(lines[1].summary.failed, 0)
+})
+
+test('409 STOCK_PREPARATION_PROJECT_ARCHIVED is a skip, not a failure', async () => {
+  const { result } = await withMockFetch(
+    () => ({ status: 409, json: { ok: false, error: { code: 'STOCK_PREPARATION_PROJECT_ARCHIVED' } } }),
+    () => runMain([], BASE_ENV),
+  )
+  assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`)
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].action, 'skipped_project_sheet_archived')
+  assert.equal(lines[1].summary.skippedProjectSheetArchived, 1)
+  assert.equal(lines[1].summary.failed, 0)
+})
+
+test('any OTHER 409 on the dry-run is still a failure (the skip is keyed on the two closed codes only)', async () => {
+  const { result } = await withMockFetch(
+    () => ({ status: 409, json: { ok: false, error: { code: 'TARGET_SHEET_FOREIGN_PROJECT' } } }),
+    () => runMain([], BASE_ENV),
+  )
+  assert.notEqual(result.code, 0)
+  const lines = jsonLines(result.stdout)
+  assert.equal(lines[0].action, 'error')
+  assert.equal(lines[0].failed, true)
+  assert.match(lines[0].error, /TARGET_SHEET_FOREIGN_PROJECT/)
+})

@@ -10,8 +10,17 @@ import {
 
 describe('task-ids', () => {
   describe('TASK_ID_PREFIXES', () => {
-    it('is the closed three-kind set', () => {
-      expect(TASK_ID_PREFIXES).toEqual({ task: 'tsk', list: 'tlst', comment: 'tcmt', event: 'tev' })
+    // ASSUMPTION(task-d): [R23] `group`/`listEvent` added here: the R23 prefixes (ruled 2026-10-07)
+    // for `task_groups.id` / `task_list_events.id`.
+    it('is the closed six-kind set (task-d adds group/listEvent per R23)', () => {
+      expect(TASK_ID_PREFIXES).toEqual({
+        task: 'tsk',
+        list: 'tlst',
+        comment: 'tcmt',
+        event: 'tev',
+        group: 'tgrp',
+        listEvent: 'tlev',
+      })
     })
   })
 
@@ -36,6 +45,20 @@ describe('task-ids', () => {
 
     it('comment kind produces a tcmt_-prefixed id matching the format', () => {
       expect(generateTaskDomainId('comment', fixedRandom)).toMatch(/^tcmt_[A-Za-z0-9]+$/)
+    })
+
+    // ASSUMPTION(task-d): [R23]
+    it('group kind produces a tgrp_-prefixed id that passes the four-conjunct CHECK', () => {
+      const id = generateTaskDomainId('group', fixedRandom)
+      expect(id).toMatch(/^tgrp_[A-Za-z0-9]+$/)
+      expect(isValidTaskDomainId(id)).toBe(true)
+    })
+
+    // ASSUMPTION(task-d): [R23]
+    it('listEvent kind produces a tlev_-prefixed id that passes the four-conjunct CHECK', () => {
+      const id = generateTaskDomainId('listEvent', fixedRandom)
+      expect(id).toMatch(/^tlev_[A-Za-z0-9]+$/)
+      expect(isValidTaskDomainId(id)).toBe(true)
     })
 
     it('is pure: same kind + same random source yields the same id', () => {

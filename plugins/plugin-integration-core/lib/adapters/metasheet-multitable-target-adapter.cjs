@@ -24,6 +24,38 @@ const {
 
 const INTERNAL_FIELD_PREFIX = '_integration_'
 
+// S3 fix round 2 (F3; register R-37): the typed refusal of a write to a READ-ONLY SYSTEM SHEET (today: the
+// stock-preparation project overview, written only by its own plugin port). DEFENSE IN DEPTH: the host's
+// plugin-scope wrapper already refuses a generic record write to such a sheet for every plugin; this adapter asks
+// the host's read-only probe (`records.isReadOnlySystemSheet`, absent on an older host) once per object per
+// run, BEFORE any write, so a pipeline whose external-system config names such a sheet fails as one typed
+// refusal instead of one host error per row. Values-free: the configured object key only, never a sheet id.
+const METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY = 'METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY'
+
+class MultitableSystemSheetWriteError extends AdapterValidationError {
+  constructor(objectId) {
+    super('MetaSheet multitable target cannot write a read-only system sheet; choose an ordinary sheet for this object', {
+      object: objectId,
+      code: METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY,
+    })
+    this.name = 'MultitableSystemSheetWriteError'
+    this.code = METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY
+  }
+}
+
+/**
+ * Refuse BEFORE any write when the host says the configured sheet is a read-only system sheet. `cache` is the
+ * adapter instance's per-object verdict (one probe per object per run). A host without the probe: no verdict,
+ * the host's own refusal still stands behind every write.
+ */
+async function assertNotReadOnlySystemSheet(recordsApi, objectConfig, cache) {
+  if (!recordsApi || typeof recordsApi.isReadOnlySystemSheet !== 'function') return
+  if (!cache.has(objectConfig.objectId)) {
+    cache.set(objectConfig.objectId, (await recordsApi.isReadOnlySystemSheet({ sheetId: objectConfig.sheetId })) === true)
+  }
+  if (cache.get(objectConfig.objectId) === true) throw new MultitableSystemSheetWriteError(objectConfig.objectId)
+}
+
 function isPlainObject(value) {
   return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
@@ -340,6 +372,8 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // S3 fix round 2 (F3): per object, is the configured sheet a read-only system sheet (host probe, once per run).
+  const systemSheetCache = new Map()
   // One guard per adapter instance = one per run, the same scope fieldMapCache already uses.
   const ownershipGuard = createMultitableOwnershipGuard({ context })
 
@@ -475,6 +509,8 @@ function createMetaSheetMultitableTargetAdapter({ system, context } = {}) {
       const request = normalizeUpsertRequest(input)
       const objectConfig = getObjectConfig(objects, request.object)
       const recordsApi = getRecordsApi(context)
+      // S3 fix round 2 (F3): a read-only system sheet is refused for the WHOLE batch, before any write.
+      await assertNotReadOnlySystemSheet(recordsApi, objectConfig, systemSheetCache)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       // Resolved ONCE for the whole batch, BEFORE the row loop: a metadata read that fails
       // must refuse the entire write (fail closed), not degrade into per-row errors that a
@@ -607,6 +643,8 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
   const normalizedSystem = normalizeExternalSystemForAdapter(system)
   const objects = normalizeObjects(normalizedSystem.config)
   const fieldMapCache = new Map()
+  // S3 fix round 2 (F3): per object, is the configured sheet a read-only system sheet (host probe, once per run).
+  const systemSheetCache = new Map()
   // The C6 planner drives insertRows/updateRows one row at a time, so the guard's per-object
   // cache is what keeps the ownership read to ONE call for the whole apply.
   const ownershipGuard = createMultitableOwnershipGuard({ context })
@@ -664,6 +702,7 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
     async insertRows(dataSourceId, object, rows, policy, principal) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
+      await assertNotReadOnlySystemSheet(recordsApi, objectConfig, systemSheetCache)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
       // REVIEW (C6): the CREATE path needs this refusal even more than the update path does.
@@ -684,6 +723,7 @@ function createMetaSheetMultitableWriteSource({ system, context } = {}) {
     async updateRows(dataSourceId, object, rows, policy, principal) {
       const recordsApi = getRecordsApi(context)
       const objectConfig = getObjectConfig(objects, object)
+      await assertNotReadOnlySystemSheet(recordsApi, objectConfig, systemSheetCache)
       const logicalToPhysical = await fieldMapForObject(objectConfig)
       const keyFields = writeSourceKeyFields(policy, objectConfig)
       const shield = await ownershipGuard.forObject(objectConfig, candidateWriteFields(rows, objectConfig))
@@ -786,6 +826,9 @@ module.exports = {
   // wouldRefuse[].code against the same constant - without reaching into the guard module.
   MultitableOwnershipGuardError,
   OWNERSHIP_GUARD_PROTECTED_KEY_FIELD,
+  // S3 fix round 2 (F3): the read-only system-sheet refusal, catchable by type / code.
+  MultitableSystemSheetWriteError,
+  METASHEET_MULTITABLE_SYSTEM_SHEET_READ_ONLY,
   createMetaSheetMultitableWriteSource,
   deriveMultitablePlannerTargetConfig,
   createMetaSheetMultitableTargetAdapter,

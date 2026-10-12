@@ -57,6 +57,11 @@ type InstanceRow = {
   // B3-03 (模板/时间筛选): optional so every pre-existing `baseInstance()` call keeps compiling
   // unchanged; only tests that exercise the templateId filter set it.
   template_id?: string | null
+  // `returnableNodeKeys` carrier (gate r1 P2-1(a)): optional for the same reason as `template_id`;
+  // only the detail-carrier test sets them. Absent ≡ a legacy row with no frozen graph.
+  published_definition_id?: string | null
+  current_node_key?: string | null
+  form_snapshot?: Record<string, unknown> | null
   created_at: Date
   updated_at: Date
 }
@@ -143,6 +148,10 @@ const routeState = vi.hoisted(() => {
     // `viewerRolesFailClosed`, so the failure must narrow the role arms (an empty role set, bound
     // as the no-match sentinel) instead of surfacing as a list 500.
     failViewerRoles: false,
+    // `approval_published_definitions` rows by id — the frozen `runtime_graph` the bridge loads for
+    // redaction, `currentNodeType` and (detail only) `returnableNodeKeys`. Empty by default, which
+    // is honest for every fixture that carries no `published_definition_id`.
+    publishedDefinitions: new Map<string, Record<string, unknown>>(),
   }
 
   const now = () => new Date('2026-04-04T08:00:00.000Z')
@@ -619,6 +628,53 @@ const routeState = vi.hoisted(() => {
       return { rows, rowCount: rows.length }
     }
 
+    // Both bridge read paths load every referenced frozen graph through this ONE statement
+    // (`loadRuntimeGraphs`), so a graph served here reaches the list builder AND the detail builder
+    // alike — which is what lets the detail-carrier test below assert the field is withheld from the
+    // list by the builder flag rather than by a missing graph.
+    if (normalized.startsWith('SELECT id, runtime_graph FROM approval_published_definitions WHERE id = ANY($1)')) {
+      const ids = (params[0] as string[]) || []
+      const rows = ids
+        .filter((id) => state.publishedDefinitions.has(id))
+        .map((id) => ({ id, runtime_graph: state.publishedDefinitions.get(id) }))
+      return { rows, rowCount: rows.length }
+    }
+
+    // Lock-10 S1 — `canReadApprovalInstance`'s single admission query, keyed on its full predicate
+    // text (the same reason as the `approval_reads` handler above). Mirrors the arms a fixture here
+    // can populate: the requester, a user / role seat, an actor record, an active `users` row with
+    // `role = 'admin'` (the fixture's users map carries no `is_admin` column, so that half of the
+    // admin arm is not modelled). The cc-record arm is not modelled either (no fixture seeds cc
+    // records); a predicate edit in the service falls through to the unhandled-SQL throw below.
+    if (
+      normalized.startsWith('SELECT 1 FROM approval_instances i WHERE i.id = $1')
+      && normalized.includes("i.requester_snapshot->>'id' = $2")
+      && normalized.includes('FROM approval_assignments a')
+      && normalized.includes('FROM approval_records r')
+    ) {
+      const instance = state.instances.get(String(params[0]))
+      const viewer = String(params[1])
+      const roles = new Set((params[2] as string[]) || [])
+      const user = state.users.get(viewer)
+      const readable = Boolean(instance) && (
+        String((instance!.requester_snapshot as { id?: unknown }).id ?? '') === viewer
+        || Array.from(state.assignments.values()).some((row) => row.instance_id === instance!.id && (
+          (row.assignment_type === 'user' && row.assignee_id === viewer)
+          || (row.assignment_type === 'role' && roles.has(row.assignee_id))
+        ))
+        || state.records.some((row) => row.instance_id === instance!.id && row.actor_id === viewer)
+        || Boolean(user && user.is_active && user.role === 'admin')
+      )
+      return { rows: readable ? [{ '?column?': 1 }] : [], rowCount: readable ? 1 : 0 }
+    }
+
+    // Owner ruling 2026-09-20 — the detail read's shared cancel-round durable-projection reader
+    // (`readCancelRoundDurableProjectionV1`). No fixture here is a cancel round, so zero rows is the
+    // production answer; the reader's own behaviour is gated by its real-DB suite, not this fake.
+    if (normalized.startsWith("SELECT metadata->'cancellationOutcome' AS cancel_round_outcome_raw")) {
+      return { rows: [], rowCount: 0 }
+    }
+
     throw new Error(`Unhandled SQL in approvals bridge test: ${normalized}`)
   })
 
@@ -639,6 +695,7 @@ const routeState = vi.hoisted(() => {
     state.users.clear()
     state.userRoles = []
     state.failViewerRoles = false
+    state.publishedDefinitions.clear()
     plmApprovals.splice(1)
     plmHistory.splice(1)
     plmApprovals[0].status = 'pending'
@@ -751,6 +808,27 @@ function createApp(plmAdapter?: ApprovalBridgePlmAdapter) {
 }
 
 const pinned = usePinnedServer()
+
+/**
+ * start → approval_1 → approval_2 → approval_3 → end — the frozen graph the detail-carrier test
+ * pins `returnableNodeKeys` against (cursor at approval_3 ⇒ the two upstream keys, trail order).
+ */
+const LINEAR_FROZEN_GRAPH: Record<string, unknown> = {
+  nodes: [
+    { key: 'start', type: 'start', config: {} },
+    { key: 'approval_1', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+    { key: 'approval_2', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+    { key: 'approval_3', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['user-1'] } },
+    { key: 'end', type: 'end', config: {} },
+  ],
+  edges: [
+    { key: 'e1', source: 'start', target: 'approval_1' },
+    { key: 'e2', source: 'approval_1', target: 'approval_2' },
+    { key: 'e3', source: 'approval_2', target: 'approval_3' },
+    { key: 'e4', source: 'approval_3', target: 'end' },
+  ],
+  policy: { allowRevoke: true },
+}
 
 /**
  * P0-A re-pin helper. `GET /api/approvals` now (a) serves a request carrying NO `tab` on the
@@ -1125,6 +1203,37 @@ describe('approval bridge routes', () => {
         },
       ],
     })
+  })
+
+  it('returnableNodeKeys rides GET /api/approvals/:id (the detail carrier) and never a GET /api/approvals row', async () => {
+    // Gate r1 P2-1(a): the DETAIL read's call-site wiring — `ApprovalBridgeService.getApproval`
+    // passing `{ withReturnableNodeKeys: true }` to `toUnifiedDTO` — pinned at the HTTP surface. The
+    // carriers seam test proves the builder; this proves the route reaches it with the instance's
+    // frozen graph, and that the list path (same builder, no flag) stays without the field even
+    // though it loads the very same graph (its rows still carry `currentNodeType` from it).
+    routeState.state.publishedDefinitions.set('pub-1', LINEAR_FROZEN_GRAPH)
+    routeState.state.instances.set('local-1', {
+      ...routeState.state.instances.get('local-1')!,
+      published_definition_id: 'pub-1',
+      current_node_key: 'approval_3',
+      form_snapshot: {},
+    })
+    // The viewer's ACTIVE seat admits the detail read (S1 participant arm) and lists the row on the
+    // default tab.
+    seedActorSeatForDefaultTab('local-1')
+
+    const app = createApp(createPlmAdapterMock())
+    pinned.setApp(app)
+
+    const detail = await request(pinned.url()).get('/api/approvals/local-1').expect(200)
+    expect(detail.body.id).toBe('local-1')
+    expect(detail.body.currentNodeType).toBe('approval')
+    expect(detail.body.returnableNodeKeys).toEqual(['approval_1', 'approval_2'])
+
+    const list = await request(pinned.url()).get('/api/approvals').expect(200)
+    expect(list.body.data.map((row: { id: string }) => row.id)).toEqual(['local-1'])
+    expect(list.body.data[0].currentNodeType).toBe('approval')
+    expect(Object.prototype.hasOwnProperty.call(list.body.data[0], 'returnableNodeKeys')).toBe(false)
   })
 
   it('refreshes PLM details on demand', async () => {

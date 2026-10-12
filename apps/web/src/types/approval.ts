@@ -18,6 +18,13 @@ export const APPROVAL_ROLE_CONFIGURE_SENTINEL = '__APPROVAL_ROLE_PLACEHOLDER__'
 // `APPROVAL_NODE_TYPES` admission set.
 export type ApprovalNodeType = 'start' | 'approval' | 'cc' | 'condition' | 'parallel' | 'end' | 'handler'
 export type ApprovalAssigneeType = 'user' | 'role'
+/**
+ * Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — the cc node's OWN target vocabulary. Byte-mirrors backend
+ * `ApprovalCcTargetType` (packages/core-backend/src/types/approval-product.ts): the two legacy kinds
+ * plus `'group'` (用户组). A SEPARATE alias from `ApprovalAssigneeType`, which also types the legacy
+ * approver `assigneeType` — OD-L1-7 widens the cc half only ("cc is a second contract, not a rider").
+ */
+export type ApprovalCcTargetType = 'user' | 'role' | 'group'
 export type ApprovalAssigneeSourceKind = 'static_user' | 'static_role' | 'requester' | 'form_field_user' | 'direct_manager' | 'dept_head' | 'continuous_managers' | 'manager_at_level' | 'requester_choice' | 'continuous_dept_heads' | 'dept_head_at_level' | 'prior_node_approver' | 'user_group' | 'form_field_user_manager' | 'form_field_user_dept_head'
 // P1-C + Lock-1 K6: threshold (N-of-M / 门槛会签) and sequential (依次审批) are the fourth and
 // fifth shipped engine modes. This union byte-mirrors backend
@@ -32,11 +39,23 @@ export type ParallelJoinMode = 'all' | 'any'
 // below for the ONE new carrier key `'designated'` targets.
 export type EmptyAssigneePolicy = 'error' | 'auto-approve' | 'designated'
 /**
+ * Lock-4 §1 F4-A (OD-L4-1(a) / OD-L4-2(a), RATIFIED) — node-level 审批类型 on `type:'approval'`.
+ * Byte-mirrors backend packages/core-backend/src/types/approval-product.ts `ApprovalType` and its
+ * runtime admission set `APPROVAL_TYPES` (ApprovalProductService.ts). Absent ≡ `'manual'` ≡ today's
+ * behavior. `'auto_reject'` is deliberately NOT a member: OD-L4-2(a) "auto_approve only, auto_reject
+ * deferred … the 审批类型 radio ships 人工/自动通过 only — no inert third option". The ONE FE tuple —
+ * the type, the authoring radios and every read-only value door derive from it.
+ */
+export const APPROVAL_TYPE_VALUES = ['manual', 'auto_approve'] as const
+export type ApprovalType = (typeof APPROVAL_TYPE_VALUES)[number]
+/**
  * Lock-4 §3 F4-B — byte-mirrors backend `EmptyAssigneeFallback`. The ONLY carrier for
  * `emptyAssigneePolicy: 'designated'` targets (one key, not two). Filled through typed pickers
- * only (D0 §10.2) — no picker ships in this fix round, so this type exists purely so the FE
- * hydrate/rebuild paths preserve a persisted value verbatim instead of silently dropping it
- * (gate X-2: the template must stay EDITABLE, not merely round-trip-safe).
+ * only (D0 §10.2): W1-1a ships them in BOTH editors (linear step editor + canvas node config
+ * editor), reusing the existing directory user/role pickers. Authoring prunes empty arrays and
+ * drops the key when both are empty (the backend `normalizeEmptyAssigneeFallback` normalizes the
+ * same way), and the key rides ONLY with `emptyAssigneePolicy: 'designated'` (gate X-2: the
+ * template stays EDITABLE, not merely round-trip-safe).
  */
 export interface EmptyAssigneeFallback {
   userIds?: string[]
@@ -76,10 +95,11 @@ export interface NodeTimeoutConfig {
   unit?: 'business'
 }
 
-// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED seven-member handler assignee-source registry. Byte-mirrors
-// backend HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler
-// node (M4 per-node-type fail-closed registry); `continuous_managers` and every forward Lock-1 kind
-// (requester_choice, …) are absent until their own slice admits them. G-13 pins this exact set.
+// Lock-3 §1.5 / OD-L3-6(a) — the RATIFIED handler assignee-source registry. Byte-mirrors backend
+// HANDLER_ASSIGNEE_SOURCE_KINDS. The inspector renders ONLY these source kinds for a handler node
+// (M4 per-node-type fail-closed registry); `continuous_managers` (OD-L3-6(a)), `prior_node_approver`
+// (K3) and `continuous_dept_heads` (K4) are absent — §1.5 names the latter two "do NOT". G-13 pins
+// this exact set (apps/web/tests/approval-handler-node-authoring.spec.ts).
 export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'static_user',
   'static_role',
@@ -90,10 +110,18 @@ export const HANDLER_ASSIGNEE_SOURCE_KINDS = [
   'manager_at_level',
   // Lock-2 §2.4 (RATIFIED 2026-08-17): the two contact-derived rows are ratified for node types
   // `approval` AND `handler` (corpus C-6; Lock-2 resolves the between-locks gap Lock-3 §1.5 left —
-  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grows the
+  // its forward-row sentence names only 表单内部门 while its roster lists 表单内联系人). Grew the
   // exact set 7→9 in the SAME slice as the kinds, with the G-13 exact-set tests updated together.
   'form_field_user_manager',
   'form_field_user_dept_head',
+  // Lock-3 §1.5 forward rows (RATIFIED; W1-1d, 2026-10-10), quoted: "Forward rows, conditional on
+  // Lock-1 landing: `user_group` (K1), `requester_choice` (K2) and `dept_head_at_level` (K5-b)
+  // ADMIT". 9→12, strictly these three. The canvas sub-forms are keyed by KIND inside the shared
+  // approval/handler section (ApprovalGraphNodeConfigEditor.vue), so no new form is needed; the
+  // submit page's requester_choice chooser (ApprovalNewView.vue) reads handler nodes too.
+  'user_group',
+  'requester_choice',
+  'dept_head_at_level',
 ] as const
 export type HandlerAssigneeSourceKind = typeof HANDLER_ASSIGNEE_SOURCE_KINDS[number]
 // Lock-3 §1.1 — handler aggregation mode. `'all'` 会签 / `'any'` 或签; absent ≡ 'all'.
@@ -208,6 +236,10 @@ export interface ApprovalNodeConfig {
   // inside that branch (ApprovalProductService.ts :2281-2305) and never emits it otherwise, so a
   // node carrying it under a different mode is a backend-drop shape, never a valid persisted state.
   approvalThreshold?: number
+  // Lock-4 §1 F4-A — 审批类型. Absent ≡ 'manual'. An `'auto_approve'` node skips assignee
+  // resolution entirely, so it is the ONE approval-node shape that may legally carry no
+  // `assigneeSources`/`assigneeIds` at all (backend `normalizeApprovalGraph` carve-out).
+  approvalType?: ApprovalType
   emptyAssigneePolicy?: EmptyAssigneePolicy
   // Lock-4 §3 F4-B — ONLY meaningful when emptyAssigneePolicy === 'designated'; absent under any
   // other policy value (byte-mirrors backend types/approval-product.ts's own comment).
@@ -271,15 +303,36 @@ export interface EffectiveNodeOperations {
   commentRequired: 'never' | 'reject_only' | 'always'
 }
 
-// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts:121-128.
-// The authoring UI only owns `mergeWithRequester` (self-approver / merge-with-requester);
-// the other three fields are carried for round-trip preservation (no silent flatten).
+// Byte-mirrors backend packages/core-backend/src/types/approval-product.ts `AutoApprovalPolicy`.
+// The node-level authoring UI owns `mergeWithRequester` + `samePersonPolicy` TOGETHER through the
+// four-value 审批人与发起人相同时 control (W1-1a, Lock-4 §2 F4-C); `mergeAdjacentApprover` /
+// `dedupeHistoricalApprover` / `actorMode` are carried for round-trip preservation (no silent
+// flatten) — the template-level dedup tier owns the two booleans on `policy.autoApproval` only.
 export interface AutoApprovalPolicy {
   mergeWithRequester?: boolean
   mergeAdjacentApprover?: boolean
   dedupeHistoricalApprover?: boolean
   actorMode?: AutoApprovalActorMode
+  /**
+   * Lock-4 §2 F4-C (OD-L4-4(a)) — 审批人=提交人, a NODE-level enum INSIDE this object. Absent ≡
+   * `'self_approve'` ≡ today's behavior when `mergeWithRequester` is off (lock text). The shipped
+   * `mergeWithRequester:true` IS `'auto_skip'` and "stays the persisted carrier for that value"
+   * (the backend `normalizeAutoApprovalPolicy` synthesizes `mergeWithRequester:true` whenever
+   * `'auto_skip'` is normalized). NOTE (code, not lock): an EXPLICIT `'self_approve'` still creates
+   * a node-level policy object, which overrides any template-level `policy.autoApproval` at that
+   * node (the shipped whole-object precedence) — so explicit and absent are NOT interchangeable in
+   * the editor; see `samePersonControlState` (approvalNodeEdit.ts).
+   */
+  samePersonPolicy?: SamePersonPolicy
 }
+
+// Lock-4 §2 F4-C — byte-mirrors backend `SamePersonPolicy` / `SAME_PERSON_POLICIES`
+// (ApprovalProductService.ts). The FULL ratified set; all four are server-enforced on main
+// (tests/unit/approval-lock4-f4c-same-person.test.ts + the approval-realdb-lock4-p3a lane), which is
+// what admits rendering them (Lock-4 §2.1). A persisted value OUTSIDE this list must stay read-only
+// (gate X-3), never be flattened to a default.
+export const SAME_PERSON_POLICIES = ['self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'] as const
+export type SamePersonPolicy = typeof SAME_PERSON_POLICIES[number]
 
 export type AutoApprovalActorMode = 'system' | 'original_approver'
 
@@ -338,7 +391,9 @@ export type ApprovalAssigneeSource =
    * authoring picker is a TYPED multi-select restricted to groups bound to the template's org
    * (`/api/approval-templates/directory/member-groups?orgId=`) — never a free-text/raw-id input; a
    * group outside the binding fails publish (values-free 400), never at dispatch. Cc-as-recipient
-   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape.
+   * (OD-L1-7) is a SEPARATE contract/registry row, not part of this shape — it landed as
+   * `CcNodeConfig.targetType: 'group'` (the "`user_group` (cc)" registry row), sharing only the
+   * bound-group picker and the backend's snapshot map + publish gate.
    */
   | { kind: 'user_group'; groupIds: string[] }
   /**
@@ -387,7 +442,14 @@ export interface ConditionRule {
 }
 
 export interface CcNodeConfig {
-  targetType: ApprovalAssigneeType
+  /**
+   * Lock-1 OD-L1-7(a): `'group'` names bound member-group ids in `targetIds` (picked from the same
+   * org-scoped bound-group list the approver `user_group` picker uses). The template keeps the
+   * group reference; the backend executor expands it per member at dispatch, so persisted cc
+   * records stay user/role. An off-enum persisted value is carried VERBATIM by the editor (G-16 —
+   * never coerced) and flagged by `validateCcEdits`; the backend remains the sole arbiter.
+   */
+  targetType: ApprovalCcTargetType
   targetIds: string[]
 }
 
@@ -533,6 +595,20 @@ export interface UnifiedApprovalDTO {
    * a parallel region (length ≥ 2). Absent on linear state.
    */
   currentNodeKeys?: string[] | null
+  /**
+   * 退回 (return) targets the server's return gate would accept RIGHT NOW, in trail order
+   * (start → cursor), computed server-side from the instance's FROZEN runtime graph with every
+   * viewer-independent check the action endpoint applies to a `return` (cancel-round instance kind,
+   * handler cursor, the cursor node's `nodeOperationPolicy.allowReturn === false`, parallel region,
+   * target on the walker's trail before the cursor); the per-viewer seat checks are NOT folded in
+   * (`nodeOperations.allowReturn` / `canDecideCurrentNode` answer those, and the button still
+   * requires both). `[]` = nothing is legal (hide 退回). `undefined` /
+   * `null` = not computed (an older server, a non-pending instance, a bridged / legacy instance
+   * with no frozen graph, or a graph the server could not walk) — fall back to the client-side
+   * candidate logic, never read absence as empty. Carried by the detail read and by every action
+   * response; never by list rows. Presentation only: the gate's own 409s remain the authority.
+   */
+  returnableNodeKeys?: string[] | null
   /** Lock-5 §2.3 / A-2 — server-resolved effective operations for THIS viewer. Detail read only. */
   nodeOperations?: EffectiveNodeOperations | null
   /**
@@ -573,6 +649,19 @@ export interface UnifiedApprovalDTO {
    * tab; callers must treat that as "no dot", never guess a value.
    */
   isRead?: boolean
+  /**
+   * 抄送我的 unread (test report 2026-10-08): populated ONLY on the 抄送我的 (cc) tab and only while
+   * the server's CC-badge switch is on — `true` when the viewer has not opened this row since the
+   * newest CC targeting them. `undefined` everywhere else; callers treat that as "no dot".
+   */
+  ccUnread?: boolean
+  /**
+   * 我发起的 new outcome (test report 2026-10-08): populated ONLY on the 我发起的 (mine) tab and only
+   * while the server's outcome-badge switch is on — `true` when the viewer's own request was decided
+   * (approved / rejected / revoked / cancelled) by someone else and not opened since.
+   * `undefined` everywhere else ("no dot").
+   */
+  outcomeUnseen?: boolean
   createdAt: string
   updatedAt: string
 }

@@ -365,20 +365,43 @@ describeIfDatabase('GET /api/approvals/:id/history — guard alignment with GET 
     expect(byAction.get('cc')?.actorId).toBe('system')
   })
 
-  it('the copies add no metadata: nodeKey stays in the stored row and off the wire (the metadata whitelist is untouched by this change)', async () => {
-    const { instanceId, rows } = await createApprovedInstance('meta')
+  // T4cd (node half; owner approval pending under the 2026-09-20 whitelist ruling): `nodeKey` and
+  // `autoApproved` are single-key projections. Each stored row also carries keys that must stay off
+  // the wire (the created row's `requestNo`; the approve row's `approvalMode` / `aggregateComplete` /
+  // `nextNodeKey`; the cc row's `targetType` / `targetId`) — proven present below, so their absence
+  // on the wire is about the projection, not about rows that never had them.
+  it('nodeKey crosses as the stored value and is the ONLY metadata key of these rows; autoApproved crosses only as boolean true', async () => {
+    const { instanceId, requesterId, rows } = await createApprovedInstance('meta')
 
-    // 正控: nodeKey IS in every stored row's metadata, so its absence below is about the projection.
     const stored = await pool().query<{ action: string; metadata: Record<string, unknown> | null }>(
       'SELECT action, metadata FROM approval_records WHERE instance_id = $1',
       [instanceId],
     )
-    for (const row of stored.rows) {
-      expect(typeof row.metadata?.nodeKey, `${row.action}: stored nodeKey`).toBe('string')
+    const storedByAction = new Map(stored.rows.map((row) => [row.action, row.metadata ?? {}]))
+    for (const [action, metadata] of storedByAction) {
+      expect(typeof metadata.nodeKey, `${action}: stored nodeKey`).toBe('string')
+      expect(Object.keys(metadata).filter((key) => key !== 'nodeKey').length, `${action}: other stored keys`).toBeGreaterThan(0)
     }
+    expect(storedByAction.get('created')?.nodeKey).toBe('start')
+
     for (const row of rows) {
-      expect(Object.prototype.hasOwnProperty.call(row, 'metadata'), `${row.action}: metadata key`).toBe(false)
+      expect(row.metadata, row.action).toEqual({ nodeKey: storedByAction.get(row.action)!.nodeKey })
       expect(Object.prototype.hasOwnProperty.call(row, 'nodeKey'), `${row.action}: top-level nodeKey`).toBe(false)
     }
+    const text = JSON.stringify(rows)
+    for (const offWire of ['requestNo', 'approvalMode', 'aggregateComplete', 'nextNodeKey', 'targetType', 'targetId', 'nodeEntryEpoch']) {
+      expect(text.includes(offWire), `${offWire} reached the wire`).toBe(false)
+    }
+
+    // autoApproved: the boolean true crosses; a string 'true' (a value the engine never writes) does not.
+    await pool().query(`UPDATE approval_records SET metadata = metadata || '{"autoApproved": true}'::jsonb WHERE instance_id = $1 AND action = 'approve'`, [instanceId])
+    await pool().query(`UPDATE approval_records SET metadata = metadata || '{"autoApproved": "true"}'::jsonb WHERE instance_id = $1 AND action = 'cc'`, [instanceId])
+    const again = await getHistory(baseUrl, instanceId, await devToken(baseUrl, requesterId, 'viewer', 'approvals:read'))
+    expect(again.status).toBe(200)
+    const againRows = ((await again.json()) as { data: { items: WireRow[] } }).data.items
+    const againByAction = new Map(againRows.map((row) => [row.action, row]))
+    expect(againByAction.get('approve')?.metadata).toEqual({ nodeKey: storedByAction.get('approve')!.nodeKey, autoApproved: true })
+    expect(againByAction.get('cc')?.metadata).toEqual({ nodeKey: storedByAction.get('cc')!.nodeKey })
+    expect(againByAction.get('created')?.metadata).toEqual({ nodeKey: 'start' })
   })
 })

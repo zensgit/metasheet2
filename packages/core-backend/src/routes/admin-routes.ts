@@ -41,6 +41,7 @@ import {
   isLiveConnectionFkViolation
 } from '../data-adapters/DataSourceManager';
 import type { PluginManifest } from '../types/plugin';
+import { probeEncryptedStoresShared } from '../security/encrypted-store-probe';
 import { createAdminFailureResponders } from './admin-failure-envelope';
 
 const logger = new Logger('AdminRoutes');
@@ -2262,6 +2263,42 @@ router.post('/health/check', async (req: Request, res: Response) => {
     // Deliberately ungated route (see the envelope module's note), so this body is readable by any
     // authenticated caller — the redaction matters most here.
     sendAdminWriteFailure(res, 'Failed to perform health check', error);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// Encrypted stores (#6164 step 1)
+// ═══════════════════════════════════════════════════════════════════
+
+/**
+ * GET /api/admin/security/encrypted-stores
+ * Run the read-only encrypted-store probe now and return its report: per store field, how many
+ * values are encrypted, how many the CURRENT ENCRYPTION_KEY / ENCRYPTION_SALT cannot decrypt, how
+ * many sit in plaintext, plus the material status (security/encrypted-store-probe.ts). The same
+ * probe runs once at startup and logs a summary.
+ *
+ * Counts and store/field names only: no plaintext, ciphertext, key material or row id ever leaves
+ * the probe, and it issues SELECTs only. A store that cannot be read is reported inside the report
+ * (table_missing / column_missing / read_failed), so a 500 here means the probe could not start at
+ * all (e.g. no pool) — answered by sendAdminReadFailure with the original error in the log only.
+ *
+ * Platform admin only, like every other read in this router (requireAdminRole: no user or
+ * non-admin -> 403 ADMIN_REQUIRED; isAdmin throwing -> 503 fail-closed; no database pool -> isAdmin
+ * returns false -> 403, see guards/audit-integration.ts:113 and rbac/service.ts:20). Which stores
+ * are broken after a key change is deployment-level state, not tenant state.
+ *
+ * Concurrent requests share ONE in-flight run (probeEncryptedStoresShared); nothing is cached after
+ * it settles, so every later request gets a fresh report.
+ */
+router.get('/security/encrypted-stores', requireAdminRole(), async (_req: Request, res: Response) => {
+  try {
+    const report = await probeEncryptedStoresShared(() => {
+      const pool = poolManager.get();
+      return { query: (sql, params) => pool.query(sql, params) };
+    });
+    res.json({ success: true, report });
+  } catch (error) {
+    sendAdminReadFailure(res, 'Failed to probe encrypted stores', error);
   }
 });
 

@@ -16,16 +16,30 @@
 #                    image only when no migrations were applied in the window.
 #   smoke          — run one of the five window smokes, PLUS the `tasks` id (owner-authorized
 #                    2026-09-28), in-container (bundle doc:
-#                    docs/development/attendance-staging-window-bundle-20260702.md). `tasks` is
-#                    a non-admin P0-A /api/tasks smoke: requires TASKS_ENABLED=true on the
-#                    running backend (fails closed otherwise), provisions ONE throwaway
-#                    non-admin user (role_permissions + user_roles + user_orgs +
-#                    user_namespace_admissions) against org `default`, proves the 403-before-
-#                    admission / 200-after-admission gate plus the create/list/complete/reopen/
-#                    read HTTP surface, and always tears the fixture back down (guaranteed
-#                    cleanup in the smoke script's own try/catch/finally, same as ae4/rd45/mp6/
-#                    hmr5). Not part of the bundle §7 fixed-format `stamps` residue-sweep — it
-#                    proves and reports its own zero-residue instead (see action_smoke below).
+#                    docs/development/attendance-staging-window-bundle-20260702.md). The smoke
+#                    script and every module it imports by relative path (smoke_deps in
+#                    action_smoke) come from the per-run runner bundle, i.e. the directory this
+#                    file runs from; copy_smoke_bundle docker-cp's exactly those files into the
+#                    backend container. action=smoke never reads, fetches or checks out a
+#                    repository on the deploy host. Rule: ae4, mp6 and otbank-v18 stay packaged
+#                    in the bundle but are not enabled in this runner until their cleanup and
+#                    fixtures match the current code; action_smoke refuses them first, before
+#                    any container access, token mint or staging write. `tasks` is
+#                    a non-admin /api/tasks smoke: requires TASKS_ENABLED=true on the running
+#                    backend (fails closed otherwise) and provisions three stamp-derived
+#                    throwaway non-admin users against org `default`: the subject
+#                    (<stamp>, own role + admission), a member (<stamp>-member, the subject's
+#                    role + admission; it authenticates only to leave a task it follows) and
+#                    an outsider (<stamp>-outsider, own tasks:read role + admission, no
+#                    relation to any smoke task). It proves the 403-before-admission /
+#                    200-after-admission gate, the P0-A create/list/complete/reopen/read
+#                    surface and the M3 parent-candidates/subtask/membership/follower-leave/
+#                    completion-mode/comment/delete surface, the outsider's 404, and always
+#                    tears the fixture
+#                    back down (guaranteed cleanup in the smoke script's own try/catch/finally,
+#                    same as ae4/rd45/mp6/hmr5). Not part of the bundle §7 fixed-format
+#                    `stamps` residue-sweep — it proves and reports its own zero-residue
+#                    instead (see action_smoke below).
 #   status         — read-only snapshot (containers, health, settings, pending migrations)
 #   (owner exclusions) migrate and deploy's inline migrate pass exactly the owner-ruled
 #                    STAGING_OWNER_EXCLUDED_MIGRATIONS list (attendance-window-runner-pipeline.lib.sh)
@@ -132,7 +146,6 @@ SOAK_ORGS="${SOAK_ORGS:-}"
 SOAK_OPTS="${SOAK_OPTS:-}"
 STAGING_DEPLOY_PATH="${STAGING_DEPLOY_PATH:-metasheet2-dingtalk-staging}"
 DEPLOY_PATH="${DEPLOY_PATH:-metasheet2}"
-SKIP_HOST_SYNC="${SKIP_HOST_SYNC:-false}"
 OUTPUT_DIR="${OUTPUT_DIR:?OUTPUT_DIR is required}"
 IMAGE_OWNER="${IMAGE_OWNER:-zensgit}"
 RUN_STAMP="${RUN_STAMP:?RUN_STAMP is required (workflow run id marker)}"
@@ -297,7 +310,7 @@ SOAK_REF_RE='^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
 # `=~` is POSIX ERE on every platform, and the grep pre-filter below uses `-E` for the same
 # reason — neither depends on the host sed/grep BRE dialect).
 SOAK_ROTATE_NOTICE_RE='ROTATE_RESULT family_count=([0-9]+) updated_count=([0-9]+)'
-# The DEPLOYED image's own CLI copies — deliberately /app paths, NOT host-synced copies:
+# The DEPLOYED image's own CLI copies — deliberately /app paths, NOT runner-bundle copies:
 # the CLI and the transition boundary it drives must come from the same build.
 SOAK_W4C5_CLI="/app/scripts/ops/attendance-w4c5-rollout-transition.ts"
 SOAK_W7_CLI="/app/scripts/ops/attendance-w7-context-source-transition.ts"
@@ -771,6 +784,32 @@ prepare_container_runner() {
     "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs"
 }
 
+# require_smoke_bundle <file>...
+# Every named file must be present in the runner bundle (HERE). Fails closed, naming every
+# missing file, before anything is copied into the container.
+require_smoke_bundle() {
+  local file
+  local -a missing=()
+  for file in "$@"; do
+    [[ -f "${HERE}/${file}" ]] || missing+=("$file")
+  done
+  if [[ "${#missing[@]}" -gt 0 ]]; then
+    fail "runner bundle is missing: ${missing[*]} (looked in ${HERE}); the workflow tar list must ship every smoke script and its relative-import closure"
+  fi
+}
+
+# copy_smoke_bundle <smoke_script> [dep...]
+# Copies the smoke script and its relative-import closure from the runner bundle into
+# ${CONTAINER_RUNNER_DIR}/scripts/ops/, so every relative import resolves next to the smoke
+# script inside the container.
+copy_smoke_bundle() {
+  require_smoke_bundle "$@"
+  local file
+  for file in "$@"; do
+    docker cp "${HERE}/${file}" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/${file}"
+  done
+}
+
 find_admin_user() {
   staging_exec node "${CONTAINER_RUNNER_DIR}/scripts/ops/attendance-window-runner-mint-token.mjs" --find-admin
 }
@@ -856,24 +895,6 @@ console.log(`env-flags ok: mode=${mode} scheduler=${sched||"<unset>"} worker=${w
 snapshot_staging_ps() {
   docker ps --filter 'name=metasheet-staging-' \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' > "${OUTPUT_DIR}/docker-ps-staging.txt"
-}
-
-host_sync_prod_repo() {
-  # Same discipline as attendance-remote-log-snapshot-prod.yml: the smoke scripts are
-  # docker-cp'd from the host-synced repo (main), decoupled from the deployed image SHA.
-  [[ -d "$PROD_REPO_DIR" ]] || fail "host repo missing: ${PROD_REPO_DIR} (DEPLOY_PATH)"
-  if [[ "$SKIP_HOST_SYNC" == "true" ]]; then
-    log "host-sync skipped (skip_host_sync=true)"
-    return 0
-  fi
-  if git -C "$PROD_REPO_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git -C "$PROD_REPO_DIR" fetch origin main
-    git -C "$PROD_REPO_DIR" checkout main
-    git -C "$PROD_REPO_DIR" pull --ff-only origin main
-    log "host-sync ok: $(git -C "$PROD_REPO_DIR" rev-parse HEAD)"
-  else
-    log "host-sync: ${PROD_REPO_DIR} is not a git repo; continuing with existing files"
-  fi
 }
 
 auth_round_trip() {
@@ -1082,22 +1103,31 @@ action_smoke() {
   require_sha
   [[ -n "$SMOKE_ID" ]] || fail "smoke input is required for action=smoke"
 
+  # smoke_deps names every module the smoke script imports by relative path (its whole
+  # relative-import closure, transitively); an arm without the line has none. The smoke script
+  # and smoke_deps are the exact set copy_smoke_bundle ships into the container, and every one
+  # of them must be in the workflow tar list. scripts/ops/attendance-window-runner-pipeline.test.mjs
+  # recomputes each closure from the module sources and requires it to equal smoke_deps.
   local smoke_script stamp_prefix
-  local -a extra_env=() extra_tokens=()
+  local -a extra_env=() extra_tokens=() smoke_deps=()
   case "$SMOKE_ID" in
     ae4)
       smoke_script="staging-attendance-ae4-result-edit-smoke.mjs"
       stamp_prefix="ae4-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("NON_ADMIN_TOKEN:reader:user:attendance:read")
       ;;
     rd45)
       smoke_script="staging-attendance-report-digest-rd45-smoke.mjs"
       stamp_prefix="rd45-smoke"
+      # The attendance plugin is loaded at runtime from PLUGIN_INDEX_PATH (the deployed image's
+      # own copy), not by relative import.
       extra_env=("PLUGIN_INDEX_PATH=/app/plugins/plugin-attendance/index.cjs")
       ;;
     otbank-v18)
       smoke_script="staging-attendance-overtime-bank-v18-smoke.mjs"
       stamp_prefix="otbank-v18-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=(
         "CASE1_TOKEN:case1:user:attendance:read,attendance:write"
         "CASE2_TOKEN:case2:user:attendance:read,attendance:write"
@@ -1109,39 +1139,52 @@ action_smoke() {
     mp6)
       smoke_script="staging-attendance-makeup-punch-mp6-smoke.mjs"
       stamp_prefix="mp6-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("SUBJECT_TOKEN:subject:user:attendance:read,attendance:write")
       ;;
     hmr5)
       smoke_script="staging-attendance-manual-missed-punch-reminder-hmr5-smoke.mjs"
       stamp_prefix="hmr5-smoke"
+      smoke_deps=("staging-attendance-tooling-teardown.mjs")
       extra_tokens=("SCOPED_TOKEN:scoped:user:attendance:read,attendance:write")
       ;;
     tasks)
       smoke_script="staging-tasks-smoke.mjs"
       stamp_prefix="tasks-smoke"
-      # No extra_tokens entry: the tasks subject needs a --tenant-id-bearing token (see
-      # mint_token's comment), which the generic extra_tokens spec format below does not carry.
-      # Minted separately, after seeding-relevant vars are known, further down.
+      # No extra_tokens entry: the tasks subject, member and outsider need --tenant-id-bearing
+      # tokens (see mint_token's comment), which the generic extra_tokens spec format below does
+      # not carry. All three are minted in the tasks block after the generic tokens.
       ;;
     *)
       fail "unknown smoke id: ${SMOKE_ID}"
       ;;
   esac
+
+  # Rule: ae4, mp6 and otbank-v18 stay packaged (their arms above still name their bundle files,
+  # so the closure, tar-list and flat-start tests keep covering them), but they are not enabled in
+  # this runner until their own cleanup and fixtures match the current code. Their cleanups do not
+  # remove the attendance_employee user_roles row that token verification adds for each synthetic
+  # user in platform/attendance product mode, and ae4's text user ids fail its import recompute
+  # steps. Refused here, first: before the bundle check, any backend probe, the identity check, the
+  # container prep, any token mint and any staging write.
+  if [[ "$SMOKE_ID" == "ae4" || "$SMOKE_ID" == "mp6" || "$SMOKE_ID" == "otbank-v18" ]]; then
+    fail "smoke=${SMOKE_ID} is not enabled in this runner: ae4, mp6 and otbank-v18 stay packaged but are refused until their cleanup and fixtures match the current code (nothing was run, copied, minted or written)"
+  fi
   local stamp="${stamp_prefix}-${RUN_STAMP}"
+
+  # Fail closed before touching the container when the runner bundle lacks any file this
+  # smoke needs.
+  require_smoke_bundle "$smoke_script" ${smoke_deps[@]+"${smoke_deps[@]}"}
 
   if [[ "$SMOKE_ID" == "tasks" ]]; then
     # Owner-authorized 2026-09-28, fail-closed: the tasks smoke drives real /api/tasks routes,
-    # which the backend does not even mount unless TASKS_ENABLED=true (routes/tasks.ts). Check
-    # BEFORE host_sync_prod_repo (no point syncing the whole repo for a smoke that cannot run).
+    # which the backend does not even mount unless TASKS_ENABLED=true (routes/tasks.ts). Checked
+    # before the identity check and before anything is copied into the container.
     local tasks_live
     tasks_live="$(soak_backend_env TASKS_ENABLED)"
     [[ "$tasks_live" == "true" ]] \
       || fail "smoke=tasks requires TASKS_ENABLED=true on the running staging backend (observed: '${tasks_live:-<unset>}'); deploy with tasks_enabled=true first (action=deploy)"
   fi
-
-  host_sync_prod_repo
-  local smoke_src="${PROD_REPO_DIR}/scripts/ops/${smoke_script}"
-  [[ -f "$smoke_src" ]] || fail "smoke script missing in host-synced repo: ${smoke_src}"
 
   # The deployed build must BE the SHA the stamps will name (bundle §2). Same dual-channel
   # identity as the deploy verifier: staging /api/health build.commit is env-pinned stale
@@ -1168,7 +1211,7 @@ action_smoke() {
   # Window-level settings-restore evidence (bundle §5): settings BEFORE and AFTER.
   capture_settings "$admin_token" "${OUTPUT_DIR}/settings-before.json" >/dev/null
 
-  docker cp "$smoke_src" "${BACKEND_CONTAINER}:${CONTAINER_RUNNER_DIR}/scripts/ops/${smoke_script}"
+  copy_smoke_bundle "$smoke_script" ${smoke_deps[@]+"${smoke_deps[@]}"}
 
   local -a run_env=(
     "BASE_URL=${IN_CONTAINER_BASE_URL}"
@@ -1190,11 +1233,16 @@ action_smoke() {
     run_env+=("$spec")
   done
   if [[ "$SMOKE_ID" == "tasks" ]]; then
-    # Tenant-scoped subject token (see mint_token's comment): tenant_id='default' — the same
+    # Tenant-scoped tokens (see mint_token's comment): tenant_id='default' — the same
     # deterministic org every other window smoke defaults ORG_ID to (ae4/rd45/otbank/mp6/hmr5),
-    # so this smoke needs no new org concept. The smoke script itself seeds the matching
-    # user_orgs row before this token is ever used to authenticate.
+    # so this smoke needs no new org concept. The smoke script itself seeds each matching
+    # user_orgs row before the token is ever used to authenticate. Each token's claims mirror
+    # the role the smoke seeds for its identity: the member shares the subject's role (it needs
+    # tasks:write only to leave a task it follows), the outsider has a tasks:read-only role.
+    # Token values only travel in run_env and are never printed.
     run_env+=("SUBJECT_TOKEN=$(mint_token "${stamp}" 'user' 'tasks:read,tasks:write' 'default')")
+    run_env+=("MEMBER_TOKEN=$(mint_token "${stamp}-member" 'user' 'tasks:read,tasks:write' 'default')")
+    run_env+=("OUTSIDER_TOKEN=$(mint_token "${stamp}-outsider" 'user' 'tasks:read' 'default')")
   fi
 
   # DATABASE_URL intentionally NOT passed: the container's own env already carries the

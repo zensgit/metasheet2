@@ -1,13 +1,15 @@
 /**
  * Lock-3 — handler-node authoring PURE-function acceptance (no mount):
- *  - G-13: the handler assignee-source registry equals the SEVEN-member set by exact-set equality
- *          (not count, not subset, not the full ApprovalAssigneeSourceKind union); two mutations
- *          (drop an admitted kind, add continuous_managers) each fail.
+ *  - G-13: the handler assignee-source registry equals the DECLARED HANDLER_ASSIGNEE_SOURCE_KINDS
+ *          set (base seven + Lock-2's two contact rows + Lock-3 §1.5's three forward rows, W1-1d)
+ *          by exact-set equality (not count, not subset, not the full ApprovalAssigneeSourceKind
+ *          union); mutations (drop an admitted kind, add continuous_managers / a "do NOT" kind)
+ *          each fail.
  *  - G-20: a `handlerx` graph forces the template read-only; a `handler` graph is recognised and
  *          complex-preserved (never flattened).
  *  - edit-model round-trip: a handler graph seeds a handler edit and rebuilds byte-identically; the
  *    validate preview rejects an unadmitted kind on a handler and a bad handlerMode.
- *  - graphTopologyEdit.appendHandlerNode inserts a valid, seven-member-admissible handler.
+ *  - graphTopologyEdit.appendHandlerNode inserts a valid, roster-admissible handler.
  */
 import { describe, expect, it } from 'vitest'
 import {
@@ -56,25 +58,24 @@ function template(graph: ApprovalGraph): ApprovalTemplateDetailDTO {
 }
 
 describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
-  it('the registry roster for `handler` equals the SEVEN-member constant by exact set equality', () => {
+  it('the registry roster for `handler` equals the declared HANDLER_ASSIGNEE_SOURCE_KINDS constant by exact set equality', () => {
     const roster = assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler').map((c) => c.kind)
     expect(new Set(roster)).toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
     expect(roster).toHaveLength(HANDLER_ASSIGNEE_SOURCE_KINDS.length)
-    // NOT the eight/nine-member approval union: strictly fewer kinds than the approval roster.
+    // NOT the full approval union: strictly fewer kinds than the approval roster.
     const approvalRoster = assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'approval').map((c) => c.kind)
     expect(roster.length).toBeLessThan(approvalRoster.length)
     expect(roster).not.toContain('continuous_managers')
-    expect(roster).not.toContain('requester_choice')
-    // Lock-1 §K5-b `dept_head_at_level`: Lock-3 §1.5 names it a FORWARD ADMIT row for `handler`,
-    // but per the SAME precedent this file already documents for `requester_choice` (shipped
-    // before P4-A, and P4-A deliberately did NOT retroactively widen the roster for it — "a
-    // separate follow-up decision, not P4-A", approval-product.ts's HANDLER_ASSIGNEE_SOURCE_KINDS
-    // doc comment), K5-b's own slice does not widen the SEVEN-member handler roster either. Not
-    // admitting it here is the deliberate deferral, not an oversight.
-    expect(roster).not.toContain('dept_head_at_level')
-    // Lock-1 §K3 `prior_node_approver`: unlike K5-b, Lock-3 §1.5 lists NO forward ADMIT row for
-    // this kind at all — its absence from the handler roster is the contract, not a deferral.
+    // W1-1d — Lock-3 §1.5 forward rows (RATIFIED), quoted: "`user_group` (K1), `requester_choice`
+    // (K2) and `dept_head_at_level` (K5-b) ADMIT (corpus C-2 lists 用户组 / 提交人自选);
+    // `prior_node_approver` (K3) and `continuous_dept_heads` (K4) do NOT". The three ADMIT rows
+    // are IN the handler roster (each landed together with its backend create/publish collector
+    // arm — the kind alone would resolve EMPTY at dispatch); the two "do NOT" kinds stay out.
+    expect(roster).toContain('user_group')
+    expect(roster).toContain('requester_choice')
+    expect(roster).toContain('dept_head_at_level')
     expect(roster).not.toContain('prior_node_approver')
+    expect(roster).not.toContain('continuous_dept_heads')
   })
 
   it('mutation 1 — dropping an admitted kind fails the exact-set check', () => {
@@ -95,17 +96,31 @@ describe('Lock-3 G-13 — handler assignee-source registry exact set', () => {
     expect(new Set(roster)).not.toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
   })
 
-  // Lock-1 §K5-b deferral invariant: even though Lock-3 §1.5 names dept_head_at_level a FORWARD
-  // ADMIT row for `handler`, this slice does NOT land it (see the `roster).not.toContain(...)`
-  // assertion above) — so "adding" it here must fail the exact-set check exactly like mutation 2's
-  // continuous_managers, not be silently accepted as a legitimate widening.
-  it('mutation 3 — adding dept_head_at_level (Lock-1 §K5-b, deliberately deferred) fails the exact-set check', () => {
+  // Lock-1 §K4 `continuous_dept_heads`: Lock-3 §1.5 names it "do NOT" for `handler` — so
+  // "adding" it must fail the exact-set check exactly like mutation 2's continuous_managers, not
+  // be silently accepted as a legitimate widening. (Before W1-1d this slot probed
+  // dept_head_at_level, which the ratified forward row now admits — see the roster test above.)
+  it('mutation 3 — adding continuous_dept_heads (Lock-1 §K4, Lock-3 §1.5 "do NOT") fails the exact-set check', () => {
     const added: ApprovalCapabilityRegistry = {
-      assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'dept_head_at_level', label: '指定层级部门负责人' }] },
+      assigneeSourcesByNodeType: { handler: [...assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler'), { kind: 'continuous_dept_heads', label: '连续多级部门负责人' }] },
       operationPoliciesByNodeType: {},
     }
     const roster = assigneeSourceRoster(added, 'handler').map((c) => c.kind)
     expect(new Set(roster)).not.toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
+  })
+
+  // W1-1d: G-13's "drop one admitted kind" over the forward rows — dropping any one of the three
+  // W1-1d kinds must fail the exact-set check (the roster test above pins their presence; this
+  // pins that the exact-set check, not merely a toContain, is what guards them).
+  it('mutation 5 — dropping a W1-1d forward kind (requester_choice / user_group / dept_head_at_level) fails the exact-set check', () => {
+    for (const kind of ['requester_choice', 'user_group', 'dept_head_at_level'] as const) {
+      const dropped: ApprovalCapabilityRegistry = {
+        assigneeSourcesByNodeType: { handler: assigneeSourceRoster(DEFAULT_APPROVAL_CAPABILITY_REGISTRY, 'handler').filter((c) => c.kind !== kind) },
+        operationPoliciesByNodeType: {},
+      }
+      const roster = assigneeSourceRoster(dropped, 'handler').map((c) => c.kind)
+      expect(new Set(roster), kind).not.toEqual(new Set(HANDLER_ASSIGNEE_SOURCE_KINDS))
+    }
   })
 
   // Lock-1 §K3: prior_node_approver has NO handler row in Lock-3 §1.5 (not even forward) —
@@ -180,7 +195,7 @@ describe('Lock-3 — handler edit-model round-trip + validate', () => {
 })
 
 describe('Lock-3 — graphTopologyEdit.appendHandlerNode', () => {
-  it('inserts a handler node on a linear edge with a seven-member-admissible default roster', () => {
+  it('inserts a handler node on a linear edge with a roster-admissible default roster', () => {
     const base: ApprovalGraph = {
       nodes: [
         { key: 'start', type: 'start', name: 's', config: {} },

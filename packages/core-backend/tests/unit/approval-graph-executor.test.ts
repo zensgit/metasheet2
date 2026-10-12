@@ -1996,3 +1996,146 @@ describe('pruneHiddenFormData — detail (明细) per-row cells (C-2)', () => {
     })
   })
 })
+
+// Lock-1 §K1 / OD-L1-7(a) (RATIFIED) — G-4 "a group cc target delivers cc events for every
+// member; the cc branch no longer throws for the ratified shape | a NON-ratified `targetType`
+// still throws — the widening is enumerated, not permissive". Both executor cc arms are
+// exercised: `resolveFromNode` (the main walk) and `resolveBranchAdvance` (a parallel branch,
+// both at fan-out and on the post-approve branch walk). Membership comes ONLY from the
+// `groupMemberIds` option (the frozen `requesterSnapshot.groupMemberIds` map) — never a live read.
+describe('ApprovalGraphExecutor — OD-L1-7(a) group cc targets', () => {
+  const FROZEN = { 'g-1': ['m-1', 'm-2'], 'g-2': ['m-2', 'm-3'], 'g-empty': [] as string[] }
+
+  function linearGraph(ccConfig: Record<string, unknown>): RuntimeGraph {
+    return {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        { key: 'cc_group', type: 'cc', config: ccConfig as never },
+        { key: 'review', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['u-9'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-cc', source: 'start', target: 'cc_group' },
+        { key: 'edge-cc-review', source: 'cc_group', target: 'review' },
+        { key: 'edge-review-end', source: 'review', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+  }
+
+  it('site 1 (resolveFromNode): a group target expands into one user event per FROZEN member, in snapshot order, carrying groupId; a member in two groups is cc\'d once', () => {
+    const executor = new ApprovalGraphExecutor(
+      linearGraph({ targetType: 'group', targetIds: ['g-1', 'g-2'] }),
+      {},
+      { groupMemberIds: FROZEN },
+    )
+    const initial = executor.resolveInitialState()
+    expect(initial.status).toBe('pending')
+    expect(initial.currentNodeKey).toBe('review')
+    expect(initial.ccEvents).toEqual([
+      { nodeKey: 'cc_group', targetType: 'user', targetId: 'm-1', groupId: 'g-1' },
+      { nodeKey: 'cc_group', targetType: 'user', targetId: 'm-2', groupId: 'g-1' },
+      { nodeKey: 'cc_group', targetType: 'user', targetId: 'm-3', groupId: 'g-2' },
+    ])
+  })
+
+  it('positive control: user / role targets are byte-identical to before (no groupId key, no expansion)', () => {
+    const roleExecutor = new ApprovalGraphExecutor(
+      linearGraph({ targetType: 'role', targetIds: ['ops'] }),
+      {},
+      { groupMemberIds: FROZEN },
+    )
+    expect(roleExecutor.resolveInitialState().ccEvents).toEqual([{ nodeKey: 'cc_group', targetType: 'role', targetId: 'ops' }])
+    const userExecutor = new ApprovalGraphExecutor(linearGraph({ targetType: 'user', targetIds: ['m-1'] }), {})
+    expect(userExecutor.resolveInitialState().ccEvents).toEqual([{ nodeKey: 'cc_group', targetType: 'user', targetId: 'm-1' }])
+  })
+
+  it('an empty frozen group, or a group id absent from the supplied map, yields ZERO cc events and never blocks the walk', () => {
+    const emptyExecutor = new ApprovalGraphExecutor(
+      linearGraph({ targetType: 'group', targetIds: ['g-empty'] }),
+      {},
+      { groupMemberIds: FROZEN },
+    )
+    const empty = emptyExecutor.resolveInitialState()
+    expect(empty.ccEvents).toEqual([])
+    expect(empty.currentNodeKey).toBe('review')
+
+    const absentExecutor = new ApprovalGraphExecutor(
+      linearGraph({ targetType: 'group', targetIds: ['g-unknown'] }),
+      {},
+      { groupMemberIds: {} },
+    )
+    expect(absentExecutor.resolveInitialState().ccEvents).toEqual([])
+  })
+
+  it('G-4 positive control: a NON-ratified targetType still throws at BOTH the choke and this arm (enumerated, not permissive)', () => {
+    const executor = new ApprovalGraphExecutor(
+      linearGraph({ targetType: 'dept', targetIds: ['d-1'] }),
+      {},
+      { groupMemberIds: FROZEN },
+    )
+    expect(() => executor.resolveInitialState()).toThrowError(/CC node cc_group has invalid config/)
+    // A non-string / blank target id is invalid for group exactly as for user/role.
+    const blankTarget = new ApprovalGraphExecutor(linearGraph({ targetType: 'group', targetIds: ['g-1', ' '] }), {}, { groupMemberIds: FROZEN })
+    expect(() => blankTarget.resolveInitialState()).toThrowError(/CC node cc_group has invalid config/)
+    // OBS (pre-existing, unchanged by this slice): `isNonEmptyStringArray([])` is vacuously true, so an
+    // EMPTY targetIds array is not rejected here for ANY kind — it simply yields zero events.
+    const noTargets = new ApprovalGraphExecutor(linearGraph({ targetType: 'group', targetIds: [] }), {}, { groupMemberIds: FROZEN })
+    expect(noTargets.resolveInitialState().ccEvents).toEqual([])
+    expect(new ApprovalGraphExecutor(linearGraph({ targetType: 'user', targetIds: [] }), {}).resolveInitialState().ccEvents).toEqual([])
+  })
+
+  it('wiring guard: a group target with NO groupMemberIds option supplied throws instead of silently dropping the cc', () => {
+    const executor = new ApprovalGraphExecutor(linearGraph({ targetType: 'group', targetIds: ['g-1'] }), {})
+    expect(() => executor.resolveInitialState()).toThrowError(/CC node cc_group has a group target but no group member snapshot was supplied/)
+  })
+
+  it('site 2 (resolveBranchAdvance): a group cc at a parallel branch head expands at fan-out, and a group cc AFTER the branch approval expands on the post-approve branch walk', () => {
+    const runtimeGraph: RuntimeGraph = {
+      nodes: [
+        { key: 'start', type: 'start', config: {} },
+        {
+          key: 'fork',
+          type: 'parallel',
+          config: { branches: ['edge-fork-a', 'edge-fork-b'], joinMode: 'all', joinNodeKey: 'join' },
+        },
+        { key: 'cc_a_head', type: 'cc', config: { targetType: 'group', targetIds: ['g-1'] } },
+        { key: 'app_a', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['a-1'] } },
+        { key: 'cc_a_tail', type: 'cc', config: { targetType: 'group', targetIds: ['g-2'] } },
+        { key: 'app_b', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['b-1'] } },
+        { key: 'join', type: 'approval', config: { assigneeType: 'user', assigneeIds: ['j-1'] } },
+        { key: 'end', type: 'end', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-fork', source: 'start', target: 'fork' },
+        { key: 'edge-fork-a', source: 'fork', target: 'cc_a_head' },
+        { key: 'edge-a-head-app', source: 'cc_a_head', target: 'app_a' },
+        { key: 'edge-app-a-tail', source: 'app_a', target: 'cc_a_tail' },
+        { key: 'edge-a-tail-join', source: 'cc_a_tail', target: 'join' },
+        { key: 'edge-fork-b', source: 'fork', target: 'app_b' },
+        { key: 'edge-b-join', source: 'app_b', target: 'join' },
+        { key: 'edge-join-end', source: 'join', target: 'end' },
+      ],
+      policy: { allowRevoke: true },
+    }
+    const executor = new ApprovalGraphExecutor(runtimeGraph, {}, { groupMemberIds: FROZEN })
+    const initial = executor.resolveInitialState()
+    expect(initial.status).toBe('pending')
+    expect(initial.parallelState).toBeDefined()
+    expect(initial.ccEvents).toEqual([
+      { nodeKey: 'cc_a_head', targetType: 'user', targetId: 'm-1', groupId: 'g-1' },
+      { nodeKey: 'cc_a_head', targetType: 'user', targetId: 'm-2', groupId: 'g-1' },
+    ])
+
+    const afterA = executor.resolveAfterApproveInParallel('app_a', initial.parallelState!)
+    expect(afterA.ccEvents).toEqual([
+      { nodeKey: 'cc_a_tail', targetType: 'user', targetId: 'm-2', groupId: 'g-2' },
+      { nodeKey: 'cc_a_tail', targetType: 'user', targetId: 'm-3', groupId: 'g-2' },
+    ])
+
+    // Positive control on the branch arm: with the option absent, the branch-head group throws the
+    // same wiring error — the guard is not site-1-only.
+    expect(() => new ApprovalGraphExecutor(runtimeGraph, {}).resolveInitialState())
+      .toThrowError(/CC node cc_a_head has a group target but no group member snapshot was supplied/)
+  })
+})

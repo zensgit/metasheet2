@@ -129,6 +129,12 @@ import {
   validateDingTalkAutomationActionConfigs,
   validateDingTalkAutomationLinks,
 } from './dingtalk-automation-link-validation'
+import {
+  STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL,
+  STOCK_PREP_OVERVIEW_READ_ONLY_CODE,
+  loadStockPreparationOverviewSheetIds,
+  type StockPreparationOverviewQueryFn,
+} from './stock-preparation-overview-contract'
 import type { Database } from '../db/types'
 
 const logger = new Logger('AutomationService')
@@ -151,6 +157,8 @@ export type AutomationRuleValidationCode =
   | typeof DELETED_TRIGGER_SELF_MUTATION_CODE
   // 客户反馈 2026-09-24 #4b: a condition VALUE that does not fit its field's type (automation-conditions.ts).
   | typeof AUTOMATION_CONDITION_VALUE_INVALID_CODE
+  // S3 fix round 2 (F2): an approval result write-back whose literal target sheet is the read-only overview.
+  | typeof STOCK_PREP_OVERVIEW_READ_ONLY_CODE
 
 /**
  * 客户反馈 2026-09-24 #3 (裁定 PR #6074) — the rule-save refusal for "record.deleted + same-base
@@ -706,6 +714,38 @@ function resultWritebackTargetId(
 // string. The save gate has already enforced the FULL triple when any is set, so runtime can read all three.)
 function isCrossBaseWriteback(writeback: Record<string, unknown>): boolean {
   return RESULT_WRITEBACK_TARGET_KEYS.some((key) => resultWritebackTargetId(writeback, key) !== null)
+}
+
+/** S3 fix round 2 (F2): the rule-save refusal sentence (values-free: a fixed code + sentence, no id). */
+export const STOCK_PREP_OVERVIEW_RESULT_WRITEBACK_SAVE_REFUSAL =
+  `${STOCK_PREP_OVERVIEW_READ_ONLY_CODE}: an approval result write-back cannot target the read-only stock-preparation project overview`
+
+/**
+ * S3 fix round 2 (F2; register R-37) — RULE SAVE refuses a `start_approval.resultWriteback` whose literal
+ * cross-base `targetSheetId` is the stock-preparation project overview. The cross-base target's fields and
+ * authority are otherwise DEFERRED to run time (T3-5 / Q4), and the run-time refusal lives in the executor's
+ * cross-base write gate (`evaluateCrossBaseWriteGate`) and in `applyResultWritebackPatch`; this makes the
+ * misconfiguration fail where the author can still fix it. Top level and every collected action (the same
+ * flattening the other save validators read). Ids outside the derived-id shape cannot be an overview: no
+ * statement. Called by createRule AND updateRule (any action-shaped edit).
+ */
+export async function validateStockPrepOverviewResultWritebackTargets(
+  queryFn: StockPreparationOverviewQueryFn,
+  actionType: string,
+  actionConfig: Record<string, unknown> | null | undefined,
+  actions: AutomationAction[] | null | undefined,
+): Promise<string | null> {
+  const candidates: string[] = []
+  const collect = (type: string, config: unknown) => {
+    if (type !== 'start_approval' || !isRecord(config) || !isRecord(config.resultWriteback)) return
+    const targetSheetId = resultWritebackTargetId(config.resultWriteback, 'targetSheetId')
+    if (targetSheetId) candidates.push(targetSheetId)
+  }
+  collect(actionType, actionConfig)
+  for (const action of actions ?? []) collect(action.type, action.config)
+  if (candidates.length === 0) return null
+  const overviews = await loadStockPreparationOverviewSheetIds(queryFn, candidates)
+  return overviews.size > 0 ? STOCK_PREP_OVERVIEW_RESULT_WRITEBACK_SAVE_REFUSAL : null
 }
 
 // W7-1 gate, shared by the writeback itself and by the deleted-sheet refusal reason (so the reason's
@@ -1610,6 +1650,16 @@ export class AutomationService {
     if (startApprovalValidationError) throw new AutomationRuleValidationError(startApprovalValidationError)
     const crossBaseWriteValidationError = validateCrossBaseWriteActionConfigs(input.actionType, actionConfig, actionsForValidation)
     if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+    // S3 fix round 2 (F2): a result write-back may not target the read-only stock-preparation overview.
+    const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
+      this.queryFn as StockPreparationOverviewQueryFn,
+      input.actionType,
+      actionConfig,
+      actionsForValidation,
+    )
+    if (overviewWritebackError) {
+      throw new AutomationRuleValidationError(overviewWritebackError, STOCK_PREP_OVERVIEW_READ_ONLY_CODE)
+    }
     // 客户反馈 2026-09-24 #3: a record.deleted rule cannot update/delete/lock its own (already gone) trigger record.
     const deletedTriggerSelfMutationError = validateDeletedTriggerSelfMutation(
       input.triggerType,
@@ -1866,6 +1916,16 @@ export class AutomationService {
         actionsForValidation,
       )
       if (crossBaseWriteValidationError) throw new AutomationRuleValidationError(crossBaseWriteValidationError)
+      // S3 fix round 2 (F2): the same overview refusal as createRule, on every action-shaped edit.
+      const overviewWritebackError = await validateStockPrepOverviewResultWritebackTargets(
+        this.queryFn as StockPreparationOverviewQueryFn,
+        nextActionType,
+        normalizedNextActionConfig,
+        actionsForValidation,
+      )
+      if (overviewWritebackError) {
+        throw new AutomationRuleValidationError(overviewWritebackError, STOCK_PREP_OVERVIEW_READ_ONLY_CODE)
+      }
       const linkValidationError = await validateDingTalkAutomationLinks(
         this.queryFn,
         sheetId,
@@ -4390,6 +4450,14 @@ export class AutomationService {
       _automationDepth: opts.automationDepth,
     })
     const wrote = await this.withTransaction(sheetId, async (query) => {
+      // S3 fix round 2 (F2; register R-37): the shared tail of BOTH result write-backs (same-base onto the
+      // source record, cross-base onto the target) ends in a bare `UPDATE meta_records`. The cross-base leg is
+      // refused earlier by the executor's write gate; this is the sink's own refusal, so neither leg can write
+      // the read-only stock-preparation project overview whatever routed it here. Throws (→ backwriteSkipped,
+      // rolled back, nothing written or announced). Ids outside the derived-id shape: no statement.
+      if ((await loadStockPreparationOverviewSheetIds(query as StockPreparationOverviewQueryFn, [sheetId])).size > 0) {
+        throw new Error(STOCK_PREP_OVERVIEW_AUTOMATION_REFUSAL)
+      }
       // Field retype slice 3a (ADR §3.11 row 7): the type / option check ran BEFORE the fence (TOCTOU, ADR
       // §3.12). Re-read the written fields FOR SHARE and refuse on drift, before the record read. No query
       // unless the conversion flag AND the writer fence are both on.

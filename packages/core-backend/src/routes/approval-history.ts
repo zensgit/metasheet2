@@ -164,6 +164,24 @@ export function camelCaseHistoryRowFields(row: Record<string, unknown>): {
   }
 }
 
+/**
+ * Test report 2026-10-08, T4cd (node half) — two more SINGLE-KEY projections onto `metadata`, added
+ * under the owner's 2026-09-20 whitelist rule (「修复应白名单投影业务字段,不能直接暴露整个 metadata」),
+ * each rebuilt here from its own key path, never from the stored object:
+ *   - `nodeKey`: the graph node a row was recorded at. Only a non-empty string crosses. The detail
+ *     page names the node from the instance's own template and never prints the key itself; the
+ *     same key already reaches the same readers on `GET /api/approvals/:id` (`currentNodeKey`,
+ *     `assignments[].nodeKey`), under the same per-instance admission as this route.
+ *   - `autoApproved`: whether the engine, not a person, approved the row. Only the boolean `true`
+ *     crosses; any other stored value is dropped.
+ * Every other metadata key stays off the wire, exactly as before.
+ */
+export function projectHistoryNodeKeyForRead(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const nodeKey = raw.trim()
+  return nodeKey.length > 0 ? nodeKey : null
+}
+
 export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): Router {
   const r = Router()
 
@@ -255,14 +273,15 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       const total = Number(countRes.rows[0]?.c || 0)
       // Lock-9 FE read-half companion + the owner's 2026-09-20 ruling on the cancel-round durable
       // read — every metadata projection here is a SINGLE JSONB KEY PATH, never `metadata` itself.
-      // THREE key paths now (`attachmentIds`, `cancellationOutcome`, `cancelRoundCloseReason`), and
-      // the list is exhaustive at this head: no other metadata key is projected, so the
-      // internal ones (`w4ActorPosture`, `parallelCancelledAssignees`, `cancelRoundBlockDetail`,
-      // `approvalThreshold`, `channel`/`cardDeliveryId`, …) cannot reach a client from this route
-      // even if the map below were wrong. This changes neither the WHERE clause (S2's pointer-row
-      // exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries above/below) nor
-      // the row set nor the ORDER/LIMIT/OFFSET — only three additional expressions are read per
-      // row, each aliased so it never collides with a real column name.
+      // FIVE key paths now (`attachmentIds`, `cancellationOutcome`, `cancelRoundCloseReason`, and —
+      // test report 2026-10-08 T4cd — `nodeKey`, `autoApproved`), and the list is exhaustive at
+      // this head: no other metadata key is projected, so the internal ones (`w4ActorPosture`,
+      // `parallelCancelledAssignees`, `cancelRoundBlockDetail`, `approvalThreshold`, `approvalMode`,
+      // `aggregateComplete`, `requestNo`, `channel`/`cardDeliveryId`, …) cannot reach a client from
+      // this route even if the map below were wrong. This changes neither the WHERE clause (S2's
+      // pointer-row exclusion, `metadata->>'commentId' IS NULL`, is untouched on both queries
+      // above/below) nor the row set nor the ORDER/LIMIT/OFFSET — only additional expressions are
+      // read per row, each aliased so it never collides with a real column name.
       const { rows } = await pool.query(
         `SELECT
            id,
@@ -278,7 +297,9 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
            to_version,
            metadata->'attachmentIds' AS lock9_attachment_ids_raw,
            metadata->'cancellationOutcome' AS cancel_round_outcome_raw,
-           metadata->>'cancelRoundCloseReason' AS cancel_round_close_reason_raw
+           metadata->>'cancelRoundCloseReason' AS cancel_round_close_reason_raw,
+           metadata->'nodeKey' AS history_node_key_raw,
+           metadata->'autoApproved' AS history_auto_approved_raw
          FROM approval_records
          WHERE instance_id = $1
            AND action <> $4
@@ -289,7 +310,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       )
 
       // The row shape is bounded by the explicit SELECT list above (no bare `metadata` column is
-      // ever projected there) — the destructure below only strips the THREE internal `*_raw`
+      // ever projected there) — the destructure below only strips the FIVE internal `*_raw`
       // aliases so they can never themselves leak onto the wire; it is not what keeps other
       // metadata keys out (the SELECT list already never asked the DB for them). Each projector
       // then REBUILDS its value field by field from a fixed key set (see
@@ -313,7 +334,7 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
       // with the flag OFF no `attachmentIds` key is ever attached, regardless of what a row's
       // `lock9_attachment_ids_raw` holds.
       //
-      // A row with none of the three whitelisted values gets NO `metadata` key at all (omitted,
+      // A row with none of the five whitelisted values gets NO `metadata` key at all (omitted,
       // never `metadata: {}`) — Lock-9's original shape choice, preserved.
       const attachmentsEnabled = isApprovalAttachmentsEnabled()
       const items = rows.map((row) => {
@@ -321,11 +342,15 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
           lock9_attachment_ids_raw: attachmentIdsRaw,
           cancel_round_outcome_raw: cancellationOutcomeRaw,
           cancel_round_close_reason_raw: cancelRoundCloseReasonRaw,
+          history_node_key_raw: nodeKeyRaw,
+          history_auto_approved_raw: autoApprovedRaw,
           ...item
         } = row as Record<string, unknown> & {
           lock9_attachment_ids_raw?: unknown
           cancel_round_outcome_raw?: unknown
           cancel_round_close_reason_raw?: unknown
+          history_node_key_raw?: unknown
+          history_auto_approved_raw?: unknown
         }
         // T4cd: camelCase copies beside the unchanged snake_case fields (see camelCaseHistoryRowFields).
         const dto = { ...item, ...camelCaseHistoryRowFields(item) }
@@ -338,6 +363,10 @@ export function approvalHistoryRouter(options?: ApprovalHistoryRouterOptions): R
           const attachmentIds = extractRiderAttachmentIds(attachmentIdsRaw)
           if (attachmentIds.length > 0) metadata.attachmentIds = attachmentIds
         }
+        // T4cd (node half): see projectHistoryNodeKeyForRead's docblock — two single-key projections.
+        const nodeKey = projectHistoryNodeKeyForRead(nodeKeyRaw)
+        if (nodeKey !== null) metadata.nodeKey = nodeKey
+        if (autoApprovedRaw === true) metadata.autoApproved = true
         return Object.keys(metadata).length > 0 ? { ...dto, metadata } : dto
       })
 

@@ -214,8 +214,11 @@ function deployEnv(harness, overrides = {}) {
 }
 
 function buildEnv(harness, overrides = {}) {
+  const env = { ...harness.env }
+  delete env.VITE_MULTITABLE_RANGE_FILL_ENABLED
+  delete env.STAGING_DEPLOY_SCOPE
   return {
-    ...harness.env,
+    ...env,
     SOURCE_DIR: repoRoot,
     IMAGE_OWNER: 'zensgit',
     IMAGE_TAG: goodSha,
@@ -536,6 +539,97 @@ test('local full build includes the web image in provenance', async (t) => {
   assert.equal(provenance.backendImageId, goodBackendImageId)
   assert.equal(provenance.webImageId, goodWebImageId)
 })
+
+for (const scope of ['backend', 'full']) {
+  test(`local ${scope} build preserves legacy arguments and provenance when range fill is unset or false`, async (t) => {
+    const h = await withHarness(t)
+    const expectedArgs = [
+      `--build-arg VCS_REF=${goodSha}`,
+      `--build-arg BUILD_IMAGE_TAG=${goodSha}`,
+      '--build-arg BUILD_IMAGE_SOURCE=https://github.com/zensgit/metasheet2',
+      '--build-arg BUILD_CREATED=<timestamp>',
+    ]
+    const expectedProvenance = {
+      schema: 'metasheet-dingtalk-staging-image-provenance/v1',
+      commit: goodSha,
+      backendImage: `ghcr.io/zensgit/metasheet2-backend:${goodSha}`,
+      backendImageId: goodBackendImageId,
+      ...(scope === 'full' ? {
+        webImage: `ghcr.io/zensgit/metasheet2-web:${goodSha}`,
+        webImageId: goodWebImageId,
+      } : {}),
+    }
+    for (const value of [undefined, 'false']) {
+      await writeFile(h.commandLog, '')
+      const result = run(buildScript, buildEnv(h, {
+        STAGING_DEPLOY_SCOPE: scope,
+        ...(value === undefined ? {} : { VITE_MULTITABLE_RANGE_FILL_ENABLED: value }),
+      }))
+      assert.equal(result.status, 0, result.stderr)
+      const builds = (await readFile(h.commandLog, 'utf8'))
+        .split('\n').filter((line) => line.startsWith('build '))
+      assert.equal(builds.length, scope === 'full' ? 2 : 1)
+      for (const command of builds) {
+        assert.deepEqual(
+          [...command.matchAll(/--build-arg \S+/g)]
+            .map(([argument]) => argument.replace(/BUILD_CREATED=\S+/, 'BUILD_CREATED=<timestamp>')),
+          expectedArgs,
+        )
+      }
+      assert.deepEqual(JSON.parse(await readFile(h.provenanceFile, 'utf8')), expectedProvenance)
+    }
+  })
+}
+
+test('local full build forwards range fill only once to the frontend image', async (t) => {
+  const h = await withHarness(t)
+  const result = run(buildScript, buildEnv(h, {
+    STAGING_DEPLOY_SCOPE: 'full',
+    VITE_MULTITABLE_RANGE_FILL_ENABLED: 'true',
+  }))
+  assert.equal(result.status, 0, result.stderr)
+  const builds = (await readFile(h.commandLog, 'utf8'))
+    .split('\n')
+    .filter((line) => line.startsWith('build '))
+  assert.equal(builds.length, 2)
+  assert.match(builds[0], /Dockerfile\.backend /)
+  assert.match(builds[1], /Dockerfile\.frontend /)
+  assert.doesNotMatch(builds[0], /VITE_MULTITABLE_RANGE_FILL_ENABLED/)
+  assert.equal(
+    builds[1].match(/--build-arg VITE_MULTITABLE_RANGE_FILL_ENABLED=true/g)?.length,
+    1,
+  )
+})
+
+for (const value of ['TRUE', '1', ' ', '']) {
+  test(`local build rejects range fill flag literal ${JSON.stringify(value)}`, async (t) => {
+    const h = await withHarness(t)
+    const result = run(buildScript, buildEnv(h, {
+      VITE_MULTITABLE_RANGE_FILL_ENABLED: value,
+    }))
+    assert.equal(result.status, 1)
+    assert.equal(
+      result.stderr,
+      '[build-dingtalk-staging-images] ERROR: VITE_MULTITABLE_RANGE_FILL_ENABLED must be literal true or false\n',
+    )
+    const log = await readFile(h.commandLog, 'utf8')
+    assert.equal(log.trim(), '')
+  })
+}
+
+for (const scope of [undefined, 'backend']) {
+  test(`local build rejects range fill with ${scope ?? 'default'} scope before Docker`, async (t) => {
+    const h = await withHarness(t)
+    const result = run(buildScript, buildEnv(h, {
+      ...(scope === undefined ? {} : { STAGING_DEPLOY_SCOPE: scope }),
+      VITE_MULTITABLE_RANGE_FILL_ENABLED: 'true',
+    }))
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /range fill requires a full-scope frontend build/)
+    const log = await readFile(h.commandLog, 'utf8')
+    assert.equal(log.trim(), '')
+  })
+}
 
 const buildCases = [
   {

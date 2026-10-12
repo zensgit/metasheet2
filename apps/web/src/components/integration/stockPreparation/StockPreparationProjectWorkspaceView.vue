@@ -5,13 +5,17 @@
          It sits above the already-synced table on purpose: 接入 and 已接入 belong on one screen, and
          it is what the per-row 刷新 below points at. The panel adds NO write authority — it drives the
          four table-action routes that already exist, each with the gate it already had. -->
+    <!-- S2 fix round 1 (refuter #6): once a run lands on the project's OWN sheet (switch on), that
+         sheet's fill view is where 「打开备料多维表」 goes — `project-target-changed` carries its
+         handle, and it outranks the shell's deployment-level handle for the project just pulled. -->
     <StockPreparationProjectSyncPanel
       :scope="scope"
       :armed-at="syncArmedAt"
-      :fill-target="props.fillTarget"
+      :fill-target="composedFillTarget"
       @navigate-stage="(viewKey: string) => emit('navigate-stage', viewKey)"
-      @open-multitable="emit('open-multitable', props.fillTarget ?? null)"
+      @open-multitable="emit('open-multitable', composedFillTarget)"
       @synced="load"
+      @project-target-changed="onProjectTargetChanged"
     />
 
     <!-- Loading: values-free spinner copy only. -->
@@ -186,6 +190,10 @@ import {
 import StockPrepTechnicalDetails from './StockPrepTechnicalDetails.vue'
 import StockPreparationProjectSyncPanel from './StockPreparationProjectSyncPanel.vue'
 import type { StockPreparationFillTarget } from '../../../services/integration/stockPreparation/projectBoard'
+import {
+  stockPrepProjectTargetFillTarget,
+  type StockPrepProjectTargetState,
+} from '../../../services/integration/stockPreparation/projectTarget'
 
 const props = withDefaults(
   defineProps<{
@@ -223,6 +231,18 @@ const emit = defineEmits<{
 const { locale } = useLocale()
 
 // Same synchronous locale idiom as the shell / the rest of the integration surface.
+/**
+ * S2 fix round 1: the project sheet the panel's last project-sheet run resolved (null = none yet, or
+ * the switch is off and the run took the old path). Its fill view outranks the shell's handle.
+ */
+const projectTargetFillTarget = ref<StockPreparationFillTarget | null>(null)
+
+function onProjectTargetChanged(state: StockPrepProjectTargetState | null): void {
+  projectTargetFillTarget.value = stockPrepProjectTargetFillTarget(state)
+}
+
+const composedFillTarget = computed<StockPreparationFillTarget | null>(() => projectTargetFillTarget.value ?? props.fillTarget ?? null)
+
 function bi(zh: string, en: string): string {
   return locale.value === 'zh-CN' ? zh : en
 }

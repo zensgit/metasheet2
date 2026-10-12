@@ -29,6 +29,11 @@
 
 const crypto = require('node:crypto')
 
+// S1: the project-sheet objectId rule (own-base.cjs holds it beside the base pair; see its note on
+// why it lives there). Read by the apply write gate's project-sheet branch and the field-id
+// translation fallback below; never written here.
+const { isStockPreparationProjectSheetObjectId } = require('./stock-preparation-own-base.cjs')
+
 const {
   DEFAULT_MAX_PAGES,
   DEFAULT_MAX_ROWS,
@@ -64,6 +69,7 @@ const { normalizeCarryPolicy } = require('./stock-preparation-carry-policy.cjs')
 const {
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
   normalizeStockPreparationTemplate,
 } = require('./stock-preparation-templates.cjs')
@@ -503,6 +509,16 @@ function normalizeStockPreparationActionConfig(input = {}) {
     // normalized object is stored and forwarded, so a new key needs no new wire here or in the
     // large-BOM lane; it needs the expander's normalizer to know it (and to refuse a misspelling).
     ...(rootSelection ? { rootSelection } : {}),
+    // S1 (ADR adr-stock-prep-project-sheets-20261008 §3): the PROJECT-SHEET OVERLAY MARKER. Set only
+    // by the registry's `applyProjectTarget` below — the registry's config drain STRIPS the key from
+    // deploy-time config (`withoutDeployTimeProjectTargetMarker`, R4), so this spread only ever sees
+    // the marker on a resolved action a route is re-normalizing — and spread
+    // CONDITIONALLY for the same reason every block above is: with the project-sheets switch off no
+    // lookup ever carries it, so every normalized action — and every snapshot, hash and response
+    // built from one — is byte-identical to pre-S1. Routes read it to decide whether the resolved
+    // target must pass the tenant wall; `assertStockPreparationTargetReady` re-normalizes the action
+    // and would otherwise drop it on the floor.
+    ...(isPlainObject(input.projectTarget) ? { projectTarget: cloneJson(input.projectTarget) } : {}),
   }
 }
 
@@ -826,6 +842,22 @@ function normalizeActionList(actions) {
 }
 
 /**
+ * R4 (S1 fix round 1): the `projectTarget` overlay marker is the REGISTRY's to set (`applyProjectTarget`
+ * below) and nobody else's. `normalizeStockPreparationActionConfig` keeps the key when it is present
+ * because the routes re-normalize a RESOLVED action through it (`assertStockPreparationTargetReady`)
+ * and the marker must survive that trip — which also means a deploy-time config that happened to
+ * carry the key would be normalized with it, and a route would then treat the env target as a
+ * registry-resolved project sheet (the gate's project branch and the tenant wall both key off the
+ * marker). So the config drain strips it: switch on or off, a deployment cannot stamp the marker on
+ * itself. Non-objects pass through untouched so the normalizer still raises its own 422.
+ */
+function withoutDeployTimeProjectTargetMarker(action) {
+  if (!isPlainObject(action) || !('projectTarget' in action)) return action
+  const { projectTarget: _ignored, ...deployTime } = action
+  return deployTime
+}
+
+/**
  * The registry, and THE ONE SEAM THAT MAKES REBINDING A SOURCE A RUNTIME ACT.
  *
  * `actions` is still the deploy-time config, still drained into a Map ONCE at construction (which
@@ -878,13 +910,66 @@ function normalizeActionList(actions) {
  * left dangling by a later delete, or one written against a system whose kind no longer matches,
  * fails loudly at read time rather than reading the wrong place.
  */
-function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding } = {}) {
+function createStockPreparationTableActionRegistry({ actions, resolveSourceBinding, resolveProjectTarget } = {}) {
   const configs = new Map()
   for (const action of normalizeActionList(actions)) {
-    const normalized = normalizeStockPreparationActionConfig(action)
+    const normalized = normalizeStockPreparationActionConfig(withoutDeployTimeProjectTargetMarker(action))
     configs.set(normalized.actionId, normalized)
   }
   const sourceBindingResolver = typeof resolveSourceBinding === 'function' ? resolveSourceBinding : null
+  // S1: the PROJECT-SHEET overlay (ADR §3 「统一接缝」), applied AFTER the source binding. Wired by the
+  // route layer only when the registry store exists; the resolver itself reads the switch PER CALL
+  // and answers null while it is off, so for every lookup that carries a tenant a wired resolver
+  // with the switch off answers byte-identically to no resolver at all (T-03 pins it deep-equal).
+  // The one thing that does NOT follow the switch is the tenant-scope rule below: a wired resolver
+  // refuses a tenant-less lookup 500 TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED BEFORE the resolver
+  // (and so the switch) is consulted — the same rule the source binding applies, and every shipped
+  // route lookup carries a tenant. The same three fail-closed rules the source binding states apply:
+  // a throw propagates (ABSENT / ARCHIVED / PROJECT_NO_REQUIRED are the resolver's own typed
+  // refusals), null means NO OVERRIDE, and a lookup without a tenant is refused rather than skipped.
+  const projectTargetResolver = typeof resolveProjectTarget === 'function' ? resolveProjectTarget : null
+
+  async function applyProjectTarget(action, input) {
+    if (!projectTargetResolver) return action
+    const tenantId = optionalString(input.tenantId)
+    if (!tenantId) {
+      throw new StockPreparationTableActionError(
+        500,
+        'TABLE_ACTION_SOURCE_BINDING_SCOPE_REQUIRED',
+        'a project-sheet resolver is configured but this table-action lookup carried no tenant scope',
+        { actionId: action.actionId },
+      )
+    }
+    const resolved = await projectTargetResolver({
+      tenantId,
+      projectNo: optionalString(input.projectNo),
+      targetPurpose: optionalString(input.targetPurpose) || 'write',
+      actionId: action.actionId,
+      // S2 (ADR §2 「客户包」): the action's declared `ext_` band — server config, never request input
+      // — so the project binding maps those columns too and the completeness gate is satisfied by a
+      // sheet that carries them. Spread only when declared: an action without a band hands the
+      // resolver exactly the S1 input.
+      ...(Array.isArray(action.extensionFieldIds) && action.extensionFieldIds.length > 0
+        ? { extensionFieldIds: [...action.extensionFieldIds] }
+        : {}),
+    })
+    if (!resolved || !isPlainObject(resolved.target)) return action
+    // Re-normalize through `normalizeTarget`, the ONE definition of a valid target, exactly as the
+    // source binding re-normalizes through `normalizeSource`. The marker rides beside it so a route
+    // can tell a resolved project sheet from the env target without comparing ids.
+    return {
+      ...action,
+      target: normalizeTarget(resolved.target),
+      projectTarget: {
+        projectNo: resolved.projectNo,
+        status: resolved.status,
+        // The DEPLOYMENT's own env target objectId, captured before the overlay replaces it: the
+        // fourth condition of the apply write gate reads it (ADR §3 「写入门」), and it is the one
+        // value from the env action the switch still reads.
+        deploymentTargetObjectId: action.target.objectId,
+      },
+    }
+  }
 
   async function applyPersistedSourceBinding(action, input) {
     if (!sourceBindingResolver) return action
@@ -925,7 +1010,7 @@ function createStockPreparationTableActionRegistry({ actions, resolveSourceBindi
       if (!action) {
         throw new StockPreparationTableActionError(422, 'TABLE_ACTION_NOT_CONFIGURED', `table action is not configured: ${actionId}`, { actionId })
       }
-      return applyPersistedSourceBinding(cloneJson(action), input)
+      return applyProjectTarget(await applyPersistedSourceBinding(cloneJson(action), input), input)
     },
   }
 }
@@ -1144,7 +1229,11 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
   // rather than removed: membership grants TRANSLATION only, never authorization,
   // and each module's own guard (confirm-writes MVP_OBJECT_ID_SET, the ledger's
   // pinned OBJECT_ID, the carry executor's bound target) stays the wall.
-  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
+  //
+  // S3 (R-37): the PROJECT OVERVIEW template rides it for the same reason the ledger does — its
+  // refresh writes rows by logical key through the one scoped records API. Translation only; the
+  // overview module's pinned OBJECT_ID is its wall, and the host's capability clamp is the people's.
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )
 
@@ -1152,7 +1241,13 @@ const MVP_TEMPLATE_BY_OBJECT_ID = new Map(
 // an unknown objectId, a provisioning API without resolveFieldIds, or ANY declared logical field the
 // platform did not resolve — a partial map would silently drop columns on write.
 async function resolveTargetFieldIds(provisioning, projectId, objectId) {
-  const template = MVP_TEMPLATE_BY_OBJECT_ID.get(objectId)
+  // S1: a PROJECT SHEET carries exactly the frozen main-table columns under a per-project objectId
+  // (stock-preparation-project-targets.cjs `projectSheetTemplate`), so it translates through the
+  // main template. Membership here grants TRANSLATION only, never authorization — each module's own
+  // guard stays the wall, exactly as the registry's header says of the canonical entry.
+  const template = isStockPreparationProjectSheetObjectId(objectId)
+    ? STOCK_PREPARATION_MAIN_TABLE_TEMPLATE
+    : MVP_TEMPLATE_BY_OBJECT_ID.get(objectId)
   if (!template) {
     throw new StockPreparationTableActionError(500, 'TABLE_ACTION_FIELD_IDS_UNRESOLVED', 'target objectId has no frozen stock-preparation template to resolve field ids from', { objectId })
   }
@@ -2381,7 +2476,7 @@ async function prepareStockPreparationMvpSnapshot(input = {}) {
 // default: a missing/disabled policy, an unallowlisted target, or the prod canonical → 403. This is the
 // FIRST thing apply does (before token consume / dry-run / write). Production apply = separate FOS-4b-3-prod
 // owner gate. Error is values-free (only a coarse reason).
-function assertStockPrepApplySandboxAllowed(target, sandboxPolicy) {
+function assertStockPrepApplySandboxAllowed(target, sandboxPolicy, projectSheetGate) {
   // Mirror the writer's target identity: objectId defaults to the prod canonical when unset, so a target
   // missing objectId is treated as canonical (and rejected) rather than slipping through on sheetId.
   const objectId = (target && optionalString(target.objectId)) || STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId
@@ -2390,6 +2485,31 @@ function assertStockPrepApplySandboxAllowed(target, sandboxPolicy) {
     throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; the production canonical stock-prep target is not appliable (production apply is a separate owner gate)', { reason: 'prod_canonical' })
   }
   const policy = isPlainObject(sandboxPolicy) ? sandboxPolicy : {}
+  // S1 (ADR §3 「写入门」, Q6): ONE additive branch for a PROJECT SHEET. A project sheet's objectId is
+  // derived per project and can never be in the deployment's env allowlist, so without this branch
+  // every apply through the overlay would refuse `target_not_allowlisted`. It ADMITS only when ALL
+  // FOUR hold — each one is pinned individually by the suite, and a missing one falls through to the
+  // existing checks below (which then refuse exactly as they always did):
+  //   1. the project-sheets switch is on for this request;
+  //   2. `objectId` equals the one the route just resolved FROM THE REGISTRY ROW (server-held, never
+  //      request-supplied) AND matches the project-sheet pattern — a hand-named sandbox twin, the
+  //      canonical object or a mismatched id all fail here;
+  //   3. the sandbox policy is enabled (`policy.enabled === true`), the same switch the env path needs;
+  //   4. the deployment's OWN env `target.objectId` is in the allowlist — i.e. the deployment had
+  //      already authorized sandbox writes; the project sheet inherits THAT authorization (Q6) and
+  //      cannot widen it.
+  // Nothing below this branch changed: with the switch off, `projectSheetGate` is never passed.
+  if (isPlainObject(projectSheetGate)
+    && projectSheetGate.enabled === true
+    && typeof projectSheetGate.registeredProjectObjectId === 'string'
+    && objectId === projectSheetGate.registeredProjectObjectId
+    && isStockPreparationProjectSheetObjectId(objectId)
+    && policy.enabled === true
+    && Array.isArray(policy.allowedTargetObjectIds)
+    && typeof projectSheetGate.deploymentTargetObjectId === 'string'
+    && policy.allowedTargetObjectIds.includes(projectSheetGate.deploymentTargetObjectId)) {
+    return
+  }
   if (policy.enabled !== true) {
     throw new StockPreparationTableActionError(403, 'STOCK_PREP_APPLY_SANDBOX_ONLY', 'apply is sandbox-only; sandbox mode is not enabled', { reason: 'sandbox_disabled' })
   }
@@ -2455,7 +2575,8 @@ function assertStockPrepApplyAllowed(target, gateContext = {}) {
     return { mode: 'production', maxCleanRows: policy.maxCleanRows }
   }
   // No production policy configured → sandbox gate (unchanged; canonical rejected; sandbox allowlist).
-  assertStockPrepApplySandboxAllowed(target, sandboxPolicy)
+  // S1: the project-sheet branch rides the same call — absent (switch off) it is a no-op.
+  assertStockPrepApplySandboxAllowed(target, sandboxPolicy, gateContext.projectSheetGate)
   return { mode: 'sandbox', maxCleanRows: null }
 }
 
@@ -2478,6 +2599,9 @@ async function applyStockPreparationAction(input = {}) {
     now: input.now,
     route: 'small',
     actionId: action.actionId,
+    // S1: server-held by the route (the registry row's objectId + the deployment env target's);
+    // undefined while the switch is off, so the gate below is byte-identical to pre-S1.
+    projectSheetGate: input.projectSheetGate,
   })
   const parameters = normalizeActionParameters(input.parameters)
   // B2a: BEFORE the token is consumed and long before the re-expansion. Ahead of the token consume

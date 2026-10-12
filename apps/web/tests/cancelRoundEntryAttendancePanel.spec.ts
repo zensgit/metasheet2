@@ -17,7 +17,14 @@ vi.mock('../src/utils/api', async (importOriginal) => {
 
 import AttendanceCancelRoundPanel from '../src/views/attendance/AttendanceCancelRoundPanel.vue'
 import { useLocale } from '../src/composables/useLocale'
-import { CANCEL_ROUND_BLOCK_CATEGORY_COPY, CANCEL_ROUND_SEAT_CLASS_COPY, normalizeCancelRoundDeliveries } from '../src/approvals/cancelRound'
+import {
+  CANCEL_ROUND_BLOCK_CATEGORY_COPY,
+  CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
+  CANCEL_ROUND_CLIENT_COPY,
+  CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT,
+  CANCEL_ROUND_SEAT_CLASS_COPY,
+  normalizeCancelRoundDeliveries,
+} from '../src/approvals/cancelRound'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
@@ -175,7 +182,8 @@ describe('launch flag OFF with an existing round (owner 2026-09-29 18:3x 「Hide
     expect(withdraw.disabled).toBe(false)
     withdraw.click()
     await flushUi()
-    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({})])
+    // F1: the withdraw names the round this panel rendered
+    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({ expectedRoundId: 'apr_1' })])
     expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请已撤回')
     // the withdrawn round stays readable; OFF still offers no launch
     expect($(root, 'data-cancel-round-progress')).not.toBeNull()
@@ -251,10 +259,75 @@ describe('launch dialog and withdraw', () => {
     const root = await mountPanel()
     $(root, 'data-cancel-round-withdraw')!.click()
     await flushUi()
-    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({})])
+    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({ expectedRoundId: 'apr_1' })])
     expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请已撤回')
     expect($(root, 'data-cancel-round-withdraw')).toBeNull()
     expect(($(root, 'data-cancel-round-launch') as HTMLButtonElement).disabled).toBe(false)
+    expect($(root, 'data-cancel-round-action-error')).toBeNull()
+  })
+
+  // F1 (reviewer 2026-10-08): a tab still showing round R1 after the leave's R1 was withdrawn and R2
+  // launched elsewhere. The withdraw names R1, so the server refuses (409, nothing written) instead of
+  // withdrawing R2 — a round this tab never showed.
+  const STALE_REFUSAL = () =>
+    jsonResponse(409, { ok: false, error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' } })
+
+  it('stale tab: the round on screen was replaced — the withdraw names it, the server refuses, and the panel says nothing was done next to the NEW round, which keeps its own withdraw', async () => {
+    summaries = [
+      () => jsonResponse(200, summaryBody({ entryEnabled: true, round: round() })),
+      () => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ roundId: 'apr_2', engineInstanceId: 'cr_2', startedAt: '2026-09-30T01:00:00.000Z' }) })),
+    ]
+    writes = [STALE_REFUSAL]
+    const root = await mountPanel()
+    $(root, 'data-cancel-round-withdraw')!.click()
+    await flushUi()
+    expect(calls()).toEqual([
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
+      ['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({ expectedRoundId: 'apr_1' })],
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
+    ])
+    const error = $(root, 'data-cancel-round-action-error')!
+    expect(error.textContent).toContain(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT].zh)
+    // never the 「an approver already acted」 copy beside a round no approver has touched, never 「withdrawn」
+    expect(root.textContent).not.toContain('已有审批人处理过')
+    expect(root.textContent).not.toContain('撤销申请已撤回')
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请审批中')
+    const again = $(root, 'data-cancel-round-withdraw') as HTMLButtonElement
+    expect(again).not.toBeNull()
+    expect(again.disabled).toBe(false)
+  })
+
+  it('same round, already finished (409; the re-read shows the SAME round decided): the registered withdraw copy stays — not the stale-round copy', async () => {
+    summaries = [
+      () => jsonResponse(200, summaryBody({ entryEnabled: true, round: round() })),
+      () => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ outcome: 'rejected', status: 'cancellation_rejected', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' }) })),
+    ]
+    writes = [STALE_REFUSAL]
+    const root = await mountPanel()
+    $(root, 'data-cancel-round-withdraw')!.click()
+    await flushUi()
+    expect(calls()[1]).toEqual(['POST', '/api/attendance/requests/req-1/cancel-round/withdraw', JSON.stringify({ expectedRoundId: 'apr_1' })])
+    const error = $(root, 'data-cancel-round-action-error')!
+    expect(error.textContent).toContain('已有审批人处理过,无法再撤回本次撤销申请')
+    expect(error.textContent).not.toContain(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT].zh)
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe('撤销申请被驳回')
+  })
+
+  it('a withdraw the server attributes to another round, or to no named round, is never a silent success', async () => {
+    const withdrawn = () => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({ outcome: 'withdrawn', status: 'cancellation_withdrawn', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' }) }))
+    for (const body of [
+      { requestId: 'req-1', roundId: 'apr_other', outcome: 'withdrawn', status: 'cancellation_withdrawn' },
+      { requestId: 'req-1' },
+    ]) {
+      summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round() })), withdrawn]
+      writes = [() => jsonResponse(200, { ok: true, data: body })]
+      const root = await mountPanel()
+      $(root, 'data-cancel-round-withdraw')!.click()
+      await flushUi()
+      const notice = $(root, 'data-cancel-round-action-error')
+      expect(notice, JSON.stringify(body)).not.toBeNull()
+      expect(notice!.textContent).toContain(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED].zh)
+    }
   })
 
   it('withdraw closed by an approver: disabled with the server-resolved reason; a non-requester sees no withdraw', async () => {
@@ -316,6 +389,56 @@ describe('round outcome presentation (P-2 / P-3 / P-7)', () => {
     expect(block.textContent).toContain(CANCEL_ROUND_BLOCK_CATEGORY_COPY.zh)
     expect(block.querySelector('details')!.textContent).toContain('FUTURE_CODE_X')
     expect(root.textContent).not.toContain('原因未知')
+  })
+})
+
+// F2 (reviewer 2026-10-08): 「请假仍然有效」 is said only of a leave that IS still approved. A leave cancelled
+// some other way — the direct cancel (`POST /api/attendance/requests/:id/cancel`), which does not touch the
+// round — keeps its last round's V1 / V3–V6 word, but never that note; and a round closed because the leave
+// is no longer approved (`CANCEL_ROUND_DOCUMENT_NOT_APPROVED`) never shows it, whatever the parent row says.
+describe('「请假仍然有效」 only next to a leave that is still approved (F2)', () => {
+  const WORDS: Array<[string, Round]> = [
+    ['V1 pending', round()],
+    ['V3 rejected', round({ outcome: 'rejected', status: 'cancellation_rejected', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' })],
+    ['V4 withdrawn', round({ outcome: 'withdrawn', status: 'cancellation_withdrawn', canWithdraw: false, withdrawBlockedReason: 'INVALID_STATUS_TRANSITION' })],
+    ['V5 window closed', round({ outcome: 'expired', status: 'cancellation_window_closed', closedBySystem: true, closeReason: 'round_expired', canWithdraw: false })],
+    // V6 from the producer whose leave really does stay valid (C-1's attendance refusal), not a synthetic code
+    ['V6 blocked (review required)', round({
+      outcome: 'blocked', status: 'cancellation_blocked', closedBySystem: true,
+      closeReason: 'business_blocked:ATTENDANCE_CANCELLATION_REVIEW_REQUIRED', blockCode: 'ATTENDANCE_CANCELLATION_REVIEW_REQUIRED', canWithdraw: false,
+    })],
+  ]
+  const NOT_APPROVED_BLOCK = round({
+    outcome: 'blocked', status: 'cancellation_blocked', closedBySystem: true,
+    closeReason: 'business_blocked:CANCEL_ROUND_DOCUMENT_NOT_APPROVED', blockCode: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', canWithdraw: false,
+  })
+
+  it.each(WORDS)('T3 control — %s on an APPROVED leave carries the note', async (_label, r) => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: r }))]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(root, 'data-cancel-round-leave-valid')!.textContent).toContain('请假仍然有效')
+  })
+
+  it.each(WORDS)('T2 — %s on a CANCELLED leave (cancelled outside the round) does not carry the note', async (_label, r) => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: r }))]
+    const root = await mountPanel({ ...LEAVE, status: 'cancelled' })
+    expect($(root, 'data-cancel-round-progress')).not.toBeNull()
+    expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
+  })
+
+  it('T1 — a cancelled leave whose round was blocked because the leave is no longer approved: the block copy, and no note contradicting it', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
+    const root = await mountPanel({ ...LEAVE, status: 'cancelled' })
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
+  })
+
+  it('T4 — the block code wins over a parent row that still says approved (stale prop, or the row and the document diverged)', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
+    const root = await mountPanel()
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
   })
 })
 

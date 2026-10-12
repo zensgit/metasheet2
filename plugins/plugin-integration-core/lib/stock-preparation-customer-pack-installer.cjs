@@ -946,22 +946,7 @@ async function preflightFieldWritePolicies({
     assertClassificationInstallable({ classification, pack })
   }
 
-  let roleCheck = 'unsupported_port'
-  if (typeof fieldPermissions.findMissingRoleIds === 'function') {
-    roleCheck = 'checked'
-    const roleIds = [...new Set(pack.fieldWritePolicies.map((policy) => policy.roleId))]
-    const result = await fieldPermissions.findMissingRoleIds({ roleIds })
-    const missing = (result && Array.isArray(result.missing)) ? [...result.missing].sort() : []
-    if (missing.length > 0) {
-      throw new StockPreparationCustomerPackInstallError(
-        422,
-        'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN',
-        'this pack declares fieldWritePolicies for a role that does not exist on this host; '
-          + 'refusing before any column is created, so the sheet is untouched',
-        { objectId: pack.targetObjectId, packId: pack.packId, roleIds: missing },
-      )
-    }
-  }
+  const roleCheck = await assertDeclaredRolesExist({ fieldPermissions, pack })
 
   let fieldCheck = 'unsupported_port'
   if (typeof fieldPermissions.findMissingFieldIds === 'function' && resolved && sheetId) {
@@ -986,6 +971,53 @@ async function preflightFieldWritePolicies({
   }
 
   return { roleCheck, fieldCheck, writeScopeCheck, classification }
+}
+
+// Condition (5) of the pre-flight: every declared role exists on this host. A port that predates
+// `findMissingRoleIds` cannot be asked ('unsupported_port'); the late mapping in
+// `applyFieldWritePolicies` still codes the port's own rejection the same way.
+async function assertDeclaredRolesExist({ fieldPermissions, pack }) {
+  if (!fieldPermissions || typeof fieldPermissions.findMissingRoleIds !== 'function') return 'unsupported_port'
+  const roleIds = [...new Set(pack.fieldWritePolicies.map((policy) => policy.roleId))]
+  const result = await fieldPermissions.findMissingRoleIds({ roleIds })
+  const missing = (result && Array.isArray(result.missing)) ? [...result.missing].sort() : []
+  if (missing.length > 0) {
+    throw new StockPreparationCustomerPackInstallError(
+      422,
+      'CUSTOMER_PACK_FIELD_PERMISSION_ROLE_UNKNOWN',
+      'this pack declares fieldWritePolicies for a role that does not exist on this host; '
+        + 'refusing before any column is created, so the sheet is untouched',
+      { objectId: pack.targetObjectId, packId: pack.packId, roleIds: missing },
+    )
+  }
+  return 'checked'
+}
+
+/**
+ * 一个项目一张备料表 (S2 fix round 1) — THE SHEET-INDEPENDENT HALF OF THE PRE-FLIGHT, askable BEFORE
+ * the target sheet exists.
+ *
+ * The project-sheet create route provisions a fresh sheet and then installs the deployment's pack
+ * onto it. Every refusal this installer can raise WITHOUT a sheet — the host provisioning surface,
+ * the field-permission port, its reconcile capability, the declared roles — is therefore asked
+ * HERE, before provisioning, with exactly the codes the install would raise (the same assertion
+ * functions, not copies). A host that would refuse every project's install so refuses before the
+ * first table is created, instead of leaving one unregistered managed table per project number.
+ *
+ * What stays sheet-bound (and so post-provision): the write-scope classification of rows already on
+ * the sheet and the template-column existence check — both empty / satisfied by construction on a
+ * freshly provisioned sheet — and the ownership classification of pre-existing `ext_` columns.
+ */
+async function preflightCustomerPackInstallCapabilities({ provisioning, fieldPermissions, pack } = {}) {
+  assertProvisioningApi(provisioning)
+  const normalized = normalizeCustomerPack(pack)
+  if (normalized.fieldWritePolicies.length === 0) {
+    return { governsWriteScopes: false, roleCheck: 'not_declared' }
+  }
+  assertFieldPermissionsPort({ fieldPermissions, pack: normalized })
+  assertFieldPermissionsReconcileSupport({ fieldPermissions, pack: normalized })
+  const roleCheck = await assertDeclaredRolesExist({ fieldPermissions, pack: normalized })
+  return { governsWriteScopes: true, roleCheck }
 }
 
 // The port-presence gate, shared by the pre-flight and the apply so the two cannot drift on the
@@ -1864,6 +1896,7 @@ module.exports = {
   StockPreparationCustomerPackInstallError,
   installCustomerPack,
   planCustomerPackInstall,
+  preflightCustomerPackInstallCapabilities,
   __internals: {
     applyFieldWritePolicies,
     assertProvisioningApi,

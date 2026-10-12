@@ -255,3 +255,50 @@ Earlier context still in this head, already on the previous baseline: #6187 narr
 Pins recomputed on this merge tree against main's pin file: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally. `plugins/plugin-attendance/index.cjs` is byte-identical to `24bb31894`. Residuals #6234–#6237 are unchanged: a deactivation that commits after the insert keeps the row; W4 still has no manager write; already-stored ghost rows are not deleted; `loadDefaultRule` still falls back to the `'default'` org.
 
 `plugin-tests.yml` is now a one-entry matrix `[20.x]`. The required check name stays `test (20.x)`. There is no `test (18.x)` leg. The attendance step still does not set `EXPECT_DB` (#6238). The approval real-DB step still sets `EXPECT_DB: '1'` and `if: matrix.node-version == '20.x'`.
+
+## 11. Alignment to main 1dd42d087 (2026-10-12)
+
+Draft #6051 was merged onto `origin/main` `1dd42d08761039c9937dae06c712fadd10092ab6` (#6348, parent `2ee3531faa978ec01865c4b89423707137bd3830`). The previous alignment baseline was `64bf18b5e833b5cf938d83afe420ae0df4370c86`. The range is 80 commits. Zero conflicts. Auto-merged attendance and OpenAPI files (`plugins/plugin-attendance/index.cjs`, attendance integration/unit tests, `packages/openapi/src/paths/attendance.yml` and generated OpenAPI artifacts, `scripts/attendance/w4c0-dml-inventory/p25-call-path-classification.cjs`) kept the roster org gate: `USER_NOT_IN_ORG` is still thrown before member inserts. `plugins/plugin-attendance/index.cjs` is no longer byte-identical to `24bb31894` because main's attendance edits merged in.
+
+Fifty of the 80 commits do not change a sensitive path on their first-parent diff (workflows, migrations, the provenance pin file, the checkpoint script and the files it loads, `vitest.config.ts`, timemachine). The checkpoint script, `recovery-archive-contract.ts`, and the private-db drain test were not in that set. The 30 that do, oldest first:
+
+| Commit | What | Sensitive paths |
+|---|---|---|
+| `195e24ac8737` | Opt-in range copy and series fill. | `multitable-web-guard.yml` |
+| `65e8ee7c76aa` | Approval CC-unread and new-outcome badges. | `approval-realdb-list-scope.yml`, `approval-web-guard.yml`, `vitest.config.ts` |
+| `fc139c868ea9` #6278 | Staging window smokes. | `attendance-staging-window-runner.yml` |
+| `8bbe8d3c5dcd` | Range-fill real-database verification. | `plugin-tests.yml`, `vitest.config.ts` |
+| `5a7e7897b864` #6273 | Recreate the test database before migrations; cap the test job at 150 minutes. The commit message mentions self-hosted runner prerequisites. #6288 later removed that routing. | `plugin-tests.yml` |
+| `fab131348957` #6282 | Stock-prep S1 project sheets. | `plugin-tests.yml`, `087_create_integration_stock_prep_project_target.sql`, `088_extend_stock_prep_audit_project_target_actions.sql`, `zzzz20261009120000_update_stock_prep_admin_permission_description_project_sheets.ts`, `src/index.ts`, `http-routes.cjs`, pin file |
+| `52aae89fc777` #6286 | Stock-prep S2 front line. | `http-routes.cjs`, pin file |
+| `80cb87322553` #6288 | Public-repo checks stay on GitHub-hosted runners. | `plugin-tests.yml` |
+| `b5a9bb07e740` #6292 | Stock-prep S4 archive and restore. | `http-routes.cjs`, pin file |
+| `548c1d5834ec` #6291 | Stop offering return targets the server always refuses. | `approval-web-guard.yml` |
+| `0db1cb9dcc2f` #6294 | Real-browser return-candidate verification. | `approval-browser-verify.yml` |
+| `00caf5f63905` #6296 | Drop the client-side return-candidate mirror. | `approval-browser-verify.yml`, `approval-web-guard.yml` |
+| `1b843faeecd6` #6266 | Tasks M4 lists. | `tasks-realdb.yml`, `zzzz20261009130000_create_task_m4_tables.ts`, `vitest.config.ts` |
+| `7aae3eda0f9e` #6295 | Stock-prep S3 project overview. | `src/index.ts`, `univer-meta.ts`, `http-routes.cjs`, pin file |
+| `c5a2d85bccbc` #6305 | Stock-prep S5a role templates. | `plugin-tests.yml`, `zzzz20261010124500_seed_stock_prep_role_templates.ts`, `vitest.config.ts` |
+| `93214d2ea634` #6307 | Stock-prep S5b members page. | `src/index.ts`, `http-routes.cjs`, pin file |
+| `e44392d033a8` #6302 | Register approval write, act, and template-manage permissions. | `approval-realdb-permission-catalogue.yml`, `zzzz20261010120000_add_approval_write_act_template_manage_permissions.ts`, `vitest.config.ts` |
+| `2df1acbadeee` #6306 | Read-only startup probe for undecryptable stores. | `src/index.ts` |
+| `f2bd21662d52` #6312 | Stock-prep S3 follow-ups. | `http-routes.cjs`, pin file |
+| `8a272f4bc7f6` #6275 | Attendance settings page shows server run switches. | `approval-web-guard.yml`, `attendance-web-guard.yml` |
+| `153575f9fce9` #6274 | Approval cancel-round findings. | `approval-web-guard.yml`, `attendance-web-guard.yml` |
+| `d2c33b842679` #6281 | Tasks notification outbox. | `tasks-realdb.yml`, `src/index.ts`, `vitest.config.ts` |
+| `9bbbdb29e352` #6300 | Attendance QA today-state and punch-order gaps. | `attendance-web-guard.yml`, `plugin-tests.yml`, `vitest.config.ts` |
+| `f14fbabd9326` #6317 | Fresh-install local org membership. | `attendance-onprem-encryption-material-contracts.yml`, `plugin-tests.yml`, `vitest.config.ts` |
+| `14c82206ce3d` #6269 | Task badge realtime invalidation. | `tasks-realdb.yml`, `src/index.ts`, `vitest.config.ts` |
+| `a1c09729180e` #6265 | Tasks M4 frontend. | `tasks-web-guard.yml` |
+| `24652ce8b77d` #6327 | Values-free 500 responses on stock-prep routes. | `http-routes.cjs`, pin file |
+| `154df39332fd` #6321 | Server time for online punches. | `attendance-web-guard.yml`, `plugin-tests.yml`, `src/index.ts`, `vitest.config.ts` |
+| `06092052d9e8` #6318 | Stock-prep S3 follow-ups 2. | `http-routes.cjs`, pin file |
+| `1dd42d087610` #6348 | Merge the legacy floor role into the built-in operator role. | `plugin-tests.yml`, `zzzz20261012090000_rename_stock_prep_frontline_display_name.ts` |
+
+#6288 (`80cb87322553`) is the hosted-runner decision. Required Linux jobs use the literal `ubuntu-latest`. `scripts/ops/github-hosted-runner-routing.test.mjs` rejects `MS2_PLUGIN_RUNNER`, self-hosted labels, and variable expressions. #6270 is closed and superseded by #6288. This branch does not reintroduce self-hosted runner routing. On the merged tree every `runs-on` in `plugin-tests.yml` is the literal `ubuntu-latest`.
+
+Pins recomputed on this merge tree against the pin file: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally (Node v22.23.3; v20.20.2 is not installed on this image). #6051-owned paths are not pin inputs.
+
+Residuals #6234–#6237 are unchanged: a deactivation that commits after the insert keeps the row; `w4c3a-legacy-plan-group-effects.ts` still has no group-manager write; already-stored ghost roster rows are not deleted; `loadDefaultRule` still falls back to the `'default'` org when the pinned org has no default rule.
+
+The matrix is still `[20.x]`. The attendance real-DB step (`attendance-real-db-integration`) still sets `DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL` and does not set `EXPECT_DB` (#6238, left as-is). The approval real-DB step still has `if: matrix.node-version == '20.x'` and `EXPECT_DB: '1'`. #6273 recreates the test database before `Run DB migrations` and sets `timeout-minutes: 150` on the test job.

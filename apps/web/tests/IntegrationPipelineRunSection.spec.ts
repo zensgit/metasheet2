@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, defineComponent, h, nextTick, type App as VueApp, type Component } from 'vue'
 import IntegrationPipelineRunSection from '../src/components/integration/IntegrationPipelineRunSection.vue'
 import type { ReadinessItem, SourceFieldOption } from '../src/components/integration/integrationWorkbenchSectionTypes'
+import { K3_WRITE_FENCE_EXPLANATION } from '../src/services/integration/writeFence'
 
 // IU-2d (docs/development/integration-ux-workbench-redesign-design-lock-20260706.md §2 IU-2,
 // stage D — run-push decomposition): structural smoke test for the extracted pipeline
@@ -51,6 +52,7 @@ describe('IntegrationPipelineRunSection (unit)', () => {
       runningPipeline: '',
       canRunPipeline: false,
       dryRunEmptyPreviewNotice: '',
+      targetWriteFenced: false,
       useGeneratedPipelineName: vi.fn(noopFn),
       executePipeline: vi.fn(noopFn),
       pipelineName: '',
@@ -97,6 +99,37 @@ describe('IntegrationPipelineRunSection (unit)', () => {
     // save-only stays disabled until the user ticks allow-save-only-run, even when runnable
     const saveOnly = container?.querySelector<HTMLButtonElement>('[data-testid="run-save-only"]')
     expect(saveOnly?.disabled).toBe(true)
+  })
+
+  // G10: the Save-only affordance must be ABSENT — not disabled — when the selected target is inside the
+  // permanent K3 external-write fence. A disabled button reads as "not yet"; this is "never".
+  it('G10: a fenced K3 target replaces the Save-only checkbox and button with the permanent read-only notice', async () => {
+    await mountSection(baseProps({ targetWriteFenced: true, canRunPipeline: true, allowSaveOnlyRun: true }))
+
+    expect(container?.querySelector('[data-testid="run-save-only"]')).toBeNull()
+    expect(container?.querySelector('[data-testid="allow-save-only-run"]')).toBeNull()
+
+    const notice = container?.querySelector('[data-testid="save-only-fenced-notice"]')
+    expect(notice).toBeTruthy()
+    expect(notice?.textContent).toContain('只读')
+    // Rendered from the SHARED constant, so this panel cannot drift from the page copy above it.
+    expect(notice?.textContent?.trim()).toBe(K3_WRITE_FENCE_EXPLANATION.zh)
+
+    // The fence bans WRITE, not preview: dry-run stays offered and enabled (E4-05 — a blanket deny that
+    // killed the read path would be a regression, not a pass).
+    const dryRun = container?.querySelector<HTMLButtonElement>('[data-testid="run-dry-run"]')
+    expect(dryRun).toBeTruthy()
+    expect(dryRun?.disabled).toBe(false)
+  })
+
+  it('G10: a non-fenced target keeps the Save-only checkbox and button exactly as before', async () => {
+    await mountSection(baseProps({ targetWriteFenced: false, canRunPipeline: true, allowSaveOnlyRun: true }))
+
+    const saveOnly = container?.querySelector<HTMLButtonElement>('[data-testid="run-save-only"]')
+    expect(saveOnly).toBeTruthy()
+    expect(saveOnly?.disabled).toBe(false)
+    expect(container?.querySelector('[data-testid="allow-save-only-run"]')).toBeTruthy()
+    expect(container?.querySelector('[data-testid="save-only-fenced-notice"]')).toBeNull()
   })
 
   it('forwards pipeline-name input through update:pipelineName (defineModel wiring)', async () => {

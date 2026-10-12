@@ -1035,7 +1035,7 @@ describe('O-8 / F8-1 — approval member-surface source guard (per changed file)
         { line: "return `指定用户${count ? `（${count} 人）` : '（无）'}`", count: 1 },
         { line: "return `指定角色${count ? `（${count} 个）` : '（无）'}`", count: 1 },
         { line: "return cfg.assigneeType === 'role' ? `指定角色（${count} 个）` : `指定成员（${count} 人）`", count: 1 },
-        { line: "return `抄送${cfg.targetType === 'role' ? '角色' : '成员'}`", count: 1 },
+        { line: "return `抄送${cfg.targetType === 'role' ? '角色' : cfg.targetType === 'group' ? '用户组' : '成员'}`", count: 1 },
         { line: "const suffix = branches.length > 2 ? '；…' : ''", count: 1 },
         { line: "return `按条件进入后续分支：${shown.join('；')}${suffix}`", count: 1 },
       ],

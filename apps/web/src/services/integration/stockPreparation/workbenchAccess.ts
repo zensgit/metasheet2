@@ -279,6 +279,81 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     path: '/api/integration/stock-preparation/projects/:projectNo/board',
     control: 'stock-prep-operator-project-board',
   }),
+  // 一个项目一张备料表 (S2, R-36) — byte-equal to the plugin manifest's three project-sheet rows. None
+  // of their controls lives on the confirmation-queue view; stockPrepPermissionMatrix.spec.ts lists
+  // them as such and StockPreparationProjectTarget.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-status',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.create',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-create',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.list',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    control: 'stock-prep-project-target-list',
+  }),
+  // S4 (R-38) — 归档代替删除 (Q2): byte-equal to the plugin manifest's two lifecycle rows. PULL tier,
+  // like the create. Their controls live on 项目备料页's sheet-state line, not on the confirmation-queue
+  // view; StockPreparationProjectArchive.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectTarget.archive',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/archive',
+    control: 'stock-prep-project-target-archive',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.restore',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/restore',
+    control: 'stock-prep-project-target-restore',
+  }),
+  // S3 (R-37) — the project overview (Q5) and the O2(a) project-level columns: byte-equal to the
+  // plugin manifest's three S3 rows. All OPERATE. The fields form lives on 项目备料页's sheet-state
+  // line, the refresh button on the home page — not on the confirmation-queue view;
+  // StockPreparationProjectOverview.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'projectFields.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields',
+  }),
+  Object.freeze({
+    capability: 'projectFields.update',
+    code: STOCK_PREP_OPERATE,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields-save',
+  }),
+  Object.freeze({
+    capability: 'projectOverview.refresh',
+    code: STOCK_PREP_OPERATE,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    control: 'stock-prep-project-overview-refresh',
+  }),
+  // S3 fix round 1 (R6): only the 拉取人员 tier CREATES the read-only overview (the project-target create
+  // route does it too, best-effort); the OPERATE refresh projects into an existing one.
+  Object.freeze({
+    capability: 'projectOverview.ensure',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    control: 'stock-prep-project-overview-ensure',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -292,6 +367,38 @@ export const STOCK_PREP_WORKBENCH_CAPABILITIES: readonly StockPrepCapability[] =
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     control: 'stock-prep-confirmation-reconcile',
+  }),
+  // S5b (R-39) — 「成员与权限」: byte-equal to the plugin manifest's four members rows. WORKBENCH_ADMIN at
+  // the plugin gate; the host's members port then admits only a platform admin or the admitted
+  // stock-prep delegated admin. The controls live on StockPreparationMembersView.vue, never on the
+  // confirmation-queue view; StockPreparationMembers.spec.ts asserts their alignment where they live.
+  Object.freeze({
+    capability: 'members.read',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    control: 'stock-prep-members-page',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleCreate',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles',
+    control: 'stock-prep-members-custom-role-create',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleUpdate',
+    code: STOCK_PREP_ADMIN,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId',
+    control: 'stock-prep-members-custom-role-save',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleProjectTargets',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets',
+    control: 'stock-prep-members-custom-role-add-tables',
   }),
 ])
 
@@ -619,6 +726,9 @@ export const STOCK_PREP_RAIL_GROUPS: readonly StockPrepRailGroup[] = Object.free
       Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      // 成员与权限 (S5b, R-39). Permission half only — the shell also requires the members read to
+      // have answered (switch on, caller admitted), so with the switch off the item never renders.
+      Object.freeze({ key: 'members', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([
@@ -674,6 +784,16 @@ export function canOpenStockPrepGettingStarted(snapshot: StockPrepAccessSnapshot
  * its own 「这一格看不了」 line rather than a page-level error.
  */
 export function canOpenStockPrepOpsPanel(snapshot: StockPrepAccessSnapshot): boolean {
+  return canOpenStockPrepInstallView(snapshot)
+}
+
+/**
+ * 成员与权限 (S5b, R-39) — the PERMISSION half of the rail item: the workbench ceiling, like the rest
+ * of 【部署与接入】. It is necessary, not sufficient: the shell renders the item only after
+ * GET …/members answered (the default-OFF switch on, and the host port admitting this caller as a
+ * platform admin or the stock-prep delegated admin), so a switch-off deployment never shows it.
+ */
+export function canOpenStockPrepMembersPage(snapshot: StockPrepAccessSnapshot): boolean {
   return canOpenStockPrepInstallView(snapshot)
 }
 

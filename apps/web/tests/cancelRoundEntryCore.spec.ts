@@ -254,17 +254,22 @@ describe('attendance-side client', () => {
     expect(summary.round?.cancellationOutcome).toEqual({ status: 'cancelled_reversal_unreported', reversal: null })
   })
 
-  it('writes go to the attendance routes; failures surface the server code; only the decision roundId is read', async () => {
+  it('writes go to the attendance routes; failures surface the server code; the decision and the withdraw resolve to the roundId the body names', async () => {
     apiFetchMock.mockImplementation(async () =>
       jsonResponse(200, { ok: true, data: { requestId: 'r1', roundId: 'apr_1', outcome: 'withdrawn', status: 'cancellation_withdrawn' } }))
     await launchCancelRound('r1', '  plans changed ')
-    await withdrawCancelRound('r1', '')
+    // The withdraw names the round on screen (F1): the server refuses it, writing nothing, when that is
+    // no longer the leave's current round.
+    await expect(withdrawCancelRound('r1', '', 'apr_1')).resolves.toBe('apr_1')
     await expect(decideCancelRound('r1', 'reject', 'no')).resolves.toBe('apr_1')
     expect(apiFetchMock.mock.calls.map((c) => [c[0], (c[1] as RequestInit).method, (c[1] as RequestInit).body])).toEqual([
       ['/api/attendance/requests/r1/cancel-round', 'POST', JSON.stringify({ reason: 'plans changed' })],
-      ['/api/attendance/requests/r1/cancel-round/withdraw', 'POST', JSON.stringify({})],
+      ['/api/attendance/requests/r1/cancel-round/withdraw', 'POST', JSON.stringify({ expectedRoundId: 'apr_1' })],
       ['/api/attendance/requests/r1/cancel-round/actions', 'POST', JSON.stringify({ action: 'reject', comment: 'no' })],
     ])
+    // a success body that names no round resolves to null (never to the id that was sent)
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(200, { ok: true, data: { requestId: 'r1' } }))
+    await expect(withdrawCancelRound('r1', null, 'apr_1')).resolves.toBeNull()
     apiFetchMock.mockResolvedValueOnce(jsonResponse(409, { ok: false, error: { code: 'CANCEL_ROUND_ALREADY_PENDING', message: 'm' } }))
     await expect(launchCancelRound('r1')).rejects.toMatchObject({ status: 409, code: 'CANCEL_ROUND_ALREADY_PENDING' })
   })
@@ -347,6 +352,25 @@ describe('approver path: the round on screen is the round decided (stale-page gu
       ['/api/attendance/requests/req-7/cancel-round', 'GET'],
       ['/api/attendance/requests/req-7/cancel-round/actions', 'POST'],
     ])
+    // F1: the decision names the round the pre-read confirmed, so the SERVER refuses it (nothing written)
+    // when a newer round has replaced it between the pre-read and this POST.
+    expect(JSON.parse(String((actionCalls()[0][1] as RequestInit).body))).toEqual({ action: 'approve', expectedRoundId: 'apr_1' })
+  })
+
+  it('the server refuses the confirmed round as no longer current (409 INVALID_STATUS_TRANSITION): ROUND_NOT_CURRENT after exactly one POST — never the withdraw copy, never a success', async () => {
+    routeFetch({
+      round: pendingRound('cr_shown'),
+      action: () => jsonResponse(409, { ok: false, error: { code: 'INVALID_STATUS_TRANSITION', message: 'Approval is already in a terminal status' } }),
+    })
+    const failure = await decideCancelRoundFromApproval(approval, 'reject', 'no').catch((e) => e)
+    expect(failure).toBeInstanceOf(ApprovalApiError)
+    expect(failure.code).toBe(CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT)
+    expect(failure.message).toBe(CANCEL_ROUND_CLIENT_COPY[CANCEL_ROUND_CLIENT_ROUND_NOT_CURRENT].zh)
+    expect(failure.message).not.toBe(CANCEL_ROUND_ERROR_COPY.INVALID_STATUS_TRANSITION.zh)
+    // a client refusal ⇒ the approval views re-read the page (isCancelRoundClientRefusal)
+    expect(isCancelRoundClientRefusal(failure)).toBe(true)
+    expect(actionCalls()).toHaveLength(1)
+    expect(JSON.parse(String((actionCalls()[0][1] as RequestInit).body))).toEqual({ action: 'reject', comment: 'no', expectedRoundId: 'apr_1' })
   })
 
   it('a newer round (withdrawn + relaunched since the page loaded) is refused before anything is sent', async () => {

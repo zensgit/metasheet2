@@ -27,7 +27,7 @@ import { createRequire } from 'node:module'
 //   OP-06 三行免责常驻 — present before a search, mid-search, and after one (every branch).
 //   OP-07 空态措辞 — "这不等于没人动过", not a generic "暂无数据".
 //   OP-08 403 措辞 — "这一格看不了:需要平台管理员" (BOTH halves, every tile).
-//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries all 14 actions the .cjs store declares,
+//   OP-09 词表防漏 — STOCK_PREP_AUDIT_ACTION_PLAIN carries all 20 actions the .cjs store declares,
 //         read from that module directly (anti-vacuity, same discipline as
 //         StockPreparationPosturePlainLanguage.spec.ts's manifest read).
 //   OP-10 目标表一致性 — installs 与 readiness 问同一个 objectId, and WHICH readiness route is used
@@ -889,8 +889,8 @@ describe('STOCK_PREP_AUDIT_ACTION_PLAIN (anti-vacuity)', () => {
     STOCK_PREP_AUDIT_ACTIONS: readonly string[]
   }
 
-  it('reads the shipped 14-action vocabulary (anti-vacuity: the actions really are declared there)', () => {
-    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS.length).toBe(14)
+  it('reads the shipped 20-action vocabulary (anti-vacuity: the actions really are declared there)', () => {
+    expect(storeModule.STOCK_PREP_AUDIT_ACTIONS.length).toBe(20)
   })
 
   it('carries a plain-language line for EVERY audit action the store vocabulary declares — 词表 key 数 = 动作数', () => {

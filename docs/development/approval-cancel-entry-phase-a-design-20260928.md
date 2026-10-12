@@ -322,8 +322,8 @@
 
 | 项 | 值 |
 |---|---|
-| 写法 | `parseBoolean(process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED, false)`,插件既有写法(同族:`ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED` 等);**每次调用时读**,不在模块加载时缓存 |
-| 默认值 | **OFF**(未设置或无法识别的值 ⇒ OFF;只有 `true` / `1` / `yes` 为 ON,插件 `parseBoolean` 既有语义) |
+| 写法 | `process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED === 'true'`(逐字节比较,AGENTS.md 红线的 exact-literal 规则);**不再**走插件既有的 `parseBoolean`(同族 `ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED` 等仍走它)。**每次调用时读**,不在模块加载时缓存。已登记 `scripts/ops/global-history-flag-manifest.mjs`。2026-10-08 审阅方 F3 修复;此前为 `parseBoolean(…, false)` |
+| 默认值 | **OFF**(未设置、空值及 `'true'` 以外的任何值 ⇒ OFF;只有恰为 `true` 为 ON:不去首尾空白、区分大小写,`TRUE` / ` true` / `1` / `yes` 均为 OFF) |
 | 只门住 | `POST /api/attendance/requests/:id/cancel-round`(发起)。读摘要 `GET`、审批人办理、申请人撤回**不受影响**(它们只作用于已存在的轮次) |
 | 判定位置 | 401(无用户)与 UUID 400 之后、请求体解析与任何读写之前 |
 | OFF 形状 | 与不存在的 id 逐字节同形的 404:`{"ok":false,"error":{"code":"NOT_FOUND","message":"Request not found"}}` |

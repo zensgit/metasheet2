@@ -3,12 +3,12 @@ import * as crypto from 'crypto'
 import { buildOnboardingPacket } from '../auth/access-presets'
 import { recordInvite } from '../auth/invite-ledger'
 import { issueInviteToken } from '../auth/invite-tokens'
-import { assertLoginName } from '../auth/login-name-rule'
+import { LoginNameRuleError, assertLoginName } from '../auth/login-name-rule'
 import { validatePassword } from '../auth/password-policy'
 import { PasswordPolicyError } from '../auth/password-policy-error'
 import { Logger } from '../core/logger'
 import { query, transaction } from '../db/pg'
-import { translateRecoveryConflict } from '../db/recovery-conflict'
+import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
   fetchDingTalkAppAccessToken,
@@ -44,13 +44,14 @@ import {
   buildUnusablePasswordHash,
   isDirectoryPendingActivationEnabled,
 } from '../auth/user-activation'
-import { claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
+import { LoginAliasClaimError, claimNonEmptyLoginAliasesOrThrow } from '../auth/login-alias-service'
 import { SimpleCronExpression } from '../services/SchedulerService'
 import {
   captureApprovalDepartureManagerContexts,
   type ApprovalDepartureManagerContext,
 } from '../services/ApprovalDirectoryOrg'
 import { deliverDirectorySyncFailureAlert, getDirectoryManagerBindingCoverage } from './directory-sync-alert-delivery'
+import { classifyDirectoryFailureText, type FixedSentenceErrorClass } from './directory-failure-text'
 import { resolveDirectoryScheduleTimezone } from './directory-sync-timezone'
 import { acquireSourceSyncFreezeLock } from './source-sync-freeze-lock'
 import { applyDirectoryDeprovisionCandidate } from './deprovision-ledger'
@@ -646,6 +647,8 @@ export type DirectoryAccountManualAdmissionResult = DirectoryAccountMutationResu
 export type DirectoryAccountBatchAdmissionOutcome = {
   succeeded: DirectoryAccountManualAdmissionResult[]
   failed: Array<{ accountId: string; error: string }>
+  /** What each `failed` entry was thrown as, index-aligned — see DirectoryAccountBatchOutcome.failedErrors. */
+  failedErrors: unknown[]
 }
 
 export type DirectoryAutoAdmissionOnboardingPacket = {
@@ -1765,7 +1768,7 @@ async function assertDirectoryProjectedGovernanceConfigValid(config: Pick<
 
   for (const roleId of roleIds) {
     if (roleId === 'admin' || deriveDelegatedAdminNamespace(roleId)) {
-      throw new Error('Projected member-group default roles cannot include platform admin or delegated admin roles')
+      throw new DirectoryValidationError('Projected member-group default roles cannot include platform admin or delegated admin roles')
     }
   }
 
@@ -1779,13 +1782,13 @@ async function assertDirectoryProjectedGovernanceConfigValid(config: Pick<
     const existingRoleIds = new Set(existingRoles.rows.map((row) => normalizeText(row.id)).filter(Boolean))
     const missingRoleIds = roleIds.filter((roleId) => !existingRoleIds.has(roleId))
     if (missingRoleIds.length > 0) {
-      throw new Error(`Projected member-group default roles not found: ${missingRoleIds.join(', ')}`)
+      throw new DirectoryValidationError(`Projected member-group default roles not found: ${missingRoleIds.join(', ')}`)
     }
   }
 
   const unsupportedNamespaces = namespaces.filter((namespace) => !isNamespaceAdmissionControlledResource(namespace))
   if (unsupportedNamespaces.length > 0) {
-    throw new Error(`Projected member-group default namespaces are not admission-controlled: ${unsupportedNamespaces.join(', ')}`)
+    throw new DirectoryValidationError(`Projected member-group default namespaces are not admission-controlled: ${unsupportedNamespaces.join(', ')}`)
   }
 }
 
@@ -2017,7 +2020,7 @@ function assertDirectoryAccountCanEnableDingTalkGrant(
   if (!enableDingTalkGrant) return
   if (!normalizeText(account.corp_id)) return
   if (normalizeText(account.open_id)) return
-  throw new Error(DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR)
+  throw new DirectoryValidationError(DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR)
 }
 
 function buildRecommendationScore(reasons: DirectoryBindingRecommendationReason[]): number {
@@ -2319,13 +2322,13 @@ function normalizeIntegrationInput(
   const defaultDeprovisionPolicy = normalizeText(input.defaultDeprovisionPolicy) || 'mark_inactive'
   const status = normalizeText(input.status) || 'active'
 
-  if (!name) throw new Error('Integration name is required')
-  if (!corpId) throw new Error('corpId is required')
+  if (!name) throw new DirectoryValidationError('Integration name is required')
+  if (!corpId) throw new DirectoryValidationError('corpId is required')
   if (!/^[!-~]+$/.test(corpId)) {
-    throw new Error('corpId must be a printable ASCII token without whitespace')
+    throw new DirectoryValidationError('corpId must be a printable ASCII token without whitespace')
   }
-  if (!appKey) throw new Error('appKey is required')
-  if (!appSecret) throw new Error('appSecret is required')
+  if (!appKey) throw new DirectoryValidationError('appKey is required')
+  if (!appSecret) throw new DirectoryValidationError('appSecret is required')
   assertDingTalkCorpAllowed(corpId, { context: 'Directory integration corpId' })
 
   return {
@@ -2448,7 +2451,9 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
       normalized.scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
-  )
+  ).catch((error: unknown) => {
+    throw uniqueViolationAsConflict(error)
+  })
 
   return summarizeIntegration(result.rows[0])
 }
@@ -2494,130 +2499,186 @@ export async function createDirectoryIntegration(input: DirectoryIntegrationInpu
 // creatable by raw ops, never by this service, and are out of scope for reactivation).
 const LOCAL_INTEGRATION_NAME = 'Local organization'
 
-export async function getOrCreateLocalIntegration(
+/**
+ * The minimal query surface the anchor get-or-create needs. A `transaction()` client satisfies it
+ * (every statement then runs on that one connection, inside that transaction), and so does
+ * `{ query }` from `../db/pg` (every statement then auto-commits on its own).
+ */
+export type LocalIntegrationAnchorClient = {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>
+}
+
+/** What a get-or-create did to the anchor: created it, revived it, or found it already active. */
+export type LocalIntegrationAnchorEvent = 'bootstrap' | 'reactivate' | null
+
+export interface LocalIntegrationAnchorResult {
+  integration: DirectoryIntegrationSummary
+  event: LocalIntegrationAnchorEvent
+}
+
+const LOCAL_INTEGRATION_RETURNING = `id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`
+
+/**
+ * W1-6 (owner ruling 2026-10-10, "锚点进事务"): the get-or-create body, run on whatever `client`
+ * the caller hands in. Every statement goes through `client.query` — a stray pool `query()` here
+ * would run on a different connection and auto-commit, which is exactly the bare-anchor leak this
+ * split exists to close. Pass a `transaction()` client so the anchor commits or rolls back WITH the
+ * caller's own writes (`local-directory-org.ts` does this for every one of its writers).
+ *
+ * Writes NO audit: an audit row goes through its own connection, so emitting it here would record a
+ * bootstrap/reactivation even when the caller's transaction later rolls the anchor back. Hand the
+ * returned result to `emitLocalIntegrationAnchorAudit` AFTER the transaction has committed.
+ *
+ * Concurrency (unchanged guarantee, new mechanism): the INSERT is `ON CONFLICT DO NOTHING` with no
+ * conflict target, so a collision on `one_active_local_integration_per_org` (or on the unique
+ * (org_id, provider, name) index) yields zero rows instead of raising 23505 — a raised 23505 would
+ * abort the caller's whole transaction. Under READ COMMITTED a second first-caller's INSERT waits on
+ * the first caller's uncommitted row: if the first commits, the INSERT does nothing and the re-select
+ * below reads the winner; if the first rolls back, the INSERT proceeds and this caller becomes the
+ * winner. Either way at most one active anchor exists and exactly one caller reports 'bootstrap'.
+ */
+export async function getOrCreateLocalIntegrationInTransaction(
+  client: LocalIntegrationAnchorClient,
   orgId: string = DEFAULT_ORG_ID,
-): Promise<DirectoryIntegrationSummary> {
+): Promise<LocalIntegrationAnchorResult> {
   const normalizedOrgId = normalizeText(orgId) || DEFAULT_ORG_ID
 
-  const existing = await selectActiveLocalIntegration(normalizedOrgId)
-  if (existing) return summarizeIntegration(existing)
+  const existing = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (existing) return { integration: summarizeIntegration(existing), event: null }
 
   // PB4-4 (reactivation, owner design lock): before bootstrapping a NEW integration, revive a
   // previously-deactivated local integration IN PLACE — same id, so its departments, accounts, and
   // future B4 department-binding refs (all FK'd to integration_id) survive. A blind INSERT here
   // collides on idx_directory_integrations_org_provider_name (the fixed 'Local organization' name),
-  // and the old B1 catch below — which only re-selects ACTIVE rows — cannot recover from that, so
-  // the org's local directory would be bricked (every getOrCreate throws) after a single deactivate.
+  // so without this the org's local directory would be bricked after a single deactivate.
   //
   // The conditional UPDATE is a race-safe latch: `WHERE status <> 'active'` is re-evaluated under
   // READ COMMITTED after the row lock, so among N concurrent callers exactly ONE flips the row
-  // (RETURNING it) and writes the reactivation audit; every other caller's UPDATE matches zero rows
-  // (the row is already active by the time its lock is granted) and falls through to re-select the
-  // now-active winner below — same id, and exactly ONE `directory.local_integration.reactivate`
-  // audit no matter how many callers raced. (`idx_directory_integrations_org_provider_name` keeps at
-  // most one such (org, 'local', name) row, so this flips exactly the one deactivated anchor, never
-  // two — even if raw ops left extra differently-named inactive local rows around.)
-  const reactivated = await query<DirectoryIntegrationRow>(
+  // (RETURNING it) and reports 'reactivate'; every other caller's UPDATE matches zero rows (the row is
+  // already active by the time its lock is granted) and falls through to re-select the now-active
+  // winner below — same id, and exactly ONE reactivation reported no matter how many callers raced.
+  // (`idx_directory_integrations_org_provider_name` keeps at most one such (org, 'local', name) row,
+  // so this flips exactly the one deactivated anchor, never two — even if raw ops left extra
+  // differently-named inactive local rows around.)
+  const reactivated = await client.query(
     `UPDATE directory_integrations
         SET status = 'active', updated_at = NOW()
       WHERE org_id = $1 AND provider = 'local' AND name = $2 AND status <> 'active'
-      RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-                default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
+      RETURNING ${LOCAL_INTEGRATION_RETURNING}`,
     [normalizedOrgId, LOCAL_INTEGRATION_NAME],
   )
   if (reactivated.rows.length === 1) {
-    const revived = summarizeIntegration(reactivated.rows[0])
-    try {
-      const { auditLog } = await import('../audit/audit')
+    return { integration: summarizeIntegration(reactivated.rows[0] as unknown as DirectoryIntegrationRow), event: 'reactivate' }
+  }
+
+  // Zero rows flipped: either a concurrent caller just reactivated/bootstrapped the active row, or
+  // there is genuinely no local integration yet. Re-check for an active winner before creating one —
+  // this is the losing side of a reactivation race (return the winner, nothing to report).
+  const reactivationWinner = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (reactivationWinner) return { integration: summarizeIntegration(reactivationWinner), event: null }
+
+  const localCorpId = `local:${normalizedOrgId}`
+  const inserted = await client.query(
+    `INSERT INTO directory_integrations (
+       org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
+       default_deprovision_policy, created_at, updated_at
+     )
+     VALUES ($1, 'local', $2, 'active', $3, $4::jsonb, false, NULL, NULL, 'mark_inactive', NOW(), NOW())
+     ON CONFLICT DO NOTHING
+     RETURNING ${LOCAL_INTEGRATION_RETURNING}`,
+    [
+      normalizedOrgId,
+      LOCAL_INTEGRATION_NAME,
+      localCorpId,
+      JSON.stringify({ mode: 'editable', source: 'local' }),
+    ],
+  )
+  if (inserted.rows.length === 1) {
+    return { integration: summarizeIntegration(inserted.rows[0] as unknown as DirectoryIntegrationRow), event: 'bootstrap' }
+  }
+
+  // Concurrency: another caller won the race and committed the one active local integration while our
+  // INSERT waited on it (the conflict did nothing). Re-read the winner.
+  const winner = await selectActiveLocalIntegration(client, normalizedOrgId)
+  if (winner) return { integration: summarizeIntegration(winner), event: null }
+  // A conflict with no active winner: the (org_id, provider, name) row exists but is not active and
+  // was not revived above (only reachable through raw ops racing this call). Same outcome as before
+  // this split, where the caught unique violation was rethrown — a fixed sentence, no values.
+  throw new Error('Local directory integration could not be created or found')
+}
+
+/**
+ * Writes the audit row for a get-or-create that created or revived the anchor (nothing for a plain
+ * read). Call it only AFTER the transaction that ran `getOrCreateLocalIntegrationInTransaction` has
+ * committed, so a rolled-back anchor is never audited.
+ */
+export async function emitLocalIntegrationAnchorAudit(result: LocalIntegrationAnchorResult): Promise<void> {
+  if (!result.event) return
+  const { integration } = result
+  const orgId = integration.orgId
+  try {
+    const { auditLog } = await import('../audit/audit')
+    if (result.event === 'reactivate') {
       await auditLog({
         actorId: 'system',
         actorType: 'system',
         action: 'directory.local_integration.reactivate',
         resourceType: 'directory-integration',
-        resourceId: revived.id,
+        resourceId: integration.id,
         // Values-free: integrationId (resourceId) + orgId + provider only. corp_id is immutable and
         // already `local:<orgId>` by the CHECK — no need to echo it.
-        meta: { orgId: normalizedOrgId, provider: 'local' },
+        meta: { orgId, provider: 'local' },
       })
-    } catch (error) {
-      // Same best-effort contract as bootstrap below: only the dynamic import can fail here, and the
-      // status flip is already committed, so we log values-free and still return the revived anchor.
-      logger.warn(`Failed to import audit module after local integration reactivation: ${readErrorMessage(error, 'unknown error')}`, {
-        integrationId: revived.id,
-        orgId: normalizedOrgId,
-      })
-    }
-    return revived
-  }
-
-  // Zero rows flipped: either a concurrent caller just reactivated/bootstrapped the active row, or
-  // there is genuinely no local integration yet. Re-check for an active winner before creating one —
-  // this is the losing side of a reactivation race (return the winner, no second audit).
-  const reactivationWinner = await selectActiveLocalIntegration(normalizedOrgId)
-  if (reactivationWinner) return summarizeIntegration(reactivationWinner)
-
-  const localCorpId = `local:${normalizedOrgId}`
-  try {
-    const result = await query<DirectoryIntegrationRow>(
-      `INSERT INTO directory_integrations (
-         org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-         default_deprovision_policy, created_at, updated_at
-       )
-       VALUES ($1, 'local', $2, 'active', $3, $4::jsonb, false, NULL, NULL, 'mark_inactive', NOW(), NOW())
-       RETURNING id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-                 default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at`,
-      [
-        normalizedOrgId,
-        LOCAL_INTEGRATION_NAME,
-        localCorpId,
-        JSON.stringify({ mode: 'editable', source: 'local' }),
-      ],
-    )
-    const created = summarizeIntegration(result.rows[0])
-    try {
-      const { auditLog } = await import('../audit/audit')
+    } else {
       await auditLog({
         actorId: 'system',
         actorType: 'system',
         action: 'directory.local_integration.bootstrap',
         resourceType: 'directory-integration',
-        resourceId: created.id,
-        meta: { orgId: normalizedOrgId, provider: 'local', corpId: localCorpId },
-      })
-    } catch (error) {
-      // Owner round P3: `auditLog` itself never rejects (by contract) — the only failure this
-      // catch can see is the dynamic `import('../audit/audit')` itself (e.g. a broken module
-      // graph). That must not be silently swallowed, but it also must not fail row creation:
-      // the row is already committed, so this stays best-effort and the function still returns
-      // normally below. Values-free: integrationId + orgId + an error summary only — no config,
-      // no corp values beyond the already-derived id fields.
-      logger.warn(`Failed to import audit module after local integration bootstrap: ${readErrorMessage(error, 'unknown error')}`, {
-        integrationId: created.id,
-        orgId: normalizedOrgId,
+        resourceId: integration.id,
+        meta: { orgId, provider: 'local', corpId: `local:${orgId}` },
       })
     }
-    return created
   } catch (error) {
-    // Concurrency: another caller won the race and created the one active local integration
-    // (Postgres unique_violation on `one_active_local_integration_per_org`). Re-read the winner.
-    if (isUniqueViolation(error)) {
-      const winner = await selectActiveLocalIntegration(normalizedOrgId)
-      if (winner) return summarizeIntegration(winner)
-    }
-    throw error
+    // Owner round P3: `auditLog` itself never rejects (by contract) — the only failure this catch
+    // can see is the dynamic `import('../audit/audit')` itself (e.g. a broken module graph). That
+    // must not be silently swallowed, but it also must not fail the caller: the anchor is already
+    // committed, so this stays best-effort. Values-free: integrationId + orgId + an error summary.
+    const verb = result.event === 'reactivate' ? 'reactivation' : 'bootstrap'
+    logger.warn(`Failed to import audit module after local integration ${verb}: ${readErrorMessage(error, 'unknown error')}`, {
+      integrationId: integration.id,
+      orgId,
+    })
   }
 }
 
-async function selectActiveLocalIntegration(orgId: string): Promise<DirectoryIntegrationRow | null> {
-  const result = await query<DirectoryIntegrationRow>(
-    `SELECT id, org_id, provider, name, status, corp_id, config, sync_enabled, schedule_cron, schedule_timezone,
-            default_deprovision_policy, last_sync_at, last_success_at, last_error, created_at, updated_at
+/**
+ * Get-or-create the org's local anchor on its own (each statement auto-commits), then audit it.
+ * Kept for callers that write nothing else alongside the anchor. A caller that writes rows under the
+ * anchor must use `getOrCreateLocalIntegrationInTransaction` inside its own transaction instead, so a
+ * failure leaves no bare anchor behind (W1-6).
+ */
+export async function getOrCreateLocalIntegration(
+  orgId: string = DEFAULT_ORG_ID,
+): Promise<DirectoryIntegrationSummary> {
+  const result = await getOrCreateLocalIntegrationInTransaction({ query }, orgId)
+  await emitLocalIntegrationAnchorAudit(result)
+  return result.integration
+}
+
+async function selectActiveLocalIntegration(
+  client: LocalIntegrationAnchorClient,
+  orgId: string,
+): Promise<DirectoryIntegrationRow | null> {
+  const result = await client.query(
+    `SELECT ${LOCAL_INTEGRATION_RETURNING}
      FROM directory_integrations
      WHERE org_id = $1 AND provider = 'local' AND status = 'active'
      LIMIT 1`,
     [orgId],
   )
-  return result.rows[0] ?? null
+  return (result.rows[0] as unknown as DirectoryIntegrationRow | undefined) ?? null
 }
 
 /**
@@ -2630,6 +2691,38 @@ export class DirectoryTenantChangeBlockedError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'DirectoryTenantChangeBlockedError'
+  }
+}
+
+/**
+ * The three typed failures below let a route pick its status from the error TYPE (400 / 404 / 409)
+ * instead of matching the English text. Their messages are developer-authored sentences; the only values
+ * some of them interpolate are the caller's own input (the role ids / namespaces an admin configured).
+ * What stays a plain `Error` here is a system fault (e.g. a summary reload that found nothing).
+ *
+ * DirectoryValidationError: the caller's input is unusable (a required field is missing, a value is
+ * malformed, a reference is ambiguous, a requested option the account cannot hold).
+ */
+export class DirectoryValidationError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DirectoryValidationError'
+  }
+}
+
+/** The entity the caller addressed (an integration, a directory account, a local user) does not exist. */
+export class DirectoryNotFoundError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DirectoryNotFoundError'
+  }
+}
+
+/** The entity's current state refuses the operation (already bound or linked, inactive, changed underneath — retry). */
+export class DirectoryConflictError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DirectoryConflictError'
   }
 }
 
@@ -2740,7 +2833,9 @@ export async function updateDirectoryIntegration(
       scheduleTimezone,
       normalized.defaultDeprovisionPolicy,
     ],
-  )
+  ).catch((error: unknown) => {
+    throw uniqueViolationAsConflict(error)
+  })
 
   return summarizeIntegration(result.rows[0])
 }
@@ -2751,7 +2846,7 @@ async function resolveDirectoryTestCurrentConfig(input: DirectoryIntegrationTest
 
   const current = await getIntegrationRow(integrationId)
   if (!current) {
-    throw new Error('Directory integration not found')
+    throw new DirectoryNotFoundError('Directory integration not found')
   }
 
   return parseIntegrationConfig(current)
@@ -3122,7 +3217,18 @@ async function readIntegrationNameForAlert(integrationId: string): Promise<strin
   }
 }
 
-async function markSyncFailure(integrationId: string, runId: string, message: string): Promise<void> {
+/** R-41: the fixed sentence a failed sync persists when its error carries no showable sentence or DingTalk code. */
+const DIRECTORY_SYNC_FAILED_SENTENCE = 'Directory sync failed'
+
+/**
+ * R-41: takes the caught ERROR, not a message, so no caller can hand it raw text. The one text written to
+ * `directory_sync_runs.error_message`, `directory_integrations.last_error` and `directory_sync_alerts.message`
+ * — and delivered OUTBOUND to the DingTalk alert group — is the classified one (directoryFailureText): a typed
+ * directory sentence, the fixed sentence plus DingTalk's numeric code, or the fixed sentence alone. The
+ * original text is logged once, here.
+ */
+async function markSyncFailure(integrationId: string, runId: string, cause: unknown): Promise<void> {
+  const message = directoryFailureText(cause, DIRECTORY_SYNC_FAILED_SENTENCE, { integrationId, runId })
   // DT-HARDEN-05: one transaction, run-row (lease release) first. As two bare
   // statements, a crash between them left the lease held until it went stale while
   // the integration already recorded the failure. No status guard on the run row on
@@ -3358,7 +3464,7 @@ async function lockDirectorySyncAccessGraphUsers(
   const priorAccessByExternalUserId = new Map<string, DirectorySyncPriorAccessRow>()
   for (const row of recheckedPrior.rows as DirectorySyncPriorAccessRow[]) {
     if (row.local_user_id && !lockedUsers.has(row.local_user_id)) {
-      throw new Error('Directory sync account binding changed before the user mutex was acquired; retry the run')
+      throw new DirectoryConflictError('Directory sync account binding changed before the user mutex was acquired; retry the run')
     }
     priorAccessByExternalUserId.set(row.external_user_id, row)
   }
@@ -3683,8 +3789,70 @@ export class DirectorySyncLeaseLostError extends Error {
   }
 }
 
+/**
+ * R-41: the error classes whose message a persisted or admin-returned directory failure may carry as it is —
+ * each one's message is a developer-authored sentence by its class contract (some interpolate the caller's own
+ * input or our own ids, never provider, transport or driver text). Declared here, after the last of the
+ * directory classes, because class declarations are not hoisted.
+ *
+ * Deliberately NOT listed: DingTalkCorpNotAllowedError. This list serves only the sync failure
+ * (markSyncFailure) and the three batch routes' `failed[].error`, and no code on those paths can throw it:
+ * its only producer is assertDingTalkCorpAllowed (integrations/dingtalk/runtime-policy.ts), called by
+ * normalizeIntegrationInput (create / update / test integration — admin routes only), by
+ * readDingTalkOauthConfig (OAuth login, auth/dingtalk-oauth.ts — outside this module's import closure) and
+ * by isDingTalkConfigured (which catches it). The directory-test route, where it IS reachable, lists it in
+ * DIRECTORY_TEST_FIXED_SENTENCES (routes/admin-directory.ts). An entry nothing can reach is an entry nobody
+ * re-checks — if a sync or batch path starts throwing it, add it back with a test in
+ * tests/unit/directory-batch-fixed-sentence-members.test.ts.
+ */
+const DIRECTORY_FAILURE_FIXED_SENTENCES: readonly FixedSentenceErrorClass[] = [
+  DirectoryValidationError,
+  DirectoryNotFoundError,
+  DirectoryConflictError,
+  DirectoryTenantChangeBlockedError,
+  DirectorySyncLeaseLostError,
+  RecoveryConflictError,
+  LoginNameRuleError,
+  PasswordPolicyError,
+  LoginAliasClaimError,
+]
+
+/**
+ * R-41: the text a directory failure may be persisted or returned with (see directory-failure-text.ts). A
+ * typed sentence is returned as it is; anything else becomes `fallback` (plus DingTalk's numeric code for a
+ * typed DingTalk failure), and its original text goes to the log — the only place it goes.
+ */
+function directoryFailureText(error: unknown, fallback: string, context: Record<string, unknown>): string {
+  const failure = classifyDirectoryFailureText(error, { fallback, fixedSentenceClasses: DIRECTORY_FAILURE_FIXED_SENTENCES })
+  if (failure.kind !== 'fixed_sentence') {
+    logger.warn(fallback, {
+      ...context,
+      error: readErrorMessage(error, 'unknown error'),
+      ...(failure.providerCode !== undefined
+        ? { providerCode: failure.providerCode, providerCodeKind: failure.providerCodeKind }
+        : {}),
+    })
+  }
+  return failure.text
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === '23505'
+}
+
+/**
+ * A unique_violation from the directory_integrations INSERT / UPDATE is the caller colliding with an existing
+ * row, not a system fault: answer it as a DirectoryConflictError whose sentence names the rule that fired and
+ * never carries the driver text. Anything else is returned unchanged.
+ */
+function uniqueViolationAsConflict(error: unknown): unknown {
+  if (!isUniqueViolation(error)) return error
+  const constraint = (error as { constraint?: unknown }).constraint
+  return new DirectoryConflictError(
+    constraint === 'one_active_local_integration_per_org'
+      ? 'This organization already has an active local directory integration'
+      : 'A directory integration with this name already exists for this provider',
+  )
 }
 
 /**
@@ -3792,7 +3960,7 @@ export async function syncDirectoryIntegration(
 }> {
   const governedUserIds = new Set<string>()
   const integration = await getIntegrationRow(rawIntegrationId)
-  if (!integration) throw new Error('Directory integration not found')
+  if (!integration) throw new DirectoryNotFoundError('Directory integration not found')
   // T2 lock-correctness P1: the manual-sync route passes req.params.integrationId VERBATIM
   // (admin-directory.ts). `directory_integrations.id` is a uuid column, so a case-variant
   // (e.g. uppercase) id still resolves THIS row via uuid casting — but the shared source
@@ -4392,7 +4560,7 @@ export async function syncDirectoryIntegration(
           && !newlyAdmittedUserIds.has(localUserId)
           && !syncAccess.lockedUserIds.has(localUserId)
         ) {
-          throw new Error(
+          throw new DirectoryConflictError(
             'Directory sync resolved a local user after the mutex inventory; retry the run',
           )
         }
@@ -4812,8 +4980,7 @@ export async function syncDirectoryIntegration(
       )
       throw error
     }
-    const message = readErrorMessage(error, 'Directory sync failed')
-    await markSyncFailure(integrationId, runId, message)
+    await markSyncFailure(integrationId, runId, error)
     throw error
   } finally {
     clearInterval(heartbeat)
@@ -4887,7 +5054,7 @@ type ExistingAccountPreviewRow = {
 
 export async function previewDirectorySyncIntegration(integrationId: string): Promise<DirectorySyncPreview> {
   const integration = await getIntegrationRow(integrationId)
-  if (!integration) throw new Error('Directory integration not found')
+  if (!integration) throw new DirectoryNotFoundError('Directory integration not found')
 
   // DT-OPS-02 / R3: refuse a preview while a real sync holds the lease for this
   // integration. Preview pulls the FULL DingTalk directory (same API quota `syncDirectoryIntegration`
@@ -5119,7 +5286,7 @@ export async function listDirectorySyncAlerts(
   }
 }> {
   const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+  if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
   const normalizedFilter: DirectorySyncAlertFilter = filter === 'pending' || filter === 'acknowledged' ? filter : 'all'
   const whereClauses: string[] = ['integration_id = $1']
@@ -5188,8 +5355,8 @@ export async function acknowledgeDirectorySyncAlert(
 ): Promise<DirectorySyncAlertSummary | null> {
   const normalizedAlertId = normalizeText(alertId)
   const normalizedAcknowledgedBy = normalizeText(acknowledgedBy)
-  if (!normalizedAlertId) throw new Error('alertId is required')
-  if (!normalizedAcknowledgedBy) throw new Error('acknowledgedBy is required')
+  if (!normalizedAlertId) throw new DirectoryValidationError('alertId is required')
+  if (!normalizedAcknowledgedBy) throw new DirectoryValidationError('acknowledgedBy is required')
 
   const result = await query<DirectorySyncAlertRow>(
     `UPDATE directory_sync_alerts
@@ -5286,7 +5453,7 @@ export async function getDirectorySyncScheduleSnapshot(
   integrationId: string,
 ): Promise<DirectorySyncScheduleSnapshot | null> {
   const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+  if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
   const integration = await getIntegrationRow(normalizedIntegrationId)
   if (!integration) return null
@@ -5361,7 +5528,7 @@ export async function listDirectoryReviewItems(
   filter: DirectoryReviewItemFilter = 'all',
 ): Promise<{ items: DirectoryReviewItemSummary[]; total: number }> {
   const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+  if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
   const normalizedFilter: DirectoryReviewItemFilter = filter === 'pending_binding' || filter === 'inactive_linked' || filter === 'missing_identifier'
     ? filter
@@ -5453,7 +5620,7 @@ export async function getDirectoryReviewItem(
   accountId: string,
 ): Promise<DirectoryReviewItemSummary | null> {
   const normalizedAccountId = normalizeText(accountId)
-  if (!normalizedAccountId) throw new Error('accountId is required')
+  if (!normalizedAccountId) throw new DirectoryValidationError('accountId is required')
 
   const rowsResult = await query<DirectoryReviewItemRow>(
     `SELECT
@@ -5526,6 +5693,15 @@ export async function getDirectoryReviewItem(
 export type DirectoryAccountBatchOutcome = {
   succeeded: DirectoryAccountMutationResult[]
   failed: Array<{ accountId: string; error: string }>
+  /**
+   * #6163 S6: what each `failed` entry was thrown as, index-aligned with `failed`. A batch that commits
+   * nothing is answered like the single-item route: the route rethrows `failedErrors[0]`, so the status
+   * comes from the error's TYPE (DirectoryValidationError 400 / DirectoryNotFoundError 404 /
+   * DirectoryConflictError 409; anything else a fixed-sentence 500), not from a regex over
+   * `failed[0].error`. Kept beside `failed` rather than inside it: the routes send `failed` as it is and
+   * never this array.
+   */
+  failedErrors: unknown[]
 }
 
 export async function batchUnbindDirectoryAccounts(
@@ -5533,17 +5709,19 @@ export async function batchUnbindDirectoryAccounts(
   input: DirectoryAccountUnbindInput,
 ): Promise<DirectoryAccountBatchOutcome> {
   const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
-  if (normalizedIds.length === 0) throw new Error('accountIds are required')
+  if (normalizedIds.length === 0) throw new DirectoryValidationError('accountIds are required')
 
-  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const directoryAccountId of normalizedIds) {
     try {
       outcome.succeeded.push(await unbindDirectoryAccount(directoryAccountId, input))
     } catch (error) {
+      // R-41: `failed[].error` is answered at 200 — a typed sentence or the fixed one, never caught text.
       outcome.failed.push({
         accountId: directoryAccountId,
-        error: readErrorMessage(error, 'Failed to unbind directory account'),
+        error: directoryFailureText(error, 'Failed to unbind directory account', { accountId: directoryAccountId }),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome
@@ -5561,10 +5739,10 @@ export async function batchBindDirectoryAccounts(
     }))
     .filter((entry) => entry.accountId.length > 0 && entry.localUserRef.length > 0)
 
-  if (normalizedEntries.length === 0) throw new Error('bindings are required')
+  if (normalizedEntries.length === 0) throw new DirectoryValidationError('bindings are required')
 
   // DT-HARDEN-04: per-item isolation — see DirectoryAccountBatchOutcome.
-  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const entry of normalizedEntries) {
     try {
       outcome.succeeded.push(await bindDirectoryAccount(entry.accountId, {
@@ -5573,10 +5751,12 @@ export async function batchBindDirectoryAccounts(
         enableDingTalkGrant: entry.enableDingTalkGrant,
       }))
     } catch (error) {
+      // R-41: see batchUnbindDirectoryAccounts.
       outcome.failed.push({
         accountId: entry.accountId,
-        error: readErrorMessage(error, 'Failed to bind directory account'),
+        error: directoryFailureText(error, 'Failed to bind directory account', { accountId: entry.accountId }),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome
@@ -5605,7 +5785,7 @@ async function assertDirectoryAccountEligibleForBatchAdmission(
   )
   const link = linkResult.rows[0]
   if (link?.link_status === 'linked' && normalizeText(link.local_user_id)) {
-    throw new Error('Directory account is already linked to a local user')
+    throw new DirectoryConflictError('Directory account is already linked to a local user')
   }
 
   const normalizedEmail = normalizeText(account.email).toLowerCase()
@@ -5624,7 +5804,7 @@ async function assertDirectoryAccountEligibleForBatchAdmission(
     [normalizedEmail, normalizedMobile],
   )
   if (matchResult.rows.length > 0) {
-    throw new Error('A local user with this email or mobile already exists; confirm the recommended binding instead of admitting a new account')
+    throw new DirectoryConflictError('A local user with this email or mobile already exists; confirm the recommended binding instead of admitting a new account')
   }
 }
 
@@ -5634,14 +5814,14 @@ export async function batchAdmitDirectoryAccountUsers(
 ): Promise<DirectoryAccountBatchAdmissionOutcome> {
   const normalizedIds = Array.from(new Set(directoryAccountIds.map((item) => normalizeText(item)).filter(Boolean)))
   const normalizedAdminUserId = normalizeText(input.adminUserId)
-  if (normalizedIds.length === 0) throw new Error('accountIds are required')
-  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (normalizedIds.length === 0) throw new DirectoryValidationError('accountIds are required')
+  if (!normalizedAdminUserId) throw new DirectoryValidationError('adminUserId is required')
 
-  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [] }
+  const outcome: DirectoryAccountBatchAdmissionOutcome = { succeeded: [], failed: [], failedErrors: [] }
   for (const accountId of normalizedIds) {
     try {
       const account = await loadDirectoryBindingTargetAccount(accountId)
-      if (!account) throw new Error('Directory account not found')
+      if (!account) throw new DirectoryNotFoundError('Directory account not found')
       await assertDirectoryAccountEligibleForBatchAdmission(account)
       const fallbackName = normalizeText(account.external_user_id) || account.id
       const admissionName = normalizeText(account.name).length >= 2 ? account.name : fallbackName
@@ -5661,10 +5841,12 @@ export async function batchAdmitDirectoryAccountUsers(
         enableDingTalkGrant: input.enableDingTalkGrant === true,
       }))
     } catch (error) {
+      // R-41: see batchUnbindDirectoryAccounts.
       outcome.failed.push({
         accountId,
-        error: readErrorMessage(error, 'Failed to create and bind local user for directory account'),
+        error: directoryFailureText(error, 'Failed to create and bind local user for directory account', { accountId }),
       })
+      outcome.failedErrors.push(error)
     }
   }
   return outcome
@@ -5693,7 +5875,7 @@ async function resolveDirectoryAccountOrgId(client: MembershipWriteClient, integ
   )
   const orgId = (orgResult.rows[0] as { org_id?: string } | undefined)?.org_id
   if (!orgId) {
-    throw new Error('Directory integration not found for account org resolution')
+    throw new DirectoryNotFoundError('Directory integration not found for account org resolution')
   }
   return orgId
 }
@@ -5845,7 +6027,7 @@ async function lockAuthoritativeDirectoryBindingAccount(
     || !integrationCorpId
     || accountCorpId !== integrationCorpId
   ) {
-    throw new Error('Directory account tenant scope is inconsistent; synchronize or repair it before binding')
+    throw new DirectoryConflictError('Directory account tenant scope is inconsistent; synchronize or repair it before binding')
   }
 
   return {
@@ -5880,11 +6062,11 @@ async function applyDirectoryAccountBindInTransaction(
     skipUserOrgMembership = false,
   } = options
   const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
-  if (!account) throw new Error('Directory account not found')
-  if (!account.is_active) throw new Error('Directory account is inactive and cannot be bound')
+  if (!account) throw new DirectoryNotFoundError('Directory account not found')
+  if (!account.is_active) throw new DirectoryConflictError('Directory account is inactive and cannot be bound')
   const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
   if (!identityExternalKey) {
-    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+    throw new DirectoryValidationError('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
@@ -5914,7 +6096,7 @@ async function applyDirectoryAccountBindInTransaction(
   )
   const priorLocalUserId = (priorLinkResult.rows[0] as { local_user_id?: string | null } | undefined)?.local_user_id ?? null
   if (priorLocalUserId !== expectedPriorLocalUserId) {
-    throw new Error('Directory account binding changed; retry the operation')
+    throw new DirectoryConflictError('Directory account binding changed; retry the operation')
   }
 
   const profile = JSON.stringify({
@@ -5959,7 +6141,7 @@ async function applyDirectoryAccountBindInTransaction(
     ],
   )
   if (conflictingIdentityResult.rows.length > 0) {
-    throw new Error('DingTalk account is already bound to another local user')
+    throw new DirectoryConflictError('DingTalk account is already bound to another local user')
   }
 
   const conflictingLinkResult = await client.query(
@@ -5974,7 +6156,7 @@ async function applyDirectoryAccountBindInTransaction(
     [account.provider, localUser.id, normalizedAccountId],
   )
   if (conflictingLinkResult.rows.length > 0) {
-    throw new Error('Local user is already linked to another DingTalk directory account')
+    throw new DirectoryConflictError('Local user is already linked to another DingTalk directory account')
   }
 
   const existingIdentityResult = await client.query(
@@ -6120,13 +6302,13 @@ async function createDirectoryAdmittedUserInTransaction(
   // that throws for ANY reason rolls the users row back, so the loop's swallow is safe.
   assertDirectoryAccountCanEnableDingTalkGrant(options.account, enableDingTalkGrant)
   if (options.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(options.email)) {
-    throw new Error('Invalid email format')
+    throw new DirectoryValidationError('Invalid email format')
   }
   // #6259: shared login-name rule; throws LoginNameRuleError (message unchanged) so a route can
   // answer 400 INVALID_USERNAME by type instead of matching the English sentence.
   assertLoginName(options.username)
   if (!options.email && !options.username && !options.mobile) {
-    throw new Error('At least one account identifier (email, username, or mobile) is required')
+    throw new DirectoryValidationError('At least one account identifier (email, username, or mobile) is required')
   }
 
   if (options.email) {
@@ -6147,7 +6329,7 @@ async function createDirectoryAdmittedUserInTransaction(
       [options.email],
     )
     if (existingUserResult.rows.length > 0) {
-      throw new Error('User with this email already exists')
+      throw new DirectoryConflictError('User with this email already exists')
     }
   }
 
@@ -6160,7 +6342,7 @@ async function createDirectoryAdmittedUserInTransaction(
       [options.username],
     )
     if (existingUsernameResult.rows.length > 0) {
-      throw new Error('User with this username already exists')
+      throw new DirectoryConflictError('User with this username already exists')
     }
   }
 
@@ -6173,7 +6355,7 @@ async function createDirectoryAdmittedUserInTransaction(
       [options.mobile],
     )
     if (existingMobileResult.rows.length > 0) {
-      throw new Error('User with this mobile already exists')
+      throw new DirectoryConflictError('User with this mobile already exists')
     }
   }
 
@@ -6194,7 +6376,7 @@ async function createDirectoryAdmittedUserInTransaction(
   if (expectedPriorLocalUserId) {
     const lockedPriorUsers = await lockUsersForAccessGraphWrite(client, [expectedPriorLocalUserId])
     if (!lockedPriorUsers.has(expectedPriorLocalUserId)) {
-      throw new Error('Directory account binding changed; retry the operation')
+      throw new DirectoryConflictError('Directory account binding changed; retry the operation')
     }
   }
 
@@ -6519,7 +6701,7 @@ async function syncProjectedDepartmentMemberGroupsInTransaction(
 
 export async function getDirectoryAccountSummary(accountId: string): Promise<DirectoryIntegrationAccountSummary | null> {
   const normalizedAccountId = normalizeText(accountId)
-  if (!normalizedAccountId) throw new Error('accountId is required')
+  if (!normalizedAccountId) throw new DirectoryValidationError('accountId is required')
 
   const result = await query<DirectoryIntegrationAccountRow>(
     `SELECT
@@ -6599,18 +6781,18 @@ async function resolveDirectoryBindingUser(localUserRef: string): Promise<Direct
   if (idMatch) return idMatch
 
   const distinctUserIds = new Set(result.rows.map((row) => row.id))
-  if (distinctUserIds.size > 1) throw new Error('Local user reference is ambiguous')
+  if (distinctUserIds.size > 1) throw new DirectoryValidationError('Local user reference is ambiguous')
 
   const emailMatches = result.rows.filter((row) => typeof row.email === 'string' && row.email.toLowerCase() === normalizedRef)
-  if (emailMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  if (emailMatches.length > 1) throw new DirectoryValidationError('Local user reference is ambiguous')
   if (emailMatches.length === 1) return emailMatches[0]
 
   const usernameMatches = result.rows.filter((row) => typeof row.username === 'string' && row.username.toLowerCase() === normalizedRef)
-  if (usernameMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  if (usernameMatches.length > 1) throw new DirectoryValidationError('Local user reference is ambiguous')
   if (usernameMatches.length === 1) return usernameMatches[0]
 
   const mobileMatches = result.rows.filter((row) => typeof row.mobile === 'string' && normalizeMobileIdentifier(row.mobile) === normalizedMobile)
-  if (mobileMatches.length > 1) throw new Error('Local user reference is ambiguous')
+  if (mobileMatches.length > 1) throw new DirectoryValidationError('Local user reference is ambiguous')
   return mobileMatches[0] ?? null
 }
 
@@ -6661,7 +6843,7 @@ export async function listDirectoryIntegrationAccounts(
   search?: string,
 ): Promise<{ items: DirectoryIntegrationAccountSummary[]; total: number }> {
   const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+  if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
   const normalizedSearch = normalizeText(search)
   const values: unknown[] = [normalizedIntegrationId]
@@ -6747,7 +6929,7 @@ export async function listDirectoryIntegrationDepartments(
   integrationId: string,
 ): Promise<{ items: DirectoryDepartmentSummary[]; total: number }> {
   const normalizedIntegrationId = normalizeText(integrationId)
-  if (!normalizedIntegrationId) throw new Error('integrationId is required')
+  if (!normalizedIntegrationId) throw new DirectoryValidationError('integrationId is required')
 
   const result = await query<DirectoryDepartmentSummaryRow>(
     `SELECT
@@ -6800,23 +6982,23 @@ export async function bindDirectoryAccount(
   const normalizedAdminUserId = normalizeText(input.adminUserId)
   const enableDingTalkGrant = input.enableDingTalkGrant !== false
 
-  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
-  if (!normalizedLocalUserRef) throw new Error('localUserRef is required')
-  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (!normalizedAccountId) throw new DirectoryValidationError('directoryAccountId is required')
+  if (!normalizedLocalUserRef) throw new DirectoryValidationError('localUserRef is required')
+  if (!normalizedAdminUserId) throw new DirectoryValidationError('adminUserId is required')
 
   const [account, previousLinkedUser] = await Promise.all([
     loadDirectoryBindingTargetAccount(normalizedAccountId),
     loadDirectoryLinkedUser(normalizedAccountId),
   ])
-  if (!account) throw new Error('Directory account not found')
+  if (!account) throw new DirectoryNotFoundError('Directory account not found')
 
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
-    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+    throw new DirectoryValidationError('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
   const localUser = await resolveDirectoryBindingUser(normalizedLocalUserRef)
-  if (!localUser) throw new Error('Local user not found')
+  if (!localUser) throw new DirectoryNotFoundError('Local user not found')
   const expectedPriorLocalUserId = previousLinkedUser?.local_user_id ?? null
 
   // O2-S2: binds write users-adjacent recovery-authority state under the access-graph
@@ -6828,10 +7010,10 @@ export async function bindDirectoryAccount(
     ])
     const lockedTargetUser = lockedUsers.get(localUser.id)
     if (!lockedTargetUser || !lockedTargetUser.isActive) {
-      throw new Error('Local user is no longer active; retry the operation')
+      throw new DirectoryConflictError('Local user is no longer active; retry the operation')
     }
     if (expectedPriorLocalUserId && !lockedUsers.has(expectedPriorLocalUserId)) {
-      throw new Error('Directory account binding changed; retry the operation')
+      throw new DirectoryConflictError('Directory account binding changed; retry the operation')
     }
     await applyDirectoryAccountBindInTransaction(client, {
       normalizedAccountId,
@@ -6874,13 +7056,13 @@ export async function admitDirectoryAccountUser(
   // Pending create: never grant DingTalk login; credentials deferred to T3 activate.
   const enableDingTalkGrant = pendingMode ? false : input.enableDingTalkGrant !== false
 
-  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
-  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (!normalizedAccountId) throw new DirectoryValidationError('directoryAccountId is required')
+  if (!normalizedAdminUserId) throw new DirectoryValidationError('adminUserId is required')
   if (!cleanName || (!cleanEmail && !cleanUsername && !cleanMobile)) {
-    throw new Error('name and at least one account identifier (email, username, or mobile) are required')
+    throw new DirectoryValidationError('name and at least one account identifier (email, username, or mobile) are required')
   }
-  if (cleanName.length < 2 || cleanName.length > 100) throw new Error('Name must be between 2 and 100 characters')
-  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new Error('Invalid email format')
+  if (cleanName.length < 2 || cleanName.length > 100) throw new DirectoryValidationError('Name must be between 2 and 100 characters')
+  if (cleanEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) throw new DirectoryValidationError('Invalid email format')
   // #6259: shared login-name rule (auth/login-name-rule.ts); LoginNameRuleError keeps the English
   // message byte-identical, and the admit-user route maps the type to 400 INVALID_USERNAME.
   assertLoginName(cleanUsername)
@@ -6906,10 +7088,10 @@ export async function admitDirectoryAccountUser(
     loadDirectoryBindingTargetAccount(normalizedAccountId),
     loadDirectoryLinkedUser(normalizedAccountId),
   ])
-  if (!account) throw new Error('Directory account not found')
+  if (!account) throw new DirectoryNotFoundError('Directory account not found')
 
   if (!buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)) {
-    throw new Error('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
+    throw new DirectoryValidationError('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
   assertDirectoryAccountCanEnableDingTalkGrant(account, enableDingTalkGrant)
 
@@ -7014,8 +7196,8 @@ export async function unbindDirectoryAccount(
   const normalizedAdminUserId = normalizeText(input.adminUserId)
   const disableDingTalkGrant = input.disableDingTalkGrant === true
 
-  if (!normalizedAccountId) throw new Error('directoryAccountId is required')
-  if (!normalizedAdminUserId) throw new Error('adminUserId is required')
+  if (!normalizedAccountId) throw new DirectoryValidationError('directoryAccountId is required')
+  if (!normalizedAdminUserId) throw new DirectoryValidationError('adminUserId is required')
 
   let previousLinkedUser: DirectoryAccountLinkedUserRow | null = null
 
@@ -7043,11 +7225,11 @@ export async function unbindDirectoryAccount(
     if (expectedLocalUserId) {
       const lockedUsers = await lockUsersForAccessGraphWrite(client, [expectedLocalUserId])
       if (!lockedUsers.has(expectedLocalUserId)) {
-        throw new Error('Directory account binding changed; retry the operation')
+        throw new DirectoryConflictError('Directory account binding changed; retry the operation')
       }
     }
     const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
-    if (!account) throw new Error('Directory account not found')
+    if (!account) throw new DirectoryNotFoundError('Directory account not found')
     const identityExternalKey = buildDingTalkIdentityExternalKey(
       account.corp_id,
       account.open_id,
@@ -7068,7 +7250,7 @@ export async function unbindDirectoryAccount(
     )
     previousLinkedUser = (linkedUserLockResult.rows[0] as DirectoryAccountLinkedUserRow | undefined) ?? null
     if ((previousLinkedUser?.local_user_id ?? null) !== expectedLocalUserId) {
-      throw new Error('Directory account binding changed; retry the operation')
+      throw new DirectoryConflictError('Directory account binding changed; retry the operation')
     }
 
     if (previousLinkedUser?.local_user_id) {
@@ -7106,7 +7288,7 @@ export async function unbindDirectoryAccount(
           candidateIdentityParams,
         )
         if (identityCandidates.rows.some((row) => normalizeText(row.corp_id) !== account.corp_id)) {
-          throw new Error('Directory identity tenant scope is inconsistent; repair it before unbinding')
+          throw new DirectoryConflictError('Directory identity tenant scope is inconsistent; repair it before unbinding')
         }
         const candidateIds = identityCandidates.rows
           .map((row) => normalizeText(row.id))

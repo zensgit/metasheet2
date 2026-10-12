@@ -1,12 +1,13 @@
 # MetaSheet 任务功能线 — Design Lock
 
 - 日期：2026-09-17；裁决：2026-09-26
-- 状态：正文 §0–§11、§13–§15 **RATIFIED 2026-09-26**（owner 原话「四题按建议值；同意拆分；起任务 B；用 B」，见评论 [5835498504](https://github.com/zensgit/metasheet2/pull/5845#issuecomment-5835498504)）。**§12 门表仍 PROPOSED**，随 M2 源码 PR 在真库/真前端逐门实跑后再 ratify。不构成 DDL 应用、PR 合并或 `TASKS_ENABLED` 授权。
+- 状态：正文 §0–§11、§13–§15 **RATIFIED 2026-09-26**（owner 原话「四题按建议值；同意拆分；起任务 B；用 B」，见评论 [5835498504](https://github.com/zensgit/metasheet2/pull/5845#issuecomment-5835498504)）。**§12 门表 RATIFIED 2026-09-28**（见评论 [5871552862](https://github.com/zensgit/metasheet2/pull/5845#issuecomment-5871552862)）。不构成 DDL 应用、PR 合并或 `TASKS_ENABLED` 授权。
 - **基线 SHA**：`bb77ca5f2ce3c2825265ec8877861d367d017ead`（本 head 相对 `origin/main` 的 merge-base）
 - 计划输入：`task-feature-development-plan-20260915.md` v5，MD5 `f74e172840d2aa2502216d0dd8dff867`（PROPOSED 计划，不等于 ratify）
 - 普查：`docs/development/task-feature-census-20260917.md`
 - 骨架：照 `docs/development/elearning-plugin-design-lock-20260810.md` 的 §0–§15 编号。**§8 不重排**（计划 v5 多处按「锁 §4 / 锁 §12」引用）。
-- 实现者不得批准自己的安全结论。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表文字自评论 5838025266 起不再在本锁里修。
+- 实现者不得批准自己的安全结论。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表文字自评论 5838025266 起不再在本锁里修（例外：owner 2026-10-07 的 R01 裁决同意改动 §12，改动按抬头「§12 增补 2026-10-07」一条写入本锁；owner 2026-10-09 裁定的勘误改了 §12 里一句状态句，也记在该条）。
+- **§12 增补 2026-10-07**：owner 当日对 R01（M4 退出门集合）按推荐值落槌；裁决见 owner comment 6092115591 on PR 6248（该评论是 owner 在会话中写下的确认原文，2026-10-10 经 owner 授权逐字代发，不是亲写）。本锁里的「R01」只指这条 owner 裁决，与 §15 的风险编号 R1–R25、Decision Register 的 R-NN 编号都无关；R01 的内容落在 §11 的 M4 行与 §12 门 23–26 及其后的子集说明。§12 门表已于 2026-09-28 ratify（评论 5871552862）；锁内原有五句仍说 §12 门表是 PROPOSED，都写于那次 ratify 之前，已按 owner 2026-10-09 裁定（#6248／门 26）勘误为这一状态：抬头状态行、§0 末段、§9「门 19 投影端」一行、§12 讲证据 lane 的一段、§13-12 各一句，这五句所在行的其余文字不变。本增补对 §12 的改动：`arm-set` 加入 R01 新增的 `M4|` 子集行与 `post-merge|23|staging真投递` 一行；门 22 脚注之后加门 23–26 正文与「R01 子集行的含义」一段，该段写明 R01 把清单的可见性、隔离与写授权格并入既有行 `M4|19|清单角色`（行键不改）；自检的门号范围改为 1–26，其后加一条行存在检查。门 1–22 正文与门表其余文字不变，只有上面勘误的 §12 那一句例外。§11 原「M3–M5」一行拆成三行：M4 行写 R01 的四部分，以及 ①–③ 与 ④ 各在何时、在哪棵树上判定（2026-10-09 按上述 owner 评论写明），M3 行与 M5 行的退出格仍是原来的「同形」。带「起草方设计，非 R01 原文」括注的内容是起草方为落实 R01 补写的，不是裁决原文；owner 改动这些内容不算改动 R01。门 26 前端重拉的窗口规则带「owner 2026-10-09 裁定，非 R01 原文」括注，按同一裁定写成；门 26 的正控与负控随之同步，前端格按格名列出（仍是起草方设计）。2026-10-09 的这三处改动（门 26 的窗口规则及其正控、负控，五句勘误，§11 M4 行的判定所在）同样以上述 owner 评论为确认出处。本增补不授权合并、DDL 应用或打开任何 `TASKS_*` 开关；它自身的合并另需 owner 点名。
 
 ---
 
@@ -22,7 +23,7 @@
 
 权威数据在任务域专用表。org 来源合同定为 `req.authenticatedTenantId`（本 SHA `packages/core-backend/src/auth/jwt-middleware.ts:101-104`）。非 admin 可达需要三件事：① `permissions` seed（是 ② 的 FK 前置，见 `20250924190000_create_rbac_tables.ts:105-115` `role_permissions_permission_code_fkey` `ON DELETE CASCADE`）；② 非 admin 角色 `role_permissions` 带 `tasks:*`；③ `user_namespace_admissions` 行。**②③ 缺一 403**；无 ① 插 ② ⇒ SQLSTATE 23503，不是 403。码名见 §13-10c（**已裁** `tasks:read` / `tasks:write` / `tasks:admin`）。feature flag `TASKS_ENABLED === 'true'`，默认 OFF。`TASKS_*` 源码读与 GH manifest 义务见 §10（有期限推迟，不是豁免）。
 
-正文 §0–§11、§13–§15 自 2026-09-26 起是 ratified 输入。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表仍 PROPOSED。M2 源码是 Draft，不应用 DDL，不合并，不打开 `TASKS_ENABLED`。
+正文 §0–§11、§13–§15 自 2026-09-26 起是 ratified 输入。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 **已裁 2026-09-26**（见评论 5835498504）。§12 门表已于 2026-09-28 ratify（见评论 5871552862）。M2 源码是 Draft，不应用 DDL，不合并，不打开 `TASKS_ENABLED`。
 
 ---
 
@@ -483,7 +484,7 @@ N/A:本线无媒体轨。
 | §13-11 | 任务投影读路径与 deny 加载点（门 9 前置） | **已裁 2026-09-26**（见评论 5835498504）。(a) 共用 WHERE 文本生成器 + deny 失败必抛；读路径 = 复用 `loadDeniedRecordIds` 的新 sibling |
 | `TASKS_*` 与 GH manifest | 章程 `AGENTS.md:68` 落地；计划 v5 无此条。正文在 **§10** 与 **§12 门 18**（不是 §13 三十九题之一）。义务推迟到首个引入 `TASKS_*` 源码读的 PR，届时同 PR 扩 `globalHistoryFlagsInSource()` 并补 manifest。本锁**不**把「无需登记」结为已定豁免。 | **未裁**（有期限推迟，不是豁免；无 owner 亲写豁免 comment） |
 | §13-1c | 跨 org 负责人/关注人 | **未设独立验收门**（仅建议；不由门 1 覆盖） |
-| 门 19 投影端 | 计划 `:116` 三端含投影 | **已裁 2026-09-26**（见评论 5835498504）后投影端算入。实现随 M5；§12 门表仍 PROPOSED |
+| 门 19 投影端 | 计划 `:116` 三端含投影 | **已裁 2026-09-26**（见评论 5835498504）后投影端算入。实现随 M5；§12 门表已于 2026-09-28 ratify（见评论 5871552862） |
 | 门 19 读路径 vs 计划 `:116` | 计划原文（逐字）：「删真相表任一格 ⇒ 路由端、count/list 端、投影逐行端三处同红」；「只改 `buildTaskScopeCondition` 的 assignee 臂一处 ⇒ `GET /api/tasks?view=assigned`、`/pending`、`/pending-count` 必须同时红」 | **偏离**：第一句不用于列表读路径（真相表不进该路径）。探针②与下句同形：置反 `TASK_ROLE_ABILITY[assignee][complete]`。夹具：他人创建、我为 assignee、我非 creator（不与门 3 ×1 共用）。`POST /api/tasks/:id/complete` 必须红；列表三端保持绿。未置反该写路由绿。第二句保留为探针①，并钉 count（见门 19）。「双真相」只指 `taskMatchesView` 与 SQL 臂两份文本；标题「一份真相」仍是一套语义，对拍在门 19 |
 | `SYSTEM_SHEET_KINDS` | 计划 §7-7 两处加 `'task_projection'` + 集合相等 | **推迟**到首个任务投影 PR（§7） |
 | 其余 §13 | 建议答案见 §13 | 待 M1 逐条 comment 或默认前进 |
@@ -511,7 +512,9 @@ N/A:本线无媒体轨。
 | M0 | 普查 + 本 PROPOSED 锁 | 计划被认可 | 本 PR-0 Draft；39 题建议答案；两轮闸另走 |
 | M1 | owner comment ID | 本锁 | **已裁 2026-09-26**（见评论 5835498504）。§13-5 / §13-9 / §13-10 / §13-11 / §13-12 按建议值落槌 |
 | M2 | PR-1 实体+最小前端（含 DDL，Draft，不应用不合并） | M1 | **只要求 §12 `arm-set` 里首个可跑为 M2 的子集全绿**。更晚里程碑的行按该表登记，不挡本行。门 22 计分。非 admin 真机冒烟只作可达性记录（权限快照带 `tasks:read`）。另需独立合并授权 comment。M1 退出已经要求四条裁题落槌，本行不再复述阻断句 |
-| M3–M5 | P0-B / P1 / P2 | 上一 PR 合并授权 | 同形 |
+| M3 | P0-B | 上一 PR 合并授权 | 同形 |
+| M4 | P1 | 上一 PR 合并授权 | R01（见抬头「§12 增补 2026-10-07」）定的四部分：① `arm-set` 两条既有 `M4\|` 行 `M4\|8\|A支与非法IANA`、`M4\|19\|清单角色` 全绿；② R01 新加的每一条 `M4\|` 行全绿，含门 23–26 的四条 `整门`；③ 把全部 `M2\|` 与 `M3\|` 行重跑一遍且全绿（M4 会回改 M2、M3 的写 handler）；④ staging 真投递一次，outbox 账本留一行，行键 `post-merge\|23\|staging真投递`，与 `post-merge\|17\|③` 同形。R01 ①–③ 在候选集成树上于合并前判定，④ staging 真投递后置：④ 记为合并后的 owner 步骤，不挡 ①–③。候选集成树指合并之前，在已含本增补的 main 上按合并顺序叠好 M4 的全部 PR、冲突按各 PR 写明的解法解好所得的树；①–③ 的判定记录在 M4 的任何一张 PR 合并之前留下（起草方设计，非 R01 原文）。合并照 M2 行与 §14-5 的既有规则「另需独立合并授权 comment」，这条规则不是 R01 的部分；更晚里程碑的 `M5\|` 行不挡本行，也沿 M2 行 |
+| M5 | P2 | 上一 PR 合并授权 | 同形 |
 
 ---
 
@@ -655,13 +658,32 @@ printf '%s\n' 'apps/web/tests/tasksFoo.spec.ts' 'apps/web/tests/tasks*.spec.ts' 
 
 > 门 22 脚注（2026-09-29，门表文字按 :9 不改）：superseded on 2026-09-29 by Decision Register R-28: the route and the entry are gated by the session feature 'tasks'; reason: the entry was visible to administrators on a server with the flag off. 被取代的只是投影里的 `'requiredFeature' in meta === false`（现为 `meta.requiredFeature === 'tasks'`，见 `apps/web/tests/tasks-routes.spec.ts`）；各格的 stub 上下文 `hasFeature` 为真，判定不变。门 21 的 G 集暂缺两个新 spec，见 R-28。
 
-门 2、13 与 `task-*.db.test.ts` 的证据 lane 是 `tasks-realdb`，门 9 也按 §13-12 (b) 走同一条。把该 job 追加进 main required checks 是合并后的 owner 步骤，这一步完成前不得把 required 执行写成已经发生。非 admin 真机冒烟只作可达性记录。**门 22 必须计分**。§13-9 / §13-10 / §13-11 / §13-12 已于 2026-09-26 落槌。§12 门表仍是 PROPOSED。
+23. 通知 outbox 的幂等与表形（R01 新门；首个可跑 = **M4**，M4 前 NOT RUN；真库格走 `tasks-realdb`）。**幂等**：同一组（事件, 收件人, 通道）入队两次，账本里仍只有一行。**表形**：插入时不给 `org_id` ⇒ SQLSTATE **23502**（该列没有默认值）；`recipient_role='observer'` ⇒ **23514**；`status='outcome_unknown'` 能写入；空汇总行——每日汇总对一个用户、一个当地日期、一个通道到点只写一行，当天汇总为空也照写、不发送，该行断言 `status='skipped'` 且 `last_error='empty_digest'`，两列都按等值比较（`last_error` 把空汇总与别的原因记下的 `skipped` 分开）。**负控**：删去入队语句的 `ON CONFLICT` 子句 ⇒ 重复入队报 **23505** 或出现两行，本门红。**正控与 mutation 手法**（起草方设计，非 R01 原文）：未改动时第一次入队恰一行，第二次入队不抛错、仍是一行；同一事件换另一个收件人再入队 ⇒ 两行（唯一键没有把不同收件人并成一行）；负控照门 6 先 `cp` 备份、`cmp` 证 mutation 已落地，测完 `cp` 恢复。
+
+    `post-merge|23|staging真投递`：R01 的第 ④ 部分。合并之后由 owner 在 staging 真投递一次，outbox 账本留下一行，与 `post-merge|17|③` 同形。这一步要 owner 另行授权 staging 部署与钉钉凭据，不在 `M4|` 行之内，不挡 M4 合并前的判定。这一行挂在门 23 之下（起草方设计，非 R01 原文）。
+24. 通知收件人集合（R01 新门；首个可跑 = **M4**，M4 前 NOT RUN）。**纯函数格**：取角色子集与事件闭集的全部组合，每个组合算出的收件人等于测试里钉死的期望表；actor 本人不在收件人里；一人兼几个角色只出一行，`recipient_role` 取优先级最高的那个。**真库格**（`tasks-realdb`）：关注人收到 `completed`，收不到 `self_completed`；清单只读成员收到 `commented`。另有两格，依据这条规则：在 all 模式里，一次加删负责人若让任务状态翻转，同一事务里补记一条 `completed` 或 `reopened` 事件，actor 是做这次加删的人。两格是：其余负责人都已完成时删掉仅剩的未完成负责人，任务转为已完成 ⇒ 关注人收到 `completed` 通知；给已完成的任务加一个负责人，任务重启 ⇒ 关注人收到 `reopened` 通知。**负控**：去掉排除 actor 的条件 ⇒ actor 那一格红；把优先级改成关注人在前 ⇒ `recipient_role` 断言红。**正控与 mutation 手法**（起草方设计，非 R01 原文）：未改动时网格逐格相等；每个真库格先断言应收的那一行确实在账本里（只断言「没有」的格不能单独过门）；两处 mutation 照门 6：`cp` 备份、`cmp` 核对、测完恢复。
+25. 调度器与投递 worker 单实例（R01 新门；首个可跑 = **M4**，M4 前 NOT RUN；`tasks-realdb`）。两条连接同时 tick 时，`tasks-scheduler:leader` 只归其中一方，判别式照 §6.4 的 `pg_locks` 键匹配与等待列；两个 worker 同时 claim，同一行不会被投递两次；§10 的三个 P1 flag 全关时不发生任何 claim，钉钉通道也不注册。**负控**：照门 6，`cp` 备份 `task-advisory-locks.ts`，注释掉 `acquireTasksSchedulerLeaderLock` 体内的取锁行并 `cmp` 证已落地 ⇒ 两方都当 leader、都扫描，本门红；测完 `cp` 恢复。**正控**（起草方设计，非 R01 原文）：未改动时该键 `granted=true` 恰一行，另一方在等待或放弃本次 tick，两方从不同时扫描；两个 worker 并发时每行的发送计数恰为 1。
+26. 红点 socket 扇出（R01 新门；首个可跑 = **M4**，M4 前 NOT RUN）。**触发**：一次写入提交后，只要它改变了 `buildTaskPendingCondition` 的任一输入，就发一次。这些输入是负责人集合、各负责人的 `completed_at`、`status`、`deleted_at`、截止日期与时间、时区；对应的写入是带负责人的 `POST /api/tasks`、complete、reopen、加或删负责人、改完成模式、删任务，以及改截止字段或时区的 PATCH。只发往按用户分的房间，收件人是变更前与变更后负责人的并集；关注人收不到；载荷只是让前端重拉红点的信号，不含计数，也不含任务字段；写入事务回滚则一条不发。前端 spec：收到该事件后重拉 `/pending-count`。重拉按 500 ms 的固定窗口合并（owner 2026-10-09 裁定，非 R01 原文）：没有窗口开着时，一条事件打开窗口，窗口从这条事件起计 500 ms，后到的事件不让它顺延；窗口开着时到达的事件并入该窗口，不另读；窗口到点时读一次。窗口开着时若另有一次 `/pending-count` 读取开始（轮询触发的、总线触发的都算），这次读取晚于窗口里的每条事件，算作回答了它们：窗口随即关闭，到点的那次读取取消。一条事件只由它到达之后才开始的读取回答：读取开始以后到达的事件进入新窗口；事件到达时已发出、尚未返回的读取不算回答了它，这次读取返回时窗口不关闭，到点照常读。**正控**（起草方设计，非 R01 原文）：all 模式任务，创建人 C 既不是负责人也不是关注人，负责人只有 A（未完成），关注人 F。C 把负责人从 A 换成 B，分两次写入、各自提交，顺序固定为先删 A、后加 B：第一次 `DELETE /api/tasks/:id/assignees/:userId` 删 A，剩零个负责人，状态不变；第二次 `POST /api/tasks/:id/assignees` 加 B。按「变更前 ∪ 变更后」，第一次的收件人恰为 {A}，第二次恰为 {B}；合计 A 一次、B 一次、F 零次。回滚格：同一条删 A 的写入在提交前被迫回滚 ⇒ 零次。前端 spec：`apps/web` 的 spec 里以 `gate26|` 开头的用例恰为下列七个格名，各一格；格名是用例名里从 `gate26|` 起到第一个空白之前的一段，其后是说明；格里的时刻按字面毫秒写，不取导出常量。`gate26|重拉格`：一条事件 ⇒ 窗口到点时恰一次 `/pending-count` 请求，带查看者时区头，并按后台读抑制未登录跳转；到下一次 60 s 轮询之前不再请求。`gate26|时区格`：这次请求带的时区是发出请求那一刻浏览器报的，不是挂载时报的。`gate26|到点格`：一条事件到达、窗口里没有别的读取开始 ⇒ 这条事件之后 499 ms 时没有请求，500 ms 时恰一次；同一窗口里再到的事件既不增加请求，也不推迟它。`gate26|提前格|轮询`：一条事件打开窗口、到点的那次读取已经排定之后，窗口开着时一次轮询读取开始 ⇒ 排定的读取随即取消，这个窗口只有轮询那一次请求，到点不再请求。`gate26|提前格|总线`：同上，这次读取由总线触发。`gate26|另开窗口格`：一个窗口到点的读取已开始、尚未返回时到达一条事件 ⇒ 这条事件打开新窗口，从它起算 499 ms 时没有新请求，500 ms 时恰一次。`gate26|在途格`：一次读取已开始、尚未返回时到达一条事件，这次读取随后在窗口到点之前返回 ⇒ 它返回时窗口不关闭，它返回之后仍有一次 `/pending-count` 请求，在这条事件之后 500 ms，红点显示的是这次请求的结果。**负控**（起草方设计，非 R01 原文）：mutation 照门 6 `cp` 备份、`cmp` 核对、测完恢复。甲，收件人只取变更后的负责人 ⇒ 第一次写入无人收到，A 那一格红；乙，收件人只取变更前的负责人 ⇒ 第二次写入无人收到，B 那一格红；丙，把发送挪到提交之前 ⇒ 回滚格收到事件，红；丁，前端去掉该事件的订阅 ⇒ 重拉格与到点格零次请求，两个提前格看不到排定的读取，红；戊，窗口里开始的读取不关窗口 ⇒ 两个提前格到点多出一次请求，红；己，读取在途时到达的事件不开窗口 ⇒ 另开窗口格与在途格少一次请求，红；庚，窗口随后到的事件顺延 ⇒ 到点格的请求晚于第一条事件之后 500 ms，红；辛，在途的读取返回时关闭窗口，即在途读取抵消了它在途时到达的事件 ⇒ 在途格在这次读取返回之后少一次请求，红；壬，窗口到点的读取返回之前，窗口仍算开着 ⇒ 读取开始以后到达的事件并入这个窗口，另开窗口格少一次请求，红；癸，改请求的形状：去掉查看者时区头 ⇒ 重拉格与时区格红；去掉未登录跳转抑制 ⇒ 重拉格红；时区只在第一次读取时取一次、之后沿用 ⇒ 时区格红。
+
+**R01 子集行的含义**（门 1–22 正文不改；下面逐行说明 R01 加在这些门上的 `M4|` 子集跑什么）：
+
+- `M4|1|清单第二租户`：清单面的第二租户隔离。清单与其任务只在 org B（harness 直发 SQL 播种），org A 的 token 按 id 读写它 ⇒ 404；负控删掉清单作用域的 org 子句，该格必须红（隔离子句清空后仍全绿即零覆盖）。**按门 1 真隔离读格的形状跑**（起草方设计，非 R01 原文）：先跑正控，org A 的 token 列清单，结果非空且只含 org A 的清单，再断言不含 org B 那张；按 id 读写 org B 的清单与读写不存在的清单同形 404；org B 的数据零变化。**成员在职三格放在本行**（起草方设计，非 R01 原文）。这三格原属下面 `M4|19|清单角色` 并入的那组。在职指 `user_orgs.is_active` 与 `users.is_active` 同时为真，与登录同一判据。三格：写清单成员时指向别的 org 的用户 ⇒ 422；指向 `users.is_active=false` 的用户 ⇒ 422，收件人入队之后才不再在职的，发送时记 `skipped`；同 org 在职用户 ⇒ 200，作正控。
+- `M4|2|清单路由`：门 2 的非 admin 正格与各条 403 负格（各用独立用户），在清单路由上原样跑一遍。**门 1、门 2 上清单行与 `新表面` 行的分工**（起草方设计，非 R01 原文）：门 1 的清单行管清单面隔离与成员在职，`新表面` 行管所有新写路由的写格；门 2 的清单行管清单路由，`新表面` 行管其余新路由。
+- `M4|8|提醒与每日汇总`：提醒缺省三格——定时任务为截止前 30 分钟；全天任务为 `tasks.time_zone` 当地 18:00；截止 00:10 的定时任务提醒落到前一天。另有：提醒策略为 none ⇒ `remind_at` 为 null；非法策略 ⇒ 422；写入时提醒时刻已过 ⇒ 不入队；非法时区 ⇒ 包装函数抛错，不悄悄按 UTC 算；每日汇总「今天 / 明天」边界由纯函数与 SQL 两份文本对拍；当天 09:00 的汇总为空、15:00 才出现当天到期的任务 ⇒ 当天不再发（当天那一行已按门 23 的空汇总行写下）。纯函数格钉死 `now`；真库格钉不住 `now()`，先读一次库时钟，再按读数决定夹具落在边界哪一侧，使正确实现与错误实现在该读数下给出不同结果；离边界太近就等它过去，不得 skip。
+- `M4|19|清单角色`（既有行，行键不改）：R01 把清单的可见性、隔离与写授权格并入这一行。在本增补之前，锁里这一行只有「清单角色格绑首个清单 PR」一句，没有列出这些格。并入的格：清单只读成员与可编辑成员对单个任务的能力格（含清单归档后任务详情仍可读、pending 与视图不变）；隔离格（清单与任务在另一 org ⇒ 404；被移出清单后立即读不到详情）；写授权格（加入清单要清单一端与任务一端都有授权，只满足清单一端的调用者加不进去，得到的 404 与任务不存在时相同；从清单成员里移除清单的 `created_by` ⇒ 422；移除清单 owner ⇒ 422）。第二租户的负例必须存在：清单的 org 谓词被删掉时，第二租户格要变红。归档格也有负控：pending 的读取被加上 `archived_at IS NULL` 条件时，清单归档的那一格要变红。门 19 的 M4 视图格不在本增补内。
+- `M4|N|新表面`（N = 1、2、13、17、18、20、21、22）：M4 新增的表面逐一走门 N 的既有格，沿用门 N 现有的夹具。**子集名「新表面」**（起草方设计，非 R01 原文）。门 1：每条新写路由缺 org ⇒ 422，422 在 `rbacGuard('tasks','write')` 之后，同夹具换有效 org 得 200 反证；**另跑门 1 的跨 org 写格**（起草方设计，非 R01 原文）。门 2：清单路由以外的每条新路由跑门 2 的非 admin 正格与 403 负格。门 13：真 `MetaSheetServer` 上每个新 router 至少打通一条路由，挂载置空后该格红。门 17：每个新 `task-*.db.test.ts` 满足 ①②④。门 18：§10 三个 P1 flag 都登记在 manifest，删任一条 ⇒ `pnpm verify:global-history-flag-manifest:test` 红。门 20：每个新 `src/tasks/*.ts` 落在行为 harness 与 (A)(B) 静态检查之下，零 I/O。门 21：每个新 `tasks*.spec.ts` 进 D、T、G 三集合，step 逐文件。门 22：`/task-lists/:id` 的路由记录按门 22 同一组格断言（`path` 换成该路由）；**投影里的 `requiredFeature` 取门 22 脚注的口径** `meta.requiredFeature === 'tasks'`（起草方设计，非 R01 原文）。
+
+门 2、13 与 `task-*.db.test.ts` 的证据 lane 是 `tasks-realdb`，门 9 也按 §13-12 (b) 走同一条。把该 job 追加进 main required checks 是合并后的 owner 步骤，这一步完成前不得把 required 执行写成已经发生。非 admin 真机冒烟只作可达性记录。**门 22 必须计分**。§13-9 / §13-10 / §13-11 / §13-12 已于 2026-09-26 落槌。§12 门表已于 2026-09-28 ratify（见评论 5871552862）。
 
 **武装表**（键 = 主体首次可跑的里程碑。每门每子集恰一次。M2 退出只取 `M2|` 行）：
 
 ```arm-set
 M2|1|整门
+M4|1|清单第二租户
+M4|1|新表面
 M2|2|整门
+M4|2|清单路由
+M4|2|新表面
 M2|3|存活六格
 M3|3|增删人切模式
 M2|4|整门
@@ -675,12 +697,14 @@ M5|7|src/multitable/task-*
 M5|7|锁序控件
 M2|8|生产路径回退
 M4|8|A支与非法IANA
+M4|8|提醒与每日汇总
 M5|9|整门
 M2|10|标题子集
 M5|10|P2子集
 M2|11|整门
 M2|12|整门
 M2|13|整门
+M4|13|新表面
 M2|14|整门
 M2|15|整门
 M2|16|整门
@@ -688,15 +712,25 @@ M2|17|①
 M2|17|②
 post-merge|17|③
 M2|17|④
+M4|17|新表面
 M2|18|整门
+M4|18|新表面
 M2|19|网格
 M2|19|探针①
 M2|19|探针②
 M4|19|清单角色
 M5|19|投影端
 M2|20|整门
+M4|20|新表面
 M2|21|整门
+M4|21|新表面
 M2|22|整门
+M4|22|新表面
+M4|23|整门
+post-merge|23|staging真投递
+M4|24|整门
+M4|25|整门
+M4|26|整门
 ```
 
 ```bash
@@ -714,8 +748,29 @@ keys=[(a,b) for _,a,b in rows]
 print("rows", len(rows), "dup", [k for k in keys if keys.count(k)>1])
 gates=sorted({int(a) for a,_,_ in [(r[1],r[0],r[2]) for r in rows]})
 print("gates", gates)
-raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) else 1)'
+raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,27)) else 1)'
 ```
+
+**行存在检查**（起草方设计，非 R01 原文）：上面的自检只核键不重复、门号集合为 1–26。R01 涉及的行只要所在门上还有别的行，被删掉时自检仍 exit 0。下面这条逐字核对 R01 涉及的 18 行都在 `arm-set` 里：第 ① 部分的两条既有 `M4|` 行，以及 R01 新加的 16 行（含 `post-merge|23|staging真投递`）：
+
+```bash
+python3 -c 'from pathlib import Path
+lines=Path("docs/development/task-feature-design-lock-20260917.md").read_text().splitlines()
+grab=False; rows=[]
+for l in lines:
+    if l.startswith("```arm-set"):
+        grab=True; continue
+    if grab and l.startswith("```"):
+        break
+    if grab and l.strip():
+        rows.append(l)
+need=["M4|1|清单第二租户","M4|1|新表面","M4|2|清单路由","M4|2|新表面","M4|8|A支与非法IANA","M4|8|提醒与每日汇总","M4|13|新表面","M4|17|新表面","M4|18|新表面","M4|19|清单角色","M4|20|新表面","M4|21|新表面","M4|22|新表面","M4|23|整门","post-merge|23|staging真投递","M4|24|整门","M4|25|整门","M4|26|整门"]
+missing=[r for r in need if r not in rows]
+print("need", len(need), "missing", missing)
+raise SystemExit(0 if not missing else 1)'
+```
+
+本 head 上 exit 0。负控在副本上跑：删去 `M4|23|整门`，或删去 `M4|19|清单角色` ⇒ 本检查 exit 1；同样这两份副本上，上面的自检仍 exit 0。
 
 门 17③ 的行键是 `post-merge|17|③`，不在 `M2|` 退出集合里。把 `tasks-realdb` 追加进 main required checks 只能在该 job 已在 main 上跑过之后，由 owner 做。`i-m2` 只列门 19 的视图格，没有增删执行人或切换完成模式的格，所以门 3 改挂 M3 不改 `i-m2`。
 
@@ -770,7 +825,7 @@ raise SystemExit(0 if len(keys)==len(set(keys)) and gates==list(range(1,23)) els
 **已裁 2026-09-26**（见评论 5835498504）：(a) 共用 WHERE 文本生成器 + deny 失败必抛。不选 (b) 存 `visibleUserIds`。读路径 = 复用 `loadDeniedRecordIds` 的新 sibling。**不得自行发明**第二条读路径。该函数**不得**照 `permission-service.ts:1272-1279` 形吞表缺失错。实现在 M5；§12 门 9 文字本轮不动。
 
 **12. §8-1 ③ required 承载**
-**已裁 2026-09-26**（见评论 5835498504）：取 (b)。任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。(a) 不采用。下面保留代价说明。§12 里原先指向未裁承载的 TBD 已改成这条已裁措辞。门表整体仍是 PROPOSED。
+**已裁 2026-09-26**（见评论 5835498504）：取 (b)。任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。(a) 不采用。下面保留代价说明。§12 里原先指向未裁承载的 TBD 已改成这条已裁措辞。门表整体已于 2026-09-28 ratify（见评论 5871552862）。
 - **(a)** 整文件加进 `.github/workflows/plugin-tests.yml` `test` job run-list。代价：s6a pin 重算（`plugins/plugin-integration-core/lib/sealed-export/vectors/s6a-package-provenance-pins.json:90` 钉住该文件）+ 与在飞 PR 串行化。本切片禁止改该文件。裁 (a) 时 ④ 必须扩成**四集合**相等（三集合 + 该 run-list）。
 - **(b)** 任务 db lane 去 `paths`、声明 `merge_group`、四步 POST-append。代价：lane 须先单独合进 main 才有同名 job；在飞 PR 要 rebase 才出现 context。裁 (b) 时 §5.2.1 ② 的「保留 paths、不声明 merge_group」形状被本项取代。
 - 已采纳 (b)，避免动 s6a。

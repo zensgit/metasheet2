@@ -1319,7 +1319,11 @@ async function readConfirmationDecisionProjectNo({ recordsApi, provisioning, tar
   return { decisionId: id, projectNo: auditableProjectNo(readCell(matches[0], 'projectNo')) }
 }
 
-async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now } = {}) {
+// `assertProjectWritable` (S4, ADR §6, register R-38) is an OPTIONAL hook the route passes only while
+// the project-sheets switch is on: called with the located row's own project cell (trimmed, or null)
+// after the row is found and BEFORE any check of its state or any patch, so a refusal from it leaves
+// the ledger untouched. Absent → this function is byte-identical to before S4.
+async function confirmConfirmationDecision({ recordsApi, provisioning, targetProjectId, permission, decisionId, inputFingerprint, resolutionAction, resolvedValue, resolvedAuxValue, notes, confirmedBy, now, assertProjectWritable } = {}) {
   assertAdminPermission(permission)
   const id = requiredString(decisionId, 'decisionId')
   const fingerprint = requiredString(inputFingerprint, 'inputFingerprint')
@@ -1362,6 +1366,9 @@ async function confirmConfirmationDecision({ recordsApi, provisioning, targetPro
     )
   }
   const record = matches[0]
+  if (typeof assertProjectWritable === 'function') {
+    await assertProjectWritable(optionalString(readCell(record, 'projectNo')))
+  }
   if (optionalString(readCell(record, 'status')) !== STATUSES.PENDING) {
     throw new StockPreparationConfirmationDecisionError(
       409,

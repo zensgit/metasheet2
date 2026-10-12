@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-3c P05/P15/P16 plugin HTTP route tests through the actual plugin loader.
  * Covers auth, capability mismatch, org boundary, stable operationId requirement,
@@ -39,7 +40,10 @@ function canListen(): Promise<boolean> {
   })
 }
 
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: Record<string, unknown> } = {},
 ): Promise<JsonResponse> {

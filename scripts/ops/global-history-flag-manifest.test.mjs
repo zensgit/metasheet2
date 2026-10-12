@@ -10,7 +10,7 @@
 
 import assert from 'node:assert/strict'
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
@@ -52,6 +52,55 @@ test('online-enrollment manifest provenance names the canonical exported flag', 
   ])
 })
 
+test('approval CC unread badge switch (test report 2026-10-08): boolean, exact true, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_CC_UNREAD_BADGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalCcUnreadBadgeEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+})
+
+test('approval new-outcome badge switch (test report 2026-10-08): boolean, exact true, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.APPROVAL_MINE_OUTCOME_BADGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
+  )
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'True'), false)
+})
+
+// ASSUMPTION(task-m4): [own-28] the TASKS_ENABLED entry: danger medium, both read points, and the
+// M4 migration the task routes depend on (named as it is on disk, so a rename is followed here).
+test('TASKS_ENABLED manifest entry: danger medium, both read points, and the M4 migration on disk', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.danger, 'medium')
+  assert.equal(
+    spec.source,
+    'packages/core-backend/src/routes/tasks.ts#tasksRouter; packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled',
+  )
+  const migrationsDir = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'packages/core-backend/src/db/migrations')
+  const m4 = readdirSync(migrationsDir).filter((name) => /^zzzz\d{14}_create_task_m4_tables\.ts$/.test(name))
+  assert.equal(m4.length, 1)
+  assert.ok(spec.purpose.includes(m4[0].replace(/\.ts$/, '')), 'purpose names the M4 migration')
+  assert.ok(spec.purpose.includes('task_list_items, task_list_members and task_user_settings'), 'purpose names the M4 tables the routes read')
+  for (const prefix of ['/api/tasks ', '/api/task-settings', '/api/task-lists', '/api/task-groups']) {
+    assert.ok(spec.purpose.includes(prefix), `purpose names the ${prefix.trim()} prefix`)
+  }
+})
+
 // NON-TAUTOLOGICAL completeness: derive the flag set from SOURCE (grep packages/core-backend/src), NOT from
 // a hand-copied list. A flag READ in source but MISSING from the manifest fails here — this is exactly how
 // the 19th flag (MULTITABLE_SHEET_REVERT_MAX_RECORDS) slipped through the earlier hardcoded-list test, which
@@ -61,10 +110,58 @@ test('online-enrollment manifest provenance names the canonical exported flag', 
 // categorize it (→ manifest if it's a recovery/history flag, → denylist with a reason if it's out of scope).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
+function hasVerifiedViteFlagSource(spec) {
+  if (!/^VITE_[A-Z0-9_]+$/.test(spec.key)) return false
+  const match = /^apps\/web\/src\/[A-Za-z0-9_./-]+\.ts#([A-Za-z_$][\w$]*)$/.exec(spec.source)
+  if (!match) return false
+
+  const webSourceRoot = path.join(REPO_ROOT, 'apps/web/src')
+  const sourcePath = path.resolve(REPO_ROOT, spec.source.split('#')[0])
+  const relativeSourcePath = path.relative(webSourceRoot, sourcePath)
+  if (
+    relativeSourcePath === '..'
+    || relativeSourcePath.startsWith(`..${path.sep}`)
+    || path.isAbsolute(relativeSourcePath)
+  ) return false
+  let source
+  try {
+    source = readFileSync(sourcePath, 'utf8')
+  } catch {
+    return false
+  }
+  return source.includes(`export function ${match[1]}(`)
+    && source.includes(`import.meta.env.${spec.key}`)
+}
+
+test('VITE manifest entries require an exact frontend source binding', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.VITE_MULTITABLE_RANGE_FILL_ENABLED
+  assert.ok(spec)
+  assert.equal(hasVerifiedViteFlagSource(spec), true)
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, key: 'VITE_UNREGISTERED_EXAMPLE' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({ ...spec, source: 'packages/core-backend/src/example.ts#isEnabled' }),
+    false,
+  )
+  assert.equal(
+    hasVerifiedViteFlagSource({
+      ...spec,
+      source: 'apps/web/src/../../packages/core-backend/src/example.ts#isEnabled',
+    }),
+    false,
+  )
+})
+
 // Non-boolean e-learning env reads that belong in the manifest, by exact name. A suffix rule such
 // as *_MS would also catch source constants (ELEARNING_MEDIA_FFPROBE_TIMEOUT_MS and friends are
 // not env reads). #6175: the audience catalog scan timeout.
 const ELEARNING_NON_BOOLEAN_FLAGS = new Set(['ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'])
+
+// Non-boolean task-line env reads that belong in the manifest, by exact name (same reason as
+// above: a suffix rule would also catch source constants). M4 PR-3b: the scheduler tick interval.
+const TASKS_NON_BOOLEAN_FLAGS = new Set(['TASKS_SCHEDULER_INTERVAL_MS'])
 
 test('audience scan timeout (#6175): numeric, default 5000, sourced from the resolver parser', () => {
   const spec = GLOBAL_HISTORY_FLAG_BY_KEY.ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS
@@ -86,6 +183,57 @@ test('audience scan timeout (#6175): numeric, default 5000, sourced from the res
   assert.match(resolver, /export function resolveElearningAudienceScanTimeoutMs\(/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_ENV = 'ELEARNING_AUDIENCE_SCAN_TIMEOUT_MS'/)
   assert.match(resolver, /ELEARNING_AUDIENCE_SCAN_TIMEOUT_DEFAULT_MS = 5_000/)
+})
+
+// M4 PR-3b: the three pipeline switches name the M4 migration they depend on as it is on disk, and
+// no other M4 migration name, so a rename of that migration is followed in their purposes too.
+test('task notification pipeline switches (M4 PR-3b): each purpose names the M4 migration on disk', () => {
+  const migrationsDir = path.join(path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..'), 'packages/core-backend/src/db/migrations')
+  const m4 = readdirSync(migrationsDir).filter((name) => /^zzzz\d{14}_create_task_m4_tables\.ts$/.test(name))
+  assert.equal(m4.length, 1)
+  const onDisk = m4[0].replace(/\.ts$/, '')
+  for (const key of [
+    'TASKS_SCHEDULER_ENABLED',
+    'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+  ]) {
+    const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+    assert.ok(spec, key)
+    const named = [...spec.purpose.matchAll(/zzzz\d{14}_create_task_m4_tables/g)].map((match) => match[0])
+    assert.deepEqual(named, [onDisk], `${key} purpose names the M4 migration on disk`)
+  }
+})
+
+// M4 PR-3b S5: TASKS_ENABLED is also the prerequisite of the scheduler and the delivery worker
+// (ASSUMPTION(task-m4): [own-3b-06]); its purpose names both switches it gates.
+test('TASKS_ENABLED purpose (M4 PR-3b): names the scheduler and the delivery worker switches it gates', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_ENABLED
+  assert.ok(spec)
+  for (const key of ['TASKS_SCHEDULER_ENABLED', 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED']) {
+    assert.ok(GLOBAL_HISTORY_FLAG_BY_KEY[key], key)
+    assert.ok(spec.purpose.includes(key), `TASKS_ENABLED purpose names ${key}`)
+  }
+  assert.match(spec.purpose, /prerequisite of the task scheduler and its notification delivery worker/)
+})
+
+test('task scheduler interval (M4 PR-3b): numeric, default 60000, clamped to half the scan window, sourced from the flags parser', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.TASKS_SCHEDULER_INTERVAL_MS
+  assert.ok(spec)
+  assert.equal(spec.type, 'numeric')
+  assert.equal(spec.source, 'packages/core-backend/src/services/task-notification-flags.ts#resolveTaskSchedulerIntervalMs')
+  assert.match(spec.activationValue, /default 60000/)
+  assert.match(spec.activationValue, /\[5000, 3600000\]/)
+  assert.match(spec.purpose, /\[5000, 3600000\]/)
+  assert.deepEqual(spec.dependsOn, ['TASKS_SCHEDULER_ENABLED'])
+  assert.equal(spec.rules, undefined)
+  assert.equal(isActivated(spec, '60000'), false)
+  assert.equal(isMisconfiguredTruthy(spec, 'true'), false)
+  const flags = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/task-notification-flags.ts'), 'utf8')
+  assert.match(flags, /export function resolveTaskSchedulerIntervalMs\(/)
+  assert.match(flags, /env\.TASKS_SCHEDULER_INTERVAL_MS/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_DEFAULT_MS = 60_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MIN_MS = 5_000/)
+  assert.match(flags, /TASK_SCHEDULER_INTERVAL_MAX_MS = TASK_REMINDER_SCAN_WINDOW_MS \/ 2/)
 })
 
 // MAINTAINER NOTE: these are PREFIX families — a future flag that shares one of these prefixes is
@@ -157,6 +305,12 @@ const NON_GH_EXACT = new Set([
   'MULTITABLE_MANAGE_SCHEMA_PERMISSION_CODE', // permission code constant
   'MULTITABLE_WRITE_PERMISSION', // permission code constant
   'MULTITABLE_SHEET_SCOPE_FORBIDDEN',
+  // 一个项目一张备料表 S3 (R-37): the plugin-scope wrapper's typed 403 when a plugin asks `ensureObject` for a
+  // `systemKind` stamp it may not have (multitable/stock-preparation-overview-contract.ts
+  // `StockPreparationOverviewSystemKindError.code`). An ERROR CODE, not a flag: nothing reads it from
+  // process.env, and the gate it names has no switch — the stamp is admitted for exactly one (plugin, kind,
+  // object) triple, always. Listed here (not registered) for the same reason as the scope codes around it.
+  'MULTITABLE_SYSTEM_KIND_FORBIDDEN',
   'MULTITABLE_UNIT_OF_WORK_SCOPE_FORBIDDEN', // plugin-scoped records UOW error code, not a flag
   'MULTITABLE_UNIT_OF_WORK_UNAVAILABLE', // required host-capability error code, not a flag
   // 客户反馈 2026-09-24 #4a (managed-table zh relabel, multitable/object-display-name-relabel.ts): four
@@ -173,19 +327,27 @@ const NON_GH_EXACT = new Set([
   'DINGTALK_TODO_MIRROR_STATUSES',
 ])
 
-function grepFlagTokens(pattern) {
-  const srcDir = path.join(REPO_ROOT, 'packages/core-backend/src')
+// Default: every *.ts under packages/core-backend/src. `{ file }` greps ONE repo-relative file instead (a
+// plugin reads its env flags in its own source, outside that tree).
+function grepFlagTokens(pattern, { file } = {}) {
+  const target = path.join(REPO_ROOT, file ?? 'packages/core-backend/src')
+  const command = file
+    ? `grep -hoE '${pattern}' ${target}`
+    : `grep -rhoE '${pattern}' ${target} --include='*.ts'`
   let out = ''
   try {
-    out = execSync(`grep -rhoE '${pattern}' ${srcDir} --include='*.ts'`, {
+    out = execSync(command, {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     })
   } catch (err) {
-    throw new Error(`could not grep ${pattern} under ${srcDir}: ${err.message}`)
+    throw new Error(`could not grep ${pattern} under ${target}: ${err.message}`)
   }
   return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
 }
+
+// The attendance plugin file whose leave cancel-round launch flag is registered here (see below).
+const ATTENDANCE_PLUGIN_SOURCE = 'plugins/plugin-attendance/index.cjs'
 
 function globalHistoryFlagsInSource() {
   const tokens = grepFlagTokens('MULTITABLE_[A-Z_0-9]+')
@@ -205,11 +367,70 @@ function globalHistoryFlagsInSource() {
     .filter((t) => !t.endsWith('_'))
     .filter((t) => !NON_GH_EXACT.has(t))
   // Task routes mount only when this flag is the exact string true (AGENTS.md: every new env flag).
-  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED'))
-  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks])].sort()
+  // The *_ENABLED rule keeps constant names out; the one non-boolean task knob is named exactly, the
+  // same shape as ELEARNING_NON_BOOLEAN_FLAGS above.
+  const tasks = grepFlagTokens('TASKS_[A-Z_0-9]+').filter((t) => t.endsWith('_ENABLED') || TASKS_NON_BOOLEAN_FLAGS.has(t))
+  // Approval center read-state badges (test report 2026-10-08): default-OFF exact-'true' switches,
+  // one family by name shape so a new badge switch joins the population as soon as source reads it.
+  const approvalBadges = grepFlagTokens('APPROVAL_[A-Z_0-9]+_BADGE_ENABLED')
+  // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 S1, R-35): the FIRST flags in this
+  // registry that are read by plugin-integration-core rather than by core-backend (AGENTS.md: every
+  // new env flag is registered here; the ADR §8 names this manifest explicitly). One family by name
+  // shape, scanned in the plugin's lib — the two keys are the switch and the G1 role list. Every
+  // other MULTITABLE_STOCK_PREP_* the plugin reads predates this registry and stays out of scope.
+  const stockPrepProjectSheets = grepPluginFlagTokens('MULTITABLE_STOCK_PREP_PROJECT_SHEET[A-Z_0-9]*')
+    .filter((t) => !t.endsWith('_'))
+  // 备料「成员与权限」(S5b, R-39): read by the plugin routes AND the host port, so both trees are scanned;
+  // `_ENABLED` only, so the refusal code STOCK_PREP_MEMBERS_PAGE_DISABLED is not mistaken for a flag.
+  const stockPrepMembersPage = [
+    ...grepPluginFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
+    ...grepFlagTokens('STOCK_PREP_MEMBERS_PAGE_[A-Z_0-9]*'),
+  ].filter((t) => t.endsWith('_ENABLED') && !t.endsWith('_ENABLED_ENV'))
+  // The leave cancel-round launch flag (AGENTS.md: every new env flag; reviewer finding F3, 2026-10-08) is
+  // read by the attendance PLUGIN, not under packages/core-backend/src. Only this one family is scanned
+  // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
+  const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
+    .filter((t) => t.endsWith('_ENABLED'))
+  return [...new Set([...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 
-test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src', () => {
+function grepPluginFlagTokens(pattern) {
+  const libDir = path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib')
+  let out = ''
+  try {
+    out = execSync(`grep -rhoE '${pattern}' ${libDir} --include='*.cjs'`, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    })
+  } catch (err) {
+    throw new Error(`could not grep ${pattern} under ${libDir}: ${err.message}`)
+  }
+  return [...new Set(out.split('\n').map((s) => s.trim()).filter(Boolean))]
+}
+
+test('leave cancel-round launch flag: registered against the plugin reader, exact literal true only', () => {
+  const key = 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined, 'the reader neither trims nor folds case')
+  assert.equal(spec.source, `${ATTENDANCE_PLUGIN_SOURCE}#isAttendanceCancelRoundEntryEnabled`)
+  // The activation value is the reader's own comparison, read from source: a reader that goes back to the
+  // plugin's lenient parseBoolean (trim + lowercase; 'true' / '1' / 'yes') fails here as well.
+  const plugin = readFileSync(path.join(REPO_ROOT, ATTENDANCE_PLUGIN_SOURCE), 'utf8')
+  const reader = /\nfunction isAttendanceCancelRoundEntryEnabled\(\) \{\n([\s\S]*?)\n\}\n/.exec(plugin)
+  assert.ok(reader, 'the plugin reader isAttendanceCancelRoundEntryEnabled must be found')
+  assert.equal(reader[1].trim(), `return process.env.${key} === 'true'`)
+  assert.equal(isActivated(spec, 'true'), true)
+  for (const value of ['TRUE', 'True', ' true', 'true ', '1', 'yes']) {
+    assert.equal(isActivated(spec, value), false, `${JSON.stringify(value)} must not activate`)
+    assert.equal(isMisconfiguredTruthy(spec, value), true, `${JSON.stringify(value)} is reported as a misconfigured truthy value`)
+  }
+  for (const value of [undefined, '', 'false']) assert.equal(isActivated(spec, value), false)
+})
+
+test('completeness (source-derived, non-tautological): manifest covers every Global-History flag read in packages/core-backend/src, plus plugins/plugin-attendance/index.cjs for the ATTENDANCE_CANCEL_ROUND_ family', () => {
   const sourceGH = globalHistoryFlagsInSource()
   assert.ok(
     sourceGH.length >= 20,
@@ -223,11 +444,13 @@ test('completeness (source-derived, non-tautological): manifest covers every Glo
     `source reads Global-History flags MISSING from the manifest — add each to global-history-flag-manifest.mjs (or, if genuinely out of scope, to NON_GH_PREFIXES/NON_GH_EXACT with a reason): ${missing.join(', ')}`,
   )
   const sourceSet = new Set(sourceGH)
-  const phantom = GLOBAL_HISTORY_FLAG_KEYS.filter((k) => !sourceSet.has(k))
+  const phantom = GLOBAL_HISTORY_FLAG_MANIFEST
+    .filter((spec) => !sourceSet.has(spec.key) && !hasVerifiedViteFlagSource(spec))
+    .map((spec) => spec.key)
   assert.deepEqual(
     phantom,
     [],
-    `manifest lists flags NOT read anywhere in packages/core-backend/src (stale or typo'd key): ${phantom.join(', ')}`,
+    `manifest lists flags NOT read anywhere in the scanned sources (packages/core-backend/src, and ${ATTENDANCE_PLUGIN_SOURCE} for the ATTENDANCE_CANCEL_ROUND_ family) (stale or typo'd key): ${phantom.join(', ')}`,
   )
   // every spec carries a non-empty source citation — a rule with no citation is not verified
   for (const spec of GLOBAL_HISTORY_FLAG_MANIFEST) {
@@ -547,4 +770,95 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
     ['archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
+})
+
+test('stock-prep project-sheets switch (ADR adr-stock-prep-project-sheets-20261008 S1, R-35): boolean, exact true, danger high, sourced from its exported predicate', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(
+    spec.source,
+    'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#stockPreparationProjectSheetsEnabled',
+  )
+  // The predicate the manifest names is the one the plugin reads, and it is the EXACT literal.
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+  assert.equal(isActivated(spec, '1'), false)
+  assert.equal(isActivated(spec, undefined), false)
+})
+
+test('stock-prep project-sheet G1 grant role list (R-35): a list, danger high, sourced from its exported parser, not a dependsOn of the switch', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS
+  assert.ok(spec)
+  assert.equal(spec.type, 'list')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.equal(
+    spec.source,
+    'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
+  )
+})
+
+test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact true, danger high, sourced from the plugin predicate, same literal in the host port', () => {
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.STOCK_PREP_MEMBERS_PAGE_ENABLED
+  assert.ok(spec)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.danger, 'high')
+  assert.deepEqual(spec.dependsOn, [])
+  assert.deepEqual(spec.conflictsWith, [])
+  assert.equal(spec.source, 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled')
+  assert.equal(isActivated(spec, 'true'), true)
+  assert.equal(isActivated(spec, 'TRUE'), false)
+  assert.equal(isActivated(spec, ' true'), false)
+  assert.equal(isActivated(spec, '1'), false)
+  assert.equal(isActivated(spec, undefined), false)
+  // Both readers spell the exact-literal comparison against the same env name.
+  const plugin = readFileSync(path.join(REPO_ROOT, 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs'), 'utf8')
+  assert.match(plugin, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
+  assert.match(plugin, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
+  const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/stock-preparation-members.ts'), 'utf8')
+  assert.match(host, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
+  assert.match(host, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
+  // Fix round 1 (S5b lock redesign): the switch-on record states what other sessions wait for, exactly,
+  // and keeps the explicit owner-acceptance line — the overclaims it replaced may not come back.
+  assert.doesNotMatch(spec.purpose, /user_roles writes for any other role are unaffected/)
+  assert.doesNotMatch(spec.purpose, /every wait is bounded by a 5 s lock_timeout/)
+  // Final review: "unaffected" overclaimed — such a write can still queue behind a blocked session or on the
+  // pool, and the role-row waiters (same-role port writes, appointments, members' approval / FWB / record-link
+  // sessions) and the pool they can fill are part of what the owner accepts.
+  assert.doesNotMatch(spec.purpose, /authority rows is unaffected/)
+  assert.match(spec.purpose, /a write that touches neither the role being written nor the grantor's own authority rows is not blocked directly by this write's locks \(it can still queue behind a blocked session or on the connection pool\)/)
+  assert.match(spec.purpose, /other writes of this port on X \(each takes its connection first and then waits.*about 20 of them fill the default 20-connection pool/)
+  assert.match(spec.purpose, /any session acting as a member of X that locks all of that user's roles FOR SHARE \(submitting an approval, an approval write-back \(FWB\) automation, writing a record link\)/)
+  assert.match(spec.purpose, /a sheet-permission PUT\) is blocked indirectly/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision that accepts these waits .*on other writes and appointments to the role being written, on approval submissions, FWB automations and record-link writes by its members .*and on the connection pool they can fill/)
+  assert.doesNotMatch(host, /authority rows\s+\*\s+is unaffected/)
+  assert.match(host, /is not blocked directly by this write's locks \(it can still queue behind a blocked session or on[\s*]+the connection pool/)
+  assert.match(host, /an approval[\s*]+write-back \(FWB\) automation/)
+  assert.match(spec.purpose, /revoking ANY of the grantor's own authority \(.*\) waits for the in-flight write with no bound from this port/)
+  assert.match(spec.purpose, /the 5 s lock_timeout bounds only THIS port's own waits/)
+  assert.match(spec.purpose, /uses more pool connections while its locks are held/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision/)
+  assert.doesNotMatch(host, /every other `user_roles` write/)
+  assert.doesNotMatch(host, /no second pool connection (?:is taken )?while (?:the locks|they) are held/)
+  assert.match(host, /WHAT OTHER SESSIONS SEE/)
+  // Fix round 2 (N3 stated exactly): the row locks hold only EXISTING rows, so an insert-only downgrade
+  // of the grantor waits on nothing and a sheet not reached yet may still be granted after it; a G1
+  // call's pool-connection wait is not a lock wait. Both the switch-on record and the header say so,
+  // and the old "cannot be revoked … nothing is granted after it" claims may not come back.
+  assert.match(spec.purpose, /an insert-only downgrade of the grantor \(.*standard PUT.*member group holding a lower level.*\) waits on nothing, and a named sheet the add has not reached yet may still be granted after it/)
+  assert.match(spec.purpose, /A G1 call waiting for a pool connection is not a lock wait and no lock_timeout bounds it: .*pool connect timeout \(10 s by default\) and ends in 500/)
+  assert.match(host, /THE INSERT-ONLY DOWNGRADE IS NOT COVERED/)
+  assert.match(host, /may STILL BE GRANTED AFTER IT/)
+  assert.match(host, /A G1 CALL WAITING FOR A POOL CONNECTION IS[\s*]+NOT A LOCK WAIT/)
+  assert.doesNotMatch(host, /cannot be revoked between the in-lock check and the G1 call/)
+  assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
+  assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
+  assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
 })

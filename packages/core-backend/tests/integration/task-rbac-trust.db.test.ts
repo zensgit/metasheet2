@@ -15,6 +15,7 @@ import { poolManager } from '../../src/integration/db/connection-pool'
 import { MetaSheetServer } from '../../src/index'
 import { completeTask, countPending, createTask } from '../../src/services/task-records'
 import { tasksRouter } from '../../src/routes/tasks'
+import { seedOrgMembers } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-rbac-trust.db.test.ts requires EXPECT_DB=1')
@@ -193,6 +194,9 @@ describe('gate 2 and gate 13 under token trust', () => {
   it('returns different rows for assigned and created', async () => {
     const actor = await userWith({ label: 'views', codes: ['tasks:read'], admission: true })
     const other = `usr_other_views_${stamp}`
+    // RULED(2026-10-07): [N2] an assignee other than the creator must be an active member of the
+    // org (design §4.6). Seeded ids end in `_${stamp}`, so afterAll's sweep removes them.
+    await seedOrgMembers(orgId, [other])
     const createdOnly = await createTask({
       orgId, creatorId: actor.userId, title: '备料复核', assignees: [other], completionMode: 'all',
     })
@@ -237,13 +241,20 @@ describe('gate 2 and gate 13 under token trust', () => {
       role: 'user',
       roles: [actor.roleId],
     }, JWT_SECRET, { expiresIn: '1h' })
+    // RULED(2026-10-07): [N2] the bait row's assignee is deliberately not a member of org
+    // 'default', and createTask writes only active members of the org as assignees (design §4.6),
+    // so that row is written with SQL; the task row still comes from createTask.
     const planted = await createTask({
       orgId: 'default',
       creatorId: `usr_def_${stamp}`,
       title: '备料复核',
-      assignees: [actor.userId],
+      assignees: [],
       completionMode: 'all',
     })
+    await poolManager.get().query(
+      'INSERT INTO task_assignees (task_id, user_id, assigned_by) VALUES ($1, $2, $3)',
+      [planted.id, actor.userId, `usr_def_${stamp}`],
+    )
     try {
       await poolManager.get().query(
         `UPDATE tasks
@@ -381,7 +392,8 @@ describe('gate 2 and gate 13 under token trust', () => {
       .set('Authorization', `Bearer ${actor.bearer}`)
       .send({})
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ done: true })
+    // M4 PR-3a §5.4: `version` is the locked value plus one for the status flip.
+    expect(response.body).toEqual({ done: true, version: 2 })
     const row = await poolManager.get().query<{ status: string; stamped: boolean }>(
       `SELECT t.status, a.completed_at IS NOT NULL AS stamped
        FROM tasks t JOIN task_assignees a ON a.task_id = t.id
@@ -394,6 +406,7 @@ describe('gate 2 and gate 13 under token trust', () => {
   it('POST /reopen with scope all clears every assignee', async () => {
     const actor = await userWith({ label: 'httpreopen', codes: ['tasks:read', 'tasks:write'], admission: true })
     const other = `usr_other_httpreopen_${stamp}`
+    await seedOrgMembers(orgId, [other])
     const created = await createTask({
       orgId, creatorId: actor.userId, title: '备料复核',
       assignees: [actor.userId, other], completionMode: 'all',
@@ -405,7 +418,8 @@ describe('gate 2 and gate 13 under token trust', () => {
       .set('Authorization', `Bearer ${actor.bearer}`)
       .send({ scope: 'all' })
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ ok: true })
+    // M4 PR-3a §5.4: two completions (one flip) then the reopen flip.
+    expect(response.body).toEqual({ ok: true, version: 3 })
     const rows = await poolManager.get().query<{ user_id: string; stamped: boolean }>(
       `SELECT user_id, completed_at IS NOT NULL AS stamped FROM task_assignees WHERE task_id = $1 ORDER BY user_id`,
       [created.id],
@@ -424,6 +438,7 @@ describe('gate 2 and gate 13 under token trust', () => {
   async function reopenOnlyCaller(label: string, body: Record<string, unknown>): Promise<void> {
     const actor = await userWith({ label, codes: ['tasks:read', 'tasks:write'], admission: true })
     const other = `usr_other_${label}_${stamp}`
+    await seedOrgMembers(orgId, [other])
     const created = await createTask({
       orgId,
       creatorId: `usr_creator_${label}_${stamp}`,
@@ -438,7 +453,8 @@ describe('gate 2 and gate 13 under token trust', () => {
       .set('Authorization', `Bearer ${actor.bearer}`)
       .send(body)
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ ok: true })
+    // M4 PR-3a §5.4: two completions (one flip) then the reopen flip.
+    expect(response.body).toEqual({ ok: true, version: 3 })
     const rows = await poolManager.get().query<{ user_id: string; stamped: boolean }>(
       'SELECT user_id, completed_at IS NOT NULL AS stamped FROM task_assignees WHERE task_id = $1',
       [created.id],

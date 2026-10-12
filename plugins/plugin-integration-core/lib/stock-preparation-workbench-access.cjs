@@ -98,9 +98,13 @@ const STOCK_PREP_PERMISSION_DESCRIPTORS = Object.freeze([
   Object.freeze({ code: STOCK_PREP_OPERATE, name: 'Stock Prep Operate', description: 'Confirm stock-preparation queue decisions and read back own value entry' }),
   // The ADMIN description gained the relabel write (客户反馈 2026-09-24 #4a). The seed migration used
   // ON CONFLICT DO NOTHING, so the new text reaches existing rows through its own compare-and-set
-  // migration (zzzz20260927120000_update_stock_prep_admin_permission_description), which the
-  // permission-matrix suite pins byte-equal to this string.
-  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no provisioning, no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on)' }),
+  // migration (zzzz20260927120000_update_stock_prep_admin_permission_description). S1 (R-35) then
+  // dropped the words "no provisioning": the ladder short-circuits ADMIN into the PULL tier, and a
+  // puller may now create ONE per-project sheet from the frozen template (the named R-11 exception),
+  // so a role editor reading "no provisioning" would be reading a lie. The second compare-and-set
+  // (zzzz20261009120000_update_stock_prep_admin_permission_description_project_sheets) carries THIS
+  // text to existing rows; the permission-matrix suite pins the whole chain byte-equal.
+  Object.freeze({ code: STOCK_PREP_ADMIN, name: 'Stock Prep Admin', description: 'Workbench-scoped stock-preparation administration (no pack install; may relabel still-English managed-table headers to their Chinese template names when the operator switch is on; includes the puller tier, which may create one per-project stock-preparation sheet from the frozen template when the project-sheets switch is on)' }),
   // Seeded by its own migration (zzzz20261008120000_add_stock_prep_pull_permission), which the
   // permission-matrix suite pins byte-equal to this row.
   Object.freeze({ code: STOCK_PREP_PULL, name: 'Stock Prep Pull', description: 'Pull from PLM into the stock-preparation sheet (dry-run, apply, large-BOM background channel, reconcile); in later slices also create project sheets and archive/restore them. The holder must also hold stock-prep:operate and stock-prep:read' }),
@@ -222,6 +226,102 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     path: '/api/integration/stock-preparation/projects/:projectNo/board',
     control: 'stock-prep-operator-project-board',
   }),
+  // 一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008 §4; S1 routes R-35, S2 controls
+  // R-36). The three project-sheet routes joined this manifest in S2, which is when their controls
+  // shipped; S1 had them on a named, expiring M-07 exemption. All three answer 404
+  // STOCK_PREPARATION_PROJECT_SHEETS_DISABLED while the default-OFF switch is off — that is a
+  // refusal by CONFIG, after the permission gate, exactly like the unconfigured handoff answering
+  // 501 — so "visible == actionable" is decided by the gate below and the controls render only
+  // once the server has answered (switch on). None of the three controls lives on the
+  // confirmation-queue view; the web matrix suite lists them as such and names the suite that
+  // asserts their alignment on the surface they do live on (StockPreparationProjectTarget.spec.ts).
+  Object.freeze({
+    // The project's sheet state (absent / active / archived), its deep-link handles and bounded row
+    // counts — values-free. OPERATE, the board's tier: a floor operator sees whether their project
+    // has a sheet and opens it (「直接打开」), but `may.*` is computed on the PULL tier.
+    capability: 'projectTarget.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-status',
+  }),
+  Object.freeze({
+    // CREATE the project's sheet — the named R-11 exception (R-35): PULL tier, frozen template, empty
+    // body. Its control is the 「新建备料表并拉取」 confirmation on the pull panel, which is itself
+    // rendered only for the PULL tier (`canRunStockPrepProjectSync`).
+    capability: 'projectTarget.create',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target',
+    control: 'stock-prep-project-target-create',
+  }),
+  Object.freeze({
+    // The tenant's registry rows (handles, enums, counts). OPERATE. Its control is the home page's
+    // 「每个项目一张备料表」 line, which renders only when this list answered.
+    capability: 'projectTarget.list',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    control: 'stock-prep-project-target-list',
+  }),
+  // S4 (ADR §6, register R-38) — 归档代替删除 (Q2): the two lifecycle routes, PULL tier like the
+  // create (S0; `stock-prep:admin` and the platform admin pass through the ladder). Both change the
+  // registry row only — never the sheet, its rows or its grants — and both answer 404 DISABLED while
+  // the default-OFF switch is off, after the gate. Their controls live on 项目备料页's sheet-state
+  // line and render only for the PULL tier, on the state the server says the action fits
+  // (`may.archive` / `may.restore`); StockPreparationProjectArchive.spec.ts asserts the alignment.
+  Object.freeze({
+    capability: 'projectTarget.archive',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/archive',
+    control: 'stock-prep-project-target-archive',
+  }),
+  Object.freeze({
+    capability: 'projectTarget.restore',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/restore',
+    control: 'stock-prep-project-target-restore',
+  }),
+  // S3 (ADR §5, register R-37) — the project overview (Q5) and the O2(a) project-level columns. All
+  // three are OPERATE, as the ADR writes them (project-fields: 「门 OPERATE」; refresh: 「OPERATE 档」):
+  // a floor operator may read / set 负责人 / 备注 / 计划完成 on a project they work and rebuild the
+  // read-only overview; the overview SHEET itself is host-level read-only for every person, admins
+  // included. All three answer 404 DISABLED while the default-OFF switch is off, after the gate. The
+  // fields form lives on 项目备料页's sheet-state line, the refresh button on the home page;
+  // StockPreparationProjectOverview.spec.ts asserts the alignment where they live. The project-level
+  // texts travel ONLY through these two routes' bodies and the overview cells — never an audit row.
+  Object.freeze({
+    capability: 'projectFields.read',
+    code: STOCK_PREP_OPERATE,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields',
+  }),
+  Object.freeze({
+    capability: 'projectFields.update',
+    code: STOCK_PREP_OPERATE,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/projects/:projectNo/target/project-fields',
+    control: 'stock-prep-project-fields-save',
+  }),
+  Object.freeze({
+    capability: 'projectOverview.refresh',
+    code: STOCK_PREP_OPERATE,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    control: 'stock-prep-project-overview-refresh',
+  }),
+  // S3 fix round 1 (R6): only the 拉取人员 tier CREATES the read-only overview (the project-target create
+  // route does it too, best-effort); the OPERATE refresh projects into an existing one.
+  Object.freeze({
+    capability: 'projectOverview.ensure',
+    code: STOCK_PREP_PULL,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    control: 'stock-prep-project-overview-ensure',
+  }),
   Object.freeze({
     capability: 'confirmationQueue.ensure',
     code: PLATFORM_ADMIN_GATE,
@@ -235,6 +335,43 @@ const STOCK_PREP_WORKBENCH_CAPABILITIES = Object.freeze([
     method: 'POST',
     path: '/api/integration/table-actions/:actionId/confirmation-decisions/reconcile',
     control: 'stock-prep-confirmation-reconcile',
+  }),
+  // S5b (ADR §11.4–11.6, register R-39) — 「成员与权限」, the app's own roles and members. All four ride
+  // the WORKBENCH_ADMIN tier (`stock-prep:admin`; platform admins through the ladder) at the plugin gate,
+  // and the host's narrow members port then admits only a platform admin or the ADMITTED `stock-prep`
+  // delegated admin (role `stock-prep_admin`) with a stock-prep scope — so the plugin gate is necessary,
+  // never sufficient. All four answer 404 STOCK_PREP_MEMBERS_PAGE_DISABLED while the default-OFF
+  // STOCK_PREP_MEMBERS_PAGE_ENABLED is off, after the gate and before any IO. Their controls live on the
+  // members page (`StockPreparationMembersView.vue`), which renders only once the read answered;
+  // StockPreparationMembers.spec.ts asserts the alignment there. Appoint / revoke / admission are NOT
+  // here: the page calls the existing `/api/admin/role-delegation/...` routes for those.
+  Object.freeze({
+    capability: 'members.read',
+    code: STOCK_PREP_ADMIN,
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    control: 'stock-prep-members-page',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleCreate',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles',
+    control: 'stock-prep-members-custom-role-create',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleUpdate',
+    code: STOCK_PREP_ADMIN,
+    method: 'PATCH',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId',
+    control: 'stock-prep-members-custom-role-save',
+  }),
+  Object.freeze({
+    capability: 'members.customRoleProjectTargets',
+    code: STOCK_PREP_ADMIN,
+    method: 'POST',
+    path: '/api/integration/stock-preparation/members/custom-roles/:roleId/project-targets',
+    control: 'stock-prep-members-custom-role-add-tables',
   }),
 ])
 
@@ -572,6 +709,10 @@ const STOCK_PREP_RAIL_GROUPS = Object.freeze([
       Object.freeze({ key: 'getting-started', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'install', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
       Object.freeze({ key: 'ops', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
+      // 成员与权限 (S5b, R-39). The rail gate is the permission half only; the shell additionally hides
+      // the item until the members read has answered (switch on, caller admitted by the host port), so
+      // with STOCK_PREP_MEMBERS_PAGE_ENABLED off nobody sees it.
+      Object.freeze({ key: 'members', gate: STOCK_PREP_RAIL_GATE_WORKBENCH_ADMIN }),
     ]),
     advancedGate: STOCK_PREP_RAIL_GATE_PLATFORM_ADMIN,
     advanced: Object.freeze([

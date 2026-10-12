@@ -305,6 +305,11 @@ describe('multitable template library', () => {
     expect(calendar?.config).toEqual(expect.objectContaining({ dateFieldId: dueDateField?.id }))
     expect(result.sheets[0].baseId).toBe('base_fixed')
     expect(result.views).toHaveLength(3)
+    // S3 fix round 1 (R12): the client-facing install response carries no `systemKind: null` key — the
+    // sheet objects are byte-identical to the pre-S3 response.
+    for (const sheet of result.sheets) {
+      expect(Object.keys(sheet).sort()).toEqual(['baseId', 'description', 'id', 'name'])
+    }
   })
 
   // S1 (adversarial review of #6091, 2026-09-26): the returned `result.views` array is ALWAYS in

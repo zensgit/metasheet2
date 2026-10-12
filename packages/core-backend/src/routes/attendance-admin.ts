@@ -11,6 +11,7 @@ import { ensurePlatformAdmin } from './admin-users'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 import {
   assignUserRoles,
+  auditDelegatedAdminScopeCleanup,
   isRoleAssignable,
   sendIfRoleAssignmentRefused,
   unassignUserRoles,
@@ -235,17 +236,52 @@ export const ATTENDANCE_ROLE_TEMPLATES: Record<AttendanceRoleTemplateId, {
 }
 
 /**
- * The authority this router acts under when it changes role membership.
+ * The namespaces this router's role-membership writes are bounded to.
  *
  * It is the router's OWN rbac resource — the same literal named by the
  * `rbacGuard('attendance', 'admin')` mount below — so every role write this router performs
  * is bounded to the one namespace the mount itself admits, whatever shape the caller's grant
  * takes. Deriving the list from the router keeps the bound identical for every caller the
  * mount lets through. A router mounted behind `rbacGuard('foo', 'admin')` would pass `['foo']`.
+ *
+ * The writers never receive a scope constant: each role route hands them the scope DERIVED from
+ * the caller's resolved user scope (`deriveAttendanceRoleAssignmentScope`), so the platform arm is
+ * reachable only through a resolution that proved a platform administrator.
  */
-const ATTENDANCE_ROLE_ASSIGNMENT_SCOPE: RoleAssignmentScope = {
-  kind: 'namespaces',
-  namespaces: ['attendance'],
+const ATTENDANCE_ROLE_NAMESPACES: readonly string[] = ['attendance']
+
+/**
+ * The ROLE-ID pre-check bound only (`resolveAttendanceRoleAssignment`, before the caller's scope is
+ * resolved): the widest role-id set this router can ever write. It is never passed to a writer.
+ */
+const ATTENDANCE_ROLE_ID_BOUND: RoleAssignmentScope = {
+  kind: 'platform-admin-in-namespaces',
+  namespaces: ATTENDANCE_ROLE_NAMESPACES,
+}
+
+/**
+ * The authority a role write of this router runs under, derived from the caller's RESOLVED user
+ * scope rather than asserted by a comment beside a constant:
+ *  - `global` → `platform-admin-in-namespaces`. `resolveAttendanceAdminUserScope` grants `global`
+ *    only to a platform administrator (legacy claim or the `admin` role), and a platform
+ *    administrator may appoint `attendance_admin` (owner ruling 「只有平台管理员能任命 *_admin」).
+ *    The role-id bound is the router's own namespace.
+ *  - anything else (`org`, or a shape this function does not know) → refused,
+ *    ORG_SCOPED_ROLE_WRITE_UNAVAILABLE: `user_roles` has no org_id, so a delegated write would grant
+ *    or revoke the role in every organization the target belongs to although the request proved
+ *    only one. If an org-scoped role store ever exists, THIS is the function that must change, and
+ *    the delegated arm for it is `{ kind: 'namespaces' }` (which refuses main-admin and
+ *    admin-equivalent roles) — never the platform arm.
+ */
+export function deriveAttendanceRoleAssignmentScope(scope: AttendanceAdminUserScope): RoleAssignmentScope {
+  if (scope?.kind === 'global') {
+    return { kind: 'platform-admin-in-namespaces', namespaces: ATTENDANCE_ROLE_NAMESPACES }
+  }
+  throw new AttendanceAdminUserScopeError(
+    403,
+    'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE',
+    'Organization-scoped role changes require an organization-scoped role store',
+  )
 }
 
 /** Single-object result: this package compiles with `strict: false`, where narrowing a
@@ -275,7 +311,7 @@ function resolveAttendanceRoleAssignment(body: unknown): AttendanceRoleResolutio
       error: { status: 400, code: 'ROLE_REQUIRED', message: 'template or roleId is required' },
     }
   }
-  if (!isRoleAssignable(finalRoleId, ATTENDANCE_ROLE_ASSIGNMENT_SCOPE)) {
+  if (!isRoleAssignable(finalRoleId, ATTENDANCE_ROLE_ID_BOUND)) {
     return {
       roleId: finalRoleId,
       error: {
@@ -589,7 +625,7 @@ type AttendanceAdminResolvedUser = {
   is_active: boolean
 }
 
-type AttendanceAdminUserScope =
+export type AttendanceAdminUserScope =
   | { kind: 'global' }
   | { kind: 'org'; orgId: string }
 
@@ -749,17 +785,6 @@ function assertAllRoleTargetsEligible(
     // Foreign-org, inactive and nonexistent identities intentionally share one response.
     throw new AttendanceAdminUserScopeError(404, 'USER_TARGET_NOT_FOUND', 'User not found in requested scope')
   }
-}
-
-function assertGlobalAttendanceRoleWriteScope(scope: AttendanceAdminUserScope): void {
-  if (scope.kind === 'global') return
-  // user_roles has no org_id. A delegated write would therefore grant or revoke the role in
-  // every organization the target belongs to, even though this request proved only one org.
-  throw new AttendanceAdminUserScopeError(
-    403,
-    'ORG_SCOPED_ROLE_WRITE_UNAVAILABLE',
-    'Organization-scoped role changes require an organization-scoped role store',
-  )
 }
 
 function getAttendanceAdminRequestUserId(req: Request): string {
@@ -1211,17 +1236,25 @@ export function attendanceAdminRouter(): Router {
       const { insert, resolvedUsers } = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        assertGlobalAttendanceRoleWriteScope(scope)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
         assertAllRoleTargetsEligible(userIds, resolved)
         await ensureAttendanceRoleTemplates(runQuery)
         const result = await assignUserRoles({
           userIds,
           roleId: finalRoleId,
-          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          scope: roleWriteScope,
           executor: client,
         })
         return { insert: result, resolvedUsers: resolved }
+      })
+      // Post-commit: a fresh `attendance_admin` appointment drops audience left from an earlier
+      // tenure inside the transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: insert?.delegatedAdminScopeCleanup,
       })
 
       const affectedUserIdsRaw = insert.affectedUserIds
@@ -1276,16 +1309,24 @@ export function attendanceAdminRouter(): Router {
       const { del, resolvedUsers } = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        assertGlobalAttendanceRoleWriteScope(scope)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
         assertAllRoleTargetsEligible(userIds, resolved)
         const result = await unassignUserRoles({
           userIds,
           roleId: finalRoleId,
-          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          scope: roleWriteScope,
           executor: client,
         })
         return { del: result, resolvedUsers: resolved }
+      })
+      // Post-commit: revoking `attendance_admin` dropped the delegated audience inside the
+      // transaction above; record what it dropped.
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: del?.delegatedAdminScopeCleanup,
       })
 
       const affectedUserIdsRaw = del.affectedUserIds
@@ -1371,20 +1412,27 @@ export function attendanceAdminRouter(): Router {
       }
       const finalRoleId = roleResolution.roleId
 
+      let membership: Awaited<ReturnType<typeof assignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        assertGlobalAttendanceRoleWriteScope(scope)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
         await ensureAttendanceRoleTemplates(runQuery)
-        await assignUserRoles({
+        membership = await assignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
-          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          scope: roleWriteScope,
           executor: client,
         })
         return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_appointed',
+        cleanup: membership?.delegatedAdminScopeCleanup,
       })
 
       const [roles, permissions, isAdmin] = await Promise.all([
@@ -1424,19 +1472,26 @@ export function attendanceAdminRouter(): Router {
       }
       const finalRoleId = roleResolution.roleId
 
+      let membership: Awaited<ReturnType<typeof unassignUserRoles>> | undefined
       const profile = await transaction(async (client) => {
         const runQuery = client.query as typeof query
         const scope = await resolveAttendanceAdminUserScope(req, runQuery, true)
-        assertGlobalAttendanceRoleWriteScope(scope)
+        const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
-        await unassignUserRoles({
+        membership = await unassignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
-          scope: ATTENDANCE_ROLE_ASSIGNMENT_SCOPE,
+          scope: roleWriteScope,
           executor: client,
         })
         return fetchUserProfile(userId, runQuery)
+      })
+      await auditDelegatedAdminScopeCleanup({
+        actorId: getAttendanceAdminRequestUserId(req),
+        roleId: finalRoleId,
+        trigger: 'role_unassigned',
+        cleanup: membership?.delegatedAdminScopeCleanup,
       })
 
       const [roles, permissions, isAdmin] = await Promise.all([

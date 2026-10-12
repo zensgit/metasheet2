@@ -66,6 +66,9 @@ export const CENTER_ZH = {
   urgeFailed: '催办失败，请重试',
   markAllReadNone: '当前范围内无未读审批',
   markAllReadFailed: '标记已读失败，请重试',
+  // Test report 2026-10-08 — tab badge tooltips, shown after the count ("3 条抄送未读").
+  ccUnreadBadgeSuffix: '条抄送未读',
+  mineOutcomeBadgeSuffix: '条新结果',
 }
 
 export const CENTER_EN: Record<keyof typeof CENTER_ZH, string> = {
@@ -125,6 +128,8 @@ export const CENTER_EN: Record<keyof typeof CENTER_ZH, string> = {
   urgeFailed: 'The reminder failed. Please try again.',
   markAllReadNone: 'No unread approvals in the current scope',
   markAllReadFailed: 'Could not mark as read. Please try again.',
+  ccUnreadBadgeSuffix: 'unread CC',
+  mineOutcomeBadgeSuffix: 'new outcome(s)',
 }
 
 export const CENTER_TABLE_ZH = {

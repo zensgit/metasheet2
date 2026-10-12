@@ -671,6 +671,29 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     source: 'packages/core-backend/src/multitable/object-display-name-relabel.ts#isManagedTableRelabelApplyEnabled',
   },
   {
+    key: 'MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "一个项目一张备料表 (ADR adr-stock-prep-project-sheets-20261008, register R-35, slice S1): the operator switch for per-project stock-preparation sheets. Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST (no restart). Off: the three project-sheet routes (GET/POST …/projects/:projectNo/target, GET …/project-targets) answer 404 STOCK_PREPARATION_PROJECT_SHEETS_DISABLED with zero IO, and every table-action route resolves the deployment env `action.target` byte for byte as before S1. On: (1) a 拉取人员 (stock-prep:pull) may CREATE one managed sheet per business project from the frozen template through the POST route — the named R-11 exception — with the objectId and sheet id derived server-side, an empty closed body, a 200-row-per-tenant cap and an audit row; (2) every stock-prep read and write (dry-run, apply, large-BOM, reconcile, mvp-persist, conflict-policies, carry, export, handoff advance, board) resolves its SHEET from the project registry (migration 087) by projectNo instead of from the env target — an unregistered project is 409 STOCK_PREPARATION_PROJECT_ABSENT, an archived one 409 STOCK_PREPARATION_PROJECT_ARCHIVED on writes, and conflict-policies without ?projectNo= is 400; (3) the tenant wall runs on the resolved sheet on routes that never ran it before; (4) the apply sandbox gate admits the registered project sheet only while the deployment's own env target objectId is already allowlisted (Q6: inherits the sandbox authorization, cannot widen it). Danger=high: it CREATES managed tables on the customer's instance (one per project, capped) and it CHANGES WHERE PULLS WRITE. Switching it off again does NOT restore pre-S1 behaviour for a deployment whose projects were pulled into project sheets: every route goes back to the old mixed env sheet, where #5860's one-sheet-one-project guard refuses every project but one (ADR §8: 关开关 = 停用拉取). The project sheets and their data stay; switching back on restores them. PRECONDITION (fix round 1, 2026-10-09): the switch must NOT be turned on before slice S2 — the customer-pack reinstall onto the project sheets and the manifest controls for the three routes — is merged; four known limitations are recorded in register R-35.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#stockPreparationProjectSheetsEnabled',
+  },
+  {
+    key: 'MULTITABLE_STOCK_PREP_PROJECT_SHEET_GRANT_ROLE_IDS',
+    type: 'list',
+    activationValue:
+      'comma-separated role ids, each `stock-prep` or `stock-prep_<x>` and existing (trimmed, de-duplicated); UNSET/EMPTY ⇒ no grant is written (G2: an admin grants by hand)',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "一个项目一张备料表 G1 (ADR §2 Q7, addendum A.6, register R-35): the SERVER-CONFIGURED roles that receive `spreadsheet:write` on every project sheet at create time (and on an idempotent create replay), through the host's narrow grant port (multitable/plugin-scope.ts grantSheetRoleWrite → services/stock-preparation-project-sheet-grants.ts). Without it a 拉取人员 creates a sheet the floor cannot open (no grant row, no global multitable:read). Bounded by the host, not by this value: role subjects only, every id inside the `stock-prep` role namespace and existing (a foreign or unknown role refuses the whole grant), the level is the literal spreadsheet:write (never read — intersection mode would lock the floor out of entering values — never admin), ADD-ONLY (ON CONFLICT DO NOTHING, no revoke, no downgrade), only on a sheet the plugin object registry records as this plugin's and this project's with the project-sheet objectId shape; every landed grant that changes the role's level writes a meta_config_revisions row (a role already holding admin gets the write row and no history row). Only read while MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED is on (the create route is 404 otherwise), but NOT modeled as dependsOn: isActivated() is false for every non-boolean spec, so a requires rule keyed off this list would never fire and would only mislead a reader of the status line. Danger=high: it is an authorization write — table-level spreadsheet:write also opens field and view management on that one sheet (the level the floor already holds on today's sheet; ADR §11.7 records the cost).",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-project-targets.cjs#resolveProjectSheetGrantRoleIds',
+  },
+  {
     key: 'MULTITABLE_COPY_SHEET_SYNC_MAX_ROWS',
     type: 'numeric',
     activationValue: 'numeric row count (default 2000; unset / blank / non-integer / < 1 = 2000; capped at 50000 = XLSX_MAX_ROWS)',
@@ -687,10 +710,119 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     activationValue: 'true',
     dependsOn: [],
     conflictsWith: [],
+    // ASSUMPTION(task-m4): [own-28] danger raised from low: turning this on now depends on a
+    // migration that is not applied yet. The purpose names all four route prefixes it mounts.
+    danger: 'medium',
+    purpose:
+      'Mounts the task routes: /api/tasks (P0-A/P0-B), /api/task-settings, /api/task-lists and /api/task-groups (M4). Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode registers none of them. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds). Since M4 PR-3a the task routes read task_list_items, task_list_members and task_user_settings, so any environment that sets this to true must have the M4 migration (zzzz20261009130000_create_task_m4_tables) applied; without it the task routes answer 500. Since M4 PR-3b it is also a prerequisite of the task scheduler and its notification delivery worker (TASKS_SCHEDULER_ENABLED, TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED): while this is not the exact string true neither of them starts, whatever their own values.',
+    source: 'packages/core-backend/src/routes/tasks.ts#tasksRouter; packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled',
+  },
+  // M4 PR-3b (design docs/development/task-m4-pr3b-backend-design-20261001.md §9.2; design lock §10 P1
+  // flags, gate 18). The three entries carry `dependsOn` as documentation only and no `rules`
+  // (ASSUMPTION(task-m4): [own-3b-22]); whether they become `requires` rules is owner question §13-Q19.
+  // Items the owner ruled on 2026-10-07 read RULED(2026-10-07); the rest stay ASSUMPTION(task-m4).
+  // Items are cited by id only. Draft PR: not merged, not on staging.
+  {
+    key: 'TASKS_SCHEDULER_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Task scheduler loop (M4 PR-3b design §6). Default OFF; exact literal 'true' only (no trim, no case folding). The scheduler is constructed and started only when this flag AND TASKS_ENABLED are both the exact string true and the database pool exists. Each tick takes the tasks-scheduler:leader advisory lock in a dedicated transaction; the tick that holds it runs the single-task reminder scan and the daily digest scan, and after that transaction commits runs the delivery loop when TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED is on. Both scans write outbox rows only while this flag, the worker flag and the DingTalk channel flag are all on (ASSUMPTION(task-m4): [own-3b-01]) and only for orgs that have an active DingTalk integration row ([own-3b-13]); otherwise the loop runs and writes nothing. Tick interval: TASKS_SCHEDULER_INTERVAL_MS, a numeric knob (default 60000 ms, clamped to 5000..3600000 ms) and not a switch. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. M4 has no hard delete and no purge job, so outbox rows are kept; the retention period is decided later (RULED(2026-10-07): [R13]). Not a session feature; not read by the web client.",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTasksSchedulerEnabled',
+  },
+  {
+    key: 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED', 'TASKS_SCHEDULER_ENABLED'],
+    conflictsWith: [],
+    danger: 'medium',
+    purpose:
+      "Task notification delivery worker (M4 PR-3b design §7). Default OFF; exact literal 'true' only. Registers the delivery job with the task scheduler; the job runs only after a tick's leader transaction has committed, so it runs only where TASKS_SCHEDULER_ENABLED (and TASKS_ENABLED) are on. The worker claims due outbox rows whose channel is registered (FOR UPDATE SKIP LOCKED, batch lease), writes a row to `sending` immediately before its single external send, and ends each claimed row as sent, retrying, failed, skipped or outcome_unknown; a `sending` row whose lease expires is swept to outcome_unknown and is never re-sent (ASSUMPTION(task-m4): [own-3b-04]). With no channel flag on the registered channel list is empty and a claim selects zero rows. Every lookup is bound to the delivery row's org_id; there is no default org. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. M4 has no hard delete and no purge job, so outbox rows are kept; the retention period is decided later (RULED(2026-10-07): [R13]).",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTaskNotificationDeliveryWorkerEnabled',
+  },
+  {
+    key: 'TASKS_NOTIFICATION_DINGTALK_WORK_NOTIFICATION_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: ['TASKS_ENABLED', 'TASKS_SCHEDULER_ENABLED', 'TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED'],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "DingTalk work-notification channel for task notifications (M4 PR-3b design §8), the only code in the task line that sends to an external service. Default OFF; exact literal 'true' only. Registers the channel `dingtalk_work_notification`. The producer and the two scheduler scans write outbox rows only while this flag, TASKS_NOTIFICATION_DELIVERY_WORKER_ENABLED and TASKS_SCHEDULER_ENABLED are all on (ASSUMPTION(task-m4): [own-3b-01]), and only for orgs that have an active DingTalk integration row ([own-3b-13]). The recipient's DingTalk identity is resolved through the org-bound directory tables of the delivery row's org, and the app credentials for the send are read from that same integration row only ([own-3b-19]); the integration's baseUrl must be https with host oapi.dingtalk.com or a .dingtalk.com subdomain ([own-3b-21]). Outbox rows hold ids and enum values only; title and body are rendered at send time. Prerequisites wherever this is on: TASKS_ENABLED on and the M4 migration (zzzz20261009130000_create_task_m4_tables) applied. danger=high: outbound messages to employees.",
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#isTaskDingTalkWorkNotificationEnabled',
+  },
+  {
+    key: 'TASKS_SCHEDULER_INTERVAL_MS',
+    type: 'numeric',
+    activationValue:
+      'numeric ms (default 60000 = 60s; unset / blank / anything but a plain non-negative integer after trimming = 60000; otherwise clamped to [5000, 3600000] = [5s, 1h = half the reminder scan window])',
+    dependsOn: ['TASKS_SCHEDULER_ENABLED'],
+    conflictsWith: [],
     danger: 'low',
     purpose:
-      'Mounts the P0-A task routes. Default OFF; the router factory returns null unless the value is the exact string true, so disabled mode does not register /api/tasks. An identical exact-true predicate (packages/core-backend/src/tasks/feature-flag.ts#isTasksEnabled, pinned equal to the mount check by tests/unit/tasks-feature-flag.test.ts) sets the session feature `tasks`: while OFF the web client shows no 任务 top-bar entry or pending badge, /tasks redirects to the home path, and the web client issues no /api/tasks request (with the build-time development feature override off, as in production builds).',
-    source: 'packages/core-backend/src/routes/tasks.ts:35',
+      'Tick interval of the task scheduler loop (M4 PR-3b design §6.6, §9.1). Read once at start-up through resolveTaskSchedulerIntervalMs: the value must be a plain digit string after trimming and a safe integer; unset, blank, signed, decimal, exponent, hex or unit-suffixed values fall back to 60000. The result is clamped to [5000, 3600000]; the ceiling is half the reminder scan window W, which keeps W >= 2 x interval so that one missed tick plus timer lateness still lands inside W (design §6.2), so 0 reads as 5000 and 86400000 as 3600000. The scheduler constructor validates the value it receives against the same range instead of clamping it. Not a gate: nothing turns on or off, and the default is the intended state. Inert unless TASKS_SCHEDULER_ENABLED (with TASKS_ENABLED) constructs the scheduler. Registered as a numeric knob although the PR-3b design (§9.1, ASSUMPTION(task-m4): [D3]) left it out of this manifest: AGENTS.md registers every new env knob here, and the other numeric knobs in this file follow the same rule.',
+    source: 'packages/core-backend/src/services/task-notification-flags.ts#resolveTaskSchedulerIntervalMs',
+  },
+  {
+    key: 'APPROVAL_CC_UNREAD_BADGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Test report 2026-10-08 T3 (being CC'd shows no prompt). Default OFF; exact literal 'true' only (no trim, no case folding). On: the approval center's 抄送我的 tab shows an unread-CC badge and a per-row dot, from GET /api/approvals/cc-unread-count and the list's per-row ccUnread, both built on one predicate: unread when the viewer has no approval_reads row at or after the newest CC row targeting them. Off: that endpoint answers 404 APPROVAL_CC_UNREAD_BADGE_DISABLED before any query, the list issues no extra query and its rows carry no new key, and the web (session feature approvalCcUnreadBadge) issues no count request. No DDL, no new realtime event, nothing added to the pending/todo counts or their socket events (todo-center lock B). Rollout effect, an owner choice at enablement: historical CC rows count by the same rule, so on the first load every CC a person was never shown since it arrived counts as unread. danger=low: read-only; one count query per approval-center load or tab switch and one id-scoped query per 抄送我的 page.",
+    source: 'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalCcUnreadBadgeEnabled',
+  },
+  {
+    key: 'APPROVAL_MINE_OUTCOME_BADGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      "Test report 2026-10-08 T6 (a requester gets no prompt when their request is rejected). Default OFF; exact literal 'true' only (no trim, no case folding). On: the approval center's 我发起的 tab shows a new-outcome badge and a per-row dot, from GET /api/approvals/mine-outcomes/unseen-count and the list's per-row outcomeUnseen, both built on one predicate: the viewer's own request is in a terminal status, the newest audit row that moved it into that status was written by someone else, and the viewer has no approval_reads row at or after that row. Self-decided outcomes (own withdrawal, own rejection or approval) are never badged. Off: that endpoint answers 404 APPROVAL_MINE_OUTCOME_BADGE_DISABLED before any query, the list issues no extra query and its rows carry no new key, and the web (session feature approvalMineOutcomeBadge) issues no count request. No DDL, no new realtime event (a requester receives no frame when someone else decides; the badge refreshes on the next load or tab switch), nothing added to the pending/todo counts or their socket events (todo-center lock B). Rollout effect, an owner choice at enablement: historical outcomes count by the same rule, so on the first load every finished request whose outcome its requester never opened afterwards counts as new. danger=low: read-only; one count query per approval-center load or tab switch and one id-scoped query per 我发起的 page.",
+    source: 'packages/core-backend/src/services/approval-notify-badge-flags.ts#isApprovalMineOutcomeBadgeEnabled',
+  },
+  {
+    key: 'STOCK_PREP_MEMBERS_PAGE_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'high',
+    purpose:
+      "备料「成员与权限」(ADR adr-stock-prep-project-sheets-20261008 §11.4–11.6, slice S5b, register R-39): the operator switch for the /stock-prep workbench's members page. Default OFF; exact literal 'true' only (no trim, no case folding), read PER REQUEST by the four plugin routes (…/stock-preparation/members, …/members/custom-roles, …/members/custom-roles/:roleId, …/members/custom-roles/:roleId/project-targets) AND by the host's narrow members port (packages/core-backend/src/services/stock-preparation-members.ts#stockPrepMembersPageEnabled), each of which answers 404 STOCK_PREP_MEMBERS_PAGE_DISABLED before any IO while it is off — after the plugin's WORKBENCH_ADMIN gate. Off, the web hides the 「成员与权限」 rail item and guards its ?tab=members deep link (both follow the read's answer), so the page is invisible. On: a platform admin or the ADMITTED stock-prep delegated admin (role stock-prep_admin with a stock-prep department / member-group scope; otherwise 403, or 403 ROLE_DELEGATION_SCOPE_REQUIRED) may create and edit server-generated stock-prep_c_<8 hex> roles carrying only stock-prep:read / :operate / :pull (any other code 400; never stock-prep:admin; never an _admin id or a built-in), within the grantor's own current codes (and, for a delegated admin, only while every member of the role is inside their delegated scope; at most 100 custom roles), and add project sheets of their own tenant to such a role through the G1 grant port (add-only, spreadsheet:write, only sheets the grantor can fully write; the project-sheet add also needs MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED, not modeled as dependsOn because the other three routes do not need it). Every change writes an audit row in the admin-users delegation shape. Appoint / revoke / admission use the existing /api/admin/role-delegation routes regardless of this switch. Danger=high: authorization writes (roles, role_permissions, sheet grants) by a non-platform administrator. Locking while ON (owner ruling 2026-10-10, lock only the role being written): there is NO table lock — a custom-role write locks the custom role's own row FOR UPDATE (a create takes a stock-prep-only advisory lock instead, for the 100-role cap) plus FOR SHARE on the grantor's own authority rows (memberships, role codes, direct codes, member groups, admission, delegation scope and, for a project-sheet add, their existing grants on the named sheets); every in-lock check runs on the transaction's own connection, and the 5 s lock_timeout bounds only THIS port's own waits (409 STOCK_PREP_MEMBERS_BUSY on expiry), never the wait it imposes on another session. What other sessions see: a write that touches neither the role being written nor the grantor's own authority rows is not blocked directly by this write's locks (it can still queue behind a blocked session or on the connection pool); while a write holds the written role X's row lock (at most about the in-lock reads, plus for a project-sheet add up to the 15 s budget and one more G1 call), each of these waits on it holding a pool connection: other writes of this port on X (each takes its connection first and then waits, bounded by its own 5 s lock_timeout; an update or rename does not go through the one-add-per-process slot, so about 20 of them fill the default 20-connection pool — measured in review: an unrelated SELECT 1 waited up to about 5.3 s and the add's next G1 call about 3.3 s for a connection), and, with no bound from this port, delegation-route appointments to X and any session acting as a member of X that locks all of that user's roles FOR SHARE (submitting an approval, an approval write-back (FWB) automation, writing a record link); a record-link session first holds the sheet rows it reads FOR SHARE, so a third party that needs one of those sheet rows (e.g. a sheet-permission PUT) is blocked indirectly, and if that sheet is on the add's list only the G1 call's 5 s lock_timeout ends it (409 BUSY); together these waiters can fill the pool, and then every pool user of the server process waits for a connection; a delegated appointment to the role being written waits for that write and then reviews its committed codes; revoking ANY of the grantor's own authority (any role they hold, stock-prep_admin included, whether by a platform admin, a batch unassign or a protected-role delete; any code on a role they hold; a direct code; a member-group membership; their admission or delegation scope; for a project-sheet add, their grant on a named sheet) waits for the in-flight write with no bound from this port — for a project-sheet add that is the in-lock reads, up to the 15 s budget and one more G1 call, and a grantor who keeps overlapping writes can hold such a revoke off until the revoker's own statement timeout. A revoke through the sheet-permission routes (sheet row locked first) on a named sheet the add has not reached is broken only by the G1 call's 5 s lock_timeout: the add answers 409 BUSY, sheets granted before it stay granted, then the revoke lands. That holds only when the revoke deletes an existing grant row of the grantor's (the row lock holds existing rows only): an insert-only downgrade of the grantor (a lower direct level on a named sheet for a grantor with no direct row there, which is what the sheet-permission page's standard PUT does when the grantor's write comes from a role or member group, or a new membership in a member group holding a lower level on that sheet) waits on nothing, and a named sheet the add has not reached yet may still be granted after it (the same outcome as granting first and downgrading second). A G1 call waiting for a pool connection is not a lock wait and no lock_timeout bounds it: if the waiters queued on the same role row (above) fill the pool, the add waits up to the pool connect timeout (10 s by default) and ends in 500, and every other pool user of the server process waits for that time too. Two edits of different custom roles whose grantors each hold the other's role can deadlock; the server breaks it and the losing edit re-runs once (a second deadlock is 409 BUSY). A project-sheet add runs its G1 calls under those locks, each with the same 5 s lock_timeout, starts no further call after a 15 s budget (409 STOCK_PREP_MEMBERS_BUSY, retryable — the grant is idempotent), runs one at a time per server process, and uses more pool connections while its locks are held (each G1 call's own transaction, the plugin's ownership hooks and audit row). OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision that accepts these waits — on revoking the grantor's own authority, on other writes and appointments to the role being written, on approval submissions, FWB automations and record-link writes by its members (and the third parties queued behind them), and on the connection pool they can fill; nothing in this entry records that acceptance.",
+    source: 'plugins/plugin-integration-core/lib/stock-preparation-members.cjs#stockPrepMembersPageEnabled',
+  },
+  {
+    key: 'VITE_MULTITABLE_RANGE_FILL_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    danger: 'low',
+    purpose:
+      'Opt-in UI gate for multitable rectangular copy and fill. Default OFF; enabled only by the exact build-time string true.',
+    source: 'apps/web/src/multitable/utils/grid-range-fill-flags.ts#isGridRangeFillEnabled',
+  },
+  {
+    key: 'ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED',
+    type: 'boolean',
+    activationValue: 'true',
+    dependsOn: [],
+    conflictsWith: [],
+    // PROPOSED, pending the owner's choice (reviewer finding F3, 2026-10-08): medium because ON lets an
+    // employee start a cancellation that, once approved, cancels the leave and returns its balance.
+    danger: 'medium',
+    purpose:
+      "Leave cancel-round product entry (approval change-request lock C v5.9, entry addendum P-1…P-11): the LAUNCH gate of POST /api/attendance/requests/:id/cancel-round, read by the attendance plugin (not by packages/core-backend/src). Default OFF; exact literal 'true' only (no trim, no case folding; '1' / 'yes' / 'TRUE' stay OFF — unlike the plugin's older env flags, it does NOT go through parseBoolean). Off: the launch answers the same 404 body as a never-existing request id, before any read or write. It gates ONLY the launch: the summary read (which reports this flag's state as entryEnabled), the approver decision, the requester's withdraw and the attendance-side pending list are not flag-gated, so a round launched while ON can still be read, decided and withdrawn after it is switched OFF. Read on every call, never cached at module load. danger=medium (PROPOSED, owner to confirm): ON lets an employee start a cancellation of their own approved leave; once the original approvers approve it, the leave is cancelled and its leave balance returned.",
+    source: 'plugins/plugin-attendance/index.cjs#isAttendanceCancelRoundEntryEnabled',
   },
 ])
 

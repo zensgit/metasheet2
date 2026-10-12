@@ -3,12 +3,17 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { completeTask, createTask, reopenTask } from '../../src/services/task-records'
+import { orgMemberSeeds } from '../helpers/task-m4-fixtures'
 
 if (process.env.EXPECT_DB !== '1') {
   throw new Error('task-completion-grid.db.test.ts requires EXPECT_DB=1')
 }
 
 const ORG_PREFIX = 'org_g3_'
+
+// RULED(2026-10-07): [N2] an assignee other than the creator must be an active member of the
+// org (design §4.6), so a cell that names one seeds it here; afterAll drops exactly those rows.
+const orgMembers = orgMemberSeeds()
 
 async function statusOf(id: string): Promise<string> {
   const result = await poolManager.get().query<{ status: string }>(
@@ -55,6 +60,7 @@ async function assertAnyOpenInvariant(id: string): Promise<void> {
 describe('gate 3 surviving completion cells', () => {
   afterAll(async () => {
     await poolManager.get().query('DELETE FROM tasks WHERE org_id LIKE $1', [`${ORG_PREFIX}%`])
+    await orgMembers.drop()
   })
 
   it('all x 0: an explicit empty assignee list stays empty and the creator complete marks done', async () => {
@@ -131,6 +137,7 @@ describe('gate 3 surviving completion cells', () => {
     const creator = `usrC_${stamp}`
     const a = `usrA_${stamp}`
     const b = `usrB_${stamp}`
+    await orgMembers.seed(orgId, [a, b])
     const created = await createTask({
       orgId, creatorId: creator, title: '备料复核', assignees: [a, b], completionMode: 'all',
     })
@@ -147,6 +154,7 @@ describe('gate 3 surviving completion cells', () => {
     const creator = `usrC_${stamp}`
     const a = `usrA_${stamp}`
     const b = `usrB_${stamp}`
+    await orgMembers.seed(orgId, [a, b])
     const created = await createTask({
       orgId, creatorId: creator, title: '备料复核', assignees: [a, b], completionMode: 'any',
     })

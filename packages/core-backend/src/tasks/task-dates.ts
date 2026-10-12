@@ -327,8 +327,10 @@ function canonicalTimeZoneName(timeZone: string): string | null {
  * failure (missing, blank, not a real zone per `isValidIanaTimeZone`, or a bare-offset form per the
  * `OFFSET_FORM_RE` guard above). Returns the CANONICAL zone name (the platform's canonical spelling, e.g. `Asia/Kolkata` and
  * `Asia/Calcutta` collapse to one name) so two spellings of the same zone collapse to one string for a caller that keys a cache
- * or a `COALESCE($3, …)` bind value on it. `isValidIanaTimeZone` is the ONE external import this
- * module tree is allowed.
+ * or a `COALESCE($3, …)` bind value on it. The imported IANA zone validator is the ONE external
+ * import THIS FILE is allowed ([D11]: the allowance is per file; `task-reminders.ts`, elsewhere in
+ * this same `src/tasks/` tree, also imports the all-day occurrence function that lock `:140` names
+ * as the required remind_at implementation).
  */
 export function validateViewerTimeZoneHeader(headerValue: unknown): string | null {
   if (typeof headerValue !== 'string') return null

@@ -89,6 +89,14 @@ on:
       - 'apps/web/src/multitable/utils/sheet-cursor-state.ts'
       - 'apps/web/src/multitable/components/MetaGridTable.vue'
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/utils/grid-range-fill-flags.ts'
+      - 'apps/web/src/multitable/utils/grid-range-fill.ts'
+      - 'apps/web/src/multitable/composables/useGridRangeSelection.ts'
+      - 'apps/web/src/multitable/components/MetaGridRangeToolbar.vue'
+      - 'apps/web/tests/multitable-range-fill-flag.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-planner.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-writer.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-interaction.spec.ts'
       # UI-P2-2a/2b (design-lock multitable-ui-p2-2-left-rail-detail-designlock-20260707.md §5, design
       # docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md): the sheet/view tree
       # component — MultitableWorkbench.vue's rail mount point — plus its typed-label module must
@@ -540,6 +548,14 @@ on:
       - 'apps/web/src/multitable/utils/sheet-cursor-state.ts'
       - 'apps/web/src/multitable/components/MetaGridTable.vue'
       - 'apps/web/src/multitable/views/MultitableWorkbench.vue'
+      - 'apps/web/src/multitable/utils/grid-range-fill-flags.ts'
+      - 'apps/web/src/multitable/utils/grid-range-fill.ts'
+      - 'apps/web/src/multitable/composables/useGridRangeSelection.ts'
+      - 'apps/web/src/multitable/components/MetaGridRangeToolbar.vue'
+      - 'apps/web/tests/multitable-range-fill-flag.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-planner.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-writer.spec.ts'
+      - 'apps/web/tests/multitable-range-fill-interaction.spec.ts'
       # UI-P2-2a/2b (design-lock multitable-ui-p2-2-left-rail-detail-designlock-20260707.md §5, design
       # docs/development/multitable-ui-p2-2b-vertical-tree-design-20260713.md): the sheet/view tree
       # component — MultitableWorkbench.vue's rail mount point — plus its typed-label module must
@@ -1021,6 +1037,9 @@ jobs:
       # field-config step above.
       - name: Run stock-prep managed table relabel panel spec
         run: pnpm --filter @metasheet/web exec vitest run StockPreparationManagedTableRelabelPanel --reporter=dot
+
+      - name: Run multitable range fill specs
+        run: pnpm --filter @metasheet/web exec vitest run tests/multitable-range-fill-flag.spec.ts tests/multitable-range-fill-planner.spec.ts tests/multitable-range-fill-writer.spec.ts tests/multitable-range-fill-interaction.spec.ts --reporter=dot
 
       - name: Run multitable web guard specs (targeted)
         # A1: meta-grid-table (windowing + infinite-scroll trigger) + multitable-grid (useMultitableGrid

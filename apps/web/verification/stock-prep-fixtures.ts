@@ -751,6 +751,38 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
     respond: ({ route }) => json(route, 200, envelope({ rowCount: 3, entries: synAuditEntries() })),
   },
   {
+    // S2 (#6286): the board's home face lists the project sheets on first render and the pull panel probes
+    // one project's sheet before a run. The acceptance deployment keeps MULTITABLE_STOCK_PREP_PROJECT_SHEETS_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO; the web client treats it as 'disabled'
+    // and renders the pre-S2 surface. Mocking the real answer keeps the P0/P1 scenarios on the old flow.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/project-targets',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S3 (R-37): 今天要处理's 「刷新项目总览」. Rendered only once the list above answered (switch on), so the
+    // switch-off lanes never press it — answered anyway with the same switch-off refusal, so a component
+    // that grows a first-render call to it stays on the old surface instead of hitting VERIFY_UNMOCKED_ROUTE.
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/refresh',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S3 fix round 1 (R6): 「建立项目总览」 (PULL). Like the refresh it renders only once the list answered with
+    // the switch on, so the switch-off lanes never press it — answered with the same refusal regardless.
+    method: 'POST',
+    path: '/api/integration/stock-preparation/project-overview/ensure',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED')),
+  },
+  {
+    // S5b (R-39): the workbench-admin shell reads the members page once on first render to decide whether
+    // the 「成员与权限」 rail item exists. The acceptance deployment keeps STOCK_PREP_MEMBERS_PAGE_ENABLED
+    // OFF, so the server answers the switch-off refusal with zero IO and the item stays hidden.
+    method: 'GET',
+    path: '/api/integration/stock-preparation/members',
+    respond: ({ route }) => json(route, 404, refusal('STOCK_PREP_MEMBERS_PAGE_DISABLED')),
+  },
+  {
     method: 'GET',
     path: '/api/integration/stock-preparation/prep-lines/export',
     respond: ({ route }) => route.fulfill({
@@ -784,12 +816,22 @@ const ROUTES: Array<{ method: string; path: string; respond: Responder }> = [
 ]
 
 /** `/projects/<no>/board` and the table-action run steps need a pattern rather than a literal. */
+const PROJECT_TARGET_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target(?:\/(?:archive|restore|project-fields))?$/
+/** S3 (R-37): the project-level columns — GET and PATCH (fix round 1, R9) on `…/target/project-fields`. */
+const PROJECT_FIELDS_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/target\/project-fields$/
 const BOARD_PATTERN = /^\/api\/integration\/stock-preparation\/projects\/([^/]+)\/board$/
 const TABLE_ACTION_PATTERN = /^\/api\/integration\/table-actions\/([^/]+)\/(.+)$/
 
 function resolveResponder(method: string, path: string): Responder | null {
   for (const entry of ROUTES) {
     if (entry.method === method && path === entry.path) return entry.respond
+  }
+  if (((method === 'GET' || method === 'POST') && PROJECT_TARGET_PATTERN.test(path))
+    || (method === 'PATCH' && PROJECT_FIELDS_PATTERN.test(path))) {
+    // Switch off in the acceptance deployment: every project-sheet route answers the same refusal (S1 §8),
+    // the S3 project-fields pair included (GET is lazy — only after the sheet state said active/archived —
+    // so the switch-off lanes never reach it; it is answered all the same).
+    return ({ route }) => json(route, 404, refusal('STOCK_PREPARATION_PROJECT_SHEETS_DISABLED'))
   }
   if (method === 'GET' && BOARD_PATTERN.test(path)) {
     return ({ route, state }) => {

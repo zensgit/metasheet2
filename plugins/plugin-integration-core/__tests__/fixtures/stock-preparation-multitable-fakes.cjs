@@ -31,6 +31,7 @@ const {
   STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE,
   STOCK_PREPARATION_MAIN_TABLE_TEMPLATE,
   STOCK_PREPARATION_MVP_TABLE_TEMPLATES,
+  STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE,
 } = require(path.join(__dirname, '..', '..', 'lib', 'stock-preparation-templates.cjs'))
 
 // The canonical MAIN template rides too: W4 carry's applyCarryViaConfirm AND the 按项目导出物料
@@ -39,7 +40,8 @@ const {
 // Purely ADDITIVE relative to the original MVP-only map: does not change resolution for any objectId
 // already registered.
 const TEMPLATE_BY_OBJECT_ID = new Map(
-  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE]
+  // S3 fix round 1: + the project overview, so a strict fake can hold overview rows (additive).
+  [...STOCK_PREPARATION_MVP_TABLE_TEMPLATES, STOCK_PREPARATION_CONFIRMATION_DECISION_TABLE_TEMPLATE, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE, STOCK_PREPARATION_PROJECT_OVERVIEW_TABLE_TEMPLATE]
     .map((template) => [template.objectId, template]),
 )
 

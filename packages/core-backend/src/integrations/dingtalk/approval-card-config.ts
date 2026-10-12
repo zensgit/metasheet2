@@ -21,6 +21,7 @@ import { randomBytes } from 'crypto'
 
 import { query } from '../../db/pg'
 import { decryptStoredSecretValue, normalizeStoredSecretValue } from '../../security/encrypted-secrets'
+import { DingTalkConfigValidationError } from './config-validation-error'
 
 const DEFAULT_PROVIDER = 'dingtalk'
 export const APPROVAL_CARD_LINK_SECRET_CONFIG_KEY = 'approvalCardLinkSecret'
@@ -246,10 +247,10 @@ export async function saveApprovalCardPublicAppUrl(
     try {
       parsed = new URL(trimmed)
     } catch {
-      throw new Error('publicAppUrl must be an absolute http(s) URL')
+      throw new DingTalkConfigValidationError('publicAppUrl must be an absolute http(s) URL')
     }
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      throw new Error('publicAppUrl must use http or https')
+      throw new DingTalkConfigValidationError('publicAppUrl must use http or https')
     }
   }
   const row = await loadIntegrationById(queryFn, integrationId)

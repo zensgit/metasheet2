@@ -32,6 +32,8 @@ export default defineConfig({
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:
+      // Range fill: real JWT + PostgreSQL atomicity, run whole-file in the post-migrate multitable gate.
+      'tests/integration/multitable-range-fill-realdb.test.ts',
       'tests/integration/admin-users.api.test.ts',
       'tests/integration/after-sales-plugin.install.test.ts',
       'tests/integration/after-sales-registry-backfill.test.ts',
@@ -125,12 +127,12 @@ export default defineConfig({
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-history-guard.yml lane, which arms EXPECT_DB=1.
       'tests/integration/approval-history-authz-guard.db.test.ts',
-      // approvals:read permission-catalogue registration (zzzz20260920130000): grant-and-gate
-      // real-DB acceptance for the finding that no migration had ever inserted this code into
-      // `permissions`, making it ungrantable through the product grant endpoint
-      // (routes/permissions.ts:156-164 400s on an unregistered code). approvals:write/act are
-      // deliberately out of scope for this migration (see the migration's own file header).
-      // Requires real PostgreSQL and the real HTTP register/grant/pending-count round trip.
+      // approval-product permission-catalogue registration (zzzz20260920130000: approvals:read;
+      // zzzz20261010120000: approvals:write, approvals:act, approval-templates:manage): grant-and-gate
+      // real-DB acceptance for the finding that no migration had ever inserted these codes into
+      // `permissions`, making them ungrantable through the product grant endpoints
+      // (routes/permissions.ts:156-164 and routes/roles.ts assertCodesInCatalog 400 on an unregistered
+      // code). Requires real PostgreSQL and the real HTTP register/grant/gate round trips.
       // Excluded here so `describeIfDatabase` cannot
       // skip-green it in the no-DB job; wired as a WHOLE FILE into the standalone
       // .github/workflows/approval-realdb-permission-catalogue.yml lane, which arms EXPECT_DB=1.
@@ -250,6 +252,13 @@ export default defineConfig({
       // a WHOLE FILE into the directory real-DB step in plugin-tests.yml (both points asserted by
       // pb4-4-reactivation-ci-wiring.test.mjs so neither can silently drop).
       'tests/integration/directory-local-integration-reactivation.db.test.ts',
+      // W1-6 (owner ruling 2026-10-10): every local-directory writer creates the org's local anchor
+      // INSIDE its own transaction — eight per-writer rollback proofs (incl. injected faults), a
+      // deterministic two-connection barrier on the anchor's unique index, and mixed first-call
+      // bursts — meaningless without a real DB. DATABASE_URL-gated; excluded here so the no-DB job
+      // cannot skip-green it, and wired as a WHOLE FILE into the directory real-DB step in
+      // plugin-tests.yml (both points asserted by w1-6-anchor-in-transaction-ci-wiring.test.mjs).
+      'tests/integration/local-directory-anchor-in-transaction.db.test.ts',
       // Canonical Org MVP B4 (#4215 §5.5): directory_department_bindings buildable FK chain — a
       // cross-org binding is FK-IMPOSSIBLE to insert (both integrations pinned to one org_id column;
       // NOT NULL closes the MATCH SIMPLE hole). Proves rejection BY the org-chain FK by name + the
@@ -1153,6 +1162,10 @@ export default defineConfig({
       'tests/integration/attendance-notification-deliveries.test.ts',
       'tests/integration/attendance-outdoor-punch.test.ts',
       'tests/integration/attendance-plugin.test.ts',
+      // Real HTTP/PG rollback and raw-event immutability; runs in the required attendance DB lane.
+      'tests/integration/attendance-live-punch-order.db.test.ts',
+      'tests/integration/attendance-online-punch-server-time.db.test.ts',
+      'tests/integration/attendance-online-punch-replay.db.test.ts',
       'tests/integration/attendance-schedule-dispatch.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
@@ -1432,6 +1445,12 @@ export default defineConfig({
       // allowlist entry there would force an s6a re-pin and a merge-serialisation race) — the same
       // precedent the sibling approval-realdb-* lanes above cite.
       'tests/integration/approval-list-scope-server-side.db.test.ts',
+      // Test report 2026-10-08: the approval center's tab read-state badges (抄送我的 unread-CC count
+      // + per-row ccUnread, 我发起的 new-outcome count + per-row outcomeUnseen) against real
+      // PostgreSQL — the time-comparison rules, count == list, the lock B negative control. Excluded
+      // from the no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE
+      // FILE into .github/workflows/approval-realdb-list-scope.yml, which arms EXPECT_DB=1.
+      'tests/integration/approval-notify-badges.db.test.ts',
       // P3-1 CSV export read-parity. Needs real PostgreSQL for the same reason its sibling above
       // does: the assertions that matter are the ones only a real row can establish — that a row the
       // list scope admits but `canReadApprovalInstance` refuses is absent from the CSV (with its
@@ -1799,7 +1818,8 @@ export default defineConfig({
       // E-learning L0 canonical role-template migration gate. Requires real
       // PostgreSQL (exact grants, idempotent repair, assignment-safe rollback).
       // Excluded from the no-DB job and wired as a WHOLE FILE into the same
-      // post-migrate schema/service step in plugin-tests.yml.
+      // post-migrate schema/service step in plugin-tests.yml. Also carries the
+      // S5a stock-prep role-template + legacy-role move cases (R-39).
       'tests/integration/elearning-role-templates.db.test.ts',
       // E-learning L0 plugin-owned jobs claim-lease gate. Requires real
       // PostgreSQL (UNIQUE identity, FOR UPDATE SKIP LOCKED, fenced finalize).
@@ -1857,6 +1877,20 @@ export default defineConfig({
       'tests/integration/task-m3-tree.db.test.ts',
       'tests/integration/task-m3-membership.db.test.ts',
       'tests/integration/task-m3-comments-deletion.db.test.ts',
+      'tests/integration/task-m4-schema.db.test.ts',
+      'tests/integration/task-m4-list-roles.db.test.ts',
+      'tests/integration/task-m4-paging-settings.db.test.ts',
+      'tests/integration/task-m4-dates.db.test.ts',
+      'tests/integration/task-m4-lists.db.test.ts',
+      'tests/integration/task-m4-list-members.db.test.ts',
+      'tests/integration/task-m4-list-items.db.test.ts',
+      'tests/integration/task-m4-groups.db.test.ts',
+      'tests/integration/task-m4-org-members.db.test.ts',
+      'tests/integration/task-m4-outbox.db.test.ts',
+      'tests/integration/task-m4-delivery.db.test.ts',
+      'tests/integration/task-m4-scheduler.db.test.ts',
+      'tests/integration/task-m4-dingtalk.db.test.ts',
+      'tests/integration/task-m4-realtime.db.test.ts',
       // E-learning V0.1 M1 media stale-row claim. Requires real PostgreSQL (FOR UPDATE
       // SKIP LOCKED across two connections). Excluded from the no-DB job so a missing
       // DATABASE_URL cannot skip-green it; wired as a WHOLE FILE into plugin-tests.yml

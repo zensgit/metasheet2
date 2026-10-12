@@ -151,8 +151,12 @@ function createStubConfigApi(
     timeoutJumpTargetOptions: () => [{ key: 'approval_2', label: '二审' }],
     approvalNodeEmptyPolicy: () => 'error',
     setApprovalNodeEmptyPolicy: () => {},
-    approvalNodeMergeWithRequester: () => false,
-    setApprovalNodeMergeWithRequester: () => {},
+    // W1-1a (Lock-4 F4-C / F4-B): the four-value same-person writer + the 'designated' fallback
+    // pickers' writer replace the shipped merge-with-requester checkbox pair. Inert here: the
+    // editor DERIVES the displayed state from approvalNodeEditFor(); writes are pinned by the
+    // full TemplateAuthoringView mounts.
+    setApprovalNodeSamePersonPolicy: () => {},
+    setApprovalNodeEmptyAssigneeFallbackIds: () => {},
     handlerNodeMode: () => 'all',
     setHandlerNodeMode: () => {},
     handlerNodeOpinionRequired: () => false,
@@ -321,5 +325,115 @@ describe('P1-C timeout controls (M7 wired, not inert)', () => {
     wallClockRadio.checked = true
     wallClockRadio.dispatchEvent(new Event('change'))
     expect(api.approvalNodeTimeout('approval_1')?.unit).toBeUndefined()
+  })
+})
+
+// Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — direct-mount wiring of the component's reveal for BOTH hidden
+// blocks, keyed only by the api's `approvalNodeHiddenBlockErrors` (the stub api below does not wire
+// the optional sticky `approvalNodeHiddenBlockRevealed`; the next describe does). Before W1-1a the
+// policy block had no mounted path in the full view (the threshold setter clamps and an invalid
+// persisted threshold opens read-only); W1-1a's 转交指定人员 without a target is one, pinned mounted in
+// approvalTemplateAuthoring.spec.ts ("W1-1a F1(b)").
+describe('F4-A hidden-block guard: a hidden block is revealed exactly while it has a live error', () => {
+  function autoApproveApi(liveErrors: Record<string, string[]>) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } })
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    ;(api as { approvalNodeHiddenBlockErrors?: unknown }).approvalNodeHiddenBlockErrors = () => liveErrors
+    return api
+  }
+
+  it('no live error ⇒ the policy grid and the timeout section stay hidden (values preserved, not rendered)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({}))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+  })
+
+  it('a live POLICY error reveals the policy grid only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ policy: ['审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'] }))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-threshold"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('a live TIMEOUT error reveals the timeout section only', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApi({ timeout: ['审批节点 approval_1 的超时转交需要选择接收人'] }))
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+  })
+
+  // The notice lives in the 审批类型 item, which renders only when the api can set the type — the
+  // stub above has no `setApprovalNodeApprovalType`, so these provide one (a no-op: never clicked).
+  function autoApproveApiWithTypeControl(liveErrors: Record<string, string[]>, opts: { readOnly?: boolean } = {}) {
+    const api = autoApproveApi(liveErrors) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    api.setApprovalNodeApprovalType = () => {}
+    if (opts.readOnly) api.readOnly = true
+    return api
+  }
+  const noticeItems = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll('[data-testid="approval-node-approval-type-hidden-error"]')).map((item) => item.textContent?.trim())
+  const POLICY_ERROR = '审批节点 approval_1 的门槛会签人数必须是不小于 1 的整数'
+  const TIMEOUT_ERROR = '审批节点 approval_1 的超时转交需要选择接收人'
+
+  it('the notice LISTS the policy-block messages, not only the timeout ones (gate r2 P3-3) — policy first, in block order', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR], timeout: [TIMEOUT_ERROR] }))
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).not.toBeNull()
+    expect(noticeItems(c)).toEqual([POLICY_ERROR, TIMEOUT_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).not.toBeNull()
+  })
+
+  it('a policy-only live error: the notice lists it and offers NO 关闭超时 (the timeout block is not failing)', () => {
+    const c = mountEditorFlat(approvalNode(), autoApproveApiWithTypeControl({ policy: [POLICY_ERROR] }))
+    expect(noticeItems(c)).toEqual([POLICY_ERROR])
+    expect(c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]')).toBeNull()
+  })
+
+  it('关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the timeout untouched', async () => {
+    const api = autoApproveApiWithTypeControl({ timeout: [TIMEOUT_ERROR] }, { readOnly: true })
+    const before = api.approvalNodeTimeout('approval_1')
+    expect(before).toEqual({ afterMinutes: 60, effect: 'remind' })
+    const c = mountEditorFlat(approvalNode(), api)
+    const clear = c.querySelector('[data-testid="approval-node-approval-type-clear-timeout"]') as HTMLButtonElement
+    expect(clear).not.toBeNull()
+    expect(clear.disabled).toBe(true)
+    // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+    clear.removeAttribute('disabled')
+    clear.click()
+    await nextTick()
+    expect(api.approvalNodeTimeout('approval_1')).toEqual({ afterMinutes: 60, effect: 'remind' })
+  })
+})
+
+// W1-1a (merge-train r3 F9) — the canvas STICKY REVEAL contract on the component side: the view owns
+// the sticky state (per node key) and reports it through the OPTIONAL `approvalNodeHiddenBlockRevealed`;
+// the component renders a hidden block when that says so, per block, while the notice stays keyed on
+// live errors only. Absent method ⇒ live errors only (the describe above).
+describe('W1-1a canvas sticky reveal: the component renders what the api reports as revealed', () => {
+  function stickyApi(revealed: (nodeKey: string, blockId: string) => boolean) {
+    const api = createStubConfigApi({ approval_1: { approvalMode: 'threshold', approvalThreshold: 1, timeout: { afterMinutes: 60, effect: 'remind' } } }) as ApprovalNodeConfigEditorApi & Record<string, unknown>
+    const edit = api.approvalNodeEditFor('approval_1') as unknown as Record<string, unknown>
+    edit.approvalType = 'auto_approve'
+    edit.omitAssigneeSources = true
+    api.approvalNodeHiddenBlockErrors = () => ({})
+    api.setApprovalNodeApprovalType = () => {}
+    api.approvalNodeHiddenBlockRevealed = revealed
+    return api
+  }
+
+  it('a sticky POLICY reveal with no live error keeps the policy grid rendered (timeout stays hidden) and shows no notice', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi((nodeKey, blockId) => nodeKey === 'approval_1' && blockId === 'policy'))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-empty-policy"]')).not.toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+    expect(c.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+  })
+
+  it('POSITIVE CONTROL: the same api reporting nothing revealed keeps both blocks hidden', () => {
+    const c = mountEditorFlat(approvalNode(), stickyApi(() => false))
+    expect(c.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+    expect(c.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
   })
 })

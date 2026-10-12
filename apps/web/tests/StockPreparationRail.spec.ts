@@ -205,9 +205,15 @@ async function waitForActive(container: HTMLElement, cycles = 40): Promise<strin
  *   null      -> the read FAILS (500), i.e. 「读不到」
  * Everything else answers with an empty, valid envelope — the panels are not what this file tests.
  */
-function answerReads(preflight: Record<string, unknown> | null): void {
+function answerReads(preflight: Record<string, unknown> | null, membersOn = false): void {
   h.apiFetch.mockImplementation(async (url: string) => {
     const target = String(url)
+    // S5b (R-39): the 「成员与权限」 existence read. OFF by default — the deployment default — so the
+    // rail is exactly what it was before S5b; `membersOn` answers it as an admitted, switched-on server.
+    if (target === '/api/integration/stock-preparation/members') {
+      if (!membersOn) return new Response(JSON.stringify({ ok: false, error: { code: 'STOCK_PREP_MEMBERS_PAGE_DISABLED' } }), { status: 404 })
+      return new Response(JSON.stringify({ ok: true, data: { enabled: true, actor: { isPlatformAdmin: false, delegated: true }, grantableCodes: [], selectableCodes: [], builtInRoles: [], customRoles: [], otherRoles: [], audit: { available: true, entries: [] } } }), { status: 200 })
+    }
     if (target.includes('/stock-preparation/preflight')) {
       if (preflight === null) return new Response(JSON.stringify({ ok: false }), { status: 500 })
       return new Response(JSON.stringify({ ok: true, data: preflight }), { status: 200 })
@@ -363,23 +369,42 @@ describe('StockPreparationRail — 左栏 rail(工作 / 部署与接入 / 帮助
     // `permissions: ['stock-prep:read']`), which is every actor in this file. `canOpenStockPrepRailItem`
     // is called here rather than in the shell deliberately — the shell's filtering is unchanged and
     // this is a guard, not a second implementation.
-    for (const actor of ACTORS) {
-      h.permissions = actor.permissions
-      h.roles = actor.roles
-      const root = await mountShell()
-      const expected: string[] = []
-      for (const group of STOCK_PREP_RAIL_GROUPS) {
-        for (const item of group.items) {
-          if (canOpenStockPrepRailItem(item.gate, { roles: h.roles, permissions: h.permissions })) expected.push(item.key)
+    //
+    // S5b (R-39): `members` is the one item with a SECOND condition — the server's members read must have
+    // answered (switch on, caller admitted). So the equality is asserted in both postures: switch off,
+    // the gate-holders see everything their gates open EXCEPT members; switch on, members too.
+    for (const membersOn of [false, true]) {
+      answerReads(NOT_INSTALLED, membersOn)
+      for (const actor of ACTORS) {
+        h.permissions = actor.permissions
+        h.roles = actor.roles
+        const root = await mountShell()
+        const expected: string[] = []
+        for (const group of STOCK_PREP_RAIL_GROUPS) {
+          for (const item of group.items) {
+            if (item.key === 'members' && !membersOn) continue
+            if (canOpenStockPrepRailItem(item.gate, { roles: h.roles, permissions: h.permissions })) expected.push(item.key)
+          }
+          const advancedGate = group.advancedGate
+          if (advancedGate && canOpenStockPrepRailItem(advancedGate, { roles: h.roles, permissions: h.permissions })) {
+            for (const key of group.advanced ?? []) expected.push(key)
+          }
         }
-        const advancedGate = group.advancedGate
-        if (advancedGate && canOpenStockPrepRailItem(advancedGate, { roles: h.roles, permissions: h.permissions })) {
-          for (const key of group.advanced ?? []) expected.push(key)
+        // The members read is a REAL `Response.json()`, i.e. macrotask turns. Settle a fixed number of
+        // turns FIRST (so a switch-off item that would appear late cannot slip past an early equal
+        // check), then wait, bounded, for the expected set.
+        for (let i = 0; i < 10; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          await nextTick()
         }
+        for (let i = 0; i < 40 && [...tabKeys(root)].sort().join() !== [...expected].sort().join(); i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          await nextTick()
+        }
+        expect([...tabKeys(root)].sort(), `${actor.name} (members switch ${membersOn ? 'on' : 'off'}): manifest gates vs rendered rail`).toEqual(expected.sort())
+        app!.unmount()
+        app = null
       }
-      expect([...tabKeys(root)].sort(), `${actor.name}: manifest gates vs rendered rail`).toEqual(expected.sort())
-      app!.unmount()
-      app = null
     }
   })
 

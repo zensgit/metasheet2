@@ -71,6 +71,45 @@ export const COMMON_APPROVAL_TEMPLATE_PRESETS: CommonApprovalTemplatePreset[] = 
   },
 ]
 
+/**
+ * A1 「提示与实际状态」 (Codex review reply 20261008 §二.6, memo R1) - the boundary note for the central
+ * 请假审批 preset.
+ *
+ * The preset creates a CENTRAL approval template. A leave request approved through it is an approval record
+ * only: at base 9d65b8318f a grep finds no subscription of the attendance plugin to central approval outcomes
+ * and no attendance-record or leave-balance write in the central approval service, so approving such a request
+ * neither writes attendance nor deducts a balance (attendance leave runs on the attendance plugin's own request
+ * path; the absence claim is grep-level, not a runtime proof - evidence and limits are in the A1 report). The
+ * note is shown where an admin picks the preset and when the draft is created. It is display copy only:
+ * `buildCommonApprovalTemplatePresetPayload('leave')` is byte-identical to before (a spec pins it), so nothing
+ * new is written into customer templates.
+ *
+ * i18n: a zh-CN / `_EN` constant pair, the F8-1 shape. The authoring page (TemplateAuthoringView.vue) is still
+ * zh-CN only until F8-3, so its callers use the default `isZh = true`; the English text is wired and tested for
+ * the day that page follows the interface language. The zh text is the wording requested for this slice.
+ */
+export const LEAVE_PRESET_BOUNDARY_NOTE = '仅审批记录,不写入考勤、不扣假期余额'
+export const LEAVE_PRESET_BOUNDARY_NOTE_EN =
+  'Approval record only: it does not write attendance records or deduct leave balances'
+
+/** The creation toast text. Every preset but 'leave' keeps the exact text it always had. */
+export const PRESET_CREATED_MESSAGE = '表单草稿已创建'
+export const PRESET_CREATED_MESSAGE_EN = 'Form draft created'
+
+/** The boundary note for a preset, or null when the preset has none (only 'leave' does). */
+export function presetBoundaryNote(id: CommonApprovalTemplatePresetId, isZh = true): string | null {
+  if (id !== 'leave') return null
+  return isZh ? LEAVE_PRESET_BOUNDARY_NOTE : LEAVE_PRESET_BOUNDARY_NOTE_EN
+}
+
+/** The success message shown right after a draft is created from a preset. */
+export function presetCreatedMessage(id: CommonApprovalTemplatePresetId, isZh = true): string {
+  const base = isZh ? PRESET_CREATED_MESSAGE : PRESET_CREATED_MESSAGE_EN
+  const note = presetBoundaryNote(id, isZh)
+  if (!note) return base
+  return isZh ? `${base}。${note}。` : `${base}. ${note}.`
+}
+
 function nextPresetKeySuffix(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
 }

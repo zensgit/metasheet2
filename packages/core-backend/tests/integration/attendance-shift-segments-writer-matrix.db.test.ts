@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W3 / #4556 — writer-matrix zero-write coverage for shift segments (real DB, route-level).
  *
@@ -45,7 +46,10 @@ const DELETED_LABEL = 'Deleted or unavailable shift'
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(

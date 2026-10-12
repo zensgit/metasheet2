@@ -8,6 +8,12 @@
 // the detail carries the server-resolved `canAttachProcessEvidence` — `true`, or `false` with
 // `&evidence=denied`. Without the parameter the fixture is exactly the P5-C one.
 //
+// The cursor is pinned at `approval_2`, the SECOND approval node of the dev-mode template graph
+// (start → approval_1 → approval_2 → end), and every seat sits on that node. 退回 only offers
+// approval nodes UPSTREAM of the cursor (the same rule the server's return gate applies), so a
+// cursor at the first approval node would legitimately have no 退回 target and no 退回 button;
+// at `approval_2` the legal target is `approval_1` (部门主管审批).
+//
 // `?scenario=add-sign-after` (F4-S1, Lock-5 L5-B) keeps the P5-C fixture and wraps ONLY the store's
 // `executeAction`: every request is recorded on `window.__P5C_ACTION_REQUESTS__`, and an `add_sign`
 // with `addSignMode:'after'` is refused with the error `dispatchAction` throws for the server's
@@ -104,7 +110,7 @@ async function main(): Promise<void> {
 
   store.activeApproval = {
     ...detail,
-    currentNodeKey: 'approval_1',
+    currentNodeKey: 'approval_2',
     nodeOperations: {
       allowTransfer: true,
       allowAddSign: true,
@@ -119,7 +125,7 @@ async function main(): Promise<void> {
             type: 'role',
             assigneeId: 'admin',
             sourceStep: 1,
-            nodeKey: 'approval_1',
+            nodeKey: 'approval_2',
             isActive: true,
             metadata: {},
           },
@@ -130,7 +136,7 @@ async function main(): Promise<void> {
             type: 'user',
             assigneeId: 'user_current',
             sourceStep: 1,
-            nodeKey: 'approval_1',
+            nodeKey: 'approval_2',
             isActive: true,
             metadata: { assigneeName: '当前审批人' },
           },
@@ -139,7 +145,7 @@ async function main(): Promise<void> {
             type: 'user',
             assigneeId: 'user_added',
             sourceStep: 1,
-            nodeKey: 'approval_1',
+            nodeKey: 'approval_2',
             isActive: true,
             metadata: { addSign: true, assigneeName: '加签审批人' },
           },
