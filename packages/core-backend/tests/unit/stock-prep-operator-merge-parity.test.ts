@@ -28,6 +28,7 @@ import {
 } from '../../src/rbac/namespace-admission'
 import { assertRoleAssignable, isAdminLevelPermissionCode } from '../../src/rbac/role-assignment'
 import { isWellFormedNewRoleId } from '../../src/routes/roles'
+import { canonicalStockPrepRoleName, STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES } from '../../src/services/stock-preparation-members'
 
 const SCRIPT_PATH = path.resolve(__dirname, '../../../../scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs')
 
@@ -42,6 +43,9 @@ type Script = {
   isWellFormedNewRoleId: (id: string) => boolean
   candidateNamespaces: (roleId: string) => string[]
   splitRoleIdProblem: (roleId: unknown) => string | null
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES: readonly string[]
+  canonicalRoleName: (raw: string) => string
+  splitRoleNameProblem: (name: unknown) => string | null
 }
 
 const loadScript = async () => (await import(pathToFileURL(SCRIPT_PATH).href)) as Script
@@ -113,5 +117,26 @@ describe('option ① split step — the ops script mirrors the server predicates
       const leading = script.candidateNamespaces(roleId)[0]!
       expect(() => assertRoleAssignable(roleId, { kind: 'namespaces', namespaces: [leading] }), roleId).not.toThrow()
     }
+  })
+
+  it('the split role name refusals use a copy of the S8 reserved display names and of canonicalStockPrepRoleName, equal to the server\'s', async () => {
+    const script = await loadScript()
+    expect([...script.STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES]).toEqual([...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES])
+    const fullWidthAdmin = '\uff21\uff24\uff2d\uff29\uff2e'
+    const corpus = [
+      '', ' ', 'admin', ' Admin ', fullWidthAdmin, 'ad\u200bmin', 'admin（内置）', 'admin (built-in)', 'Admin(builtin)', '审批与提交',
+      '操作人员', ' 操作人员（内置） ', 'Operator', 'OPERATOR', 'Floor\u3000operator', '一线填写', '数据管理员(拉取人员)', 'Data manager (puller)',
+      'administrator', '\ufeffadmin', 'a\u00a0b', '内置', '(内置)', 'x【内置】',
+      ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+    ]
+    for (const raw of corpus) {
+      expect(script.canonicalRoleName(raw), JSON.stringify(raw)).toBe(canonicalStockPrepRoleName(raw))
+    }
+    // Every S8 reserved name, and `admin` (a role displayed as admin is an approval administrator,
+    // approval-record-link-txn-auth.ts / automation-approval-template-access.ts), is refused.
+    for (const name of [...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES, 'admin', 'Admin', fullWidthAdmin]) {
+      expect(script.splitRoleNameProblem(name), name).not.toBeNull()
+    }
+    expect(script.splitRoleNameProblem('审批与提交')).toBeNull()
   })
 })

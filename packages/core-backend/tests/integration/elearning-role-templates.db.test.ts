@@ -1033,7 +1033,7 @@ describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
 })
 
 /*
- * Owner ruling 2026-10-12 (R-39): the legacy floor role merges into the built-in one at the R65 deploy
+ * Owner ruling 2026-10-12 (R-39): the legacy floor role merges into the built-in one at the R66 deploy
  * and the built-in role is shown as 「操作人员」. Two things are proved here against REAL PostgreSQL:
  * the compare-and-set display-name migration (zzzz20261012090000), and the move script's option ①
  * split step (`--split-extra-codes-to-role`) — above all that it leaves every member's EFFECTIVE
@@ -1095,16 +1095,31 @@ describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => 
         await sql`DELETE FROM system_configs WHERE key = 'attendance.settings'`.execute(trx)
         await sql`INSERT INTO approval_instances (id, status, requester_snapshot) VALUES (${instanceId}, 'pending', ${JSON.stringify({ id: member })}::jsonb)`.execute(trx)
 
+        // `updated_at` is PUT /api/roles/:id's optimistic-concurrency token (routes/roles.ts
+        // `expectedUpdatedAt`): the rename must move it, so a 角色管理 tab loaded before the upgrade
+        // gets 409 ROLE_MODIFIED instead of silently saving the old name back. Pinned to a past
+        // instant first, because now() is constant inside this one test transaction.
+        const pastToken = '2001-02-03T04:05:06.789Z'
+        const tokenOf = async () => (await sql<{ ms: string }>`SELECT (extract(epoch FROM updated_at) * 1000)::bigint::text AS ms FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)).rows.map((row) => Number(row.ms))
+        const pinToken = async () => { await sql`UPDATE roles SET updated_at = ${pastToken}::timestamptz WHERE id = 'stock-prep_frontline'`.execute(trx) }
+
         await stockPrepTemplatesUp(trx)
         expect(await nameOf()).toEqual(['一线填写'])
+        await pinToken()
         await frontlineRenameUp(trx)
         expect(await nameOf()).toEqual(['操作人员'])
+        expect((await tokenOf())[0], 'up() moves updated_at with the name').toBeGreaterThan(Date.parse(pastToken))
+        await pinToken()
         await frontlineRenameUp(trx)
         expect(await nameOf(), 'a second up() is a no-op').toEqual(['操作人员'])
+        expect(await tokenOf(), 'a no-op up() leaves updated_at alone').toEqual([Date.parse(pastToken)])
         await frontlineRenameDown(trx)
         expect(await nameOf(), 'down() is the mirror').toEqual(['一线填写'])
+        expect((await tokenOf())[0], 'down() moves updated_at with the name').toBeGreaterThan(Date.parse(pastToken))
+        await pinToken()
         await frontlineRenameDown(trx)
         expect(await nameOf(), 'a second down() is a no-op').toEqual(['一线填写'])
+        expect(await tokenOf(), 'a no-op down() leaves updated_at alone').toEqual([Date.parse(pastToken)])
 
         await step('hand-renamed', async () => {
           await sql`UPDATE roles SET name = 'OPM 现场手改的名字' WHERE id = 'stock-prep_frontline'`.execute(trx)

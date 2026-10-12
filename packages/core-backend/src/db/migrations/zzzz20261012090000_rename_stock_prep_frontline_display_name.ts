@@ -6,7 +6,8 @@ import { checkTableExists } from './_patterns'
 /**
  * Owner ruling 2026-10-12 (decision register R-39; ADR adr-stock-prep-project-sheets-20261008 §8
  * step 3, §11.2-1, §11.3): the built-in floor role `stock-prep_frontline` and the demo server's
- * legacy floor role `stock-prep-operator` are merged at the R65 deploy, and the built-in role's
+ * legacy floor role `stock-prep-operator` are merged at the R66 deploy (R65 = 6d4e9fc38 shipped
+ * without this merge, owner: 「R65 = main 原样，不等其他」), and the built-in role's
  * display name becomes 「操作人员」 (was 「一线填写」, seeded by
  * zzzz20261010124500_seed_stock_prep_role_templates — that migration already ran at R64 and is not
  * edited). The role ID stays `stock-prep_frontline`: G1, the members page and the move script
@@ -265,10 +266,13 @@ export async function renameFrontlineDisplayName(
     return 'attendance-keys'
   }
 
-  // The compare-and-set and the name-clash check in ONE statement.
+  // The compare-and-set and the name-clash check in ONE statement. `updated_at` moves with the name:
+  // it is the optimistic-concurrency token of PUT /api/roles/:id (routes/roles.ts compares the
+  // client's `expectedUpdatedAt` with it and answers 409 ROLE_MODIFIED on a mismatch), so a 角色管理
+  // tab loaded before the upgrade cannot save the old name back silently.
   const renamed = await sql<{ id: string }>`
     UPDATE roles
-       SET name = ${to}
+       SET name = ${to}, updated_at = now()
      WHERE id = ${STOCK_PREP_FRONTLINE_ROLE_ID}
        AND name = ${from}
        AND NOT EXISTS (

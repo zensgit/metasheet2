@@ -8,8 +8,8 @@
  * the `stock-prep` namespace) can neither see nor assign it (`roleIdMatchesNamespace`). The S5a
  * migration (zzzz20261010124500_seed_stock_prep_role_templates) creates `stock-prep_frontline`; this
  * script moves the people and the table grants across. Owner ruling 2026-10-12 (R-39): the two
- * floor roles are merged at the R65 deploy (not at switch-on), and the built-in role is shown as
- * 「操作人员」 (migration zzzz20261012090000; the id stays `stock-prep_frontline`).
+ * floor roles are merged at the R66 deploy (not at switch-on; R65 = 6d4e9fc38 shipped without this
+ * merge), and the built-in role is shown as 「操作人员」 (migration zzzz20261012090000; the id stays `stock-prep_frontline`).
  *
  * OWNER ACTION. Running this script against ANY server database — with or without `--apply` — is an
  * owner action (先批后动). It only ever reads or writes the database named by DATABASE_URL; it makes
@@ -72,10 +72,21 @@
  * administrator handles that by hand); the id falls in such a namespace; an existing split role's
  * codes differ from the extra codes, or `--split-role-name` names it differently; an absent split
  * role id still has leftover `user_roles` / `role_permissions` rows, or another role already carries
- * the split name; the split role (by id, and by id or display name for approval seats / CC records)
+ * the split name; an existing split role's display name is RESERVED (see THE SPLIT ROLE NAME); the
+ * split role (by id, and by id or display name for approval seats / CC records)
  * is the subject of role-subject grant rows, active role approvals, role-typed approval seats or
  * role-targeted CC records while old-role members not yet in it would be added (they would GAIN them).
  * The dry run prints the split census and the verdict, and writes nothing.
+ * THE SPLIT ROLE NAME (`--split-role-name`, refused at parse time before connecting, never echoed)
+ * must be non-empty, its own trim, at most SPLIT_ROLE_NAME_MAX printable characters, and not
+ * RESERVED: its comparison form (`canonicalRoleName`, a copy of stock-preparation-members.ts
+ * `canonicalStockPrepRoleName`: NFKC, spaces / format characters dropped, lower-cased, a trailing
+ * 「（内置）」 / "(built-in)" marker dropped) may not be `admin` — a role whose trimmed display name is
+ * `admin` makes its members approval administrators (approval-record-link-txn-auth.ts and
+ * multitable/automation-approval-template-access.ts test `roles.has('admin')` over role ids AND
+ * display names) — nor one of the built-in stock-prep display names (STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+ * a copy of the server's S8 list, pinned equal by the parity test), so the split role cannot pose as
+ * 「操作人员」 / 「一线填写」 or another built-in in 角色管理 and in every appoint list.
  *
  * WHEN `--apply` REFUSES (exit 2, nothing written). These are the ONLY checks. Each compares the two
  * roles, not each member's effective permissions through their other roles, so it can refuse a move
@@ -298,6 +309,48 @@ export function splitRoleIdProblem(roleId) {
   return null
 }
 
+/**
+ * services/stock-preparation-members.ts STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES (the S8 reserved
+ * names), copied; tests/unit/stock-prep-operator-merge-parity.test.ts pins it equal to the server's.
+ */
+export const STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES = Object.freeze([
+  '备料主管理员',
+  '数据管理员（拉取人员）',
+  '开发成员',
+  '操作人员',
+  '一线填写',
+  'Main administrator',
+  'Data manager (puller)',
+  'Developer',
+  'Operator',
+  'Floor operator',
+])
+
+/** services/stock-preparation-members.ts `canonicalStockPrepRoleName`, copied (parity-pinned). */
+export function canonicalRoleName(raw) {
+  const folded = raw.normalize('NFKC').replace(/[\p{Z}\p{Cf}\s]+/gu, '').toLowerCase()
+  return folded.replace(/[\p{Ps}\p{Pi}]?(?:内置|built-?in)[\p{Pe}\p{Pf}]?$/u, '')
+}
+
+const RESERVED_SPLIT_ROLE_NAMES = new Set(STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES.map(canonicalRoleName))
+
+/**
+ * Why `name` may not be a split role's display name because of WHAT it says (null = acceptable):
+ * `admin` in any case / spacing (a role displayed as admin makes its members approval
+ * administrators) or a built-in stock-prep display name. Applied to the name this run would give a
+ * new split role AND to the name of an existing role it would reuse. Never echoes the name.
+ */
+export function splitRoleNameReservedProblem(name) {
+  const canonical = canonicalRoleName(String(name ?? ''))
+  if (canonical === PLATFORM_ADMIN_ROLE_ID) {
+    return 'the split role name may not be admin in any case or spacing (a role displayed as admin makes its members approval administrators)'
+  }
+  if (RESERVED_SPLIT_ROLE_NAMES.has(canonical)) {
+    return 'the split role name may not be a built-in stock-prep role name (it would pose as that role in 角色管理 and every appoint list)'
+  }
+  return null
+}
+
 /** Why `name` may not be the split role's display name (null = acceptable). Never echoes the name. */
 export function splitRoleNameProblem(name) {
   if (typeof name !== 'string' || name.length === 0 || name !== name.trim()) {
@@ -306,7 +359,7 @@ export function splitRoleNameProblem(name) {
   if ([...name].length > SPLIT_ROLE_NAME_MAX || /[\p{Cc}\p{Cf}]/u.test(name)) {
     return `the split role name must be 1-${SPLIT_ROLE_NAME_MAX} printable characters`
   }
-  return null
+  return splitRoleNameReservedProblem(name)
 }
 
 const HELP_TEXT = `stock-preparation-migrate-legacy-operator-role.mjs — move ${OLD_ROLE_ID} onto ${TARGET_ROLE_ID}.
@@ -765,6 +818,8 @@ async function readSplitCensus(client, split, { lock }) {
     exists,
     // The CALLER's name is checked against an existing role; an existing role's name is never printed.
     existingNameMatchesRequest: exists ? normalizeString(roleRow.name) === split.roleName : null,
+    // An existing role's name is judged like a given one (admin / reserved); only the reason is printed.
+    existingNameProblem: exists ? splitRoleNameReservedProblem(normalizeString(roleRow.name)) : null,
     codes: (await client.query(SQL.roleCodes, id)).rows.map((row) => row.permission_code),
     members: await count(client, SQL.oldMembers, id),
     oldMembersAlreadyIn: await count(client, SQL.sharedMembers, [OLD_ROLE_ID, split.roleId]),
@@ -928,6 +983,9 @@ export function decideSplit(census, split) {
     }
     if (split.roleNameGiven && s.existingNameMatchesRequest === false) {
       refusals.push(`split: role ${s.roleId} already exists under another display name; an existing role is reused as found (drop --split-role-name or choose another id)`)
+    }
+    if (s.existingNameProblem) {
+      refusals.push(`split: role ${s.roleId} already exists and ${s.existingNameProblem.replace(/^the split role name/, 'its display name')}; choose another id`)
     }
   } else {
     if (s.members > 0 || s.codes.length > 0) {

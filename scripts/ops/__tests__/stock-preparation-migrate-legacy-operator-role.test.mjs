@@ -22,7 +22,8 @@ const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const SCRIPT_PATH = path.join(ROOT_DIR, 'scripts', 'ops', 'stock-preparation-migrate-legacy-operator-role.mjs')
 const {
   main, run, OLD_ROLE_ID, TARGET_ROLE_ID, EXIT_OK, EXIT_FAILURE, EXIT_REFUSED,
-  RECOMMENDED_SPLIT_ROLE_ID, DEFAULT_SPLIT_ROLE_NAME, parseArgs, splitRoleIdProblem,
+  RECOMMENDED_SPLIT_ROLE_ID, DEFAULT_SPLIT_ROLE_NAME, parseArgs, splitRoleIdProblem, splitRoleNameProblem,
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
 } = await import(pathToFileURL(SCRIPT_PATH).href)
 
 const OLD = 'stock-prep-operator'
@@ -1055,6 +1056,52 @@ test('split reuses an existing role only when its codes EQUAL the extra codes (a
   sameName.roles.push({ id: SPLIT, name: ' 审批与提交 ' })
   for (const code of EXTRA) sameName.rolePermissions.push({ role_id: SPLIT, permission_code: code })
   assert.equal((await runMain(['--apply', '--split-extra-codes-to-role', SPLIT, '--split-role-name', '审批与提交'], sameName)).code, EXIT_OK)
+})
+
+// A role whose trimmed display name is `admin` makes its members approval administrators
+// (approval-record-link-txn-auth.ts, multitable/automation-approval-template-access.ts); a built-in
+// stock-prep display name would let the split role pose as that built-in (S8 reserved names).
+const RESERVED_SPLIT_NAMES = [
+  'admin', 'Admin', 'ADMIN', 'ａｄｍｉｎ', 'ad min', 'admin（内置）',
+  '操作人员', 'Operator', 'operator', '一线填写', 'Floor operator', 'FLOOR  OPERATOR', '操作人员（内置）', '备料主管理员', 'Main administrator',
+]
+
+test('split usage: a split role name that is admin (any case / spacing) or a built-in stock-prep display name is refused before connecting, never echoed', async () => {
+  assert.equal(STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES.length, 10)
+  for (const name of [...RESERVED_SPLIT_NAMES, ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES]) {
+    assert.notEqual(splitRoleNameProblem(name), null, `refused: ${JSON.stringify(name)}`)
+    let connected = false
+    const err = []
+    const code = await main(['--split-extra-codes-to-role', SPLIT, '--split-role-name', name], { DATABASE_URL: 'postgres://fake' }, {
+      createClient: async () => { connected = true; return makeFakeClient(splitState()) }, out: () => {}, err: (line) => err.push(line),
+    })
+    assert.equal(code, EXIT_FAILURE, name)
+    assert.equal(connected, false, name)
+    assert.ok(err.join('\n').includes('--split-role-name: the split role name may not be'), name)
+    // The refusal names the fixed word admin itself, and the role ids / the script's file name contain
+    // "operator"; no other given value may appear.
+    const withoutIds = err.join('\n').replaceAll('migrate-legacy-operator-role', '').replaceAll(OLD, '').replaceAll(TARGET, '').replaceAll(SPLIT, '')
+    if (name.length > 3 && name !== 'admin') assert.ok(!withoutIds.includes(name), `never echoed: ${JSON.stringify(name)}`)
+  }
+  for (const name of [DEFAULT_SPLIT_ROLE_NAME, 'administrator', 'admins', 'approvals admin', '审批管理', 'Operator 2', '操作人员甲']) {
+    assert.equal(splitRoleNameProblem(name), null, `accepted: ${JSON.stringify(name)}`)
+  }
+})
+
+test('split refuses to REUSE an existing role whose display name is admin or a built-in stock-prep name (old-role members would gain it), before any write', async () => {
+  for (const name of [' admin ', 'Admin', '操作人员', 'Floor operator']) {
+    const state = splitState()
+    state.roles.push({ id: SPLIT, name })
+    for (const code of EXTRA) state.rolePermissions.push({ role_id: SPLIT, permission_code: code })
+    const before = snapshot(state)
+    const { code, out, writes } = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], state)
+    assert.equal(code, EXIT_REFUSED, name)
+    assert.deepEqual(writes, [], name)
+    assert.equal(snapshot(state), before, name)
+    assert.ok(out.some((line) => line.startsWith(`REFUSED: split: role ${SPLIT} already exists and its display name may not be`)), name)
+    const printed = out.join('\n').replaceAll('migrate-legacy-operator-role', '').replaceAll(OLD, '').replaceAll(TARGET, '').replaceAll(SPLIT, '')
+    if (name.trim().length > 3 && name.trim() !== 'admin') assert.ok(!printed.includes(name.trim()), `never printed: ${JSON.stringify(name)}`)
+  }
 })
 
 test('split refuses an absent id that still has leftover rows, or a display name another role already carries', async () => {
