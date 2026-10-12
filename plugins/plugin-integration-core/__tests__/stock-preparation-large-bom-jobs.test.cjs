@@ -2503,7 +2503,7 @@ async function testLegacyRealCheckpointCannotResume() {
   const set = storage.set.bind(storage)
   storage.set = async (...args) => { stateWrites += 1; return set(...args) }
   await assert.rejects(
-    () => runLargeBomCheckpointApplyJobChunk({ ...runInput, bomEvaluationVersion: 'stock-preparation-bom.v2' }),
+    () => runLargeBomCheckpointApplyJobChunk({ ...runInput, bomEvaluationVersion: 'stock-preparation-bom.v3' }),
     (error) => error.code === 'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED' && error.status === 409,
     'a real legacy paused checkpoint must not be rescued by a caller-supplied generation',
   )
@@ -2513,7 +2513,7 @@ async function testLegacyRealCheckpointCannotResume() {
 }
 
 async function testEvaluationVersionProducerChainAndRevisions() {
-  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v2')
+  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v3')
   const storage = createStorage()
   const scope = { storage, ...TEST_SCOPE, actionId: 'plm.stock-preparation.pull-bom.v1', jobId: 'job-producer-version' }
   const created = await createLargeBomBackgroundExpansionJob({

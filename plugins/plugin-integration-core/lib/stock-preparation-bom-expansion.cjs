@@ -18,7 +18,7 @@ const DEFAULT_MAX_DEPTH = 20
 const DEFAULT_MAX_ROWS = 10000
 // Server-owned evaluation generation, not source schema or authorization. Persisted
 // artifacts from older algorithms must not be silently relabelled with this value.
-const STOCK_PREPARATION_BOM_EVALUATION_VERSION = 'stock-preparation-bom.v2'
+const STOCK_PREPARATION_BOM_EVALUATION_VERSION = 'stock-preparation-bom.v3'
 const LARGE_BOM_BOUNDED_ERROR_TYPES = Object.freeze([
   'max_rows_exceeded',
   'read_page_limit_exceeded',
@@ -1100,14 +1100,22 @@ function splitNameAndSpec(value) {
  * **消掉** —— 那是把一道已有的守卫放松。所以:四样一致 **且用量也一致** 才合并(真正的重复,
  * 例如两条 active bomHead 指着同一条明细);用量不一致的仍然两行入库,仍然被挂起给人看。
  */
-function siblingDedupeKey({ parentComponentCode, componentCode, nameAndSpec, material, rawQuantity }) {
-  return JSON.stringify([
+function siblingDedupeKey({ parentComponentCode, componentCode, nameAndSpec, material, rawQuantity, componentSourceId }) {
+  const identity = [
     toKey(parentComponentCode),
     toKey(componentCode),
     toKey(nameAndSpec),
     toKey(material),
     rawQuantity === undefined ? null : String(rawQuantity),
-  ])
+  ]
+  // Missing display fields do not establish business equivalence. Preserve the
+  // original key for complete identities, but require the already-validated
+  // source ID for incomplete ones so a different component's subtree survives.
+  // Keep the display fields and quantity too: this does not hide their conflicts.
+  if (identity.slice(1, 4).some(value => value === null)) {
+    return JSON.stringify(['source-fallback', toKey(componentSourceId), ...identity])
+  }
+  return JSON.stringify(identity)
 }
 
 function makePath(pathTokens) {
@@ -1967,6 +1975,7 @@ async function expandPlmProjectBom(input = {}) {
         // info.getMaterialId()` 同一组值。名称及规格用的是 **未切分** 的原串,所以两个同图号、
         // 不同名称的标准件不会被合并(老系统那行注释说的就是这件事)。
         const dedupeKey = siblingDedupeKey({
+          componentSourceId: childSourceId,
           parentComponentCode: parentRow.componentCode,
           componentCode: plan.part.codeField ? readField(partRow, plan.part.codeField) : undefined,
           nameAndSpec: plan.part.nameField ? readField(partRow, plan.part.nameField) : undefined,

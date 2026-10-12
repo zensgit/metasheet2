@@ -174,7 +174,7 @@ async function testBomHeadActiveStateContract() {
       assert.equal(result.rows.length, mode === 'recursive' ? 3 : 2)
     }
   }
-  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v2')
+  assert.equal(STOCK_PREPARATION_BOM_EVALUATION_VERSION, 'stock-preparation-bom.v3')
 }
 
 async function testOrderSpecifiedBomVersionOverridesOnlyRootRead() {
@@ -2014,6 +2014,54 @@ async function testSameDrawingDifferentStandardPartsSurvive() {
   assert.equal('duplicateSiblingsCollapsed' in result.summary, false)
 }
 
+// Incomplete display identity is not evidence that distinct source components are
+// duplicates. Keep both branches, while collapsing a repeated same-ID relation.
+async function testIncompleteSiblingIdentityKeepsDistinctSourceSubtrees() {
+  const fields = ['IdentityNo', 'IdentityName', 'Material']
+  for (const missingFields of [fields, ...fields.map(field => [field])]) {
+    for (const missing of [undefined, null, '', '   ']) {
+      const part = id => {
+        const row = { OBJ_ID: id, IdentityNo: 'SAME', IdentityName: 'Synthetic part', Material: 'Synthetic', SysVer: 'V1' }
+        for (const field of missingFields) {
+          if (missing === undefined) delete row[field]
+          else row[field] = missing
+        }
+        return row
+      }
+      const { adapter, calls } = createAdapter(baseData({
+        DN_PDM_PartLibraryInfo: [
+          { OBJ_ID: 'PART-A', IdentityNo: 'A-001', IdentityName: 'Assembly', Material: 'Steel', SysVer: 'V1' },
+          part('PART-B'), part('PART-C'),
+          { OBJ_ID: 'PART-D', IdentityNo: 'D-001', IdentityName: 'Leaf', Material: 'Synthetic', SysVer: 'V1' },
+        ],
+        DN_PDM_BomHeadInfo: [
+          { part_id: 'PART-A', bom_id: 'BOM-A', SysVer: 'V1', bom_able: true },
+          { part_id: 'PART-C', bom_id: 'BOM-C', SysVer: 'V1', bom_able: true },
+        ],
+        DN_PDM_BomDetailsInfo: [
+          { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: 3 },
+          { bom_pid: 'BOM-A', part_id: 'PART-B', Bom_ExAttr1: '3' },
+          { bom_pid: 'BOM-A', part_id: 'PART-C', Bom_ExAttr1: 3 },
+          { bom_pid: 'BOM-C', part_id: 'PART-D', Bom_ExAttr1: 4 },
+        ],
+      }))
+      const result = await expandPlmProjectBom({ sourceAdapter: adapter, projectNo: 'P-001' })
+      assert.equal(result.valid, true)
+      assert.deepEqual(result.rows.map(row => row.componentSourceId), ['PART-A', 'PART-B', 'PART-C', 'PART-D'], 'missing display identity must not discard a different source subtree')
+      assert.equal(result.rows[3].totalQuantity, 24)
+      assert.equal(result.summary.duplicateSiblingsCollapsed, 1, 'only the repeated same-ID, same-quantity relation collapses')
+      assert(calls.some(call => call.object === 'DN_PDM_BomHeadInfo' && call.filters.part_id === 'PART-C'))
+    }
+  }
+  const complete = baseData()
+  complete.DN_PDM_PartLibraryInfo.push({ ...complete.DN_PDM_PartLibraryInfo[1], OBJ_ID: 'PART-C' })
+  complete.DN_PDM_BomDetailsInfo.push({ ...complete.DN_PDM_BomDetailsInfo[0], part_id: 'PART-C' })
+  const compatible = await expandPlmProjectBom({ sourceAdapter: createAdapter(complete).adapter, projectNo: 'P-001' })
+  assert.equal(compatible.valid, true)
+  assert.deepEqual(compatible.rows.map(row => row.componentSourceId), ['PART-A', 'PART-B'], 'complete display equivalence keeps the existing first-wins rule across source IDs')
+  assert.equal(compatible.summary.duplicateSiblingsCollapsed, 1)
+}
+
 // ③ 同父同键但用量不同的两条明细:不合并,仍然两行 —— 这是对老系统的有意偏离,理由写在
 //    siblingDedupeKey 的注释里:合并会把 duplicate_expanded_key 的 fail-closed 挂起消掉。
 async function testSiblingsThatDisagreeOnQuantityAreNotCollapsed() {
@@ -2457,6 +2505,7 @@ async function main() {
   await testScaleLimitsRemainDiagnosableAndValuesFree()
   await testTwoActiveBomHeadsCollapseOneChild()
   await testSameDrawingDifferentStandardPartsSurvive()
+  await testIncompleteSiblingIdentityKeepsDistinctSourceSubtrees()
   await testSiblingsThatDisagreeOnQuantityAreNotCollapsed()
   await testRootSelectionKeepsHighestMainDrawingAndSheetMetal()
   await testRootSelectionDropsDashDescendantsWhenNoMainDrawing()
