@@ -645,9 +645,13 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Backend log rotation (runbook-backend-log-rotation-20261012): hermetic, pm2 / schtasks /
           # ScheduledTasks replaced by functions. The Windows-only cases self-report SKIP here; the
           # script's PowerShell 5.1 grammar is pinned statically by the suite itself. The explicit
