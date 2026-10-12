@@ -871,18 +871,22 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     enNext: 'Pressing again will not change it — a platform administrator has to upgrade the server; give an administrator this error code.',
   }),
   // S3 fix round 2 (F4): the refresh never waits for another overview update; it says so and does nothing.
+  // Follow-ups 2 fix round 2: the next step promises nothing about the running update's outcome — that run can
+  // itself end 503 INCOMPLETE, so it only says to press again later and read the answer.
   STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY: Object.freeze({
     zh: '项目总览表正在被另一次更新改写,这次刷新没有做任何事,什么都没有改动。',
     en: 'The project overview is being updated by another run right now, so this refresh did nothing and nothing changed.',
-    zhNext: '稍等一会儿再点「刷新项目总览」;正在进行的那次更新完成后,总览就是最新的。',
-    enNext: 'Wait a moment and press "Refresh the project overview" again; once the running update finishes, the overview is current.',
+    zhNext: '稍等一会儿再点「刷新项目总览」,看那次更新的结果;那次更新不一定能写完全部项目。',
+    enNext: 'Wait a moment and press "Refresh the project overview" again to see how that update ended; it may not write every project.',
   }),
   // S3 follow-up C: the refresh wrote some rows but could not write every project — the overview is NOT current.
+  // Follow-ups 2 (item 2): the next line promises only what is true across a server restart — a refresh redoes
+  // every project (the server's in-process "still to retry" list is lost on restart, so it is never promised).
   STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE: Object.freeze({
     zh: '项目总览表这次只刷新了一部分,有的项目没能写进去,所以总览还不是最新的。',
     en: 'The project overview was only partly refreshed: some projects could not be written, so the overview is not current yet.',
-    zhNext: '没写进去的项目已经记下了;过一会儿再点「刷新项目总览」。如果一直这样,请把这条报错代码给平台管理员。',
-    enNext: 'The projects that were not written are remembered; press "Refresh the project overview" again in a moment. If it keeps happening, give a platform administrator this error code.',
+    zhNext: '有项目没写进去,稍后再点「刷新项目总览」会重做全部项目。如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'Some projects were not written; pressing "Refresh the project overview" again a little later redoes every project. If it keeps happening, give a platform administrator this error code.',
   }),
   STOCK_PREPARATION_PROJECT_ROUTE_FAILED: Object.freeze({
     zh: '这一步没有完成,请稍后再试一次。',
@@ -2519,6 +2523,11 @@ export const STOCK_PREP_PROJECT_OVERVIEW_PLAIN: Record<string, StockPrepPlainEnt
   overview_cooled: Object.freeze({
     zh: '刚刚刷新过,数字已经是最新的;过一会儿再刷新。',
     en: 'It was refreshed a moment ago and the numbers are current; refresh again in a little while.',
+  }),
+  // S3 follow-ups 2 (item 1): the cooldown after a refresh that could not write every project — never "current".
+  overview_cooled_incomplete: Object.freeze({
+    zh: '刚才那次刷新有项目没写进去,总览还不是最新的;这次没有再刷新,稍后再点「刷新项目总览」会重做全部项目。',
+    en: 'The last refresh could not write every project, so the overview is not current yet; nothing was done this time — press "Refresh the project overview" again a little later to redo every project.',
   }),
   fields_invalid_control: Object.freeze({
     zh: '负责人和备注里不能有换行、制表符这类看不见的控制字符,这次没有保存。',
