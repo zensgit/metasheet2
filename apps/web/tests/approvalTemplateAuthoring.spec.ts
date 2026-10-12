@@ -35,6 +35,7 @@ import {
   visibilityDraftWithScalarText,
   type FieldVisibilityDraft,
 } from '../src/approvals/templateAuthoring'
+import { CONDITION_VALUE_COPY_EN, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -173,7 +174,11 @@ const ElInput = defineComponent({
   props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String, size: String },
   emits: ['update:modelValue'],
   render() {
-    return h('input', {
+    // R-43 (B) stub fidelity: a real `type="textarea"` el-input renders a <textarea>, which keeps
+    // newlines (a jsdom <input> strips them). Placeholder is rendered so a test can find an
+    // otherwise unlabelled textarea; reads/writes still go through `.value` + `input`.
+    return h(this.type === 'textarea' ? 'textarea' : 'input', {
+      placeholder: this.placeholder,
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
@@ -206,6 +211,9 @@ const ElSelect = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
+      // R-43 (B): a `multiple` select's DOM selection does not survive re-render (the stub patches
+      // `value` with the array's string form), so tests read the bound model back from here.
+      'data-model-value': JSON.stringify(this.modelValue ?? null),
       onChange: (event: Event) => {
         const target = event.target as HTMLSelectElement
         // W1-1a stub fidelity (test-only; mirrors approval-template-authoring-canvas-inspector.spec.ts's
@@ -224,9 +232,9 @@ const ElSelect = defineComponent({
 
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
+  props: { label: String, value: String, disabled: Boolean },
   render() {
-    return h('option', { value: this.value }, this.label)
+    return h('option', { value: this.value, disabled: this.disabled }, this.label)
   },
 })
 
@@ -3951,7 +3959,11 @@ describe('TemplateAuthoringView', () => {
     operatorSelect.value = 'eq'
     operatorSelect.dispatchEvent(new Event('change'))
     await flushUi()
-    const valueInput = inRow('approval-field-visibility-value') as HTMLInputElement
+    // R-43 (B): `amount` is a NUMBER field, so the value control is the number input and the saved
+    // rule value is the number 1000. (This test used to pin `value: '1000'` — a string the
+    // evaluator's `===` never matches against the number the requester submits.)
+    expect(inRow('approval-field-visibility-value')).toBeNull()
+    const valueInput = inRow('approval-field-visibility-number-value') as HTMLInputElement
     valueInput.value = '1000'
     valueInput.dispatchEvent(new Event('input'))
     await flushUi()
@@ -3961,7 +3973,7 @@ describe('TemplateAuthoringView', () => {
 
     expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    expect(payload.formSchema.fields[1].visibilityRule).toEqual({ fieldId: 'amount', operator: 'eq', value: '1000' })
+    expect(payload.formSchema.fields[1].visibilityRule).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1000 })
   })
 
   it('clearing the dependency in the mounted view drops the rule from the saved payload', async () => {
@@ -6083,6 +6095,264 @@ describe('TemplateAuthoringView', () => {
       expect(config.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
       // The completed save re-baselines the draft: the sticky reveal is released and the grid hides again.
       expect(inEditor('approval-node-empty-policy')).toBeNull()
+    })
+  })
+
+  // R-43 (B) — condition values by field type, mounted. Branch rules are edited in BOTH hosts of the
+  // shared condition editor (the flag-off structured list and the Canvas inspector); visibility rules
+  // here go through the flag-off legacy inline editor (Designer 2.0 is covered by
+  // approval-form-field-inspector.spec.ts). The test locale is en, so new copy is the EN table.
+  describe('R-43 (B) typed condition values (mounted)', () => {
+    type Rule = { fieldId: string; operator: string; value?: unknown }
+    const OPTION_FIELDS = [
+      { id: 'amount', type: 'number', label: '金额', required: true },
+      { id: 'kind', type: 'select', label: '类型', options: [{ label: '出差', value: 'opt_trip' }, { label: '其他', value: 'opt_other' }] },
+      { id: 'tags', type: 'multi-select', label: '标签', options: [{ label: '加急', value: 'opt_urgent' }, { label: '普通', value: 'opt_normal' }] },
+      { id: 'reason', type: 'text', label: '事由' },
+      { id: 'reviewer', type: 'user', label: '审批人', required: true },
+    ]
+    function typedTemplate(rules: Rule[], extraFields: unknown[] = []) {
+      return buildTemplate({
+        formSchema: { fields: [...OPTION_FIELDS, ...extraFields] } as any,
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules }], defaultEdgeKey: 'e-b' } },
+            { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-c', source: 'start', target: 'cond_1' },
+            { key: 'e-a', source: 'cond_1', target: 'app_a' },
+            { key: 'e-b', source: 'cond_1', target: 'end' },
+            { key: 'e-a-end', source: 'app_a', target: 'end' },
+          ],
+        } as any,
+      })
+    }
+    async function mountTyped(rules: Rule[], canvas = false, extraFields: unknown[] = []): Promise<ParentNode> {
+      approvalCanvasV2.value = canvas
+      setRouteParams({ id: 'tpl_typed' })
+      getTemplateSpy.mockResolvedValue(typedTemplate(rules, extraFields))
+      await mountView()
+      await flushUi()
+      if (!canvas) return container!
+      ;(container!.querySelector(
+        '[data-testid="approval-canvas-node"][data-node-type="condition"] [data-testid="approval-canvas-node-select"]',
+      ) as HTMLButtonElement).click()
+      await flushUi()
+      const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]')
+      expect(inspector).not.toBeNull()
+      return inspector!
+    }
+    const rows = (scope: ParentNode) => Array.from(scope.querySelectorAll('[data-testid="approval-condition-rule"]')) as HTMLElement[]
+    const inRule = (scope: ParentNode, index: number, testId: string) =>
+      rows(scope)[index]?.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+    async function choose(el: HTMLSelectElement | null, value: string) {
+      expect(el).not.toBeNull()
+      el!.value = value
+      el!.dispatchEvent(new Event('change'))
+      await flushUi()
+    }
+    async function type(el: HTMLInputElement | HTMLTextAreaElement | null, value: string) {
+      expect(el).not.toBeNull()
+      el!.value = value
+      el!.dispatchEvent(new Event('input'))
+      await flushUi()
+    }
+    async function saveRules(): Promise<Rule[]> {
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      return payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules
+    }
+    async function saveFields(): Promise<any[]> {
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      return (updateTemplateSpy.mock.calls[0]?.[1] as any).formSchema.fields
+    }
+    const branchHead = (scope: ParentNode) =>
+      (scope.querySelector('[data-testid="approval-condition-branch"]')?.textContent ?? '')
+
+    it('marks every rule that can never take effect, and an unedited save keeps all of them byte-identical (no rewrite, no blocker)', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'kind', operator: 'eq', value: 'opt_gone' },
+        { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' },
+        { fieldId: 'amount', operator: 'eq', value: '5000' },
+        { fieldId: 'reason', operator: 'in', value: 'a' },
+        { fieldId: 'amount', operator: 'gt', value: '5000' },
+      ]
+      const scope = await mountTyped(rules)
+      const issue = (index: number) => inRule(scope, index, 'approval-condition-rule-issue')?.textContent ?? ''
+      expect(issue(0)).toBe(conditionValueIssueText(['value-not-option'], false))
+      expect(issue(1)).toBe(conditionValueIssueText(['operator-not-effective'], false))
+      expect(issue(2)).toBe(conditionValueIssueText(['not-number'], false))
+      expect(issue(3)).toBe(conditionValueIssueText(['in-not-list'], false))
+      expect(inRule(scope, 4, 'approval-condition-rule-issue')).toBeNull() // gt normalises '5000': in effect today
+      const tagOperator = inRule(scope, 1, 'approval-condition-rule-operator')!
+      const eqChoice = Array.from(tagOperator.options).find((option) => option.value === 'eq')
+      expect(eqChoice?.disabled).toBe(true)
+      expect(eqChoice?.textContent).toContain(CONDITION_VALUE_COPY_EN.notApplicableSuffix.trim())
+      expect(await saveRules()).toStrictEqual(rules)
+    })
+
+    for (const canvas of [false, true]) {
+      const host = canvas ? 'Canvas inspector' : 'structured list'
+      it(`${host}: a select rule picks an option NAME and saves the option VALUE; the branch summary shows the name`, async () => {
+        const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_other' }], canvas)
+        const select = inRule(scope, 0, 'approval-condition-rule-option-value')!
+        expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['出差', '其他'])
+        expect(select.textContent).not.toContain('opt_')
+        expect(inRule(scope, 0, 'approval-condition-rule-value')).toBeNull()
+        await choose(select, 'opt_trip')
+        expect(branchHead(scope)).toContain('出差')
+        expect(branchHead(scope)).not.toContain('opt_trip')
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+      })
+
+      it(`${host}: multi-select offers only in / isEmpty; in saves an ARRAY of option values in option order (select too)`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' },
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+        ], canvas)
+        const operator = inRule(scope, 0, 'approval-condition-rule-operator')!
+        expect(Array.from(operator.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty'])
+        await choose(operator, 'in')
+        const tagValues = inRule(scope, 0, 'approval-condition-rule-option-values')!
+        expect(JSON.parse(tagValues.getAttribute('data-model-value')!)).toEqual(['opt_urgent'])
+        pickOptions(tagValues, ['opt_normal', 'opt_urgent'])
+        await flushUi()
+        expect(JSON.parse(inRule(scope, 0, 'approval-condition-rule-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_urgent', 'opt_normal'])
+        await choose(inRule(scope, 1, 'approval-condition-rule-operator'), 'in')
+        pickOptions(inRule(scope, 1, 'approval-condition-rule-option-values')!, ['opt_trip', 'opt_other'])
+        await flushUi()
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] },
+          { fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] },
+        ])
+      })
+
+      it(`${host}: number rules save NUMBERS (eq and in); text in saves a list and keeps the typed newlines`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'amount', operator: 'eq', value: 1 },
+          { fieldId: 'amount', operator: 'in', value: [1] },
+          { fieldId: 'reason', operator: 'in', value: ['x'] },
+        ], canvas)
+        expect(inRule(scope, 0, 'approval-condition-rule-value')).toBeNull()
+        await type(inRule(scope, 0, 'approval-condition-rule-number-value'), '5000')
+        const numbers = inRule(scope, 1, 'approval-condition-rule-values')!
+        expect(numbers.tagName).toBe('TEXTAREA')
+        await type(numbers, '1000\n2000\n')
+        expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('1000\n2000\n')
+        await type(inRule(scope, 2, 'approval-condition-rule-values'), 'a\nb')
+        expect(inRule(scope, 2, 'approval-condition-rule-values')!.value).toBe('a\nb')
+        const saved = await saveRules()
+        expect(saved).toStrictEqual([
+          { fieldId: 'amount', operator: 'eq', value: 5000 },
+          { fieldId: 'amount', operator: 'in', value: [1000, 2000] },
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+        ])
+        expect(typeof saved[0].value).toBe('number')
+      })
+    }
+
+    it('switching the rule field clears a value that means nothing for the new field and picks an effective operator', async () => {
+      const scope = await mountTyped([{ fieldId: 'amount', operator: 'eq', value: 5000 }])
+      await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'kind')
+      expect(inRule(scope, 0, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('""')
+      expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('eq')
+      await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'tags')
+      expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('in')
+      expect(await saveRules()).toStrictEqual([{ fieldId: 'tags', operator: 'in' }])
+    })
+
+    it('renaming an option shows the new name with the stored value unchanged; deleting it marks the rule', async () => {
+      const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+      const kindRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+      const optionsBox = () => kindRow.querySelector('textarea[placeholder="每行一个选项，格式：显示名:值"]') as HTMLTextAreaElement
+      await type(optionsBox(), '差旅:opt_trip\n其他:opt_other')
+      const select = inRule(scope, 0, 'approval-condition-rule-option-value')!
+      expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['差旅', '其他'])
+      expect(select.getAttribute('data-model-value')).toBe('"opt_trip"')
+      expect(branchHead(scope)).toContain('差旅')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      await type(optionsBox(), '其他:opt_other')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['value-not-option'], false))
+      expect(await saveRules()).toStrictEqual([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+    })
+
+    // ── legacy (flag-off) form designer: visibility rules ──
+    const NOTE = { id: 'note', type: 'text', label: '备注' }
+    const noteRow = () => {
+      const rowsList = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+      return rowsList[rowsList.length - 1] as HTMLElement
+    }
+    const inNote = (testId: string) => noteRow().querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+    const noteRule = (fields: any[]) => fields.find((field) => field.id === 'note').visibilityRule
+
+    it('legacy designer: a select dependency picks an option name (eq) and several names (in); saved as option values', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [NOTE])
+      await choose(inNote('approval-field-visibility-depends'), 'kind')
+      const single = inNote('approval-field-visibility-option-value')!
+      expect(Array.from(single.options).map((option) => option.textContent)).toEqual(['出差', '其他'])
+      expect(inNote('approval-field-visibility-value')).toBeNull()
+      await choose(single, 'opt_trip')
+      await choose(inNote('approval-field-visibility-operator'), 'in')
+      const multiple = inNote('approval-field-visibility-option-values')!
+      expect(JSON.parse(multiple.getAttribute('data-model-value')!)).toEqual(['opt_trip'])
+      pickOptions(multiple, ['opt_other', 'opt_trip'])
+      await flushUi()
+      expect(JSON.parse(inNote('approval-field-visibility-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_trip', 'opt_other'])
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'kind', operator: 'in', values: ['opt_trip', 'opt_other'] })
+    })
+
+    it('legacy designer: a number dependency saves a NUMBER for eq and numbers for in; a text dependency in keeps one value per line', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [NOTE, { ...NOTE, id: 'note_text', label: '说明' }])
+      const rowsList = () => Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]')) as HTMLElement[]
+      const textRow = () => rowsList()[rowsList().length - 1]
+      const numberRow = () => rowsList()[rowsList().length - 2]
+      const inRow = (row: HTMLElement, testId: string) => row.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+      await choose(inRow(numberRow(), 'approval-field-visibility-depends'), 'amount')
+      await type(inRow(numberRow(), 'approval-field-visibility-number-value'), '1500')
+      await choose(inRow(textRow(), 'approval-field-visibility-depends'), 'reason')
+      await choose(inRow(textRow(), 'approval-field-visibility-operator'), 'in')
+      await type(inRow(textRow(), 'approval-field-visibility-values'), 'a\nb\n')
+      expect(inRow(textRow(), 'approval-field-visibility-values')!.value).toBe('a\nb\n')
+      let fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1500 })
+      expect(fields.find((field: any) => field.id === 'note_text').visibilityRule).toStrictEqual({ fieldId: 'reason', operator: 'in', values: ['a', 'b'] })
+
+      updateTemplateSpy.mockClear()
+      await choose(inRow(numberRow(), 'approval-field-visibility-operator'), 'in')
+      await type(inRow(numberRow(), 'approval-field-visibility-values'), '1\n2')
+      expect(inRow(numberRow(), 'approval-field-visibility-values')!.value).toBe('1\n2')
+      fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+    })
+
+    it('legacy designer: a stored multi-select eq rule is marked (operator shown disabled) and saved unchanged; retyping the dependency marks instead of clearing', async () => {
+      const legacyRule = { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' }
+      const kindRule = { fieldId: 'kind', operator: 'eq', value: 'opt_trip' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [
+        { ...NOTE, id: 'note_kind', visibilityRule: kindRule },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const operator = inNote('approval-field-visibility-operator')!
+      expect(operator.value).toBe('eq')
+      expect(Array.from(operator.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['operator-not-effective'], false))
+
+      const kindRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+      await choose(kindRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement, 'number')
+      const rowsList = Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]')) as HTMLElement[]
+      const kindDependent = rowsList[rowsList.length - 2]
+      expect(kindDependent.querySelector('[data-testid="approval-field-visibility-issue"]')?.textContent)
+        .toBe(conditionValueIssueText(['not-number'], false))
+      const fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual(legacyRule)
+      expect(fields.find((field: any) => field.id === 'note_kind').visibilityRule).toStrictEqual(kindRule)
     })
   })
   })
