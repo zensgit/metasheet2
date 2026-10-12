@@ -156,7 +156,7 @@
 | 行 | 承载 | 本次运行 | 结果 |
 |---|---|---|---|
 | `M3` 设父格（同用结构锁） | `task-m3-tree`（含 `M3\|6\|整门` 的按原文匹配取锁函数体的文件内负控） | lane ×3 | 25/25 ×3 |
-| `M2\|5\|整门`（待办键集） | 五键：`task-m4-paging-settings.db.test.ts`（lane 文件）；六键：`tests/unit/task-records-guards.test.ts`（单测子集）；两者：本文件 `ms-pending-unchanged`（修复轮 1 改正承载文件名，`task-p0a` 里没有键集格） | lane ×3 | lane 三遍全绿；`ms-pending-unchanged` ×3 绿 |
+| `M2\|5\|整门`（待办键集与跨时区字节） | 键集：五键 `task-m4-paging-settings.db.test.ts`（lane）、六键 `tests/unit/task-records-guards.test.ts`（单测子集）、两者 本文件 `ms-pending-unchanged`；门 5 的其余格：`task-read-path.db.test.ts` 的跨时区字节格（lane）、`tests/unit/task-dates.test.ts`（单测子集）（修复轮 1 改正承载文件名，`task-p0a` 里没有门 5 的格） | lane ×3 | lane 三遍全绿；`ms-pending-unchanged` ×3 绿 |
 | PR-3c 单测 `task-counts-touchpoints` | §4 | 本地 | 绿 |
 | 其余 `M2\|` / `M3\|` / `M4\|` 行 | lane 的其余文件、鉴权门 | lane ×3；鉴权门 | 见 §6.1 |
 | 前端行 | `apps/web` | NOT RUN | 本切片不改 `apps/web`；详情多两个键、列表项多一列，前端未跑 |
@@ -243,7 +243,7 @@ MU22、MU23、MU26–MU32 红的只有本轮新加的格或本轮扩展过的格
 | 起点 `4554b5012b` | 1319（9 failed / 1138 passed / 172 skipped） | 22269（52 failed / 20475 passed / 1742 skipped） |
 | 修复 `9593d67de6` | 1319（9 failed / 1138 passed / 172 skipped） | 22271（52 failed / 20477 passed / 1742 skipped） |
 
-+2 是 `task-access` 的两格（初版已加，闸审核过 219 → 221）。两边的失败清单逐行比对，只差两个与任务无关的文件：`dingtalk-automation-link-routes.api.test.ts` 的一格只在起点红，`comment-mention-candidates-bounded.test.ts` 的一格只在修复红。对照：这两个文件在两个 head 上各单独跑 3 遍，6 遍都是 2 files / 63 passed，判为全量负载下的抖动。其余失败两边相同，都是环境类：四个恢复归档 / 保管文件、`approval-cancel-round-ci-wiring`、`approval-ci-coverage-enumeration`、`tasks-auth-ci-wiring`（需要 python 与 yaml）、`dingtalk-transport-resilience`。没有回归。
++2 是 `task-access` 的两格（初版已加，闸审核过 219 → 221）。两边的失败清单逐行比对，只差两个与任务无关的文件：`dingtalk-automation-link-routes.api.test.ts` 的一格只在起点红，`comment-mention-candidates-bounded.test.ts` 的一格只在修复红。对照：这两个文件在两个 head 上各单独跑 3 遍，6 遍都是 2 files / 63 passed，判为全量负载下的抖动。其余失败两边逐行相同：四个恢复归档 / 保管文件、`approval-cancel-round-ci-wiring`、`approval-ci-coverage-enumeration`、`tasks-auth-ci-wiring`（与闸审在另一台机器上见到的环境类失败同一批：需要 python 与 yaml 等），以及 `dingtalk-transport-resilience`（两边都红，与本切片无关，原因本轮没有查）。没有回归。
 
 ### 11.5 整图边读的查询计划（RAN，另一台机器，PostgreSQL 16）
 
