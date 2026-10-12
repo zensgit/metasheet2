@@ -478,6 +478,9 @@ describe('tasks P0-A real db', () => {
       seriesId: null,
       previousOccurrenceId: null,
       nextOccurrenceId: null,
+      // M5 PR-4a slice 4 (§3.8, [S13], [S11]): not a milestone, no dependency.
+      isMilestone: false,
+      dependencies: { predecessors: [], successors: [] },
     })
     const asCreator = await getTask({ orgId, actorId: userA, taskId: created.id })
     expect(asCreator.canComplete).toBe(true)

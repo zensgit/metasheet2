@@ -372,6 +372,44 @@ export function buildLiveChildrenOfTasksCondition(input: { parentIdsParam: reado
   }
 }
 
+// M5 PR-4a design §3.4, §4.7: the dependency graph of one org, read under the structure lock before
+// an edge is added (the cycle check and the per-task limit see every live edge, D4, ASSUMPTION), by
+// the candidate read (the cycle exclusion) and, anchored on one task, by the dependency lists. The org
+// is this module's single org clause on the predecessor end; the successor end is checked for
+// liveness only, because both composite foreign keys of `task_dependencies` (`(predecessor_id,
+// org_id)` and `(successor_id, org_id)` onto `tasks (id, org_id)`) put the two ends and the edge in
+// one org. Edges of a soft-deleted task stay in the table and are left out here (D17, ASSUMPTION).
+/**
+ * `{ sql, params }` TEXT selecting the rows of `task_dependencies` whose two ends are live tasks of
+ * one org, for a query `FROM task_dependencies`. `$1` = a task id, or `null` for every edge of the
+ * org; with an id only the edges that have it as predecessor or successor. `$2` = org.
+ */
+export function buildOrgDependencyEdgesCondition(input: { taskIdParam: string | null; orgParam: string }): TaskScopeCondition {
+  return {
+    sql:
+      `(${TASK_ID_PLACEHOLDER}::text IS NULL OR task_dependencies.predecessor_id = ${TASK_ID_PLACEHOLDER} ` +
+      `OR task_dependencies.successor_id = ${TASK_ID_PLACEHOLDER}) ` +
+      `AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = task_dependencies.predecessor_id AND ${taskOrgLiveClause()}) ` +
+      `AND EXISTS (SELECT 1 FROM tasks AS successor_task WHERE successor_task.id = task_dependencies.successor_id ` +
+      `AND successor_task.deleted_at IS NULL)`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §3.4, §4.7: the tasks a dependency candidate list starts from. Whether the caller
+// may edit a row is decided per row from its role set (`can(roles, 'edit')`), never here.
+/**
+ * `{ sql, params }` TEXT selecting the live tasks of one org other than one task. `$1` = the task
+ * the candidates are for (left out), `$2` = org. A caller that appends its own parameters numbers
+ * them from `params.length + 1`.
+ */
+export function buildDependencyCandidateTasksCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.id <> ${TASK_ID_PLACEHOLDER} AND ${taskOrgLiveClause()}`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
 // ASSUMPTION(task-m4): [own-02] tasks of one list (list item listing, "is this task in the list").
 /**
  * `{ sql, params }` TEXT selecting the live tasks of one org that are items of one list.

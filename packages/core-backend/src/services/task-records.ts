@@ -53,6 +53,7 @@ import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers, findActiveOrgMembers } from './task-org-members'
+import { loadDependencyItems } from './task-dependency-records'
 import { canonicalRecurrence, liveSuccessorId, loadSeries, occurrenceOrdinal } from './task-recurrence-records'
 import { loadBadgeScope, loadRemindPolicy } from './task-user-settings'
 
@@ -234,8 +235,10 @@ function taskViewCondition(input: { orgId: string; actorId: string; view: string
 export async function listTasks(input: { orgId: string; actorId: string; view: string; page?: TaskPageParams }): Promise<Row[]> {
   const cond = taskViewCondition(input)
   const paged = pageClause(cond.params, pageOrDefault(input.page))
+  // M5 PR-4a slice 4 (design §3.8): `is_milestone` after the M2 columns (RULED(2026-10-09): [S13];
+  // ASSUMPTION(task-m5a): [a-18]). `/pending` keeps its key set (lock §6.1, gate 5).
   const result = await query<Row>(
-    `SELECT id, title, status, completion_mode, created_by, due_at FROM tasks WHERE ${cond.sql} ${paged.sql}`,
+    `SELECT id, title, status, completion_mode, created_by, due_at, is_milestone FROM tasks WHERE ${cond.sql} ${paged.sql}`,
     paged.params,
   )
   return result.rows
@@ -328,7 +331,7 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
     `SELECT id, title, status, completion_mode, created_by, due_at, parent_id, depth, version,
             due_date::text AS due_date, due_time::text AS due_time, time_zone,
             description, start_date::text AS start_date, start_time::text AS start_time, remind_at,
-            recurrence, recurrence_series_id, previous_occurrence_id
+            recurrence, recurrence_series_id, previous_occurrence_id, is_milestone
      FROM tasks WHERE ${cond.sql}`,
     cond.params,
   )
@@ -431,6 +434,11 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
       firstId: textOrNull(row.recurrence_series_id) ?? input.taskId,
       actorId: input.actorId,
     }),
+    // M5 PR-4a slice 4 (design §3.8), after the view check. RULED(2026-10-09): [S13] the milestone
+    // flag; [S11] the two dependency lists, each counterpart filtered by the caller's own `view`
+    // (ASSUMPTION(task-m5a): [a-28]) and carrying `canRemove` ([a-12]); not paged (D18, ASSUMPTION).
+    isMilestone: row.is_milestone === true,
+    dependencies: await loadDependencyItems(plainDb, { orgId: input.orgId, taskId: input.taskId, actorId: input.actorId, selfRoles: roles }),
   }
 }
 

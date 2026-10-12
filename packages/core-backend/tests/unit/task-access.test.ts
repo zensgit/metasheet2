@@ -5,7 +5,9 @@ import {
   TASK_ROLES,
   TASK_ROLE_ABILITY,
   TASK_VIEWS,
+  buildDependencyCandidateTasksCondition,
   buildLiveChildrenOfTasksCondition,
+  buildOrgDependencyEdgesCondition,
   buildTaskByIdAnyStateCondition,
   buildTaskSeriesMembersCondition,
   buildTaskByIdCondition,
@@ -576,6 +578,9 @@ describe('buildTaskByIdAnyStateCondition (M4 PR-3b)', () => {
       buildTaskByIdAnyStateCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
       buildTaskSeriesMembersCondition({ seriesIdParam: 'tsk_a', orgParam: 'org1' }),
       buildLiveChildrenOfTasksCondition({ parentIdsParam: ['tsk_a'], orgParam: 'org1' }),
+      buildOrgDependencyEdgesCondition({ taskIdParam: null, orgParam: 'org1' }),
+      buildOrgDependencyEdgesCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
+      buildDependencyCandidateTasksCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' }),
     ]
     for (const cond of outputs) expect(cond.sql.split('tasks.org_id = $2').length - 1).toBe(1)
   })
@@ -598,6 +603,32 @@ describe('buildTaskSeriesMembersCondition / buildLiveChildrenOfTasksCondition (M
     expect(cond.sql).toBe('tasks.parent_id = ANY($1::text[]) AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL')
     expect(cond.params).toEqual([['tsk_a', 'tsk_b'], 'org1'])
     expect(cond.params[0]).not.toBe(parents)
+    expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+  })
+})
+
+// M5 PR-4a slice 4 (design task-m5-pr4a-backend-design-20261010.md §3.4, §4.7): the org dependency
+// graph and the candidate tasks go through the module's single org clause.
+describe('buildOrgDependencyEdgesCondition / buildDependencyCandidateTasksCondition (M5 PR-4a slice 4)', () => {
+  it('org edges: pinned text and params; the org clause once, on the predecessor end, live ends only', () => {
+    const all = buildOrgDependencyEdgesCondition({ taskIdParam: null, orgParam: 'org1' })
+    expect(all.sql).toBe(
+      '($1::text IS NULL OR task_dependencies.predecessor_id = $1 OR task_dependencies.successor_id = $1) ' +
+      'AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = task_dependencies.predecessor_id AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL) ' +
+      'AND EXISTS (SELECT 1 FROM tasks AS successor_task WHERE successor_task.id = task_dependencies.successor_id AND successor_task.deleted_at IS NULL)',
+    )
+    expect(all.params).toEqual([null, 'org1'])
+    expect(new Set(all.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
+    expect(all.sql.includes('task_dependencies.org_id')).toBe(false)
+    const anchored = buildOrgDependencyEdgesCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(anchored.sql).toBe(all.sql)
+    expect(anchored.params).toEqual(['tsk_a', 'org1'])
+  })
+
+  it('candidate tasks: pinned text and params, live rows of the org other than the task, the org clause once', () => {
+    const cond = buildDependencyCandidateTasksCondition({ taskIdParam: 'tsk_a', orgParam: 'org1' })
+    expect(cond.sql).toBe('tasks.id <> $1 AND (tasks.org_id = $2) AND tasks.deleted_at IS NULL')
+    expect(cond.params).toEqual(['tsk_a', 'org1'])
     expect(new Set(cond.sql.match(/\$\d+/g))).toEqual(new Set(['$1', '$2']))
   })
 })

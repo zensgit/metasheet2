@@ -229,11 +229,27 @@ describe('tasks auth gate', () => {
   ]
 
   // The M5 PR-4a routes registered so far (design task-m5-pr4a-backend-design-20261010.md §3.0):
-  // slice 3 adds PUT /api/tasks/:id/recurrence. Only the route population and the dispatch binding
-  // below cover them for now; their gate 1 / 2 rows are slice 6 (that design, §1.3).
-  const M5_PLACEHOLDER = { taskId: 'tsk_missing' }
-  const M5_ROUTES: Array<{ label: string; method: 'put'; path: (c: { taskId: string }) => string }> = [
+  // slice 3 adds PUT /api/tasks/:id/recurrence; slice 4 the milestone route and the five dependency
+  // routes (§3.3, §3.4). Only the route population and the dispatch binding below cover them for
+  // now; their gate 1 / 2 rows are slice 6 (that design, §1.3).
+  const M5_PLACEHOLDER = { taskId: 'tsk_missing', otherId: 'tsk_other' }
+  type M5Ctx = { taskId: string; otherId: string }
+  const M5_ROUTES: Array<{ label: string; method: 'get' | 'post' | 'put' | 'patch' | 'delete'; path: (c: M5Ctx) => string }> = [
     { label: 'PUT /api/tasks/:id/recurrence', method: 'put', path: (c) => `/api/tasks/${c.taskId}/recurrence` },
+    { label: 'PATCH /api/tasks/:id/milestone', method: 'patch', path: (c) => `/api/tasks/${c.taskId}/milestone` },
+    { label: 'GET /api/tasks/:id/dependencies', method: 'get', path: (c) => `/api/tasks/${c.taskId}/dependencies` },
+    { label: 'POST /api/tasks/:id/dependencies', method: 'post', path: (c) => `/api/tasks/${c.taskId}/dependencies` },
+    {
+      label: 'DELETE /api/tasks/:id/dependencies/predecessors/:otherId',
+      method: 'delete',
+      path: (c) => `/api/tasks/${c.taskId}/dependencies/predecessors/${c.otherId}`,
+    },
+    {
+      label: 'DELETE /api/tasks/:id/dependencies/successors/:otherId',
+      method: 'delete',
+      path: (c) => `/api/tasks/${c.taskId}/dependencies/successors/${c.otherId}`,
+    },
+    { label: 'GET /api/tasks/:id/dependency-candidates', method: 'get', path: (c) => `/api/tasks/${c.taskId}/dependency-candidates` },
   ]
 
   // The 30 M4 (PR-3a) routes, design §3 and §10.7: PATCH /api/tasks/:id (S4), task settings (S3),
@@ -1258,7 +1274,7 @@ describe('tasks auth gate', () => {
     ]
     expect(new Set(tables).size, 'a route appears twice in the tables').toBe(tables.length)
     expect(new Set(registered).size, 'the router registers a route twice').toBe(registered.length)
-    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length, M5_ROUTES.length]).toEqual([8, 13, 30, 1])
+    expect([P0A_ROUTES.length, M3_ROUTES.length, M4_ROUTES.length, M5_ROUTES.length]).toEqual([8, 13, 30, 7])
     expect([...registered].sort()).toEqual([...tables].sort())
     const dispatchedTo = (method: string, url: string): string => {
       const layer = stack.find((candidate) => candidate.route?.methods[method] === true && candidate.match(url))

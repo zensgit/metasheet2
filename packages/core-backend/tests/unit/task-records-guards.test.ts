@@ -801,7 +801,9 @@ describe('task list items (M4 PR-3a S7)', () => {
     vi.mocked(query).mockClear()
     await expect(listTaskListItems({ ...base, query: { limit: '2', offset: '1' } })).resolves.toEqual({ items: [], total: 0 })
     const statements = vi.mocked(query).mock.calls.map((call) => ({ sql: String(call[0]).replace(/\s+/g, ' ').trim(), params: call[1] }))
-    const read = statements.find((call) => call.sql.startsWith('SELECT id, title, status, completion_mode, created_by, due_at FROM tasks'))
+    // M5 PR-4a slice 4 (design task-m5-pr4a-backend-design-20261010.md §3.8, [a-18]): `is_milestone`
+    // follows the item columns of `GET /api/tasks`.
+    const read = statements.find((call) => call.sql.startsWith('SELECT id, title, status, completion_mode, created_by, due_at, is_milestone FROM tasks'))
     expect(read?.sql).toContain('EXISTS (SELECT 1 FROM task_list_items tli WHERE tli.task_id = tasks.id AND tli.list_id = $1)')
     expect(read?.sql).toContain('ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT $3 OFFSET $4')
     expect(read?.params).toEqual(['tlst_1', 'org-1', 2, 1])
