@@ -62,6 +62,17 @@ run-name: "Attendance Staging Window Runner: ${{ inputs.action }}${{ inputs.acti
 #   soak-status    — daily monitoring channel: monitoring-pack Q1-Q16 + the W7-2
 #                    compare-window counters via psql; exits nonzero on mechanical alerts.
 #
+# STAGING ORG-MEMBERSHIP actions (owner ruling 2026-10-12; population = an ACTIVE user with NO
+# user_orgs row, i.e. action=migrate's zero_membership_no_row_count):
+#   org-membership-inspect — READ-ONLY, values-free locate: per matching user only
+#                    fp = left(md5(id),16), created_at (UTC), synthetic class name, counts and
+#                    yes/no facts; plus the org ids that have active members and their counts.
+#   org-membership-repair  — ONE owner-named repair from `repair_spec`:
+#                    deactivate:<fp16>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR or
+#                    add-membership:<fp16>:<org_id>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR.
+#                    Read-only preconditions -> full pg_dump on the host -> one transaction that
+#                    writes exactly one row and asserts the full counter delta before COMMIT.
+#
 # Modeled on attendance-remote-log-snapshot-prod.yml (SSH via deploy secrets, artifact
 # upload, 15-minute timeout, single concurrency group). Remote logic lives in the
 # committed scripts/ops/attendance-staging-window-runner-remote.sh. Each run ships ONE
@@ -90,7 +101,7 @@ on:
         description: 'What to run against the STAGING stack'
         required: true
         type: choice
-        options: [deploy, smoke, status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status]
+        options: [deploy, smoke, status, migrate, residue-sweep, soak-baseline, soak-seed, soak-flags, soak-run, soak-status, org-membership-inspect, org-membership-repair]
         default: status
       deploy_sha:
         description: 'FULL 40-char commit SHA (GHCR tags are full-SHA). Required for deploy, migrate, smoke, and soak-flags. Migrate runs that exact image migration universe without switching the app; soak-flags must equal the RUNNING image tags.'
@@ -131,6 +142,10 @@ on:
         type: choice
         options: ['false', 'true']
         default: 'false'
+      repair_spec:
+        description: 'action=org-membership-repair only (owner-named): deactivate:<fp16>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR or add-membership:<fp16>:<org_id>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR. fp16 comes from action=org-membership-inspect; org_id must already have active members. Must be empty for every other action.'
+        required: false
+        default: ''
 
 concurrency:
   group: attendance-staging-window-runner
@@ -164,9 +179,26 @@ jobs:
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
+          REPAIR_SPEC: ${{ inputs.repair_spec }}
         run: |
           set -euo pipefail
-          case "$ACTION" in deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          case "$ACTION" in deploy|smoke|status|migrate|residue-sweep|soak-baseline|soak-seed|soak-flags|soak-run|soak-status|org-membership-inspect|org-membership-repair) ;; *) echo "invalid action: $ACTION" >&2; exit 2 ;; esac
+          # repair_spec (owner ruling 2026-10-12): single-line, then the strict regex (the same
+          # literal as ORG_MEMBERSHIP_REPAIR_SPEC_RE in the pipeline lib, which the remote script
+          # re-checks), then scoping. The value is never echoed back: a malformed spec could be a
+          # pasted raw id. The regex is also what keeps the prelude's single-quoted export safe.
+          REPAIR_SPEC="${REPAIR_SPEC:-}"
+          if [[ "$REPAIR_SPEC" == *$'\n'* || "$REPAIR_SPEC" == *$'\r'* ]]; then
+            echo "repair_spec must be single-line (value withheld)" >&2
+            exit 2
+          fi
+          repair_spec_re='^(deactivate:[0-9a-f]{16}|add-membership:[0-9a-f]{16}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}):I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR$'
+          if [[ "$ACTION" == "org-membership-repair" ]]; then
+            [[ "$REPAIR_SPEC" =~ $repair_spec_re ]] || { echo "repair_spec must be exactly deactivate:<fp16>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR or add-membership:<fp16>:<org_id>:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR (value withheld)" >&2; exit 2; }
+          elif [[ -n "$REPAIR_SPEC" ]]; then
+            echo "repair_spec is only meaningful for action=org-membership-repair, got action=$ACTION (value withheld)" >&2
+            exit 2
+          fi
           if [[ "$ACTION" == "deploy" || "$ACTION" == "migrate" || "$ACTION" == "smoke" || "$ACTION" == "soak-flags" ]]; then
             if [[ ! "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]; then
               echo "deploy_sha must be the FULL 40-char lowercase commit SHA for action=$ACTION (GHCR tags are full-SHA; short prefixes fail with manifest unknown), got: '$DEPLOY_SHA'" >&2
@@ -350,6 +382,7 @@ jobs:
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
+          REPAIR_SPEC: ${{ inputs.repair_spec }}
           RUNNER_DIR: ${{ steps.sync.outputs.runner_dir }}
         run: |
           set -euo pipefail
@@ -381,6 +414,7 @@ jobs:
           export STAMPS='${STAMPS}'
           export SOAK_ORGS='${SOAK_ORGS}'
           export SOAK_OPTS='${SOAK_OPTS}'
+          export REPAIR_SPEC='${REPAIR_SPEC}'
           export OUTPUT_DIR='${remote_output_dir}'
           export RUN_STAMP='gh${GITHUB_RUN_ID}a${GITHUB_RUN_ATTEMPT}'
           rm -rf '${remote_output_dir}'
@@ -426,6 +460,7 @@ jobs:
           STAMPS: ${{ inputs.stamps }}
           SOAK_ORGS: ${{ inputs.soak_orgs }}
           SOAK_OPTS: ${{ inputs.soak_opts }}
+          REPAIR_SPEC: ${{ inputs.repair_spec }}
         run: |
           set -euo pipefail
           {
@@ -437,6 +472,15 @@ jobs:
             if [[ "$ACTION" == soak-* ]]; then
               echo "- Soak orgs: \`${SOAK_ORGS:-<none>}\`"
               echo "- Soak opts: \`${SOAK_OPTS:-<none>}\`"
+            fi
+            if [[ "$ACTION" == "org-membership-repair" ]]; then
+              # Re-validated before printing (this step runs under always()); a malformed value is withheld.
+              repair_spec_re='^(deactivate:[0-9a-f]{16}|add-membership:[0-9a-f]{16}:[A-Za-z0-9][A-Za-z0-9._-]{0,127}):I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR$'
+              if [[ "${REPAIR_SPEC:-}" =~ $repair_spec_re ]]; then
+                echo "- Repair spec: \`${REPAIR_SPEC%:I_CONFIRM_STAGING_ORG_MEMBERSHIP_REPAIR}\`"
+              else
+                echo "- Repair spec: \`<malformed; withheld>\`"
+              fi
             fi
             echo "- Deploy SHA: \`${DEPLOY_SHA:-<none>}\`"
             echo "- Window env: \`${SET_WINDOW_ENV}\`"
