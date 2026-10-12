@@ -2,7 +2,7 @@
 
 - 设计：分支 `claude/tasks-m5-pr4a`，文件 `docs/development/task-m5-pr4a-backend-design-20261010.md`（冻结稿 v4 及其后两次文档修订）。本切片按其 §1.3 切片 4、§3.0、§3.3、§3.4、§3.8（详情的 `isMilestone` 与 `dependencies`、两条列表读的 `is_milestone`、待办不改）、§4.1（`task-dependency-records.ts`）、§4.2、§4.4、§4.7（两个新 builder）、§6.1 的 `M5|7` 与 `M5|10`、§6.2 候选 M5-c、§6.2.1 的里程碑、依赖、候选、读依赖与 `DepItem` 五行、§6.4 的待办不变格实现。锁：`docs/development/task-feature-design-lock-20260917.md`（main 版）。
 - 裁定只按日期与条目号引用：owner 2026-10-12（从切片 2 起继续实现 PR-4a，叠在 #6249 上，每片单独过闸，只开 Draft，未裁的问题取设计缺省，不合并，不对任何环境应用 DDL）；S09、S11、S12、S13、S31（M5-c 候选格：自依赖、重复、成环都是 422）（2026-10-09）。本文自选的取舍按设计 §7.1 的 `[a-NN]` 缺省执行；D4、D17、D18 是缺省约束（`ASSUMPTION`）；候选排除成环任务按设计缺省（X3，任务 E 的自选，§7.2 的 owner 问题）。
-- 分支：`claude/tasks-m5-pr4a-s4`，起点 `4554b5012b`（切片 1–3 叠在 #6249 上）。提交：代码与单测 `09e4e7fd9e`、真库文件与登记 `56baecedcb`、软删格补后置一端 `353f8ea0dd`、本记录。不推送、不开 PR、不合并；没有新开关、没有新的 `TASKS_*` 读点、没有新挂载点；迁移仍是切片 2 的 Draft，没有对任何共享环境应用。
+- 分支：`claude/tasks-m5-pr4a-s4`，起点 `4554b5012b`（切片 1–3 叠在 #6249 上）。提交：代码与单测 `09e4e7fd9e`、真库文件与登记 `56baecedcb`、软删格补后置一端 `353f8ea0dd`、本记录初版 `35cb3bbeab`；闸审轮 1 的修复 `9593d67de6` 与本记录的修订（§11）。不推送、不开 PR、不合并；没有新开关、没有新的 `TASKS_*` 读点、没有新挂载点；迁移仍是切片 2 的 Draft，没有对任何共享环境应用。
 - 任务 E（#6249）本切片**没有改动**：`task-dependencies.ts` 与 `task-milestone.ts` 的导出按设计 §4.1 的对照表原样调用，没有建 `claude/tasks-e-pure-s4`。
 - 本地环境：Node 25.9.0，`node_modules` 是指向主检出的符号链接（未提交）。真库在另一台机器上跑（PostgreSQL 16，Node 20），一次性工作树与库，用完即删（§10）。变异驱动与临时 tsconfig 都不入库。
 
@@ -15,7 +15,7 @@
 | `src/tasks/task-access.ts` | `buildOrgDependencyEdgesCondition`（`$1` = 任务 id 或 `null`，`$2` = org）与 `buildDependencyCandidateTasksCondition`（`$1` = 本任务、排除，`$2` = org），都经模块唯一的 org 子句（§3 第 1 条） |
 | `src/services/task-records.ts` | 详情加 `isMilestone`、`dependencies`（`view` 判定之后组装）；`GET /api/tasks` 的列表读在既有列之后加 `is_milestone` |
 | `src/services/task-list-records.ts` | 清单任务项读加 `is_milestone`（同上一行） |
-| `tests/integration/task-m5-dependencies.db.test.ts`（新） | 真库 33 格（§5） |
+| `tests/integration/task-m5-dependencies.db.test.ts`（新） | 真库 41 格（§5；初版 33 格，修复轮 1 加 8 格，§11） |
 | `tests/unit/task-access.test.ts` | 两个新 builder 的钉文、参数、占位符集合；并入「每个 builder 输出恰含一次 org 子句」那一格 |
 | `tests/unit/task-records-guards.test.ts` | 清单任务项读的 SQL 前缀钉加 `is_milestone` |
 | `tests/integration/task-p0a.db.test.ts`、`task-m4-list-items.db.test.ts`、`task-m4-paging-settings.db.test.ts` | 详情整体钉加两键（`isMilestone: false`、`dependencies` 两个空数组）；列表项整体钉与键集钉加 `is_milestone` |
@@ -34,11 +34,11 @@
 
 ## 3. 偏离与本件的取法
 
-1. **边 builder 的形状**：org 子句只出现一次，落在前置一端（`EXISTS (… tasks.id = task_dependencies.predecessor_id AND <org 子句与存活>)`）；后置一端只查存活。依据是两条组合外键 `(predecessor_id, org_id)`、`(successor_id, org_id)` 都指向 `tasks (id, org_id)`，边与两端必在同一 org。没有手写 `task_dependencies.org_id`，所以门 1 的单字面量变异仍覆盖这条读。代价：这种写法下查询计划大概率不走 `idx_tdep_org`（设计 §2.3 的用意是按 org 取边不落全表扫描）；本件**没有跑 EXPLAIN**（NOT RUN），按 org 取的是 `tasks` 上带 org 的索引再按主键连到边。为了把整图读与按单任务读合成一个 builder，`$1` 可为 `null`（`$1::text IS NULL OR … = $1`）；设计只点名了 builder 的名字与「选出」的语义，这一参数形状是本件的取法。
+1. **边 builder 的形状**：org 子句只出现一次，落在前置一端（`EXISTS (… tasks.id = task_dependencies.predecessor_id AND <org 子句与存活>)`）；后置一端只查存活。依据是两条组合外键 `(predecessor_id, org_id)`、`(successor_id, org_id)` 都指向 `tasks (id, org_id)`，边与两端必在同一 org。没有手写 `task_dependencies.org_id`，所以门 1 的单字面量变异仍覆盖这条读。代价：这条整图读不走 `idx_tdep_org`，而设计 §2.3 的用意是按 org 取边不落全表扫描。修复轮 1 实测（§11.5，PostgreSQL 16，合成数据，事务回滚）：每 org 1000 任务、999 条边，20 个 org 时是 `task_dependencies` 的 `Seq Scan` 与本 org 任务（`idx_tsk_org_status`）做 hash join，200 个 org 时是 `Parallel Seq Scan`，两次都扫了全部 org 的边；计划随数据分布而变（闸审在另一组数据上见过按 `tasks` 驱动、走 `task_dependencies_pkey` 的计划），这里不作一般结论。按单任务锚定的读（列表、详情、删边）不受影响。为了把整图读与按单任务读合成一个 builder，`$1` 可为 `null`（`$1::text IS NULL OR … = $1`）；设计只点名了 builder 的名字与「选出」的语义，这一参数形状是本件的取法。
 2. **里程碑写 `updated_at`**：与切片 3 的设 / 清规则同一取法（同一个锁后读数），列为同一个 owner 问题（切片 3 记录 §9 第 2 条）。依赖写不碰任务行，`updated_at` 不动。
 3. **`POST /dependencies` 的「恰一个键」取严格读法**：请求体必须是对象且只有一个键，键是 `predecessorId` 或 `successorId`，值过 `isValidTaskDomainId`；多出任何别的键也是 422 `INVALID_DEPENDENCY`（格 `dep-invalid-body`，变异 MU19）。`PATCH /milestone` 只看 `isMilestone`，别的键忽略。
 4. **候选的读法**：照 M3 `parent-candidates` 的先例，按候选 builder 读出本 org 全部存活任务（带 `q` 时在 SQL 里先按标题过滤），在 TS 里逐行判 `edit`，再交给 `dependencyCandidates` 排除已连与成环，按 SQL 的 `TASK_PAGE_SORT_KEY` 顺序保留，最后才切页；`total` 是过滤后的数。代价是每次调用与本 org 任务数成正比，没有压测。
-5. **`q` 的细节**：字面子串用 `strpos(lower(title), lower(q)) > 0`（不解释 `%`、`_`）；长度按请求里原样字符串的 UTF-16 码元数判（> 200 ⇒ 422），去空白后为空视同未传；同名参数出现多次（数组）⇒ 422。三个 query 码的先后（方向、`q`、分页）设计没有定，本件按此顺序。
+5. **`q` 的细节**：字面子串用 `strpos(lower(title), lower(q)) > 0`（不解释 `%`、`_`）；长度按去掉首尾空白之后的字符（码点，`[...s].length`）数判（> 200 ⇒ 422），与本模块组其余文本上限同一口径（修复轮 1 改正，原为原样字符串的 UTF-16 码元数，见 §11）；去空白后为空视同未传；同名参数出现多次（数组）⇒ 422。三个 query 码的先后（方向、`q`、分页）设计没有定，本件按此顺序。
 6. **`M5|7` 正向格的位置**：设父、依赖增删、派生、里程碑的正向格与三组两两并发格放在新文件（`lock-…` 五格）；切片 2 放在 `task-m5-schema.db.test.ts` 的设父、建任务、调度 tick 与反序 / leader 共存格不动。fence（rank 2）按设计 §4.2、§6.1 归 PR-4c，本切片不加方法、不改 `TASK_LOCK_RANKS`；本切片对 `src/db/` 的 diff 为空。切片 2 记录留下的「第一个在一个事务里取两把任务锁的切片要处理实例模型」没有被触发：依赖写只取结构锁一把。
 7. **通知入队的可检出性**：本切片的四个事件词都不通知，所以「没有投递行」在调用与不调用 `enqueueTaskEventNotifications` 两种情况下一样；`dep-notify` 只证明打开投递后这些写不产生行、同一任务的完成会产生（正控）。仓库里没有对事件写入点的静态普查能检出漏掉的入队调用；本件如实记下，不另造检查。
 8. **鉴权门**：只做路由人口格与分派绑定；新路由的门 1 / 2 逐路由格（缺 org、准入、码、403）归切片 6（§1.3）。真库文件里的缺 org 读格（`dep-read-auth`）用租户声明为空的令牌，在 `RBAC_TOKEN_TRUST=true` 下跑。
@@ -63,9 +63,9 @@
 | 门 15 | 本切片新增与改动的 132 行生产注释，记号表同 PR-3c 验证记录 §6 | 0 命中 |
 | 文本扫描 | 两个字面扫描器与引号扫描器，对本记录、新服务文件、新真库文件与全部提交说明 | 都 exit 0 |
 
-## 5. 真库文件 `task-m5-dependencies.db.test.ts`（33 格）
+## 5. 真库文件 `task-m5-dependencies.db.test.ts`（41 格）
 
-静态展开 33：普通 `it` 33 格，没有 `it.each`。格名前缀：`ms-` 里程碑、`dep-` 依赖、`cand-` 候选、`lock-` 锁序。对照设计：
+静态展开 41：普通 `it` 41 格，没有 `it.each`（初版 33 格；§6、§7 的计数是初版的，修复轮 1 的计数见 §11）。格名前缀：`ms-` 里程碑、`dep-` 依赖、`cand-` 候选、`lock-` 锁序。对照设计：
 
 | 设计条目 | 格 |
 |---|---|
@@ -77,16 +77,18 @@
 | M5-c：两种请求形、边行、两端事件与时刻、任务行不动 | `dep-add-both-forms` |
 | M5-c：自依赖、重复、成环各 422（S31 采纳的格） | `dep-self`、`dep-duplicate`、`dep-cycle` |
 | M5-c：菱形合法 | `dep-diamond` |
+| D4：判环读整张 org 图（与两端都不相连的边、调用者看不见的中间任务） | `dep-cycle-far`、`dep-cycle-hidden`（修复轮 1） |
+| D17：已软删任务的边不进判环与 50 条计数 | `dep-dead-middle`、`dep-limit-dead`（修复轮 1） |
 | M5-c：删边、删不存在的边为空操作 | `dep-remove`、`dep-remove-missing` |
 | §3.4 请求体形状（`[a-12]`、`[a-32]`）与 404 先于 422 | `dep-invalid-body` |
 | `M5\|10` 写路径的 id 两格（前导 / 尾随 `_` ⇒ 422 `INVALID_DEPENDENCY`） | `dep-m5-10-ids` |
 | M5-c：跨 org ⇒ 404；对端不存在 / 已软删 ⇒ 404 | `dep-counterpart` |
-| §6.2.1 依赖加边、删边行（含「一端无 edit ⇒ 404」） | `dep-auth` |
+| §6.2.1 依赖加边、删边行（含「一端无 edit ⇒ 404」；对端只是清单只读者时加边、删边都 404，删边一格为修复轮 1 所加） | `dep-auth` |
 | D18 每任务 50 条 ⇒ 422 `LIMIT`（两端各一次，含正控） | `dep-limit` |
 | D17 软删留边、不写 `dependency_removed`、读时过滤（两端） | `dep-soft-deleted` |
 | M5-c：两个连接同时加 X→Y 与 Y→X，第三连接持 `task_dependencies` 的 `SHARE`、按门 6 的 settle 规则放开，恰一个成功、图无环 | `dep-concurrent-cross` |
 | §6.2.1 读依赖行（C、A、LE、F、LR 200；O 404；缺 org 404） | `dep-read-auth` |
-| §6.2.1 `DepItem` 行（看不见的对端不列不计；`canRemove` 两端都 `edit`）；详情同形 | `dep-item` |
+| §6.2.1 `DepItem` 行（看不见的对端不列不计；`canRemove` 两端都 `edit`，只 `view` 本任务而能 `edit` 对端时为假（修复轮 1））；详情同形 | `dep-item` |
 | `[a-34]` `DepItem` 的顺序 | `dep-item-order` |
 | §3.4 候选的结果集：调用者能 `edit` 的任务；本任务、已有边的任务与会成环的任务（X3）不在其中；`TASK_PAGE_SORT_KEY` 顺序；`total` | `cand-direction` |
 | §6.2.1 候选行（只关注、只读的任务不在结果里） | `cand-direction` |
@@ -94,6 +96,7 @@
 | 分页 | `cand-page` |
 | §3.0：候选的 404 先于 `INVALID_DIRECTION`；F、LR 404 | `cand-order` |
 | M5-c：同一用户在两个 org 在职，候选不含另一 org 的任务 | `cand-two-orgs` |
+| S11：父、子任务不被排除；已软删任务不是候选；D17：死边不参与成环排除；走过一个完整菱形 | `cand-tree`、`cand-soft-deleted`、`cand-dead-middle`、`cand-diamond`（修复轮 1） |
 | §4.4 新词不通知（含完成的正控） | `dep-notify` |
 | `M5\|7` 正向：依赖增删、里程碑、派生各一个序列 `[structure]`；设父 ∥ 加边、设父 ∥ 派生、加边 ∥ 派生，各两个序列 | `lock-dep-add`、`lock-dep-remove`、`lock-milestone`、`lock-spawn`、`lock-pairs` |
 
@@ -146,14 +149,14 @@
 | MU20 | `M5\|10` | deps | 请求体 id 不过四合取（只查非空字符串） | `dep-invalid-body`、`dep-m5-10-ids` |
 | MU21 | §3.0 | deps | 加边先查请求体、后查 `edit` | `dep-invalid-body` |
 
-文件简称：deps = `src/services/task-dependency-records.ts`，access = `src/tasks/task-access.ts`，records = `src/services/task-records.ts`。没有做的：S31 的自依赖 / 重复 / 成环三者的判定在任务 E 的纯函数里，由 #6249 的单测承载，本切片不在服务层变异它们；入队调用的漏调用检不出（§3 第 7 条）。
+文件简称：deps = `src/services/task-dependency-records.ts`，access = `src/tasks/task-access.ts`，records = `src/services/task-records.ts`。没有做的：S31 的自依赖 / 重复 / 成环三者的判定在任务 E 的纯函数里，由 #6249 的单测承载，本切片不在服务层变异它们；入队调用的漏调用检不出（§3 第 7 条）。闸审轮 1 指出本节原来低估了缺口：判环与候选排除**读哪张图**（整张 org 图，D4、E07；只含存活边，D17）是服务的选择，任务 E 的单测看不到，初版 33 格对「只读两端的边」「保留死边」这类变异全绿。修复轮 1 加格并补变异 MU22–MU32，全部被杀（§11.3）。
 
 ## 8. 回归行（§1.3 切片 4）
 
 | 行 | 承载 | 本次运行 | 结果 |
 |---|---|---|---|
 | `M3` 设父格（同用结构锁） | `task-m3-tree`（含 `M3\|6\|整门` 的按原文匹配取锁函数体的文件内负控） | lane ×3 | 25/25 ×3 |
-| `M2\|5\|整门`（待办键集） | `task-p0a` 等 lane 文件；本文件 `ms-pending-unchanged` | lane ×3 | lane 三遍全绿；`ms-pending-unchanged` ×3 绿 |
+| `M2\|5\|整门`（待办键集） | 五键：`task-m4-paging-settings.db.test.ts`（lane 文件）；六键：`tests/unit/task-records-guards.test.ts`（单测子集）；两者：本文件 `ms-pending-unchanged`（修复轮 1 改正承载文件名，`task-p0a` 里没有键集格） | lane ×3 | lane 三遍全绿；`ms-pending-unchanged` ×3 绿 |
 | PR-3c 单测 `task-counts-touchpoints` | §4 | 本地 | 绿 |
 | 其余 `M2\|` / `M3\|` / `M4\|` 行 | lane 的其余文件、鉴权门 | lane ×3；鉴权门 | 见 §6.1 |
 | 前端行 | `apps/web` | NOT RUN | 本切片不改 `apps/web`；详情多两个键、列表项多一列，前端未跑 |
@@ -161,10 +164,10 @@
 
 ## 9. owner 问题与待办
 
-1. **里程碑写是否带 `updated_at`**（§3 第 2 条）：与切片 3 记录 §9 第 2 条同一问题，本件写。
-2. **`q` 的长度口径与三个 query 码的先后**（§3 第 5 条）：本件的取法，设计未定。
+1. **里程碑写是否带 `updated_at`**（§3 第 2 条）：与切片 3 记录 §9 第 2 条同一问题，本件写。连带效果一并请 owner 看：`TASK_PAGE_SORT_KEY` 以 `updated_at` 打头，所以设 / 清里程碑会把任务挪到 `GET /api/tasks`、清单任务项读与候选的页序前面；`/api/tasks/pending` 的项的 `updatedAt` 值也随之变（键集不变，门 5 不受影响）。
+2. **三个 query 码的先后**（§3 第 5 条）：本件的取法，设计未定。`q` 的长度口径不再是开放项：设计写「200 个字符」，修复轮 1 按码点数（去首尾空白后）实现，与模块组其余文本上限一致。
 3. **候选的规模**（§3 第 4 条）：逐行判权限、过滤后切页，与本 org 任务数成正比；若要 SQL 里预筛，需要把角色判定的一部分写进 SQL，与「行级规则只出自纯函数」（门 20）有张力。
-4. **`idx_tdep_org` 是否被用到**（§3 第 1 条）：EXPLAIN 没有跑；若要它生效，需要在边 builder 里写 `task_dependencies.org_id`，那会是 org 子句之外的第二处 org 文本。
+4. **`idx_tdep_org` 是否被用到**（§3 第 1 条）：不被用到。实测（§11.5）的整图读在结构锁内（加边）与候选读里扫全部租户的边：20 万条边时约 10 ms，随全库边数增长。若要它生效，需要在边 builder 里写 `task_dependencies.org_id`（同一数据上这一写法走 `idx_tdep_org`，约 4 ms），那会是 org 子句之外的第二处 org 文本。请 owner 在两者之间取舍；本件不改 builder。
 5. 设计 §7.2 已登记、本切片照缺省执行的：X3（候选排除成环任务）、两条有上限的读不分页（S34 / E22）、详情的 `dependencies` 不分页。
 6. 候选门 29 的入锁修订仍按设计 §7.3 待 owner 点名；里程碑授权格挂在 M5-c 行（`[a-39]`，§7.4 Q4）。
 7. 新路由的门 1 / 2 逐路由格归切片 6。
@@ -172,3 +175,102 @@
 ## 10. 清理
 
 另一台机器上本次的两个工作树（开发、最终）、两个库、日志、变异驱动、变异清单与各次 JSON 报告都已删除；删除后核对过：那台机器的工作树目录与库列表里都不再有本次的条目。推过去的两个引用留在那台机器的克隆里。本机的临时 tsconfig 用完即删；本机工作树的 `node_modules` 符号链接未提交。
+
+## 11. 闸审轮 1 的修复（2026-10-13）
+
+闸审轮 1 在 `35cb3bbeab` 上报 0 条 P1 / P2，16 条 P3 / NIT。修复提交 `9593d67de6`（代码一处、测试两个文件），其后只有本记录的修订。任务 E（#6249）这一轮也**没有改动**：变异 MU30 只在另一台机器的一次性工作树里改过 `task-dependencies.ts`，跑完逐字节还原，没有提交。
+
+### 11.1 逐条处置
+
+| # | 级别 | 问题 | 处置 |
+|---|---|---|---|
+| 1 | P3 | 候选 `q` 的长度按原样文本的 UTF-16 码元数算 | 采纳。改为去首尾空白之后的码点数（§3 第 5 条）；`cand-q` 加 200 个补充平面字符 ⇒ 200、201 个 ⇒ 422、两侧各一个空白的 200 ⇒ 200、201 ⇒ 422；变异 MU31 |
+| 2 | P3 | `canRemove` 只看对端的回归没有格能抓 | 采纳。`dep-item` 加一端：F 只关注本任务、创建了对端 ⇒ F 读到它且 `canRemove` 为假，读路由与详情同形；变异 MU22 |
+| 3 | NIT | 删边时对端只是清单只读者这一格没钉 | 采纳。`dep-auth` 补边与 `remove, other end LR` 一行；变异 MU32 |
+| 4 | NIT | 里程碑写动 `updated_at` 会改页序与待办 `updatedAt` | 保持为 owner 问题，§9 第 1 条补上页序与 `/pending` `updatedAt` 两个效果。不改代码 |
+| 5 | NIT | 整图边读不走 `idx_tdep_org` | 记录实测计划（§3 第 1 条、§9 第 4 条、§11.5）。不改 builder（owner 问题） |
+| 6 | P3 | 判环读整张 org 图没有被钉住 | 采纳。加 `dep-cycle-far`（四节点链的远端闭环）与 `dep-cycle-hidden`（调用者看不见的中间任务）；变异 MU23、MU24、MU25 |
+| 7 | P3 | D17 存活过滤只在读上钉，判环 / 计数 / 候选排除的输入没钉 | 采纳。加 `dep-dead-middle`、`dep-limit-dead`、`cand-dead-middle`；变异 MU26、MU27 |
+| 8 | P3 | S11 「父、子不排除」没有格 | 采纳。加 `cand-tree`；变异 MU28 |
+| 9 | NIT | 「已软删任务不是候选」只有 builder 钉文 | 采纳。加 `cand-soft-deleted`；变异 MU29 |
+| 10 | NIT | 菱形格从不走过已完成的菱形 | 采纳。加 `cand-diamond`；变异 MU30 |
+| 11 | NIT | `dep-item-order` 的夹具种了两个二元环 | 采纳。后置一侧改用另外两个任务，顺序断言不变（时间先于字节序） |
+| 12 | NIT | §7 低估了服务层图输入的缺口 | 采纳。§7 末句改写，并指向本节 |
+| 13 | P3 | §3 第 1 条描述了一个没测过的计划 | 采纳。删去该句，换成实测（§11.5），并把代价写进 §9 第 4 条 |
+| 14 | P3 | 没有完整的 core-backend 无库单测一行 | 采纳。§11.4 |
+| 15 | NIT | §8 把 `task-p0a` 记成 `M2\|5` 的承载 | 采纳。§8 改为实际承载文件（按 grep 核过） |
+| 16 | NIT | 测试注释在叙述改动 | 采纳。`task-m4-paging-settings.db.test.ts` 那一行改为陈述规则 |
+
+### 11.2 本地（RAN，`9593d67de6`）
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit -p .` | 0 errors |
+| 临时 tsconfig（同 §4，含两个改动的真库文件） | 新文件 0 条；只有既有的 `import.meta` TS1343（`task-m4-fixtures.ts` 一处、`task-m4-paging-settings.db.test.ts` 三处，与本轮改动的行无关） |
+| 任务单测子集 + 绊线（同 §4 命令） | 51 files / 2105 passed / 0 failed |
+| 门 17 ①：新真库文件在 `vitest.config.ts` 下 | `No test files found`，exit 1 |
+| ops 两个文件 | 194/194 |
+| 门 7 ERE（同 §4） | 恰 3 行，全在 `src/db/task-advisory-locks.ts` |
+| 门 15：本轮新增与改动的生产注释 4 行（记号表同 §4） | 0 命中 |
+| 文本扫描：三个扫描器，对本记录与本轮的提交说明 | 都 exit 0 |
+
+### 11.3 变异（RAN，另一台机器，一次性工作树，`9593d67de6`，新文件 41 格）
+
+做法同 §7（断言 needle 恰一次 → 写入变异 → 跑新真库文件、JSON reporter → 写回并核 md5）。**11 个变异全部被杀，11 次还原逐字节相同**；每次 41 格收集齐，未红的格是绿的。
+
+| # | 出处 | 文件 | 变异 | 红的格 |
+|---|---|---|---|---|
+| MU22 | §6.2.1、`[a-12]` | deps | `canRemove` 只看对端（两端都取对端的角色集） | `dep-item` |
+| MU23 | D4、E07 | deps | 加边的图只取与两端相连的边（同一 builder 各锚一次） | `dep-cycle-far` |
+| MU24 | D4 | deps | 加边的图只取与 `:id` 相连的边 | `dep-cycle`、`dep-limit`、`dep-cycle-far`、`dep-cycle-hidden` |
+| MU25 | D4 | deps | 加边的图只留两端都对调用者可见的边 | `dep-limit`、`dep-cycle-hidden` |
+| MU26 | D17 | deps | 加边的图在调用处手写 SQL，保留已软删任务的边 | `dep-dead-middle`、`dep-limit-dead` |
+| MU27 | D17、X3 | deps | 候选排除的图同上保留死边 | `cand-dead-middle` |
+| MU28 | S11 | deps | 候选 SQL 排除本任务的父与子 | `cand-tree` |
+| MU29 | §4.7 | access | 候选 builder 的存活子句换成任意状态 | `cand-soft-deleted`、`cand-dead-middle` |
+| MU30 | E14 | 任务 E（仅一次性工作树） | `reachableFrom` 遇到重访即抛错 | `cand-diamond` |
+| MU31 | `[a-32]` | deps | `q` 的上限改回原样文本的 UTF-16 码元数 | `cand-q` |
+| MU32 | §6.2.1 | deps | 删边时对端的清单只读者按编辑者算 | `dep-auth` |
+
+MU22、MU23、MU26–MU32 红的只有本轮新加的格或本轮扩展过的格（`dep-item`、`dep-auth`、`cand-q`）；本轮没有在初版 33 格上重跑这些变异，初版对它们全绿是闸审的观察。MU24 与 MU25 还被初版就有的格杀死（`dep-cycle`、`dep-limit`）。
+
+### 11.4 完整的 core-backend 无库单测（RAN，另一台机器，Node 20）
+
+命令：`env -u DATABASE_URL vitest run --config vitest.config.ts`（`packages/core-backend` 下）。
+
+| head | 文件 | 测试 |
+|---|---|---|
+| 起点 `4554b5012b` | 1319（9 failed / 1138 passed / 172 skipped） | 22269（52 failed / 20475 passed / 1742 skipped） |
+| 修复 `9593d67de6` | 1319（9 failed / 1138 passed / 172 skipped） | 22271（52 failed / 20477 passed / 1742 skipped） |
+
++2 是 `task-access` 的两格（初版已加，闸审核过 219 → 221）。两边的失败清单逐行比对，只差两个与任务无关的文件：`dingtalk-automation-link-routes.api.test.ts` 的一格只在起点红，`comment-mention-candidates-bounded.test.ts` 的一格只在修复红。对照：这两个文件在两个 head 上各单独跑 3 遍，6 遍都是 2 files / 63 passed，判为全量负载下的抖动。其余失败两边相同，都是环境类：四个恢复归档 / 保管文件、`approval-cancel-round-ci-wiring`、`approval-ci-coverage-enumeration`、`tasks-auth-ci-wiring`（需要 python 与 yaml）、`dingtalk-transport-resilience`。没有回归。
+
+### 11.5 整图边读的查询计划（RAN，另一台机器，PostgreSQL 16）
+
+在 lane 库里开一个事务，按 org 种 1000 个任务与一条 999 条边的链，`ANALYZE` 后对 `loadOrgEdges` 的 SQL 取服务绑定的值（`$1` 为 `NULL`、`$2` 为其中一个 org）跑 `EXPLAIN ANALYZE`，然后 `ROLLBACK`（之后核对种入的行数为 0）。
+
+| 规模 | 计划 | 执行时间 |
+|---|---|---|
+| 20 个 org，19980 条边 | `Seq Scan on task_dependencies`（19980 行）hash join 本 org 的任务（`idx_tsk_org_status` 位图扫描），后置一端走 `tasks_pkey` | 1.8 ms |
+| 200 个 org，199800 条边 | `Parallel Seq Scan on task_dependencies`（2 × 99900 行）加 hash join，其余同上 | 10.0 ms |
+| 同上，SQL 加 `task_dependencies.org_id = <org>`（对照，不入库） | `Bitmap Index Scan on idx_tdep_org` | 4.1 ms |
+
+结论只针对这组数据：现在的写法在这两个规模上扫的是全部租户的边；计划随数据而变（闸审在另一组数据上见过按 `tasks` 驱动、走 `task_dependencies_pkey` 的计划）。取舍归 §9 第 4 条。
+
+### 11.6 另一台机器的 lane（RAN，`9593d67de6`）
+
+一次性工作树，新建空库，全量迁移 433 条成功，环境同 §6。
+
+| 运行 | 结果 |
+|---|---|
+| 单文件（迁移之后、lane 之前） | `task-m5-dependencies` 41/41 |
+| lane 第 1 遍 | 25 files / 990 passed (990) |
+| lane 第 2 遍 | 25 files / 990 passed (990) |
+| lane 第 3 遍 | 25 files / 990 passed (990) |
+| 鉴权门（同 §6.1 的环境） | 1 file / 86 passed (86) |
+
+990 = 初版的 982 + 新加的 8 格；新文件静态展开 41 = 收集 41（门 17 ②）。三遍逐文件计数：`task-m5-dependencies` 41/41、`task-m3-tree` 25/25、`task-p0a` 13/13、`task-m4-list-items` 25/25、`task-m4-paging-settings` 77/77、`task-m5-schema` 53/53（三遍相同）；三遍日志里 `socket hang up` / `ECONNRESET` 都是 0。门 19：`tsx tests/helpers/gate19-identities.ts <lane 第 3 遍日志> <锁>` ⇒ `gate19: passed identities equal the i-m2 list`。这三遍之前，同一工作树的另一个新库上还跑过两遍 lane 与一遍鉴权门（990、990、86，全绿），不计入上表。没有红格，所以没有起对照。
+
+### 11.7 清理
+
+另一台机器上本轮的三个一次性工作树（起点、修复、变异）与库、日志、变异驱动的输出都已删除，删除后核对过工作树目录与库列表；推过去的两个引用留在那台机器的克隆里。本机的临时 tsconfig 与驱动脚本都在会话临时目录，没有入库，用完即删。
