@@ -1,20 +1,30 @@
 import { describe, expect, it } from 'vitest'
 import {
+  TASK_DAILY_DIGEST_TIME_OF_DAY,
+  TASK_REMINDER_FLOOR_EVENT_TYPES,
+  TASK_REMINDER_SCAN_BATCH,
+  TASK_REMINDER_SCAN_CURSOR_START,
+  TASK_REMINDER_SCAN_ORDER_BY,
   TASK_REMINDER_SCAN_WINDOW_MS,
   buildTaskDailyDigestCondition,
   buildTaskDailyDigestSourceKey,
   buildTaskEventSourceKey,
   buildTaskListEventSourceKey,
+  buildTaskReminderScanCondition,
   buildTaskReminderSourceKey,
+  computeDailyDigestSendAt,
   computeDefaultRemindAt,
+  isDailyDigestDue,
   isInDailyDigest,
   isReminderSkippedByTaskState,
   isTaskReminderDue,
   parseRemindPolicy,
+  resolveDailyDigestOccurrence,
   shouldEnqueueReminder,
   type TaskDailyDigestShape,
 } from '../../src/tasks/task-reminders'
 import { computeDueAt } from '../../src/tasks/task-dates'
+import { TASK_SCHEDULER_INTERVAL_MAX_MS } from '../../src/services/task-notification-flags'
 
 describe('task-reminders', () => {
   describe('parseRemindPolicy', () => {
@@ -541,6 +551,228 @@ describe('task-reminders', () => {
         "(tasks.org_id = $2) AND tasks.deleted_at IS NULL AND (EXISTS (SELECT 1 FROM task_assignees ta WHERE ta.task_id = tasks.id AND ta.user_id = $1)) AND tasks.status = 'open' AND NOT EXISTS (SELECT 1 FROM task_assignees ta_done WHERE ta_done.task_id = tasks.id AND ta_done.user_id = $1 AND ta_done.completed_at IS NOT NULL) AND ((tasks.due_time IS NOT NULL AND tasks.due_at < (((now() AT TIME ZONE $3)::date + 2)::timestamp AT TIME ZONE $3)) OR (tasks.due_time IS NULL AND tasks.due_date <= ((now() AT TIME ZONE $3)::date + 1)))",
       )
       expect(params).toEqual(['u1', 'org1', 'Asia/Shanghai'])
+    })
+  })
+})
+
+// ── PR-3b S1 additions (design §6.2 / §6.3) ─────────────────────────────────────────────────────
+
+describe('task-reminders — scheduler scan pieces (PR-3b S1)', () => {
+  const now = new Date('2026-10-07T12:00:00.000Z')
+
+  describe('constants', () => {
+    it('TASK_REMINDER_SCAN_BATCH is 500 (ASSUMPTION(task-m4): [own-3b-08])', () => {
+      expect(TASK_REMINDER_SCAN_BATCH).toBe(500)
+    })
+
+    it('TASK_REMINDER_FLOOR_EVENT_TYPES is exactly created + remind_changed ([R06])', () => {
+      expect(TASK_REMINDER_FLOOR_EVENT_TYPES).toEqual(['created', 'remind_changed'])
+    })
+
+    it('the scheduler interval ceiling is half the scan window W (W ≥ 2 × interval, design §6.2)', () => {
+      expect(TASK_SCHEDULER_INTERVAL_MAX_MS).toBe(TASK_REMINDER_SCAN_WINDOW_MS / 2)
+      expect(TASK_REMINDER_SCAN_WINDOW_MS).toBe(7_200_000)
+    })
+
+    it('the first-page cursor is (-infinity, "") ([own-3b-15]) and is frozen', () => {
+      expect(TASK_REMINDER_SCAN_CURSOR_START).toEqual({ afterAtParam: '-infinity', afterIdParam: '' })
+      expect(Object.isFrozen(TASK_REMINDER_SCAN_CURSOR_START)).toBe(true)
+    })
+
+    it('the ORDER BY paired with the keyset condition is remind_at, id ascending', () => {
+      expect(TASK_REMINDER_SCAN_ORDER_BY).toBe('tasks.remind_at ASC, tasks.id ASC')
+    })
+  })
+
+  describe('buildTaskReminderScanCondition', () => {
+    it('full-text SQL pin: window upper/lower bound, open + live, keyset cursor; params $1..$4 in order', () => {
+      const { sql, params } = buildTaskReminderScanCondition({
+        nowParam: now,
+        windowMsParam: TASK_REMINDER_SCAN_WINDOW_MS,
+        ...TASK_REMINDER_SCAN_CURSOR_START,
+      })
+      expect(sql).toBe(
+        'tasks.remind_at IS NOT NULL AND tasks.remind_at <= $1::timestamptz ' +
+          "AND tasks.remind_at > ($1::timestamptz - ($2::int * interval '1 millisecond')) " +
+          "AND tasks.status = 'open' AND tasks.deleted_at IS NULL " +
+          'AND (tasks.remind_at, tasks.id) > ($3::timestamptz, $4::text)',
+      )
+      expect(params).toEqual([now, 7_200_000, '-infinity', ''])
+    })
+
+    it('a later page passes the previous page\'s last (remind_at, id) as $3/$4', () => {
+      const afterAt = new Date('2026-10-07T11:30:00.000Z')
+      const { sql, params } = buildTaskReminderScanCondition({
+        nowParam: now,
+        windowMsParam: 7_200_000,
+        afterAtParam: afterAt,
+        afterIdParam: 'tsk_0000000000000000000001',
+      })
+      expect(params).toEqual([now, 7_200_000, afterAt, 'tsk_0000000000000000000001'])
+      expect(sql).toContain('(tasks.remind_at, tasks.id) > ($3::timestamptz, $4::text)')
+    })
+
+    it('is a cross-org scan: no org clause, no $5 (the page LIMIT is the caller\'s)', () => {
+      const { sql } = buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, ...TASK_REMINDER_SCAN_CURSOR_START })
+      expect(sql).not.toContain('org_id')
+      expect(sql).not.toContain('$5')
+      expect(sql).not.toContain('LIMIT')
+    })
+
+    it('both window bounds are present: inclusive upper (<= now), exclusive lower (> now − W)', () => {
+      const { sql } = buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, ...TASK_REMINDER_SCAN_CURSOR_START })
+      expect(sql).toContain('tasks.remind_at <= $1::timestamptz')
+      expect(sql).toContain("tasks.remind_at > ($1::timestamptz - ($2::int * interval '1 millisecond'))")
+      expect(sql).toContain("tasks.status = 'open' AND tasks.deleted_at IS NULL")
+    })
+
+    it('rejects a non-object input (the gate-20 probe shape) with TypeError', () => {
+      expect(() => buildTaskReminderScanCondition('x' as never)).toThrow(TypeError)
+      expect(() => buildTaskReminderScanCondition(null as never)).toThrow(TypeError)
+    })
+
+    it('rejects a non-Date / invalid now', () => {
+      expect(() =>
+        buildTaskReminderScanCondition({ nowParam: '2026-10-07T12:00:00Z' as never, windowMsParam: 1000, ...TASK_REMINDER_SCAN_CURSOR_START }),
+      ).toThrow(TypeError)
+      expect(() =>
+        buildTaskReminderScanCondition({ nowParam: new Date(NaN), windowMsParam: 1000, ...TASK_REMINDER_SCAN_CURSOR_START }),
+      ).toThrow(TypeError)
+    })
+
+    it('rejects a window that is not a positive int4 (0, negative, fraction, 2^31, text)', () => {
+      for (const bad of [0, -1, 1.5, 2_147_483_648, Number.NaN, 'x']) {
+        expect(() =>
+          buildTaskReminderScanCondition({ nowParam: now, windowMsParam: bad as never, ...TASK_REMINDER_SCAN_CURSOR_START }),
+        ).toThrow(TypeError)
+      }
+      expect(() =>
+        buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 2_147_483_647, ...TASK_REMINDER_SCAN_CURSOR_START }),
+      ).not.toThrow()
+    })
+
+    it('a cursor given as the database text of remind_at (microseconds kept) is passed through verbatim', () => {
+      for (const afterAtParam of [
+        '2026-10-07 11:30:00.123456+00',
+        '2026-10-07 19:30:00.123456+08',
+        '2026-10-07 06:00:00+05:30',
+        '2026-10-07 11:30:00+00',
+        '2026-10-07T11:30:00.123Z',
+      ]) {
+        const { params } = buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, afterAtParam, afterIdParam: 'tsk_1' })
+        expect(params).toEqual([now, 1000, afterAtParam, 'tsk_1'])
+      }
+    })
+
+    it('rejects a cursor that is not -infinity, a valid Date or a timestamptz text, or a non-string id', () => {
+      for (const afterAtParam of ['yesterday', 'now', 'infinity', '', ' ', '2026-10-07', '2026-10-07 11:30', '2026-10-07 11:30:00', 'x', 7]) {
+        expect(
+          () => buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, afterAtParam: afterAtParam as never, afterIdParam: '' }),
+          String(afterAtParam),
+        ).toThrow(TypeError)
+      }
+      expect(() =>
+        buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, afterAtParam: new Date(NaN), afterIdParam: '' }),
+      ).toThrow(TypeError)
+      expect(() =>
+        buildTaskReminderScanCondition({ nowParam: now, windowMsParam: 1000, afterAtParam: '-infinity', afterIdParam: 7 as never }),
+      ).toThrow(TypeError)
+    })
+  })
+
+  describe('computeDailyDigestSendAt (R07: 09:00 local)', () => {
+    it('TASK_DAILY_DIGEST_TIME_OF_DAY is 09:00', () => {
+      expect(TASK_DAILY_DIGEST_TIME_OF_DAY).toBe('09:00')
+    })
+
+    it('three zones on one date: Asia/Shanghai, UTC, America/New_York (EDT)', () => {
+      expect(computeDailyDigestSendAt('2026-10-07', 'Asia/Shanghai').toISOString()).toBe('2026-10-07T01:00:00.000Z')
+      expect(computeDailyDigestSendAt('2026-10-07', 'UTC').toISOString()).toBe('2026-10-07T09:00:00.000Z')
+      expect(computeDailyDigestSendAt('2026-10-07', 'America/New_York').toISOString()).toBe('2026-10-07T13:00:00.000Z')
+    })
+
+    it('a UTC+14 zone: local 09:00 is the previous UTC day', () => {
+      expect(computeDailyDigestSendAt('2026-10-07', 'Pacific/Kiritimati').toISOString()).toBe('2026-10-06T19:00:00.000Z')
+    })
+
+    it('DST: America/New_York on the fall-back day is EST (UTC−5); Europe/London on the spring-forward day is BST (UTC+1)', () => {
+      expect(computeDailyDigestSendAt('2026-11-01', 'America/New_York').toISOString()).toBe('2026-11-01T14:00:00.000Z')
+      expect(computeDailyDigestSendAt('2026-03-29', 'Europe/London').toISOString()).toBe('2026-03-29T08:00:00.000Z')
+    })
+
+    it('rejects a value that is not a YYYY-MM-DD string (TypeError, incl. the gate-20 probe) and a nonexistent date (RangeError)', () => {
+      expect(() => computeDailyDigestSendAt(20261007 as never, 'UTC')).toThrow(TypeError)
+      expect(() => computeDailyDigestSendAt('x', 'x')).toThrow(TypeError)
+      expect(() => computeDailyDigestSendAt('x', 'UTC')).toThrow(TypeError)
+      expect(() => computeDailyDigestSendAt('2026-3-8', 'UTC')).toThrow(TypeError)
+      expect(() => computeDailyDigestSendAt('2026-02-30', 'UTC')).toThrow(RangeError)
+      expect(() => computeDailyDigestSendAt('2026-02-30', 'UTC')).toThrow('computeDailyDigestSendAt: "2026-02-30" is not a real calendar date')
+    })
+
+    it('the shared calendar check keeps computeDefaultRemindAt\'s own messages and classes (task D unchanged)', () => {
+      const allDay = { dueTime: null, dueAt: null, timeZone: 'UTC', policy: { mode: 'default' as const } }
+      expect(() => computeDefaultRemindAt({ ...allDay, dueDate: '2026-3-8' })).toThrow(
+        new RangeError('computeDefaultRemindAt: dueDate must be YYYY-MM-DD, got "2026-3-8"'),
+      )
+      expect(() => computeDefaultRemindAt({ ...allDay, dueDate: '2026-02-30' })).toThrow(
+        new RangeError('computeDefaultRemindAt: "2026-02-30" is not a real calendar date'),
+      )
+      expect(() => computeDefaultRemindAt({ ...allDay, dueDate: 20261007 as never })).toThrow(RangeError)
+    })
+
+    it('rejects an invalid IANA zone (never degrades to UTC)', () => {
+      expect(() => computeDailyDigestSendAt('2026-10-07', 'Not/AZone')).toThrow(RangeError)
+      expect(() => computeDailyDigestSendAt('2026-10-07', '')).toThrow(RangeError)
+      expect(() => computeDailyDigestSendAt('2026-10-07', 'x')).toThrow(RangeError)
+    })
+  })
+
+  describe('isDailyDigestDue / resolveDailyDigestOccurrence (sendAt ≤ now < sendAt + W; [own-3b-02])', () => {
+    const sendAt = new Date('2026-10-07T01:00:00.000Z') // 09:00 Asia/Shanghai
+
+    it('sendAt − 1ms -> false', () => {
+      expect(isDailyDigestDue(new Date(sendAt.getTime() - 1), 'Asia/Shanghai')).toBe(false)
+    })
+
+    it('sendAt -> true', () => {
+      expect(isDailyDigestDue(sendAt, 'Asia/Shanghai')).toBe(true)
+    })
+
+    it('sendAt + W − 1ms -> true', () => {
+      expect(isDailyDigestDue(new Date(sendAt.getTime() + TASK_REMINDER_SCAN_WINDOW_MS - 1), 'Asia/Shanghai')).toBe(true)
+    })
+
+    it('sendAt + W -> false (no catch-up later in the day)', () => {
+      expect(isDailyDigestDue(new Date(sendAt.getTime() + TASK_REMINDER_SCAN_WINDOW_MS), 'Asia/Shanghai')).toBe(false)
+      expect(isDailyDigestDue(new Date('2026-10-07T07:00:00.000Z'), 'Asia/Shanghai')).toBe(false) // 15:00 local
+    })
+
+    it('resolveDailyDigestOccurrence exposes localDate, sendAt and due', () => {
+      const occ = resolveDailyDigestOccurrence(new Date('2026-10-07T01:30:00.000Z'), 'Asia/Shanghai')
+      expect(occ.localDate).toBe('2026-10-07')
+      expect(occ.sendAt.toISOString()).toBe('2026-10-07T01:00:00.000Z')
+      expect(occ.due).toBe(true)
+    })
+
+    it('two recipients in different zones at one instant: only the one at 09:xx local is due, each with its own local date', () => {
+      const at = new Date('2026-10-06T19:30:00.000Z') // 09:30 Pacific/Kiritimati (Oct 7), 03:30 Asia/Shanghai (Oct 7)
+      const kiritimati = resolveDailyDigestOccurrence(at, 'Pacific/Kiritimati')
+      const shanghai = resolveDailyDigestOccurrence(at, 'Asia/Shanghai')
+      expect(kiritimati).toMatchObject({ localDate: '2026-10-07', due: true })
+      expect(kiritimati.sendAt.toISOString()).toBe('2026-10-06T19:00:00.000Z')
+      expect(shanghai).toMatchObject({ localDate: '2026-10-07', due: false })
+    })
+
+    it('the local date rolls with now: just before local midnight is not due, the next morning is', () => {
+      expect(isDailyDigestDue(new Date('2026-10-07T15:59:59.999Z'), 'Asia/Shanghai')).toBe(false) // 23:59:59 Oct 7
+      expect(isDailyDigestDue(new Date('2026-10-08T01:00:00.000Z'), 'Asia/Shanghai')).toBe(true) // 09:00 Oct 8
+    })
+
+    it('rejects a non-Date now (TypeError) and an invalid zone (RangeError)', () => {
+      expect(() => isDailyDigestDue('x' as never, 'UTC')).toThrow(TypeError)
+      expect(() => isDailyDigestDue(new Date(NaN), 'UTC')).toThrow(TypeError)
+      expect(() => isDailyDigestDue(sendAt, 'Not/AZone')).toThrow(RangeError)
+      expect(() => resolveDailyDigestOccurrence(sendAt, 'x')).toThrow(RangeError)
     })
   })
 })

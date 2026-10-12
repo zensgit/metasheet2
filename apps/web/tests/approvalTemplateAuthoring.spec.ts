@@ -8,6 +8,8 @@ import TemplateAuthoringView from '../src/views/approval/TemplateAuthoringView.v
 import type { ApprovalNodeConfig, ApprovalTemplateDetailDTO, AutoApprovalPolicy } from '../src/types/approval'
 import { APPROVAL_ROLE_CONFIGURE_SENTINEL } from '../src/types/approval'
 import {
+  APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS,
+  approvalNodeEditHiddenBlockLiveErrors,
   buildApprovalGraph,
   buildCreateTemplatePayload,
   buildFormSchema,
@@ -16,6 +18,10 @@ import {
   createEmptyTemplateDraft,
   draftFromTemplate,
   graphReadOnlyReason,
+  setStepSamePersonChoice,
+  stepHiddenBlockLiveErrors,
+  stepOmitsAssigneeSources,
+  stepSamePersonControlState,
   unsupportedTemplateAuthoringReason,
   validateTemplateApprovalFlow,
   validateTemplateDraft,
@@ -194,7 +200,14 @@ const ElSelect = defineComponent({
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
       onChange: (event: Event) => {
-        const value = (event.target as HTMLSelectElement).value
+        const target = event.target as HTMLSelectElement
+        // W1-1a stub fidelity (test-only; mirrors approval-template-authoring-canvas-inspector.spec.ts's
+        // P1-B/P2(b) fix): a real el-select `multiple` emits an ARRAY via `update:model-value`, not the
+        // native single string. Gated on the `multiple` DOM attribute (fallthrough from the real
+        // template binding), so every single-value select in this file is unaffected. No test in this
+        // file drove a multi-select's change event before (the linear setters would have thrown on a
+        // string), so no prior assertion depended on the old single-string behavior.
+        const value = target.multiple ? Array.from(target.selectedOptions).map((option) => option.value) : target.value
         this.$emit('update:modelValue', value)
         this.$emit('change', value)
       },
@@ -451,6 +464,63 @@ function setInput(testId: string, value: string) {
   const input = container!.querySelector(`[data-testid="${testId}"]`) as HTMLInputElement
   input.value = value
   input.dispatchEvent(new Event('input'))
+}
+
+// W1-1a gate r2 (P2-1 / P2-2) — the directory seam for the typed fallback pickers.
+// `useApprovalDirectory` is NOT mocked in this file, so its loaders reach the real `apiFetch` and
+// then the global `fetch`. `searchUsers` REPLACES the shared user list only on a successful
+// response; a failed fetch leaves the list untouched, so a "a search dropped the chip" pin would
+// pass against nothing. These helpers stub `fetch` and route by URL: the users page is served
+// verbatim, the roles list only when a test asks for it, and every other directory loader gets a
+// non-ok response, so a late mount-time load cannot replace a list under the test. The response is
+// the minimal ok/status/json shape (as in approvalTemplateCenterCategory.spec.ts). The shared
+// afterEach of the view suite undoes the stub.
+// W1-1a gate r2 P3-1 — the transfer hint, restated verbatim (Lock-4 L4:130-132: 空审批人策略 applies
+// only if the node then has no assignee at all).
+const W11A_SAME_PERSON_TRANSFER_HINT_TEXT =
+  '若发起人没有直属上级/部门负责人（或该负责人就是发起人本人），本节点不会生成这位审批人；若本节点因此没有任何审批人，按「空审批人策略」处理，不会退回由发起人本人审批。'
+
+const DIRECTORY_USERS_PATH = '/api/approval-templates/directory/users'
+function stubDirectoryFetch(options: {
+  users: Array<{ id: string; name: string; email: string }>
+  roles?: Array<{ id: string; name: string }>
+}) {
+  const fetchSpy = vi.fn(async (input: unknown) => {
+    const url = String(input)
+    if (url.includes(DIRECTORY_USERS_PATH)) {
+      return { ok: true, status: 200, json: async () => ({ users: options.users }) }
+    }
+    if (options.roles && /\/api\/approval-templates\/directory\/roles(?:\?|$)/.test(url)) {
+      return { ok: true, status: 200, json: async () => ({ roles: options.roles }) }
+    }
+    return { ok: false, status: 503, json: async () => null }
+  })
+  vi.stubGlobal('fetch', fetchSpy)
+  return fetchSpy
+}
+
+function directoryUserSearchCount(fetchSpy: ReturnType<typeof stubDirectoryFetch>): number {
+  return fetchSpy.mock.calls.filter(([input]) => String(input).includes(DIRECTORY_USERS_PATH)).length
+}
+
+// Opening a real el-select dropdown emits `visible-change(true)`, which the view's pickers answer with
+// `onUserSearch('')`. The ElSelect stub above does not declare that event, so the view's listener falls
+// through to the native <select> as a DOM listener of the same name; dispatching it runs the view's own
+// handler (the Event object is truthy). The fetch spy's call count is the positive control that it did.
+function openUserPicker(select: HTMLSelectElement): void {
+  select.dispatchEvent(new Event('visible-change'))
+}
+
+/** Text of the picker's `<option value=…>`, or null when the picker has no option for that value. */
+function optionText(select: HTMLSelectElement, value: string): string | null {
+  const option = Array.from(select.options).find((candidate) => candidate.value === value)
+  return option ? option.textContent : null
+}
+
+/** Pick exactly `values` in a `multiple` stub select (the stub emits the selected values as an array). */
+function pickOptions(select: HTMLSelectElement, values: string[]): void {
+  for (const option of Array.from(select.options)) option.selected = values.includes(option.value)
+  select.dispatchEvent(new Event('change'))
 }
 
 // P1-A0 — typed basic-info issue model (master §4 UI-0; Lock-0 L0-3 typed-issue-record delta,
@@ -1271,29 +1341,114 @@ describe('approval template authoring helpers', () => {
     expect(reason).toContain('暂不支持')
   })
 
-  // T7/T8 — P2-1 fix: the LINEAR branch checked only top-level config keys, so a node carrying
-  // `autoApprovalPolicy.samePersonPolicy` (F4-C; not in `BACKEND_AUTO_APPROVAL_POLICY_KEYS`, so
-  // backend `normalizeAutoApprovalPolicy` silently re-synthesizes `mergeWithRequester:true` from it
-  // on every save) looked editable. The complex path already ran the nested
-  // `hasKeyOutside(config.autoApprovalPolicy, BACKEND_AUTO_APPROVAL_POLICY_KEYS)` check (:1067); the
-  // linear path now runs the SAME check, so both editors agree.
-  it('T7: samePersonPolicy carrier forces the linear editor read-only (was wrongly editable)', () => {
-    const autoSkip = unsupportedTemplateAuthoringReason(
-      buildAutoApprovalTemplate({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' } as AutoApprovalPolicy),
-    )
-    expect(autoSkip).not.toBeNull()
-    expect(autoSkip).toContain('暂不支持')
+  // T7/T8 — history: the P2-1 fix made a linear node carrying `autoApprovalPolicy.samePersonPolicy`
+  // READ-ONLY, because the shipped 自审合并 checkbox owned only `mergeWithRequester` and could not
+  // clear a persisted `auto_skip`/`transfer_*` (backend `normalizeAutoApprovalPolicy` re-synthesizes
+  // `mergeWithRequester:true` from 'auto_skip' on every save — the self-revert class). W1-1a
+  // (Lock-4 F4-C, RATIFIED) INVERTS T7: the four-value control now owns BOTH carriers, so the key
+  // joins the nested allowlist and such a template opens EDITABLE. Only an OFF-ENUM value stays
+  // read-only (T7b, gate X-3). T8 stays as the bare-carrier control.
+  it('T7 (inverted by W1-1a): a samePersonPolicy carrier opens the linear editor EDITABLE for every ratified value', () => {
+    for (const policy of [
+      { mergeWithRequester: true, samePersonPolicy: 'auto_skip' },
+      { samePersonPolicy: 'self_approve' },
+      { samePersonPolicy: 'transfer_direct_manager' },
+      { samePersonPolicy: 'transfer_dept_head', actorMode: 'system' },
+    ] as AutoApprovalPolicy[]) {
+      expect(unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate(policy)), JSON.stringify(policy)).toBeNull()
+    }
+  })
 
-    const transfer = unsupportedTemplateAuthoringReason(
-      buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_direct_manager' } as AutoApprovalPolicy),
+  it('T7b (gate X-3): an OFF-ENUM samePersonPolicy still forces the linear editor read-only — positive control: T7 above, same fixture, known value', () => {
+    const reason = unsupportedTemplateAuthoringReason(
+      buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy),
     )
-    expect(transfer).not.toBeNull()
+    expect(reason).not.toBeNull()
+    expect(reason).toContain('暂不支持')
   })
 
   it('T8: a bare mergeWithRequester carrier (no samePersonPolicy) stays editable — negative control for T7', () => {
     // Guards against a T7 fix that over-widens hasKeyOutside and traps the T3 baseline too.
     const reason = unsupportedTemplateAuthoringReason(buildAutoApprovalTemplate({ mergeWithRequester: true }))
     expect(reason).toBeNull()
+  })
+
+  // ── W1-1a (Lock-4 §2 F4-C) — the LINEAR half of the four-value control. ──────────────────────
+  function rebuiltPolicy(draft: ReturnType<typeof draftFromTemplate>): AutoApprovalPolicy | undefined {
+    return (buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig).autoApprovalPolicy
+  }
+
+  it('T9: hydrate keeps BOTH raw carriers and the displayed choice is derived from them (runtime-faithful)', () => {
+    const cases: Array<[AutoApprovalPolicy, string]> = [
+      [{ mergeWithRequester: true }, 'auto_skip'],
+      [{ mergeWithRequester: true, samePersonPolicy: 'auto_skip' }, 'auto_skip'],
+      [{ samePersonPolicy: 'self_approve' }, 'self_approve'],
+      [{ samePersonPolicy: 'transfer_direct_manager' }, 'transfer_direct_manager'],
+      [{ samePersonPolicy: 'transfer_dept_head' }, 'transfer_dept_head'],
+      [{ samePersonPolicy: 'self_approve', mergeWithRequester: true }, 'auto_skip'],
+      [{ mergeAdjacentApprover: true }, 'default'],
+    ]
+    for (const [policy, expected] of cases) {
+      const step = draftFromTemplate(buildAutoApprovalTemplate(policy)).steps[0]
+      expect(step.mergeWithRequester, JSON.stringify(policy)).toBe(policy.mergeWithRequester === true)
+      expect(step.samePersonPolicy, JSON.stringify(policy)).toBe(policy.samePersonPolicy)
+      expect(stepSamePersonControlState(step), JSON.stringify(policy)).toEqual({ kind: 'editable', choice: expected })
+    }
+  })
+
+  it('T10: an UNTOUCHED step re-saves byte-identical for every shape — a bare legacy carrier never gains samePersonPolicy (lock: "no existing graph changes shape")', () => {
+    for (const policy of [
+      { mergeWithRequester: true },
+      { mergeWithRequester: true, samePersonPolicy: 'auto_skip' },
+      { samePersonPolicy: 'self_approve' },
+      { samePersonPolicy: 'transfer_direct_manager', mergeAdjacentApprover: true, actorMode: 'system' },
+      { samePersonPolicy: 'self_approve', mergeWithRequester: true },
+    ] as AutoApprovalPolicy[]) {
+      expect(rebuiltPolicy(draftFromTemplate(buildAutoApprovalTemplate(policy))), JSON.stringify(policy)).toEqual(policy)
+    }
+  })
+
+  it("T11: picks write BOTH carriers — 'auto_skip' adds samePersonPolicy + mergeWithRequester (default (a)); leaving it DELETES mergeWithRequester", () => {
+    const draft = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    setStepSamePersonChoice(draft.steps[0], 'self_approve')
+    // The discriminating case: with only `samePersonPolicy` written, the backend would keep
+    // mergeWithRequester:true and the merge cascade would still auto-skip while the UI says 本人审批.
+    expect(rebuiltPolicy(draft)).toEqual({ samePersonPolicy: 'self_approve' })
+    setStepSamePersonChoice(draft.steps[0], 'transfer_dept_head')
+    expect(rebuiltPolicy(draft)).toEqual({ samePersonPolicy: 'transfer_dept_head' })
+    setStepSamePersonChoice(draft.steps[0], 'auto_skip')
+    expect(rebuiltPolicy(draft)).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
+  })
+
+  it("T12: '默认' OMITS both keys (default (b)) — the whole autoApprovalPolicy is dropped when nothing else is left, siblings survive otherwise", () => {
+    const bare = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' }))
+    setStepSamePersonChoice(bare.steps[0], 'default')
+    expect(bare.steps[0].samePersonPolicy).toBeUndefined()
+    expect(bare.steps[0].mergeWithRequester).toBe(false)
+    expect('autoApprovalPolicy' in (buildApprovalGraph(bare).nodes[1]?.config as ApprovalNodeConfig)).toBe(false)
+
+    const withSiblings = draftFromTemplate(buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_direct_manager', mergeAdjacentApprover: true, actorMode: 'system' }))
+    setStepSamePersonChoice(withSiblings.steps[0], 'default')
+    expect(rebuiltPolicy(withSiblings)).toEqual({ mergeAdjacentApprover: true, actorMode: 'system' })
+  })
+
+  it("T13: an explicit 'self_approve' is written ONLY when picked — a fresh step stays absent (no node policy, so the template-level policy still applies there)", () => {
+    const draft = createEmptyTemplateDraft()
+    expect(stepSamePersonControlState(draft.steps[0])).toEqual({ kind: 'editable', choice: 'default' })
+    expect('autoApprovalPolicy' in (buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig)).toBe(false)
+    setStepSamePersonChoice(draft.steps[0], 'self_approve')
+    expect((buildApprovalGraph(draft).nodes[1]?.config as ApprovalNodeConfig).autoApprovalPolicy).toEqual({ samePersonPolicy: 'self_approve' })
+  })
+
+  it('T14: re-picking the current projection is a no-op, and an off-enum persisted value is never overwritten by the setter (X-3)', () => {
+    const legacy = draftFromTemplate(buildAutoApprovalTemplate({ mergeWithRequester: true }))
+    setStepSamePersonChoice(legacy.steps[0], 'auto_skip')
+    expect(rebuiltPolicy(legacy)).toEqual({ mergeWithRequester: true })
+
+    const unknown = draftFromTemplate(buildAutoApprovalTemplate({ samePersonPolicy: 'transfer_to_ceo' } as unknown as AutoApprovalPolicy))
+    expect(stepSamePersonControlState(unknown.steps[0])).toEqual({ kind: 'unknown' })
+    setStepSamePersonChoice(unknown.steps[0], 'default')
+    expect(unknown.steps[0].samePersonPolicy).toBe('transfer_to_ceo')
   })
 })
 
@@ -1339,6 +1494,8 @@ describe('TemplateAuthoringView', () => {
     container?.remove()
     app = null
     container = null
+    // W1-1a gate r2: undo `stubDirectoryFetch` (a no-op for every test that did not stub).
+    vi.unstubAllGlobals()
     if (originalScrollIntoView) {
       Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
     } else {
@@ -1998,7 +2155,7 @@ describe('TemplateAuthoringView', () => {
     }
   }
 
-  it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the self-approver toggle (E) together, editable', async () => {
+  it('combined view A1: a static_user + self-approver step renders the directory picker (A) and the same-person control (E) together, editable', async () => {
     setRouteParams({ id: 'tpl_combo' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
       approvalGraph: buildComboGraph({ assigneeSources: [{ kind: 'static_user', userIds: ['u1'] }], approvalMode: 'single', emptyAssigneePolicy: 'error', autoApprovalPolicy: { mergeWithRequester: true } }),
@@ -2007,7 +2164,12 @@ describe('TemplateAuthoringView', () => {
     await flushUi()
 
     expect(container!.querySelector('[data-testid="approval-step-user-picker"]')).not.toBeNull() // A renders
-    expect(container!.querySelector('[data-testid="approval-step-merge-with-requester"]')).not.toBeNull() // E renders, same step
+    // E renders, same step — W1-1a: the four-value control replaced the 自审合并 checkbox and projects
+    // the persisted bare carrier { mergeWithRequester: true } as 自动通过 ('auto_skip').
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.value).toBe('auto_skip')
+    expect(samePerson.disabled).toBe(false)
     expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull() // editable, not fail-closed
     expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
   })
@@ -2702,9 +2864,11 @@ describe('TemplateAuthoringView', () => {
     const mode = container!.querySelector('[data-testid="approval-node-mode"]') as HTMLSelectElement
     mode.value = 'all'
     mode.dispatchEvent(new Event('change'))
-    const merge = container!.querySelector('[data-testid="approval-node-merge-with-requester"]') as HTMLInputElement
-    merge.checked = true
-    merge.dispatchEvent(new Event('change'))
+    // W1-1a: the four-value same-person control replaced the 自审合并 checkbox on the canvas path too.
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    samePerson.value = 'auto_skip'
+    samePerson.dispatchEvent(new Event('change'))
     const fieldAccess = container!.querySelector('[data-testid="approval-node-field-access-amount"]') as HTMLSelectElement
     fieldAccess.value = 'hidden'
     fieldAccess.dispatchEvent(new Event('change'))
@@ -2713,8 +2877,479 @@ describe('TemplateAuthoringView', () => {
     const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
     const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
     expect(approval.config.approvalMode).toBe('all')
-    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    // Implementer default (a): 'auto_skip' writes samePersonPolicy AND keeps the shipped carrier in sync.
+    expect(approval.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
     expect(approval.config.fieldPermissions).toEqual([{ fieldId: 'amount', access: 'hidden' }])
+  })
+
+  // ── W1-1a (Lock-4 F4-B / F4-C) — the CANVAS-path node config editor (flag-off structured list
+  // mounts the same ApprovalGraphNodeConfigEditor the Canvas inspector hosts). Directory fetches are
+  // not mocked in this file, so picker options come from the view's own placeholder synthesis for the
+  // persisted ids (`ensure*OptionVisible`) — the same mechanism the shipped static_role picker uses.
+  it('W1-1a canvas: designated targets + the four-value same-person control hydrate, edit and save through the node config editor', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'], roleIds: ['approval-admin'] },
+        autoApprovalPolicy: { mergeWithRequester: true },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    const emptyPolicy = container!.querySelector('[data-testid="approval-node-empty-policy"]') as HTMLSelectElement
+    expect(emptyPolicy.value).toBe('designated')
+    expect(Array.from(emptyPolicy.options).map((option) => option.value)).toEqual(['error', 'auto-approve', 'designated'])
+    const userPicker = container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement
+    const rolePicker = container!.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]') as HTMLSelectElement
+    expect(userPicker.value).toBe('u-fallback')
+    expect(rolePicker.value).toBe('approval-admin')
+    // C7 raw-id census spirit: a hydrated target the directory page has not loaded renders a business
+    // placeholder label, never the raw id.
+    expect(userPicker.textContent).not.toContain('u-fallback')
+    expect(rolePicker.textContent).not.toContain('approval-admin')
+    expect(container!.querySelector('[data-testid="approval-node-empty-fallback-hint"]')).not.toBeNull()
+
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('auto_skip')
+    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')).toBeNull()
+    samePerson.value = 'transfer_direct_manager'
+    samePerson.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-node-same-person-transfer-hint"]')!.textContent)
+      .toBe(W11A_SAME_PERSON_TRANSFER_HINT_TEXT)
+
+    // Drop the user target, keep the role (one side at a time).
+    for (const option of Array.from(userPicker.options)) option.selected = false
+    userPicker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const graph = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph
+    const approval = graph.nodes.find((candidate: any) => candidate.key === 'approval_1')
+    expect(approval.config.emptyAssigneePolicy).toBe('designated')
+    expect(approval.config.emptyAssigneeFallback).toEqual({ roleIds: ['approval-admin'] })
+    // INVARIANT (default (a)): leaving 自动通过 deleted the shipped carrier — no co-present merge flag.
+    expect(approval.config.autoApprovalPolicy).toEqual({ samePersonPolicy: 'transfer_direct_manager' })
+  })
+
+  it('W1-1a canvas: clearing every designated target blocks 保存草稿 with the B-s10 preview (nothing reaches the server)', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_bs10' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { roleIds: ['approval-admin'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    const rolePicker = container!.querySelector('[data-testid="approval-node-empty-fallback-role-picker"]') as HTMLSelectElement
+    for (const option of Array.from(rolePicker.options)) option.selected = false
+    rolePicker.dispatchEvent(new Event('change'))
+    await flushUi()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(0)
+    const summary = container!.querySelector('[data-testid="approval-template-validation-summary"]')
+    expect(summary).not.toBeNull()
+    expect(summary!.textContent).toContain('转交指定人员')
+    expect(summary!.textContent).not.toContain('approval-admin')
+  })
+
+  // ── W1-1a — the LINEAR step editor (flag off, linear template). ─────────────────────────────
+  it('W1-1a linear: a persisted designated role + transfer_dept_head hydrate; 默认 drops the node policy; the fallback re-saves verbatim', async () => {
+    setRouteParams({ id: 'tpl_w11a_linear' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'designated',
+              emptyAssigneeFallback: { userIds: ['u-fallback'], roleIds: ['approval-admin'] },
+              autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const emptyPolicy = container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(emptyPolicy.value).toBe('designated')
+    const rolePicker = container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]') as HTMLSelectElement
+    expect(rolePicker.value).toBe('approval-admin')
+    const userPicker = container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(userPicker.value).toBe('u-fallback')
+    // C7 raw-id census spirit (the lexical census does not scan `:label` bindings): hydrated targets
+    // the directory page has not loaded render a business placeholder label, never the raw id.
+    expect(userPicker.textContent).not.toContain('u-fallback')
+    expect(rolePicker.textContent).not.toContain('approval-admin')
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('transfer_dept_head')
+    expect(Array.from(samePerson.options).map((option) => option.value))
+      .toEqual(['default', 'self_approve', 'auto_skip', 'transfer_direct_manager', 'transfer_dept_head'])
+    // Gate r2 P3-1 (Lock-4 L4:130-132): the empty-assignee fallback is CONDITIONAL on the node having no
+    // assignee left. Restated here, not imported, so reverting the copy reddens this pin.
+    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')!.textContent)
+      .toBe(W11A_SAME_PERSON_TRANSFER_HINT_TEXT)
+
+    samePerson.value = 'default'
+    samePerson.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-step-same-person-transfer-hint"]')).toBeNull()
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes[1].config
+    expect('autoApprovalPolicy' in config).toBe(false)
+    expect(config.emptyAssigneePolicy).toBe('designated')
+    expect(config.emptyAssigneeFallback).toEqual({ userIds: ['u-fallback'], roleIds: ['approval-admin'] })
+  })
+
+  // Gate r2 P2-2: the blocked half alone was an absence assertion without a positive control (Lock-4
+  // §3, L4:285-286), and it stayed green with the linear picker write-through removed (mutation E1e).
+  // The test now also CHOOSES a role and a user through the typed pickers and asserts the save goes
+  // through carrying exactly those targets. The directory is served through the fetch seam: roles by
+  // the mount-time load, users by the picker's own search.
+  it("W1-1a linear: choosing 转交指定人员 renders the typed pickers and blocks save until a target is chosen", async () => {
+    const fetchSpy = stubDirectoryFetch({
+      users: [{ id: 'u-pick', name: '目录用户', email: '' }],
+      roles: [{ id: 'role-pick', name: '审批管理员' }],
+    })
+    await mountView()
+    setInput('approval-template-name', '报销审批')
+    const emptyPolicy = container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]')).toBeNull()
+    emptyPolicy.value = 'designated'
+    emptyPolicy.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]')).not.toBeNull()
+    expect(container!.querySelector('[data-testid="approval-step-empty-fallback-hint"]')).not.toBeNull()
+
+    const saveButton = container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement
+    saveButton.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(0)
+    expect(container!.querySelector('[data-testid="approval-template-validation-summary"]')!.textContent).toContain('转交指定人员')
+
+    // Positive control: choose a role and a user through the typed pickers, then save again.
+    const rolePicker = container!.querySelector('[data-testid="approval-step-empty-fallback-role-picker"]') as HTMLSelectElement
+    await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+    pickOptions(rolePicker, ['role-pick'])
+    await flushUi()
+    const userPicker = container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    openUserPicker(userPicker)
+    await vi.waitFor(() => expect(optionText(userPicker, 'u-pick')).toBe('目录用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    pickOptions(userPicker, ['u-pick'])
+    await flushUi()
+
+    saveButton.click()
+    await flushUi()
+    expect(createTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (createTemplateSpy.mock.calls[0]?.[0] as any).approvalGraph.nodes
+      .find((node: any) => node.key === 'approval_1').config
+    expect({ emptyAssigneePolicy: config.emptyAssigneePolicy, emptyAssigneeFallback: config.emptyAssigneeFallback })
+      .toStrictEqual({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { userIds: ['u-pick'], roleIds: ['role-pick'] } })
+  })
+
+  // ── W1-1a gate r2 P2-1 (C7: a fallback chip never shows a raw id). `searchUsers` REPLACES the shared
+  // user list with the new page, and Element Plus labels a selected value that has no option with the
+  // raw value (`useSelect.getOption`). The fallback ids are re-ensured into the list only while the
+  // policy is 'designated': after a search (`onUserSearch`), on hydrate / pick (`syncStepOptions`,
+  // `syncApprovalNodeOptions`), and, since this round, on every empty-assignee-policy change. The stub
+  // renders NOTHING for an option-less value, so these pins assert that the `<option value=id>` is
+  // present and reads 未知用户 — never the mere absence of the id from the picker text.
+  function buildW11aLinearTemplate(config: Record<string, unknown>) {
+    return buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          { key: 'approval_1', type: 'approval', name: '审批人 1', config: config as ApprovalNodeConfig },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    })
+  }
+
+  // Pins the `onUserSearch` designated loop (mutation X7c): the picker stays mounted, so only that loop
+  // can put the hydrated target back after the page replaced the list.
+  it('W1-1a linear (gate r2 P2-1): a user search while 转交指定人员 stays selected keeps the hydrated fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_linear_search' })
+    getTemplateSpy.mockResolvedValue(buildW11aLinearTemplate({
+      assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['u-fallback'] },
+    }))
+    await mountView()
+    await flushUi()
+    const userPicker = () => container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+
+    openUserPicker(userPicker())
+    // Positive control: the search ran and its page replaced the list (the page user is labelled).
+    await vi.waitFor(() => expect(optionText(userPicker(), 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+  })
+
+  // Pins the policy-change re-sync (the linear select's @change): switching away unmounts the pickers
+  // while the draft keeps the target (default (g)); a search in between drops its placeholder option;
+  // only a re-sync on the switch back restores it.
+  it('W1-1a linear (gate r2 P2-1): switching 空审批人策略 away, searching, and back re-syncs the retained fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_linear_switch' })
+    getTemplateSpy.mockResolvedValue(buildW11aLinearTemplate({
+      assigneeSources: [{ kind: 'static_user', userIds: ['u-page'] }],
+      approvalMode: 'single',
+      emptyAssigneePolicy: 'designated',
+      emptyAssigneeFallback: { userIds: ['u-fallback'] },
+    }))
+    await mountView()
+    await flushUi()
+    const fallbackPicker = () => container!.querySelector('[data-testid="approval-step-empty-fallback-user-picker"]') as HTMLSelectElement | null
+    const emptyPolicy = () => container!.querySelector('[data-testid="approval-step-empty-policy"]') as HTMLSelectElement
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+
+    emptyPolicy().value = 'error'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).toBeNull()
+
+    // A search through the step's own source picker; the page omits the retained target.
+    const sourcePicker = container!.querySelector('[data-testid="approval-step-user-picker"]') as HTMLSelectElement
+    openUserPicker(sourcePicker)
+    await vi.waitFor(() => expect(optionText(sourcePicker, 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    // Precondition that makes the last assertion discriminating: the search really dropped the
+    // retained target's option (it is re-ensured only while the policy is 'designated').
+    expect(optionText(sourcePicker, 'u-fallback')).toBeNull()
+
+    emptyPolicy().value = 'designated'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).not.toBeNull()
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+  })
+
+  // Canvas twin of the search pin: `onUserSearch` re-syncs every approval node through
+  // `syncApprovalNodeOptions`, whose designated branch puts the hydrated target back.
+  it('W1-1a canvas (gate r2 P2-1): a user search while 转交指定人员 stays selected keeps the hydrated fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_canvas_search' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+    const userPicker = () => container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+
+    openUserPicker(userPicker())
+    await vi.waitFor(() => expect(optionText(userPicker(), 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(userPicker(), 'u-fallback')).toBe('未知用户')
+  })
+
+  // Pins the canvas policy-change re-sync (`setApprovalNodeEmptyPolicy` → `syncApprovalNodeOptions`).
+  it('W1-1a canvas (gate r2 P2-1): switching 空审批人策略 away, searching, and back re-syncs the retained fallback target as a 未知用户 option', async () => {
+    const fetchSpy = stubDirectoryFetch({ users: [{ id: 'u-page', name: '页面用户', email: '' }] })
+    setRouteParams({ id: 'tpl_w11a_c7_canvas_switch' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'static_user', userIds: ['u-page'] }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'designated',
+        emptyAssigneeFallback: { userIds: ['u-fallback'] },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+    const fallbackPicker = () => container!.querySelector('[data-testid="approval-node-empty-fallback-user-picker"]') as HTMLSelectElement | null
+    const emptyPolicy = () => container!.querySelector('[data-testid="approval-node-empty-policy"]') as HTMLSelectElement
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+
+    emptyPolicy().value = 'error'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).toBeNull()
+
+    const sourcePicker = container!.querySelector('[data-testid="approval-node-source-user-picker"]') as HTMLSelectElement
+    openUserPicker(sourcePicker)
+    await vi.waitFor(() => expect(optionText(sourcePicker, 'u-page')).toBe('页面用户'))
+    expect(directoryUserSearchCount(fetchSpy)).toBe(1)
+    expect(optionText(sourcePicker, 'u-fallback')).toBeNull()
+
+    emptyPolicy().value = 'designated'
+    emptyPolicy().dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(fallbackPicker()).not.toBeNull()
+    expect(optionText(fallbackPicker()!, 'u-fallback')).toBe('未知用户')
+  })
+
+  it('W1-1a linear (gate X-3): an off-enum persisted samePersonPolicy opens read-only, the control shows an honest label — never the raw value', async () => {
+    setRouteParams({ id: 'tpl_w11a_x3' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: { samePersonPolicy: 'transfer_to_ceo' },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(true)
+    expect(samePerson.value).toBe('__unknown__')
+    expect(samePerson.textContent).not.toContain('transfer_to_ceo')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // Gate r1 P3-1 — X-3 says read-only "on BOTH the linear and canvas paths"; the linear test above is
+  // the mounted linear pin, this is the mounted CANVAS pin (flag-off structured list hosting the same
+  // ApprovalGraphNodeConfigEditor the Canvas inspector hosts). The component's own belt (an unknown
+  // value disables the control even under an editable host) is pinned separately by a direct mount
+  // with `readOnly: false` in approval-template-authoring-canvas-inspector.spec.ts.
+  it('W1-1a canvas (gate X-3): an off-enum persisted samePersonPolicy opens the complex template read-only, the node control shows an honest label — never the raw value', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_x3' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        autoApprovalPolicy: { samePersonPolicy: 'transfer_to_ceo' },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).not.toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.disabled).toBe(true)
+    expect(samePerson.value).toBe('__unknown__')
+    expect(samePerson.textContent).not.toContain('transfer_to_ceo')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('W1-1a canvas (gate X-3 positive control): the same complex fixture with a KNOWN samePersonPolicy opens editable', async () => {
+    setRouteParams({ id: 'tpl_w11a_canvas_x3_known' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: buildG5ComplexGraph({
+        assigneeSources: [{ kind: 'direct_manager' }],
+        approvalMode: 'single',
+        emptyAssigneePolicy: 'error',
+        autoApprovalPolicy: { samePersonPolicy: 'transfer_dept_head' },
+      }),
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-node-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(false)
+    expect(samePerson.value).toBe('transfer_dept_head')
+    expect((container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  // Gate r1 NIT-1 / NIT-2 on the LINEAR path: a node that already carries another node-level
+  // auto-approval key (API-authored; allowlisted, so the template stays editable) overrides the
+  // template tier whatever the same-person control shows — the 默认 label and the hint say so, and
+  // an untouched save keeps the sibling (no flatten).
+  it('W1-1a linear (gate r1 NIT-1/NIT-2): a node with a sibling auto-approval key shows the neutral 默认 label + the already-overrides hint, and re-saves the sibling untouched', async () => {
+    setRouteParams({ id: 'tpl_w11a_linear_sibling' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      approvalGraph: {
+        nodes: [
+          { key: 'start', type: 'start', name: '发起', config: {} },
+          {
+            key: 'approval_1',
+            type: 'approval',
+            name: '审批人 1',
+            config: {
+              assigneeSources: [{ kind: 'form_field_user', fieldId: 'reviewer' }],
+              approvalMode: 'single',
+              emptyAssigneePolicy: 'error',
+              autoApprovalPolicy: { dedupeHistoricalApprover: true },
+            },
+          },
+          { key: 'end', type: 'end', name: '结束', config: {} },
+        ],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+        ],
+      },
+    }))
+    await mountView()
+    await flushUi()
+
+    expect(container!.querySelector('[data-testid="approval-template-unsupported-alert"]')).toBeNull()
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.disabled).toBe(false)
+    expect(samePerson.value).toBe('default')
+    expect(samePerson.options[0]!.textContent).toBe('默认（本节点已有单独的自动审批设置）')
+    expect(container!.querySelector('[data-testid="approval-step-same-person-hint"]')!.textContent)
+      .toBe('本节点已有单独的自动审批设置，模板级「审批人去重」不作用于本节点。')
+
+    ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+    const config = (updateTemplateSpy.mock.calls[0]?.[1] as any).approvalGraph.nodes[1].config
+    expect(config.autoApprovalPolicy).toEqual({ dedupeHistoricalApprover: true })
   })
 
   it('FC-2 wiring: switching a condition branch to formula writes formula to the save payload while topology stays byte-identical', async () => {
@@ -3606,6 +4241,19 @@ describe('TemplateAuthoringView', () => {
       radios.forEach((radio) => expect(radio.disabled).toBe(false))
     })
 
+    // Gate r1 P3-2: the W1-1a slice corrected this sentence (the old copy said the tier applied to
+    // nodes without their own DEDUP rule; the backend `getEffectiveAutoApprovalPolicy` skips the
+    // template tier at ANY node carrying a node-level `autoApprovalPolicy` key). Pinned verbatim so the
+    // precedence copy cannot silently regress; whether it ships in this slice stays an owner call.
+    it('M8: the dedup-tier hint states the node-over-template precedence exactly', async () => {
+      await mountView()
+      ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
+      await flushUi()
+      const hint = container!.querySelector('[data-testid="approval-template-dedup-tier-hint"]')
+      expect(hint).not.toBeNull()
+      expect(hint!.textContent!.trim()).toBe('同一审批人在流程中再次出现时按所选规则自动通过该节点，无需重复处理；审批节点单独设置了自动审批规则（例如「审批人与发起人为同一人时」选择了默认以外的选项）时，该节点不再沿用本设置；返回上一节点后该节点重新计入本轮去重历史。')
+    })
+
     it('defaults to 不去重 (none) for a brand-new template — §2.2 no shipped default may change', async () => {
       await mountView()
       ;(container!.querySelector('[data-testid="approval-template-section-more-settings"]') as HTMLButtonElement).click()
@@ -3774,9 +4422,10 @@ describe('TemplateAuthoringView', () => {
 
       ;(container!.querySelector('[data-testid="approval-template-section-flow"]') as HTMLButtonElement).click()
       await flushUi()
-      const nodeSelfApproverCheckbox = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-      expect(nodeSelfApproverCheckbox).not.toBeNull()
-      expect(nodeSelfApproverCheckbox.checked).toBe(true)
+      // W1-1a: the node-level four-value control still projects the untouched bare carrier as 自动通过.
+      const nodeSamePersonControl = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+      expect(nodeSamePersonControl).not.toBeNull()
+      expect(nodeSamePersonControl.value).toBe('auto_skip')
 
       ;(container!.querySelector('[data-testid="approval-template-publish-button"]') as HTMLButtonElement).click()
       await flushUi()
@@ -3787,16 +4436,22 @@ describe('TemplateAuthoringView', () => {
       const payload = publishTemplateSpy.mock.calls.at(-1)?.[1] as { policy: { autoApproval?: Record<string, unknown> } }
       expect(payload.policy.autoApproval).toEqual({ mergeAdjacentApprover: true })
       // The template-level tier switch must never have written into the node's own config.
+      // W1-1a (Lock-4 F4-C: "no existing graph changes shape"): the persisted bare carrier reaches
+      // the server EXACTLY as it was — the four-value control never adds samePersonPolicy to an
+      // untouched node (publish persists the draft through updateTemplate first).
+      const saved = updateTemplateSpy.mock.calls.at(-1)?.[1] as { approvalGraph: { nodes: Array<{ key: string; config: Record<string, unknown> }> } }
+      expect(saved.approvalGraph.nodes.find((node) => node.key === 'approval_1')?.config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
     })
   })
 
-  it('T7: wires the self-approver toggle through the mounted view into the saved payload', async () => {
+  it('T7: wires the same-person control (自动通过) through the mounted view into the saved payload', async () => {
     await mountView()
 
     setInput('approval-template-name', '请假审批')
-    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-    mergeToggle.checked = true
-    mergeToggle.dispatchEvent(new Event('change'))
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson.value).toBe('default')
+    samePerson.value = 'auto_skip'
+    samePerson.dispatchEvent(new Event('change'))
     await flushUi()
 
     ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
@@ -3804,7 +4459,8 @@ describe('TemplateAuthoringView', () => {
 
     expect(createTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = createTemplateSpy.mock.calls[0]?.[0] as any
-    expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true })
+    // Implementer default (a): both carriers, exactly the shape the backend persists for 'auto_skip'.
+    expect(payload.approvalGraph.nodes[1].config.autoApprovalPolicy).toEqual({ mergeWithRequester: true, samePersonPolicy: 'auto_skip' })
   })
 
   it('G-1: opens a complex (parallel) graph READ-ONLY but save-able — preserves the graph on save, never flattens', async () => {
@@ -3888,9 +4544,9 @@ describe('TemplateAuthoringView', () => {
 
     await mountView()
 
-    const mergeToggle = container!.querySelector('[data-testid="approval-step-merge-with-requester"]') as HTMLInputElement
-    expect(mergeToggle).not.toBeNull()
-    expect(mergeToggle.disabled).toBe(true)
+    const samePerson = container!.querySelector('[data-testid="approval-step-same-person-policy"]') as HTMLSelectElement
+    expect(samePerson).not.toBeNull()
+    expect(samePerson.disabled).toBe(true)
   })
 
   it('B1-07: dirty-draft tracking arms the browser leave protection, and only when dirty', async () => {
@@ -4762,6 +5418,664 @@ describe('TemplateAuthoringView', () => {
         expect(byTestId('approval-form-field-inspector-record-link-catalog-error')).toBeNull()
         expect(optionTexts(BASE_SELECT)).toEqual(['请选择目标空间', '销售空间'])
       })
+    })
+  })
+
+  // ── Lock-4 §1 F4-A — 审批类型 (approvalType) through the REAL mounted view ───────────────────────
+  // docs/development/approval-lock4-flow-policies-20260817.md §1 F4-A / §2.3 / OD-L4-2(a). The
+  // template is LOADED THROUGH THE API SEAM (getTemplate) and SAVED through the real button, so
+  // these also exercise the read-only door and the save gating the pure helpers cannot see. Before
+  // this slice every one of these templates opened read-only with save disabled. `JSON.stringify`
+  // equality pins key order (`toEqual` would not); fixtures are in the backend-normalized shape.
+  describe('Lock-4 §1 F4-A — 审批类型 authoring and the via-API round-trip (mounted)', () => {
+    const f4aLinear = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-end', source: 'approval_1', target: 'end' },
+      ],
+    })
+    // The cc node forces the preserved-graph path (the canvas edit model; flag OFF renders it in the
+    // structured list with the SAME ApprovalGraphNodeConfigEditor the canvas inspector hosts).
+    const f4aComplex = (config: Record<string, unknown>) => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '主管', config },
+        { key: 'cc_1', type: 'cc', name: '抄送', config: { targetType: 'role', targetIds: ['finance'] } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'e1', source: 'start', target: 'approval_1' },
+        { key: 'e2', source: 'approval_1', target: 'cc_1' },
+        { key: 'e3', source: 'cc_1', target: 'end' },
+      ],
+    })
+    const SOURCELESS_AUTO = { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const AUTO_WITH_SOURCE = { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }
+    const EXPLICIT_MANUAL = { assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'manual', emptyAssigneePolicy: 'error' }
+    const CASES: Array<[string, string, Record<string, unknown>]> = [
+      ['sourceless', 'a sourceless auto_approve node', SOURCELESS_AUTO],
+      ['withsource', 'an auto_approve node that still carries a source', AUTO_WITH_SOURCE],
+      ['manual', "an explicit 'manual' node", EXPLICIT_MANUAL],
+    ]
+    const q = <T extends Element = HTMLElement>(testId: string) => container!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function loadEditable(id: string, graph: unknown): Promise<void> {
+      setRouteParams({ id })
+      getTemplateSpy.mockResolvedValue(buildTemplate({ approvalGraph: graph as any }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).toBeNull()
+      expect(q<HTMLButtonElement>('approval-template-save-button')!.disabled).toBe(false)
+    }
+
+    async function saveAndTakePayload(callIndex: number): Promise<any> {
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(callIndex + 1)
+      return updateTemplateSpy.mock.calls[callIndex]?.[1]
+    }
+
+    for (const [slug, label, config] of CASES) {
+      it(`LINEAR editor: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aLinear(config)
+        await loadEditable(`tpl_f4a_linear_${slug}`, graph)
+        expect(container!.querySelectorAll('[data-testid="approval-template-step-row"]')).toHaveLength(1)
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+
+      it(`CANVAS edit model: ${label}, loaded through the API, is editable and saves its approvalGraph byte-for-byte`, async () => {
+        const graph = f4aComplex(config)
+        await loadEditable(`tpl_f4a_complex_${slug}`, graph)
+        expect(container!.querySelector('[data-approval-node="approval_1"]')).not.toBeNull()
+        const payload = await saveAndTakePayload(0)
+        expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+      })
+    }
+
+    it('LINEAR: each step gets a two-option 审批类型 radiogroup (人工审批 / 自动通过, no 自动拒绝 — OD-L4-2(a)) with a per-step radio name', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', emptyAssigneePolicy: 'error' })
+      graph.nodes.splice(2, 0, { key: 'approval_2', type: 'approval', name: '审批人 2', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      graph.edges = [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ]
+      await loadEditable('tpl_f4a_linear_two_steps', graph)
+      const groups = Array.from(container!.querySelectorAll('[data-testid="approval-step-approval-type"]'))
+      expect(groups).toHaveLength(2)
+      const names = groups.map((group) => {
+        const radios = Array.from(group.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+        expect(radios.map((radio) => radio.value)).toEqual(['manual', 'auto_approve'])
+        expect(Array.from(group.querySelectorAll('label')).map((labelEl) => labelEl.textContent?.trim())).toEqual(['人工审批', '自动通过'])
+        expect(radios[0]!.checked).toBe(true)
+        expect(new Set(radios.map((radio) => radio.name)).size).toBe(1)
+        return radios[0]!.name
+      })
+      expect(new Set(names).size).toBe(2)
+      expect(container!.textContent).not.toContain('自动拒绝')
+    })
+
+    it('LINEAR: 自动通过 hides the person-only controls and saves approvalType with NO assigneeSources', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_toggle', graph)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-same-person-policy')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-auto-hint')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      expect(Array.from(container!.querySelectorAll('[data-testid="approval-spine-chip-step"]')).map((chip) => chip.textContent)).toEqual([
+        expect.stringContaining('自动通过'),
+      ])
+      let payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ approvalMode: 'all', approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
+      )
+
+      // The save re-hydrates the draft from the server response, which carries NO source: the scratch
+      // lived only in the unsaved session, so 人工审批 now starts from the zero-config requester
+      // default (owner-visible consequence, recorded in the slice note).
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      payload = await saveAndTakePayload(1)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'all', emptyAssigneePolicy: 'error' }),
+      )
+    })
+
+    it('LINEAR: 自动通过 then 人工审批 BEFORE saving restores the configured source — the traversal is lossless and the save is byte-for-byte the original', async () => {
+      const graph = f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'all', emptyAssigneePolicy: 'error' })
+      await loadEditable('tpl_f4a_linear_traversal', graph)
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph)).toBe(JSON.stringify(graph))
+    })
+
+    it('LINEAR: an auto_approve step that still carries a source keeps it VISIBLE with a notice (it is saved); the notice action drops it', async () => {
+      await loadEditable('tpl_f4a_linear_live_source', f4aLinear(AUTO_WITH_SOURCE))
+      expect(q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.checked).toBe(true)
+      expect(q('approval-step-source-kind')).not.toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).not.toBeNull()
+
+      q<HTMLButtonElement>('approval-step-approval-type-drop-sources')!.click()
+      await flushUi()
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-approval-type-live-sources-hint')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
+    })
+
+    it('CANVAS edit model: a sourceless auto_approve node renders an editor (seeded) with 自动通过 checked and no cards / policy / timeout; 人工审批 lands on one requester card and saves it', async () => {
+      await loadEditable('tpl_f4a_complex_seeded', f4aComplex(SOURCELESS_AUTO))
+      const editor = container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      expect(editor).not.toBeNull()
+      expect((editor.querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(editor.querySelector('[data-testid="approval-node-source-add"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor.querySelector('[data-testid="approval-node-approval-type-auto-hint"]')).not.toBeNull()
+
+      ;(editor.querySelector('[data-testid="approval-node-approval-type-manual"]') as HTMLInputElement).click()
+      await flushUi()
+      const cards = editor.querySelectorAll('[data-testid="approval-node-source-card"]')
+      expect(cards).toHaveLength(1)
+      expect((cards[0]!.querySelector('[data-testid="approval-node-source-kind-requester"]') as HTMLInputElement).checked).toBe(true)
+      expect(editor.querySelector('[data-testid="approval-node-mode"]')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config).toEqual({ approvalMode: 'single', emptyAssigneePolicy: 'error', assigneeSources: [{ kind: 'requester' }] })
+    })
+
+    // ── Lock-4 §1 F4-A HIDDEN-BLOCK GUARD — a hidden block that is saved AND validated must not stay
+    // hidden while it fails: the block is rendered again with a notice naming the error, the author
+    // can fix or clear it, and then the save proceeds. Both editors, one mechanism.
+    const select = (el: HTMLSelectElement | null, value: string) => {
+      el!.value = value
+      el!.dispatchEvent(new Event('change'))
+    }
+    const hiddenErrors = (testId: string) =>
+      Array.from(container!.querySelectorAll(`[data-testid="${testId}"]`)).map((item) => item.textContent?.trim())
+
+    it('HIDDEN-BLOCK GUARD (LINEAR): an enabled-but-empty timeout switched to 自动通过 stays VISIBLE with a notice naming the errors and blocks save; filling it clears the notice, the section stays until the save completes', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(q('approval-step-timeout-after-minutes')).not.toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([
+        expect.stringContaining('超时时长'),
+        expect.stringContaining('超时后的处理方式'),
+      ])
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      const summary = q('approval-template-validation-summary')!.textContent ?? ''
+      for (const message of hiddenErrors('approval-step-approval-type-hidden-error')) expect(summary).toContain(message)
+
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '30'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      // Still failing (no effect yet) ⇒ still visible.
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([expect.stringContaining('超时后的处理方式')])
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      // Valid ⇒ the notice goes, but the revealed section STAYS (sticky reveal, gate r2 P3-1) so the
+      // author is never unmounted mid-edit; the value is preserved verbatim.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes[1].config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.timeout).toEqual({ afterMinutes: 30, effect: 'remind' })
+      // Save completed ⇒ re-baselined ⇒ the valid hidden timeout (inert: an auto_approve step never
+      // waits) is hidden again.
+      expect(q('approval-step-timeout-section')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR): 关闭超时 on the notice is the one-click author action — the section hides and the save carries no timeout', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout_clear', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!.click()
+      await flushUi()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(JSON.stringify(SOURCELESS_AUTO))
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR policy rows): a failing hidden threshold reveals ONLY the policy rows (the source rows stay hidden — they are really omitted); a valid N clears the notice and the rows stay until the save completes', async () => {
+      // Reached here through the input stub (Element Plus clamps to min=1 in a real browser); this pins
+      // the policy block's wiring and the source/policy split, which a later policy rule (e.g. a
+      // designated empty-assignee fallback) will rely on.
+      await loadEditable('tpl_f4a_linear_hidden_policy', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'threshold', approvalThreshold: 3, emptyAssigneePolicy: 'error' }))
+      const threshold = q<HTMLInputElement>('approval-step-threshold')!
+      threshold.value = '0'
+      threshold.dispatchEvent(new Event('input'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-threshold')).not.toBeNull()
+      expect(q('approval-step-same-person-policy')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([expect.stringContaining('门槛会签人数')])
+      expect(q('approval-step-approval-type-clear-timeout')).toBeNull()
+
+      const fixed = q<HTMLInputElement>('approval-step-threshold')!
+      fixed.value = '2'
+      fixed.dispatchEvent(new Event('input'))
+      await flushUi()
+      // Sticky reveal (gate r2 P3-1): notice gone, rows still mounted, source rows still hidden.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      expect(q('approval-step-source-kind')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      expect(JSON.stringify(payload.approvalGraph.nodes[1].config)).toBe(
+        JSON.stringify({ approvalMode: 'threshold', approvalThreshold: 2, approvalType: 'auto_approve', emptyAssigneePolicy: 'error' }),
+      )
+      expect(q('approval-step-threshold')).toBeNull()
+    })
+
+    // Shared setup for the sticky / read-only / duplicate pins below: tick 启用超时处理 (left empty) on
+    // every linear step, then switch every step to 自动通过 ⇒ each step's hidden timeout is failing.
+    async function brokenTimeoutAutoSteps(): Promise<void> {
+      for (const enable of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-timeout-enabled"]'))) {
+        enable.checked = true
+        enable.dispatchEvent(new Event('change'))
+      }
+      await flushUi()
+      for (const radio of Array.from(container!.querySelectorAll<HTMLInputElement>('[data-testid="approval-step-approval-type-auto-approve"]'))) radio.click()
+      await flushUi()
+    }
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL (gate r2 P3-1): typing into the revealed minutes field never unmounts it — the keystroke that makes the step valid keeps the field, the save carries the full value', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_typing', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      // 提醒 first (the order that used to unmount), then type 6 … 60 into the SAME input element.
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '6'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      // The step is valid now (notice gone) — the field the author is typing in is still mounted.
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      minutes.value = '60'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-after-minutes')).toBe(minutes)
+      const payload = await saveAndTakePayload(0)
+      expect(payload.approvalGraph.nodes[1].config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+      expect(q('approval-step-timeout-section')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) STICKY REVEAL releases on a 审批类型 change: 人工审批 then back to 自动通过 with valid values hides the timeout section again', async () => {
+      await loadEditable('tpl_f4a_linear_sticky_release', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      select(q<HTMLSelectElement>('approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = q<HTMLInputElement>('approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-timeout-section')).not.toBeNull() // sticky
+      q<HTMLInputElement>('approval-step-approval-type-manual')!.click()
+      await flushUi()
+      // While the radio says 人工审批 the step keeps its sources ⇒ the section renders anyway.
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      // Back on 自动通过 with a VALID timeout ⇒ released, not re-revealed.
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) two SAME-NAMED sourceless auto steps with broken timeouts are BOTH revealed (call-site multiset, gate r2 P2-1)', async () => {
+      const node = (key: string) => ({ key, type: 'approval', name: '审批', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } })
+      await loadEditable('tpl_f4a_dup_names', {
+        nodes: [{ key: 'start', type: 'start', name: '发起', config: {} }, node('approval_1'), node('approval_2'), { key: 'end', type: 'end', name: '结束', config: {} }],
+        edges: [
+          { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+          { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+          { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+        ],
+      })
+      await brokenTimeoutAutoSteps()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-errors-hint"]')).toHaveLength(2)
+      expect(container!.querySelectorAll('[data-testid="approval-step-approval-type-hidden-error"]')).toHaveLength(4)
+    })
+
+    it('HIDDEN-BLOCK GUARD (LINEAR) 关闭超时 is inert when read-only (gate r2 P3-2): disabled, and a forced click leaves the draft untouched', async () => {
+      await loadEditable('tpl_f4a_linear_hidden_timeout_readonly', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      await brokenTimeoutAutoSteps()
+      canManageTemplates.value = false
+      await flushUi()
+      const clear = q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!
+      expect(clear.disabled).toBe(true)
+      // Simulate a neutered :disabled — the handler's own readOnly guard must still refuse.
+      clear.removeAttribute('disabled')
+      clear.click()
+      await flushUi()
+      expect(q<HTMLInputElement>('approval-step-timeout-enabled')!.checked).toBe(true)
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toHaveLength(2)
+    })
+
+    it('HIDDEN-BLOCK GUARD (CANVAS edit model): a 转交他人 timeout with no target switched to 自动通过 stays VISIBLE with a notice and blocks save; choosing 提醒 hides it and the save proceeds', async () => {
+      await loadEditable('tpl_f4a_complex_hidden_timeout', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const enable = editor().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'transfer')
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+      await flushUi()
+
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(editor().querySelector('[data-testid="approval-node-mode"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).not.toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-transfer-target"]')).not.toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).not.toBeNull()
+      expect(hiddenErrors('approval-node-approval-type-hidden-error')).toEqual(['审批节点 approval_1 的超时转交需要选择接收人'])
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain('审批节点 approval_1 的超时转交需要选择接收人')
+
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'remind')
+      await flushUi()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.timeout).toEqual({ afterMinutes: 60, effect: 'remind' })
+    })
+
+    it('HIDDEN-BLOCK GUARD (CANVAS edit model): 关闭超时 on the notice clears the timeout (author action) and the save carries none', async () => {
+      await loadEditable('tpl_f4a_complex_hidden_timeout_clear', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const enable = editor().querySelector('[data-testid="approval-node-timeout-enabled"]') as HTMLInputElement
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      select(editor().querySelector('[data-testid="approval-node-timeout-effect"]'), 'transfer')
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-auto-approve"]') as HTMLInputElement).click()
+      await flushUi()
+      ;(editor().querySelector('[data-testid="approval-node-approval-type-clear-timeout"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(editor().querySelector('[data-testid="approval-node-timeout-section"]')).toBeNull()
+      expect(editor().querySelector('[data-testid="approval-node-approval-type-hidden-errors-hint"]')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(Object.prototype.hasOwnProperty.call(config, 'timeout')).toBe(false)
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+    })
+
+    it("an approvalType outside the FE union ('auto_reject') opens READ-ONLY with save disabled — never silently dropped (gate X-3 analog)", async () => {
+      setRouteParams({ id: 'tpl_f4a_auto_reject' })
+      getTemplateSpy.mockResolvedValue(buildTemplate({
+        approvalGraph: f4aLinear({ assigneeSources: [{ kind: 'requester' }], approvalMode: 'single', approvalType: 'auto_reject', emptyAssigneePolicy: 'error' }) as any,
+      }))
+      await mountView()
+      await flushUi()
+      expect(q('approval-template-unsupported-alert')).not.toBeNull()
+      const save = q<HTMLButtonElement>('approval-template-save-button')!
+      expect(save.disabled).toBe(true)
+      save.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+    })
+
+    // Gate r3 P3-1: the linear sticky reveal is per step and per block. X1/X2 pin step isolation
+    // (a reveal or a 审批类型 change on one step never touches another); X3 pins that 关闭超时 releases only `timeout`.
+    const gateR3TwoSteps = () => ({
+      nodes: [
+        { key: 'start', type: 'start', name: '发起', config: {} },
+        { key: 'approval_1', type: 'approval', name: '审批人 1', config: { assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+        { key: 'approval_2', type: 'approval', name: '审批人 2', config: { approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'error', timeout: { afterMinutes: 30, effect: 'remind' } } },
+        { key: 'end', type: 'end', name: '结束', config: {} },
+      ],
+      edges: [
+        { key: 'edge-start-approval_1', source: 'start', target: 'approval_1' },
+        { key: 'edge-approval_1-approval_2', source: 'approval_1', target: 'approval_2' },
+        { key: 'edge-approval_2-end', source: 'approval_2', target: 'end' },
+      ],
+    })
+    const gateR3Rows = () => Array.from(container!.querySelectorAll<HTMLElement>('[data-testid="approval-template-step-row"]'))
+    const gateR3In = <T extends Element = HTMLElement>(row: HTMLElement | undefined, testId: string) => row!.querySelector(`[data-testid="${testId}"]`) as T | null
+
+    async function gateR3BreakThenFixStep1(): Promise<HTMLInputElement> {
+      expect(gateR3Rows()).toHaveLength(2)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const enable = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      select(gateR3In<HTMLSelectElement>(gateR3Rows()[0], 'approval-step-timeout-effect'), 'remind')
+      await flushUi()
+      const minutes = gateR3In<HTMLInputElement>(gateR3Rows()[0], 'approval-step-timeout-after-minutes')!
+      minutes.value = '45'
+      minutes.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      return minutes
+    }
+
+    it('GATE-R3 X1: a sticky reveal on step 1 never reveals step 2 (valid hidden timeout stays hidden)', async () => {
+      await loadEditable('tpl_gate_r3_x1', gateR3TwoSteps())
+      await gateR3BreakThenFixStep1()
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(1)
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-section')).not.toBeNull()
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+    })
+
+    it('GATE-R3 X2: a 审批类型 change on step 2 never releases step 1 (the field being edited stays mounted)', async () => {
+      await loadEditable('tpl_gate_r3_x2', gateR3TwoSteps())
+      const minutes = await gateR3BreakThenFixStep1()
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-manual')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      gateR3In<HTMLInputElement>(gateR3Rows()[1], 'approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(gateR3In(gateR3Rows()[0], 'approval-step-timeout-after-minutes')).toBe(minutes)
+      expect(gateR3In(gateR3Rows()[1], 'approval-step-timeout-section')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const approvals = payload.approvalGraph.nodes.filter((n: any) => n.type === 'approval')
+      expect(approvals.map((n: any) => n.config.timeout)).toEqual([{ afterMinutes: 45, effect: 'remind' }, { afterMinutes: 30, effect: 'remind' }])
+      expect(container!.querySelectorAll('[data-testid="approval-step-timeout-section"]')).toHaveLength(0)
+    })
+
+    it('GATE-R3 X3: 关闭超时 releases only the timeout block; a sticky policy block stays mounted', async () => {
+      await loadEditable('tpl_gate_r3_x3', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'threshold', approvalThreshold: 3, emptyAssigneePolicy: 'error' }))
+      const threshold = q<HTMLInputElement>('approval-step-threshold')!
+      threshold.value = '0'
+      threshold.dispatchEvent(new Event('input'))
+      await flushUi()
+      const enable = q<HTMLInputElement>('approval-step-timeout-enabled')!
+      enable.checked = true
+      enable.dispatchEvent(new Event('change'))
+      await flushUi()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+      expect(q('approval-step-threshold')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).not.toBeNull()
+      const fixed = q<HTMLInputElement>('approval-step-threshold')!
+      fixed.value = '2'
+      fixed.dispatchEvent(new Event('input'))
+      await flushUi()
+      expect(q('approval-step-threshold')).toBe(fixed)
+      q<HTMLButtonElement>('approval-step-approval-type-clear-timeout')!.click()
+      await flushUi()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-threshold')).toBe(fixed)
+    })
+
+    // ── W1-1a × F4-A, owner ruling 2026-10-10 「F1 选 b」: 转交指定人员 with no target on a sourceless
+    // auto_approve step / node is covered by the HIDDEN-BLOCK GUARD. The error is attributed to the
+    // `policy` block, that block is revealed WITH the fallback pickers inside it, and the save is blocked
+    // with a named cause; picking a target unblocks it and the save carries the fallback with NO assignee
+    // sources. The backend B-s10 rejects the untargeted state on every write, so the block is required.
+    const F1B_LINEAR_MSG = '审批人 1 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色'
+    const F1B_CANVAS_MSG = '审批节点 approval_1 的空审批人策略为「转交指定人员」，需要至少指定一位用户或一个角色'
+
+    it('W1-1a F1(b) pure: designated-without-target on a sourceless auto_approve step / node is attributed to the POLICY block only; the linear policy neutralizer also resets samePersonPolicy (B1)', () => {
+      const linear = draftFromTemplate(buildTemplate({
+        approvalGraph: f4aLinear({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'designated' }) as any,
+      }))
+      const step = linear.steps[0]!
+      expect(stepOmitsAssigneeSources(step)).toBe(true)
+      expect(step.emptyAssigneePolicy).toBe('designated')
+      expect(validateTemplateApprovalFlow(linear)).toContain(F1B_LINEAR_MSG)
+      expect(stepHiddenBlockLiveErrors(linear, step)).toEqual({ policy: [F1B_LINEAR_MSG] })
+
+      const complex = draftFromTemplate(buildTemplate({
+        approvalGraph: f4aComplex({ approvalMode: 'single', approvalType: 'auto_approve', emptyAssigneePolicy: 'designated' }) as any,
+      }))
+      expect(validateTemplateApprovalFlow(complex)).toContain(F1B_CANVAS_MSG)
+      expect(approvalNodeEditHiddenBlockLiveErrors(complex, 'approval_1')).toEqual({ policy: [F1B_CANVAS_MSG] })
+
+      // B1: every policy-row draft field is reset by the policy neutralizer. Behaviourally inert today
+      // (no validator rule reads samePersonPolicy), so the neutralizer's output is pinned directly.
+      const neutral = APPROVAL_STEP_HIDDEN_BLOCK_NEUTRALIZERS.policy({ ...step, samePersonPolicy: 'auto_skip' })
+      expect(neutral.samePersonPolicy).toBeUndefined()
+      expect(neutral.emptyAssigneePolicy).toBe('error')
+    })
+
+    it('W1-1a F1(b) LINEAR: 转交指定人员 with no target, switched to 自动通过, REVEALS the policy rows with the pickers (source rows stay hidden), names the error and blocks save; a picked role clears the notice, the rows stay (sticky) and the save carries designated + fallback with NO assigneeSources', async () => {
+      stubDirectoryFetch({ users: [], roles: [{ id: 'role-pick', name: '审批管理员' }] })
+      await loadEditable('tpl_w11a_f1b_linear', f4aLinear({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      select(q<HTMLSelectElement>('approval-step-empty-policy'), 'designated')
+      await flushUi()
+      expect(q('approval-step-empty-fallback-role-picker')).not.toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      q<HTMLInputElement>('approval-step-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(q('approval-step-source-kind')).toBeNull()
+      expect(q<HTMLSelectElement>('approval-step-empty-policy')!.value).toBe('designated')
+      expect(q('approval-step-empty-fallback-user-picker')).not.toBeNull()
+      expect(q('approval-step-empty-fallback-role-picker')).not.toBeNull()
+      expect(q('approval-step-same-person-policy')).not.toBeNull()
+      expect(q('approval-step-timeout-section')).toBeNull()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-step-approval-type-hidden-error')).toEqual([F1B_LINEAR_MSG])
+      expect(q('approval-step-approval-type-clear-timeout')).toBeNull()
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain(F1B_LINEAR_MSG)
+
+      const rolePicker = q<HTMLSelectElement>('approval-step-empty-fallback-role-picker')!
+      await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+      pickOptions(rolePicker, ['role-pick'])
+      await flushUi()
+      expect(q('approval-step-approval-type-hidden-errors-hint')).toBeNull()
+      expect(q('approval-step-empty-fallback-role-picker')).toBe(rolePicker)
+      expect(q('approval-step-source-kind')).toBeNull()
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.type === 'approval').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.emptyAssigneePolicy).toBe('designated')
+      expect(config.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+      // The completed save re-baselines the draft: the sticky reveal is released and the rows hide again.
+      expect(q('approval-step-empty-policy')).toBeNull()
+    })
+
+    it('W1-1a F1(b) CANVAS: 转交指定人员 with no target, switched to 自动通过, REVEALS the policy grid with the pickers (cards stay hidden), names the error and blocks save; a picked role clears the notice, the grid STAYS mounted (sticky, train r3 F9) and the save carries designated + fallback with NO assigneeSources', async () => {
+      stubDirectoryFetch({ users: [], roles: [{ id: 'role-pick', name: '审批管理员' }] })
+      await loadEditable('tpl_w11a_f1b_canvas', f4aComplex({ assigneeSources: [{ kind: 'direct_manager' }], approvalMode: 'single', emptyAssigneePolicy: 'error' }))
+      const editor = () => container!.querySelector('[data-approval-node="approval_1"]') as HTMLElement
+      const inEditor = <T extends Element = HTMLElement>(testId: string) => editor().querySelector(`[data-testid="${testId}"]`) as T | null
+      select(inEditor<HTMLSelectElement>('approval-node-empty-policy'), 'designated')
+      await flushUi()
+      expect(inEditor('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      inEditor<HTMLInputElement>('approval-node-approval-type-auto-approve')!.click()
+      await flushUi()
+
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      expect(inEditor('approval-node-mode')).not.toBeNull()
+      expect(inEditor<HTMLSelectElement>('approval-node-empty-policy')!.value).toBe('designated')
+      expect(inEditor('approval-node-empty-fallback-user-picker')).not.toBeNull()
+      expect(inEditor('approval-node-empty-fallback-role-picker')).not.toBeNull()
+      expect(inEditor('approval-node-same-person-policy')).not.toBeNull()
+      expect(inEditor('approval-node-timeout-section')).toBeNull()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).not.toBeNull()
+      expect(hiddenErrors('approval-node-approval-type-hidden-error')).toEqual([F1B_CANVAS_MSG])
+      expect(inEditor('approval-node-approval-type-clear-timeout')).toBeNull()
+      q<HTMLButtonElement>('approval-template-save-button')!.click()
+      await flushUi()
+      expect(updateTemplateSpy).not.toHaveBeenCalled()
+      expect(q('approval-template-validation-summary')!.textContent).toContain(F1B_CANVAS_MSG)
+
+      const rolePicker = inEditor<HTMLSelectElement>('approval-node-empty-fallback-role-picker')!
+      await vi.waitFor(() => expect(optionText(rolePicker, 'role-pick')).toBe('审批管理员'))
+      pickOptions(rolePicker, ['role-pick'])
+      await flushUi()
+      expect(inEditor('approval-node-approval-type-hidden-errors-hint')).toBeNull()
+      // STICKY: the pick made the block valid, and the picker being edited stays mounted (same element).
+      expect(inEditor('approval-node-empty-fallback-role-picker')).toBe(rolePicker)
+      expect(editor().querySelectorAll('[data-testid="approval-node-source-card"]')).toHaveLength(0)
+      const payload = await saveAndTakePayload(0)
+      const config = payload.approvalGraph.nodes.find((n: any) => n.key === 'approval_1').config
+      expect(config.approvalType).toBe('auto_approve')
+      expect(Object.prototype.hasOwnProperty.call(config, 'assigneeSources')).toBe(false)
+      expect(config.emptyAssigneePolicy).toBe('designated')
+      expect(config.emptyAssigneeFallback).toStrictEqual({ roleIds: ['role-pick'] })
+      // The completed save re-baselines the draft: the sticky reveal is released and the grid hides again.
+      expect(inEditor('approval-node-empty-policy')).toBeNull()
     })
   })
   })

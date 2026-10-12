@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §12.3) — Stage E residual gate matrix (real DB, real
  * MetaSheetServer + plugin activate, route-level plus targeted module-level
@@ -154,7 +155,10 @@ function resetAttendanceSettingsCacheAfterRestore(): void {
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -819,7 +823,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const org1Ops = await operationRows(isoOrg, 'live_punch')
     expect(org1Ops.length).toBe(1)
     expect(org1Ops[0].actor_id).toBe(isoUserA)
-    expect(org1Ops[0].response_snapshot).toEqual(first.body.data)
+    expect(org1Ops[0].response_snapshot).toEqual({ version: 'attendance-online-punch-v1', status: 200, body: first.body })
   })
 
   it('leg 4 — W4 shadow response-loss retry: replay returns the stored response with ONE event and ONE result; a different outdoor-note payload on the same key is 409', async () => {

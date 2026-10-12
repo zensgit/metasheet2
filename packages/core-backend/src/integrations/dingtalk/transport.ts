@@ -34,25 +34,45 @@ const logger = new Logger('DingTalkTransport')
  * (per app/corp, Redis or equivalent) is explicitly out of scope — follow-up work.
  */
 
+/**
+ * R-41 follow-up (log hygiene): the provider body a DingTalk error carries is attached NON-enumerable and
+ * read-only. Callers keep reading it as `error.responseBody` (retry / ledger classification, the admin-surface
+ * errcode, the person-delivery ledger's explicit `stringifyResponseBody(error.responseBody)`), but
+ * JSON.stringify(error), a `{ ...error }` copy and a logger serialising `{ error }` object meta no longer write
+ * it: an oapi / v1.0 body can carry request ids, user profile fields and other provider text. The same
+ * technique DingTalkIncompleteResponseError introduced; tests/unit/dingtalk-incomplete-response-error.test.ts
+ * pins all three classes.
+ */
+function attachHiddenResponseBody(error: Error, responseBody: Record<string, unknown> | null): void {
+  Object.defineProperty(error, 'responseBody', {
+    value: responseBody,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  })
+}
+
 export class DingTalkRequestError extends Error {
   statusCode: number
-  responseBody: Record<string, unknown> | null
+  /** Non-enumerable, read-only — see attachHiddenResponseBody. */
+  declare readonly responseBody: Record<string, unknown> | null
 
   constructor(message: string, statusCode: number, responseBody: Record<string, unknown> | null) {
     super(message)
     this.name = 'DingTalkRequestError'
     this.statusCode = statusCode
-    this.responseBody = responseBody
+    attachHiddenResponseBody(this, responseBody)
   }
 }
 
 export class DingTalkBusinessError extends Error {
-  responseBody: Record<string, unknown> | null
+  /** Non-enumerable, read-only — see attachHiddenResponseBody. */
+  declare readonly responseBody: Record<string, unknown> | null
 
   constructor(message: string, responseBody: Record<string, unknown> | null) {
     super(message)
     this.name = 'DingTalkBusinessError'
-    this.responseBody = responseBody
+    attachHiddenResponseBody(this, responseBody)
   }
 }
 
@@ -325,6 +345,12 @@ export interface DingTalkTransportRequest {
   timeoutMs?: number
   /** Caller's OVERALL signal: aborts the whole retry loop (incl. mid-backoff) immediately. */
   signal?: AbortSignal
+  /**
+   * `false`: the warn line for a rejected (non-2xx) response carries the HTTP status and a fixed
+   * note; the upstream message is left out (the caller keeps a redacted form of it). Default:
+   * the message is logged.
+   */
+  logUpstreamMessage?: boolean
 }
 
 export function normalizeErrorMessage(payload: Record<string, unknown> | null, fallback: string): string {
@@ -532,7 +558,11 @@ async function performDingTalkAttempt(
 
     if (!response.ok) {
       const message = normalizeErrorMessage(payload, request.fallbackError)
-      logger.warn(`DingTalk request failed (${response.status}): ${message}`)
+      if (request.logUpstreamMessage === false) {
+        logger.warn(`DingTalk request failed (${response.status}); the upstream message is not logged for this call`)
+      } else {
+        logger.warn(`DingTalk request failed (${response.status}): ${message}`)
+      }
       const requestError = new DingTalkRequestError(message, response.status, payload)
       const retryAfterMs = parseRetryAfterMs(readResponseHeader(response, 'retry-after'))
       if (retryAfterMs !== null) retryAfterHints.set(requestError, retryAfterMs)

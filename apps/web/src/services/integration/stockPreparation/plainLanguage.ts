@@ -890,6 +890,16 @@ export const STOCK_PREP_ERROR_PLAIN: Record<string, StockPrepPlainEntry> = Objec
     zhNext: '如果一直这样,请把这条报错代码给平台管理员。',
     enNext: 'If it keeps happening, give a platform administrator this error code.',
   }),
+  // 2026-10-10 audit: the ONE values-free 500 every other stock-prep / table-action route answers when something
+  // untyped went wrong on the server. Deliberately does NOT say "nothing changed": a write route can fail part
+  // way, so the reader is told to look before retrying. The server sentence behind it is fixed English and is
+  // never shown; this is.
+  STOCK_PREPARATION_ROUTE_FAILED: Object.freeze({
+    zh: '这一步没能完成,服务器那边出了问题。',
+    en: 'This step could not be completed — something went wrong on the server.',
+    zhNext: '先刷新看一下结果再决定要不要重试;如果一直这样,请把这条报错代码给平台管理员。',
+    enNext: 'Refresh and check the result before trying again; if it keeps happening, give a platform administrator this error code.',
+  }),
   STOCK_PREPARATION_PROJECT_OVERVIEW_PROVISIONING_UNAVAILABLE: Object.freeze({
     zh: '这套系统还建不了项目总览表,这次没有刷新,什么都没有改动。',
     en: 'This system cannot create the project overview sheet yet, so nothing was refreshed and nothing changed.',
@@ -2545,8 +2555,9 @@ export function stockPrepClockText(iso: string): string | null {
 }
 
 /**
- * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus a clause for the projects whose
- * sheet could not be read this time and one for a refresh that stopped at its bound. Counts only.
+ * The refresh's one result line: 「已刷新 N 个项目（截至 hh:mm）」, plus failed count read attempts and
+ * a refresh that stopped at its bound. Failed attempts can later heal; they do not count distinct projects
+ * or establish the final numbers' freshness. Counts only.
  */
 export function stockPrepProjectOverviewRefreshText(result: {
   projectCount: number
@@ -2559,8 +2570,8 @@ export function stockPrepProjectOverviewRefreshText(result: {
   let en = clock ? `Refreshed ${result.projectCount} project(s) (as of ${clock})` : `Refreshed ${result.projectCount} project(s)`
   const unreadable = result.unreadableCount ?? 0
   if (unreadable > 0) {
-    zh += `;其中 ${unreadable} 个项目的表这次没读到,数字没有更新`
-    en += `; ${unreadable} project sheet(s) could not be read this time and keep their old numbers`
+    zh += `;本次计数读取有 ${unreadable} 次未成功,请查看各项目的「截至」时间`
+    en += `; ${unreadable} count read attempt(s) failed; check each project's "as of" time`
   }
   zh += '。'
   en += '.'

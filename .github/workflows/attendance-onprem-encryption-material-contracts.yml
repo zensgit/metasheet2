@@ -25,6 +25,8 @@ on:
       - 'scripts/ops/attendance-onprem-env-check.sh'
       - 'scripts/ops/attendance-preflight.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs'
+      - 'scripts/ops/multitable-onprem-bootstrap-admin.ps1'
       - 'scripts/ops/attendance-onprem-package-verify.sh'
       - 'docker/app.env.example'
       - 'docker/app.env.attendance-onprem.template'
@@ -39,6 +41,8 @@ on:
       - 'scripts/ops/attendance-onprem-env-check.sh'
       - 'scripts/ops/attendance-preflight.sh'
       - 'scripts/ops/attendance-onprem-bootstrap-admin.sh'
+      - 'scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs'
+      - 'scripts/ops/multitable-onprem-bootstrap-admin.ps1'
       - 'scripts/ops/attendance-onprem-package-verify.sh'
       - 'docker/app.env.example'
       - 'docker/app.env.attendance-onprem.template'
@@ -60,3 +64,8 @@ jobs:
           node-version: 20
       - name: Run hermetic encryption-material contract tests
         run: node --test scripts/ops/attendance-onprem-encryption-material-contracts.test.mjs
+      # W1-6: the fresh-install local org bootstrap step in bootstrap-admin.sh and its .ps1 twin
+      # (gate, read-only SQL, existing route, values-free messages, sh/ps1 parity). Hermetic: psql
+      # stub, loopback HTTP stand-in for the backend; the .ps1 cases run under the runner's pwsh.
+      - name: Run hermetic fresh-install local org bootstrap tests (sh + ps1)
+        run: node --test scripts/ops/attendance-onprem-bootstrap-admin-local-org.test.mjs
