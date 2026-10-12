@@ -38,6 +38,8 @@ export async function acquireTasksSchedulerLeaderLock(query: TaskAdvisoryQuery):
 // ASSUMPTION(task-m5a): [a-36] the scheduler leader lock has no rank and is exclusive: taking it
 // while the instance holds any ranked lock, or taking a ranked lock while it holds the leader lock,
 // throws. Lock §6.4: the leader never shares a transaction with the other two task locks.
+// A request counts from the moment it is admitted, before its statement is sent, so calls on one
+// instance that run concurrently are ordered too; a request whose helper failed still counts.
 //
 // The three helpers above are called unchanged. A lock is recorded only after its helper returns;
 // an error the helper throws reaches the caller unchanged and is not recorded (the scheduler tick
@@ -87,20 +89,24 @@ function rankOf(lock: TaskLockOrderLock): number | null {
 export function withTaskLockOrder(query: TaskAdvisoryQuery): TaskLockOrder {
   lockOrderInstances += 1
   const instance = lockOrderInstances
-  const held: TaskLockOrderLock[] = []
+  // Every lock this instance has admitted, in order, including one whose helper has not returned
+  // yet or has failed: two calls started before either returns are checked against each other.
+  const requested: TaskLockOrderLock[] = []
 
   const admit = (lock: TaskLockOrderLock): void => {
     const rank = rankOf(lock)
     if (rank === null) {
-      if (held.some((h) => h !== 'leader')) throw new TaskLockOrderViolation(held, lock)
-      return
+      if (requested.some((h) => h !== 'leader')) throw new TaskLockOrderViolation(requested, lock)
+    } else {
+      if (requested.includes('leader')) throw new TaskLockOrderViolation(requested, lock)
+      // Keys of one rank are not ordered here: each transaction takes one structure lock today. A
+      // transaction that takes several keys of one rank takes them in one fixed order.
+      const highest = Math.max(0, ...requested.map((h) => rankOf(h) ?? 0))
+      if (rank < highest) throw new TaskLockOrderViolation(requested, lock)
     }
-    if (held.includes('leader')) throw new TaskLockOrderViolation(held, lock)
-    const highest = Math.max(0, ...held.map((h) => rankOf(h) ?? 0))
-    if (rank < highest) throw new TaskLockOrderViolation(held, lock)
+    requested.push(lock)
   }
   const record = (lock: TaskLockOrderLock): void => {
-    held.push(lock)
     if (lockOrderRecorder !== null) lockOrderRecorder(instance, lock)
   }
 

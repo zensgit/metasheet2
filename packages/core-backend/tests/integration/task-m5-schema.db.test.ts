@@ -33,6 +33,14 @@ import { newTaskCommentId, newTaskId, newTaskListId } from '../../src/services/t
 import { createTask } from '../../src/services/task-records'
 import { TaskScheduler, type LeaderClient } from '../../src/services/task-scheduler'
 import { setTaskParent } from '../../src/services/task-structure'
+import {
+  TASK_ATTACHMENT_BIND_KINDS,
+  TASK_ATTACHMENT_LIMITS,
+  TASK_ATTACHMENT_MIME_EXTENSIONS,
+  TASK_ATTACHMENT_SCAN_STATES,
+  TASK_ATTACHMENT_STATUSES,
+} from '../../src/tasks/task-attachments'
+import { TASK_FIELD_TYPES } from '../../src/tasks/task-fields'
 import { generateTaskDomainId } from '../../src/tasks/task-ids'
 import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
 
@@ -317,6 +325,74 @@ async function snapshot(run: Runner): Promise<Snapshot> {
   }
 }
 
+/**
+ * Every column, constraint, index and trigger of `tasks` and `task_comments`, M2–M4 objects
+ * included: down() must remove exactly the M5 objects from these two tables and up() must add
+ * exactly them back.
+ */
+interface WholeTables {
+  columns: Array<[table: string, column: string, type: string, notNull: boolean, defaultExpr: string | null]>
+  constraints: Array<[table: string, name: string, def: string]>
+  indexes: Array<[table: string, name: string, def: string]>
+  triggers: Array<[table: string, name: string, def: string]>
+}
+
+const WHOLE_TABLES = ['tasks', 'task_comments']
+
+async function wholeTables(run: Runner): Promise<WholeTables> {
+  const columns = await run<{ t: string; c: string; ty: string; nn: boolean; d: string | null }>(
+    `SELECT cl.relname AS t, a.attname AS c, format_type(a.atttypid, a.atttypmod) AS ty,
+            a.attnotnull AS nn, pg_get_expr(ad.adbin, ad.adrelid) AS d
+       FROM pg_attribute a
+       JOIN pg_class cl ON cl.oid = a.attrelid
+       LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+      WHERE cl.relnamespace = 'public'::regnamespace AND cl.relname = ANY($1::text[])
+        AND a.attnum > 0 AND NOT a.attisdropped
+      ORDER BY cl.relname, a.attname`,
+    [WHOLE_TABLES],
+  )
+  const constraints = await run<{ t: string; n: string; d: string }>(
+    `SELECT cl.relname AS t, c.conname AS n, pg_get_constraintdef(c.oid) AS d
+       FROM pg_constraint c JOIN pg_class cl ON cl.oid = c.conrelid
+      WHERE cl.relnamespace = 'public'::regnamespace AND cl.relname = ANY($1::text[])
+      ORDER BY cl.relname, c.conname`,
+    [WHOLE_TABLES],
+  )
+  const indexes = await run<{ t: string; n: string; d: string }>(
+    `SELECT tablename AS t, indexname AS n, indexdef AS d FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = ANY($1::text[])
+      ORDER BY tablename, indexname`,
+    [WHOLE_TABLES],
+  )
+  const triggers = await run<{ t: string; n: string; d: string }>(
+    `SELECT cl.relname AS t, t.tgname AS n, pg_get_triggerdef(t.oid) AS d
+       FROM pg_trigger t JOIN pg_class cl ON cl.oid = t.tgrelid
+      WHERE NOT t.tgisinternal AND cl.relnamespace = 'public'::regnamespace AND cl.relname = ANY($1::text[])
+      ORDER BY cl.relname, t.tgname`,
+    [WHOLE_TABLES],
+  )
+  return {
+    columns: columns.map((r) => [r.t, r.c, r.ty, r.nn, r.d]),
+    constraints: constraints.map((r) => [r.t, r.n, r.d]),
+    indexes: indexes.map((r) => [r.t, r.n, r.d]),
+    triggers: triggers.map((r) => [r.t, r.n, r.d]),
+  }
+}
+
+/** `whole` with the M5 objects of `tasks` and `task_comments` taken out. */
+function withoutM5(whole: WholeTables): WholeTables {
+  const m5Constraint = (t: string, n: string): boolean =>
+    (t === 'tasks' && TASKS_CONSTRAINTS.includes(n)) || (t === 'task_comments' && n === COMMENTS_KEY)
+  const m5Index = (t: string, n: string): boolean =>
+    (t === 'tasks' && TASKS_INDEXES.includes(n)) || (t === 'task_comments' && n === COMMENTS_KEY)
+  return {
+    columns: whole.columns.filter(([t, c]) => !(t === 'tasks' && TASKS_COLUMNS.includes(c))),
+    constraints: whole.constraints.filter(([t, n]) => !m5Constraint(t, n)),
+    indexes: whole.indexes.filter(([t, n]) => !m5Index(t, n)),
+    triggers: whole.triggers,
+  }
+}
+
 const byKey = <T extends unknown[]>(rows: T[]): T[] =>
   [...rows].sort((a, b) => JSON.stringify(a.slice(0, 2)).localeCompare(JSON.stringify(b.slice(0, 2))))
 
@@ -587,6 +663,39 @@ describe('task M5 schema (real db)', () => {
       }
       expect(seen).toEqual([probeFn])
     })
+
+    // RULED(2026-10-09): [S18] [S19] [S22] [S25]. The pure validators and the CHECKs must name the
+    // same closed sets, or a value the validator accepts is refused by the database. The purge
+    // reasons and the intent statuses have no pure-module counterpart and are pinned above only.
+    it('the closed-set CHECKs equal the pure-module constants (field types, attachment mime types, statuses, bind kinds, scan states, size ceiling)', async () => {
+      const rows = await q(
+        `SELECT c.conname AS n, pg_get_constraintdef(c.oid) AS d FROM pg_constraint c
+          WHERE c.conname = ANY($1::text[]) AND c.connamespace = 'public'::regnamespace ORDER BY c.conname`,
+        [[
+          'task_attachments_bind_kind_chk',
+          'task_attachments_mime_type_chk',
+          'task_attachments_scan_state_chk',
+          'task_attachments_size_chk',
+          'task_attachments_status_chk',
+          'task_fields_type_chk',
+        ]],
+      )
+      const defs = new Map(rows.map((r) => [String(r.n), String(r.d)]))
+      expect(defs.size).toBe(6)
+      const listed = (name: string): string[] => {
+        const def = defs.get(name) ?? ''
+        expect(def, name).toMatch(/= ANY \(ARRAY\[/)
+        return [...def.matchAll(/'([^']*)'::text/g)].map((m) => m[1]).sort()
+      }
+      const sorted = (values: readonly string[]): string[] => [...values].sort()
+      expect(listed('task_fields_type_chk')).toEqual(sorted(TASK_FIELD_TYPES))
+      expect(listed('task_attachments_mime_type_chk')).toEqual(sorted(Object.keys(TASK_ATTACHMENT_MIME_EXTENSIONS)))
+      expect(listed('task_attachments_status_chk')).toEqual(sorted(TASK_ATTACHMENT_STATUSES))
+      expect(listed('task_attachments_bind_kind_chk')).toEqual(sorted(TASK_ATTACHMENT_BIND_KINDS))
+      expect(listed('task_attachments_scan_state_chk')).toEqual(sorted(TASK_ATTACHMENT_SCAN_STATES))
+      const size = /size_bytes >= (\d+)\) AND \(size_bytes <= (\d+)/.exec(defs.get('task_attachments_size_chk') ?? '')
+      expect(size?.slice(1).map(Number)).toEqual([1, TASK_ATTACHMENT_LIMITS.maxFileBytes])
+    })
   })
 
   // RULED(2026-10-09): [S13] [S14] [S16] [S17]. ASSUMPTION(task-m5a): [a-20], [a-06] (D2).
@@ -842,6 +951,13 @@ describe('task M5 schema (real db)', () => {
       await expectPgError(() => insertRow('task_attachments', taskAttachment(orgId, taskId, { storage_key: key })), '23505', 'task_attachments_storage_key_key')
     })
 
+    it('the same id twice with a different storage key is 23505 (task_attachments_pkey)', async () => {
+      const orgId = org('att')
+      const taskId = await insertTask(orgId)
+      const first = await insertRow('task_attachments', taskAttachment(orgId, taskId))
+      await expectPgError(() => insertRow('task_attachments', taskAttachment(orgId, taskId, { id: first.id })), '23505', 'task_attachments_pkey')
+    })
+
     it('closed sets (23514): mime type, bind kind, status, scan state; size is 1..10485760', async () => {
       const orgId = org('att')
       const taskId = await insertTask(orgId)
@@ -979,6 +1095,13 @@ describe('task M5 schema (real db)', () => {
       const key = storageKey()
       await insertRow('task_attachment_purge_intents', { id: intentIdFor(key), storage_key: key, reason: 'unbound_ttl' })
       await expectPgError(() => insertRow('task_attachment_purge_intents', { id: `tpi_${rnd(32)}`, storage_key: key, reason: 'unbound_ttl' }), '23505', 'task_attachment_purge_intents_storage_key_key')
+    })
+
+    it('the same id twice with a different storage key is 23505 (task_attachment_purge_intents_pkey)', async () => {
+      const key = storageKey()
+      const id = intentIdFor(key)
+      await insertRow('task_attachment_purge_intents', { id, storage_key: key, reason: 'unbound_ttl' })
+      await expectPgError(() => insertRow('task_attachment_purge_intents', { id, storage_key: storageKey(), reason: 'unbound_ttl' }), '23505', 'task_attachment_purge_intents_pkey')
     })
   })
 
@@ -1131,7 +1254,7 @@ describe('task M5 schema (real db)', () => {
       else if (pool) await pool.end()
     })
 
-    it('down() removes the seven tables, the trigger function, the four tasks columns with their constraints and indexes, and task_comments_id_task_id_key; up() restores identical columns, constraints, indexes and trigger', async () => {
+    it('down() removes the seven tables, the trigger function, the four tasks columns with their constraints and indexes, and task_comments_id_task_id_key, and nothing else of tasks or task_comments; up() restores identical columns, constraints, indexes and trigger', async () => {
       const url = process.env.DATABASE_URL
       if (!url) throw new Error('DATABASE_URL is required')
       sentinelFieldId = await insertField(org('rollback'))
@@ -1147,6 +1270,12 @@ describe('task M5 schema (real db)', () => {
           expect(byKey(before.columns)).toEqual(byKey(EXPECTED_COLUMNS))
           expect(before.constraints).toEqual(sortByName(EXPECTED_CONSTRAINTS))
           expect(before.indexes).toEqual(sortByName(EXPECTED_INDEXES))
+          const wholeBefore = await wholeTables(run)
+          const wholeExpectedDown = withoutM5(wholeBefore)
+          // The M5 objects of the two tables are all in the snapshot that down() takes away.
+          expect(wholeBefore.columns.length - wholeExpectedDown.columns.length).toBe(TASKS_COLUMNS.length)
+          expect(wholeBefore.constraints.length - wholeExpectedDown.constraints.length).toBe(TASKS_CONSTRAINTS.length + 1)
+          expect(wholeBefore.indexes.length - wholeExpectedDown.indexes.length).toBe(TASKS_INDEXES.length + 1)
 
           await m5Down(trx)
           for (const table of M5_TABLES) {
@@ -1163,6 +1292,8 @@ describe('task M5 schema (real db)', () => {
           expect(tasks[0].r).toBe('tasks')
           const m4Key = await run(`SELECT 1 FROM pg_constraint WHERE conrelid = 'public.tasks'::regclass AND conname = 'tasks_id_org_id_key'`)
           expect(m4Key).toHaveLength(1)
+          // Whole tables: down() removed the M5 objects of tasks and task_comments and nothing else.
+          expect(await wholeTables(run)).toEqual(wholeExpectedDown)
 
           await m5Up(trx)
           const after = await snapshot(run)
@@ -1170,6 +1301,8 @@ describe('task M5 schema (real db)', () => {
           expect(after.constraints).toEqual(before.constraints)
           expect(after.indexes).toEqual(before.indexes)
           expect(after.triggers).toEqual(before.triggers)
+          // Whole tables: up() added back exactly what down() removed, and nothing else.
+          expect(await wholeTables(run)).toEqual(wholeBefore)
           reachedEnd = true
           throw ROLLBACK
         })
