@@ -66,16 +66,33 @@
  * default, and through which preset or role, is an approval-product policy decision that belongs to
  * the owner and is NOT made here.
  *
- * `down()` deletes the three codes' rows from `role_permissions`, then `user_permissions`, then
- * `permissions`. Both grant tables carry an `ON DELETE CASCADE` foreign key to `permissions(code)`,
- * so the final DELETE alone would cascade them away; the two explicit DELETEs are written out so the
- * row-loss is visible at the call site (same as the sibling migration).
+ * `down()` NEVER deletes from `role_permissions` or `user_permissions`. It removes a code's
+ * `permissions` row only when nothing binds it, in ONE statement for all three codes:
+ * `DELETE FROM permissions p WHERE p.code IN (<the three codes>) AND NOT EXISTS (a role_permissions
+ * row for p.code) AND NOT EXISTS (a user_permissions row for p.code)`; each NOT EXISTS clause is
+ * emitted when its table exists (a missing grant table cannot hold a binding). The NOT EXISTS guards
+ * are what keep the `ON DELETE CASCADE` foreign keys both grant tables carry to `permissions(code)`
+ * from ever firing: a bound row is not deleted, so there is nothing to cascade. A code that is still
+ * bound is left in the catalogue exactly as it is, together with every grant that references it, and
+ * `down()` logs one `console.warn` line per kept code (read back with a `SELECT` after the DELETE).
+ * Without a `permissions` table `down()` does nothing.
  *
- * DISCLOSURE: rolling this migration back is NOT reversible for grant state. It permanently drops
- * every `role_permissions` / `user_permissions` row for these three codes, whoever wrote it: an
- * administrator through the product endpoints, a preset, or a plugin through `applyRoleMatrix`
- * (rows this migration never created). Re-running `up()` re-registers the catalogue rows only; every
- * holder has to be granted again.
+ * DISCLOSURE: this `down()` is deliberately narrower than "undo `up()`". `up()` is
+ * `ON CONFLICT DO NOTHING`, so a catalogue row for any of these codes may predate it (a plugin's
+ * `applyRoleMatrix` self-registration, which also writes role bindings; an earlier hand-made
+ * registration), and grants for these codes are written by administrators, presets and plugins,
+ * never by this migration. A rollback must not take any of those grants with it: a deployed database
+ * has been seen where one of these codes was registered and bound to a live role before this
+ * migration ran, and the earlier cascading `down()` would have stripped that role's grant. So a
+ * rollback keeps every bound code registered with all its grants, and removes only codes nobody
+ * holds. Consequences: (1) a bound code is still grantable after `down()`, and a catalogue row this
+ * migration did insert stays behind once someone holds it; an operator who really wants the code
+ * gone revokes its grants through the product endpoints first and then runs `down()` again;
+ * (2) an UNBOUND row is removed even if it predates this migration, because nothing distinguishes it
+ * from a row `up()` inserted; no holder loses anything (only that row's own name/description text
+ * goes), and a plugin that still names the code re-registers it the next time it applies its role
+ * matrix (`ON CONFLICT DO NOTHING` there too). Re-running `up()` after `down()` re-registers the
+ * removed rows and leaves the kept ones as they are.
  */
 
 import type { Kysely } from 'kysely'
@@ -126,24 +143,33 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  if (await checkTableExists(db, 'role_permissions')) {
-    await sql`
-      DELETE FROM role_permissions
-      WHERE permission_code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
-  }
+  if (!(await checkTableExists(db, 'permissions'))) return
 
-  if (await checkTableExists(db, 'user_permissions')) {
-    await sql`
-      DELETE FROM user_permissions
-      WHERE permission_code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
-  }
+  // Never a DELETE on role_permissions / user_permissions — see file header. A code is removed from
+  // the catalogue only when no grant row references it, so the ON DELETE CASCADE foreign keys from
+  // both grant tables never fire and no grant this migration did not write is ever lost.
+  const unboundByRole = (await checkTableExists(db, 'role_permissions'))
+    ? sql`AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.permission_code = p.code)`
+    : sql``
+  const unboundByUser = (await checkTableExists(db, 'user_permissions'))
+    ? sql`AND NOT EXISTS (SELECT 1 FROM user_permissions upm WHERE upm.permission_code = p.code)`
+    : sql``
 
-  if (await checkTableExists(db, 'permissions')) {
-    await sql`
-      DELETE FROM permissions
-      WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
+  await sql`
+    DELETE FROM permissions p
+    WHERE p.code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+      ${unboundByRole}
+      ${unboundByUser}
+  `.execute(db)
+
+  const kept = await sql<{ code: string }>`
+    SELECT code FROM permissions
+    WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+  `.execute(db)
+  for (const row of kept.rows) {
+    console.warn(
+      `[Migration] down(): kept permission ${row.code} in the catalogue — it is still bound in ` +
+        'role_permissions/user_permissions; its grants are left untouched (revoke them first to remove the code)',
+    )
   }
 }

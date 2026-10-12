@@ -1,7 +1,10 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import net from 'net'
+import { Pool } from 'pg'
+import { Kysely, PostgresDialect } from 'kysely'
 import { MetaSheetServer } from '../../src/index'
 import { poolManager } from '../../src/integration/db/connection-pool'
+import * as writeActManageMigration from '../../src/db/migrations/zzzz20261010120000_add_approval_write_act_template_manage_permissions'
 
 /**
  * Approval-product permission codes — real-DB acceptance for the two migrations that register them in
@@ -223,6 +226,68 @@ describeIfDatabase('approval-product permission catalogue registration — grant
       [[...APPROVAL_PRODUCT_CODES]],
     )
     expect(userRows.rows).toEqual([])
+  })
+
+  /**
+   * Placed right after the zero-grant test ON PURPOSE: the cases below grant approvals:write / act /
+   * manage to throwaway users and those rows live until afterAll, so this is the last point in the file
+   * where approvals:act and approval-templates:manage are known to be unbound. Same EXCLUSIVE-DATABASE
+   * requirement as the two tests above (it deletes and re-inserts global catalogue rows); the finally
+   * block re-runs up() so every later case sees all three codes registered again.
+   */
+  it('ROLLBACK SAFETY: down() keeps a code that a role holds (catalogue row AND binding survive), removes only the two unbound codes, and up() re-registers them', async () => {
+    const roleId = `permcat-down-role-${TS}`
+    const migrationPool = new Pool({ connectionString: process.env.DATABASE_URL })
+    const migrationDb = new Kysely<unknown>({ dialect: new PostgresDialect({ pool: migrationPool }) })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const unbound = await pool().query<{ n: number }>(
+        `SELECT (SELECT count(*) FROM role_permissions WHERE permission_code = ANY($1::text[]))::int
+              + (SELECT count(*) FROM user_permissions WHERE permission_code = ANY($1::text[]))::int AS n`,
+        [['approvals:act', 'approval-templates:manage']],
+      )
+      expect(unbound.rows[0]?.n).toBe(0)
+
+      // The deployed shape that motivated narrowing down(): approvals:write bound to a live role.
+      await pool().query(`INSERT INTO roles (id, name) VALUES ($1, 'Permcat Down Probe Role')`, [roleId])
+      await pool().query(`INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, 'approvals:write')`, [roleId])
+      const writeRowBefore = await pool().query(`SELECT code, name, description FROM permissions WHERE code = 'approvals:write'`)
+      expect(writeRowBefore.rows).toHaveLength(1)
+
+      await writeActManageMigration.down(migrationDb)
+
+      const binding = await pool().query(
+        `SELECT role_id, permission_code FROM role_permissions WHERE role_id = $1`,
+        [roleId],
+      )
+      expect(binding.rows).toEqual([{ role_id: roleId, permission_code: 'approvals:write' }])
+      const writeRowAfter = await pool().query(`SELECT code, name, description FROM permissions WHERE code = 'approvals:write'`)
+      expect(writeRowAfter.rows).toEqual(writeRowBefore.rows)
+      const remaining = await pool().query<{ code: string }>(
+        `SELECT code FROM permissions WHERE code = ANY($1::text[])`,
+        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
+      )
+      expect(remaining.rows.map((row) => row.code)).toEqual(['approvals:write'])
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0]?.[0])).toContain('approvals:write')
+
+      await writeActManageMigration.up(migrationDb)
+
+      const restored = await pool().query<{ code: string }>(
+        `SELECT code FROM permissions WHERE code = ANY($1::text[])`,
+        [['approvals:write', 'approvals:act', 'approval-templates:manage']],
+      )
+      expect(restored.rows.map((row) => row.code).sort()).toEqual(['approval-templates:manage', 'approvals:act', 'approvals:write'])
+      const bindingAfterUp = await pool().query(`SELECT permission_code FROM role_permissions WHERE role_id = $1`, [roleId])
+      expect(bindingAfterUp.rows).toEqual([{ permission_code: 'approvals:write' }])
+    } finally {
+      warn.mockRestore()
+      // Whatever happened above, later cases need all three codes registered and no binding of ours.
+      await writeActManageMigration.up(migrationDb)
+      await pool().query(`DELETE FROM role_permissions WHERE role_id = $1`, [roleId])
+      await pool().query(`DELETE FROM roles WHERE id = $1`, [roleId])
+      await migrationDb.destroy()
+    }
   })
 
   it(

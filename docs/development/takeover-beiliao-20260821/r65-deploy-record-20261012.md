@@ -49,7 +49,7 @@
 ## 6. 待办
 
 - owner：发送客户答复发送版；定 `stock-prep_puller` 分配；联系客户 DBA 恢复 PLM 只读登录（恢复后再核预检 / dry-run）；定日志轮转方案；定 R66 拆出角色 id（开发机推荐 `approvals_operator`）。
-- 开发机：收窄 R65 迁移的 `down()`；R66（#6348）核验完转 ready；云课堂启用步骤另帖。
+- 开发机：收窄 R65 迁移的 `down()`——已完成（分支 `fix/approval-permission-catalogue-down-narrow-20261012`：`down()` 不再删任何授予，只删无绑定的目录行，有绑定的码连同授予保留）；R66（#6348）核验完转 ready；云课堂启用步骤另帖。
 - 脚本：运维机 `metasheet-ops/releases/r65/`（wrapper 钉：迁移名、三码目录与绑定计数、六个开关非 `true`、九个 dist 标记、启动日志尾读）。
 
 ## 7. 已知问题（开发机·审批线 2026-10-12 帖，R65 已含；owner「补」）
