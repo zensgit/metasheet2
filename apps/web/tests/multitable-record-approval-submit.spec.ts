@@ -1192,6 +1192,8 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     submitBtn()!.click()
     await flushUi(8)
     expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).not.toBeNull()
+    // A refusal must not lock the picker: switching template is the actor's way out.
+    expect(templateSelect()!.disabled).toBe(false)
     await pickTemplate('tpl_purchase')
     await pickTemplate('tpl_leave')
     expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
@@ -1211,6 +1213,8 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     const { container } = mountInspector({ canSubmitApproval: true, client })
     await flushUi()
     await openDialog(container)
+    // Nothing is in flight yet, so the picker must be usable before any template is chosen.
+    expect(templateSelect()!.disabled).toBe(false)
     await pickTemplate('tpl_leave')
     setFieldValue('reason', '年假')
     await flushUi()
