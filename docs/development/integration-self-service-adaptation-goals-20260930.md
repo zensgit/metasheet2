@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§204）**：Automation 当前提交 `0216e45b4` 的普通检查 47/47 成功，#6337 保持草稿。授权的 Firefox 本地 manual + interval 完整交叉验证及原生回执复核通过，浏览器差异适配见 §203。含上游修复的 Canary 157 隔离最小诊断和 manual + interval 完整诊断亦通过，原生回执复核通过；相对候选仅改两处浏览器路径，原断言和产品代码不变。尚未升级仓库依赖，Stable/Beta 对应源码未含该修复，Canary 不作为发布基线。原固定 Chromium 完整 run `38175124419` 的 POST / ABORTED 失败和独立终审阻断仍保留。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§206）**：新 main `8bfeb5c91` 与 Automation `0216e45b4` 的合流候选树 `4107a1683` 已完成本地定向回归、`validate:all`、Canary 原 manual + interval 完整诊断及原生回执复核。受检 Git 原字节未改；完整诊断仅派生两处浏览器路径。尚未生成或推送四支代码 PR 的合流提交，不称新 head CI 已绿。此前授权的 Firefox 交叉验证见 §203，旧候选 Canary 诊断见 §204。固定 Chromium 的 run `38175124419` 失败及独立终审仍为阻断，Canary 不作为发布基线。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2329,3 +2329,12 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 新 main 为 `8bfeb5c91eefbf6dc3ff49fd2d0134761543f3bf`，相对原受测 main `906840c74cab5120aac73132644372e678f6b334` 多 3 个提交。审阅输出仅包含路径元数据及本任务重叠的六个共享入口差异：测试清单新增考勤项、后端入口的考勤连接 release 转发 error 参数等；未展示客户答复/部署记录正文，未访问客户系统或考勤运行数据。不能因 PR 显示 MERGEABLE 而免除 main 对齐后的验收。
 - 完成 Git 对象层合流预检，未更新分支、索引或工作区。四个冻结 head 各与上述 main 执行 `git merge-tree --write-tree --name-only --no-messages`，均 exit 0、无冲突路径。树对象分别为：宜搭 `bc13b537b5e6b2302b604765285f7027e93cdd17`；K3 `f9f696aafe01033c53cdccfd4d485f6ff65f114b`；PLM `66b71ef49bd5555a136bdcff992db75bc72e202a`；Automation `4107a168347fc3d45c98d711ba23580fcdfb6d6e`。这些只是待验候选树，不是提交、CI 结果、已重打 pin 或已发布证据。
 - 余项分清：实现/测试缺口按各批原合同逐项闭合；新 main 合流树须重新验证后才可更新代码 PR；固定浏览器发布基线和独立终审尚未决；真实读取/发送、合并、部署继续单独授权。本轮不新建连接器或重写已有第二 owner 复用功能，不以缩小目标收尾。
+
+## 206. 新 main 合流候选的隔离回归（2026-10-12）
+
+- 冻结树 `4107a168347fc3d45c98d711ba23580fcdfb6d6e`，由 feature `0216e45b44cc1cf738f67fc06b9218d2f78c62a2` 与 main `8bfeb5c91eefbf6dc3ff49fd2d0134761543f3bf` 对象层合流得到。只请求准入 Git blob，不读取被排除内容或原工作副本内容；沿用 89 路径保护及环境/产物/密钥文件规则，并排除本次交付记录正文。最终 13,756 个准入条目、207,284,345 字节，97 个排除项，原索引前后相同。没有归一化 Git 原始字节。manifest SHA `7af599a9b8b1010e06289cd8282037fffcc8ab04a40f07a285a1551a096ee375`，archive SHA `a988e9bfe50a02815fd8aec1fd528cd16ed8100b5744a7a0316bf8980712530f`；不是完整仓库所有文件的复制或证明。
+- 新独立 Linux 副本离线安装、私有 user/net/pid/mount namespace、caps0/NNP 下：203/203 原验收契约，试用及完整应用类型检查，66 个后端整文件 3,226/3,226，52 个插件整套文件（含原 provenance），21 个前端整文件 1,437/1,437 均通过。前端增补宜搭/Automation 和新 main 的共享入口回归；无按用例筛选、跳过、重试或未处理错误。8 个真实 values-free handler 集合去守卫变异均由指定断言捕获。全部准入源码前后未变，receipt SHA `11104415cdbbe9b58121881d979ae8ed51e4c4adcc2b38c23f3cc5ef1e42a094`。该组未启动数据库，也不冒称完整 CI 或独立审查。
+- 原 `pnpm validate:all` 最终 exit 0、stderr 空；按根脚本实际执行插件清单验证及工作区现有 lint/type-check，不扩称每个仓库文件均有 lint 规则。13 个插件、0 错误、14 条既有警告；stdout SHA `f99039bbfee7e1d2e3318252548c6fcff134dd2e1664c2374080d64c92dffa19`。前两次启动失败分别为隔离 PATH 缺嵌套 pnpm、npm 不允许 user/global 配置同时指向同一 `/dev/null`；修工具为已验证运行时路径和两份独立空配置文件，未读取宿主用户配置、未动产品/验证脚本，保留两个失败回执。再次逐字节验证 13,756 源条目未变。
+- 另一全新源码/依赖副本执行原 manual 和 interval 完整应用命令，使用已冻结的 Canary 157，仅改两处测试浏览器可执行路径，原 console/socket/请求/权限断言均未改。八个现有覆盖输入先与新树哈希一致才允许复制；不是用旧分支文件覆盖新 main 的差异。两轮 exit 0、stderr 空、原生 passed、自建数据库正常停删。manual 回执 SHA `1b5eedb1bdd6e82634d40c99e8c7e274e04a8385b83c80ca128a0047b8f656fb`，interval SHA `e14fc4ad7782771660aa8a7e37bde300fff12be330a94888a5a4ed8ccc1df658`。
+- root 复核 exit 0：全部 13,756 准入条目逐一核对原 manifest，除两条精确可执行路径派生外无差异；每轮再核对原生回执、6,584 个运行时受跟踪源文件、18 份阶段日志、4 份嵌套浏览器日志、467 条迁移及清理、owner-OFF 私有日志扫描、原 K3/宜搭/初始化/Automation/stop 验证器。复核 SHA `b3c00d46f02425daaedafb620891a55d7aa401e0ff2a317af70dd8aeab159fbd`，driver 回执 SHA `d400e798f593d76e51fb10ec8f25cf45497514a42c6f97995bc94373dff8cf8f`。不声称文件系统或 Unix IPC 隔离，不冒充独立反驳。
+- 证据适用于上述组合候选树，不是另外三棵切片树各自的整链验收，也不是一个已经发布的 merge commit。四支代码 PR 尚未更新；固定浏览器 CI 和独立终审仍待闭合，不能用 Canary 成功撤销旧失败或默认批准发布。没有合并、部署、真实客户 SQL/API、token 交换或宜搭发送，K3 永久禁写；目标仍 active。
