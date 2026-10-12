@@ -22,7 +22,34 @@ import {
   down as stockPrepTemplatesDown,
   up as stockPrepTemplatesUp,
 } from '../../src/db/migrations/zzzz20261010124500_seed_stock_prep_role_templates'
+import {
+  STOCK_PREP_FRONTLINE_NAME,
+  STOCK_PREP_FRONTLINE_SEEDED_NAME,
+  down as frontlineRenameDown,
+  up as frontlineRenameUp,
+} from '../../src/db/migrations/zzzz20261012090000_rename_stock_prep_frontline_display_name'
+import { invalidateUserPerms, listUserPermissions } from '../../src/rbac/service'
 import { canReadApprovalInstance } from '../../src/services/approval-instance-readability'
+
+// `rbac/service.ts` (the server's permission resolution) reads through `db/pg`. In this file that
+// module is routed to whichever client a test installs — the test's own transaction — so the
+// server's resolver sees the rolled-back rows. With no client installed it throws: nothing here may
+// reach a real pool behind a test's back.
+const pgRoute = vi.hoisted(() => ({
+  client: null as null | { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount?: number }> },
+}))
+vi.mock('../../src/db/pg', () => {
+  const route = (text: string, params?: unknown[]) => {
+    if (!pgRoute.client) throw new Error('db/pg is only reachable through a test transaction in this file')
+    return pgRoute.client.query(text, params)
+  }
+  return {
+    pool: { query: route },
+    query: route,
+    transaction: () => { throw new Error('db/pg transaction() is not used by this file') },
+    getPoolStats: () => ({}),
+  }
+})
 
 const DATABASE_URL = process.env.DATABASE_URL
 if (!DATABASE_URL) {
@@ -387,11 +414,17 @@ const S5A_EXPECTED = [
   { id: 'stock-prep_frontline', name: '一线填写', codes: ['stock-prep:operate', 'stock-prep:read'] },
   { id: 'stock-prep_puller', name: '数据管理员（拉取人员）', codes: ['stock-prep:operate', 'stock-prep:pull', 'stock-prep:read'] },
 ]
+// What the migration CHAIN leaves (owner 2026-10-12, R-39: zzzz20261012090000 renames the frontline
+// role's display name to 「操作人员」 after S5a seeded 「一线填写」).
+const S5A_CHAIN_EXPECTED = S5A_EXPECTED.map((role) => (role.id === 'stock-prep_frontline' ? { ...role, name: '操作人员' } : role))
 const S5A_SCRIPT_PATH = path.resolve(__dirname, '../../../../scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs')
 
+type S5aSplitRequest = { roleId: string; roleName: string; roleNameGiven: boolean }
 type S5aScript = {
-  SQL: { moveMembers: string }
-  run: (options: { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> }; apply?: boolean; deleteEmptyOldRole?: boolean; manageTransaction?: boolean; write?: (line: string) => void }) => Promise<{ exitCode: number; membersMoved: number; sheetGrantsMoved: number; oldRoleDeleted: boolean; refusals: string[] }>
+  SQL: { moveMembers: string; removeExtraCodes: string; addSplitMembers: string }
+  DEFAULT_SPLIT_ROLE_NAME: string
+  RECOMMENDED_SPLIT_ROLE_ID: string
+  run: (options: { client: { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }> }; apply?: boolean; deleteEmptyOldRole?: boolean; split?: S5aSplitRequest | null; manageTransaction?: boolean; write?: (line: string) => void }) => Promise<{ exitCode: number; membersMoved: number; sheetGrantsMoved: number; oldRoleDeleted: boolean; refusals: string[]; split: null | { roleCreated: boolean; codesBound: number; membersAdded: number; codesRemoved: number } }>
 }
 
 async function s5aRoleRows(trx: Transaction<unknown>, ids: readonly string[]) {
@@ -445,18 +478,18 @@ async function s5aLedger(trx: Transaction<unknown>) {
 }
 
 describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
-  it('ran in this database: the four templates exist with exactly their codes and no member', async () => {
+  it('ran in this database: the four templates exist with exactly their codes and no member; the chain ends with the frontline role named 「操作人员」 (owner 2026-10-12)', async () => {
     const ledger = await sql<{ name: string }>`
-      SELECT name FROM kysely_migration WHERE name = ${S5A_MIGRATION_NAME}
+      SELECT name FROM kysely_migration WHERE name IN (${S5A_MIGRATION_NAME}, 'zzzz20261012090000_rename_stock_prep_frontline_display_name') ORDER BY name
     `.execute(db)
-    expect(ledger.rows).toEqual([{ name: S5A_MIGRATION_NAME }])
+    expect(ledger.rows).toEqual([{ name: S5A_MIGRATION_NAME }, { name: 'zzzz20261012090000_rename_stock_prep_frontline_display_name' }])
 
     const roles = await sql<{ id: string; name: string }>`
       SELECT id, name FROM roles
        WHERE id IN (${sql.join(STOCK_PREP_ROLE_TEMPLATE_IDS.map((id) => sql`${id}`))})
        ORDER BY id
     `.execute(db)
-    expect(roles.rows).toEqual(S5A_EXPECTED.map(({ id, name }) => ({ id, name })))
+    expect(roles.rows).toEqual(S5A_CHAIN_EXPECTED.map(({ id, name }) => ({ id, name })))
     const mappings = await sql<{ role_id: string; permission_code: string }>`
       SELECT role_id, permission_code FROM role_permissions
        WHERE role_id IN (${sql.join(STOCK_PREP_ROLE_TEMPLATE_IDS.map((id) => sql`${id}`))})
@@ -991,6 +1024,635 @@ describe('S5a stock-prep role templates migration (real PostgreSQL)', () => {
           .toMatchObject({ exitCode: 2, membersMoved: 0, sheetGrantsMoved: 0, oldRoleDeleted: false })
         expect(await s5aRoleRows(trx, ['stock-prep-operator'])).toEqual([{ id: 'stock-prep-operator', name: 'S5a legacy floor' }])
 
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+})
+
+/*
+ * Owner ruling 2026-10-12 (R-39): the legacy floor role merges into the built-in one at the R66 deploy
+ * and the built-in role is shown as 「操作人员」. Two things are proved here against REAL PostgreSQL:
+ * the compare-and-set display-name migration (zzzz20261012090000), and the move script's option ①
+ * split step (`--split-extra-codes-to-role`) — above all that it leaves every member's EFFECTIVE
+ * permission set, as the server resolves it (rbac/service.ts `listUserPermissions`), unchanged.
+ * Every scenario runs inside one transaction that is rolled back.
+ */
+type S5aClient = { query: (text: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>>; rowCount: number }> }
+
+function s5aTrxClient(trx: Transaction<unknown>): S5aClient {
+  return {
+    query: async (text: string, params: unknown[] = []) => {
+      const result = await trx.executeQuery(CompiledQuery.raw(text, params))
+      return { rows: result.rows as Array<Record<string, unknown>>, rowCount: result.rows.length }
+    },
+  }
+}
+
+/** Puts the legacy role and the recommended split role back to "absent" inside the transaction. */
+async function s5aResetLegacyAndSplit(trx: Transaction<unknown>, splitRoleId: string) {
+  for (const roleId of ['stock-prep-operator', splitRoleId]) {
+    await sql`DELETE FROM user_roles WHERE role_id = ${roleId}`.execute(trx)
+    await sql`DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = ${roleId}`.execute(trx)
+    await sql`DELETE FROM role_permissions WHERE role_id = ${roleId}`.execute(trx)
+    await sql`DELETE FROM roles WHERE id = ${roleId}`.execute(trx)
+  }
+  await sql`UPDATE user_invites SET status = 'revoked' WHERE role_id = 'stock-prep-operator' AND status = 'pending'`.execute(trx)
+}
+
+const OPM_EXTRA_CODES = ['approvals:read', 'approvals:write', 'multitable:submit-approval']
+
+describe('2026-10-12 frontline display-name migration (real PostgreSQL)', () => {
+  it('compare-and-set up / down; a hand-renamed or absent role, a taken name, approval read keys, approval graphs and attendance role references leave it as found — rolled back', async () => {
+    const rollback = new Error('rollback frontline rename test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const member = `opm-rename-member-${suffix}`
+    const instanceId = `opm-rename-appr-${suffix}`
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    try {
+      await db.transaction().execute(async (trx) => {
+        const nameOf = async () => (await sql<{ name: string }>`SELECT name FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)).rows.map((row) => row.name)
+        const step = async (label: string, body: () => Promise<void>) => {
+          await sql`SAVEPOINT opm_rename_case`.execute(trx)
+          try {
+            await body()
+          } catch (error) {
+            throw new Error(`${label}: ${(error as Error).message}`)
+          }
+          await sql`ROLLBACK TO SAVEPOINT opm_rename_case`.execute(trx)
+        }
+        await s5aResetTemplates(trx)
+        // Neutralise any approval rows the shared database may already hold under the two names.
+        await sql`UPDATE approval_assignments SET assignee_id = assignee_id || ' (opm)' WHERE assignment_type = 'role' AND assignee_id IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
+        await sql`UPDATE approval_records SET metadata = jsonb_set(metadata, '{targetId}', to_jsonb((metadata->>'targetId') || ' (opm)')) WHERE action = 'cc' AND metadata->>'targetType' = 'role' AND metadata->>'targetId' IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
+        await sql`UPDATE roles SET name = name || ' (opm)' WHERE btrim(name) IN (${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME})`.execute(trx)
+        await sql`UPDATE approval_templates SET visibility_scope = '{"type":"all","ids":[]}'::jsonb WHERE visibility_scope->>'type' = 'role' AND visibility_scope->'ids' ?| ARRAY[${STOCK_PREP_FRONTLINE_NAME}, ${STOCK_PREP_FRONTLINE_SEEDED_NAME}]`.execute(trx)
+        await sql`UPDATE approval_template_versions SET approval_graph = '{}'::jsonb WHERE approval_graph::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`UPDATE approval_published_definitions SET runtime_graph = '{}'::jsonb WHERE runtime_graph::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`DELETE FROM attendance_scheduler_scopes WHERE subject_ref LIKE ANY (ARRAY['%操作人员%', '%一线填写%']) OR scope::text LIKE ANY (ARRAY['%操作人员%', '%一线填写%'])`.execute(trx)
+        await sql`DELETE FROM system_configs WHERE key = 'attendance.settings'`.execute(trx)
+        await sql`INSERT INTO approval_instances (id, status, requester_snapshot) VALUES (${instanceId}, 'pending', ${JSON.stringify({ id: member })}::jsonb)`.execute(trx)
+
+        // `updated_at` is PUT /api/roles/:id's optimistic-concurrency token (routes/roles.ts
+        // `expectedUpdatedAt`): the rename must move it, so a 角色管理 tab loaded before the upgrade
+        // gets 409 ROLE_MODIFIED instead of silently saving the old name back. Pinned to a past
+        // instant first, because now() is constant inside this one test transaction.
+        const pastToken = '2001-02-03T04:05:06.789Z'
+        const tokenOf = async () => (await sql<{ ms: string }>`SELECT (extract(epoch FROM updated_at) * 1000)::bigint::text AS ms FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)).rows.map((row) => Number(row.ms))
+        const pinToken = async () => { await sql`UPDATE roles SET updated_at = ${pastToken}::timestamptz WHERE id = 'stock-prep_frontline'`.execute(trx) }
+
+        await stockPrepTemplatesUp(trx)
+        expect(await nameOf()).toEqual(['一线填写'])
+        await pinToken()
+        await frontlineRenameUp(trx)
+        expect(await nameOf()).toEqual(['操作人员'])
+        expect((await tokenOf())[0], 'up() moves updated_at with the name').toBeGreaterThan(Date.parse(pastToken))
+        await pinToken()
+        await frontlineRenameUp(trx)
+        expect(await nameOf(), 'a second up() is a no-op').toEqual(['操作人员'])
+        expect(await tokenOf(), 'a no-op up() leaves updated_at alone').toEqual([Date.parse(pastToken)])
+        await frontlineRenameDown(trx)
+        expect(await nameOf(), 'down() is the mirror').toEqual(['一线填写'])
+        expect((await tokenOf())[0], 'down() moves updated_at with the name').toBeGreaterThan(Date.parse(pastToken))
+        await pinToken()
+        await frontlineRenameDown(trx)
+        expect(await nameOf(), 'a second down() is a no-op').toEqual(['一线填写'])
+        expect(await tokenOf(), 'a no-op down() leaves updated_at alone').toEqual([Date.parse(pastToken)])
+
+        await step('hand-renamed', async () => {
+          await sql`UPDATE roles SET name = 'OPM 现场手改的名字' WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['OPM 现场手改的名字'])
+          await frontlineRenameDown(trx)
+          expect(await nameOf()).toEqual(['OPM 现场手改的名字'])
+        })
+        // The case S5a's clash rule produces: the built-in role carries the `（内置）` suffix because
+        // a role the SITE owns (another id) is named exactly 一线填写. Only the built-in id may ever
+        // be renamed — the site's role keeps its name in both directions.
+        const siteRole = `opm-site-${suffix}`
+        const siteName = async () => (await sql<{ name: string }>`SELECT name FROM roles WHERE id = ${siteRole}`.execute(trx)).rows.map((row) => row.name)
+        await step('seed clash suffix, a site role (another id) named exactly 一线填写', async () => {
+          await sql`UPDATE roles SET name = '一线填写（内置）' WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await sql`INSERT INTO roles (id, name) VALUES (${siteRole}, '一线填写')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写（内置）'])
+          expect(await siteName(), 'a role under another id is never renamed by up()').toEqual(['一线填写'])
+        })
+        await step('down(): built-in renamed by hand, a site role (another id) named exactly 操作人员', async () => {
+          await sql`UPDATE roles SET name = 'OPM 现场手改的名字' WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await sql`INSERT INTO roles (id, name) VALUES (${siteRole}, '操作人员')`.execute(trx)
+          await frontlineRenameDown(trx)
+          expect(await nameOf()).toEqual(['OPM 现场手改的名字'])
+          expect(await siteName(), 'a role under another id is never renamed by down()').toEqual(['操作人员'])
+        })
+        await step('absent', async () => {
+          await sql`DELETE FROM role_permissions WHERE role_id = 'stock-prep_frontline'`.execute(trx)
+          await sql`DELETE FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf(), 'never created').toEqual([])
+        })
+        await step('name taken by another role', async () => {
+          await sql`INSERT INTO roles (id, name) VALUES (${`opm-clash-${suffix}`}, ' 操作人员 ')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('an inactive role seat already names 操作人员 (members would gain read access)', async () => {
+          await sql`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES (${instanceId}, 'role', '操作人员', FALSE)`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a role CC record already names 操作人员', async () => {
+          await sql`
+            INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+            VALUES (${instanceId}, 'cc', ${member}, 'OPM requester', 'pending', 1, ${JSON.stringify({ targetType: 'role', targetId: '操作人员' })}::jsonb)
+          `.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a seat names 一线填写 while the role has a member (they would lose read access); without the member it renames', async () => {
+          await sql`INSERT INTO approval_assignments (instance_id, assignment_type, assignee_id, is_active) VALUES (${instanceId}, 'role', '一线填写', FALSE)`.execute(trx)
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('a role CC record names 一线填写 while the role has a member (they would lose read access); without the member it renames', async () => {
+          await sql`
+            INSERT INTO approval_records (instance_id, action, actor_id, actor_name, to_status, to_version, metadata)
+            VALUES (${instanceId}, 'cc', ${member}, 'OPM requester', 'pending', 1, ${JSON.stringify({ targetType: 'role', targetId: '一线填写' })}::jsonb)
+          `.execute(trx)
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        // Template visibility (记录送审 / automation creator) also matches a member's roles by trimmed
+        // display name: a role-scoped visibility list naming the new name would be gained, one naming
+        // the old name lost while the role has members. A dept-scoped list carrying the same string is
+        // not a role reference and does not block.
+        const template = async (type: string, ids: string[]) => {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-vis-${randomUUID()}`}, 'OPM visibility template', ${JSON.stringify({ type, ids })}::jsonb)`.execute(trx)
+        }
+        await step('a role-scoped template visibility list already names 操作人员 (members would gain the template)', async () => {
+          await template('dept', ['操作人员'])
+          await frontlineRenameUp(trx)
+          expect(await nameOf(), 'a dept-scoped list is not a role reference').toEqual(['操作人员'])
+          await frontlineRenameDown(trx)
+          await template('role', ['OPM other', '操作人员'])
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a role-scoped template visibility list names 一线填写 while the role has a member (they would lose it); without the member it renames', async () => {
+          await template('role', ['一线填写'])
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+
+        // Approval graphs: a seat / CC record created from a graph carries the graph's entry as its key,
+        // and the read arm matches it by display name — a graph naming the new name would be gained by
+        // future instances, one naming the old name lost while the role has members. Shapes outside the
+        // five role-reference shapes (a user assignee that reads like the name) do not block.
+        const graphOf = (config: Record<string, unknown>, type = 'approval') => JSON.stringify({ nodes: [{ key: 'start', type: 'start', config: {} }, { key: 'n1', type, config }], edges: [] })
+        const graphTemplate = async () => (await sql<{ id: string }>`INSERT INTO approval_templates (key, name) VALUES (${`opm-graph-${randomUUID()}`}, 'OPM graph template') RETURNING id`.execute(trx)).rows[0]!.id
+        const version = async (approvalGraph: string) => {
+          const templateId = await graphTemplate()
+          const versionId = (await sql<{ id: string }>`INSERT INTO approval_template_versions (template_id, version, approval_graph) VALUES (${templateId}, 1, ${approvalGraph}::jsonb) RETURNING id`.execute(trx)).rows[0]!.id
+          return { templateId, versionId }
+        }
+        await step('graphs outside the five role-reference shapes do not block', async () => {
+          await version(graphOf({ assigneeType: 'user', assigneeIds: ['操作人员'] }))
+          await version(graphOf({ targetType: 'group', targetIds: ['操作人员'] }, 'cc'))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('a template version graph names 操作人员 as a static role approver (members would gain future instances)', async () => {
+          await version(graphOf({ assigneeSources: [{ kind: 'static_role', roleIds: ['操作人员'] }] }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a published definition alone names 操作人员 as a role CC target (its version names nobody)', async () => {
+          const { templateId, versionId } = await version(graphOf({ assigneeType: 'user', assigneeIds: ['OPM nobody'] }))
+          await sql`INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active) VALUES (${templateId}, ${versionId}, ${graphOf({ targetType: 'role', targetIds: ['操作人员'] }, 'cc')}::jsonb, FALSE)`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a graph names 一线填写 (empty-assignee fallback) while the role has a member; without the member it renames', async () => {
+          await version(graphOf({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { roleIds: ['一线填写'] } }))
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+
+        // Attendance puts a user's role ids AND display names into both its role and role-tag context:
+        // scheduler scopes (subject or target lists) and the settings' holiday / calendar overrides
+        // naming a name would be gained or lost by the role's members.
+        const scope = async (subjectType: string, subjectRef: string, body: Record<string, unknown>, isActive = true) => {
+          await sql`INSERT INTO attendance_scheduler_scopes (subject_type, subject_ref, actions, scope, is_active) VALUES (${subjectType}, ${subjectRef}, ARRAY['view']::text[], ${JSON.stringify(body)}::jsonb, ${isActive})`.execute(trx)
+        }
+        const settings = async (value: string) => {
+          await sql`INSERT INTO system_configs (key, value) VALUES ('attendance.settings', ${value})`.execute(trx)
+        }
+        await step('attendance rows naming the names elsewhere (a user subject, a department list, other settings keys) do not block', async () => {
+          await scope('user', '操作人员', { departments: ['操作人员'] })
+          await settings(JSON.stringify({ holidayPolicy: { overrides: [{ name: '操作人员', userNames: ['操作人员'] }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('an INACTIVE attendance scheduler scope has 操作人员 as its role subject', async () => {
+          await scope('role', ' 操作人员 ', { userIds: ['OPM target'] }, false)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('an attendance scheduler scope lists 操作人员 in its roleTags target list', async () => {
+          await scope('user', 'OPM scheduler', { roleTags: ['OPM other', '操作人员'] })
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a calendar override filters on roles: [操作人员]', async () => {
+          await settings(JSON.stringify({ calendarPolicy: { overrides: [{ source: 'role', filters: { roles: ['操作人员'] } }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('a holiday override names 操作人员 in a comma-separated role_tags string', async () => {
+          await settings(JSON.stringify({ holidayPolicy: { overrides: [{ name: 'OPM holiday', role_tags: 'OPM other, 操作人员' }] } }))
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+        await step('attendance settings that are not JSON count nothing (the plugin runs on its defaults)', async () => {
+          await settings('{"calendarPolicy": 操作人员')
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('an attendance scope subject and a calendar override name 一线填写 while the role has a member; without the member it renames', async () => {
+          await scope('role_tag', '一线填写', { userIds: ['OPM target'] })
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+          await sql`DELETE FROM user_roles WHERE user_id = ${member}`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['操作人员'])
+        })
+        await step('a calendar override names 一线填写 while the role has a member', async () => {
+          await settings(JSON.stringify({ calendarPolicy: { overrides: [{ source: 'role', filters: { roleTags: ['一线填写'] } }] } }))
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep_frontline')`.execute(trx)
+          await frontlineRenameUp(trx)
+          expect(await nameOf()).toEqual(['一线填写'])
+        })
+
+        const logged = logSpy.mock.calls.map((args) => args.join(' ')).filter((line) => line.includes('zzzz20261012090000'))
+        expect(logged.length).toBeGreaterThan(0)
+        for (const line of logged) {
+          expect(line).not.toContain(suffix)
+          expect(line).not.toContain('OPM 现场手改的名字')
+        }
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    } finally {
+      logSpy.mockRestore()
+    }
+  })
+})
+
+describe('2026-10-12 option ① split step of the legacy floor-role move (real PostgreSQL)', () => {
+  it('apply --split-extra-codes-to-role: EVERY member\'s effective permission set (rbac/service listUserPermissions) is identical before and after — members with other roles, direct codes, legacy codes and no admission included; the move without the split would not be — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback option-1 split test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const splitRoleId = script.RECOMMENDED_SPLIT_ROLE_ID
+    const otherRole = `opm-other-${suffix}`
+    const users = {
+      onlyOld: `opm-a-${suffix}`,
+      oldAndTarget: `opm-b-${suffix}`,
+      oldAndOthers: `opm-c-${suffix}`,
+      oldDirectNoAdmission: `opm-d-${suffix}`,
+      targetOnly: `opm-e-${suffix}`,
+      bystander: `opm-f-${suffix}`,
+    }
+    const allUsers = Object.values(users)
+    const split = { roleId: splitRoleId, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = s5aTrxClient(trx)
+        await s5aResetTemplates(trx)
+        await s5aResetLegacyAndSplit(trx, splitRoleId)
+        await stockPrepTemplatesUp(trx)
+
+        for (const userId of allUsers) {
+          await sql`INSERT INTO users (id, email, password_hash, permissions) VALUES (${userId}, ${`${userId}@example.invalid`}, 'x', ${JSON.stringify(userId === users.oldDirectNoAdmission ? ['multitable:read'] : [])}::jsonb)`.execute(trx)
+        }
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'OPM legacy floor'), (${otherRole}, 'OPM other role')`.execute(trx)
+        for (const code of ['stock-prep:read', 'stock-prep:operate', ...OPM_EXTRA_CODES]) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES (${otherRole}, 'approvals:read'), (${otherRole}, 'multitable:read')`.execute(trx)
+        const memberships: Array<[string, string]> = [
+          [users.onlyOld, 'stock-prep-operator'],
+          [users.oldAndTarget, 'stock-prep-operator'], [users.oldAndTarget, 'stock-prep_frontline'],
+          [users.oldAndOthers, 'stock-prep-operator'], [users.oldAndOthers, otherRole], [users.oldAndOthers, 'stock-prep_puller'],
+          [users.oldDirectNoAdmission, 'stock-prep-operator'],
+          [users.targetOnly, 'stock-prep_frontline'],
+          [users.bystander, otherRole],
+        ]
+        for (const [userId, roleId] of memberships) {
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${userId}, ${roleId})`.execute(trx)
+        }
+        await sql`INSERT INTO user_permissions (user_id, permission_code) VALUES (${users.oldDirectNoAdmission}, 'approvals:write')`.execute(trx)
+        for (const userId of [users.onlyOld, users.oldAndTarget, users.oldAndOthers, users.targetOnly]) {
+          await sql`INSERT INTO user_namespace_admissions (user_id, namespace, enabled) VALUES (${userId}, 'stock-prep', TRUE)`.execute(trx)
+        }
+
+        const effective = async () => {
+          const out: Record<string, string[]> = {}
+          for (const userId of allUsers) {
+            invalidateUserPerms(userId)
+            out[userId] = [...(await listUserPermissions(userId))].sort()
+          }
+          return out
+        }
+        pgRoute.client = client
+        try {
+          const before = await effective()
+          // The fixture is meaningful: the server resolves the extra codes, and admission filters stock-prep.
+          expect(before[users.onlyOld]).toEqual(['approvals:read', 'approvals:write', 'multitable:submit-approval', 'stock-prep:operate', 'stock-prep:read'])
+          expect(before[users.oldDirectNoAdmission]).toEqual(['approvals:read', 'approvals:write', 'multitable:read', 'multitable:submit-approval'])
+
+          // Negative control: the same move WITHOUT the split step changes effective sets.
+          await sql`SAVEPOINT opm_negative_control`.execute(trx)
+          const refused = await script.run({ client, apply: true, manageTransaction: false })
+          expect(refused.exitCode, 'without --split the loss refusal fires').toBe(2)
+          await client.query(script.SQL.removeExtraCodes, ['stock-prep-operator', OPM_EXTRA_CODES])
+          await client.query(script.SQL.moveMembers, ['stock-prep-operator', 'stock-prep_frontline'])
+          const withoutSplit = await effective()
+          expect(withoutSplit[users.onlyOld]).toEqual(['stock-prep:operate', 'stock-prep:read'])
+          expect(withoutSplit).not.toEqual(before)
+          await sql`ROLLBACK TO SAVEPOINT opm_negative_control`.execute(trx)
+
+          // Dry run with the split: the plan, the extra codes as the database holds them, nothing written.
+          const dryLines: string[] = []
+          const dry = await script.run({ client, apply: false, split, manageTransaction: false, write: (line) => dryLines.push(line) })
+          expect(dry.exitCode).toBe(0)
+          expect(dryLines).toContain('split: extra codes (on stock-prep-operator, not on stock-prep_frontline): 3 (approvals:read, approvals:write, multitable:submit-approval)')
+          expect(dryLines).toContain(`split: role ${splitRoleId} absent; its codes: 0; its members: 0`)
+          expect(dryLines).toContain(`split: delegable namespaces ${splitRoleId} falls in: 0`)
+          expect(dryLines).toContain(`dry run: --apply first does the split: create role ${splitRoleId} with 3 code(s) (approvals:read, approvals:write, multitable:submit-approval), add 4 member(s) of stock-prep-operator to it, remove those 3 code(s) from stock-prep-operator`)
+          expect(await s5aRoleRows(trx, [splitRoleId])).toEqual([])
+          expect(await effective()).toEqual(before)
+
+          // Apply with the split.
+          const applyLines: string[] = []
+          const applied = await script.run({ client, apply: true, split, manageTransaction: false, write: (line) => applyLines.push(line) })
+          expect(applied).toMatchObject({ exitCode: 0, membersMoved: 4, split: { roleCreated: true, codesBound: 3, membersAdded: 4, codesRemoved: 3 } })
+          expect(await effective(), 'every member\'s effective permission set is unchanged').toEqual(before)
+
+          expect(await s5aRoleRows(trx, [splitRoleId])).toEqual([{ id: splitRoleId, name: '审批与提交' }])
+          expect(await s5aCodes(trx, splitRoleId)).toEqual(OPM_EXTRA_CODES)
+          expect(await s5aCodes(trx, 'stock-prep-operator')).toEqual(['stock-prep:operate', 'stock-prep:read'])
+          expect(await s5aCodes(trx, 'stock-prep_frontline'), 'the built-in target never receives the extra codes').toEqual(['stock-prep:operate', 'stock-prep:read'])
+          const membersOf = async (roleId: string) => (await sql<{ user_id: string }>`SELECT user_id FROM user_roles WHERE role_id = ${roleId} ORDER BY user_id`.execute(trx)).rows.map((row) => row.user_id)
+          expect(await membersOf('stock-prep-operator')).toEqual([])
+          expect(await membersOf(splitRoleId)).toEqual([users.onlyOld, users.oldAndTarget, users.oldAndOthers, users.oldDirectNoAdmission].sort())
+          expect(await membersOf('stock-prep_frontline')).toEqual([users.onlyOld, users.oldAndTarget, users.oldAndOthers, users.oldDirectNoAdmission, users.targetOnly].sort())
+
+          // Rerun: nothing left to split or move.
+          const again = await script.run({ client, apply: true, split, manageTransaction: false })
+          expect(again).toMatchObject({ exitCode: 0, membersMoved: 0, split: { roleCreated: false, membersAdded: 0, codesRemoved: 0 } })
+          expect(await effective()).toEqual(before)
+
+          for (const line of [...dryLines, ...applyLines]) {
+            expect(line).not.toContain(suffix)
+            expect(line).not.toContain('OPM legacy floor')
+          }
+        } finally {
+          pgRoute.client = null
+        }
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+
+  it('apply --split holds user_roles and role_permissions until the transaction ends: a concurrent membership or code write waits (lock_timeout) — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback option-1 lock test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const splitRoleId = script.RECOMMENDED_SPLIT_ROLE_ID
+    const other = await pool.connect()
+    const attempt = async (text: string, params: unknown[]) => {
+      await other.query('BEGIN')
+      try {
+        await other.query(`SET LOCAL lock_timeout = '300ms'`)
+        await other.query(text, params)
+        return 'written'
+      } catch (error) {
+        return (error as { code?: string }).code ?? 'unknown'
+      } finally {
+        await other.query('ROLLBACK')
+      }
+    }
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = s5aTrxClient(trx)
+        await s5aResetTemplates(trx)
+        await s5aResetLegacyAndSplit(trx, splitRoleId)
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'OPM legacy floor')`.execute(trx)
+        for (const code of ['stock-prep:read', 'stock-prep:operate', 'approvals:read']) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${`opm-lock-${suffix}`}, 'stock-prep-operator')`.execute(trx)
+        // Before the script runs, nothing holds the tables.
+        expect(await attempt('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [`opm-lock-free-${suffix}`, `opm-lock-role-${suffix}`])).toBe('written')
+
+        const applied = await script.run({ client, apply: true, split: { roleId: splitRoleId, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }, manageTransaction: false })
+        expect(applied.exitCode).toBe(0)
+        // 55P03 = lock_not_available: the writes wait for this transaction.
+        expect(await attempt('INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)', [`opm-lock-late-${suffix}`, 'stock-prep-operator'])).toBe('55P03')
+        expect(await attempt('INSERT INTO role_permissions (role_id, permission_code) VALUES ($1, $2)', [`opm-lock-role-${suffix}`, 'approvals:read'])).toBe('55P03')
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    } finally {
+      other.release()
+    }
+  })
+
+  it('split refusals on real rows: an id inside a delegable namespace, an admin-level extra code, an existing role with other codes, leftover rows; an exact existing role is reused — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback option-1 refusal test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const splitRoleId = script.RECOMMENDED_SPLIT_ROLE_ID
+    const member = `opm-r-${suffix}`
+    const split = { roleId: splitRoleId, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = s5aTrxClient(trx)
+        await s5aResetTemplates(trx)
+        await s5aResetLegacyAndSplit(trx, splitRoleId)
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', 'OPM legacy floor')`.execute(trx)
+        for (const code of ['stock-prep:read', 'stock-prep:operate', ...OPM_EXTRA_CODES]) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep-operator')`.execute(trx)
+        const refusedWith = async (label: string, needle: string) => {
+          const codesBefore = await s5aCodes(trx, 'stock-prep-operator')
+          const lines: string[] = []
+          const result = await script.run({ client, apply: true, split, manageTransaction: false, write: (line) => lines.push(line) })
+          expect(result.exitCode, label).toBe(2)
+          expect(lines.some((line) => line.startsWith('REFUSED: split:') && line.includes(needle)), `${label}: ${needle}`).toBe(true)
+          expect(await s5aCodes(trx, 'stock-prep-operator'), label).toEqual(codesBefore)
+          expect(await s5aRoleRows(trx, ['stock-prep-operator']), label).toHaveLength(1)
+        }
+        const scenario = async (label: string, setup: () => Promise<void>, needle: string) => {
+          await sql`SAVEPOINT opm_refusal_case`.execute(trx)
+          await setup()
+          await refusedWith(label, needle)
+          await sql`ROLLBACK TO SAVEPOINT opm_refusal_case`.execute(trx)
+        }
+
+        await scenario('a role id deriving the namespace approvals_operator exists', async () => {
+          await sql`INSERT INTO roles (id, name) VALUES ('approvals_operator_admin', 'OPM delegate')`.execute(trx)
+        }, 'falls inside 1 namespace(s)')
+        await scenario('an admin-level extra code', async () => {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', 'approvals:admin')`.execute(trx)
+        }, 'admin-level (approvals:admin)')
+        await scenario('the split role exists with other codes', async () => {
+          await sql`INSERT INTO roles (id, name) VALUES (${splitRoleId}, '审批与提交')`.execute(trx)
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES (${splitRoleId}, 'approvals:read')`.execute(trx)
+        }, 'not exactly the extra codes')
+        await scenario('leftover user_roles rows under the absent split id', async () => {
+          await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${`opm-orphan-${suffix}`}, ${splitRoleId})`.execute(trx)
+        }, 'does not exist but 1 user_roles row(s)')
+
+        // An existing split role holding EXACTLY the extra codes is reused.
+        await sql`INSERT INTO roles (id, name) VALUES (${splitRoleId}, '审批与提交')`.execute(trx)
+        for (const code of OPM_EXTRA_CODES) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES (${splitRoleId}, ${code})`.execute(trx)
+        }
+        const reused = await script.run({ client, apply: true, split, manageTransaction: false })
+        expect(reused).toMatchObject({ exitCode: 0, membersMoved: 1, split: { roleCreated: false, codesBound: 0, membersAdded: 1, codesRemoved: 3 } })
+        expect(await s5aCodes(trx, splitRoleId)).toEqual(OPM_EXTRA_CODES)
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+
+  it('the approval designer census counts template versions / published definitions naming the old role as a role approver, handler, fallback, CC target or 提交人自选 role scope, by id or display name — and nothing else; the template visibility census counts role-scoped lists lost / gained by the move — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as S5aScript
+    const rollback = new Error('rollback approval designer census test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const graph = (config: Record<string, unknown>, type = 'approval') => JSON.stringify({ nodes: [{ key: 'start', type: 'start', config: {} }, { key: 'n1', type, config }], edges: [] })
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = s5aTrxClient(trx)
+        await s5aResetTemplates(trx)
+        await s5aResetLegacyAndSplit(trx, script.RECOMMENDED_SPLIT_ROLE_ID)
+        await stockPrepTemplatesUp(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', ' OPM legacy floor ')`.execute(trx)
+        const census = async () => {
+          const lines: string[] = []
+          await script.run({ client, apply: false, manageTransaction: false, write: (line) => lines.push(line) })
+          return lines.filter((line) => line.startsWith('approval designer'))
+        }
+        const visibility = async (split: null | { roleId: string; roleName: string; roleNameGiven: boolean }) => {
+          const lines: string[] = []
+          await script.run({ client, apply: false, split, manageTransaction: false, write: (line) => lines.push(line) })
+          const visible = lines.filter((line) => line.startsWith('approval template visibility'))
+          return { lost: Number(/: (\d+); moved members would stop/.exec(visible[0] ?? '')?.[1] ?? NaN), gained: Number(/: (\d+); moved members would newly/.exec(visible[1] ?? '')?.[1] ?? NaN), lines: visible }
+        }
+        const splitRequest = { roleId: script.RECOMMENDED_SPLIT_ROLE_ID, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }
+        const baseline = await census()
+        const visibilityBaseline = await visibility(null)
+        // the old role holds codes the target lacks, so the split step would run (no member: no refusal)
+        for (const code of OPM_EXTRA_CODES) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        const splitBaseline = await visibility(splitRequest)
+        const targetName = (await sql<{ name: string }>`SELECT btrim(name) AS name FROM roles WHERE id = 'stock-prep_frontline'`.execute(trx)).rows[0]!.name
+        const visibilityLists: Array<[string, string[]]> = [
+          ['role', ['stock-prep-operator']], // lost
+          ['role', ['OPM other', 'OPM legacy floor']], // lost: by trimmed display name
+          ['role', [' OPM legacy floor ']], // neither: the list entry is compared exactly
+          ['role', ['stock-prep-operator', 'stock-prep_frontline']], // neither: seen before and after
+          ['role', ['stock-prep-operator', script.RECOMMENDED_SPLIT_ROLE_ID]], // lost without the split, kept with it
+          ['role', [targetName]], // gained: the target's display name
+          ['role', ['stock-prep_frontline']], // gained
+          ['role', [script.RECOMMENDED_SPLIT_ROLE_ID]], // gained only with the split
+          ['role', [script.DEFAULT_SPLIT_ROLE_NAME]], // gained only with the split
+          ['dept', ['stock-prep-operator']], // neither: not a role list
+          ['user', ['stock-prep_frontline']], // neither
+        ]
+        for (const [index, [type, ids]] of visibilityLists.entries()) {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-vis-${index}-${suffix}`}, 'OPM visibility template', ${JSON.stringify({ type, ids })}::jsonb)`.execute(trx)
+        }
+        const visibilityAfter = await visibility(null)
+        expect(visibilityAfter.lost - visibilityBaseline.lost).toBe(3)
+        expect(visibilityAfter.gained - visibilityBaseline.gained).toBe(2)
+        const splitAfter = await visibility(splitRequest)
+        expect(splitAfter.lines[0]).toContain('but not through stock-prep_frontline or approvals_operator')
+        expect(splitAfter.lost - splitBaseline.lost).toBe(2)
+        expect(splitAfter.gained - splitBaseline.gained).toBe(4)
+        for (const line of [...visibilityAfter.lines, ...splitAfter.lines]) expect(line).not.toContain(suffix)
+
+        const template = (await sql<{ id: string }>`INSERT INTO approval_templates (key, name) VALUES (${`opm-tpl-${suffix}`}, 'OPM template') RETURNING id`.execute(trx)).rows[0]!.id
+        const graphs = [
+          graph({ assigneeType: 'role', assigneeIds: ['stock-prep-operator'] }), // counted: legacy role assignee by id
+          graph({ assigneeSources: [{ kind: 'static_role', roleIds: ['OPM legacy floor'] }] }), // counted: by trimmed display name
+          graph({ assigneeSources: [{ kind: 'static_role', roleIds: ['stock-prep-operator'] }] }, 'handler'), // counted: handler node
+          graph({ emptyAssigneePolicy: 'designated', emptyAssigneeFallback: { roleIds: ['stock-prep-operator'] } }), // counted: fallback
+          graph({ targetType: 'role', targetIds: ['stock-prep-operator'] }, 'cc'), // counted: role CC
+          graph({ assigneeType: 'user', assigneeIds: ['stock-prep-operator'] }), // NOT: a user id that looks like it
+          graph({ assigneeSources: [{ kind: 'static_user', userIds: ['stock-prep-operator'] }] }), // NOT
+          graph({ targetType: 'group', targetIds: ['stock-prep-operator'] }, 'cc'), // NOT: a member group
+          graph({ assigneeType: 'role', assigneeIds: ['stock-prep_frontline'] }), // NOT: another role
+          graph({ assigneeSources: [{ kind: 'requester_choice', mode: 'single', scope: { type: 'role', roleIds: ['stock-prep-operator'] } }] }), // counted: 提交人自选 role scope
+          graph({ assigneeSources: [{ kind: 'requester_choice', mode: 'multi', scope: { type: 'members', userIds: ['stock-prep-operator'] } }] }), // NOT: a member list
+        ]
+        const versionIds: string[] = []
+        for (const [index, approvalGraph] of graphs.entries()) {
+          versionIds.push((await sql<{ id: string }>`
+            INSERT INTO approval_template_versions (template_id, version, approval_graph) VALUES (${template}, ${index + 1}, ${approvalGraph}::jsonb) RETURNING id
+          `.execute(trx)).rows[0]!.id)
+        }
+        // One ACTIVE definition per template (idx_approval_published_definitions_active_template): the
+        // decoy active one belongs to a second template whose only version names nobody.
+        const decoyTemplate = (await sql<{ id: string }>`INSERT INTO approval_templates (key, name) VALUES (${`opm-tpl-b-${suffix}`}, 'OPM decoy template') RETURNING id`.execute(trx)).rows[0]!.id
+        const decoyVersion = (await sql<{ id: string }>`
+          INSERT INTO approval_template_versions (template_id, version, approval_graph) VALUES (${decoyTemplate}, 1, ${graphs[5]}::jsonb) RETURNING id
+        `.execute(trx)).rows[0]!.id
+        await sql`
+          INSERT INTO approval_published_definitions (template_id, template_version_id, runtime_graph, is_active)
+          VALUES (${template}, ${versionIds[0]}, ${graphs[0]}::jsonb, TRUE),
+                 (${template}, ${versionIds[4]}, ${graphs[4]}::jsonb, FALSE),
+                 (${decoyTemplate}, ${decoyVersion}, ${graphs[5]}::jsonb, TRUE)
+        `.execute(trx)
+
+        const after = await census()
+        const count = (lines: string[], index: number, re: RegExp) => Number(re.exec(lines[index] ?? '')?.[1] ?? NaN)
+        expect(count(after, 0, /: (\d+) \(templates/) - count(baseline, 0, /: (\d+) \(templates/)).toBe(6)
+        expect(count(after, 0, /\(templates: (\d+)\)/) - count(baseline, 0, /\(templates: (\d+)\)/)).toBe(1)
+        expect(count(after, 1, /the same way: (\d+) /) - count(baseline, 1, /the same way: (\d+) /)).toBe(2)
+        expect(count(after, 1, /\(active: (\d+)\)/) - count(baseline, 1, /\(active: (\d+)\)/)).toBe(1)
+        for (const line of after) expect(line).not.toContain(suffix)
         throw rollback
       })
     } catch (error) {

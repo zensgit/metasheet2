@@ -72,7 +72,7 @@ function sendRolePermissionRequestError(res: Response, error: RolePermissionRequ
  * (which covers U+FEFF, U+3000, NBSP and every other Unicode space), and free of control
  * (Cc) and format (Cf — zero-width, bidi) characters anywhere inside.
  */
-function isWellFormedNewRoleId(id: string): boolean {
+export function isWellFormedNewRoleId(id: string): boolean {
   if (!id || id !== id.trim()) return false
   return !/[\p{Cc}\p{Cf}]/u.test(id)
 }
