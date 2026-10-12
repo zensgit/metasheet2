@@ -1,8 +1,8 @@
-// Import writes carry orgId in JSON. Follow-up GETs must carry the same selector:
-// legacy import reads do not derive it from the authenticated tenant claim.
+// Attendance writes carry orgId in JSON. Follow-up requests must carry the same
+// selector: legacy import/request reads do not derive it from the tenant claim.
 export function scopeAttendanceImportUrl(rawUrl, orgId) {
   const url = new URL(rawUrl)
-  if (!url.pathname.startsWith('/api/attendance/import/')) return rawUrl
+  if (!/^\/api\/attendance\/(?:import\/|requests(?:\/|$)|records(?:\/|$))/.test(url.pathname)) return rawUrl
   const existing = url.searchParams.getAll('orgId')
   if (existing.some(value => value !== orgId)) {
     throw new Error('ATTENDANCE_IMPORT_ORG_MISMATCH')
