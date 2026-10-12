@@ -11,6 +11,72 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    AttendanceTimezonePolicyRead:
+      type: object
+      additionalProperties: false
+      required:
+      - enabled
+      - version
+      - systemDefault
+      properties:
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+          description: Zero only for an absent disabled policy; persisted revisions start
+            at one.
+        systemDefault:
+          type: object
+          additionalProperties: false
+          required:
+          - orgId
+          - referenceId
+          - timezone
+          - version
+          properties:
+            orgId:
+              type: string
+            referenceId:
+              type: string
+            timezone:
+              type: string
+              description: Valid IANA timezone identifier
+            version:
+              type: integer
+              minimum: 1
+    AttendanceEmployeeTimezoneOverrideRead:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required:
+      - orgId
+      - userId
+      - referenceId
+      - timezone
+      - version
+      - effectiveFrom
+      - effectiveTo
+      properties:
+        orgId:
+          type: string
+        userId:
+          type: string
+        referenceId:
+          type: string
+        timezone:
+          type: string
+          description: Valid IANA timezone identifier
+        version:
+          type: integer
+          minimum: 1
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
     StandardResponse:
       type: object
       properties:

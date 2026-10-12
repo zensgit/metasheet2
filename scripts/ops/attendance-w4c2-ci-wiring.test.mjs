@@ -2216,6 +2216,8 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
   'tests/integration/attendance-shift-swap.test.ts',
   'tests/integration/attendance-soak-diff-families.db.test.ts',
+  'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+  'tests/integration/attendance-timezone-policy-store.db.test.ts',
   'tests/integration/attendance-unscheduled-reminder.test.ts',
   'tests/integration/attendance-w4c0-concurrency-gates-e3.db.test.ts',
   'tests/integration/attendance-w4c0-db-gates-e1.db.test.ts',

@@ -1157,6 +1157,9 @@ export default defineConfig({
       // plugin-tests.yml executes the complete file with ATTENDANCE_TEST_DATABASE_URL.
       'tests/integration/attendance-result-edit.test.ts',
       'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
+      // Multi-timezone D1 requires a real database and must not enter the no-DB lane.
+      'tests/integration/attendance-timezone-policy-routes.db.test.ts',
+      'tests/integration/attendance-timezone-policy-store.db.test.ts',
       'tests/integration/attendance-comp-time-expiry-reminder.test.ts',
       'tests/integration/attendance-expiry-service.test.ts',
       'tests/integration/attendance-notification-deliveries.test.ts',

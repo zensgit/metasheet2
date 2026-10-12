@@ -34,6 +34,7 @@ const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/atten
 const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const { hasReversedLivePunchOrder } = require('./lib/attendance-live-punch-order.cjs')
 const { CLIENT_TIMESTAMP_CODE, CLIENT_TIMESTAMP_MESSAGE, hasClientPunchTimestamp, getOnlinePunchServerInstant } = require('./lib/attendance-online-punch-clock.cjs')
+const { registerAttendanceTimezonePolicyRoutes } = require('./lib/attendance-timezone-policy-routes.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -51061,6 +51062,13 @@ module.exports = {
         }
       })
     )
+
+    registerAttendanceTimezonePolicyRoutes({
+      addRoute: (...args) => context.api.http.addRoute(...args),
+      withPermission,
+      resolveActor: resolveAttendanceGroupRouteActorContext,
+      db,
+    })
 
     context.api.http.addRoute(
       'GET',

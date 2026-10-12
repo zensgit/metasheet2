@@ -11,6 +11,73 @@ components:
       scheme: bearer
       bearerFormat: JWT
   schemas:
+    AttendanceTimezonePolicyRead:
+      type: object
+      additionalProperties: false
+      required:
+        - enabled
+        - version
+        - systemDefault
+      properties:
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          minimum: 0
+          description: >-
+            Zero only for an absent disabled policy; persisted revisions start
+            at one.
+        systemDefault:
+          type: object
+          additionalProperties: false
+          required:
+            - orgId
+            - referenceId
+            - timezone
+            - version
+          properties:
+            orgId:
+              type: string
+            referenceId:
+              type: string
+            timezone:
+              type: string
+              description: Valid IANA timezone identifier
+            version:
+              type: integer
+              minimum: 1
+    AttendanceEmployeeTimezoneOverrideRead:
+      type: object
+      nullable: true
+      additionalProperties: false
+      required:
+        - orgId
+        - userId
+        - referenceId
+        - timezone
+        - version
+        - effectiveFrom
+        - effectiveTo
+      properties:
+        orgId:
+          type: string
+        userId:
+          type: string
+        referenceId:
+          type: string
+        timezone:
+          type: string
+          description: Valid IANA timezone identifier
+        version:
+          type: integer
+          minimum: 1
+        effectiveFrom:
+          type: string
+          format: date-time
+        effectiveTo:
+          type: string
+          format: date-time
+          nullable: true
     StandardResponse:
       type: object
       properties:
@@ -14868,6 +14935,100 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/attendance/timezone-policy:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read organization attendance timezone policy
+      description: >-
+        Requires attendance:admin and active membership in the authenticated
+        organization. An absent policy is OFF with version 0. The organization
+        must have one valid default attendance rule; no global fallback is used.
+        This read does not enable the feature or select a target shift.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    $ref: '#/components/schemas/AttendanceTimezonePolicyRead'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector differs from the authenticated organization
+        '409':
+          description: Ambiguous persisted timezone configuration
+        '422':
+          description: Required timezone configuration is missing or invalid
+        '503':
+          description: Timezone configuration store unavailable
+  /api/attendance/timezone-policy/employees/{userId}:
+    x-plugin: plugin-attendance
+    get:
+      summary: Read current effective employee attendance timezone override
+      description: >-
+        Requires attendance:admin and active administrator and target employee
+        memberships in the authenticated organization. Uses the server instant
+        and a half-open effective interval. Null means inheritance, not a
+        selected shift timezone.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: userId
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - ok
+                  - data
+                properties:
+                  ok:
+                    type: boolean
+                    enum:
+                      - true
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required:
+                      - override
+                    properties:
+                      override:
+                        $ref: >-
+                          #/components/schemas/AttendanceEmployeeTimezoneOverrideRead
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Organization selector differs from the authenticated organization
+        '409':
+          description: Ambiguous persisted timezone configuration
+        '422':
+          description: Required timezone configuration is missing or invalid
+        '503':
+          description: Timezone configuration store unavailable
   /api/attendance/settings:
     x-plugin: plugin-attendance
     get:
