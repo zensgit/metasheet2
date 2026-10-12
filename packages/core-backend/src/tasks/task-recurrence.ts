@@ -174,17 +174,31 @@ export function nextOccurrenceDueDate(rule: TaskRecurrenceRule, current: string,
   const r = requireRule(rule, fn)
   const cur = requireCivilDate(current, 'current', fn)
   const anc = requireCivilDate(anchor, 'anchor', fn)
+  const next = stepOccurrenceDueDate(r, cur, anc, fn)
+  if (next === null) throw new RangeError(`${fn}: result is outside 0001..9999`)
+  return next
+}
+
+const LAST_CIVIL_DATE = '9999-12-31'
+
+/**
+ * The stepping behind `nextOccurrenceDueDate`, on already validated input. `null` when the next due
+ * date would fall after 9999-12-31: `planSpawn` reports that as `series_ended` (the calendar ends the
+ * series) instead of letting a RangeError fail the completion that triggered the spawn.
+ */
+function stepOccurrenceDueDate(r: TaskRecurrenceRule, cur: string, anc: string, fn: string): string | null {
+  const daysLeft = civilDayDiff(cur, LAST_CIVIL_DATE)
   switch (r.freq) {
     case 'daily':
-      return addCivilDays(cur, r.interval)
+      return r.interval > daysLeft ? null : addCivilDays(cur, r.interval)
     case 'weekly': {
       // Monday-based index: Monday = 0 … Sunday = 6.
       const wanted = (r.byWeekday as number[]).map((d) => (d + 6) % 7).sort((a, b) => a - b)
       const curIndex = (civilWeekday(cur) + 6) % 7
-      const monday = addCivilDays(cur, -curIndex)
       const laterThisWeek = wanted.find((index) => index > curIndex)
-      if (laterThisWeek !== undefined) return addCivilDays(monday, laterThisWeek)
-      return addCivilDays(monday, 7 * r.interval + wanted[0])
+      // Offset from `cur` itself, so the check never steps outside the calendar first.
+      const offset = laterThisWeek !== undefined ? laterThisWeek - curIndex : 7 * r.interval + wanted[0] - curIndex
+      return offset > daysLeft ? null : addCivilDays(cur, offset)
     }
     case 'monthly': {
       const [cy, cm] = splitCivil(cur)
@@ -192,7 +206,7 @@ export function nextOccurrenceDueDate(rule: TaskRecurrenceRule, current: string,
       const total = cy * 12 + (cm - 1) + r.interval
       const year = Math.floor(total / 12)
       const month = (total % 12) + 1
-      if (year > 9999) throw new RangeError(`${fn}: result is outside 0001..9999`)
+      if (year > 9999) return null
       const length = daysInCivilMonth(year, month)
       const ruleDay = r.byMonthDay === 'last' ? length : (r.byMonthDay ?? anchorDay)
       return formatCivil(year, month, Math.min(ruleDay, length), fn)
@@ -201,7 +215,7 @@ export function nextOccurrenceDueDate(rule: TaskRecurrenceRule, current: string,
       const [cy] = splitCivil(cur)
       const [, anchorMonth, anchorDay] = splitCivil(anc)
       const year = cy + r.interval
-      if (year > 9999) throw new RangeError(`${fn}: result is outside 0001..9999`)
+      if (year > 9999) return null
       return formatCivil(year, anchorMonth, Math.min(anchorDay, daysInCivilMonth(year, anchorMonth)), fn)
     }
     default:
@@ -388,7 +402,8 @@ function validateSource(source: unknown, fn: string): TaskOccurrenceSource {
 // reminder policy applies (computed by the service layer).
 /**
  * Plans the next occurrence of `source`. `no_due_date`: the source's due date was cleared after the
- * rule was set. `series_ended`: the next occurrence would fall outside `end`. Otherwise returns the
+ * rule was set. `series_ended`: the next occurrence would fall outside `end`, or after 9999-12-31
+ * (never a RangeError). Otherwise returns the
  * new row (due date stepped, start date shifted by the same number of civil days, `due_at`
  * recomputed with `computeDueAt` in the source's time zone) and two events: `recurrence_spawned` on
  * the source (payload `{ spawnedTaskId }`) and `created` on the new task.
@@ -420,7 +435,9 @@ export function planSpawn(input: {
 
   if (source.dueDate === null) return { ok: false, reason: 'no_due_date' }
   const currentDue = requireCivilDate(source.dueDate, 'source.dueDate', fn)
-  const nextDue = nextOccurrenceDueDate(rule, currentDue, anchor)
+  // A next due date past 9999-12-31 ends the series like `end` does (M5 PR-4a design §3.2 step 4).
+  const nextDue = stepOccurrenceDueDate(rule, currentDue, anchor, fn)
+  if (nextDue === null) return { ok: false, reason: 'series_ended' }
   if (!isWithinRecurrenceEnd(rule, nextDue, input.occurrenceNumber + 1)) {
     return { ok: false, reason: 'series_ended' }
   }
