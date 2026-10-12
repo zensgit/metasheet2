@@ -66,16 +66,43 @@
  * default, and through which preset or role, is an approval-product policy decision that belongs to
  * the owner and is NOT made here.
  *
- * `down()` deletes the three codes' rows from `role_permissions`, then `user_permissions`, then
- * `permissions`. Both grant tables carry an `ON DELETE CASCADE` foreign key to `permissions(code)`,
- * so the final DELETE alone would cascade them away; the two explicit DELETEs are written out so the
- * row-loss is visible at the call site (same as the sibling migration).
+ * `down()` NEVER deletes from `role_permissions` or `user_permissions`. It removes a code's
+ * `permissions` row only when nothing binds it, in ONE statement for all three codes:
+ * `DELETE FROM permissions p WHERE p.code IN (<the three codes>) AND NOT EXISTS (a role_permissions
+ * row for p.code) AND NOT EXISTS (a user_permissions row for p.code)`; each NOT EXISTS clause is
+ * emitted when its table exists (a missing grant table cannot hold a binding). The NOT EXISTS guards
+ * keep the `ON DELETE CASCADE` foreign keys both grant tables carry to `permissions(code)` from
+ * firing on a row that is bound when the DELETE runs. On their own they do NOT cover a grant that a
+ * concurrent transaction commits while the DELETE waits for that row: under READ COMMITTED the
+ * re-check after the wait does not re-run the NOT EXISTS subqueries, so the row would be deleted and
+ * the fresh grant cascaded away. So `down()` first takes `SELECT code FROM permissions WHERE code IN
+ * (...) FOR UPDATE` on the three rows. A grant INSERT's foreign-key check needs a KEY SHARE lock on the
+ * referenced row, which conflicts with FOR UPDATE, so after the lock is held no new grant for these
+ * codes can commit until `down()`'s transaction ends, and the DELETE (a new statement, so a fresh
+ * snapshot) sees every grant committed before the lock. That guarantee holds because the migrator
+ * runs `down()` in one transaction (Kysely's `Migrator` on PostgreSQL, transactional DDL, and
+ * `src/db/migrate.ts` does not disable it); calling `down()` outside a transaction releases the
+ * lock straight after the SELECT and reopens the window. A code that is still bound is left in the
+ * catalogue exactly as it is, together with every grant that references it, and `down()` logs one
+ * `console.warn` line per kept code (read back with a `SELECT` after the DELETE). Without a
+ * `permissions` table `down()` does nothing.
  *
- * DISCLOSURE: rolling this migration back is NOT reversible for grant state. It permanently drops
- * every `role_permissions` / `user_permissions` row for these three codes, whoever wrote it: an
- * administrator through the product endpoints, a preset, or a plugin through `applyRoleMatrix`
- * (rows this migration never created). Re-running `up()` re-registers the catalogue rows only; every
- * holder has to be granted again.
+ * DISCLOSURE: this `down()` is deliberately narrower than "undo `up()`". `up()` is
+ * `ON CONFLICT DO NOTHING`, so a catalogue row for any of these codes may predate it (a plugin's
+ * `applyRoleMatrix` self-registration, which also writes role bindings; an earlier hand-made
+ * registration), and grants for these codes are written by administrators, presets and plugins,
+ * never by this migration. A rollback must not take any of those grants with it: a deployed database
+ * has been seen where one of these codes was registered and bound to a live role before this
+ * migration ran, and the earlier cascading `down()` would have stripped that role's grant. So a
+ * rollback keeps every bound code registered with all its grants, and removes only codes nobody
+ * holds. Consequences: (1) a bound code is still grantable after `down()`, and a catalogue row this
+ * migration did insert stays behind once someone holds it; an operator who really wants the code
+ * gone revokes its grants through the product endpoints first and then runs `down()` again;
+ * (2) an UNBOUND row is removed even if it predates this migration, because nothing distinguishes it
+ * from a row `up()` inserted; no holder loses anything (only that row's own name/description text
+ * goes), and a plugin that still names the code re-registers it the next time it applies its role
+ * matrix (`ON CONFLICT DO NOTHING` there too). Re-running `up()` after `down()` re-registers the
+ * removed rows and leaves the kept ones as they are.
  */
 
 import type { Kysely } from 'kysely'
@@ -126,24 +153,41 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
-  if (await checkTableExists(db, 'role_permissions')) {
-    await sql`
-      DELETE FROM role_permissions
-      WHERE permission_code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
-  }
+  if (!(await checkTableExists(db, 'permissions'))) return
 
-  if (await checkTableExists(db, 'user_permissions')) {
-    await sql`
-      DELETE FROM user_permissions
-      WHERE permission_code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
-  }
+  // Never a DELETE on role_permissions / user_permissions — see file header. A code is removed from
+  // the catalogue only when no grant row references it. The NOT EXISTS guards alone miss a grant
+  // committed while the DELETE waits on the row; the FOR UPDATE lock below (held until the
+  // migrator's transaction ends) is what blocks such grants, so the ON DELETE CASCADE foreign keys
+  // from both grant tables never fire on a bound row.
+  await sql`
+    SELECT code FROM permissions
+    WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+    FOR UPDATE
+  `.execute(db)
 
-  if (await checkTableExists(db, 'permissions')) {
-    await sql`
-      DELETE FROM permissions
-      WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
-    `.execute(db)
+  const unboundByRole = (await checkTableExists(db, 'role_permissions'))
+    ? sql`AND NOT EXISTS (SELECT 1 FROM role_permissions rp WHERE rp.permission_code = p.code)`
+    : sql``
+  const unboundByUser = (await checkTableExists(db, 'user_permissions'))
+    ? sql`AND NOT EXISTS (SELECT 1 FROM user_permissions upm WHERE upm.permission_code = p.code)`
+    : sql``
+
+  await sql`
+    DELETE FROM permissions p
+    WHERE p.code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+      ${unboundByRole}
+      ${unboundByUser}
+  `.execute(db)
+
+  const kept = await sql<{ code: string }>`
+    SELECT code FROM permissions
+    WHERE code IN (${sql.join(APPROVAL_PRODUCT_PERMISSION_CODES)})
+  `.execute(db)
+  for (const row of kept.rows) {
+    console.warn(
+      `[Migration] down(): kept permission ${row.code} in the catalogue — it is still bound in ` +
+        'role_permissions/user_permissions; its grants are left untouched (revoke them first to remove the code)',
+    )
   }
 }
