@@ -304,3 +304,20 @@ Residuals #6234–#6237 are unchanged: a deactivation that commits after the ins
 The matrix is still `[20.x]`. The attendance real-DB step (`attendance-real-db-integration`) still sets `DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL` and does not set `EXPECT_DB` (#6238, left as-is). The approval real-DB step still has `if: matrix.node-version == '20.x'` and `EXPECT_DB: '1'`. #6273 recreates the test database before `Run DB migrations` and sets `timeout-minutes: 150` on the test job.
 
 Git auto-merged `p25-call-path-classification.cjs` and kept both sides: the roster job-status classification stays at five updates (the four plan writes plus the org-gate failure write), and #6306's read-only encrypted-store probe entry stays. Each parent still expected a generated census of 110 sites. Together the generated census is 111, with no unclassified sites and no count drift. The explicit length in `attendance-w4c0-dml-inventory-collector.test.mjs` is 111.
+
+## 12. Alignment to main 5acc139a4 (2026-10-12)
+
+Draft #6051 was merged onto `origin/main` `5acc139a44e6e4eb0e8e23a9b0f4e6b2f16d0ed6` (#6358, parent `4e9bafed7b1e06a8df445983aa451f052d8949db`). Nothing had landed past that SHA at fetch time. The previous alignment baseline was `1dd42d08761039c9937dae06c712fadd10092ab6`. Zero conflicts. Harold approved merging this tip, including the workflow edits, and re-running the required checks.
+
+Four commits since the previous baseline. The first three do not change a sensitive path. The fourth does.
+
+| Commit | What | Sensitive paths |
+|---|---|---|
+| `8fb388f0a71b` #6355 | Decision-register note. | none |
+| `8b2213f1fad8` #6356 | Operator-merge script line endings and runbook notes. | none |
+| `4e9bafed7b1e` #6357 | Stock-prep deploy record and customer reply. | none |
+| `5acc139a44e6` #6358 | UUID v4 helper with a `getRandomValues` fallback. | `attendance-web-guard.yml`, `stock-prep-browser-verify.yml` |
+
+#6358 adds `apps/web/src/utils/uuid.ts` to the attendance-web-guard path filter and to the module-graph wiring in both workflows. Job names stay `attendance-web-guard` and `browser-verify`. `plugin-tests.yml` still uses literal `ubuntu-latest` on every `runs-on`.
+
+Pins recomputed on this merge tree: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally on Node v22.23.3.
