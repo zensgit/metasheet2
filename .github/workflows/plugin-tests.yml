@@ -1316,15 +1316,6 @@ jobs:
         if: matrix.node-version == '20.x'
         run: node --test scripts/ops/stock-preparation-plm-full-app-contract.test.mjs scripts/ops/stock-preparation-plm-owned-pg.test.mjs scripts/ops/run-stock-preparation-yida-synthetic-trial.test.mjs
 
-      # Each scenario owns fresh synthetic migrations and production app lifecycle.
-      - name: Run synthetic PLM full-app manual and interval acceptance
-        id: stock-preparation-plm-full-app
-        if: matrix.node-version == '20.x'
-        timeout-minutes: 20
-        run: |
-          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin
-          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval
-
       - name: Run external-system delete x pointer-write lock protocol real-DB proof
         id: external-system-delete-bind-lock-protocol-real-db
         if: matrix.node-version == '20.x'
@@ -1368,6 +1359,17 @@ jobs:
             tests/integration/stock-preparation-yida-delivery-runner-realdb.test.ts \
             tests/integration/automation-live-authority-realdb.test.ts \
             --reporter=verbose
+
+      # Keep the real-DB proof ahead of full-app browser acceptance so a browser
+      # regression cannot hide its result. Both steps remain required/fail-fast.
+      # Each scenario owns fresh synthetic migrations and production app lifecycle.
+      - name: Run synthetic PLM full-app manual and interval acceptance
+        id: stock-preparation-plm-full-app
+        if: matrix.node-version == '20.x'
+        timeout-minutes: 20
+        run: |
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin
+          node scripts/ops/run-stock-preparation-plm-full-app.mjs --pg-bin=/usr/lib/postgresql/14/bin --automation-scenario=interval
 
       # These files each import the real native AuthService/JWT and scoped pool.
       # Isolated fresh forks, no broad setup RBAC bypass, no suite skip-green.

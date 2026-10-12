@@ -862,6 +862,8 @@ function assertWorkflowContract(document) {
     && acceptance['timeout-minutes'] > 0 && acceptance['timeout-minutes'] <= 20,
   'full-app acceptance must have a positive timeout of at most 20 minutes')
   assert.ok(steps.indexOf(acceptance) > steps.indexOf(browser), 'Chromium must be installed before acceptance')
+  const realDb = requiredStep(steps, 'external-system-delete-bind-lock-protocol-real-db')
+  assert.ok(steps.indexOf(realDb) < steps.indexOf(acceptance), 'real-DB proof must precede full-app browser acceptance')
   const postgres = steps.find(step => step.uses === 'ankane/setup-postgres@v1')
   assert.ok(postgres && String(postgres.with?.['postgres-version']) === '14', 'reuse the PostgreSQL 14 installation')
   assert.ok(steps.indexOf(postgres) < steps.indexOf(acceptance), 'PostgreSQL binaries must already be installed')
@@ -870,6 +872,15 @@ function assertWorkflowContract(document) {
 
 test('formal synthetic acceptance and all three no-DB suites execute in the required CI lane', () => {
   assertWorkflowContract(workflow)
+})
+
+test('CI rejects browser acceptance masking the real-DB proof', () => {
+  const candidate = structuredClone(workflow)
+  const steps = candidate.jobs.test.steps
+  const acceptance = requiredStep(steps, acceptanceId)
+  steps.splice(steps.indexOf(acceptance), 1)
+  steps.splice(steps.indexOf(requiredStep(steps, 'external-system-delete-bind-lock-protocol-real-db')), 0, acceptance)
+  assert.throws(() => assertWorkflowContract(candidate), /real-DB proof must precede full-app browser acceptance/u)
 })
 
 test('CI contract rejects missing or skipped Node 20 acceptance and contracts', () => {
