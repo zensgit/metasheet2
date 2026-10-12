@@ -213,7 +213,7 @@
               />
               <el-input
                 v-else
-                :model-value="conditionRuleValueText(rule)"
+                :model-value="ruleScalarText(rule)"
                 size="small"
                 placeholder="比较值"
                 :disabled="readOnly"
@@ -235,6 +235,13 @@
               role="note"
               data-testid="approval-condition-rule-issue"
             >{{ ruleIssueText(rule) }}</p>
+            <!-- R-43 (B): a marked value the box shows EMPTY (so re-entering it is a real edit) is
+                 shown here read-only; plain-text interpolation, cut short. -->
+            <p
+              v-if="ruleStoredValueShown(rule)"
+              class="template-authoring__hint template-authoring__condition-rule-issue template-authoring__condition-rule-stored"
+              data-testid="approval-condition-rule-stored-value"
+            >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-condition-rule-stored-value-text">{{ conditionStoredValuePreview(rule.value) }}</span></p>
           </div>
         </template>
         <el-button
@@ -1486,9 +1493,11 @@ import type { ConditionRuleEdit, ConditionRuleOperator } from '../conditionEdit'
 import {
   conditionOperatorsFor,
   conditionRuleValueIssues,
+  conditionStoredValuePreview,
   conditionValueCopy,
   conditionValueIssueText,
   conditionValueKind,
+  conditionValueShowsBlank,
   formatConditionListText,
   isCurrentOptionValue,
   isOptionKind,
@@ -1650,7 +1659,10 @@ const ruleListTextBuffers = new WeakMap<ConditionRuleEdit, string>()
 function ruleField(rule: ConditionRuleEdit): ConditionValueField | null {
   const id = typeof rule.fieldId === 'string' ? rule.fieldId.trim() : ''
   const option = conditionFieldOptions.value.find((candidate) => candidate.id === id)
-  return option?.type ? { type: option.type, options: option.options ?? [] } : null
+  if (!option?.type) return null
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
 }
 function ruleKind(rule: ConditionRuleEdit): ConditionValueKind {
   return conditionValueKind(ruleField(rule))
@@ -1676,8 +1688,26 @@ function ruleOperatorChoices(rule: ConditionRuleEdit) {
   }
   return choices
 }
+function ruleIssues(rule: ConditionRuleEdit) {
+  return conditionRuleValueIssues(rule, ruleField(rule))
+}
 function ruleIssueText(rule: ConditionRuleEdit): string {
-  return conditionValueIssueText(conditionRuleValueIssues(rule, ruleField(rule)), isZh.value)
+  return conditionValueIssueText(ruleIssues(rule), isZh.value)
+}
+/**
+ * A free-entry value box (text / number / one-per-line list) shows a marked stored value EMPTY:
+ * `el-input` emits nothing when the typed text equals what it shows, so re-entering the value as
+ * displayed would change nothing. The stored value is never rewritten on load; it is shown
+ * read-only next to the box instead. Option pickers have their own invalid-value placeholders.
+ */
+function ruleValueShownBlank(rule: ConditionRuleEdit): boolean {
+  return !ruleIsOption(rule) && rule.operator !== 'isEmpty' && conditionValueShowsBlank(ruleIssues(rule))
+}
+function ruleStoredValueShown(rule: ConditionRuleEdit): boolean {
+  return ruleValueShownBlank(rule) && !isBlankRuleValue(rule.value)
+}
+function ruleScalarText(rule: ConditionRuleEdit): string {
+  return ruleValueShownBlank(rule) ? '' : conditionRuleValueText(rule)
 }
 function isBlankRuleValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
@@ -1760,6 +1790,7 @@ function ruleListText(rule: ConditionRuleEdit): string {
   const list = ruleValueList(rule)
   const buffered = ruleListTextBuffers.get(rule)
   if (buffered !== undefined && sameConditionList(parseConditionListText(buffered, kind), list)) return buffered
+  if (ruleValueShownBlank(rule)) return ''
   if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
   return formatConditionListText(list)
 }
@@ -2226,6 +2257,10 @@ const { node } = toRefs(props)
 .template-authoring__condition-rule-issue {
   flex-basis: 100%;
   margin: 0;
+}
+
+.template-authoring__condition-rule-stored {
+  overflow-wrap: anywhere;
 }
 
 .template-authoring__condition-rule {

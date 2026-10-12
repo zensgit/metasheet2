@@ -1614,12 +1614,22 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     )
     expect(stale.input('approval-form-field-inspector-visibility-value').value).toBe('')
     expect(issueText(stale)).toContain(conditionValueIssueMessage('not-text', false))
+    // gate r3 F3-1 / NIT-e: the saved value is shown read-only next to the empty box
+    const storedNote = (mounted: typeof stale): string | null => {
+      try {
+        return mounted.q('[data-testid="approval-form-field-inspector-visibility-stored-value-text"]').textContent
+      } catch {
+        return null // `q` throws when nothing is rendered
+      }
+    }
+    expect(storedNote(stale)).toBe('5')
     expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).not.toContain('field_2')
     await stale.typeText('approval-form-field-inspector-visibility-value', '5')
     await stale.blur('approval-form-field-inspector-visibility-value')
     expect(stale.commands).toHaveLength(1)
     expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: '5' })
     expect(issueText(stale)).toBe('')
+    expect(storedNote(stale)).toBeNull()
     expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).toContain('field_2')
 
     const staleList = await mountInspector(
@@ -1628,11 +1638,13 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     )
     expect((staleList.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement).value).toBe('')
     expect(issueText(staleList)).toContain(conditionValueIssueMessage('not-text', false))
+    expect(storedNote(staleList)).toBe('[1,2]')
     await staleList.typeText('approval-form-field-inspector-visibility-values', '1\n2')
     await staleList.blur('approval-form-field-inspector-visibility-values')
     expect(staleList.commands).toHaveLength(1)
     expect(buildVisibilityRule(visibilityOf(staleList, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'in', values: ['1', '2'] })
     expect(issueText(staleList)).toBe('')
+    expect(storedNote(staleList)).toBeNull()
   })
 
   it('multi-select dependency offers only effective operators; a stored eq is shown disabled and marked', async () => {

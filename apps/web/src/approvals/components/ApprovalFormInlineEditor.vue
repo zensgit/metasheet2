@@ -609,7 +609,9 @@
             </div>
             <div v-if="field.visibility.dependsOnFieldId" class="template-authoring__hint">
               仅当依赖字段满足条件时才显示本字段。
-              <template v-if="visibilityKindOf(field) === 'text' && (field.visibility.operator === 'eq' || field.visibility.operator === 'neq')">
+              <!-- R-43 gate r3 NIT-c: not while a marked stored value is shown empty (the box is empty
+                   but what is saved is not an empty value). -->
+              <template v-if="visibilityKindOf(field) === 'text' && (field.visibility.operator === 'eq' || field.visibility.operator === 'neq') && !visibilityIssueText(field)">
                 比较值留空表示「{{ field.visibility.operator === 'eq' ? '等于' : '不等于' }}空值」；要取消规则请把依赖字段设为「无」。
               </template>
             </div>
@@ -619,6 +621,11 @@
               role="note"
               data-testid="approval-field-visibility-issue"
             >{{ visibilityIssueText(field) }}</div>
+            <div
+              v-if="visibilityStoredValueNote(field) !== null"
+              class="template-authoring__hint template-authoring__stored-value"
+              data-testid="approval-field-visibility-stored-value"
+            >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-field-visibility-stored-value-text">{{ visibilityStoredValueNote(field) }}</span></div>
           </el-form-item>
         </div>
       </div>
@@ -676,6 +683,7 @@ import { computed } from 'vue'
 import type { FormFieldVisibilityOperator, FormOption } from '../../types/approval'
 import {
   buildVisibilityRule,
+  visibilityStoredValuePreview,
   visibilityDependencyValueField,
   visibilityDraftForDependencyChange,
   visibilityDraftList,
@@ -816,6 +824,11 @@ function visibilityOperatorChoices(field: FieldAuthoringDraft) {
     })
   }
   return choices
+}
+/** R-43 (B): the saved value its box shows EMPTY because the rule is marked (read-only), or null. */
+function visibilityStoredValueNote(field: FieldAuthoringDraft): string | null {
+  if (!field.visibility.dependsOnFieldId) return null
+  return visibilityStoredValuePreview(field.visibility, visibilityDependency(field))
 }
 function visibilityIssueText(field: FieldAuthoringDraft): string {
   if (!field.visibility.dependsOnFieldId) return ''
@@ -1000,6 +1013,10 @@ function detailColumnRowKey(row: DetailColumnDraft): string {
 
 .template-authoring__hint--issue {
   color: var(--el-color-danger);
+}
+
+.template-authoring__stored-value {
+  overflow-wrap: anywhere;
 }
 
 .template-authoring__detail {

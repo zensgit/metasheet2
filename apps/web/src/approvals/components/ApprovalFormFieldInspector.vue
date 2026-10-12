@@ -739,6 +739,13 @@
           >
             {{ visibilityIssueText }}
           </p>
+          <!-- R-43 (B): a marked value its box shows EMPTY (re-entering it is a real edit) is shown
+               here read-only; plain-text interpolation, cut short. -->
+          <p
+            v-if="visibilityStoredValueNote !== null"
+            class="approval-form-field-inspector__hint approval-form-field-inspector__stored-value"
+            data-testid="approval-form-field-inspector-visibility-stored-value"
+          >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-form-field-inspector-visibility-stored-value-text">{{ visibilityStoredValueNote }}</span></p>
         </template>
       </section>
 
@@ -920,6 +927,7 @@ import { DETAIL_LEAF_FIELD_TYPES, type DetailColumnDraft } from '../detailField'
 import type { FormFieldType, FormOption } from '../../types/approval'
 import {
   buildVisibilityRule,
+  visibilityStoredValuePreview,
   visibilityDraftForDependencyChange,
   visibilityDraftList,
   visibilityDraftListText,
@@ -1064,6 +1072,12 @@ const visibilityIssueText = computed(() => {
     visibilityRuleValueIssues(buildVisibilityRule(current.visibility), visibilityDependency.value),
     isZh.value,
   )
+})
+
+const visibilityStoredValueNote = computed(() => {
+  const current = props.field
+  if (!current || !current.visibility.dependsOnFieldId) return null
+  return visibilityStoredValuePreview(current.visibility, visibilityDependency.value)
 })
 
 // Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
@@ -2176,6 +2190,10 @@ defineExpose({ settlePendingEdits, isDirty })
 .approval-form-field-inspector__error {
   font-size: 12px;
   color: var(--el-color-danger);
+}
+
+.approval-form-field-inspector__stored-value {
+  overflow-wrap: anywhere;
 }
 
 .approval-form-field-inspector__option-choices {

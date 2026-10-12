@@ -197,11 +197,17 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
       expect(CJK.test(rendered), key).toBe(false)
       expect(rendered).not.toContain('opt_')
     }
-    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number', 'not-text'] as const) {
+    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number', 'not-text', 'not-date'] as const) {
       expect(CJK.test(conditionValueIssueMessage(issue, true))).toBe(true)
       expect(CJK.test(conditionValueIssueMessage(issue, false))).toBe(false)
     }
     expect(CONDITION_VALUE_COPY_ZH.staleListHint(2)).toContain('2')
+    // Gate r3 F3-1: the stored-value note's prefix is values-free (the value renders outside it).
+    expect(CJK.test(CONDITION_VALUE_COPY_ZH.storedValuePrefix)).toBe(true)
+    expect(CONDITION_VALUE_COPY_ZH.storedValuePrefix).not.toMatch(/\d/)
+    expect(CONDITION_VALUE_COPY_EN.storedValuePrefix).not.toMatch(/\d/)
+    expect(CONDITION_VALUE_COPY_ZH.issueNotDate).not.toMatch(/\d/)
+    expect(CONDITION_VALUE_COPY_EN.issueNotDate).not.toMatch(/\d/)
     // Gate r1 P3-4: a multi-select eq never matches but neq ALWAYS matches — the copy says both.
     expect(CONDITION_VALUE_COPY_ZH.issueOperatorNotEffective).toContain('永远成立')
     expect(CONDITION_VALUE_COPY_EN.issueOperatorNotEffective).toContain('always matches')

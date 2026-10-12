@@ -36,6 +36,8 @@ export interface ConditionFieldOption {
   label: string
   type?: FormFieldType
   options?: readonly FormOption[]
+  /** R-43 (B): the submitted form value is a list (a multi-person picker). */
+  listValued?: boolean
 }
 
 /**

@@ -19,8 +19,10 @@ import { CONDITION_RULE_OPERATORS } from './conditionEdit'
 // holds a single value, a LIST under a single-value operator (eq/neq/gt/gte/lt/lte — eq never
 // matches, neq always matches; an empty list included), a non-string value compared strictly
 // (eq/neq/in) against a text-type field (e.g. a number left behind when the field was retyped from
-// number to text: `'5' === 5` never matches), or an operator a multi-select cannot use. Marking is
-// display-only: never a save/publish blocker, never a rewrite.
+// number to text: `'5' === 5` never matches), a non-date value ordered (gt/gte/lt/lte) against a
+// date field (the executor turns the date into a timestamp, so the result never depends on the
+// date), or an operator a multi-select cannot use. Marking is display-only: never a save/publish
+// blocker, never a rewrite.
 
 export type ConditionValueKind = 'option-single' | 'option-multi' | 'number' | 'text'
 
@@ -28,6 +30,12 @@ export type ConditionValueKind = 'option-single' | 'option-multi' | 'number' | '
 export interface ConditionValueField {
   type: FormFieldType
   options?: readonly FormOption[]
+  /**
+   * The submitted form value is a LIST for this field although its kind is not option-multi (a
+   * multi-person picker). The executor's `in` then also matches a single stored value
+   * (`formValue.includes(value)`), so a scalar `in` is not marked there.
+   */
+  listValued?: boolean
 }
 
 export function conditionValueKind(field: ConditionValueField | null | undefined): ConditionValueKind {
@@ -120,6 +128,7 @@ export type ConditionValueIssue =
   | 'list-not-scalar'
   | 'not-number'
   | 'not-text'
+  | 'not-date'
 
 function isBlankValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
@@ -127,6 +136,25 @@ function isBlankValue(value: unknown): boolean {
 
 function isFiniteNumber(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value)
+}
+
+function isDateField(field: ConditionValueField): boolean {
+  return field.type === 'date' || field.type === 'datetime'
+}
+
+/**
+ * True when gt/gte/lt/lte can order this stored value against a date: the executor turns a
+ * `YYYY-MM-DD…` string that parses as a date into a timestamp (the same thing it does to the date
+ * form value). Anything else — a number, a numeric string, a malformed date — is compared as-is
+ * against that timestamp, so the outcome never depends on the date entered.
+ */
+function isComparableDateValue(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const text = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}(?:$|[T\s].*)/.test(text)) return false
+  // Lenient on purpose (the mark is advisory): a browser that rejects the space-separated form the
+  // server accepts must not mark a working rule, so the `T` form is tried as well.
+  return !Number.isNaN(Date.parse(text)) || !Number.isNaN(Date.parse(text.replace(' ', 'T')))
 }
 
 /**
@@ -140,6 +168,7 @@ function valueIssues(
   numberCheck: (value: unknown) => boolean,
   strict: boolean,
 ): ConditionValueIssue[] {
+  // `strict === false` ⇔ gt/gte/lt/lte (branch rules only; visibility rules have no ordering).
   const kind = conditionValueKind(field)
   const present = values.filter((value) => !isBlankValue(value))
   const issues: ConditionValueIssue[] = []
@@ -151,6 +180,9 @@ function valueIssues(
   }
   if (kind === 'text' && strict && present.some((value) => typeof value !== 'string')) {
     issues.push('not-text')
+  }
+  if (!strict && isDateField(field) && present.some((value) => !isComparableDateValue(value))) {
+    issues.push('not-date')
   }
   return issues
 }
@@ -177,8 +209,9 @@ export function visibilityRuleValueIssues(
 
 /**
  * Why a stored BRANCH rule can never take effect against `field`. Mirrors the backend executor:
- * `in` needs an array (except on a multi-select, whose array form value `includes` a scalar);
- * gt/gte/lt/lte normalise a numeric string, eq/neq/in compare a number strictly.
+ * `in` needs an array (except where the form value itself is an array — a multi-select, a
+ * multi-person picker — which `includes` a scalar); gt/gte/lt/lte normalise a
+ * numeric string (but a date field only orders against a date string), eq/neq/in compare strictly.
  */
 export function conditionRuleValueIssues(
   rule: { operator: ConditionRule['operator']; value?: unknown },
@@ -195,7 +228,7 @@ export function conditionRuleValueIssues(
   if (rule.operator !== 'in' && Array.isArray(value)) return ['list-not-scalar']
   if (Array.isArray(value) && value.length === 0) return []
   const issues: ConditionValueIssue[] = []
-  if (rule.operator === 'in' && !Array.isArray(value) && kind !== 'option-multi') {
+  if (rule.operator === 'in' && !Array.isArray(value) && kind !== 'option-multi' && !field.listValued) {
     issues.push('in-not-list')
   }
   const values = Array.isArray(value) ? value : [value]
@@ -219,6 +252,9 @@ export interface ConditionValueCopy {
   issueListNotScalar: string
   issueNotNumber: string
   issueNotText: string
+  issueNotDate: string
+  /** Prefix of the read-only note under a box shown empty because its stored value is marked. */
+  storedValuePrefix: string
   chooseOption: string
   chooseOptions: string
   noOptions: string
@@ -241,6 +277,8 @@ export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
   issueListNotScalar: '这个条件类型只能比较单个值，当前保存的是一组值，无法按预期生效，请重新填写或选择。',
   issueNotNumber: '数值字段的比较值不是数字，此条件不会生效，请重新填写。',
   issueNotText: '比较值的类型与字段类型不一致（字段可能改过类型），此条件不会生效，请重新填写。',
+  issueNotDate: '日期字段只能和日期比较大小，当前比较值不是日期，比较结果与所填日期无关，无法按预期生效，请按「年-月-日」重新填写。',
+  storedValuePrefix: '原值：',
   chooseOption: '请选择选项',
   chooseOptions: '请选择一个或多个选项',
   noOptions: '依赖字段还没有选项，请先添加选项。',
@@ -263,6 +301,8 @@ export const CONDITION_VALUE_COPY_EN: ConditionValueCopy = {
   issueListNotScalar: 'This condition type compares a single value, but a list of values is saved, so it does not work as intended. Enter or choose the value again.',
   issueNotNumber: 'The value for a number field is not a number, so this condition never takes effect. Enter it again.',
   issueNotText: 'The saved value does not match the field type (the field type may have changed), so this condition never takes effect. Enter it again.',
+  issueNotDate: 'A date field can only be compared with a date. The saved value is not a date, so the result does not depend on the date entered and the condition does not work as intended. Enter it again as year-month-day.',
+  storedValuePrefix: 'Saved value: ',
   chooseOption: 'Choose an option',
   chooseOptions: 'Choose one or more options',
   noOptions: 'The field has no options yet. Add options first.',
@@ -296,6 +336,8 @@ export function conditionValueIssueMessage(issue: ConditionValueIssue, isZh: boo
       return copy.issueNotNumber
     case 'not-text':
       return copy.issueNotText
+    case 'not-date':
+      return copy.issueNotDate
   }
 }
 
@@ -304,4 +346,43 @@ export function conditionValueIssueText(issues: readonly ConditionValueIssue[], 
   if (issues.length === 0) return ''
   const copy = conditionValueCopy(isZh)
   return `${copy.issueTitle}${issues.map((issue) => conditionValueIssueMessage(issue, isZh)).join(' ')}`
+}
+
+// --- marked values the text boxes show EMPTY ----------------------------------------------------
+
+/**
+ * Issues whose stored value a free-text box shows EMPTY instead of its text. Element Plus's
+ * `el-input` emits nothing when the typed text equals the text it already shows, so re-entering a
+ * marked value exactly as displayed (`5` for a number on a text field, `a` for a single value under
+ * `in`, `a` for a one-entry list under `eq`) would change nothing and keep the mark. Shown empty,
+ * re-entering it is a real edit that stores the right shape. The stored value is never rewritten on
+ * load; the editors show it separately as a read-only note (see `conditionStoredValuePreview`).
+ */
+const BLANKED_TEXT_ISSUES: readonly ConditionValueIssue[] = ['not-text', 'in-not-list', 'list-not-scalar']
+
+export function conditionValueShowsBlank(issues: readonly ConditionValueIssue[]): boolean {
+  return issues.some((issue) => BLANKED_TEXT_ISSUES.includes(issue))
+}
+
+const STORED_VALUE_PREVIEW_MAX = 60
+
+/**
+ * Read-only preview of a stored condition value (rendered as plain text, never as HTML): a string
+ * as-is, anything else as JSON so `5` and `'5'`, `[1,2]` and `'1,2'` stay distinguishable. Line
+ * breaks are flattened and the text is cut to a short length with an ellipsis.
+ */
+export function conditionStoredValuePreview(value: unknown, maxLength = STORED_VALUE_PREVIEW_MAX): string {
+  let text: string
+  if (typeof value === 'string') {
+    text = value
+  } else {
+    try {
+      text = JSON.stringify(value) ?? String(value)
+    } catch {
+      text = String(value)
+    }
+  }
+  const flat = text.replace(/\s*[\r\n]+\s*/g, ' ⏎ ')
+  const chars = Array.from(flat)
+  return chars.length > maxLength ? `${chars.slice(0, maxLength).join('')}…` : flat
 }

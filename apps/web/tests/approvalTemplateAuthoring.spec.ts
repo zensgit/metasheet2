@@ -183,7 +183,14 @@ const ElInput = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // R-43 gate r3 (F3-1) stub fidelity: Element Plus 2.11.8 `ElInput.handleInput` emits nothing
+      // when the typed text equals the text it already shows (`String(modelValue ?? '')`), so
+      // re-entering a value exactly as displayed is NOT an edit. The stub must not paper over that.
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -6208,6 +6215,14 @@ describe('TemplateAuthoringView', () => {
       expect(eqChoice?.disabled).toBe(true)
       expect(eqChoice?.textContent).toContain(CONDITION_VALUE_COPY_EN.notApplicableSuffix.trim())
       for (const index of [5, 6, 7]) expect(issue(index)).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      // Gate r3 F3-1: a marked value in a free-text box shows EMPTY; the saved value is a read-only note.
+      const storedNote = (index: number) => inRule(scope, index, 'approval-condition-rule-stored-value-text')?.textContent ?? null
+      expect(inRule(scope, 3, 'approval-condition-rule-values')!.value).toBe('')
+      expect(storedNote(3)).toBe('a')
+      expect((inRule(scope, 6, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(storedNote(6)).toBe('["a","b"]')
+      // option pickers / number boxes keep their own placeholders (no note); an unmarked rule has none
+      for (const index of [0, 1, 2, 4, 5]) expect(storedNote(index)).toBeNull()
       // The single-option picker shows the invalid placeholder for the list (never an option picked).
       const listPicker = inRule(scope, 5, 'approval-condition-rule-option-value')!
       expect(listPicker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
@@ -6315,7 +6330,104 @@ describe('TemplateAuthoringView', () => {
         ])
         expect(typeof saved[0].value).toBe('number')
       })
+
+      // Gate r3 F3-1: Element Plus emits nothing when the typed text equals what the box shows (the
+      // ElInput stub above is faithful to that), so a marked value is shown EMPTY — re-entering it
+      // exactly as it was saved is then a real edit that stores the working shape.
+      it(`${host}: gate r3 F3-1 — re-entering a marked value as it was saved corrects it (box empty, saved value shown read-only)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: 'a' }, // scalar `in` (pre-R-43 shape)
+          { fieldId: 'amount', operator: 'in', value: 5 }, // scalar `in` on a number field
+          { fieldId: 'reason', operator: 'eq', value: ['a'] }, // one-entry list under eq
+          { fieldId: 'reason', operator: 'eq', value: 5 }, // number on a text field
+          { fieldId: 'reason', operator: 'in', value: [1, 2] }, // numbers in a text `in`
+          { fieldId: 'reason', operator: 'gt', value: 3 }, // control: in effect, never marked
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        const box = (index: number) => (
+          inRule(scope, index, 'approval-condition-rule-values') ?? inRule(scope, index, 'approval-condition-rule-value')
+        ) as HTMLInputElement | HTMLTextAreaElement
+        const storedNote = (index: number) => inRule(scope, index, 'approval-condition-rule-stored-value-text')?.textContent ?? null
+        const issue = (index: number) => inRule(scope, index, 'approval-condition-rule-issue')?.textContent ?? null
+        expect(issue(0)).toBe(conditionValueIssueText(['in-not-list'], false))
+        expect(issue(1)).toBe(conditionValueIssueText(['in-not-list'], false))
+        expect(issue(2)).toBe(conditionValueIssueText(['list-not-scalar'], false))
+        expect(issue(3)).toBe(conditionValueIssueText(['not-text'], false))
+        expect(issue(4)).toBe(conditionValueIssueText(['not-text'], false))
+        expect(issue(5)).toBeNull()
+        expect([0, 1, 2, 3, 4].map((index) => box(index).value)).toEqual(['', '', '', '', ''])
+        expect([0, 1, 2, 3, 4].map(storedNote)).toEqual(['a', '5', '["a"]', '5', '[1,2]'])
+        expect(inRule(scope, 0, 'approval-condition-rule-stored-value')!.textContent)
+          .toBe(`${CONDITION_VALUE_COPY_EN.storedValuePrefix}a`)
+        expect(box(5).value).toBe('3')
+        expect(storedNote(5)).toBeNull()
+
+        // re-enter each value exactly as it was saved
+        for (const [index, text] of [[0, 'a'], [1, '5'], [2, 'a'], [3, '5'], [4, '1\n2'], [5, '3']] as const) {
+          await type(box(index), text)
+        }
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-stored-value"]'))).toBe(false)
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'reason', operator: 'in', value: ['a'] },
+          { fieldId: 'amount', operator: 'in', value: [5] },
+          { fieldId: 'reason', operator: 'eq', value: 'a' },
+          { fieldId: 'reason', operator: 'eq', value: '5' },
+          { fieldId: 'reason', operator: 'in', value: ['1', '2'] },
+          // the unmarked gt box showed '3': re-typing it is no edit, so the number stays as saved
+          { fieldId: 'reason', operator: 'gt', value: 3 },
+        ])
+      })
+
+      it(`${host}: gate r3 F3-1 — loading a marked rule never rewrites it (an untouched save is byte-identical)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: 'a' },
+          { fieldId: 'reason', operator: 'eq', value: ['a'] },
+          { fieldId: 'reason', operator: 'eq', value: 5 },
+        ]
+        await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        expect(await saveRules()).toStrictEqual(rules)
+      })
     }
+
+    it('gate r3 F3-2: a scalar in on a MULTI-person field takes effect (not marked); on a single-person field it is', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'signers', operator: 'in', value: 'u1' },
+        { fieldId: 'reviewer', operator: 'in', value: 'u1' },
+      ]
+      const scope = await mountTyped(rules.map((rule) => ({ ...rule })), false, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+      ])
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('u1')
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['in-not-list'], false))
+      expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('')
+      expect(await saveRules()).toStrictEqual(rules)
+    })
+
+    it('gate r3 F3-3: gt on a DATE field with a non-date value is marked; re-typing the number keeps the mark, a date clears it', async () => {
+      const scope = await mountTyped([
+        { fieldId: 'due', operator: 'gt', value: 3 },
+        { fieldId: 'due', operator: 'lte', value: '2026-01-01' },
+      ], false, [{ id: 'due', type: 'date', label: '截止日期' }])
+      const notDate = conditionValueIssueText(['not-date'], false)
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')).toBeNull()
+      const box = inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement
+      // not a shape problem: the box shows what is saved (no read-only note)
+      expect(box.value).toBe('3')
+      expect(inRule(scope, 0, 'approval-condition-rule-stored-value')).toBeNull()
+      await type(box, '3')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      await type(box, '20260101')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      await type(box, '2026-01-01')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      expect(await saveRules()).toStrictEqual([
+        { fieldId: 'due', operator: 'gt', value: '2026-01-01' },
+        { fieldId: 'due', operator: 'lte', value: '2026-01-01' },
+      ])
+    })
 
     it('gate r2 P3-b: an EMPTY list stored under eq/neq is marked and saved unchanged', async () => {
       const rules: Rule[] = [
@@ -6482,6 +6594,17 @@ describe('TemplateAuthoringView', () => {
       expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(notText)
       // gt/gte/lt/lte normalise both sides in the executor — still in effect, never marked
       expect(inRule(scope, 2, 'approval-condition-rule-issue')).toBeNull()
+      // Gate r3 F3-1 / NIT-e: the branch boxes show EMPTY too (aligned with the visibility box), and
+      // every marked value is shown read-only next to its box.
+      expect((inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('')
+      expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('5')
+      expect(inRule(scope, 1, 'approval-condition-rule-stored-value-text')?.textContent).toBe('[1,2]')
+      expect((inRule(scope, 2, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('3')
+      expect(inRule(scope, 2, 'approval-condition-rule-stored-value')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('5')
+      // Gate r3 NIT-c: no 「比较值留空表示等于空值」 while the empty box stands for a marked saved value.
+      expect(noteRow().textContent).not.toContain('比较值留空')
 
       let fields = await saveFields()
       expect(fields.find((field: any) => field.id === 'amount').type).toBe('text')
@@ -6497,6 +6620,10 @@ describe('TemplateAuthoringView', () => {
       await type(inRule(scope, 1, 'approval-condition-rule-values'), '1\n2')
       expect(inNote('approval-field-visibility-issue')).toBeNull()
       expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+      expect(container!.querySelector('[data-testid="approval-condition-rule-stored-value"]')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      // NIT-c control: the hint is back once the rule is a working text comparison
+      expect(noteRow().textContent).toContain('比较值留空')
       fields = await saveFields()
       expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: '5' })
       payload = updateTemplateSpy.mock.calls[0]?.[1] as any

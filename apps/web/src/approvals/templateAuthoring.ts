@@ -38,11 +38,15 @@ import {
 } from './detailField'
 import { validateRecordLinkPinAgainstLoadedCatalog, visibilityReferenceBaseFieldId } from './recordLinkField'
 import {
+  conditionStoredValuePreview,
   conditionValueKind,
+  conditionValueShowsBlank,
   formatConditionListText,
+  isOptionKind,
   parseConditionListText,
   sameConditionList,
   visibilityOperatorsFor,
+  visibilityRuleValueIssues,
   type ConditionValueField,
   type ConditionValueKind,
 } from './conditionValueTyping'
@@ -531,12 +535,39 @@ export function buildVisibilityRule(visibility: FieldVisibilityDraft): FormField
 // copies arrays (the form command layer only shallow-copies `visibility`). Normalisation keeps any
 // value a plain trimmed string expresses losslessly in `valueText` alone (three-key shape).
 
-/** Draft field → condition-value description (options parsed for select / multi-select). */
-export function conditionValueFieldFromDraft(field: Pick<FieldAuthoringDraft, 'type' | 'optionsText'>): ConditionValueField {
-  return {
+/**
+ * Draft field → condition-value description (options parsed for select / multi-select). A
+ * multi-person picker submits a LIST value (`listValued`, set only when true). An attachment field
+ * (also list-valued) never reaches here: it is not an authorable type.
+ */
+export function conditionValueFieldFromDraft(
+  field: Pick<FieldAuthoringDraft, 'type' | 'optionsText'> & Partial<Pick<FieldAuthoringDraft, 'userSelection'>>,
+): ConditionValueField {
+  const description: ConditionValueField = {
     type: field.type,
     options: field.type === 'select' || field.type === 'multi-select' ? parseOptionsText(field.optionsText) : [],
   }
+  if (field.type === 'user' && field.userSelection === 'multi') {
+    description.listValued = true
+  }
+  return description
+}
+
+/**
+ * Read-only preview of a stored visibility value that its free-entry box shows EMPTY because the
+ * rule is marked (`conditionValueShowsBlank`), so the author still sees what was saved; null when
+ * the box shows the value itself (or the dependency is an option field, whose pickers carry their
+ * own invalid-value placeholders).
+ */
+export function visibilityStoredValuePreview(
+  visibility: FieldVisibilityDraft,
+  dependency: ConditionValueField | null,
+): string | null {
+  if (!dependency || isOptionKind(conditionValueKind(dependency))) return null
+  const rule = buildVisibilityRule(visibility)
+  if (!rule || rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return null
+  if (!conditionValueShowsBlank(visibilityRuleValueIssues(rule, dependency))) return null
+  return conditionStoredValuePreview(rule.operator === 'in' ? rule.values : rule.value)
 }
 
 /**
