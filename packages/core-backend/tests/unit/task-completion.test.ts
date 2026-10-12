@@ -471,10 +471,15 @@ describe('applyCompleteForAll (M5 PR-4a slice 1, G1)', () => {
     expect(result).toEqual({ rows: [row('a', T0), row('b', null)], done: true, via: 'formula', events: [] })
   })
 
-  it('an open all-mode task whose rows are all stamped already: nothing to stamp, so no event (done is still computed)', () => {
+  it('an open all-mode task whose rows are all stamped already: no row changes, the task flips to done and one completed with payload { scope: all } is recorded (design §3.1: one completed on the flip)', () => {
     const rows = [row('a', T0), row('b', T0)]
     const result = applyCompleteForAll({ mode: 'all', rows, actorId: CREATOR, createdBy: CREATOR, now: NOW, wasDone: false })
-    expect(result).toEqual({ rows: [row('a', T0), row('b', T0)], done: true, via: 'formula', events: [] })
+    expect(result).toEqual({
+      rows: [row('a', T0), row('b', T0)],
+      done: true,
+      via: 'formula',
+      events: [{ type: 'completed', userId: CREATOR, occurredAt: NOW, payload: { scope: 'all' } }],
+    })
   })
 
   it('any mode and a task without assignees: exactly what applyComplete gives the creator, done or not, assignee or not', () => {

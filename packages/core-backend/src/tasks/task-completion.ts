@@ -174,9 +174,11 @@ export function applyComplete(input: {
  * 2. `wasDone` ⇒ no-op, no event, in every mode, even when a row is still null (task-c A6: an
  *    assignee added to a done task, then the mode switched to `all`);
  * 3. `all` mode with at least one assignee: every null row is stamped with the SAME `now`, a row that
- *    already holds a completion instant keeps it, and one `completed` is recorded for the actor with
- *    payload `{ scope: 'all' }` when at least one row was stamped (no change ⇒ no event, as in
- *    `applyComplete`);
+ *    already holds a completion instant keeps it, the task is done, and one `completed` is recorded
+ *    for the actor with payload `{ scope: 'all' }` (design §3.1 events row, §4.1: one `completed` on
+ *    the flip). That holds when no row was left to stamp too: past the `wasDone` branch every call
+ *    here flips the task, so it never flips without its event. `applyComplete` keeps its own
+ *    "no stamped row ⇒ no event" rule for the default path;
  * 4. otherwise (`any` mode, or no assignee): `applyComplete` itself, result for result.
  */
 export function applyCompleteForAll(input: {
@@ -198,19 +200,10 @@ export function applyCompleteForAll(input: {
   if (mode !== 'all' || rows.length === 0) {
     return applyComplete(input)
   }
-  let changed = false
-  const newRows = rows.map((row) => {
-    if (isCompleted(row)) return { ...row }
-    changed = true
-    return { ...row, completedAt: now }
-  })
-  const done = computeTaskDone({ mode, assigneeRows: newRows })
-  if (!changed) {
-    return { rows: newRows, done, via: 'formula', events: [] }
-  }
+  const newRows = rows.map((row) => (isCompleted(row) ? { ...row } : { ...row, completedAt: now }))
   return {
     rows: newRows,
-    done,
+    done: computeTaskDone({ mode, assigneeRows: newRows }),
     via: 'formula',
     events: [{ type: 'completed', userId: actorId, occurredAt: now, payload: { scope: 'all' } }],
   }

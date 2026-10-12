@@ -688,7 +688,8 @@ export async function completeTask(input: { orgId: string; actorId: string; task
   const counts = taskCountsSignal()
   const result = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    const { roles, assignees: rows } = await loadRowRoles(db, { ...input, createdBy: task.createdBy })
+    // The request's `scope` stays out of the role lookup: only the three fields it reads are passed.
+    const { roles, assignees: rows } = await loadRowRoles(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy })
     // Lock §6.2: zero-assignee tasks are completed by the creator only. Refused here as the same
     // 404 as any other missing ability, before `applyComplete` (which throws for that case).
     if (!canChangeCompletion(roles, 'complete', rows.length)) fail(404, 'NOT_FOUND')

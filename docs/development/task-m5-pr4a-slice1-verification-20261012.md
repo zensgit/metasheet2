@@ -2,7 +2,7 @@
 
 - 设计：Draft #6332，分支 `claude/tasks-m5-pr4a`，head `7f1c4c536f`，文件 `docs/development/task-m5-pr4a-backend-design-20261010.md`（冻结稿 v4 及其后两次文档修订）。本切片按其 §1.3 切片 1、§3.1、§4.1、§4.3、§4.4、§5、§6.2 的 G1 行与 §7.1 的 `[a-01]`–`[a-05]`、`[a-24]`、`[a-37]` 实现。锁：`docs/development/task-feature-design-lock-20260917.md`（main 版）。
 - 裁定只按日期与条目号引用：owner 2026-10-09 六项之第 3 项（G1 是 PR-4a 的第一片，先于重复任务的派生；只限创建人；任务已完成时再完成是空操作，不写第二条事件）；owner 2026-10-10（M5 从 PR-4a 的冻结开始，只起 Draft，不合并，不对任何环境应用 DDL）。
-- 分支：`claude/tasks-m5-pr4a-s1`，从 `origin/main` `906840c74c` 开出。两个提交：代码与测试一个，本记录一个。不推送、不开 PR、不合并；本切片没有迁移、没有 DDL、没有新开关，也不打开任何 `TASKS_*` 开关。
+- 分支：`claude/tasks-m5-pr4a-s1`，从 `origin/main` `906840c74c` 开出。两个提交：代码与测试一个，本记录一个；修复轮 1 另加一个提交（代码、测试与本记录的 §9，见 §9）。不推送、不开 PR、不合并；本切片没有迁移、没有 DDL、没有新开关，也不打开任何 `TASKS_*` 开关。
 - 本地环境：Node 25.9.0（CI 与另一台机器是 Node 20），`node_modules` 是指向主检出的符号链接，没有 `pnpm install`。真库在另一台机器上跑：PostgreSQL 16.15，Node 20.20.2，那里用的都是一次性的工作树与库，用完即删（§5 末行）。变异驱动、同步脚本与临时 tsconfig 都不入库。
 
 ## 1. 文件
@@ -25,7 +25,7 @@
 
 - **判定顺序（§3.1）**：全部在结构锁内：取任务（404）→ 角色集与 `canChangeCompletion(roles, 'complete', n)`（404）→ 解析 `scope`（422 `INVALID_SCOPE`）→ `scope === 'all'` 时 `canCompleteForAll`（404）→ 纯函数 → 写。路由只取原样字段，所以看不见任务的人、能看不能完成的人带非法 `scope` 都得到与任务不存在相同的 404。
 - **`scope` 解析（`[a-01]`）**：缺省（字段不存在）为 `'self'`；出现但不是 `'self'` / `'all'` 的值（含 `null`、数字、大小写不同的字符串、数组）一律 422。reopen 的解析不动。
-- **`applyCompleteForAll`（§4.1）**：分支顺序为：非创建人抛错 → `wasDone` 为真即空操作（任何模式，含仍有空行的 A6 形）→ `all` 模式且至少一名负责人：所有空行取同一个 `now`，已有时刻保留，至少填了一行时给一条 `completed`，payload `{ scope: 'all' }`（`[a-03]`）→ 其余（`any` 模式、零负责人）原样委托 `applyComplete`（`[a-04]`，结果逐项相同，事件不带 payload）。
+- **`applyCompleteForAll`（§4.1）**：分支顺序为：非创建人抛错 → `wasDone` 为真即空操作（任何模式，含仍有空行的 A6 形）→ `all` 模式且至少一名负责人：所有空行取同一个 `now`，已有时刻保留，给一条 `completed`（修复轮 1 起不论是否填了行，§3 第 6 条），payload `{ scope: 'all' }`（`[a-03]`）→ 其余（`any` 模式、零负责人）原样委托 `applyComplete`（`[a-04]`，结果逐项相同，事件不带 payload）。
 - **时刻（`[a-37]`）**：锁内取一次应用时钟 `now`，行、任务的 `completed_at` 与 `completed` 的 `occurred_at` 都用它。
 - **详情（`[a-05]`）**：`canCompleteForAll` = `canCompleteForAll(...)` ∧ 任务 open ∧ `all` 模式 ∧ 至少一名负责人；放在详情对象的末尾。
 - **`version`（§4.3）**：G1 的翻转 +1，空操作不变。
@@ -40,7 +40,7 @@
 3. **「逐行取时」变异的两种写法**：§5 说把同一个 `now` 换成逐行取时 ⇒ g1-creator-all 红。纯函数里逐行 `new Date()` 的写法（M05a）在真库里几乎总落在同一毫秒，g1-creator-all 抓不到它（两轮变异里该格都没有变红），由单测格「every stamped row carries the now argument」等 4 格杀死（该格用假时钟把系统时间放在别处）。逐行取库时钟的写法（M05b，`clock_timestamp()`）让 g1-creator-all、g1-keep-first、g1-concurrent 变红。§5 那句只对后一种写法成立。
 4. **§5 表之外加的格**：真库 g1-signals（G1 的 `completed` 经 PR-3b 入队给除创建人之外的每个成员各一行，每名负责人提交后各收一条红点信号，重复调用不入队、不发信号；对应 §1.3 切片 1 的回归行 `M4|24` 与 `M4|26`）；g1-follower / g1-outsider 一格里另加清单只读者；四个单测文件的 21 格。
 5. **既有测试的改动**：只有一处：`task-p0a.db.test.ts` 的详情整体形状断言加了一键 `canCompleteForAll: false`（§3.8 加键的直接后果）。其余既有格的期望值都没有改；四个单测文件只是追加格。
-6. **只在真的填了行时写 `completed`**：§4.1 对 `all` 模式的说法是把空行都填上、写一条 `completed`，没有说没有空行可填时怎样。本件取至少填了一行才写，与 `applyComplete` 一致（没有改动就没有事件），也与 §5 的说明一致（去掉 `wasDone` 分支后 g1-repeat 不会多写，M03 实测如此）。由此带来的一个边角：一个 open、`all` 模式、每一行都已有时刻的任务（经接口到不了：最后一行盖上时任务就翻为 done，删掉最后一个未完成的负责人也会翻转），创建人的 `scope: 'all'` 会把它翻为 done 而不写事件；缺省的完成在同一状态下今天也是这样。列为一个待确认的问题（汇报里另列）。
+6. **翻转即一条 `completed`（修复轮 1 改正，见 §9）**：第一个提交里本件取「至少填了一行才写」，与 `applyComplete` 一致；但冻结设计 §3.1 的事件行是「翻转时一条 `completed`」，§4.1 是「`all` 模式填满空行并给一条 `completed`」，都没有附加条件，所以那是本件对冻结值的偏离。修复轮 1 去掉了 `applyCompleteForAll` 里「没有填行就不写事件」的分支：过了 `wasDone` 分支、`all` 模式且至少一名负责人时，每次调用都是一次翻转，恰写一条 `completed`（payload `{ scope: 'all' }`），没有行可填时也一样（一个 open、`all` 模式、每一行都已有时刻的任务；经接口到不了，只能直发 SQL 播种）。缺省的完成（`applyComplete`）在同一状态下仍是翻转而不写事件，那是 main 上既有的行为、不在本切片内，没有改，列为 owner 问题（§9）。随之而来：§5 说去掉 `wasDone` 分支后 g1-repeat 不会多写，修复后不再成立，M03 现在也让 g1-repeat 变红（§9 的变异表）。
 
 ## 4. 本地（RAN）
 
@@ -108,7 +108,7 @@
 |---|---|---|---|---|---|---|
 | M01 | §5 | records | 去掉 `completeTask` 里的 `canCompleteForAll` 判定 | 1 | g1-assignee、g1-list-editor | 请求到达纯函数，对非创建人抛错，得 500 而不是 404 |
 | M02 | §5 | records | 把它换成 `can(roles, 'edit')` | 1 | g1-assignee、g1-list-editor | 同上 |
-| M03 | §5 | completion | 去掉 `applyCompleteForAll` 的 `wasDone` 空操作分支 | 2 | g1-repeat-null-row | g1-repeat 保持绿，与 §5 的说明一致 |
+| M03 | §5 | completion | 去掉 `applyCompleteForAll` 的 `wasDone` 空操作分支 | 2 | g1-repeat-null-row | g1-repeat 保持绿，与 §5 的说明一致（第一个提交上的结果；修复轮 1 之后见 §9） |
 | M04 | §5 | records | 去掉 `withOrgStructure` 里的取结构锁 | 6 | g1-concurrent | 单测红的 6 格是既有格（断言第二句是取锁） |
 | M05a | §5（纯函数形） | completion | 填空行时逐行 `new Date()` | 4 | 无 | 见 §3 第 3 条：真库里同一毫秒，抓不到；由单测杀死 |
 | M05b | §5（SQL 形） | records | 写负责人行时每行取 `clock_timestamp()` | 0 | g1-creator-all、g1-keep-first、g1-concurrent | |
@@ -146,3 +146,67 @@ G1 路径本身在这两道门上的表现另由真库格 g1-signals 看过（§
 - 与 #6249 叠在一起的树、PR-4a 最终 head 上全部 `M2|` / `M3|` / `M4|` 行的重跑（§6.4）：本分支没有叠 #6249，也只有切片 1，这两项 NOT RUN。
 - 既有门行的手工负控（以往验证记录里「手工，本次」的那些）：本次没有重做；文件内的负控随 §5 的 lane 跑过。
 - 前端：本切片不改 `apps/web`，前端 spec 没有跑。
+
+## 9. 修复轮 1（2026-10-12）
+
+门审第 1 轮：确认的 P1 / P2 为 0；P3 / NIT 15 条（三个审阅视角，多条重复），归成下面 10 项。修复提交叠在 `cc6d638b06` 之上，只改 4 个文件：`src/tasks/task-completion.ts`、`src/services/task-records.ts`、`tests/unit/task-completion.test.ts`、`tests/integration/task-m5-g1.db.test.ts`，以及本记录。没有迁移、没有 DDL、没有新开关；PR-3c 普查文件未改。
+
+### 9.1 处置
+
+| # | 审阅条目 | 处置 | 内容 |
+|---|---|---|---|
+| F1 | P3 ×3：`all` 模式 open、各行都已有时刻的任务，`scope: 'all'` 翻为 done 却不写 `completed` | 改（只改 G1 路径） | 冻结 §3.1 事件行「翻转时一条 `completed`」与 §4.1「`all` 模式填满空行并给一条 `completed`」都不带条件，第一个提交的「没有填行就不写」是对冻结值的偏离（§3 第 6 条已改写）。`applyCompleteForAll` 去掉该分支：过了 `wasDone` 分支、`all` 模式且至少一名负责人时恒写一条 `completed`，payload `{ scope: 'all' }`。单测格「an open all-mode task whose rows are all stamped already」改为断言这一条事件（格数不变）。经接口到不了这个状态，所以没有新增真库格。`applyComplete`（缺省路径）同一状态下翻转不写事件是 main 既有行为，没有改，作为 owner 问题列在 9.3 |
+| F2 | P3：g1-self-unchanged（及 g1-any / g1-zero）一格跑全部形状，共享主机上超过 30 s 一次 | 改 | 这两格各给 120 s 的显式预算，文件的 `afterAll` 给 60 s。没有拆成 `it.each`：拆了会改变 §5 一格一名的对应、门 17 ② 的静态展开数（13）与 lane 的总格数（829） |
+| F3 | NIT：`completeTask` 把整个 `input`（含 `scope`）展开进 `loadRowRoles` 的参数 | 改 | 只传 `taskId`、`actorId`、`createdBy` 三个字段。`reopenTask` 的同形写法是 main 既有的，不在本切片内，没有动 |
+| F4 | NIT：没有格钉住「能完成但不是创建人的调用者带非法 `scope` 得 422，先于创建人 404」 | 改 | g1-bad-scope 里加两次调用：负责人与清单可编辑者各带 `{ scope: 'x' }` ⇒ 422 `INVALID_SCOPE`，格末的快照断言照旧证明什么都没写。格数不变（13）。审阅提出的变异（在解析之前按原样请求体判创建人）记为 MF2，见 9.2 |
+| F5 | NIT ×2：§5 的「逐行取时 ⇒ g1-creator-all 红」只对 SQL 形成立 | 不改代码 | 设计在另一条分支上冻结，本件不改；两种写法与各自的杀手格已记在 §3 第 3 条与 §6 的 M05a / M05b，留给下一次设计修订 |
+| F6 | NIT ×2：g1-concurrent 在服务层而不是两个 HTTP 请求 | 不改 | 已在 §3 第 2 条披露；路由只把原样 `scope` 交给服务，由路由单测与其余 12 个经 HTTP 的格覆盖；开 PR 时在正文里写明 |
+| F7 | NIT：all 与 self 交错的竞态没有格 | 不改（可选项） | 审阅标为可选；加格会改变门 17 ② 的数与 lane 总数。结构锁本身由 g1-concurrent 与 M04 证明 |
+| F8 | NIT：complete 的 `scope` 严格解析、reopen 宽松 | 不改 | 冻结 `[a-01]` 的 owner 问题，按冻结值（严格）发货 |
+| F9 | NIT ×3：共享机器上 lane 里与本切片无关的计时格变红 | 不改代码，记录 | 门审看到的红格：`task-m3-comments-deletion` 的删除让位上界（5328 > 5000）与在途评论写入一格、`task-m4-scheduler` 的 leader 时限两格、`task-m4-list-items` 的 30 s 超时、`task-m3-tree` 的子进程 exit 1；它们都不在本切片改动的文件里，在同一树上重跑全绿，门审在 `906840c74c` 上的对照也出现同样的 `task-m3-tree` 子进程失败与 scheduler 两格。本轮 lane 的两格红见 9.2，同类 |
+| F10 | NIT：门 17 ② 的 CI 一半 | NOT RUN | 没有推送；开 PR 后以 CI 的 `tasks-realdb` 为准 |
+
+### 9.2 本轮运行（RAN）
+
+本地（Node 25.9.0），命令同 §4：
+
+| 项 | 结果 |
+|---|---|
+| `tsc --noEmit -p .` | 0 errors |
+| 本轮改动的两个测试文件，临时 tsconfig 加 `noUnusedLocals` | 两个文件 0 条诊断 |
+| 任务单测子集（38 files） | 1599 passed（格数与修复前相同：F1 只是改写一格的期望） |
+| PR-3c 普查 `task-counts-touchpoints` | 含在上一行，文件未改，绿 |
+| supertest 绊线 | 3/3 |
+
+另一台机器（PostgreSQL 16.15，Node 20），修复后的树（4 个改动文件叠在 `cc6d638b06` 上的临时提交，没有改动分支），新建一次性库，432 条迁移：
+
+| 运行 | 结果 |
+|---|---|
+| lane 第 1 遍 | 22 files：2 failed / 827 passed (829) |
+| lane 第 2 遍 | 22 files：829 passed (829) |
+| 鉴权门 | 86 passed (86) |
+
+两遍里 `task-m5-g1` 都是 13/13，`socket hang up` / `ECONNRESET` 都为 0；运行时那台机器的负载约 4.6–5.5。第 1 遍的两格红：`task-m4-groups` 的 negative control 5（该格跑了 105 s）与 `task-m3-comments-deletion` 的「在途评论写入不挡完成等写入」；两个文件都不在本切片的改动里（本轮也没有碰），同一树上的第 2 遍全绿，与 9.1 F9 同类。
+
+变异（同一台机器、同一个一次性工作树与库，驱动脚本不入库；逐个写入、跑 §6 的 6 个单测文件与真库文件、从备份还原；三次还原后两个源文件的 md5 都与本地修复后的文件相同，未变异的真库文件对照 0 红）：
+
+| # | 文件 | 变异 | 单测红 | 真库红 |
+|---|---|---|---|---|
+| MF1 | completion | 恢复「各行都已有时刻 ⇒ 不写事件」 | 1（F1 改写的那一格） | 0（该状态经接口到不了，没有真库格） |
+| M03（重跑） | completion | 去掉 `applyCompleteForAll` 的 `wasDone` 分支 | 3 | g1-repeat、g1-repeat-null-row、g1-concurrent、g1-signals |
+| MF2 | records | 在解析 `scope` 之前，按原样请求体对非 `'self'` 的值判创建人（404） | 0 | g1-bad-scope |
+
+M03 现在也让 g1-repeat 变红：F1 之后已 done 的任务若越过 `wasDone` 分支就会再写一条 `completed`，§5 那句「g1-repeat 单靠它杀不死这个变异」对修复后的代码不再成立。
+
+用完之后那台机器上的工作树、库与本轮的临时文件都已删除并核对过；推过去的临时引用留在那台机器的克隆里。
+
+### 9.3 仍待 owner
+
+- 缺省完成（`applyComplete`）在 open、`all` 模式、各行都已有时刻的状态下（经接口同样到不了）翻为 done 而不写事件：是否也改成「翻转即一条事件」。这是 main 既有行为，改它会动缺省路径，不在本切片。
+- `[a-01]`：complete 严格、reopen 宽松（F8）。
+- §5 变异措辞的两种写法（F5），留给设计修订。
+
+### 9.4 NOT RUN
+
+§8 各项仍然 NOT RUN；本轮另有：CI 上的门 17 ②（F10）。
+

@@ -51,6 +51,13 @@ const seededRoles: string[] = []
 const T0 = '2026-10-01T08:00:00.123456Z'
 const T0_US = '1790841600123456'
 
+/** The twin cells below run every shape twice (about 20 tasks and 20 to 30 HTTP calls in one cell),
+ * so they get a budget of their own instead of the config's 30 s, and the cleanup hook after them a
+ * larger one than the config's 15 s; on a loaded runner the default budgets have been exceeded with
+ * no contract defect. */
+const TWIN_CELL_TIMEOUT_MS = 120000
+const HOOK_TIMEOUT_MS = 60000
+
 let listener: TasksListener | undefined
 
 beforeAll(async () => {
@@ -61,7 +68,7 @@ afterAll(async () => {
   resetTaskCountsBroadcasterForTests()
   await dropTaskM4Fixtures({ orgPrefix: ORG_PREFIX, userIds: seededUsers, roleIds: seededRoles })
   await listener?.close()
-})
+}, HOOK_TIMEOUT_MS)
 
 /** The file's one listener: `Connection: close`, no keep-alive. */
 function app(): TasksClient {
@@ -357,7 +364,7 @@ describe('M5 PR-4a slice 1, G1: the creator completes a task for every assignee'
     expect(await snapshot(taskId)).toBe(before)
   })
 
-  it('g1-bad-scope | the creator with a present scope other than self or all: 422 INVALID_SCOPE, nothing written; callers who cannot complete the task get the missing-task 404 with the same body', async () => {
+  it('g1-bad-scope | the creator with a present scope other than self or all: 422 INVALID_SCOPE, nothing written; an assignee and a list editor (who may complete, not for all) get the same 422, since the scope is parsed before the creator check; callers who cannot complete the task get the missing-task 404 with the same body', async () => {
     const w = await world('bad')
     const taskId = await taskOf(w, { mode: 'all', assignees: [w.a, w.b] })
     const before = await snapshot(taskId)
@@ -365,6 +372,13 @@ describe('M5 PR-4a slice 1, G1: the creator completes a task for every assignee'
       const res = await complete(w.c, taskId, { scope })
       expect(res.status, JSON.stringify(scope)).toBe(422)
       expect(res.body, JSON.stringify(scope)).toEqual({ error: { code: 'INVALID_SCOPE' } })
+    }
+    // Design §3.1 order: the scope (422) comes before `canCompleteForAll` (404), so a caller who may
+    // complete the task but is not its creator gets the 422 too.
+    for (const who of [w.a, w.le]) {
+      const res = await complete(who, taskId, { scope: 'x' })
+      expect(res.status, who.userId).toBe(422)
+      expect(res.body, who.userId).toEqual({ error: { code: 'INVALID_SCOPE' } })
     }
     for (const who of [w.o, w.f]) {
       const res = await complete(who, taskId, { scope: 'x' })
@@ -508,7 +522,7 @@ describe('M5 PR-4a slice 1, G1: the default complete is unchanged', () => {
       anchors(shape, plain)
       expect(self, shape.label).toEqual(plain)
     }
-  })
+  }, TWIN_CELL_TIMEOUT_MS)
 
   it('g1-any / g1-zero | the creator\'s scope all in any mode and on a task without assignees gives what the default complete gives, payload {} included', async () => {
     const w = await world('anyzero')
@@ -522,7 +536,7 @@ describe('M5 PR-4a slice 1, G1: the default complete is unchanged', () => {
       expect(done[0][1], shape.label).toBe(w.c.userId)
       expect(done[0][2], shape.label).toEqual({})
     }
-  })
+  }, TWIN_CELL_TIMEOUT_MS)
 })
 
 // ---------------------------------------------------------------------------------------------
