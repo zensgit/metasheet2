@@ -230,6 +230,11 @@ async function changeEvents(taskId: string): Promise<EventRow[]> {
   return (await eventsOf(taskId)).filter((event) => event.type !== 'created')
 }
 
+/** Every edge row of `orgId`, live or not. */
+async function orgEdgeCount(orgId: string): Promise<number> {
+  return (await q<{ n: number }>('SELECT count(*)::int AS n FROM task_dependencies WHERE org_id = $1', [orgId]))[0].n
+}
+
 /** The task rows, the edges touching them and their events, as one string ("nothing was written"). */
 async function snapshot(ids: string[]): Promise<string> {
   const tasks = await q('SELECT id, is_milestone, version, updated_at, status, deleted_at FROM tasks WHERE id = ANY($1) ORDER BY id COLLATE "C"', [ids])
@@ -560,7 +565,7 @@ describe('M5 PR-4a slice 4, M5-c: adding and removing an edge', () => {
     expect(await snapshot([t, gone, foreign])).toBe(snap)
   })
 
-  it('dep-auth | §6.2.1: A (edit on :id) with LE on the other end 200 to add and to remove; edit on :id but only F or LR on the other end, or only F on :id with edit on the other end: 404 byte-identical, nothing written', async () => {
+  it('dep-auth | §6.2.1: A (edit on :id) with LE on the other end 200 to add and to remove; edit on :id but only F or LR on the other end (add and remove), or only F on :id with edit on the other end: 404 byte-identical, nothing written', async () => {
     const w = await world('auth')
     const t = await taskOf(w)
     const uLe = await plain(w.orgId, w.c, '可编辑')
@@ -577,6 +582,7 @@ describe('M5 PR-4a slice 4, M5-c: adding and removing an edge', () => {
     expect([removed.status, removed.body]).toEqual([200, { predecessorId: uLe, successorId: t }])
     // Edges the 404 removes must leave in place.
     await seedEdge(w.orgId, uF, t)
+    await seedEdge(w.orgId, uLr, t)
     await seedEdge(w.orgId, t, v)
     const all = [t, uLe, uF, uLr, v]
     const snap = await snapshot(all)
@@ -586,6 +592,7 @@ describe('M5 PR-4a slice 4, M5-c: adding and removing an edge', () => {
       ['add, other end LR', postDep(w.a, t, { predecessorId: uLr })],
       ['add, :id only F', postDep(w.a, v, { predecessorId: uLe })],
       ['remove, other end F', deletePredecessor(w.a, t, uF)],
+      ['remove, other end LR', deletePredecessor(w.a, t, uLr)],
       ['remove, :id only F', deletePredecessor(w.a, v, t)],
     ]
     for (const [label, call] of refused) {
@@ -640,6 +647,65 @@ describe('M5 PR-4a slice 4, M5-c: adding and removing an edge', () => {
     expect((await postDep(w.a, t, { successorId: p })).status).toBe(404)
     expect((await postDep(w.a, t, { predecessorId: s })).status).toBe(404)
   })
+})
+
+describe('M5 PR-4a slice 4, M5-c: the graph the add checks read (D4, D17, ASSUMPTION)', () => {
+  it('dep-cycle-far | the cycle check reads the whole org graph: with A → B → C → D, adding D → A (no edge of B → C touches either end) is 422 CYCLE, nothing written', async () => {
+    const w = await world('far')
+    const [a, b, c, d] = [await plain(w.orgId, w.a, 'A'), await plain(w.orgId, w.a, 'B'), await plain(w.orgId, w.a, 'C'), await plain(w.orgId, w.a, 'D')]
+    for (const [pred, succ] of [[a, b], [b, c], [c, d]]) expect((await postDep(w.a, succ, { predecessorId: pred })).status).toBe(200)
+    const snap = await snapshot([a, b, c, d])
+    const res = await postDep(w.a, a, { predecessorId: d })
+    expect([res.status, res.body]).toEqual([422, { error: { code: 'CYCLE' } }])
+    expect(await orgEdgeCount(w.orgId)).toBe(3)
+    expect(await snapshot([a, b, c, d])).toBe(snap)
+  })
+
+  it('dep-cycle-hidden | the cycle check reads edges whatever the caller sees: X → H → Y with H invisible to A (C wrote both edges); A adding Y → X is 422 CYCLE, nothing written', async () => {
+    const w = await world('hidden')
+    const x = (await createTask({ orgId: w.orgId, creatorId: w.c.userId, title: 'X', assignees: [w.a.userId] })).id
+    const y = (await createTask({ orgId: w.orgId, creatorId: w.c.userId, title: 'Y', assignees: [w.a.userId] })).id
+    const h = await plain(w.orgId, w.c, 'H')
+    expect((await postDep(w.c, h, { predecessorId: x })).status).toBe(200)
+    expect((await postDep(w.c, y, { predecessorId: h })).status).toBe(200)
+    expect((await detail(w.a, h)).status).toBe(404)
+    const snap = await snapshot([x, y, h])
+    const res = await postDep(w.a, x, { predecessorId: y })
+    expect([res.status, res.body]).toEqual([422, { error: { code: 'CYCLE' } }])
+    expect(await orgEdgeCount(w.orgId)).toBe(2)
+    expect(await snapshot([x, y, h])).toBe(snap)
+  })
+
+  it('dep-dead-middle | D17: an edge to a soft-deleted task is not in the cycle graph: A → B → C with B soft-deleted, adding C → A is 200', async () => {
+    const w = await world('deadmid')
+    const [a, b, c] = [await plain(w.orgId, w.a, 'A'), await plain(w.orgId, w.a, 'B'), await plain(w.orgId, w.a, 'C')]
+    expect((await postDep(w.a, b, { predecessorId: a })).status).toBe(200)
+    expect((await postDep(w.a, c, { predecessorId: b })).status).toBe(200)
+    await deleteTaskById({ orgId: w.orgId, actorId: w.a.userId, taskId: b })
+    const res = await postDep(w.a, a, { predecessorId: c })
+    expect([res.status, res.body]).toEqual([200, { predecessorId: c, successorId: a }])
+  })
+
+  it('dep-limit-dead | D17 and D18: an edge to a soft-deleted task does not count toward the 50: 50 edges with one counterpart soft-deleted, one more edge on that end is 200', async () => {
+    const w = await world('limdead')
+    const full = await plain(w.orgId, w.a, '满')
+    const others: string[] = []
+    for (let i = 0; i < 50; i += 1) others.push(newTaskId())
+    await q(
+      `INSERT INTO tasks (id, org_id, title, created_by) SELECT u.id, $2, '填充', $3 FROM unnest($1::text[]) AS u(id)`,
+      [others, w.orgId, w.c.userId],
+    )
+    await q(
+      `INSERT INTO task_dependencies (predecessor_id, successor_id, org_id, created_by)
+       SELECT u.id, $2, $3, 'usr_seed' FROM unnest($1::text[]) AS u(id)`,
+      [others, full, w.orgId],
+    )
+    await deleteTaskById({ orgId: w.orgId, actorId: w.c.userId, taskId: others[0] })
+    const free = await plain(w.orgId, w.a, '空')
+    const res = await postDep(w.a, full, { predecessorId: free })
+    expect([res.status, res.body]).toEqual([200, { predecessorId: free, successorId: full }])
+    expect(await orgEdgeCount(w.orgId)).toBe(51)
+  }, LIMIT_CELL_TIMEOUT_MS)
 })
 
 describe('M5 PR-4a slice 4, M5-c: the concurrent cross-add (design §6.2, opening paragraph)', () => {
@@ -701,7 +767,7 @@ describe('M5 PR-4a slice 4, M5-c: reading the dependencies', () => {
     expect([noOrg.status, noOrg.body]).toEqual([404, { error: { code: 'NOT_FOUND' } }])
   })
 
-  it('dep-item | DepItem: id, title, status, dueAt, isMilestone, canRemove; a counterpart the caller cannot view is neither listed nor counted ([a-28]); canRemove only with edit on both ends ([a-12]); the detail carries the same lists', async () => {
+  it('dep-item | DepItem: id, title, status, dueAt, isMilestone, canRemove; a counterpart the caller cannot view is neither listed nor counted ([a-28]); canRemove only with edit on both ends ([a-12]): edit on the counterpart with only view on :id is false; the detail carries the same lists', async () => {
     const w = await world('item')
     const t = await taskOf(w)
     const pLe = (await createTask({ orgId: w.orgId, creatorId: w.c.userId, title: '可编辑前置', assignees: undefined, dueDate: '2031-03-15', timeZone: 'Asia/Shanghai' })).id
@@ -714,6 +780,10 @@ describe('M5 PR-4a slice 4, M5-c: reading the dependencies', () => {
     await listOf(w.orgId, w.c, [s], [[w.a, 'edit']])
     for (const p of [pLe, pF, pNone]) expect((await postDep(w.c, t, { predecessorId: p })).status).toBe(200)
     expect((await postDep(w.c, t, { successorId: s })).status).toBe(200)
+    // Created by F, who only follows T: F edits this end and views the other. C may not edit it, so
+    // the edge is written with SQL.
+    const pByF = await plain(w.orgId, w.f, 'F 的前置')
+    await seedEdge(w.orgId, pByF, t)
     const dueAt = (await q<{ due_at: Date }>('SELECT due_at FROM tasks WHERE id = $1', [pLe]))[0].due_at.toISOString()
     const asA = await getDeps(w.a, t)
     expect(asA.status).toBe(200)
@@ -727,10 +797,14 @@ describe('M5 PR-4a slice 4, M5-c: reading the dependencies', () => {
     expect((await detail(w.a, t)).body.dependencies).toEqual(asA.body)
     const asC = await getDeps(w.c, t)
     expect(asC.body.predecessors.map((item: { id: string; canRemove: boolean }) => [item.id, item.canRemove])).toEqual([[pLe, true], [pF, true], [pNone, true]])
-    // F and LR view T and none of its counterparts: both lists are empty for them.
+    // F views T and edits only the counterpart it created: listed, never removable.
     const asF = await getDeps(w.f, t)
-    expect(asF.body.predecessors.map((item: { id: string }) => item.id)).toEqual([])
-    expect(asF.body.successors).toEqual([])
+    expect([asF.status, asF.body]).toEqual([200, {
+      predecessors: [{ id: pByF, title: 'F 的前置', status: 'open', dueAt: null, isMilestone: false, canRemove: false }],
+      successors: [],
+    }])
+    expect((await detail(w.f, t)).body.dependencies).toEqual(asF.body)
+    // LR views T and none of its counterparts: both lists are empty.
     const asLr = await getDeps(w.lr, t)
     expect(asLr.body).toEqual({ predecessors: [], successors: [] })
   })
@@ -741,14 +815,16 @@ describe('M5 PR-4a slice 4, M5-c: reading the dependencies', () => {
     const ids = [await plain(w.orgId, w.c), await plain(w.orgId, w.c), await plain(w.orgId, w.c)]
     const [low, high] = [...ids.slice(0, 2)].sort()
     const early = ids[2]
+    // The successors are other tasks than the predecessors, so the seeded graph stays acyclic (S12).
+    const [sLow, sHigh] = [await plain(w.orgId, w.c), await plain(w.orgId, w.c)].sort()
     await seedEdge(w.orgId, high, t, '2026-10-01T00:00:00.000002Z')
     await seedEdge(w.orgId, low, t, '2026-10-01T00:00:00.000002Z')
     await seedEdge(w.orgId, early, t, '2026-10-01T00:00:00.000001Z')
-    await seedEdge(w.orgId, t, high, '2026-10-01T00:00:00.000001Z')
-    await seedEdge(w.orgId, t, low, '2026-10-01T00:00:00.000003Z')
+    await seedEdge(w.orgId, t, sHigh, '2026-10-01T00:00:00.000001Z')
+    await seedEdge(w.orgId, t, sLow, '2026-10-01T00:00:00.000003Z')
     const res = await getDeps(w.c, t)
     expect(res.body.predecessors.map((item: { id: string }) => item.id)).toEqual([early, low, high])
-    expect(res.body.successors.map((item: { id: string }) => item.id)).toEqual([high, low])
+    expect(res.body.successors.map((item: { id: string }) => item.id)).toEqual([sHigh, sLow])
   })
 })
 
@@ -797,7 +873,7 @@ describe('M5 PR-4a slice 4, M5-c: GET /api/tasks/:id/dependency-candidates', () 
     expect([succ.status, succ.body.items.map((item: { id: string }) => item.id), succ.body.total]).toEqual([200, [g.e1, g.e2, g.d2], 3])
   })
 
-  it('cand-q | q is a literal, case-insensitive title substring: "alpha" ⇒ E1, "%" ⇒ E1 only, "_" ⇒ E2 only; blank ⇒ no filter; 201 characters or a repeated q ⇒ 422 INVALID_QUERY', async () => {
+  it('cand-q | q is a literal, case-insensitive title substring: "alpha" ⇒ E1, "%" ⇒ E1 only, "_" ⇒ E2 only; blank ⇒ no filter; the limit is 200 characters (code points) once trimmed: 200 supplementary-plane characters or 200 with blanks around them pass; 201 characters or a repeated q ⇒ 422 INVALID_QUERY', async () => {
     const w = await world('candq')
     const g = await graph(w)
     const ids = async (query: Record<string, string | string[]>): Promise<unknown> => {
@@ -809,9 +885,12 @@ describe('M5 PR-4a slice 4, M5-c: GET /api/tasks/:id/dependency-candidates', () 
     expect(await ids({ q: '_' })).toEqual([200, [g.e2]])
     expect(await ids({ q: '   ' })).toEqual([200, [g.e1, g.e2, g.u1]])
     expect(await ids({ q: 'x'.repeat(200) })).toEqual([200, []])
-    for (const query of [{ q: 'x'.repeat(201) }, { q: ['a', 'b'] }]) {
+    const astral = String.fromCodePoint(0x20000)
+    expect(await ids({ q: astral.repeat(200) })).toEqual([200, []])
+    expect(await ids({ q: ` ${'x'.repeat(200)} ` })).toEqual([200, []])
+    for (const query of [{ q: 'x'.repeat(201) }, { q: astral.repeat(201) }, { q: ` ${'x'.repeat(201)} ` }, { q: ['a', 'b'] }]) {
       const res = await candidates(w.a, g.t, { direction: 'predecessor', ...query })
-      expect([res.status, res.body]).toEqual([422, { error: { code: 'INVALID_QUERY' } }])
+      expect([res.status, res.body], JSON.stringify(query).slice(0, 40)).toEqual([422, { error: { code: 'INVALID_QUERY' } }])
     }
   })
 
@@ -854,6 +933,51 @@ describe('M5 PR-4a slice 4, M5-c: GET /api/tasks/:id/dependency-candidates', () 
       expect(ids, direction).toContain(mine)
       expect(ids, direction).not.toContain(foreign)
     }
+  })
+})
+
+describe('M5 PR-4a slice 4, M5-c: the candidate set beyond the fixture graph ([S11], X3, D17)', () => {
+  async function candidateIds(who: SeededTaskActor, taskId: string, direction: 'predecessor' | 'successor'): Promise<unknown> {
+    const res = await candidates(who, taskId, { direction })
+    return [res.status, (res.body.items as Array<{ id: string }> | undefined)?.map((item) => item.id).sort(), res.body.total]
+  }
+
+  it('cand-tree | [S11]: the parent and a child of the task are candidates in both directions', async () => {
+    const w = await world('candtree')
+    const [p, t, k] = [await plain(w.orgId, w.a, 'P'), await plain(w.orgId, w.a, 'T'), await plain(w.orgId, w.a, 'K')]
+    await setTaskParent({ orgId: w.orgId, actorId: w.a.userId, taskId: t, body: { parentId: p } })
+    await setTaskParent({ orgId: w.orgId, actorId: w.a.userId, taskId: k, body: { parentId: t } })
+    for (const direction of ['predecessor', 'successor'] as const) {
+      expect(await candidateIds(w.a, t, direction), direction).toEqual([200, [p, k].sort(), 2])
+    }
+  })
+
+  it('cand-soft-deleted | a soft-deleted task is never a candidate: T, G soft-deleted, L ⇒ exactly L in both directions', async () => {
+    const w = await world('canddel')
+    const [t, g, l] = [await plain(w.orgId, w.a, 'T'), await plain(w.orgId, w.a, 'G'), await plain(w.orgId, w.a, 'L')]
+    await deleteTaskById({ orgId: w.orgId, actorId: w.a.userId, taskId: g })
+    for (const direction of ['predecessor', 'successor'] as const) {
+      expect(await candidateIds(w.a, t, direction), direction).toEqual([200, [l], 1])
+    }
+  })
+
+  it('cand-dead-middle | D17: an edge to a soft-deleted task is not in the exclusion graph: T → D → E with D soft-deleted, E is a predecessor candidate of T', async () => {
+    const w = await world('canddead')
+    const [t, d, e] = [await plain(w.orgId, w.a, 'T'), await plain(w.orgId, w.a, 'D'), await plain(w.orgId, w.a, 'E')]
+    expect((await postDep(w.a, d, { predecessorId: t })).status).toBe(200)
+    expect((await postDep(w.a, e, { predecessorId: d })).status).toBe(200)
+    await deleteTaskById({ orgId: w.orgId, actorId: w.a.userId, taskId: d })
+    expect(await candidateIds(w.a, t, 'predecessor')).toEqual([200, [e], 1])
+  })
+
+  it('cand-diamond | a walk through a finished diamond: with A → B, A → C, B → D, C → D, adding X → A is 200; then X\'s predecessor candidates are exactly the unrelated Y (A, B, C and D would each close a cycle)', async () => {
+    const w = await world('canddiam')
+    const [a, b, c, d] = [await plain(w.orgId, w.a, 'A'), await plain(w.orgId, w.a, 'B'), await plain(w.orgId, w.a, 'C'), await plain(w.orgId, w.a, 'D')]
+    const [x, y] = [await plain(w.orgId, w.a, 'X'), await plain(w.orgId, w.a, 'Y')]
+    for (const [pred, succ] of [[a, b], [a, c], [b, d], [c, d]]) expect((await postDep(w.a, succ, { predecessorId: pred })).status).toBe(200)
+    const res = await postDep(w.a, a, { predecessorId: x })
+    expect([res.status, res.body]).toEqual([200, { predecessorId: x, successorId: a }])
+    expect(await candidateIds(w.a, x, 'predecessor')).toEqual([200, [y], 1])
   })
 })
 

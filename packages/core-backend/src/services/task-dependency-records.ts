@@ -382,16 +382,18 @@ export async function removeTaskDependency(input: {
   })
 }
 
-/** The longest candidate search text, in UTF-16 code units of the text as sent (design §3.4, [a-32]). */
+/** The longest candidate search text, in characters (code points) of the trimmed text (design §3.4, [a-32]). */
 const CANDIDATE_QUERY_MAX = 200
 
 // ASSUMPTION(task-m5a): [a-32] `q` is a literal, case-insensitive title substring: no wildcard is
-// interpreted. Absent, or blank once trimmed ⇒ no filter; not one string, or longer than 200 code
-// units as sent ⇒ 422 INVALID_QUERY.
+// interpreted. Absent, or blank once trimmed ⇒ no filter; not one string, or more than 200
+// characters once trimmed ⇒ 422 INVALID_QUERY. Characters are code points (`[...s].length`), as in
+// every other text limit of the task modules: a supplementary-plane character counts once.
 function parseCandidateQuery(raw: unknown): string | null {
   if (raw === undefined) return null
-  if (typeof raw !== 'string' || raw.length > CANDIDATE_QUERY_MAX) fail(422, 'INVALID_QUERY')
+  if (typeof raw !== 'string') fail(422, 'INVALID_QUERY')
   const trimmed = (raw as string).trim()
+  if ([...trimmed].length > CANDIDATE_QUERY_MAX) fail(422, 'INVALID_QUERY')
   return trimmed.length === 0 ? null : trimmed
 }
 
