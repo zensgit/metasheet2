@@ -929,7 +929,7 @@ export async function spawnNextOccurrenceIfDue(db: Db, input: {
     await db.query(
       `INSERT INTO task_field_values (task_id, field_id, org_id, value, updated_by, updated_at)
        SELECT $1, v.field_id, $2, v.value, $3, $4::timestamptz FROM jsonb_to_recordset($5::jsonb) AS v(field_id text, value jsonb)`,
-      [next.id, input.orgId, input.actorId, input.now.toISOString(), JSON.stringify(plan.fieldValues)],
+      [next.id, input.orgId, input.actorId, input.now.toISOString(), JSON.stringify(plan.fieldValues.map((entry) => ({ field_id: entry.fieldId, value: entry.value })))],
     )
   }
   for (const event of plan.events) {
