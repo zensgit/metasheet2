@@ -1146,6 +1146,20 @@ describe('发起人自选 / requester choice in the record submit dialog (R-43 A
     expect(submitBtn()!.disabled).toBe(false)
   })
 
+  it('does NOT predict for an active served version WITHOUT a requester-choice node', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({ ...SIMPLE_FORM, activeVersionId: 'v1', latestVersionId: 'v1' }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
   it('does NOT predict when the version ids are missing', async () => {
     const client = fakeApiClient({
       getApprovalTemplate: vi.fn().mockResolvedValue({ ...SIMPLE_FORM, servedGraphRequiresRequesterChoice: true }),
