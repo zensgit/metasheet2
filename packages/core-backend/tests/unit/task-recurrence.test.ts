@@ -353,6 +353,20 @@ describe('task-recurrence', () => {
       expect(spawn({ recurrence: rule }, { occurrenceNumber: 2 }).ok).toBe(true)
       expect(spawn({ recurrence: rule }, { occurrenceNumber: 3 })).toEqual({ ok: false, reason: 'series_ended' })
     })
+    it('series_ended (never a RangeError) when the next due date would pass 9999-12-31', () => {
+      const last = { dueDate: '9999-12-31', startDate: null, startTime: null, remindAt: null }
+      expect(spawn({ ...last }, { anchorDueDate: '9999-12-31' })).toEqual({ ok: false, reason: 'series_ended' })
+      expect(spawn({ ...last, recurrence: { freq: 'weekly', interval: 1, byWeekday: [1] } }, { anchorDueDate: '9999-12-31' })).toEqual({ ok: false, reason: 'series_ended' })
+      expect(spawn({ ...last, dueDate: '9999-12-01', recurrence: { freq: 'monthly', interval: 1 } }, { anchorDueDate: '9999-12-01' })).toEqual({ ok: false, reason: 'series_ended' })
+      expect(spawn({ ...last, dueDate: '9999-01-01', recurrence: { freq: 'yearly', interval: 1 } }, { anchorDueDate: '9999-01-01' })).toEqual({ ok: false, reason: 'series_ended' })
+      // 9999-12-30 is a Thursday: a later weekday in the same week still fits, the next week does not.
+      expect(spawn({ ...last, dueDate: '9999-12-30', recurrence: { freq: 'weekly', interval: 1, byWeekday: [5] } }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, task: { dueDate: '9999-12-31' } })
+      expect(spawn({ ...last, dueDate: '9999-12-30', recurrence: { freq: 'weekly', interval: 1, byWeekday: [4] } }, { anchorDueDate: '9999-12-30' })).toEqual({ ok: false, reason: 'series_ended' })
+      // The last representable day itself is still spawned.
+      expect(spawn({ ...last, dueDate: '9999-12-30' }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, task: { dueDate: '9999-12-31' } })
+      // nextOccurrenceDueDate on its own keeps its RangeError.
+      expect(() => nextOccurrenceDueDate(DAILY, '9999-12-31', '9999-12-31')).toThrow(RangeError)
+    })
     it('rejects malformed input with TypeError', () => {
       expect(() => spawn({}, { newTaskId: 'tsk_s1' })).toThrow(TypeError) // same id as the source
       expect(() => spawn({}, { newTaskId: 'tsk__x' })).toThrow(TypeError)
