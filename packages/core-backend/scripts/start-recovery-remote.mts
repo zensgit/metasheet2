@@ -1,9 +1,9 @@
 import { createRequire } from 'node:module'
 import type { MetaSheetServer as Server } from '../src/index'
-import { readRecoveryRemoteResourceConfig } from '../src/multitable/recovery-resource-config'
-import { isRecoveryArchiveRestoreWorkerEnabled } from '../src/multitable/recovery-archive-restore-worker'
 
 const require = createRequire(import.meta.url)
+const { readRecoveryRemoteResourceConfig } = require('../src/multitable/recovery-resource-config.ts') as typeof import('../src/multitable/recovery-resource-config')
+const { isRecoveryArchiveRestoreWorkerEnabled } = require('../src/multitable/recovery-archive-restore-worker.ts') as typeof import('../src/multitable/recovery-archive-restore-worker')
 const cancellation = new AbortController()
 let server: Server | undefined
 let starting = true
