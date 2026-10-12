@@ -232,6 +232,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   ELEARNING_SHORT_ANSWER_MAX_CHARS,
@@ -494,10 +495,7 @@ function watchChallengeRequestId(
 ): string {
   const key = `${session}\n${challengeId}\n${selections[0]}\n${selections[1]}`
   if (challengeAckIdentity?.key === key) return challengeAckIdentity.requestId
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new Error('crypto.randomUUID unavailable')
-  }
-  const requestId = crypto.randomUUID()
+  const requestId = randomUuid()
   challengeAckIdentity = { key, requestId }
   return requestId
 }
@@ -816,10 +814,7 @@ function enrollmentRequestId(courseId: string): string {
   if (enrollmentRequestIdentity?.courseId === courseId) {
     return enrollmentRequestIdentity.requestId
   }
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new Error('crypto.randomUUID unavailable')
-  }
-  const requestId = crypto.randomUUID()
+  const requestId = randomUuid()
   enrollmentRequestIdentity = { courseId, requestId }
   return requestId
 }

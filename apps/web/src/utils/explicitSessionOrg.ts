@@ -1,3 +1,5 @@
+import { randomUuid } from './uuid'
+
 const STORAGE_KEY = 'metasheet.explicitSessionOrg.v1'
 export const EXPLICIT_SESSION_ORG_KEY = STORAGE_KEY
 const INVALID_SESSION = 'SESSION_ORG_REAUTH_REQUIRED'
@@ -30,7 +32,7 @@ export function readExplicitSession(token: string | null, payload: Record<string
 export function beginExplicitSessionOrgChange(expectedToken: string): SessionChange | null {
   try {
     if (localStorage.getItem('auth_token') !== expectedToken) return null
-    const change = { previous: localStorage.getItem(STORAGE_KEY), epoch: crypto.randomUUID() }
+    const change = { previous: localStorage.getItem(STORAGE_KEY), epoch: randomUuid() }
     // Install the barrier BEFORE either token alias changes. Every reader blocks
     // on this state rather than temporarily falling back to an old login hint.
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ state: 'changing', epoch: change.epoch }))

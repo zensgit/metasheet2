@@ -69,6 +69,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
   createElearningAnalyticsExport,
@@ -145,7 +146,7 @@ function exportInput(): { departmentId: string; periodStart: string; periodEnd: 
 function requestIdFor(input: ReturnType<typeof exportInput>): string {
   const fingerprint = JSON.stringify(input)
   if (pendingExportIdentity?.fingerprint === fingerprint) return pendingExportIdentity.requestId
-  const requestId = crypto.randomUUID()
+  const requestId = randomUuid()
   pendingExportIdentity = { fingerprint, requestId }
   return requestId
 }

@@ -777,6 +777,7 @@ import { AppRouteNames } from '../../router/types'
 import { useAuth } from '../../composables/useAuth'
 import { useLocale } from '../../composables/useLocale'
 import { scheduleIdle } from '../../utils/scheduleIdle'
+import { randomUuid } from '../../utils/uuid'
 import type { CalendarVisibleRange } from '../../composables/useCalendarDays'
 import {
   EffectiveCalendarFetchError,
@@ -1346,7 +1347,7 @@ async function onRunButton({ recordId, field }: { recordId: string; field: MetaF
     if (!window.confirm(prompt)) return
     confirmed = true
   }
-  const requestId = crypto.randomUUID()
+  const requestId = randomUuid()
 
   buttonRunPending.value = [...buttonRunPending.value, key]
   try {
