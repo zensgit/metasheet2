@@ -55,6 +55,7 @@ beforeEach(() => {
 afterEach(() => {
   app?.unmount(); app = null; container?.remove(); container = null
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
 })
 
 describe('business trip destination timezone form', () => {
@@ -131,6 +132,35 @@ describe('business trip destination timezone form', () => {
     await vi.waitFor(() => { expect(refresh).toHaveBeenCalledOnce() })
     expect(send.mock.calls[1][1]?.body).toBe(send.mock.calls[0][1]?.body)
   })
+  it('uses secure random bytes when the native UUID API is unavailable and retains that identity on retry', async () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(0))
+    const insecureRandom = vi.spyOn(Math, 'random')
+    vi.stubGlobal('crypto', { getRandomValues })
+    send.mockRejectedValueOnce(new Error('network')).mockResolvedValueOnce(reply())
+    const f = fixture()
+    await f.fill()
+    await f.submit()
+    await vi.waitFor(() => { expect(f.root.querySelector('[role="alert"]')).not.toBeNull() })
+    await f.submit()
+    await vi.waitFor(() => { expect(refresh).toHaveBeenCalledOnce() })
+    const expected = { destinationTimezone: 'Asia/Singapore', startAt: '2026-10-15T01:00:00.000Z',
+      endAt: '2026-10-15T10:00:00.000Z', operationId: '00000000-0000-4000-8000-000000000000' }
+    expect(send.mock.calls.map(call => JSON.parse(String(call[1]?.body)))).toEqual([expected, expected])
+    expect(getRandomValues).toHaveBeenCalledOnce()
+    expect(insecureRandom).not.toHaveBeenCalled()
+  })
+  it('does not send or fall back when secure UUID generation throws', async () => {
+    const getRandomValues = vi.fn((bytes: Uint8Array) => bytes.fill(0))
+    const insecureRandom = vi.spyOn(Math, 'random')
+    vi.stubGlobal('crypto', { randomUUID: () => { throw new Error('secure generation failed') }, getRandomValues })
+    const f = fixture()
+    await f.fill()
+    await f.submit()
+    expect(send).not.toHaveBeenCalled()
+    expect(getRandomValues).not.toHaveBeenCalled()
+    expect(insecureRandom).not.toHaveBeenCalled()
+    expect(f.root.textContent).toContain('无法生成申请标识')
+  })
   it('creates a fresh operation identity after a confirmed successful submission', async () => {
     const nextId = '00000000-0000-4000-8000-000000000002'
     const nonce = vi.fn().mockReturnValueOnce(operationId).mockReturnValueOnce(nextId)
@@ -170,11 +200,13 @@ describe('business trip destination timezone form', () => {
     expect(f.root.querySelector('form')).toBeNull()
   })
   it('fails without sending when secure UUID generation is unavailable', async () => {
+    const insecureRandom = vi.spyOn(Math, 'random')
     vi.stubGlobal('crypto', {})
     const f = fixture()
     await f.fill()
     await f.submit()
     expect(send).not.toHaveBeenCalled()
     expect(f.root.textContent).toContain('无法生成申请标识')
+    expect(insecureRandom).not.toHaveBeenCalled()
   })
 })

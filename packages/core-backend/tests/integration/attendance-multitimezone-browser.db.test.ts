@@ -286,6 +286,38 @@ describe('multi-timezone actual browser login, API and isolated PostgreSQL', () 
     await employeePage.screenshot({ path: path.join(output, 'employee-tokyo-server-punch.png'), fullPage: true })
     expect(pageErrors).toEqual([])
   }, 240_000)
+  it('shows a real started-shift conflict and prevents saving a conflicting policy preview', async () => {
+    const policyBefore = await fixture.pool.query('SELECT enabled,version FROM attendance_timezone_policies WHERE org_id=$1', [fixture.orgId])
+    const contextBefore = await fixture.pool.query('SELECT context_fingerprint FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3::date', [fixture.orgId, employee.userId, targetWorkDate])
+    expect(contextBefore.rows).toHaveLength(1)
+    await adminPage.bringToFront()
+    await adminPage.locator('[data-timezone-proposed]').uncheck()
+    const preview = adminPage.waitForResponse(response => new URL(response.url()).pathname === '/api/attendance/timezone-policy/preview')
+    await adminPage.locator('[data-timezone-preview]').click()
+    const response = await preview
+    expect(response.status()).toBe(200)
+    const body = await response.json()
+    expect(body.ok).toBe(true)
+    expect(body.data.proposedEnabled).toBe(false)
+    expect(body.data.conflictingUsers).toBe(1)
+    expect(body.data.conflictCounts).toEqual({ startedContext: 1, tripContext: 0, invalidTargetContext: 0 })
+    await adminPage.locator('[data-timezone-conflicting]').filter({ hasText: '1' }).waitFor()
+    expect(await adminPage.locator('[data-timezone-save]').isDisabled()).toBe(true)
+    const panel = adminPage.locator('[data-attendance-timezone-policy]')
+    expect(await panel.textContent()).toMatch(/Resolve conflicts|请处理冲突/)
+    await panel.scrollIntoViewIfNeeded()
+    await panel.screenshot({ path: path.join(output, 'admin-started-shift-conflict.png') })
+    expect((await fixture.pool.query('SELECT enabled,version FROM attendance_timezone_policies WHERE org_id=$1', [fixture.orgId])).rows).toEqual(policyBefore.rows)
+    expect((await fixture.pool.query('SELECT context_fingerprint FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3::date', [fixture.orgId, employee.userId, targetWorkDate])).rows).toEqual(contextBefore.rows)
+    await writeFile(path.join(output, 'policy-conflict-preview.json'), JSON.stringify({
+      status: response.status(), conflictCounts: body.data.conflictCounts,
+      conflictingUsers: body.data.conflictingUsers, saveDisabled: true,
+      policyUnchanged: true, contextUnchanged: true,
+    }, null, 2))
+    await adminPage.locator('[data-timezone-proposed]').check()
+    expect(pageErrors).toEqual([])
+  }, 240_000)
+
   it('checks out the original employee shift using its original stored timezone', async () => {
     const before = await fixture.pool.query('SELECT context_fingerprint FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3::date', [fixture.orgId, employee.userId, targetWorkDate])
     expect(before.rows).toHaveLength(1)

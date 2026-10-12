@@ -227,7 +227,7 @@ describe('business trip real request approval and destination arrangement',() =>
     expect(edited.status,edited.body.error?.code).toBe(422)
     expect(edited.body.error.code).toBe('ATTENDANCE_TRIP_EDIT_UNSUPPORTED')
     expect((await f.pool.query('SELECT * FROM attendance_requests WHERE id=$1',[id])).rows).toEqual(before)
-    const correction=await f.request('/api/attendance/requests',employee.token,{requestType:'time_correction',workDate:startAt.toISOString().slice(0,10),requestedInAt:startAt.toISOString(),reason:'synthetic correction'})
+    const correction=await f.request('/api/attendance/requests',employee.token,{orgId:f.orgId,requestType:'time_correction',workDate:startAt.toISOString().slice(0,10),requestedInAt:startAt.toISOString(),reason:'synthetic correction'})
     expect(correction.status,correction.body.error?.code).toBe(201)
     const correctionId=correction.body.data.request.id
     const normalEdit=await f.request('/api/attendance/requests/'+correctionId,employee.token,{reason:'synthetic correction edited'},'PUT')

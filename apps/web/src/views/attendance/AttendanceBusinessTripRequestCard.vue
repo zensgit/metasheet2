@@ -44,6 +44,7 @@
 <script setup lang="ts">
 import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import { apiFetch } from '../../utils/api'
+import { randomUuid } from '../../utils/uuid'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { buildTimezoneOptions } from './attendanceTimezones'
 import { resolveAttendanceWallTime, type AttendanceWallTimeResult } from './attendanceWallTime'
@@ -90,11 +91,10 @@ async function submit(): Promise<void> {
   const body = { destinationTimezone: form.destinationTimezone, startAt, endAt, ...(form.reason.trim() ? { reason: form.reason.trim() } : {}) }
   const key = JSON.stringify(body)
   if (!retry || retry.key !== key) {
-    if (typeof globalThis.crypto?.randomUUID !== 'function') {
+    try { retry = { key, operationId: randomUuid() } } catch {
       fail('Request identity is unavailable. Reload in a secure browser.', '无法生成申请标识，请在安全浏览器环境中重新加载。')
       return
     }
-    retry = { key, operationId: globalThis.crypto.randomUUID() }
   }
   const current = ++generation
   submitting.value = true

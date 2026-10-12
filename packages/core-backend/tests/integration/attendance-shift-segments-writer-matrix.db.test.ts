@@ -153,9 +153,10 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     await insertShadowRolloutRow(orgId)
   }
 
-  async function mintToken(userId: string, tenantId?: string): Promise<string> {
+  async function mintToken(userId: string, tenantId: string): Promise<string> {
+    await seedActiveIdentity(userId, tenantId)
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(tenantId)}&roles=admin&perms=${encodeURIComponent('attendance:read,attendance:write,attendance:admin,attendance:approve,attendance:import')}`,
     )
     expect(res.status, res.raw).toBe(200)
     return (res.body as { token?: string })?.token ?? ''
@@ -179,6 +180,20 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
        VALUES ($1, $2, true)
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = true`,
       [userId, orgId],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code) VALUES ($1, 'attendance:admin') ON CONFLICT DO NOTHING`,
+      [userId],
+    )
+  }
+
+  async function seedDefaultRule(orgId: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'W3 Writer Matrix Default', 'UTC', 1, '09:00', '18:00', '[0,1,2,3,4,5,6]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)`,
+      [randomUUID(), orgId],
     )
   }
 
@@ -331,6 +346,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   }
 
   async function seedPublishedAssignment(orgId: string, userId: string, shiftId: string, workDate: string): Promise<string> {
+    await seedActiveIdentity(userId, orgId)
+    await seedDefaultRule(orgId)
     const id = randomUUID()
     await pool.query(
       `INSERT INTO attendance_shift_assignments
@@ -757,6 +774,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('matrix: draft + active assignment create/update return typed 422 with zero writes', async () => {
     const orgId = org('matrix-assign')
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
+    await seedActiveIdentity(`${orgId}-worker-2`, orgId)
     const multiId = await createMultiShift(token, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
@@ -842,6 +862,9 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('matrix: generated rotation assignment create/update (draft + active) return typed 422 with zero writes', async () => {
     const orgId = org('matrix-rotasgn')
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
+    await seedActiveIdentity(`${orgId}-worker-2`, orgId)
     const multiId = await createMultiShift(token, orgId)
     // Rule seeded directly: the API create would (correctly) 422 on M.
     const ruleId = randomUUID()
@@ -936,6 +959,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('matrix: fixed schedule apply and rebuild return typed 422 with zero writes', async () => {
     const orgId = org('matrix-fixed')
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const multiId = await createMultiShift(token, orgId)
 
     const group = await postJson('/api/attendance/groups', token, orgId, {
@@ -1079,6 +1103,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('matrix: schedule publication fails closed when a draft shift became multi-segment', async () => {
     const orgId = org('matrix-publish')
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
@@ -1102,6 +1128,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('P27: schedule publication consumes the canonical posture seam before publishing a multi-segment reference', async () => {
     const orgId = randomUUID()
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'P27 Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const draft = await postJson('/api/attendance/schedule-drafts/assignments', token, orgId, {
@@ -1123,6 +1151,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
   it('P27: rotation publication consumes the same posture seam before publishing a multi-segment reference', async () => {
     const orgId = randomUUID()
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const single = await createShiftViaApi(token, orgId, { name: 'P27 Rotation Day', workStartTime: '09:00', workEndTime: '18:00' })
     const singleId = single.body.data.id as string
     const rule = await postJson('/api/attendance/rotation-rules', token, orgId, {
@@ -1156,6 +1186,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const userId = `${orgId}-worker`
     const workDate = '2049-06-17'
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, {
       name: 'P27 calculation first',
       workStartTime: '09:00',
@@ -1212,6 +1244,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const userId = `${orgId}-worker`
     const workDate = '2049-06-18'
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-worker`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, {
       name: 'P27 publication first',
       workStartTime: '09:00',
@@ -1787,6 +1821,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
 
       const multiId = await createMultiShift(token, orgId)
       const userId = `${orgId}-worker`
+      await seedActiveIdentity(userId, orgId)
       const workDate = '2049-06-10'
       // Automatic matching only considers users in a scheduled_shift group.
       const group = await postJson('/api/attendance/groups', token, orgId, {
@@ -1881,7 +1916,7 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const assignmentD1 = await seedPublishedAssignment(orgId, `${orgId}-da`, shiftD1, '2049-06-14')
     const assignmentD2 = await seedPublishedAssignment(orgId, `${orgId}-db`, shiftD2, '2049-06-15')
     // Lock-11 §10 W-4: shift-swap's derivation subject is the requester assignment's userId
-    // (`${orgId}-da` here) — seed it explicitly (seedPublishedAssignment does not).
+    // (`${orgId}-da` here), also seeded by seedPublishedAssignment.
     await seedActiveIdentity(`${orgId}-da`, orgId)
     const swap = await postJson('/api/attendance/shift-swap-requests', token, orgId, {
       requesterAssignmentId: assignmentD1,
@@ -2095,6 +2130,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     const service = plugin.__attendanceShiftServiceForTests.getService()
     const orgId = org('concurrency')
     const token = await mintToken(`${orgId}-admin`, orgId)
+    await seedDefaultRule(orgId)
+    await seedActiveIdentity(`${orgId}-racer`, orgId)
     const shiftId = (await createShiftViaApi(token, orgId, { name: 'Race', workStartTime: '09:00', workEndTime: '18:00' })).body.data.id as string
 
     const wrap = (client: import('pg').PoolClient) => ({
@@ -2239,6 +2276,8 @@ describeDb('W3 shift-segments writer matrix (real DB, route-level)', () => {
     // Author a multi-segment shift (preview-only, always allowed) then drive the production
     // active-assignment writer, whose reference guard resolves the port on its own write trx.
     async function attemptMultiSegmentAssignment(token: string, orgId: string): Promise<HttpResponse> {
+      await seedActiveIdentity(`${orgId}-worker`, orgId)
+      await seedDefaultRule(orgId)
       const shiftId = await createMultiShift(token, orgId, 'Gate A lock-in split')
       return postJson('/api/attendance/assignments', token, orgId, {
         userId: `${orgId}-worker`,

@@ -2101,7 +2101,7 @@ describe('Attendance self-service dashboard', () => {
     const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
-      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+      if (url.endsWith(`/api/attendance/cancel-rounds/pending?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, { ok: true, data: { items: [], total: 0 } })
       }
       return baseImpl(input, init)
@@ -2112,7 +2112,7 @@ describe('Attendance self-service dashboard', () => {
     await flushUi(16)
 
     const pendingReads = vi.mocked(apiFetch).mock.calls.filter(call =>
-      String(call[0]).endsWith('/api/attendance/cancel-rounds/pending'))
+      String(call[0]).endsWith(`/api/attendance/cancel-rounds/pending?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`))
     expect(pendingReads).toHaveLength(1)
     expect(container!.querySelector('[data-attendance-request-tools]')).toBeTruthy()
     expect(container!.querySelector('[data-cancel-round-pending]')).toBeNull()
@@ -2128,7 +2128,7 @@ describe('Attendance self-service dashboard', () => {
     const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
-      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+      if (url.endsWith(`/api/attendance/cancel-rounds/pending?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -2193,7 +2193,7 @@ describe('Attendance self-service dashboard', () => {
     const baseImpl = vi.mocked(apiFetch).getMockImplementation()!
     vi.mocked(apiFetch).mockImplementation(async (input, init) => {
       const url = typeof input === 'string' ? input : (input as Request).url
-      if (url.endsWith('/api/attendance/cancel-rounds/pending')) {
+      if (url.endsWith(`/api/attendance/cancel-rounds/pending?orgId=${encodeURIComponent(authMockState.sessionOrgId)}`)) {
         return jsonResponse(200, {
           ok: true,
           data: {

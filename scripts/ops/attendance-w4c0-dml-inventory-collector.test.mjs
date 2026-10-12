@@ -179,6 +179,37 @@ test('ACP read decisions require each reviewed symbol and exact count', () => {
   }
 })
 
+test('scheduled existing-parent read is one exact base-table precondition and does not admit neighboring readers', () => {
+  const relPath = 'plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs'
+  const enclosingSymbol = 'prepareScheduledContext'
+  const sites = scanFileForAttendanceRecordReadSites(relPath, fs.readFileSync(path.join(rootDir, relPath), 'utf8'))
+    .filter(site => site.enclosingSymbol === enclosingSymbol)
+  const decisions = ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS
+    .filter(entry => entry.relPath === relPath && entry.enclosingSymbol === enclosingSymbol)
+  assert.equal(sites.length, 1)
+  assert.deepEqual(decisions, [{ relPath, enclosingSymbol, count: 1, role: 'scheduled_existing_parent_precondition' }])
+  const accepted = classifyAttendanceRecordReadSites(sites, decisions)
+  assert.deepEqual(accepted.unclassified, [])
+  assert.deepEqual(accepted.countDrift, [])
+  assert.deepEqual(accepted.stale, [])
+  assert.equal(accepted.classifiedSites[0].role, 'scheduled_existing_parent_precondition')
+  assert.equal(classifyAttendanceRecordReadSites(sites, []).unclassified.length, 1)
+  const duplicate = classifyAttendanceRecordReadSites([...sites, ...sites], decisions)
+  assert.deepEqual(duplicate.countDrift, [{ ...decisions[0], actual: 2 }])
+  assert.deepEqual(classifyAttendanceRecordReadSites([], decisions).stale, decisions)
+  for (const change of [
+    { enclosingSymbol: 'unreviewedScheduledRead' },
+    { relPath: 'plugins/plugin-attendance/lib/unreviewed-timezone-runtime.cjs' },
+  ]) {
+    const refused = classifyAttendanceRecordReadSites(sites.map(site => ({ ...site, ...change })))
+    assert.equal(refused.unclassified.length, 1)
+  }
+  const neighbor = scanFileForAttendanceRecordReadSites(relPath,
+    'async function unreviewedScheduledRead() { return db.query(`SELECT timezone FROM attendance_records`) }\n')
+  assert.equal(neighbor.length, 1)
+  assert.equal(classifyAttendanceRecordReadSites([...sites, ...neighbor], decisions).unclassified.length, 1)
+})
+
 test('W4C-3a: generated SELECT inventory classifies every attendance-record read', () => {
   const source = createWorktreeSource(rootDir)
   const { sites } = buildAttendanceRecordReadCensus(source)

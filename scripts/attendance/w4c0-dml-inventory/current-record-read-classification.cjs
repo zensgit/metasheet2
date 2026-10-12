@@ -11,6 +11,10 @@ function entry(relPath, enclosingSymbol, count, role) {
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   // Exact internal frozen-context and source-change preconditions; no public record listing.
+  // Scheduled generation checks physical parent existence before current-policy resolution.
+  // Match generateAbsenceRecords' base-table NOT EXISTS, including retired/review placeholders;
+  // the authoritative parent resolver separately enforces retirement before any write or skip.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'prepareScheduledContext', 1, 'scheduled_existing_parent_precondition'),
   entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDates', 1, 'batch_frozen_target_precondition'),
   entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'readTargetTimezoneContexts', 1, 'batch_original_freeze_migration_precondition'),
   entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 1, 'original_frozen_v2_continuation_precondition'),

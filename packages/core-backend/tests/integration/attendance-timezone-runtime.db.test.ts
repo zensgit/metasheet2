@@ -4,6 +4,8 @@ import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
+import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
 import { Client } from 'pg'
 import { createOnlinePunchDbFixture, punchClock, punchPlugin } from '../utils/attendance-online-punch-db'
 
@@ -1080,6 +1082,340 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       punchClock.setOnlinePunchInstantForTests(workDate+'T20:00:00Z')
       const restored = await fixture.request('/api/attendance/settings',admin.token,{calendarPolicy:{overrides:previous}},'PUT')
       expect(restored.status,restored.body.error?.code).toBe(200)
+    }
+  })
+
+  it('MT06 ON rotation selects the local work-date phase and freezes overnight late/early metrics in the effective zone', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const dayShiftId = randomUUID()
+    const nightShiftId = randomUUID()
+    const rotationRuleId = randomUUID()
+    const rotationAssignmentId = randomUUID()
+    const employeeReferenceId = randomUUID()
+    const workDate = '2026-02-02'
+    const zone = 'America/New_York'
+    await policy(true)
+    await fixture.pool.query(
+      'INSERT INTO attendance_employee_timezone_overrides(id,org_id,user_id,timezone,effective_from,effective_to,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$7)',
+      [employeeReferenceId,fixture.orgId,actor.userId,zone,'2026-02-01T00:00:00Z','2026-02-05T00:00:00Z',admin.userId],
+    )
+    // Two valid single-segment phases. The UTC punch date is February 3,
+    // but February 2 is phase 1 (night); phase 0 is deliberately a different shift.
+    for (const [id,start,end,overnight] of [
+      [dayShiftId,'08:00','16:00',false],
+      [nightShiftId,'22:00','06:00',true],
+    ] as const) {
+      await fixture.pool.query(
+        "INSERT INTO attendance_shifts(id,org_id,name,timezone,work_start_time,work_end_time,is_overnight,working_days,late_grace_minutes,early_grace_minutes,rounding_minutes) VALUES($1::uuid,$2,$1::text,'Asia/Tokyo',$3,$4,$5,'[0,1,2,3,4,5,6]'::jsonb,0,0,1)",
+        [id,fixture.orgId,start,end,overnight],
+      )
+    }
+    await fixture.pool.query(
+      "INSERT INTO attendance_rotation_rules(id,org_id,name,timezone,shift_sequence,is_active) VALUES($1,$2,'MT06 synthetic rotation','Pacific/Honolulu',$3::jsonb,true)",
+      [rotationRuleId,fixture.orgId,JSON.stringify([dayShiftId,nightShiftId])],
+    )
+    await fixture.pool.query(
+      "INSERT INTO attendance_rotation_assignments(id,org_id,user_id,rotation_rule_id,start_date,end_date,is_active,publish_status) VALUES($1,$2,$3,$4,'2026-02-01','2026-02-03',true,'published')",
+      [rotationAssignmentId,fixture.orgId,actor.userId,rotationRuleId],
+    )
+    const previousFlag = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+    try {
+      await fixture.pool.query(
+        "INSERT INTO attendance_calculation_rollout_state(org_id,state,engine_version,reason_code,actor_id,version,prior_state) VALUES($1,'legacy','mt06-test','TEST_FIXTURE',$2,1,NULL) ON CONFLICT(org_id) DO NOTHING",
+        [fixture.orgId,admin.userId],
+      )
+      const states = ['legacy','shadow','eligible','authoritative']
+      for (;;) {
+        const current = (await fixture.pool.query('SELECT state,version FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows[0]
+        const position = states.indexOf(current.state)
+        expect(position).toBeGreaterThanOrEqual(0)
+        if (current.state === 'authoritative') break
+        await fixture.pool.query(
+          'UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',
+          [fixture.orgId,states[position+1],current.state,Number(current.version)+1],
+        )
+      }
+      const incoming = await punch(actor,'check_in','2026-02-03T03:10:00.000Z')
+      expect(incoming.status,incoming.body.error?.code).toBe(200)
+      const frozenBefore = (await fixture.pool.query(
+        'SELECT *,work_date::text AS work_date FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows
+      expect(frozenBefore).toHaveLength(1)
+      const frozen = frozenBefore[0]
+      expect({
+        workDate:frozen.work_date,timezone:frozen.timezone,
+        start:frozen.absolute_start_at,end:frozen.absolute_end_at,
+      }).toEqual({
+        workDate,timezone:zone,
+        start:new Date('2026-02-03T03:00:00.000Z'),end:new Date('2026-02-03T11:00:00.000Z'),
+      })
+      expect(frozen.frame_snapshot.identity).toMatchObject({
+        workDate,shiftId:nightShiftId,assignmentId:rotationAssignmentId,source:'rotation',timezone:zone,
+        startAt:'2026-02-03T03:00:00.000Z',endAt:'2026-02-03T11:00:00.000Z',
+      })
+      expect(frozen.frame_snapshot.timezoneContext).toMatchObject({
+        source:'employee_override',referenceId:employeeReferenceId,timezone:zone,mode:'multi_timezone',
+      })
+      const original = (await fixture.pool.query(
+        'SELECT id,context_snapshot,attribution_snapshot FROM attendance_record_calculations WHERE id=$1 AND attendance_record_id=$2 AND org_id=$3',
+        [frozen.original_calculation_id,frozen.record_id,fixture.orgId],
+      )).rows
+      expect(original).toHaveLength(1)
+      expect(original[0].context_snapshot).toEqual(frozen.frame_snapshot.identity.calculationDefinition)
+      expect(original[0].context_snapshot).toMatchObject({
+        workDate,timezone:zone,shiftId:nightShiftId,isWorkday:true,
+        segments:[{index:0,startTime:'22:00',endTime:'06:00',startDayOffset:0,endDayOffset:1,
+          lateGraceMinutes:0,earlyLeaveGraceMinutes:0}],
+      })
+      expect(original[0].attribution_snapshot.value.absoluteWindow).toEqual({
+        startAt:'2026-02-03T03:00:00.000Z',endAt:'2026-02-03T11:00:00.000Z',
+      })
+      const outgoing = await punch(actor,'check_out','2026-02-03T10:40:00.000Z')
+      expect(outgoing.status,outgoing.body.error?.code).toBe(200)
+      expect(await eventRows(actor)).toEqual([
+        {event_type:'check_in',timezone:zone,work_date:workDate,occurred_at:new Date('2026-02-03T03:10:00.000Z')},
+        {event_type:'check_out',timezone:zone,work_date:workDate,occurred_at:new Date('2026-02-03T10:40:00.000Z')},
+      ])
+      const records = (await fixture.pool.query(
+        'SELECT id,work_date::text,timezone,status,work_minutes,late_minutes,early_leave_minutes,first_in_at,last_out_at,current_calculation_id FROM attendance_records WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows
+      expect(records).toEqual([{
+        id:frozen.record_id,work_date:workDate,timezone:zone,status:'late_early',
+        work_minutes:450,late_minutes:10,early_leave_minutes:20,
+        first_in_at:new Date('2026-02-03T03:10:00.000Z'),last_out_at:new Date('2026-02-03T10:40:00.000Z'),
+        current_calculation_id:expect.any(String),
+      }])
+      const finalCalculation = (await fixture.pool.query(
+        'SELECT version,context_snapshot,projected_work_minutes,projected_late_minutes,projected_early_leave_minutes FROM attendance_record_calculations WHERE id=$1 AND attendance_record_id=$2 AND org_id=$3',
+        [records[0].current_calculation_id,frozen.record_id,fixture.orgId],
+      )).rows
+      expect(finalCalculation).toEqual([{
+        version:2,context_snapshot:original[0].context_snapshot,
+        projected_work_minutes:450,projected_late_minutes:10,projected_early_leave_minutes:20,
+      }])
+      expect((await fixture.pool.query(
+        'SELECT *,work_date::text AS work_date FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows).toEqual(frozenBefore)
+    } finally {
+      if (previousFlag === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = previousFlag
+      // Only mutable synthetic schedule rows; retain produced immutable history.
+      await fixture.pool.query('DELETE FROM attendance_rotation_assignments WHERE id=$1 AND org_id=$2',[rotationAssignmentId,fixture.orgId])
+      await fixture.pool.query('DELETE FROM attendance_rotation_rules WHERE id=$1 AND org_id=$2',[rotationRuleId,fixture.orgId])
+      await resetSources()
+    }
+  })
+
+
+  it('MT06 ON preserves a legally published multi-segment planned break while wildcard-only references remain refused', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const workDate = '2026-02-04'
+    const zone = 'America/New_York'
+    const fixtureLabel = randomUUID()
+    let assignmentId: string | undefined
+    const previousFlag = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+    try {
+      punchClock.setOnlinePunchInstantForTests('2025-12-01T00:00:00Z')
+      const created = await fixture.request('/api/attendance/shifts',admin.token,{
+        name:`MT06 split ${fixtureLabel}`,timezone:'Asia/Tokyo',
+        lateGraceMinutes:0,earlyGraceMinutes:0,roundingMinutes:1,workingDays:[0,1,2,3,4,5,6],
+        segments:[{startTime:'08:00',endTime:'12:00'},{startTime:'13:00',endTime:'17:00'}],
+      })
+      expect(created.status,created.body.error?.code).toBe(201)
+      const shiftId = created.body.data.id as string
+      expect((await fixture.pool.query(
+        'SELECT segment_index,start_time::text,end_time::text,start_day_offset,end_day_offset FROM attendance_shift_segments WHERE org_id=$1 AND shift_id=$2 ORDER BY segment_index',
+        [fixture.orgId,shiftId],
+      )).rows).toEqual([
+        {segment_index:0,start_time:'08:00:00',end_time:'12:00:00',start_day_offset:0,end_day_offset:0},
+        {segment_index:1,start_time:'13:00:00',end_time:'17:00:00',start_day_offset:0,end_day_offset:0},
+      ])
+      await fixture.pool.query(
+        "INSERT INTO attendance_calculation_rollout_state(org_id,state,engine_version,reason_code,actor_id,version,prior_state) VALUES($1,'legacy','mt06-test','TEST_FIXTURE',$2,1,NULL) ON CONFLICT(org_id) DO NOTHING",
+        [fixture.orgId,admin.userId],
+      )
+      const states = ['legacy','shadow','eligible','authoritative']
+      for (;;) {
+        const current = (await fixture.pool.query('SELECT state,version FROM attendance_calculation_rollout_state WHERE org_id=$1',[fixture.orgId])).rows[0]
+        const position = states.indexOf(current.state)
+        expect(position).toBeGreaterThanOrEqual(0)
+        if (current.state === 'authoritative') break
+        await fixture.pool.query(
+          'UPDATE attendance_calculation_rollout_state SET state=$2,prior_state=$3,version=$4 WHERE org_id=$1',
+          [fixture.orgId,states[position+1],current.state,Number(current.version)+1],
+        )
+      }
+      // Reference authorization is exact-org allowlist AND persisted posture.
+      // A wildcard is intentionally inert, even with this authoritative row.
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = '*'
+      const rejected = await fixture.request('/api/attendance/assignments',admin.token,{
+        userId:actor.userId,shiftId,startDate:workDate,endDate:workDate,
+      })
+      expect(rejected).toMatchObject({status:422,body:{ok:false,error:{
+        code:'ATTENDANCE_SHIFT_MULTI_SEGMENT_CALCULATION_DISABLED',
+      }}})
+      expect((await fixture.pool.query(
+        'SELECT id FROM attendance_shift_assignments WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows).toEqual([])
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = fixture.orgId
+      const published = await fixture.request('/api/attendance/assignments',admin.token,{
+        userId:actor.userId,shiftId,startDate:workDate,endDate:workDate,
+      })
+      expect(published.status,published.body.error?.code).toBe(201)
+      assignmentId = published.body.data.assignment.id
+      expect((await fixture.pool.query(
+        'SELECT id,shift_id,is_active,publish_status,start_date::text,end_date::text FROM attendance_shift_assignments WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows).toEqual([{
+        id:assignmentId,shift_id:shiftId,is_active:true,publish_status:'published',start_date:workDate,end_date:workDate,
+      }])
+      await policy(true)
+      await fixture.pool.query(
+        'INSERT INTO attendance_employee_timezone_overrides(id,org_id,user_id,timezone,effective_from,effective_to,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$7)',
+        [randomUUID(),fixture.orgId,actor.userId,zone,'2026-02-04T00:00:00Z','2026-02-06T00:00:00Z',admin.userId],
+      )
+      const evidence = [
+        ['check_in','2026-02-04T13:10:00.000Z'],
+        ['check_out','2026-02-04T17:00:00.000Z'],
+        ['check_in','2026-02-04T18:00:00.000Z'],
+        ['check_out','2026-02-04T21:40:00.000Z'],
+      ] as const
+      const first = await punch(actor,evidence[0][0],evidence[0][1])
+      expect(first.status,first.body.error?.code).toBe(200)
+      const frozenBefore = (await fixture.pool.query(
+        'SELECT *,work_date::text AS work_date FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows
+      expect(frozenBefore).toHaveLength(1)
+      const frozen = frozenBefore[0]
+      expect(frozen.frame_snapshot.identity).toMatchObject({
+        workDate,shiftId,assignmentId,source:'shift',timezone:zone,
+        startAt:'2026-02-04T13:00:00.000Z',endAt:'2026-02-04T22:00:00.000Z',
+      })
+      expect(frozen.frame_snapshot.identity.calculationDefinition).toMatchObject({
+        workDate,timezone:zone,shiftId,segments:[
+          {index:0,startTime:'08:00',endTime:'12:00',startDayOffset:0,endDayOffset:0,lateGraceMinutes:0,earlyLeaveGraceMinutes:0},
+          {index:1,startTime:'13:00',endTime:'17:00',startDayOffset:0,endDayOffset:0,lateGraceMinutes:0,earlyLeaveGraceMinutes:0},
+        ],
+      })
+      for (const [eventType,instant] of evidence.slice(1)) {
+        const result = await punch(actor,eventType,instant)
+        expect(result.status,result.body.error?.code).toBe(200)
+      }
+      expect(await eventRows(actor)).toEqual(evidence.map(([event_type,instant]) => ({
+        event_type,timezone:zone,work_date:workDate,occurred_at:new Date(instant),
+      })))
+      const records = (await fixture.pool.query(
+        'SELECT id,work_date::text,timezone,status,work_minutes,late_minutes,early_leave_minutes,current_calculation_id FROM attendance_records WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows
+      expect(records).toEqual([{
+        id:frozen.record_id,work_date:workDate,timezone:zone,status:'late_early',
+        work_minutes:450,late_minutes:10,early_leave_minutes:20,current_calculation_id:expect.any(String),
+      }])
+      const calculated = (await fixture.pool.query(
+        'SELECT version,context_snapshot,projected_work_minutes,projected_late_minutes,projected_early_leave_minutes FROM attendance_record_calculations WHERE id=$1 AND attendance_record_id=$2 AND org_id=$3',
+        [records[0].current_calculation_id,frozen.record_id,fixture.orgId],
+      )).rows
+      expect(calculated).toEqual([{
+        version:4,context_snapshot:frozen.frame_snapshot.identity.calculationDefinition,
+        projected_work_minutes:450,projected_late_minutes:10,projected_early_leave_minutes:20,
+      }])
+      // 230 + 220 = 450. The 60-minute planned gap is never the 510-minute envelope.
+      expect((await fixture.pool.query(
+        'SELECT segment_index,expected_start_at,expected_end_at,actual_in_at,actual_out_at,work_minutes,late_minutes,early_leave_minutes FROM attendance_record_segments WHERE calculation_id=$1 AND record_id=$2 AND org_id=$3 ORDER BY segment_index',
+        [records[0].current_calculation_id,frozen.record_id,fixture.orgId],
+      )).rows).toEqual([
+        {segment_index:0,expected_start_at:new Date('2026-02-04T13:00:00Z'),expected_end_at:new Date('2026-02-04T17:00:00Z'),
+          actual_in_at:new Date(evidence[0][1]),actual_out_at:new Date(evidence[1][1]),work_minutes:230,late_minutes:10,early_leave_minutes:0},
+        {segment_index:1,expected_start_at:new Date('2026-02-04T18:00:00Z'),expected_end_at:new Date('2026-02-04T22:00:00Z'),
+          actual_in_at:new Date(evidence[2][1]),actual_out_at:new Date(evidence[3][1]),work_minutes:220,late_minutes:0,early_leave_minutes:20},
+      ])
+      expect((await fixture.pool.query(
+        'SELECT *,work_date::text AS work_date FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId],
+      )).rows).toEqual(frozenBefore)
+    } finally {
+      if (previousFlag === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = previousFlag
+      if (assignmentId) await fixture.pool.query('DELETE FROM attendance_shift_assignments WHERE id=$1 AND org_id=$2',[assignmentId,fixture.orgId])
+      await resetSources()
+    }
+  })
+
+  it('MT12 two persistent independent loaders observe committed OFF/ON/OFF policy changes through separate real database connections', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const referenceId = randomUUID()
+    await fixture.pool.query(
+      'INSERT INTO attendance_employee_timezone_overrides(id,org_id,user_id,timezone,effective_from,effective_to,created_by,updated_by) VALUES($1,$2,$3,$4,$5,$6,$7,$7)',
+      [referenceId,fixture.orgId,actor.userId,'Asia/Tokyo','2026-01-01T00:00:00Z','2026-02-01T00:00:00Z',admin.userId],
+    )
+    const requireModule = createRequire(import.meta.url)
+    const { createAttendanceTimezoneContextLoader } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-timezone-context-loader.cjs')
+    const { createAttendanceTimezonePolicyStore } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs')
+    const { readApprovedTrips } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs')
+    const clients = await Promise.all([fixture.pool.connect(),fixture.pool.connect()])
+    const inputs = {orgId:fixture.orgId,userId:actor.userId,occurredAt:new Date('2026-01-13T01:00:00Z'),workDate:'2026-01-13'}
+    const noWrites = async () => { throw new Error('MT12_READ_ONLY_ADAPTER_WRITE_FORBIDDEN') }
+    const readers = clients.map(client => {
+      const statements: string[] = []
+      const query = (sql:string,values?:unknown[]) => {
+        statements.push(sql)
+        return client.query(sql,values)
+      }
+      // Production store/loader/trip reader, created exactly once per connection.
+      // Write-only constructor capabilities are deliberately unreachable; mutations
+      // below use the real authenticated HTTP configuration route.
+      const store = createAttendanceTimezonePolicyStore({query,transaction:noWrites,authorizeManage:noWrites})
+      const load = createAttendanceTimezoneContextLoader({query,policyStore:store,readApprovedTrips})
+      return {client,statements,load}
+    })
+    const read = async (reader: typeof readers[number]) => {
+      reader.statements.length = 0
+      await reader.client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+      try {
+        await acquireAttendanceTimezoneRuntimeLocksV1(reader.client,{orgId:fixture.orgId,userId:actor.userId})
+        const result = await reader.load(inputs)
+        await reader.client.query('COMMIT')
+        return {
+          timezone:result.timezone,source:result.source,mode:result.mode,policyVersion:result.policyVersion,
+          employeeReads:reader.statements.filter(sql => sql.includes('FROM attendance_employee_timezone_overrides')).length,
+        }
+      } catch (error) {
+        await reader.client.query('ROLLBACK')
+        throw error
+      }
+    }
+    try {
+      const pids = await Promise.all(clients.map(async client => (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid))
+      expect(new Set(pids).size).toBe(2)
+      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+        timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:0,employeeReads:0,
+      })))
+      punchClock.setOnlinePunchInstantForTests('2025-12-01T00:00:00Z')
+      const enabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:true,expectedVersion:0},'PUT')
+      expect(enabled).toMatchObject({status:200,body:{ok:true,data:{enabled:true,version:1}}})
+      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+        timezone:'Asia/Tokyo',source:'employee_override',mode:'multi_timezone',policyVersion:1,employeeReads:1,
+      })))
+      const disabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:false,expectedVersion:1},'PUT')
+      expect(disabled).toMatchObject({status:200,body:{ok:true,data:{enabled:false,version:2}}})
+      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+        timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:2,employeeReads:0,
+      })))
+      expect(await fixture.counts(actor.userId)).toEqual({events:0,records:0,requests:0,operations:0})
+    } finally {
+      for (const client of clients) { await client.query('ROLLBACK'); client.release() }
+      await resetSources()
     }
   })
 
