@@ -367,6 +367,25 @@ describe('task-recurrence', () => {
       // nextOccurrenceDueDate on its own keeps its RangeError.
       expect(() => nextOccurrenceDueDate(DAILY, '9999-12-31', '9999-12-31')).toThrow(RangeError)
     })
+    it('series_ended (never a RangeError, never an instant past year 9999) when a value derived from a next due date of 9999-12-31 leaves the range', () => {
+      const ended = { ok: false, reason: 'series_ended' }
+      const end = { dueDate: '9999-12-30', startDate: null, startTime: null, remindAt: null }
+      const west = { ...end, dueTime: null, timeZone: 'America/New_York' }
+      // All day west of UTC: the due instant of 9999-12-31 falls in year 10000 ([own-38]).
+      expect(spawn(west, { anchorDueDate: '9999-12-30' })).toEqual(ended)
+      expect(spawn({ ...west, dueDate: '9999-11-30', recurrence: { freq: 'monthly', interval: 1, byMonthDay: 'last' } }, { anchorDueDate: '9999-11-30' })).toEqual(ended)
+      // Positive controls: the same dates east of UTC, and a time of day that keeps the instant in 9999.
+      expect(spawn({ ...west, timeZone: 'Asia/Shanghai' }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, task: { dueDate: '9999-12-31', dueAt: new Date('9999-12-31T15:59:59.999Z') } })
+      expect(spawn({ ...west, dueDate: '9999-11-30', timeZone: 'Asia/Shanghai', recurrence: { freq: 'monthly', interval: 1, byMonthDay: 'last' } }, { anchorDueDate: '9999-11-30' })).toMatchObject({ ok: true, task: { dueDate: '9999-12-31' } })
+      expect(spawn({ ...west, dueTime: '09:00' }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, task: { dueDate: '9999-12-31', dueAt: new Date('9999-12-31T14:00:00.000Z') } })
+      // A start date after the due date ([own-07]) that would shift past 9999-12-31; a start equal to the due date still shifts.
+      expect(spawn({ ...end, startDate: '9999-12-31' }, { anchorDueDate: '9999-12-30' })).toEqual(ended)
+      expect(spawn({ ...end, startDate: '9999-12-30' }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, task: { startDate: '9999-12-31' } })
+      // A reminder after the due date ([own-30]) that would shift past the end of year 9999; one that stays inside is shifted.
+      // Due 9999-12-30 09:00 Asia/Shanghai = 01:00Z.
+      expect(spawn({ ...end, remindAt: new Date('9999-12-31T20:00:00.000Z') }, { anchorDueDate: '9999-12-30' })).toEqual(ended)
+      expect(spawn({ ...end, remindAt: new Date('9999-12-30T20:00:00.000Z') }, { anchorDueDate: '9999-12-30' })).toMatchObject({ ok: true, reminder: { kind: 'shifted', remindAt: new Date('9999-12-31T20:00:00.000Z') } })
+    })
     it('rejects malformed input with TypeError', () => {
       expect(() => spawn({}, { newTaskId: 'tsk_s1' })).toThrow(TypeError) // same id as the source
       expect(() => spawn({}, { newTaskId: 'tsk__x' })).toThrow(TypeError)

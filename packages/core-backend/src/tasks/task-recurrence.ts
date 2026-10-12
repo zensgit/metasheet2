@@ -180,6 +180,8 @@ export function nextOccurrenceDueDate(rule: TaskRecurrenceRule, current: string,
 }
 
 const LAST_CIVIL_DATE = '9999-12-31'
+/** The last UTC year of a due or reminder instant the direct writes accept ([own-30], [own-38]). */
+const LAST_INSTANT_YEAR = 9999
 
 /**
  * The stepping behind `nextOccurrenceDueDate`, on already validated input. `null` when the next due
@@ -402,8 +404,9 @@ function validateSource(source: unknown, fn: string): TaskOccurrenceSource {
 // reminder policy applies (computed by the service layer).
 /**
  * Plans the next occurrence of `source`. `no_due_date`: the source's due date was cleared after the
- * rule was set. `series_ended`: the next occurrence would fall outside `end`, or after 9999-12-31
- * (never a RangeError). Otherwise returns the
+ * rule was set. `series_ended`: the next occurrence would fall outside `end`, or after 9999-12-31,
+ * or its shifted start date, due instant or shifted reminder would leave the range the direct writes
+ * accept (never a RangeError). Otherwise returns the
  * new row (due date stepped, start date shifted by the same number of civil days, `due_at`
  * recomputed with `computeDueAt` in the source's time zone) and two events: `recurrence_spawned` on
  * the source (payload `{ spawnedTaskId }`) and `created` on the new task.
@@ -442,14 +445,29 @@ export function planSpawn(input: {
     return { ok: false, reason: 'series_ended' }
   }
 
+  // The calendar also ends the series when a value derived from the next due date leaves the range
+  // the direct writes accept (M5 PR-4a design §3.2 step 4: the decision is made here, never a throw):
+  // the shifted start date past 9999-12-31, the due instant past the end of year 9999 ([own-38]; a
+  // zone west of UTC puts 9999-12-31 there), or a shifted reminder past it ([own-30]).
   const shift = civilDayDiff(currentDue, nextDue)
-  const nextStart = source.startDate === null ? null : addCivilDays(requireCivilDate(source.startDate, 'source.startDate', fn), shift)
+  let nextStart: string | null = null
+  if (source.startDate !== null) {
+    const start = requireCivilDate(source.startDate, 'source.startDate', fn)
+    if (shift > civilDayDiff(start, LAST_CIVIL_DATE)) return { ok: false, reason: 'series_ended' }
+    nextStart = addCivilDays(start, shift)
+  }
   const nextDueAt = computeDueAt({ dueDate: nextDue, dueTime: source.dueTime, timeZone: source.timeZone })
+  if (nextDueAt.getUTCFullYear() > LAST_INSTANT_YEAR) return { ok: false, reason: 'series_ended' }
   let reminder: SpawnReminder
   if (source.remindAt !== null) {
     const currentDueAt = computeDueAt({ dueDate: currentDue, dueTime: source.dueTime, timeZone: source.timeZone })
     const offsetMs = currentDueAt.getTime() - source.remindAt.getTime()
-    reminder = { kind: 'shifted', remindAt: new Date(nextDueAt.getTime() - offsetMs) }
+    const remindAt = new Date(nextDueAt.getTime() - offsetMs)
+    // ASSUMPTION(task-e): a reminder set after the due date that would shift past the end of year 9999
+    // ends the series like the due instant does; dropping or clamping the reminder are the
+    // alternatives (an open owner question of M5 PR-4a slice 3).
+    if (remindAt.getUTCFullYear() > LAST_INSTANT_YEAR) return { ok: false, reason: 'series_ended' }
+    reminder = { kind: 'shifted', remindAt }
   } else {
     reminder = { kind: 'default_policy', policyUserId: source.createdBy }
   }
