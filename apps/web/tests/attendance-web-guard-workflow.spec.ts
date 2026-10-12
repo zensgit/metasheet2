@@ -142,6 +142,19 @@ function requiredLaneExecCommand(script: string): string {
 }
 
 describe('attendance web guard workflow contract', () => {
+  it('carries both server clock wholefiles in the classifiers and both test lanes', () => {
+    const doc = loadYaml(workflow) as { on: { push: { paths: string[] } } }
+    const required = requiredLaneExecCommand(readFileSync(resolve(process.cwd(), 'scripts/run-required-web-tests.sh'), 'utf8')).split(/\s+/)
+    const targeted = targetedRunCommand(workflow).split(/\s+/)
+    for (const spec of ['attendance-server-clock.spec.ts', 'attendance-server-clock-view.spec.ts']) {
+      const path = `apps/web/tests/${spec}`
+      expect(doc.on.push.paths).toContain(path)
+      expect(workflow.split(path)).toHaveLength(3)
+      expect(required).toContain(spec)
+      expect(targeted).toContain(spec)
+    }
+  })
+
   it('parses the required lane as one exec logical line, not one physical line', () => {
     // Pins the parsing contract the assertion below depends on, and shows why it changed: the
     // physical-line form yields nothing usable against the current file.

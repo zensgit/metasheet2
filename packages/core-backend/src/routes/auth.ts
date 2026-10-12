@@ -53,6 +53,7 @@ import { secretManager } from '../security/SecretManager'
 import { isPlmEnabled, resolveEffectiveProductMode } from '../config/product-mode'
 import { getBcryptSaltRounds, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { DingTalkBusinessError, DingTalkRequestError } from '../integrations/dingtalk/client'
+import { classifyDirectoryFailureText } from '../directory/directory-failure-text'
 
 const logger = new Logger('AuthRouter')
 
@@ -1767,7 +1768,7 @@ authRouter.post('/dingtalk/callback', async (req: Request, res: Response) => {
       : error instanceof DingTalkLoginPolicyError
       ? error.message
       : error instanceof DingTalkRequestError
-        ? error.message
+        ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
         : 'DingTalk authentication failed'
 
     return res.status(statusCode).json({
@@ -1879,7 +1880,7 @@ authRouter.post('/login/dingtalk/container', async (req: Request, res: Response)
       : error instanceof DingTalkBusinessError
         ? 'DingTalk rejected the container auth code'
         : error instanceof DingTalkRequestError
-          ? error.message
+          ? classifyDirectoryFailureText(error, { fallback: 'DingTalk authentication failed' }).text
           : 'DingTalk authentication failed'
     const code = error instanceof DingTalkLoginPolicyError
       ? error.code

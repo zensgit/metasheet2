@@ -98,6 +98,8 @@
  * Values-free discipline: closed codes only; no caller value in any error.
  */
 import crypto from 'node:crypto'
+import { buildOnlinePunchRequestV1, ONLINE_PUNCH_SOURCE_REF, makeOnlinePunchReceiptV1, parseOnlinePunchReceiptV1, retryOnlinePunchClaimV1, withOnlinePunchCompanionV1, OnlinePunchConnectionUncertainError, type OnlinePunchRequestV1, type OnlinePunchReceiptV1 } from './online-punch-request'
+import type { AttendanceRequestOperationBoundaryInputV1, AttendanceRequestOperationExternalTransactionResultV1 } from './w4c3b-request-operation-boundary'
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationRolloutLock,
@@ -121,6 +123,7 @@ import {
   cancelAttendanceResultOperationV1,
   enqueueAttendanceResultEventOutboxV1,
   isRetryableSqlState,
+  readOnlinePunchReplayV1,
   runAttendanceResultOperationTransactionV1,
   sealAttendanceResultOperationV1,
 } from './w4c0-operation-registry'
@@ -372,6 +375,9 @@ export interface AttendanceLivePunchLegacyArgsV1 {
 }
 
 export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
+  /** Captured once by activation; ordinary HTTP cannot provide an adapter. */
+  executeOnlineOutdoorInTransaction?(trx: AttendanceW4TransactionClientV1, input: AttendanceRequestOperationBoundaryInputV1): Promise<AttendanceRequestOperationExternalTransactionResultV1>
+
   /**
    * P01/P02 verbatim transaction body: event INSERT -> record lock -> frozen
    * V1 attribution meta -> upsert -> merge lift. MUST generate any random IDs
@@ -697,7 +703,15 @@ export type AttendanceScheduledRunBoundaryResultV1 =
       }>
     }
 
+export type OnlinePunchInputV1 = Parameters<typeof buildOnlinePunchRequestV1>[0]
+export type OnlinePunchPreparedV1 =
+  | { readonly kind: 'normal'; readonly input: AttendanceLivePunchBoundaryInputV1 }
+  | { readonly kind: 'outdoor'; readonly input: AttendanceRequestOperationBoundaryInputV1 }
+  | { readonly kind: 'refusal'; readonly error: unknown }
 export interface AttendanceW4LiveScheduledBoundaryV1 {
+  probeOnlinePunchReplay(input: OnlinePunchInputV1): Promise<OnlinePunchReceiptV1 | null>
+  executeOnlinePunch(input: OnlinePunchInputV1, prepared: OnlinePunchPreparedV1): Promise<{ kind: string; receipt: OnlinePunchReceiptV1 }>
+
   executeLivePunch(input: AttendanceLivePunchBoundaryInputV1): Promise<AttendanceLivePunchBoundaryResultV1>
   executeScheduledRun(input: AttendanceScheduledRunBoundaryInputV1): Promise<AttendanceScheduledRunBoundaryResultV1>
   recoverScheduledRun(
@@ -707,7 +721,7 @@ export interface AttendanceW4LiveScheduledBoundaryV1 {
 
 export interface AttendanceW4BoundaryConnectionV1 {
   readonly client: AttendanceW4TransactionClientV1
-  release(): void
+  release(error?: Error): void
 }
 
 export interface AttendanceW4LiveScheduledBoundaryDepsV1 {
@@ -1926,10 +1940,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
   async function withConnection<T>(body: (client: AttendanceW4TransactionClientV1) => Promise<T>): Promise<T> {
     const connection = await deps.acquireConnection()
+    let discard: Error | undefined
     try {
       return await body(connection.client)
+    } catch (error) {
+      if (error instanceof OnlinePunchConnectionUncertainError) discard = error
+      throw error
     } finally {
-      connection.release()
+      connection.release(discard)
     }
   }
 
@@ -1985,8 +2003,55 @@ export function createAttendanceLiveScheduledBoundaryV1(
   // Live punch.
   // -------------------------------------------------------------------------
 
-  async function executeLivePunch(
-    input: AttendanceLivePunchBoundaryInputV1,
+  async function executeLivePunch(input: AttendanceLivePunchBoundaryInputV1): Promise<AttendanceLivePunchBoundaryResultV1> {
+    return withConnection(client => runAttendanceResultOperationTransactionV1(client,
+      trx => executeLivePunchInTransaction(trx, input)))
+  }
+
+  function onlineAuthorization(request: OnlinePunchRequestV1) {
+    return createAuthorizedAttendanceWriteContextV1({ actorId: request.userId, actorPosture: 'self',
+      tokenSubjectUserId: request.tokenSubjectUserId, orgId: request.orgId,
+      subjectScope: { kind: 'self', userId: request.userId }, capability: 'punch', sourceRef: ONLINE_PUNCH_SOURCE_REF })
+  }
+  async function probeOnlinePunchReplay(input: OnlinePunchInputV1): Promise<OnlinePunchReceiptV1 | null> {
+    const request = buildOnlinePunchRequestV1(input)
+    return withConnection(client => runAttendanceResultOperationTransactionV1(client, async trx => {
+      const value = await readOnlinePunchReplayV1(trx, onlineAuthorization(request), request)
+      return value === null ? null : parseOnlinePunchReceiptV1(value)
+    }))
+  }
+  async function executeOnlinePunch(input: OnlinePunchInputV1, prepared: OnlinePunchPreparedV1) {
+    const request = buildOnlinePunchRequestV1(input)
+    const authorization = onlineAuthorization(request)
+    return retryOnlinePunchClaimV1(() => withConnection(client =>
+      runAttendanceResultOperationTransactionV1(client, async trx => {
+        const preflight = await attendanceResultOperationPreflightV1(trx, authorization, request.registryInput, { onlinePunch: request })
+        if (preflight.kind === 'replay') {
+          return { kind: 'replay', receipt: parseOnlinePunchReceiptV1(preflight.responses.itemResponses[request.operationId]) }
+        }
+        if (preflight.kind === 'suspended') throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+        if (preflight.kind !== 'claimed' || preflight.itemIdentities.length !== 1) boundaryFail('W4C2_ONLINE_CLAIM_INVALID', 500)
+        if (prepared.kind === 'refusal') throw prepared.error
+        if (prepared.kind === 'normal') {
+          if (prepared.input.orgId !== request.orgId || prepared.input.userId !== request.userId
+            || prepared.input.operationId !== request.operationId || prepared.input.occurredAtRaw !== null) boundaryFail('W4C2_ONLINE_INPUT_INVALID')
+          const outcome = await executeLivePunchInTransaction(trx, prepared.input, { request, preflight, authorization })
+          return { kind: outcome.kind, receipt: makeOnlinePunchReceiptV1(200, { ok: true, data: wireJson(outcome.response) }) }
+        }
+        if (prepared.input.kind !== 'request_create' || prepared.input.routeVariant !== 'outdoor'
+          || prepared.input.operationId !== request.operationId || typeof adapters.executeOnlineOutdoorInTransaction !== 'function') boundaryFail('W4C2_ONLINE_INPUT_INVALID')
+        const outcome = await withOnlinePunchCompanionV1(trx, request,
+          () => adapters.executeOnlineOutdoorInTransaction!(trx, prepared.input))
+        if (outcome.kind === 'business_refused') boundaryFail(outcome.code, 409)
+        const receipt = makeOnlinePunchReceiptV1(202, wireJson(outcome.response))
+        await sealAttendanceResultOperationV1(trx, preflight.itemIdentities[0], { responseSnapshot: receipt })
+        return { kind: outcome.kind, receipt }
+      })))
+  }
+
+  async function executeLivePunchInTransaction(
+    trx: AttendanceW4TransactionClientV1, input: AttendanceLivePunchBoundaryInputV1,
+    online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
   ): Promise<AttendanceLivePunchBoundaryResultV1> {
     // Org-key pre-classification. The rollout domain is canonical UUIDs plus the
     // exact 'default' sentinel; a legacy org key OUTSIDE that lexical domain can
@@ -2002,943 +2067,939 @@ export function createAttendanceLiveScheduledBoundaryV1(
       rolloutKey = null
     }
 
-    return withConnection((client) =>
-      runAttendanceResultOperationTransactionV1(client, async (trx) => {
-        const pluginTrx = pluginShapedTrx(trx)
-        const legacyPunchArgs = buildLegacyPunchArgs(input)
+    const pluginTrx = pluginShapedTrx(trx)
+    const legacyPunchArgs = buildLegacyPunchArgs(input)
 
-        if (rolloutKey === null) {
-          if (input.operationId !== null) {
-            // A stable-ID command requires a canonical org key (values-free).
-            boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
-          }
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
-          return { kind: 'legacy' as const, response: result }
-        }
+    if (rolloutKey === null) {
+      if (input.operationId !== null) {
+        // A stable-ID command requires a canonical org key (values-free).
+        boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
+      }
+      const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
+      return { kind: 'legacy' as const, response: result }
+    }
 
-        // Suspension preflight precedes the first source DML (lock 12.3): the
-        // org rollout SHARED advisory lock, then the one posture seam.
-        await acquireAttendanceCalculationRolloutLock(trx, rolloutKey, 'shared')
-        const posture = await resolveSegmentCalculationPosture(trx, rolloutKey as unknown as string)
+    // Suspension preflight precedes the first source DML (lock 12.3): the
+    // org rollout SHARED advisory lock, then the one posture seam.
+    await acquireAttendanceCalculationRolloutLock(trx, rolloutKey, 'shared')
+    const posture = await resolveSegmentCalculationPosture(trx, rolloutKey as unknown as string)
 
-        if (input.operationId === null) {
-          if (posture.writePosture === 'blocked') {
-            throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
-          }
-          if (posture.writePosture === 'legacy_projection_only') {
-            // Null-ID legacy command: same closed adapter, no operation row, no
-            // outbox, no calculation, NO strict envelope/witness surface; the
-            // route keeps its existing synchronous best-effort emit.
-            const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
-            return { kind: 'legacy' as const, response: result }
-          }
-          // W4-postured org + null-ID falls through to the registry protocol,
-          // which fails closed with W4C0_OPERATION_ID_REQUIRED before source DML.
-        }
-
-        // Stable-ID or W4-postured command: strict envelope + branded witness +
-        // full registry preflight (replay-before-suspension per lock 7.1/8.2).
-        const envelope: NormalizedAttendanceSourceOperationEnvelopeV1 = normalizeAttendanceSourceOperationEnvelopeV1({
-          schemaVersion: 1,
-          orgId: input.orgId,
-          correlationId: `live-punch:${input.orgId}:${input.userId}:${input.workDate}`,
-          command: {
-            schemaVersion: 1,
-            kind: 'live_punch',
-            subjectUserId: input.userId,
-            operationId: input.operationId,
-            payload: {
-              eventType: input.eventType,
-              // Command identity: the client's own business-time bytes when it
-              // sent any; otherwise the route-resolved instant (a client that
-              // wants a congruent response-loss retry supplies occurredAt
-              // explicitly).
-              occurredAt: input.occurredAtRaw ?? input.occurredAtResolved,
-              timezone: input.timezone,
-              source: input.source,
-              location: wireJson(input.location) as Record<string, unknown> | null,
-              meta: wireJson(input.meta) as Record<string, unknown> | null,
-              photoFileRef: input.photoFileRef,
-            },
-          },
-          batch: null,
-        })
-
-        const authorization = createAuthorizedAttendanceWriteContextV1({
-          actorId: input.userId,
-          actorPosture: 'self',
-          tokenSubjectUserId: input.userId,
-          orgId: envelope.orgId,
-          subjectScope: { kind: 'self', userId: input.userId },
-          capability: 'punch',
-          sourceRef: LIVE_SOURCE_REF,
-        })
-
-        const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
-
-        if (preflight.kind === 'replay') {
-          const responses = Object.values(preflight.responses.itemResponses)
-          return { kind: 'replay' as const, response: responses[0] ?? null }
-        }
-        if (preflight.kind === 'suspended') {
-          throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
-        }
-
-        if (preflight.kind === 'legacy_no_operation') {
-          // Posture raced to legacy between the probe and the registry re-read:
-          // the null-ID legacy contract applies (no operation row).
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
-          return { kind: 'legacy' as const, response: result }
-        }
-
-        // preflight.kind === 'claimed'
-        const org = preflight.org
-        const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
-        const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
-
-        if (isLegacyCompat) {
-          // Stable-ID legacy command: same closed adapter plus ONLY the
-          // compatibility operation claim/seal — no calculation, no outbox, no
-          // W4 result pointer (lock 4.1/12 preamble).
-          const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
-          await sealAttendanceResultOperationV1(trx, identity, {
-            responseSnapshot: wireJson(result),
-          })
-          return { kind: 'legacy_compat' as const, response: result }
-        }
-
-        // Three-posture matrix: a business time only the legacy parser accepts.
-        // HOISTED above the authoritative branch by Gate D2 so both the authoritative reject
-        // (below, first thing in the branch) and the eligible reject (further down) read ONE
-        // predicate rather than two copies that could drift. Pure and DML-free (`isStrictInstant`
-        // is a try/catch around the strict instant parser), so hoisting it is behaviour-
-        // preserving for every other posture.
-        const legacyOnlyTime = input.occurredAtRaw !== null && !isStrictInstant(input.occurredAtRaw)
-
-        // W4 posture. Distinguish effective shadow vs eligible vs authoritative
-        // (still under the org rollout shared lock acquired above).
-        if (posture.effectiveState === 'authoritative' || org.acceptedWritePosture === 'authoritative') {
-          // ===================================================================
-          // Gate D2 (#4556 / #4844) — the AUTHORITATIVE live-punch writer.
-          //
-          // REPLACEMENT, NOT A DELETE. This branch body previously failed closed. Deleting it
-          // instead of replacing it would let an allowlisted authoritative org's punch fall
-          // through to the shadow `applyLivePunchLegacy` call below — a silent 503-to-legacy-
-          // projection conversion, fail-OPEN the instant the allowlist gains an authoritative
-          // entry. The branch body must always be a real writer, and it must `return`/throw
-          // before control can reach that call site (pinned behaviourally by the zero-invocation
-          // spy on the injected `applyLivePunchLegacy`).
-          //
-          // Deliberate deviation from §8.2's step-4-before-step-5 numbering: the parent lock is
-          // taken BEFORE the in-transaction W2 re-resolution here, because the retirement guard
-          // and the create-if-absent placeholder must both settle before ANY source DML (the
-          // split event INSERT included). Safe: the two orderings cannot interleave, because the
-          // org rollout SHARED advisory lock is held for the whole transaction on BOTH paths and
-          // a posture transition needs the EXCLUSIVE one — so every in-flight punch for an org
-          // sees the same posture, and a shadow punch can never be concurrent with an
-          // authoritative punch on the same parent row.
-          // ===================================================================
-
-          // -- Step 1: legacy-only business time is REJECTED, with ZERO DML ------------------
-          // The eligible reject below never evaluates on this path (it is gated on
-          // `effectiveState === 'eligible'`), so this is a genuinely new in-branch check, not a
-          // widened existing one. Authoritative may never be LOOSER than eligible: §12.3 requires
-          // effective eligible|authoritative to reject before event/request/result/effect DML.
-          // The whole transaction rolls back, discarding the preflight claim; no event row, no
-          // record row, no calculation row, and no `attendance.punched` outbox row (the enqueue
-          // is further down, after this point).
-          if (legacyOnlyTime) {
-            throw new AttendanceW4OperationError('W4_ATTRIBUTION_UNSUPPORTED')
-          }
-
-          // -- Step 2: the widened locked parent read (class-11 target lock + FOR UPDATE) ------
-          // Read-only. Also re-locked by the core's own `lockParent FOR UPDATE by id` inside the
-          // same transaction (a no-op re-lock); the boundary's advisory target lock precedes the
-          // row lock and the core takes no advisory lock, so there is no inversion.
-          let authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
-
-          // -- Step 3a: absent parent → create-if-absent review placeholder --------------------
-          // The FIRST DML this branch performs (Steps 1-2 are a throw and a SELECT), which is
-          // exactly what makes plain ON CONFLICT DO NOTHING legal here without a SAVEPOINT.
-          if (authoritativeParent === null) {
-            await insertAuthoritativeReviewPlaceholderParentV1(trx, {
-              orgId: envelope.orgId,
-              userId: input.userId,
-              workDate: input.workDate,
-              timezone: input.timezone,
-              isWorkday: input.isWorkday,
-            })
-            // ALWAYS re-read under the lock — never assume our own placeholder won. On a lost
-            // race the winner's row may be a legacy-ACTIVE row (compat fingerprint becomes
-            // load-bearing), another review placeholder, or a RETIRED row (refused below); this
-            // re-entry is what routes every one of those to the same resolution path.
-            authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
-            if (authoritativeParent === null) {
-              // Neither our INSERT nor a racer's produced a visible row under our own lock —
-              // a programming/DB-state error, not a business outcome.
-              boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
-            }
-          }
-
-          // -- Step 3b: DEFAULT-REFUSE retirement guard ---------------------------------------
-          // Runs before any FURTHER DML — before the split event INSERT and before the core call.
-          // (In the absent branch above the only preceding DML is our own placeholder INSERT,
-          // which either created a `review_placeholder` row that this guard admits, or wrote
-          // nothing at all; so no refusing case ever leaves a write behind.)
-          //
-          // The core is reason-BLIND: its `lockParent` SELECT omits `visibility_reason` and its
-          // completed-path pointer UPDATE reactivates the parent to `w4/active/active`
-          // UNCONDITIONALLY. The boundary is the only reason-aware reader, so the guard belongs
-          // here. It is also precisely the guard the Step-4 adapter split removes from this path:
-          // the legacy punch's own operator-retirement refusal lives inside the
-          // `attendance_records` upsert that the split drops.
-          //
-          // D2 default on the `import_rollback` fork is explicit REFUSE (never a bare completed
-          // that reactivates a rolled-back day); routing it through the governed preimage-freeze
-          // reactivation instead is an owner product call, not a build-time choice.
-          assertParentNotRetiredForAuthoritativePunchV1({
-            visibilityState: authoritativeParent.visibilityState,
-            visibilityReason: authoritativeParent.visibilityReason,
-          })
-
-          // -- Step 4: split event INSERT, then the shared compute ----------------------------
-          // The SPLIT half only: durable punch evidence + the wire `event`. The legacy daily
-          // `attendance_records` upsert is deliberately NOT run — the core owns that row on this
-          // path. `adapters.applyLivePunchLegacy` is never called from this branch.
-          const authoritativeEvent = await adapters.insertLivePunchEvent(pluginTrx, legacyPunchArgs)
-
-          // The WIRE-ECHO `workDateResolution`, derived HERE — before any write this operation
-          // makes to `attendance_records` — because that is where the legacy path derives it.
-          //
-          // ORDERING IS SEMANTIC, NOT COSMETIC. The resolver consults OPEN records
-          // (`w4c3c-active-current.ts:176-190`: `visibility_state='active'` via the current view,
-          // `first_in_at IS NOT NULL AND last_out_at IS NULL`) when it breaks ties between
-          // candidate shifts. The core's completed-path pointer UPDATE writes exactly that shape
-          // for a check-in-only day — `first_in_at` set, `last_out_at` still null, and it flips the
-          // row to `active` — so a derivation placed AFTER the core call can observe an open record
-          // THIS operation just created and echo a resolution the legacy path, which derives before
-          // its own upsert (`index.cjs`, `deriveLegacyLivePunchAttributionV1` ahead of
-          // `appendUpsert`), could never produce for the same punch. Only the echoed field is
-          // affected — the persisted calculation freezes `authoritativeResolution` below — but the
-          // owner's ruling is that the authoritative response matches the legacy contract,
-          // SEMANTICS included, not merely field names and casing.
-          //
-          // Placed adjacent to `authoritativeResolution` so both resolver reads observe the same
-          // pre-write state. (The preceding event INSERT is irrelevant to both: neither read
-          // touches `attendance_events`, and the create-if-absent placeholder cannot register as an
-          // open record — it is `retired`, so the current view excludes it, and its `first_in_at`
-          // is NULL either way.)
-          const authoritativeWorkDateResolution =
-            await adapters.deriveLivePunchWorkDateResolution(pluginTrx, legacyPunchArgs)
-
-          const authoritativeNowIso = new Date().toISOString()
-          const authoritativeResolution = await adapters.resolveLiveCandidate(pluginTrx, {
-            orgId: envelope.orgId,
-            userId: input.userId,
-            occurredAt: input.occurredAtResolved,
-            // PRE-resolution timezone, anchor deliberately omitted — identical contract to the
-            // shadow branch's own call (see `resolveLiveCandidate`'s doc comment).
-            timezone: input.requestTimezone,
-          })
-          const authoritativeAttribution = attributionFromResolution(authoritativeResolution, {
-            orgId: envelope.orgId,
-            userId: input.userId,
-            source: 'live_resolution',
-            nowIso: authoritativeNowIso,
-          })
-          let authoritativeContext: FrozenAttendanceContextV1 | null = null
-          let authoritativeW7GroupShadow: W7GroupShadowHalfV1 | null = null
-          if (authoritativeAttribution.posture === 'resolved_v2') {
-            const issued = await issueThroughW7Seam(pluginTrx, {
-              orgId: envelope.orgId,
-              userId: input.userId,
-              workDate: authoritativeAttribution.value.workDate,
-              shiftId: authoritativeAttribution.value.shiftId,
-              timezone: authoritativeResolution.fullWinner?.timezone ?? input.requestTimezone,
-              isWorkday: input.isWorkday,
-              holidayKind: input.holidayKind,
-            })
-            authoritativeContext = issued.context
-            authoritativeW7GroupShadow = issued.w7GroupShadow
-          }
-          // Evidence is loaded AFTER the split INSERT so this punch is inside its own evidence
-          // set — otherwise a day's first check-in could never produce a completed segment.
-          const authoritativeEvidenceAnchorWorkDate =
-            authoritativeAttribution.posture === 'resolved_v2'
-              ? authoritativeAttribution.value.workDate
-              : input.workDate
-          const authoritativeEvidence = await loadLivePunchEvidence(
-            trx,
-            envelope.orgId,
-            input.userId,
-            authoritativeEvidenceAnchorWorkDate,
-          )
-          const authoritativeCalculated = calculateAttendanceSegmentsV1({
-            attribution: authoritativeAttribution,
-            context: authoritativeContext,
-            evidence: authoritativeEvidence,
-            approvedFacts: [],
-          })
-
-          // identityDrift override (canonical freeze semantics §4.2 candidate (i)), computed
-          // exactly as the shadow branch does. On the AUTHORITATIVE path this override is
-          // load-bearing rather than cosmetic: passing the raw calculator result through on a
-          // drifted punch would write a COMPLETED row and MOVE THE PARENT POINTER onto an
-          // attribution whose identity the operation never committed to.
-          const authoritativeInnerComparableFingerprint =
-            authoritativeAttribution.posture === 'resolved_v2'
-              ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({
-                  attribution: authoritativeAttribution,
-                  context: authoritativeContext,
-                })
-              : null
-          const authoritativeIdentityMismatch =
-            authoritativeAttribution.posture === 'resolved_v2' &&
-            (authoritativeAttribution.value.workDate !== input.workDate
-              || authoritativeAttribution.value.shiftId !== input.shiftId)
-          const authoritativeFingerprintMismatch =
-            authoritativeAttribution.posture === 'resolved_v2' &&
-            authoritativeInnerComparableFingerprint !== input.outerSourceDefinitionFingerprint
-          const authoritativeIdentityDrift =
-            authoritativeIdentityMismatch || authoritativeFingerprintMismatch
-          const authoritativeCalculation: AttendanceSegmentCalculationResultV1 =
-            authoritativeIdentityDrift
-              ? {
-                  outcome: 'review_required',
-                  outcomeReasonCode: 'context_mismatch',
-                  segments: [],
-                  dailyProjection: null,
-                }
-              : authoritativeCalculated
-
-          // -- Steps 5 & 6: preimage + expected pointer, and the payload fingerprint ----------
-          const authoritativeProvenanceRef: AttendanceInputProvenanceRefV1 = {
-            transport: 'live_event',
-            sourceRef: LIVE_SOURCE_REF,
-            artifactSha256: null,
-            normalizedCsvSha256: null,
-            convertedSheetName: null,
-          }
-          const authoritativePayloadFingerprint =
-            computeAuthoritativeLivePunchPayloadFingerprintV1(input)
-          const { preimage: authoritativePreimage, expectedCurrentCalculationId } =
-            buildAuthoritativeLivePunchPreimageV1(authoritativeParent)
-
-          // -- Step 7: the core owns the calc row, the lineage, and the parent pointer --------
-          const authoritativeWritten = await writeAuthoritativeSegmentCalculationV1(trx, {
-            orgId: envelope.orgId,
-            recordId: authoritativeParent.id,
-            entrypoint: 'live',
-            operationId: identity.id,
-            calculation: authoritativeCalculation,
-            attribution: authoritativeAttribution,
-            context: authoritativeContext,
-            evidence: authoritativeEvidence as unknown as readonly unknown[],
-            approvedFacts: [],
-            provenanceRef: authoritativeProvenanceRef,
-            // BOTH places: top-level for the core's own conflict check, and embedded so a
-            // genuine retry's `input_provenance.payloadFingerprint` read matches.
-            inputProvenance: {
-              ...authoritativeProvenanceRef,
-              payloadFingerprint: authoritativePayloadFingerprint,
-            },
-            payloadFingerprint: authoritativePayloadFingerprint,
-            preimage: authoritativePreimage,
-            expectedCurrentCalculationId,
-            sourceBatchId: null,
-            actorId: authorization.actorId,
-            correlationId: envelope.correlationId,
-          })
-
-          // Seal fingerprints are RECOMPUTED at the boundary over the same inputs the core
-          // hashed — the core's return shape is deliberately unchanged by D2. The tier arg MUST
-          // be `segment_authoritative`: copying the shadow builder's `legacy_shadow` would seal a
-          // fingerprint that does not match the persisted authoritative row.
-          const authoritativeSemanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
-            attribution: authoritativeAttribution,
-            context: authoritativeContext,
-            evidence: authoritativeEvidence,
-            approvedFacts: [],
-            manualOverride: null,
-            mergePolicy: 'append',
-            calculationTier: 'segment_authoritative',
-            engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
-            snapshotSchemaVersion: 1,
-          })
-          const authoritativeProvenanceFingerprint =
-            computeAttendanceProvenanceFingerprintV1(authoritativeProvenanceRef)
-
-          // Outbox BEFORE seal (lock 8.2 steps 14-15), unconditional — byte-identical to the
-          // shadow path's own enqueue, which already fires for review outcomes today. Whether a
-          // review-only authoritative outcome SHOULD emit `attendance.punched` is an open product
-          // question; D2 changes nothing about it.
-          await enqueueAttendanceResultEventOutboxV1(trx, identity, [
-            {
-              eventKind: 'attendance.punched',
-              payload: {
-                userId: input.userId,
-                orgId: envelope.orgId,
-                workDate: input.workDate,
-                eventType: input.eventType,
-                occurredAt: input.occurredAtResolved,
-                timezone: input.timezone,
-              },
-              payloadSchemaVersion: 1,
-              businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
-                kind: 'attendance.punched',
-                orgId: envelope.orgId,
-                operationId: identity.id,
-              }),
-            },
-          ])
-
-          // -- Step 8a: the caller response — PRESERVES THE EXISTING PUBLIC CONTRACT -----------
-          //
-          // `POST /api/attendance/punch` returns `{event, record, workDateResolution}` where
-          // `record` is the persisted `attendance_records` ROW in its snake_case DB shape (the
-          // published `AttendanceRecord` contract; the legacy adapter returns exactly that row
-          // from its own `RETURNING *` upsert). The authoritative path MUST return the same shape
-          // — field set and casing identical, only the VALUES differing (they now reflect the
-          // authoritative projection rather than the legacy one).
-          //
-          // An earlier revision of this branch mapped `record` from `calculation.dailyProjection`
-          // (camelCase `PreparedDailyProjectionV1`, nine fields, all-null for review). That was a
-          // BREAKING contract change: it renamed every field, dropped columns the published shape
-          // carries (`id`, `user_id`, `org_id`, `is_workday`, `source_batch_id`,
-          // `projection_owner`, `visibility_state`, `visibility_reason`, `created_at`,
-          // `updated_at`) and would have silently broken the mobile client, with only tests
-          // FREEZING the new shape rather than approving it. Owner ruling: preserve the contract.
-          // Any future protocol change is an independent RATIFY plus OpenAPI/SDK/client updates,
-          // not a side effect of delivering the authoritative writer.
-          //
-          // So: re-SELECT the row the core just wrote, INSIDE the same transaction and after the
-          // core's pointer UPDATE, and ship it verbatim. For a COMPLETED outcome this is the
-          // promoted `w4`/`active` row carrying the authoritative daily values; for a REVIEW
-          // outcome it is the parent as it stands (the create-if-absent placeholder, or the
-          // untouched legacy row when one already existed) — in both cases a REAL persisted row,
-          // never a synthesized acknowledgement.
-          const persistedParent = await trx.query(
-            `SELECT * FROM attendance_records WHERE id = $1::uuid AND org_id = $2`,
-            [authoritativeParent.id, envelope.orgId],
-          )
-          if (persistedParent.rows.length !== 1) {
-            // The row was locked FOR UPDATE by this transaction and the core wrote through it, so
-            // its absence here is a programming/DB-state error, not a business outcome.
-            boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
-          }
-          const authoritativeRecord = persistedParent.rows[0] as Record<string, unknown>
-
-          // W7-2 (P1): record the group comparison AFTER the core's own write
-          // and pointer update, against the SERVED projection as persisted —
-          // the row this response ships. Shadow-only by construction
-          // (`insertShadowCalculation` => mode='shadow', projection_effect
-          // 'none'); the pointer and the sealed response are untouched.
-          // CONTAINED (gate P1-2): the unserved half runs in its own
-          // savepoint and can never abort the served punch. SKIPPED on the
-          // core's replay return: the original execution already recorded the
-          // comparison (and the identity-index catch inside the wrapper
-          // backstops the race where it had not yet committed).
-          if (authoritativeW7GroupShadow && authoritativeWritten.kind !== 'replay') {
-            await recordW7GroupShadowComparisonContainedV1(trx, {
-              orgId: envelope.orgId,
-              recordId: authoritativeParent.id,
-              entrypoint: 'live',
-              producingOperationId: identity.id,
-              attribution: authoritativeAttribution,
-              evidence: authoritativeEvidence,
-              provenanceRef: authoritativeProvenanceRef,
-              w7GroupShadow: authoritativeW7GroupShadow,
-              identityDrift: authoritativeIdentityDrift,
-              actorId: authorization.actorId,
-              correlationId: envelope.correlationId,
-              legacyProjection: 'read_served_row',
-            })
-          }
-
-          // `authoritativeWorkDateResolution` was derived in Step 4, BEFORE the core's writes —
-          // see the ordering note there. Deriving it here instead would let it observe the open
-          // record this operation's own pointer UPDATE just created.
-          const authoritativeResponse = {
-            event: authoritativeEvent,
-            record: authoritativeRecord,
-            workDateResolution: authoritativeWorkDateResolution,
-          }
-
-          await sealAttendanceResultOperationV1(trx, identity, {
-            responseSnapshot: wireJson(authoritativeResponse),
-            resolvedRecordId: authoritativeParent.id,
-            resolvedCalculationId: authoritativeWritten.calculationId,
-            resultSemanticFingerprint: authoritativeSemanticFingerprint,
-            resultProvenanceFingerprint: authoritativeProvenanceFingerprint,
-          })
-
-          // The P-A obligation: this `return` is what keeps control from reaching the shadow
-          // `applyLivePunchLegacy` call site below.
-          return {
-            kind: 'w4' as const,
-            response: authoritativeResponse,
-            shadow: {
-              calculationId: authoritativeWritten.calculationId,
-              outcome: authoritativeCalculation.outcome,
-              outcomeReasonCode: authoritativeCalculation.outcomeReasonCode,
-            },
-          }
-        }
-
-        if (legacyOnlyTime && posture.effectiveState === 'eligible') {
-          // Reject BEFORE event/request/result/effect DML: rollback discards
-          // the preflight claim; no source row is ever written.
-          throw new AttendanceW4OperationError('W4_ATTRIBUTION_UNSUPPORTED')
-        }
-
-        // Shadow: execute the prepared legacy projection (the same closed
-        // adapter bytes), then append the shadow result atomically.
+    if (input.operationId === null) {
+      if (posture.writePosture === 'blocked') {
+        throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+      }
+      if (posture.writePosture === 'legacy_projection_only') {
+        // Null-ID legacy command: same closed adapter, no operation row, no
+        // outbox, no calculation, NO strict envelope/witness surface; the
+        // route keeps its existing synchronous best-effort emit.
         const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
+        return { kind: 'legacy' as const, response: result }
+      }
+      // W4-postured org + null-ID falls through to the registry protocol,
+      // which fails closed with W4C0_OPERATION_ID_REQUIRED before source DML.
+    }
 
-        // Section 8.2 step 4: candidate resolution runs inside the
-        // transaction, BEFORE step 5's target lock/parent FOR UPDATE below
-        // (reorder — #4612 gate3 P2-1 remediation, canonical freeze
-        // semantics judgment §6 "锁序倒置": the parent lock previously
-        // preceded this resolution, inverting the lock's numbered step
-        // order. Both calls are read-only queries under this transaction's
-        // SERIALIZABLE snapshot with no lock contention between them, so the
-        // reorder has no observable behavioral effect and no independently
-        // provable mutation leg is claimed for it — this is a structural
-        // realignment with §8.2's step numbering, not a correctness fix.
-        // `timezone` below is the exact PRE-resolution value the route
-        // itself fed its own resolver call (`input.requestTimezone`); the
-        // anchor is deliberately OMITTED so the resolver derives it itself
-        // from `(occurredAt, timezone)` — see `resolveLiveCandidate`'s own
-        // doc comment above for why `input.timezone`/`input.workDate`
-        // (POST-resolution) must never be used here. The legacy-only-time
-        // branch below never resolves a candidate at all, so this is skipped
-        // for it.
-        const nowIso = new Date().toISOString()
-        const resolution = legacyOnlyTime
-          ? null
-          : await adapters.resolveLiveCandidate(pluginTrx, {
-              orgId: envelope.orgId,
-              userId: input.userId,
-              occurredAt: input.occurredAtResolved,
-              timezone: input.requestTimezone,
+    // Stable-ID or W4-postured command: strict envelope + branded witness +
+    // full registry preflight (replay-before-suspension per lock 7.1/8.2).
+    const envelope: NormalizedAttendanceSourceOperationEnvelopeV1 = normalizeAttendanceSourceOperationEnvelopeV1({
+      schemaVersion: 1,
+      orgId: input.orgId,
+      correlationId: `live-punch:${input.orgId}:${input.userId}:${input.workDate}`,
+      command: {
+        schemaVersion: 1,
+        kind: 'live_punch',
+        subjectUserId: input.userId,
+        operationId: input.operationId,
+        payload: {
+          eventType: input.eventType,
+          // Command identity: the client's own business-time bytes when it
+          // sent any; otherwise the route-resolved instant (a client that
+          // wants a congruent response-loss retry supplies occurredAt
+          // explicitly).
+          occurredAt: input.occurredAtRaw ?? input.occurredAtResolved,
+          timezone: input.timezone,
+          source: input.source,
+          location: wireJson(input.location) as Record<string, unknown> | null,
+          meta: wireJson(input.meta) as Record<string, unknown> | null,
+          photoFileRef: input.photoFileRef,
+        },
+      },
+      batch: null,
+    })
+
+    const authorization = online?.authorization ?? createAuthorizedAttendanceWriteContextV1({
+      actorId: input.userId,
+      actorPosture: 'self',
+      tokenSubjectUserId: input.userId,
+      orgId: envelope.orgId,
+      subjectScope: { kind: 'self', userId: input.userId },
+      capability: 'punch',
+      sourceRef: LIVE_SOURCE_REF,
+    })
+
+    const preflight = online?.preflight ?? await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
+
+    if (preflight.kind === 'replay') {
+      const responses = Object.values(preflight.responses.itemResponses)
+      return { kind: 'replay' as const, response: responses[0] ?? null }
+    }
+    if (preflight.kind === 'suspended') {
+      throw new AttendanceW4OperationError('SEGMENT_CALCULATION_SUSPENDED')
+    }
+
+    if (preflight.kind === 'legacy_no_operation') {
+      // Posture raced to legacy between the probe and the registry re-read:
+      // the null-ID legacy contract applies (no operation row).
+      const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
+      return { kind: 'legacy' as const, response: result }
+    }
+
+    // preflight.kind === 'claimed'
+    const org = preflight.org
+    const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
+    const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
+
+    if (isLegacyCompat) {
+      // Stable-ID legacy command: same closed adapter plus ONLY the
+      // compatibility operation claim/seal — no calculation, no outbox, no
+      // W4 result pointer (lock 4.1/12 preamble).
+      const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
+      await sealAttendanceResultOperationV1(trx, identity, {
+        responseSnapshot: online ? makeOnlinePunchReceiptV1(200, { ok: true, data: wireJson(result) }) : wireJson(result),
+      })
+      return { kind: 'legacy_compat' as const, response: result }
+    }
+
+    // Three-posture matrix: a business time only the legacy parser accepts.
+    // HOISTED above the authoritative branch by Gate D2 so both the authoritative reject
+    // (below, first thing in the branch) and the eligible reject (further down) read ONE
+    // predicate rather than two copies that could drift. Pure and DML-free (`isStrictInstant`
+    // is a try/catch around the strict instant parser), so hoisting it is behaviour-
+    // preserving for every other posture.
+    const legacyOnlyTime = input.occurredAtRaw !== null && !isStrictInstant(input.occurredAtRaw)
+
+    // W4 posture. Distinguish effective shadow vs eligible vs authoritative
+    // (still under the org rollout shared lock acquired above).
+    if (posture.effectiveState === 'authoritative' || org.acceptedWritePosture === 'authoritative') {
+      // ===================================================================
+      // Gate D2 (#4556 / #4844) — the AUTHORITATIVE live-punch writer.
+      //
+      // REPLACEMENT, NOT A DELETE. This branch body previously failed closed. Deleting it
+      // instead of replacing it would let an allowlisted authoritative org's punch fall
+      // through to the shadow `applyLivePunchLegacy` call below — a silent 503-to-legacy-
+      // projection conversion, fail-OPEN the instant the allowlist gains an authoritative
+      // entry. The branch body must always be a real writer, and it must `return`/throw
+      // before control can reach that call site (pinned behaviourally by the zero-invocation
+      // spy on the injected `applyLivePunchLegacy`).
+      //
+      // Deliberate deviation from §8.2's step-4-before-step-5 numbering: the parent lock is
+      // taken BEFORE the in-transaction W2 re-resolution here, because the retirement guard
+      // and the create-if-absent placeholder must both settle before ANY source DML (the
+      // split event INSERT included). Safe: the two orderings cannot interleave, because the
+      // org rollout SHARED advisory lock is held for the whole transaction on BOTH paths and
+      // a posture transition needs the EXCLUSIVE one — so every in-flight punch for an org
+      // sees the same posture, and a shadow punch can never be concurrent with an
+      // authoritative punch on the same parent row.
+      // ===================================================================
+
+      // -- Step 1: legacy-only business time is REJECTED, with ZERO DML ------------------
+      // The eligible reject below never evaluates on this path (it is gated on
+      // `effectiveState === 'eligible'`), so this is a genuinely new in-branch check, not a
+      // widened existing one. Authoritative may never be LOOSER than eligible: §12.3 requires
+      // effective eligible|authoritative to reject before event/request/result/effect DML.
+      // The whole transaction rolls back, discarding the preflight claim; no event row, no
+      // record row, no calculation row, and no `attendance.punched` outbox row (the enqueue
+      // is further down, after this point).
+      if (legacyOnlyTime) {
+        throw new AttendanceW4OperationError('W4_ATTRIBUTION_UNSUPPORTED')
+      }
+
+      // -- Step 2: the widened locked parent read (class-11 target lock + FOR UPDATE) ------
+      // Read-only. Also re-locked by the core's own `lockParent FOR UPDATE by id` inside the
+      // same transaction (a no-op re-lock); the boundary's advisory target lock precedes the
+      // row lock and the core takes no advisory lock, so there is no inversion.
+      let authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
+
+      // -- Step 3a: absent parent → create-if-absent review placeholder --------------------
+      // The FIRST DML this branch performs (Steps 1-2 are a throw and a SELECT), which is
+      // exactly what makes plain ON CONFLICT DO NOTHING legal here without a SAVEPOINT.
+      if (authoritativeParent === null) {
+        await insertAuthoritativeReviewPlaceholderParentV1(trx, {
+          orgId: envelope.orgId,
+          userId: input.userId,
+          workDate: input.workDate,
+          timezone: input.timezone,
+          isWorkday: input.isWorkday,
+        })
+        // ALWAYS re-read under the lock — never assume our own placeholder won. On a lost
+        // race the winner's row may be a legacy-ACTIVE row (compat fingerprint becomes
+        // load-bearing), another review placeholder, or a RETIRED row (refused below); this
+        // re-entry is what routes every one of those to the same resolution path.
+        authoritativeParent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
+        if (authoritativeParent === null) {
+          // Neither our INSERT nor a racer's produced a visible row under our own lock —
+          // a programming/DB-state error, not a business outcome.
+          boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
+        }
+      }
+
+      // -- Step 3b: DEFAULT-REFUSE retirement guard ---------------------------------------
+      // Runs before any FURTHER DML — before the split event INSERT and before the core call.
+      // (In the absent branch above the only preceding DML is our own placeholder INSERT,
+      // which either created a `review_placeholder` row that this guard admits, or wrote
+      // nothing at all; so no refusing case ever leaves a write behind.)
+      //
+      // The core is reason-BLIND: its `lockParent` SELECT omits `visibility_reason` and its
+      // completed-path pointer UPDATE reactivates the parent to `w4/active/active`
+      // UNCONDITIONALLY. The boundary is the only reason-aware reader, so the guard belongs
+      // here. It is also precisely the guard the Step-4 adapter split removes from this path:
+      // the legacy punch's own operator-retirement refusal lives inside the
+      // `attendance_records` upsert that the split drops.
+      //
+      // D2 default on the `import_rollback` fork is explicit REFUSE (never a bare completed
+      // that reactivates a rolled-back day); routing it through the governed preimage-freeze
+      // reactivation instead is an owner product call, not a build-time choice.
+      assertParentNotRetiredForAuthoritativePunchV1({
+        visibilityState: authoritativeParent.visibilityState,
+        visibilityReason: authoritativeParent.visibilityReason,
+      })
+
+      // -- Step 4: split event INSERT, then the shared compute ----------------------------
+      // The SPLIT half only: durable punch evidence + the wire `event`. The legacy daily
+      // `attendance_records` upsert is deliberately NOT run — the core owns that row on this
+      // path. `adapters.applyLivePunchLegacy` is never called from this branch.
+      const authoritativeEvent = await adapters.insertLivePunchEvent(pluginTrx, legacyPunchArgs)
+
+      // The WIRE-ECHO `workDateResolution`, derived HERE — before any write this operation
+      // makes to `attendance_records` — because that is where the legacy path derives it.
+      //
+      // ORDERING IS SEMANTIC, NOT COSMETIC. The resolver consults OPEN records
+      // (`w4c3c-active-current.ts:176-190`: `visibility_state='active'` via the current view,
+      // `first_in_at IS NOT NULL AND last_out_at IS NULL`) when it breaks ties between
+      // candidate shifts. The core's completed-path pointer UPDATE writes exactly that shape
+      // for a check-in-only day — `first_in_at` set, `last_out_at` still null, and it flips the
+      // row to `active` — so a derivation placed AFTER the core call can observe an open record
+      // THIS operation just created and echo a resolution the legacy path, which derives before
+      // its own upsert (`index.cjs`, `deriveLegacyLivePunchAttributionV1` ahead of
+      // `appendUpsert`), could never produce for the same punch. Only the echoed field is
+      // affected — the persisted calculation freezes `authoritativeResolution` below — but the
+      // owner's ruling is that the authoritative response matches the legacy contract,
+      // SEMANTICS included, not merely field names and casing.
+      //
+      // Placed adjacent to `authoritativeResolution` so both resolver reads observe the same
+      // pre-write state. (The preceding event INSERT is irrelevant to both: neither read
+      // touches `attendance_events`, and the create-if-absent placeholder cannot register as an
+      // open record — it is `retired`, so the current view excludes it, and its `first_in_at`
+      // is NULL either way.)
+      const authoritativeWorkDateResolution =
+        await adapters.deriveLivePunchWorkDateResolution(pluginTrx, legacyPunchArgs)
+
+      const authoritativeNowIso = new Date().toISOString()
+      const authoritativeResolution = await adapters.resolveLiveCandidate(pluginTrx, {
+        orgId: envelope.orgId,
+        userId: input.userId,
+        occurredAt: input.occurredAtResolved,
+        // PRE-resolution timezone, anchor deliberately omitted — identical contract to the
+        // shadow branch's own call (see `resolveLiveCandidate`'s doc comment).
+        timezone: input.requestTimezone,
+      })
+      const authoritativeAttribution = attributionFromResolution(authoritativeResolution, {
+        orgId: envelope.orgId,
+        userId: input.userId,
+        source: 'live_resolution',
+        nowIso: authoritativeNowIso,
+      })
+      let authoritativeContext: FrozenAttendanceContextV1 | null = null
+      let authoritativeW7GroupShadow: W7GroupShadowHalfV1 | null = null
+      if (authoritativeAttribution.posture === 'resolved_v2') {
+        const issued = await issueThroughW7Seam(pluginTrx, {
+          orgId: envelope.orgId,
+          userId: input.userId,
+          workDate: authoritativeAttribution.value.workDate,
+          shiftId: authoritativeAttribution.value.shiftId,
+          timezone: authoritativeResolution.fullWinner?.timezone ?? input.requestTimezone,
+          isWorkday: input.isWorkday,
+          holidayKind: input.holidayKind,
+        })
+        authoritativeContext = issued.context
+        authoritativeW7GroupShadow = issued.w7GroupShadow
+      }
+      // Evidence is loaded AFTER the split INSERT so this punch is inside its own evidence
+      // set — otherwise a day's first check-in could never produce a completed segment.
+      const authoritativeEvidenceAnchorWorkDate =
+        authoritativeAttribution.posture === 'resolved_v2'
+          ? authoritativeAttribution.value.workDate
+          : input.workDate
+      const authoritativeEvidence = await loadLivePunchEvidence(
+        trx,
+        envelope.orgId,
+        input.userId,
+        authoritativeEvidenceAnchorWorkDate,
+      )
+      const authoritativeCalculated = calculateAttendanceSegmentsV1({
+        attribution: authoritativeAttribution,
+        context: authoritativeContext,
+        evidence: authoritativeEvidence,
+        approvedFacts: [],
+      })
+
+      // identityDrift override (canonical freeze semantics §4.2 candidate (i)), computed
+      // exactly as the shadow branch does. On the AUTHORITATIVE path this override is
+      // load-bearing rather than cosmetic: passing the raw calculator result through on a
+      // drifted punch would write a COMPLETED row and MOVE THE PARENT POINTER onto an
+      // attribution whose identity the operation never committed to.
+      const authoritativeInnerComparableFingerprint =
+        authoritativeAttribution.posture === 'resolved_v2'
+          ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({
+              attribution: authoritativeAttribution,
+              context: authoritativeContext,
             })
+          : null
+      const authoritativeIdentityMismatch =
+        authoritativeAttribution.posture === 'resolved_v2' &&
+        (authoritativeAttribution.value.workDate !== input.workDate
+          || authoritativeAttribution.value.shiftId !== input.shiftId)
+      const authoritativeFingerprintMismatch =
+        authoritativeAttribution.posture === 'resolved_v2' &&
+        authoritativeInnerComparableFingerprint !== input.outerSourceDefinitionFingerprint
+      const authoritativeIdentityDrift =
+        authoritativeIdentityMismatch || authoritativeFingerprintMismatch
+      const authoritativeCalculation: AttendanceSegmentCalculationResultV1 =
+        authoritativeIdentityDrift
+          ? {
+              outcome: 'review_required',
+              outcomeReasonCode: 'context_mismatch',
+              segments: [],
+              dailyProjection: null,
+            }
+          : authoritativeCalculated
 
-        const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
-        if (!parent) {
-          // The legacy upsert always creates the parent; a missing row here is
-          // a programming error, not a business outcome.
-          boundaryFail('W4C2_SHADOW_PARENT_MISSING', 500)
-        }
-        const version = await nextCalculationVersion(trx, parent.id)
-        const command = envelope.commands[0]
-        const provenanceRef: AttendanceInputProvenanceRefV1 = {
-          transport: 'live_event',
-          sourceRef: LIVE_SOURCE_REF,
-          artifactSha256: null,
-          normalizedCsvSha256: null,
-          convertedSheetName: null,
-        }
-        const correlationId = envelope.correlationId
+      // -- Steps 5 & 6: preimage + expected pointer, and the payload fingerprint ----------
+      const authoritativeProvenanceRef: AttendanceInputProvenanceRefV1 = {
+        transport: 'live_event',
+        sourceRef: LIVE_SOURCE_REF,
+        artifactSha256: null,
+        normalizedCsvSha256: null,
+        convertedSheetName: null,
+      }
+      const authoritativePayloadFingerprint =
+        computeAuthoritativeLivePunchPayloadFingerprintV1(input)
+      const { preimage: authoritativePreimage, expectedCurrentCalculationId } =
+        buildAuthoritativeLivePunchPreimageV1(authoritativeParent)
 
-        let calculationId: string
-        let outcome: 'completed' | 'review_required'
-        let outcomeReasonCode: string
-        let semanticFingerprint: string
-        let provenanceFingerprint: string
+      // -- Step 7: the core owns the calc row, the lineage, and the parent pointer --------
+      const authoritativeWritten = await writeAuthoritativeSegmentCalculationV1(trx, {
+        orgId: envelope.orgId,
+        recordId: authoritativeParent.id,
+        entrypoint: 'live',
+        operationId: identity.id,
+        calculation: authoritativeCalculation,
+        attribution: authoritativeAttribution,
+        context: authoritativeContext,
+        evidence: authoritativeEvidence as unknown as readonly unknown[],
+        approvedFacts: [],
+        provenanceRef: authoritativeProvenanceRef,
+        // BOTH places: top-level for the core's own conflict check, and embedded so a
+        // genuine retry's `input_provenance.payloadFingerprint` read matches.
+        inputProvenance: {
+          ...authoritativeProvenanceRef,
+          payloadFingerprint: authoritativePayloadFingerprint,
+        },
+        payloadFingerprint: authoritativePayloadFingerprint,
+        preimage: authoritativePreimage,
+        expectedCurrentCalculationId,
+        sourceBatchId: null,
+        actorId: authorization.actorId,
+        correlationId: envelope.correlationId,
+      })
 
-        if (legacyOnlyTime) {
-          // Exactly one zero-segment, no-pointer review carrying the raw value
-          // plus legacy-parser provenance (lock 12.3 matrix, shadow leg).
-          // `evidence_snapshot` stays a CLOSED AttendanceEvidenceV1 array (the
-          // legacy-only value is NOT admissible W4 evidence — that is the whole
-          // point of this branch), so the frozen raw/parser/resolved-instant
-          // provenance lives in `input_provenance`; the raw bytes still bind
-          // the semantic fingerprint through the attribution sourceFingerprint.
-          outcome = 'review_required'
-          outcomeReasonCode = 'legacy_time_ingress_not_authoritative'
-          const attribution = unsupportedAttribution('unresolved', sha256Hex(String(input.occurredAtRaw)))
-          const inserted = await insertShadowCalculation(trx, {
-            orgId: envelope.orgId,
-            recordId: parent.id,
-            version,
-            entrypoint: 'live',
-            operationId: identity.id,
-            attribution,
-            context: null,
-            segmentSnapshot: [],
-            evidence: [],
-            approvedFacts: [],
-            inputProvenance: {
-              ...provenanceRef,
-              legacyTimeIngress: {
-                raw: input.occurredAtRaw,
-                parser: 'legacy_parseDateInput_server_local',
-                resolvedInstant: input.occurredAtResolved,
-              },
-            },
-            provenanceRef,
-            mergePolicy: 'append',
-            outcome,
-            outcomeReasonCode,
-            segments: [],
-            dailyProjection: null,
-            actorId: authorization.actorId,
-            correlationId,
-            legacyProjection: parent,
-          })
-          calculationId = inserted.calculationId
-          semanticFingerprint = inserted.semanticFingerprint
-          provenanceFingerprint = inserted.provenanceFingerprint
-        } else {
-          // W2/context freeze: `resolution` was already re-run above (step
-          // 4, this transaction's snapshot) — build the frozen attribution
-          // and context from it.
-          const attribution = attributionFromResolution(resolution!, {
-            orgId: envelope.orgId,
+      // Seal fingerprints are RECOMPUTED at the boundary over the same inputs the core
+      // hashed — the core's return shape is deliberately unchanged by D2. The tier arg MUST
+      // be `segment_authoritative`: copying the shadow builder's `legacy_shadow` would seal a
+      // fingerprint that does not match the persisted authoritative row.
+      const authoritativeSemanticFingerprint = computeAttendanceSemanticInputFingerprintV1({
+        attribution: authoritativeAttribution,
+        context: authoritativeContext,
+        evidence: authoritativeEvidence,
+        approvedFacts: [],
+        manualOverride: null,
+        mergePolicy: 'append',
+        calculationTier: 'segment_authoritative',
+        engineVersion: ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
+        snapshotSchemaVersion: 1,
+      })
+      const authoritativeProvenanceFingerprint =
+        computeAttendanceProvenanceFingerprintV1(authoritativeProvenanceRef)
+
+      // Outbox BEFORE seal (lock 8.2 steps 14-15), unconditional — byte-identical to the
+      // shadow path's own enqueue, which already fires for review outcomes today. Whether a
+      // review-only authoritative outcome SHOULD emit `attendance.punched` is an open product
+      // question; D2 changes nothing about it.
+      await enqueueAttendanceResultEventOutboxV1(trx, identity, [
+        {
+          eventKind: 'attendance.punched',
+          payload: {
             userId: input.userId,
-            source: 'live_resolution',
-            nowIso,
-          })
-          let context: FrozenAttendanceContextV1 | null = null
-          let w7GroupShadow: W7GroupShadowHalfV1 | null = null
-          if (attribution.posture === 'resolved_v2') {
-            const issued = await issueThroughW7Seam(pluginTrx, {
-              orgId: envelope.orgId,
-              userId: input.userId,
-              workDate: attribution.value.workDate,
-              shiftId: attribution.value.shiftId,
-              // Section 5.2/5.3 (Q16 §4.1 :562-567, Q17 §5.2 :924): the
-              // frozen context's timezone must come from THIS freeze step's
-              // own winner, never the route's (possibly stale) input.timezone
-              // — attributionFromResolution already required
-              // resolution.fullWinner.timezone to be a non-empty string
-              // whenever posture reached 'resolved_v2', so the fallback below
-              // is defensive only (unreachable on this branch in practice).
-              timezone: resolution!.fullWinner?.timezone ?? input.requestTimezone,
-              isWorkday: input.isWorkday,
-              holidayKind: input.holidayKind,
-            })
-            context = issued.context
-            w7GroupShadow = issued.w7GroupShadow
-          }
-          // Section 5.3 (:936): evidence is anchored to the FROZEN
-          // attribution's own work date, not the boundary's (possibly
-          // stale, pre-transaction) `input.workDate` — the two coincide
-          // unless a genuine DB-state race occurred between the route's
-          // resolution and this transaction's snapshot (see the identity
-          // drift check below, which forces review whenever they diverge).
-          const evidenceAnchorWorkDate =
-            attribution.posture === 'resolved_v2' ? attribution.value.workDate : input.workDate
-          const evidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, evidenceAnchorWorkDate)
-          const calculation = calculateAttendanceSegmentsV1({
-            attribution,
-            context,
-            evidence,
-            approvedFacts: [],
-          })
-          // Section 8.2 step 7 (`:1821-1822` verbatim: "require candidate
-          // identity plus source-definition fingerprint equality"): the
-          // re-run candidate identity must equal the identity already
-          // committed to when this operation was normalized (`input.workDate`
-          // / `input.shiftId`, the latter baked into the route's own
-          // pre-transaction `resolvePunchWorkDateByShiftWindow` call) —
-          // reachable only via a genuine DB-state race between the route's
-          // pre-transaction resolution and this transaction's snapshot (the
-          // legacy adapter's own in-transaction resolution above and this one
-          // share the SAME inputs/snapshot, so they always agree with EACH
-          // OTHER; this compares against the OUTER, pre-transaction identity
-          // instead). A completed V2 result may never attach to a parent
-          // record keyed by a DIFFERENT work date, NOR carry a DIFFERENT
-          // winning shift, than its own frozen attribution — canonical
-          // freeze semantics judgment §4.2 candidate (i): review-required
-          // with the closed `context_mismatch` code, zero segments, no
-          // pointer change, the legacy projection already applied above left
-          // exactly as is.
-          //
-          // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥): widened from
-          // workDate-only to (workDate, shiftId) — a `shiftId`-only race
-          // (workDate held fixed, only the winning shift swapped) previously
-          // slipped this gate silently (`outcome` stayed `completed`); see
-          // the real two-connection leg in
-          // `attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts`
-          // ("Group D").
-          //
-          // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round —
-          // source-definition fingerprint half WIRED, PENDING O-5): the
-          // comparison this code performs is wired end-to-end, but it
-          // compares a NARROWER domain than the object §8.2 step 7 names
-          // ("the source-definition fingerprint" — the storage column's
-          // domain, which still includes `reasonCode`) — see the O-5 status
-          // block atop `computeAttendanceOuterComparableSourceDefinition
-          // FingerprintV1` in `w4c1-fingerprints.ts` and the PR body's O-5
-          // section for the two full remediation specs and why this is not
-          // yet a satisfied clause. `input.outerSourceDefinitionFingerprint`
-          // is the route's own PRE-transaction fingerprint (see the field's
-          // own doc comment); `innerComparableSourceDefinitionFingerprint`
-          // below is this transaction's own freeze-step fingerprint, in the
-          // SAME narrower comparison domain (see next paragraph) — a
-          // SEPARATE call from the one `insertShadowCalculation` makes for
-          // the STORAGE column (that one stays the original, wider domain;
-          // `insertShadowCalculation`'s own signature/contract is
-          // unchanged).
-          //
-          // DOMAIN NOTE — why this is NOT the storage fingerprint:
-          // `computeAttendanceOuterComparableSourceDefinitionFingerprintV1`
-          // (not `computeAttendanceSourceDefinitionFingerprintV1`) projects
-          // out `reasonCode` IN ADDITION TO `resolvedAt`. Discovered
-          // empirically (`attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts`
-          // "Group E / eDay2"): the lock's own §8.2 step 3-before-4 ordering
-          // means this SAME operation's own step-3 legacy write can flip
-          // which branch of `selectAmongMatchingCandidates` matches
-          // (`openPreviousMatches` seeing an open row THIS transaction just
-          // created), changing `reasonCode` with ZERO concurrency and the
-          // SAME resulting `workDate`/`shiftId` — a false positive the wider
-          // storage domain would have produced here. See
-          // `w4c1-fingerprints.ts`'s own doc comment on that function for
-          // the full account of why excluding `reasonCode` is principled
-          // (tie-break provenance, not identity or policy).
-          //
-          // STRUCTURAL NOTE — SUBSUMPTION for WELL-FORMED shifts, and a
-          // RETRACTION (#4612 gate4 P2, independent review): an earlier
-          // version of this comment claimed an "identity-only,
-          // fingerprint-silent" leg "could not be built" from a real DB
-          // fixture in this schema. That claim was WRONG AS STATED. What is
-          // actually true, in three parts:
-          //
-          //  (a) For any shiftId swap between two WELL-FORMED shifts (both
-          //      resolve a non-null `context`), subsumption holds: the
-          //      (narrowed) fingerprint domain still CONTAINS
-          //      `workDate`/`shiftId` (only `resolvedAt`/`reasonCode` are
-          //      excluded), and `FrozenAttendanceContextV1` (`context`) ALSO
-          //      carries its own `shiftId` independently
-          //      (`w4c0-write-boundary-types.ts`) — so a real shiftId swap
-          //      between two well-formed shifts changes BOTH
-          //      `attribution.value.shiftId` AND `context.shiftId`, tripping
-          //      the fingerprint conjunct too. This is confirmed by mutation
-          //      (see the freeze-anchor test's own header comment and the PR
-          //      body): neutering `identityMismatch` alone leaves every
-          //      well-formed-shift leg in this suite green — the fingerprint
-          //      conjunct independently catches the same race.
-          //
-          //  (b) The escape THIS well-formed-shift argument cannot rule out
-          //      — identity differs while the fingerprint conjunct stays
-          //      SILENT — requires `context === null` on BOTH the outer and
-          //      inner reads, i.e. `buildW4ShadowFrozenContextV1` rejecting
-          //      BOTH candidate shifts' shapes. The enumeration of its
-          //      null-context paths (`index.cjs` ~L21451-21489 — cross-
-          //      checked against the function's four `return null` sites:
-          //      three simple sites, plus the ~L21479 compound guard's five
-          //      disjuncts. Two of those five disjuncts (`!startTime` and
-          //      `!endTime`) share one cause and collapse into the single
-          //      list item (iv) below, so the compound guard contributes
-          //      four list items, not five — 3 simple + 4 compound = the
-          //      seven entries that follow, not five and not eight):
-          //      (i) no matching shift row; (ii) more than 3 segment rows
-          //      (ruled out for a genuinely persisted shift — the CHECK
-          //      bounds the RANGE (`chk_attendance_shift_segments_index_range`
-          //      caps `segment_index` at 0-2) and the per-shift UNIQUE index
-          //      (`uq_attendance_shift_segments_shift_index` on
-          //      `(shift_id, segment_index)`) bounds OCCUPANCY (each of the
-          //      three legal values can appear at most once) — CHECK alone
-          //      does not cap row count (four rows could all satisfy
-          //      `segment_index = 1`), the two constraints TOGETHER are
-          //      needed to conclude a 4th row cannot be inserted at all;
-          //      `zzzz20260724120000_create_attendance_shift_segments.ts`);
-          //      (iii) a NON-DENSE segment_index set (`index !== i` at
-          //      ~L21479 — the CHECK constraint bounds the range, not the
-          //      density, and the unique index does not require row 0 to
-          //      exist, so a single `segment_index = 1` row with no row 0 IS
-          //      insertable); (iv) `normalizeTimeString` failing on a
-          //      segment's own `start_time`/`end_time` — e.g. a sub-second-
-          //      precision value (`'09:00:00.5'`, legal for the column's
-          //      `time` type, verified by direct INSERT: no CHECK on this
-          //      table constrains time-string format) fails the read-side
-          //      regex; this is NOT a "malformed row" case, it is legal per
-          //      every CHECK/uniqueness constraint the table has, so it IS
-          //      directly constructible in a real-DB test fixture, same as
-          //      (iii) — but the shift service's create/update path's own
-          //      input validation (`SEGMENT_INPUT_TIME_PATTERN` in
-          //      `attendance-shift-service.cjs`, strict `HH:MM`, no seconds)
-          //      rejects anything but exact minute-granularity, so THAT path
-          //      never produces one either. NOT independently checked here:
-          //      the one-time migration backfill
-          //      (`zzzz20260724120000_create_attendance_shift_segments.ts`)
-          //      is a SEPARATE writer — it derives segment 0's `start_time`/
-          //      `end_time` from the shift's own legacy `work_start_time`/
-          //      `work_end_time` columns, not from validated create/update
-          //      input, and runs once at migrate time rather than on the
-          //      ongoing write path; whether those legacy columns can
-          //      themselves carry sub-second precision is not analyzed here;
-          //      (v) a segment's
-          //      `start_day_offset !== 0` (ruled out the same way as (ii) —
-          //      `chk_attendance_shift_segments_start_day_offset` CHECK
-          //      forces `start_day_offset = 0`, so this disjunct of the
-          //      ~L21479 guard can never fire against a persisted row);
-          //      (vi) a segment's `end_day_offset` outside `{0, 1}` (ruled
-          //      out the same way — `chk_attendance_shift_segments_end_day_offset`
-          //      CHECK forces `end_day_offset IN (0, 1)`); (vii) blank
-          //      legacy `work_start_time`/`work_end_time`, reached ONLY via
-          //      the `else` branch taken when `segmentRows.length === 0`
-          //      (~L21492-21495) — NOT, as an earlier version of this
-          //      comment claimed, "via path (iii)/(iv) once segment rows
-          //      exist": that `else` branch is mutually exclusive with
-          //      (iii)/(iv)/(v)/(vi), which all `return null` from inside
-          //      the `segmentRows.length > 0` loop and can never fall
-          //      through to it. (vii) is reachable only when the shift has
-          //      zero persisted segment rows AND its own legacy time
-          //      columns fail `normalizeTimeString`; `NOT NULL` on
-          //      `attendance_shifts.work_start_time`/`work_end_time` rules
-          //      out a blank/NULL value for a persisted row, but (as with
-          //      (iv)) does not by itself rule out a sub-second-precision
-          //      value — that route is not analyzed here. Paths
-          //      (i)/(ii)/(v)/(vi) are blocked outright by a CHECK
-          //      constraint with no fixture, malformed or otherwise, able
-          //      to insert one; (vii) needs a deleted/never-created shift
-          //      row or an un-migrated/corrupted one to hit blank legacy
-          //      columns via the analyzed route. None of these is pursued
-          //      (no sanctioned production path produces one mid-race — a
-          //      different, unrelated defect class). Paths (iii) and (iv)
-          //      are DIFFERENT: both are legal per every CHECK/uniqueness
-          //      constraint this table has, so both ARE directly
-          //      constructible in a real-DB test fixture, even though the
-          //      canonical shift service (the only writer audited here for
-          //      create/update; the one-time migration backfill described
-          //      above under (iv) is a second sanctioned writer whose source
-          //      columns are NOT analyzed here) never produces either shape
-          //      via create/update (dense 0..2 for (iii) — see the
-          //      migration's header comment; strict `HH:MM` input for (iv)
-          //      — see above).
-          //
-          //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
-          //      leg is NOT reachable from two well-formed shifts (part a
-          //      still holds), and is NOT production-reachable (part b's
-          //      (iii) and (iv) both require a fixture the canonical shift
-          //      service never writes) — but it IS constructible as a
-          //      deliberately malformed real-DB test fixture, and the
-          //      freeze-anchor test's "Group G" leg now does exactly that
-          //      (via (iii)), giving the identity conjunct a genuine
-          //      discriminating leg (closing the untested-guard gap gate4
-          //      found; the fingerprint conjunct remains the only conjunct
-          //      with an EXCLUSIVE mutation-discriminating leg among the
-          //      well-formed-shift legs (L6: neutering fingerprint alone
-          //      reds ONLY L6) — Group D / Group D-overnight are DOUBLE-
-          //      covered well-formed-shift legs (neutering either conjunct
-          //      alone leaves them green; both must be neutered to red
-          //      them), not legs the fingerprint conjunct alone
-          //      discriminates). See that test's own comment and the
-          //      leg-map atop the file for the mutation evidence.
-          //
-          //  Letter note (#4612 gate4 round 3, P3-1/P3-2 fix): this
-          //  sub-enumeration was previously five items (i)-(v) and mis-
-          //  stated as "the full enumeration" while omitting the
-          //  start_day_offset/end_day_offset disjuncts, and its old (v)
-          //  claimed a false "only reachable via (iii)/(iv)" causal chain.
-          //  It is now seven items (i)-(vii); old (v) is renumbered (vii).
-          const innerComparableSourceDefinitionFingerprint =
-            attribution.posture === 'resolved_v2'
-              ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({ attribution, context })
-              : null
-          const identityMismatch =
-            attribution.posture === 'resolved_v2' &&
-            (attribution.value.workDate !== input.workDate || attribution.value.shiftId !== input.shiftId)
-          const fingerprintMismatch =
-            attribution.posture === 'resolved_v2' &&
-            innerComparableSourceDefinitionFingerprint !== input.outerSourceDefinitionFingerprint
-          const identityDrift = identityMismatch || fingerprintMismatch
-          outcome = identityDrift ? 'review_required' : calculation.outcome
-          outcomeReasonCode = identityDrift ? 'context_mismatch' : calculation.outcomeReasonCode
-          const inserted = await insertShadowCalculation(trx, {
             orgId: envelope.orgId,
-            recordId: parent.id,
-            version,
-            entrypoint: 'live',
-            operationId: identity.id,
-            attribution,
-            context,
-            segmentSnapshot: context ? (context.segments as unknown as unknown[]) : [],
-            evidence: evidence as unknown as unknown[],
-            approvedFacts: [],
-            inputProvenance: { ...provenanceRef },
-            provenanceRef,
-            mergePolicy: 'append',
-            outcome,
-            outcomeReasonCode,
-            segments: identityDrift ? [] : calculation.segments,
-            dailyProjection: identityDrift ? null : calculation.dailyProjection,
-            actorId: authorization.actorId,
-            correlationId,
-            legacyProjection: parent,
-          })
-          calculationId = inserted.calculationId
-          semanticFingerprint = inserted.semanticFingerprint
-          provenanceFingerprint = inserted.provenanceFingerprint
-
-          // W7-2 (P2): the dual-run's group half, recorded AFTER the W4 shadow
-          // row. The comparison record carries the producing operation in its
-          // MARKER (its `operation_id` column is NULL by design), so the W4
-          // row keeps its `uq_arc_operation` slot untouched. The legacy side
-          // of the comparison is the SAME served `parent` row the W4 row
-          // compared against. The seal below keeps referencing the W4 row's
-          // calculationId/fingerprints — the comparison row is never the
-          // operation's result. CONTAINED (gate P1-2): its failure can never
-          // abort the served punch.
-          if (w7GroupShadow) {
-            await recordW7GroupShadowComparisonContainedV1(trx, {
-              orgId: envelope.orgId,
-              recordId: parent.id,
-              entrypoint: 'live',
-              producingOperationId: identity.id,
-              attribution,
-              evidence,
-              provenanceRef,
-              w7GroupShadow,
-              identityDrift,
-              actorId: authorization.actorId,
-              correlationId,
-              legacyProjection: parent,
-            })
-          }
-        }
-
-        // Outbox BEFORE seal (lock 8.2 steps 14-15): the lifecycle event this
-        // entrypoint currently emits becomes a durable row; the caller must NOT
-        // direct-emit for this result kind.
-        await enqueueAttendanceResultEventOutboxV1(trx, identity, [
-          {
-            eventKind: 'attendance.punched',
-            payload: {
-              userId: input.userId,
-              orgId: envelope.orgId,
-              workDate: input.workDate,
-              eventType: input.eventType,
-              occurredAt: input.occurredAtResolved,
-              timezone: input.timezone,
-            },
-            payloadSchemaVersion: 1,
-            businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
-              kind: 'attendance.punched',
-              orgId: envelope.orgId,
-              operationId: identity.id,
-            }),
+            workDate: input.workDate,
+            eventType: input.eventType,
+            occurredAt: input.occurredAtResolved,
+            timezone: input.timezone,
           },
-        ])
+          payloadSchemaVersion: 1,
+          businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+            kind: 'attendance.punched',
+            orgId: envelope.orgId,
+            operationId: identity.id,
+          }),
+        },
+      ])
 
-        const response = wireJson(result)
-        await sealAttendanceResultOperationV1(trx, identity, {
-          responseSnapshot: response,
-          resolvedRecordId: parent.id,
-          resolvedCalculationId: calculationId,
-          resultSemanticFingerprint: semanticFingerprint,
-          resultProvenanceFingerprint: provenanceFingerprint,
+      // -- Step 8a: the caller response — PRESERVES THE EXISTING PUBLIC CONTRACT -----------
+      //
+      // `POST /api/attendance/punch` returns `{event, record, workDateResolution}` where
+      // `record` is the persisted `attendance_records` ROW in its snake_case DB shape (the
+      // published `AttendanceRecord` contract; the legacy adapter returns exactly that row
+      // from its own `RETURNING *` upsert). The authoritative path MUST return the same shape
+      // — field set and casing identical, only the VALUES differing (they now reflect the
+      // authoritative projection rather than the legacy one).
+      //
+      // An earlier revision of this branch mapped `record` from `calculation.dailyProjection`
+      // (camelCase `PreparedDailyProjectionV1`, nine fields, all-null for review). That was a
+      // BREAKING contract change: it renamed every field, dropped columns the published shape
+      // carries (`id`, `user_id`, `org_id`, `is_workday`, `source_batch_id`,
+      // `projection_owner`, `visibility_state`, `visibility_reason`, `created_at`,
+      // `updated_at`) and would have silently broken the mobile client, with only tests
+      // FREEZING the new shape rather than approving it. Owner ruling: preserve the contract.
+      // Any future protocol change is an independent RATIFY plus OpenAPI/SDK/client updates,
+      // not a side effect of delivering the authoritative writer.
+      //
+      // So: re-SELECT the row the core just wrote, INSIDE the same transaction and after the
+      // core's pointer UPDATE, and ship it verbatim. For a COMPLETED outcome this is the
+      // promoted `w4`/`active` row carrying the authoritative daily values; for a REVIEW
+      // outcome it is the parent as it stands (the create-if-absent placeholder, or the
+      // untouched legacy row when one already existed) — in both cases a REAL persisted row,
+      // never a synthesized acknowledgement.
+      const persistedParent = await trx.query(
+        `SELECT * FROM attendance_records WHERE id = $1::uuid AND org_id = $2`,
+        [authoritativeParent.id, envelope.orgId],
+      )
+      if (persistedParent.rows.length !== 1) {
+        // The row was locked FOR UPDATE by this transaction and the core wrote through it, so
+        // its absence here is a programming/DB-state error, not a business outcome.
+        boundaryFail('W4C2_AUTHORITATIVE_PARENT_UNRESOLVED', 500)
+      }
+      const authoritativeRecord = persistedParent.rows[0] as Record<string, unknown>
+
+      // W7-2 (P1): record the group comparison AFTER the core's own write
+      // and pointer update, against the SERVED projection as persisted —
+      // the row this response ships. Shadow-only by construction
+      // (`insertShadowCalculation` => mode='shadow', projection_effect
+      // 'none'); the pointer and the sealed response are untouched.
+      // CONTAINED (gate P1-2): the unserved half runs in its own
+      // savepoint and can never abort the served punch. SKIPPED on the
+      // core's replay return: the original execution already recorded the
+      // comparison (and the identity-index catch inside the wrapper
+      // backstops the race where it had not yet committed).
+      if (authoritativeW7GroupShadow && authoritativeWritten.kind !== 'replay') {
+        await recordW7GroupShadowComparisonContainedV1(trx, {
+          orgId: envelope.orgId,
+          recordId: authoritativeParent.id,
+          entrypoint: 'live',
+          producingOperationId: identity.id,
+          attribution: authoritativeAttribution,
+          evidence: authoritativeEvidence,
+          provenanceRef: authoritativeProvenanceRef,
+          w7GroupShadow: authoritativeW7GroupShadow,
+          identityDrift: authoritativeIdentityDrift,
+          actorId: authorization.actorId,
+          correlationId: envelope.correlationId,
+          legacyProjection: 'read_served_row',
+        })
+      }
+
+      // `authoritativeWorkDateResolution` was derived in Step 4, BEFORE the core's writes —
+      // see the ordering note there. Deriving it here instead would let it observe the open
+      // record this operation's own pointer UPDATE just created.
+      const authoritativeResponse = {
+        event: authoritativeEvent,
+        record: authoritativeRecord,
+        workDateResolution: authoritativeWorkDateResolution,
+      }
+
+      await sealAttendanceResultOperationV1(trx, identity, {
+        responseSnapshot: online ? makeOnlinePunchReceiptV1(200, { ok: true, data: wireJson(authoritativeResponse) }) : wireJson(authoritativeResponse),
+        resolvedRecordId: authoritativeParent.id,
+        resolvedCalculationId: authoritativeWritten.calculationId,
+        resultSemanticFingerprint: authoritativeSemanticFingerprint,
+        resultProvenanceFingerprint: authoritativeProvenanceFingerprint,
+      })
+
+      // The P-A obligation: this `return` is what keeps control from reaching the shadow
+      // `applyLivePunchLegacy` call site below.
+      return {
+        kind: 'w4' as const,
+        response: authoritativeResponse,
+        shadow: {
+          calculationId: authoritativeWritten.calculationId,
+          outcome: authoritativeCalculation.outcome,
+          outcomeReasonCode: authoritativeCalculation.outcomeReasonCode,
+        },
+      }
+    }
+
+    if (legacyOnlyTime && posture.effectiveState === 'eligible') {
+      // Reject BEFORE event/request/result/effect DML: rollback discards
+      // the preflight claim; no source row is ever written.
+      throw new AttendanceW4OperationError('W4_ATTRIBUTION_UNSUPPORTED')
+    }
+
+    // Shadow: execute the prepared legacy projection (the same closed
+    // adapter bytes), then append the shadow result atomically.
+    const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
+
+    // Section 8.2 step 4: candidate resolution runs inside the
+    // transaction, BEFORE step 5's target lock/parent FOR UPDATE below
+    // (reorder — #4612 gate3 P2-1 remediation, canonical freeze
+    // semantics judgment §6 "锁序倒置": the parent lock previously
+    // preceded this resolution, inverting the lock's numbered step
+    // order. Both calls are read-only queries under this transaction's
+    // SERIALIZABLE snapshot with no lock contention between them, so the
+    // reorder has no observable behavioral effect and no independently
+    // provable mutation leg is claimed for it — this is a structural
+    // realignment with §8.2's step numbering, not a correctness fix.
+    // `timezone` below is the exact PRE-resolution value the route
+    // itself fed its own resolver call (`input.requestTimezone`); the
+    // anchor is deliberately OMITTED so the resolver derives it itself
+    // from `(occurredAt, timezone)` — see `resolveLiveCandidate`'s own
+    // doc comment above for why `input.timezone`/`input.workDate`
+    // (POST-resolution) must never be used here. The legacy-only-time
+    // branch below never resolves a candidate at all, so this is skipped
+    // for it.
+    const nowIso = new Date().toISOString()
+    const resolution = legacyOnlyTime
+      ? null
+      : await adapters.resolveLiveCandidate(pluginTrx, {
+          orgId: envelope.orgId,
+          userId: input.userId,
+          occurredAt: input.occurredAtResolved,
+          timezone: input.requestTimezone,
         })
 
-        return {
-          kind: 'w4' as const,
-          response: result,
-          shadow: { calculationId, outcome, outcomeReasonCode },
-        }
-      }),
-    )
+    const parent = await lockShadowParentRecord(trx, org, input.userId, input.workDate)
+    if (!parent) {
+      // The legacy upsert always creates the parent; a missing row here is
+      // a programming error, not a business outcome.
+      boundaryFail('W4C2_SHADOW_PARENT_MISSING', 500)
+    }
+    const version = await nextCalculationVersion(trx, parent.id)
+    const command = envelope.commands[0]
+    const provenanceRef: AttendanceInputProvenanceRefV1 = {
+      transport: 'live_event',
+      sourceRef: LIVE_SOURCE_REF,
+      artifactSha256: null,
+      normalizedCsvSha256: null,
+      convertedSheetName: null,
+    }
+    const correlationId = envelope.correlationId
+
+    let calculationId: string
+    let outcome: 'completed' | 'review_required'
+    let outcomeReasonCode: string
+    let semanticFingerprint: string
+    let provenanceFingerprint: string
+
+    if (legacyOnlyTime) {
+      // Exactly one zero-segment, no-pointer review carrying the raw value
+      // plus legacy-parser provenance (lock 12.3 matrix, shadow leg).
+      // `evidence_snapshot` stays a CLOSED AttendanceEvidenceV1 array (the
+      // legacy-only value is NOT admissible W4 evidence — that is the whole
+      // point of this branch), so the frozen raw/parser/resolved-instant
+      // provenance lives in `input_provenance`; the raw bytes still bind
+      // the semantic fingerprint through the attribution sourceFingerprint.
+      outcome = 'review_required'
+      outcomeReasonCode = 'legacy_time_ingress_not_authoritative'
+      const attribution = unsupportedAttribution('unresolved', sha256Hex(String(input.occurredAtRaw)))
+      const inserted = await insertShadowCalculation(trx, {
+        orgId: envelope.orgId,
+        recordId: parent.id,
+        version,
+        entrypoint: 'live',
+        operationId: identity.id,
+        attribution,
+        context: null,
+        segmentSnapshot: [],
+        evidence: [],
+        approvedFacts: [],
+        inputProvenance: {
+          ...provenanceRef,
+          legacyTimeIngress: {
+            raw: input.occurredAtRaw,
+            parser: 'legacy_parseDateInput_server_local',
+            resolvedInstant: input.occurredAtResolved,
+          },
+        },
+        provenanceRef,
+        mergePolicy: 'append',
+        outcome,
+        outcomeReasonCode,
+        segments: [],
+        dailyProjection: null,
+        actorId: authorization.actorId,
+        correlationId,
+        legacyProjection: parent,
+      })
+      calculationId = inserted.calculationId
+      semanticFingerprint = inserted.semanticFingerprint
+      provenanceFingerprint = inserted.provenanceFingerprint
+    } else {
+      // W2/context freeze: `resolution` was already re-run above (step
+      // 4, this transaction's snapshot) — build the frozen attribution
+      // and context from it.
+      const attribution = attributionFromResolution(resolution!, {
+        orgId: envelope.orgId,
+        userId: input.userId,
+        source: 'live_resolution',
+        nowIso,
+      })
+      let context: FrozenAttendanceContextV1 | null = null
+      let w7GroupShadow: W7GroupShadowHalfV1 | null = null
+      if (attribution.posture === 'resolved_v2') {
+        const issued = await issueThroughW7Seam(pluginTrx, {
+          orgId: envelope.orgId,
+          userId: input.userId,
+          workDate: attribution.value.workDate,
+          shiftId: attribution.value.shiftId,
+          // Section 5.2/5.3 (Q16 §4.1 :562-567, Q17 §5.2 :924): the
+          // frozen context's timezone must come from THIS freeze step's
+          // own winner, never the route's (possibly stale) input.timezone
+          // — attributionFromResolution already required
+          // resolution.fullWinner.timezone to be a non-empty string
+          // whenever posture reached 'resolved_v2', so the fallback below
+          // is defensive only (unreachable on this branch in practice).
+          timezone: resolution!.fullWinner?.timezone ?? input.requestTimezone,
+          isWorkday: input.isWorkday,
+          holidayKind: input.holidayKind,
+        })
+        context = issued.context
+        w7GroupShadow = issued.w7GroupShadow
+      }
+      // Section 5.3 (:936): evidence is anchored to the FROZEN
+      // attribution's own work date, not the boundary's (possibly
+      // stale, pre-transaction) `input.workDate` — the two coincide
+      // unless a genuine DB-state race occurred between the route's
+      // resolution and this transaction's snapshot (see the identity
+      // drift check below, which forces review whenever they diverge).
+      const evidenceAnchorWorkDate =
+        attribution.posture === 'resolved_v2' ? attribution.value.workDate : input.workDate
+      const evidence = await loadLivePunchEvidence(trx, envelope.orgId, input.userId, evidenceAnchorWorkDate)
+      const calculation = calculateAttendanceSegmentsV1({
+        attribution,
+        context,
+        evidence,
+        approvedFacts: [],
+      })
+      // Section 8.2 step 7 (`:1821-1822` verbatim: "require candidate
+      // identity plus source-definition fingerprint equality"): the
+      // re-run candidate identity must equal the identity already
+      // committed to when this operation was normalized (`input.workDate`
+      // / `input.shiftId`, the latter baked into the route's own
+      // pre-transaction `resolvePunchWorkDateByShiftWindow` call) —
+      // reachable only via a genuine DB-state race between the route's
+      // pre-transaction resolution and this transaction's snapshot (the
+      // legacy adapter's own in-transaction resolution above and this one
+      // share the SAME inputs/snapshot, so they always agree with EACH
+      // OTHER; this compares against the OUTER, pre-transaction identity
+      // instead). A completed V2 result may never attach to a parent
+      // record keyed by a DIFFERENT work date, NOR carry a DIFFERENT
+      // winning shift, than its own frozen attribution — canonical
+      // freeze semantics judgment §4.2 candidate (i): review-required
+      // with the closed `context_mismatch` code, zero segments, no
+      // pointer change, the legacy projection already applied above left
+      // exactly as is.
+      //
+      // W4C-2 remediation (#4612 gate3 P2-1 self-report ⑥): widened from
+      // workDate-only to (workDate, shiftId) — a `shiftId`-only race
+      // (workDate held fixed, only the winning shift swapped) previously
+      // slipped this gate silently (`outcome` stayed `completed`); see
+      // the real two-connection leg in
+      // `attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts`
+      // ("Group D").
+      //
+      // W4C-2 gate3 P2-1 closure (#4612 self-report ⑥, second round —
+      // source-definition fingerprint half WIRED, PENDING O-5): the
+      // comparison this code performs is wired end-to-end, but it
+      // compares a NARROWER domain than the object §8.2 step 7 names
+      // ("the source-definition fingerprint" — the storage column's
+      // domain, which still includes `reasonCode`) — see the O-5 status
+      // block atop `computeAttendanceOuterComparableSourceDefinition
+      // FingerprintV1` in `w4c1-fingerprints.ts` and the PR body's O-5
+      // section for the two full remediation specs and why this is not
+      // yet a satisfied clause. `input.outerSourceDefinitionFingerprint`
+      // is the route's own PRE-transaction fingerprint (see the field's
+      // own doc comment); `innerComparableSourceDefinitionFingerprint`
+      // below is this transaction's own freeze-step fingerprint, in the
+      // SAME narrower comparison domain (see next paragraph) — a
+      // SEPARATE call from the one `insertShadowCalculation` makes for
+      // the STORAGE column (that one stays the original, wider domain;
+      // `insertShadowCalculation`'s own signature/contract is
+      // unchanged).
+      //
+      // DOMAIN NOTE — why this is NOT the storage fingerprint:
+      // `computeAttendanceOuterComparableSourceDefinitionFingerprintV1`
+      // (not `computeAttendanceSourceDefinitionFingerprintV1`) projects
+      // out `reasonCode` IN ADDITION TO `resolvedAt`. Discovered
+      // empirically (`attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts`
+      // "Group E / eDay2"): the lock's own §8.2 step 3-before-4 ordering
+      // means this SAME operation's own step-3 legacy write can flip
+      // which branch of `selectAmongMatchingCandidates` matches
+      // (`openPreviousMatches` seeing an open row THIS transaction just
+      // created), changing `reasonCode` with ZERO concurrency and the
+      // SAME resulting `workDate`/`shiftId` — a false positive the wider
+      // storage domain would have produced here. See
+      // `w4c1-fingerprints.ts`'s own doc comment on that function for
+      // the full account of why excluding `reasonCode` is principled
+      // (tie-break provenance, not identity or policy).
+      //
+      // STRUCTURAL NOTE — SUBSUMPTION for WELL-FORMED shifts, and a
+      // RETRACTION (#4612 gate4 P2, independent review): an earlier
+      // version of this comment claimed an "identity-only,
+      // fingerprint-silent" leg "could not be built" from a real DB
+      // fixture in this schema. That claim was WRONG AS STATED. What is
+      // actually true, in three parts:
+      //
+      //  (a) For any shiftId swap between two WELL-FORMED shifts (both
+      //      resolve a non-null `context`), subsumption holds: the
+      //      (narrowed) fingerprint domain still CONTAINS
+      //      `workDate`/`shiftId` (only `resolvedAt`/`reasonCode` are
+      //      excluded), and `FrozenAttendanceContextV1` (`context`) ALSO
+      //      carries its own `shiftId` independently
+      //      (`w4c0-write-boundary-types.ts`) — so a real shiftId swap
+      //      between two well-formed shifts changes BOTH
+      //      `attribution.value.shiftId` AND `context.shiftId`, tripping
+      //      the fingerprint conjunct too. This is confirmed by mutation
+      //      (see the freeze-anchor test's own header comment and the PR
+      //      body): neutering `identityMismatch` alone leaves every
+      //      well-formed-shift leg in this suite green — the fingerprint
+      //      conjunct independently catches the same race.
+      //
+      //  (b) The escape THIS well-formed-shift argument cannot rule out
+      //      — identity differs while the fingerprint conjunct stays
+      //      SILENT — requires `context === null` on BOTH the outer and
+      //      inner reads, i.e. `buildW4ShadowFrozenContextV1` rejecting
+      //      BOTH candidate shifts' shapes. The enumeration of its
+      //      null-context paths (`index.cjs` ~L21451-21489 — cross-
+      //      checked against the function's four `return null` sites:
+      //      three simple sites, plus the ~L21479 compound guard's five
+      //      disjuncts. Two of those five disjuncts (`!startTime` and
+      //      `!endTime`) share one cause and collapse into the single
+      //      list item (iv) below, so the compound guard contributes
+      //      four list items, not five — 3 simple + 4 compound = the
+      //      seven entries that follow, not five and not eight):
+      //      (i) no matching shift row; (ii) more than 3 segment rows
+      //      (ruled out for a genuinely persisted shift — the CHECK
+      //      bounds the RANGE (`chk_attendance_shift_segments_index_range`
+      //      caps `segment_index` at 0-2) and the per-shift UNIQUE index
+      //      (`uq_attendance_shift_segments_shift_index` on
+      //      `(shift_id, segment_index)`) bounds OCCUPANCY (each of the
+      //      three legal values can appear at most once) — CHECK alone
+      //      does not cap row count (four rows could all satisfy
+      //      `segment_index = 1`), the two constraints TOGETHER are
+      //      needed to conclude a 4th row cannot be inserted at all;
+      //      `zzzz20260724120000_create_attendance_shift_segments.ts`);
+      //      (iii) a NON-DENSE segment_index set (`index !== i` at
+      //      ~L21479 — the CHECK constraint bounds the range, not the
+      //      density, and the unique index does not require row 0 to
+      //      exist, so a single `segment_index = 1` row with no row 0 IS
+      //      insertable); (iv) `normalizeTimeString` failing on a
+      //      segment's own `start_time`/`end_time` — e.g. a sub-second-
+      //      precision value (`'09:00:00.5'`, legal for the column's
+      //      `time` type, verified by direct INSERT: no CHECK on this
+      //      table constrains time-string format) fails the read-side
+      //      regex; this is NOT a "malformed row" case, it is legal per
+      //      every CHECK/uniqueness constraint the table has, so it IS
+      //      directly constructible in a real-DB test fixture, same as
+      //      (iii) — but the shift service's create/update path's own
+      //      input validation (`SEGMENT_INPUT_TIME_PATTERN` in
+      //      `attendance-shift-service.cjs`, strict `HH:MM`, no seconds)
+      //      rejects anything but exact minute-granularity, so THAT path
+      //      never produces one either. NOT independently checked here:
+      //      the one-time migration backfill
+      //      (`zzzz20260724120000_create_attendance_shift_segments.ts`)
+      //      is a SEPARATE writer — it derives segment 0's `start_time`/
+      //      `end_time` from the shift's own legacy `work_start_time`/
+      //      `work_end_time` columns, not from validated create/update
+      //      input, and runs once at migrate time rather than on the
+      //      ongoing write path; whether those legacy columns can
+      //      themselves carry sub-second precision is not analyzed here;
+      //      (v) a segment's
+      //      `start_day_offset !== 0` (ruled out the same way as (ii) —
+      //      `chk_attendance_shift_segments_start_day_offset` CHECK
+      //      forces `start_day_offset = 0`, so this disjunct of the
+      //      ~L21479 guard can never fire against a persisted row);
+      //      (vi) a segment's `end_day_offset` outside `{0, 1}` (ruled
+      //      out the same way — `chk_attendance_shift_segments_end_day_offset`
+      //      CHECK forces `end_day_offset IN (0, 1)`); (vii) blank
+      //      legacy `work_start_time`/`work_end_time`, reached ONLY via
+      //      the `else` branch taken when `segmentRows.length === 0`
+      //      (~L21492-21495) — NOT, as an earlier version of this
+      //      comment claimed, "via path (iii)/(iv) once segment rows
+      //      exist": that `else` branch is mutually exclusive with
+      //      (iii)/(iv)/(v)/(vi), which all `return null` from inside
+      //      the `segmentRows.length > 0` loop and can never fall
+      //      through to it. (vii) is reachable only when the shift has
+      //      zero persisted segment rows AND its own legacy time
+      //      columns fail `normalizeTimeString`; `NOT NULL` on
+      //      `attendance_shifts.work_start_time`/`work_end_time` rules
+      //      out a blank/NULL value for a persisted row, but (as with
+      //      (iv)) does not by itself rule out a sub-second-precision
+      //      value — that route is not analyzed here. Paths
+      //      (i)/(ii)/(v)/(vi) are blocked outright by a CHECK
+      //      constraint with no fixture, malformed or otherwise, able
+      //      to insert one; (vii) needs a deleted/never-created shift
+      //      row or an un-migrated/corrupted one to hit blank legacy
+      //      columns via the analyzed route. None of these is pursued
+      //      (no sanctioned production path produces one mid-race — a
+      //      different, unrelated defect class). Paths (iii) and (iv)
+      //      are DIFFERENT: both are legal per every CHECK/uniqueness
+      //      constraint this table has, so both ARE directly
+      //      constructible in a real-DB test fixture, even though the
+      //      canonical shift service (the only writer audited here for
+      //      create/update; the one-time migration backfill described
+      //      above under (iv) is a second sanctioned writer whose source
+      //      columns are NOT analyzed here) never produces either shape
+      //      via create/update (dense 0..2 for (iii) — see the
+      //      migration's header comment; strict `HH:MM` input for (iv)
+      //      — see above).
+      //
+      //  (c) CONCLUSION, corrected: an identity-only, fingerprint-silent
+      //      leg is NOT reachable from two well-formed shifts (part a
+      //      still holds), and is NOT production-reachable (part b's
+      //      (iii) and (iv) both require a fixture the canonical shift
+      //      service never writes) — but it IS constructible as a
+      //      deliberately malformed real-DB test fixture, and the
+      //      freeze-anchor test's "Group G" leg now does exactly that
+      //      (via (iii)), giving the identity conjunct a genuine
+      //      discriminating leg (closing the untested-guard gap gate4
+      //      found; the fingerprint conjunct remains the only conjunct
+      //      with an EXCLUSIVE mutation-discriminating leg among the
+      //      well-formed-shift legs (L6: neutering fingerprint alone
+      //      reds ONLY L6) — Group D / Group D-overnight are DOUBLE-
+      //      covered well-formed-shift legs (neutering either conjunct
+      //      alone leaves them green; both must be neutered to red
+      //      them), not legs the fingerprint conjunct alone
+      //      discriminates). See that test's own comment and the
+      //      leg-map atop the file for the mutation evidence.
+      //
+      //  Letter note (#4612 gate4 round 3, P3-1/P3-2 fix): this
+      //  sub-enumeration was previously five items (i)-(v) and mis-
+      //  stated as "the full enumeration" while omitting the
+      //  start_day_offset/end_day_offset disjuncts, and its old (v)
+      //  claimed a false "only reachable via (iii)/(iv)" causal chain.
+      //  It is now seven items (i)-(vii); old (v) is renumbered (vii).
+      const innerComparableSourceDefinitionFingerprint =
+        attribution.posture === 'resolved_v2'
+          ? computeAttendanceOuterComparableSourceDefinitionFingerprintV1({ attribution, context })
+          : null
+      const identityMismatch =
+        attribution.posture === 'resolved_v2' &&
+        (attribution.value.workDate !== input.workDate || attribution.value.shiftId !== input.shiftId)
+      const fingerprintMismatch =
+        attribution.posture === 'resolved_v2' &&
+        innerComparableSourceDefinitionFingerprint !== input.outerSourceDefinitionFingerprint
+      const identityDrift = identityMismatch || fingerprintMismatch
+      outcome = identityDrift ? 'review_required' : calculation.outcome
+      outcomeReasonCode = identityDrift ? 'context_mismatch' : calculation.outcomeReasonCode
+      const inserted = await insertShadowCalculation(trx, {
+        orgId: envelope.orgId,
+        recordId: parent.id,
+        version,
+        entrypoint: 'live',
+        operationId: identity.id,
+        attribution,
+        context,
+        segmentSnapshot: context ? (context.segments as unknown as unknown[]) : [],
+        evidence: evidence as unknown as unknown[],
+        approvedFacts: [],
+        inputProvenance: { ...provenanceRef },
+        provenanceRef,
+        mergePolicy: 'append',
+        outcome,
+        outcomeReasonCode,
+        segments: identityDrift ? [] : calculation.segments,
+        dailyProjection: identityDrift ? null : calculation.dailyProjection,
+        actorId: authorization.actorId,
+        correlationId,
+        legacyProjection: parent,
+      })
+      calculationId = inserted.calculationId
+      semanticFingerprint = inserted.semanticFingerprint
+      provenanceFingerprint = inserted.provenanceFingerprint
+
+      // W7-2 (P2): the dual-run's group half, recorded AFTER the W4 shadow
+      // row. The comparison record carries the producing operation in its
+      // MARKER (its `operation_id` column is NULL by design), so the W4
+      // row keeps its `uq_arc_operation` slot untouched. The legacy side
+      // of the comparison is the SAME served `parent` row the W4 row
+      // compared against. The seal below keeps referencing the W4 row's
+      // calculationId/fingerprints — the comparison row is never the
+      // operation's result. CONTAINED (gate P1-2): its failure can never
+      // abort the served punch.
+      if (w7GroupShadow) {
+        await recordW7GroupShadowComparisonContainedV1(trx, {
+          orgId: envelope.orgId,
+          recordId: parent.id,
+          entrypoint: 'live',
+          producingOperationId: identity.id,
+          attribution,
+          evidence,
+          provenanceRef,
+          w7GroupShadow,
+          identityDrift,
+          actorId: authorization.actorId,
+          correlationId,
+          legacyProjection: parent,
+        })
+      }
+    }
+
+    // Outbox BEFORE seal (lock 8.2 steps 14-15): the lifecycle event this
+    // entrypoint currently emits becomes a durable row; the caller must NOT
+    // direct-emit for this result kind.
+    await enqueueAttendanceResultEventOutboxV1(trx, identity, [
+      {
+        eventKind: 'attendance.punched',
+        payload: {
+          userId: input.userId,
+          orgId: envelope.orgId,
+          workDate: input.workDate,
+          eventType: input.eventType,
+          occurredAt: input.occurredAtResolved,
+          timezone: input.timezone,
+        },
+        payloadSchemaVersion: 1,
+        businessKeyFingerprint: computeAttendanceBusinessKeyFingerprintV1({
+          kind: 'attendance.punched',
+          orgId: envelope.orgId,
+          operationId: identity.id,
+        }),
+      },
+    ])
+
+    const response = wireJson(result)
+    await sealAttendanceResultOperationV1(trx, identity, {
+      responseSnapshot: online ? makeOnlinePunchReceiptV1(200, { ok: true, data: response }) : response,
+      resolvedRecordId: parent.id,
+      resolvedCalculationId: calculationId,
+      resultSemanticFingerprint: semanticFingerprint,
+      resultProvenanceFingerprint: provenanceFingerprint,
+    })
+
+    return {
+      kind: 'w4' as const,
+      response: result,
+      shadow: { calculationId, outcome, outcomeReasonCode },
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -3762,5 +3823,5 @@ export function createAttendanceLiveScheduledBoundaryV1(
     )
   }
 
-  return { executeLivePunch, executeScheduledRun, recoverScheduledRun }
+  return { executeLivePunch, executeScheduledRun, recoverScheduledRun, probeOnlinePunchReplay, executeOnlinePunch }
 }
