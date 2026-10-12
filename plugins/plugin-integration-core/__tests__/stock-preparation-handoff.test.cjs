@@ -3511,7 +3511,6 @@ async function main() {
   console.log('stock-preparation-handoff: 通知下一步 turn state, advance route and notification guards passed')
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+// S3 follow-ups 2 (item 5): the fail-closed runner (support/fail-closed-suite-runner.cjs) — `main` runs as one test
+// under the exit sentinel and the whole-suite timeout, so a check that hangs can never end this suite with exit 0.
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-handoff.test.cjs', main)
