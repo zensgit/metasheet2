@@ -36,6 +36,7 @@ import {
   type FieldVisibilityDraft,
 } from '../src/approvals/templateAuthoring'
 import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
+import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -6275,6 +6276,23 @@ describe('TemplateAuthoringView', () => {
         ])
       })
 
+      it(`${host}: in → isEmpty → in keeps the WHOLE list (isEmpty leaves the value untouched)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+          { fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] },
+          { fieldId: 'amount', operator: 'in', value: [1, 2] },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        for (const index of [0, 1, 2]) {
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'isEmpty')
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'in')
+        }
+        expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('a\nb')
+        expect(JSON.parse(inRule(scope, 1, 'approval-condition-rule-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_urgent', 'opt_normal'])
+        expect(inRule(scope, 2, 'approval-condition-rule-values')!.value).toBe('1\n2')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
       it(`${host}: number rules save NUMBERS (eq and in); text in saves a list and keeps the typed newlines`, async () => {
         const scope = await mountTyped([
           { fieldId: 'amount', operator: 'eq', value: 1 },
@@ -6298,6 +6316,18 @@ describe('TemplateAuthoringView', () => {
         expect(typeof saved[0].value).toBe('number')
       })
     }
+
+    it('gate r2 P3-b: an EMPTY list stored under eq/neq is marked and saved unchanged', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'kind', operator: 'neq', value: [] },
+        { fieldId: 'reason', operator: 'eq', value: [] },
+      ]
+      const scope = await mountTyped(rules)
+      for (const index of [0, 1]) {
+        expect(inRule(scope, index, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      }
+      expect(await saveRules()).toStrictEqual(rules)
+    })
 
     it('switching the rule field clears a value that means nothing for the new field and picks an effective operator', async () => {
       const scope = await mountTyped([{ fieldId: 'amount', operator: 'eq', value: 5000 }])
@@ -6430,6 +6460,53 @@ describe('TemplateAuthoringView', () => {
       await choose(inNote('approval-field-visibility-operator'), 'eq')
       expect(inNote('approval-field-visibility-issue')).toBeNull()
       expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'reason', operator: 'eq', value: 'a' })
+    })
+
+    it('gate r2 F2-1 legacy designer: retyping a referenced NUMBER field to text marks the number values (visibility + branch), saves them unchanged, and re-entering saves strings that match', async () => {
+      const branchRules: Rule[] = [
+        { fieldId: 'amount', operator: 'eq', value: 5 },
+        { fieldId: 'amount', operator: 'in', value: [1, 2] },
+        { fieldId: 'amount', operator: 'gt', value: 3 },
+      ]
+      const visibilityRule = { fieldId: 'amount', operator: 'eq', value: 5 }
+      const scope = await mountTyped(branchRules.map((rule) => ({ ...rule })), false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      const amountRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[0] as HTMLElement
+      await choose(amountRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement, 'text')
+
+      const notText = conditionValueIssueText(['not-text'], false)
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(notText)
+      // shown empty (like a non-number on a number field): what is stored never matches a text value
+      expect((inNote('approval-field-visibility-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notText)
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(notText)
+      // gt/gte/lt/lte normalise both sides in the executor — still in effect, never marked
+      expect(inRule(scope, 2, 'approval-condition-rule-issue')).toBeNull()
+
+      let fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'amount').type).toBe('text')
+      expect(noteRule(fields)).toStrictEqual(visibilityRule)
+      let payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules).toStrictEqual(branchRules)
+      // negative control: the unchanged number rule never shows the field for the text value '5'
+      expect(getVisibleFormFields({ fields } as any, { amount: '5' }).map((field) => field.id)).not.toContain('note')
+
+      updateTemplateSpy.mockClear()
+      await type(inNote('approval-field-visibility-value') as unknown as HTMLInputElement, '5')
+      await type(inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement, '5')
+      await type(inRule(scope, 1, 'approval-condition-rule-values'), '1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+      fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: '5' })
+      payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules).toStrictEqual([
+        { fieldId: 'amount', operator: 'eq', value: '5' },
+        { fieldId: 'amount', operator: 'in', value: ['1', '2'] },
+        { fieldId: 'amount', operator: 'gt', value: 3 },
+      ])
+      // positive control: the re-entered string rule now shows the field
+      expect(getVisibleFormFields({ fields } as any, { amount: '5' }).map((field) => field.id)).toContain('note')
     })
 
     it('legacy designer: a stored multi-select eq rule is marked (operator shown disabled) and saved unchanged; retyping the dependency marks instead of clearing', async () => {
@@ -6672,6 +6749,11 @@ describe('R-43 (B) typed visibility drafts', () => {
     expect(buildVisibilityRule(via(eqNumber, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [5] })
     expect(buildVisibilityRule(via(eqOption, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'kind', operator: 'in', values: ['opt_a'] })
     expect(buildVisibilityRule(via(inText, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'reason', operator: 'in', values: ['a', 'b'] })
+    // Gate r2 NIT-a: a stored eq value that itself contains a newline rides the carrier, so the
+    // isEmpty round trip never mistakes it for an `in` list and truncates it.
+    const multiline = draftFromTemplate(visibilityTemplate({ ml: { fieldId: 'kind', operator: 'eq', value: 'line1\nline2' } })).fields[2].visibility
+    expect(multiline.value).toBe('line1\nline2')
+    expect(buildVisibilityRule(via(multiline, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'line1\nline2' })
 
     const text = { type: 'text' as const, options: [] }
     const select = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }] }

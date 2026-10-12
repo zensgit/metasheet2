@@ -1606,6 +1606,35 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     expect(issueText(stale)).toBe('')
   })
 
+  it('gate r2 F2-1: a non-string value on a TEXT dependency is marked, shown empty, and re-entering the same text commits a string', async () => {
+    // e.g. a number left behind when the dependency was retyped number → text (`'5' === 5` never matches)
+    const stale = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: 5 } })],
+      { selected: 'local_2' },
+    )
+    expect(stale.input('approval-form-field-inspector-visibility-value').value).toBe('')
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('not-text', false))
+    expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).not.toContain('field_2')
+    await stale.typeText('approval-form-field-inspector-visibility-value', '5')
+    await stale.blur('approval-form-field-inspector-visibility-value')
+    expect(stale.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(stale, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'eq', value: '5' })
+    expect(issueText(stale)).toBe('')
+    expect(getVisibleFormFields(buildFormSchema(stale.session().draft), { field_1: '5' }).map((f) => f.id)).toContain('field_2')
+
+    const staleList = await mountInspector(
+      [field(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'in', valueText: '1\n2', values: [1, 2] } })],
+      { selected: 'local_2' },
+    )
+    expect((staleList.q('[data-testid="approval-form-field-inspector-visibility-values"]') as HTMLTextAreaElement).value).toBe('')
+    expect(issueText(staleList)).toContain(conditionValueIssueMessage('not-text', false))
+    await staleList.typeText('approval-form-field-inspector-visibility-values', '1\n2')
+    await staleList.blur('approval-form-field-inspector-visibility-values')
+    expect(staleList.commands).toHaveLength(1)
+    expect(buildVisibilityRule(visibilityOf(staleList, 1))).toStrictEqual({ fieldId: 'field_1', operator: 'in', values: ['1', '2'] })
+    expect(issueText(staleList)).toBe('')
+  })
+
   it('multi-select dependency offers only effective operators; a stored eq is shown disabled and marked', async () => {
     const multi = (index: number, extra: Partial<FieldAuthoringDraft> = {}) => selectField(index, { type: 'multi-select', ...extra })
     const inspector = await mountInspector([multi(1), field(2)], { selected: 'local_2' })

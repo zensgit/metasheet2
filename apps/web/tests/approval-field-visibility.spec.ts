@@ -159,6 +159,22 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     expect(visibilityRuleValueIssues({ operator: 'neq', value: [1] }, number)).toEqual(['list-not-scalar'])
     expect(visibilityRuleValueIssues({ operator: 'eq', value: ['opt_a'] }, single)).toEqual(['list-not-scalar'])
     expect(visibilityRuleValueIssues({ operator: 'in', values: ['opt_a'] }, single)).toEqual([])
+    // Gate r2 P3-b: an EMPTY list under eq/neq is marked the same way on every kind.
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(visibilityRuleValueIssues({ operator, value: [] }, single)).toEqual(['list-not-scalar'])
+      expect(visibilityRuleValueIssues({ operator, value: [] }, text)).toEqual(['list-not-scalar'])
+      expect(visibilityRuleValueIssues({ operator, value: [] }, number)).toEqual(['list-not-scalar'])
+    }
+    expect(visibilityRuleValueIssues({ operator: 'in', values: [] }, text)).toEqual([])
+    // Gate r2 F2-1: a non-string value on a TEXT-type dependency never matches `===` / `includes`
+    // (e.g. a number left behind when the dependency was retyped number → text).
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: 5 }, text)).toEqual(['not-text'])
+    expect(visibilityRuleValueIssues({ operator: 'neq', value: 5 }, text)).toEqual(['not-text'])
+    expect(visibilityRuleValueIssues({ operator: 'in', values: [1, 2] }, text)).toEqual(['not-text'])
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: 20260101 }, { type: 'date' as const, options: [] })).toEqual(['not-text'])
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: '5' }, text)).toEqual([])
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: null }, text)).toEqual([])
+    expect(visibilityRuleValueIssues({ operator: 'in', values: ['1', '2'] }, text)).toEqual([])
   })
 
   it('parseConditionNumber / parseConditionListText / sameConditionList', () => {
@@ -181,7 +197,7 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
       expect(CJK.test(rendered), key).toBe(false)
       expect(rendered).not.toContain('opt_')
     }
-    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number'] as const) {
+    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number', 'not-text'] as const) {
       expect(CJK.test(conditionValueIssueMessage(issue, true))).toBe(true)
       expect(CJK.test(conditionValueIssueMessage(issue, false))).toBe(false)
     }

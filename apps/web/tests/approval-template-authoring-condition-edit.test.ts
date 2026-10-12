@@ -634,8 +634,36 @@ describe('R-43 (B) typed branch condition values', () => {
       expect(conditionRuleValueIssues({ operator, value: ['a'] }, text)).toEqual(['list-not-scalar'])
     }
     expect(conditionRuleValueIssues({ operator: 'eq', value: ['opt_gone'] }, single)).toEqual(['list-not-scalar'])
-    expect(conditionRuleValueIssues({ operator: 'eq', value: [] }, single)).toEqual([])
+    // Gate r2 P3-b: an EMPTY list under a single-value operator is marked too (`neq []` always matches);
+    // an empty `in` list is just not filled in yet.
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: [] }, single)).toEqual(['list-not-scalar'])
+      expect(conditionRuleValueIssues({ operator, value: [] }, text)).toEqual(['list-not-scalar'])
+    }
+    expect(conditionRuleValueIssues({ operator: 'in', value: [] }, text)).toEqual([])
     expect(conditionRuleValueIssues({ operator: 'isEmpty', value: ['a'] }, text)).toEqual([])
+  })
+
+  it('gate r2 F2-1: a non-string value under eq/neq/in on a TEXT-type field is marked (never under gt/gte/lt/lte)', () => {
+    const date = { type: 'date' as const, options: [] }
+    // e.g. a number left behind when the field was retyped number → text: `'5' === 5` never matches
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 5 }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'neq', value: 5 }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: [1, 2] }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['a', 2] }, text)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 20260101 }, date)).toEqual(['not-text'])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: true }, text)).toEqual(['not-text'])
+    // the executor normalises both sides for gt/gte/lt/lte — a number still compares there
+    for (const operator of ['gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 20260101 }, date)).toEqual([])
+      expect(conditionRuleValueIssues({ operator, value: 5 }, text)).toEqual([])
+    }
+    // strings stay fine; blank stays "not filled in"
+    expect(conditionRuleValueIssues({ operator: 'eq', value: '5' }, text)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['1', '2'] }, text)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'eq', value: null }, text)).toEqual([])
+    // a scalar `in` on text: both marks
+    expect(conditionRuleValueIssues({ operator: 'in', value: 5 }, text)).toEqual(['in-not-list', 'not-text'])
   })
 
   function editsWith(rules: Array<{ fieldId: string; operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'isEmpty'; value: unknown }>): ConditionEdits {

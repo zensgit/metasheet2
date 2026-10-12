@@ -159,9 +159,9 @@ export const AUTHORABLE_FIELD_TYPES: AuthorableFieldType[] = [
  *
  * R-43 (B): two OPTIONAL typed carriers. Anything a plain trimmed string can express losslessly
  * stays in `valueText` only (the three-key shape every existing caller/spec writes); a number,
- * boolean, null, a string with edge whitespace, or a list entry containing a newline rides the
- * carrier, so a number-field rule is saved as a number and an API-authored typed rule survives an
- * edit-and-save round trip instead of silently degrading to a string.
+ * boolean, null, a string with edge whitespace or a newline, or a list entry containing a newline
+ * rides the carrier, so a number-field rule is saved as a number and an API-authored typed rule
+ * survives an edit-and-save round trip instead of silently degrading to a string.
  */
 export interface FieldVisibilityDraft {
   dependsOnFieldId: string
@@ -572,16 +572,16 @@ export function visibilityDraftList(visibility: FieldVisibilityDraft): unknown[]
 /**
  * Read (display): the eq/neq text-box text. Number kind shows only a finite number (a stored
  * non-number shows '' and is explained by the issue note, so re-typing the same digits is a real
- * edit that commits a number). Text kind never shows a literal "null".
+ * edit that commits a number). Text kind shows only a string, by the same rule: a stored non-string
+ * (e.g. a number left behind when the field was retyped from number to text, which `===` never
+ * matches) shows '' and is explained by the issue note, so re-typing it commits a string.
  */
 export function visibilityDraftScalarText(visibility: FieldVisibilityDraft, kind: ConditionValueKind): string {
   const scalar = visibilityDraftScalar(visibility)
   if (kind === 'number') {
     return typeof scalar === 'number' && Number.isFinite(scalar) ? String(scalar) : ''
   }
-  if (visibility.value === undefined) return visibility.valueText
-  if (visibility.value === null) return ''
-  return typeof visibility.value === 'string' ? visibility.value : String(visibility.value)
+  return typeof scalar === 'string' ? scalar : ''
 }
 
 /**
@@ -592,13 +592,18 @@ export function visibilityDraftListText(visibility: FieldVisibilityDraft, kind: 
   const list = visibilityDraftList(visibility)
   if (sameConditionList(parseConditionListText(visibility.valueText, kind), list)) return visibility.valueText
   if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
+  // Text kind: a stored non-string entry never matches (`includes` is strict) — show '' like above.
+  if (kind === 'text' && !list.every((value) => typeof value === 'string')) return ''
   return formatConditionListText(list)
 }
 
-/** Write (typed eq/neq value). */
+/**
+ * Write (typed eq/neq value). A string containing a newline rides the carrier too, so a carrier-less
+ * `valueText` with a newline can only be an `in` list (what `visibilityDraftWithOperator` relies on).
+ */
 export function visibilityDraftWithScalar(visibility: FieldVisibilityDraft, value: unknown): FieldVisibilityDraft {
   const base = { dependsOnFieldId: visibility.dependsOnFieldId, operator: visibility.operator }
-  if (typeof value === 'string' && value === value.trim()) return { ...base, valueText: value }
+  if (typeof value === 'string' && value === value.trim() && !value.includes('\n')) return { ...base, valueText: value }
   return { ...base, valueText: '', value }
 }
 

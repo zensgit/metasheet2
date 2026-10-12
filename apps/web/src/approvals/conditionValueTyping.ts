@@ -17,8 +17,10 @@ import { CONDITION_RULE_OPERATORS } from './conditionEdit'
 // The issue helpers below mirror the same evaluators, so an editor can MARK a stored rule that cannot
 // work as intended: a value no current option carries, a non-number on a number field, an `in` that
 // holds a single value, a LIST under a single-value operator (eq/neq/gt/gte/lt/lte — eq never
-// matches, neq always matches), or an operator a multi-select cannot use. Marking is display-only:
-// never a save/publish blocker, never a rewrite.
+// matches, neq always matches; an empty list included), a non-string value compared strictly
+// (eq/neq/in) against a text-type field (e.g. a number left behind when the field was retyped from
+// number to text: `'5' === 5` never matches), or an operator a multi-select cannot use. Marking is
+// display-only: never a save/publish blocker, never a rewrite.
 
 export type ConditionValueKind = 'option-single' | 'option-multi' | 'number' | 'text'
 
@@ -117,6 +119,7 @@ export type ConditionValueIssue =
   | 'in-not-list'
   | 'list-not-scalar'
   | 'not-number'
+  | 'not-text'
 
 function isBlankValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
@@ -126,10 +129,16 @@ function isFiniteNumber(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value)
 }
 
+/**
+ * `strict`: the operator compares with `===` / `includes` (eq/neq/in). Only then can a non-string
+ * value never match a text-type field's string value; gt/gte/lt/lte normalise both sides in the
+ * executor (a number/date compared against text still works there), so they are never marked.
+ */
 function valueIssues(
   values: readonly unknown[],
   field: ConditionValueField,
   numberCheck: (value: unknown) => boolean,
+  strict: boolean,
 ): ConditionValueIssue[] {
   const kind = conditionValueKind(field)
   const present = values.filter((value) => !isBlankValue(value))
@@ -139,6 +148,9 @@ function valueIssues(
   }
   if (kind === 'number' && present.some((value) => !numberCheck(value))) {
     issues.push('not-number')
+  }
+  if (kind === 'text' && strict && present.some((value) => typeof value !== 'string')) {
+    issues.push('not-text')
   }
   return issues
 }
@@ -155,12 +167,12 @@ export function visibilityRuleValueIssues(
   const kind = conditionValueKind(field)
   if (!visibilityOperatorsFor(kind).includes(rule.operator)) return ['operator-not-effective']
   if (rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return []
-  // eq/neq compare one value with `===` / `!==`: a stored LIST never / always matches.
-  if (rule.operator !== 'in' && Array.isArray(rule.value) && rule.value.length > 0) return ['list-not-scalar']
+  // eq/neq compare one value with `===` / `!==`: a stored LIST (even an empty one) never / always matches.
+  if (rule.operator !== 'in' && Array.isArray(rule.value)) return ['list-not-scalar']
   const values = rule.operator === 'in'
     ? (Array.isArray(rule.values) ? rule.values : [])
     : [rule.value]
-  return valueIssues(values, field, isFiniteNumber)
+  return valueIssues(values, field, isFiniteNumber, true)
 }
 
 /**
@@ -177,9 +189,11 @@ export function conditionRuleValueIssues(
   if (!conditionOperatorsFor(kind).includes(rule.operator)) return ['operator-not-effective']
   if (rule.operator === 'isEmpty') return []
   const value = rule.value
-  if (isBlankValue(value) || (Array.isArray(value) && value.length === 0)) return []
-  // eq/neq/gt/gte/lt/lte compare ONE value: a stored list never matches (neq: always matches).
+  if (isBlankValue(value)) return []
+  // eq/neq/gt/gte/lt/lte compare ONE value: a stored list (even an empty one) never matches (neq:
+  // always matches). An empty `in` list is simply not filled in yet.
   if (rule.operator !== 'in' && Array.isArray(value)) return ['list-not-scalar']
+  if (Array.isArray(value) && value.length === 0) return []
   const issues: ConditionValueIssue[] = []
   if (rule.operator === 'in' && !Array.isArray(value) && kind !== 'option-multi') {
     issues.push('in-not-list')
@@ -190,6 +204,7 @@ export function conditionRuleValueIssues(
     values,
     field,
     comparesNormalised ? (entry) => parseConditionNumber(entry) !== null : isFiniteNumber,
+    !comparesNormalised,
   ))
   return issues
 }
@@ -203,6 +218,7 @@ export interface ConditionValueCopy {
   issueInNotList: string
   issueListNotScalar: string
   issueNotNumber: string
+  issueNotText: string
   chooseOption: string
   chooseOptions: string
   noOptions: string
@@ -224,6 +240,7 @@ export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
   issueInNotList: '「包含于」需要一组值，当前只保存了单个值，此条件不会生效，请重新填写或选择。',
   issueListNotScalar: '这个条件类型只能比较单个值，当前保存的是一组值，无法按预期生效，请重新填写或选择。',
   issueNotNumber: '数值字段的比较值不是数字，此条件不会生效，请重新填写。',
+  issueNotText: '比较值的类型与字段类型不一致（字段可能改过类型），此条件不会生效，请重新填写。',
   chooseOption: '请选择选项',
   chooseOptions: '请选择一个或多个选项',
   noOptions: '依赖字段还没有选项，请先添加选项。',
@@ -245,6 +262,7 @@ export const CONDITION_VALUE_COPY_EN: ConditionValueCopy = {
   issueInNotList: 'The "in" condition needs a list of values; it holds a single value and never takes effect. Enter or choose the values again.',
   issueListNotScalar: 'This condition type compares a single value, but a list of values is saved, so it does not work as intended. Enter or choose the value again.',
   issueNotNumber: 'The value for a number field is not a number, so this condition never takes effect. Enter it again.',
+  issueNotText: 'The saved value does not match the field type (the field type may have changed), so this condition never takes effect. Enter it again.',
   chooseOption: 'Choose an option',
   chooseOptions: 'Choose one or more options',
   noOptions: 'The field has no options yet. Add options first.',
@@ -276,6 +294,8 @@ export function conditionValueIssueMessage(issue: ConditionValueIssue, isZh: boo
       return copy.issueListNotScalar
     case 'not-number':
       return copy.issueNotNumber
+    case 'not-text':
+      return copy.issueNotText
   }
 }
 
