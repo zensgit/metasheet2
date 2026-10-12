@@ -5,7 +5,7 @@
 const assert = require('node:assert/strict')
 const bom = require('../lib/stock-preparation-bom-expansion.cjs')
 const jobs = require('../lib/stock-preparation-large-bom-jobs.cjs')
-const { PROJECT, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, runCases, clone } = require('./stock-preparation-bom-active-state.test.cjs')
+const { PROJECT, SCOPE, NOW, fixture, sourceFor, storage, recordsApi, actionFor, runCases, clone } = require('./support/stock-preparation-bom-active-state-fixture.cjs')
 const VERSION = 'stock-preparation-bom.v2'
 const VERSION_ERROR = 'LARGE_BOM_EVALUATION_VERSION_UNSUPPORTED'
 const INVALID = [['missing'], ['old', 'stock-preparation-bom.v1'], ['future', 'stock-preparation-bom.v999'], ['number', 2], ['null', null], ['object', { version: VERSION }], ['blank', ''], ['padded', ` ${VERSION} `]]
@@ -210,4 +210,4 @@ async function main() {
 }
 
 module.exports = { main }
-if (require.main === module) main().catch((error) => { console.error(error); process.exitCode = 1 })
+require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('stock-preparation-bom-artifact-version.test.cjs', main)
