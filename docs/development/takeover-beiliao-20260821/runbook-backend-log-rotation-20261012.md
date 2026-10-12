@@ -95,7 +95,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    - `pm2 reloadLogs exit=0: Reloading all logs... | All logs reloaded`；
    - `live log(s) reopened by pm2`；
    - `done, exit 0`。
-3. 退出码 4：逐个文件看日志。`ROLLED BACK: … moved back to …` = 已移回原名，后端照常写原文件，什么都没丢；`LATE REOPEN: … came back after the wait; archive … kept` = pm2 晚到地重建了活动日志，这个文件已轮转，不用处理。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行。有 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; …` 时**不要 `pm2 kill`**，按 §3 第 8 项去掉那个 daemon（必须在下一次 `MetaSheet-PM2` 启动之前），再把这一段日志报给开发机。
+3. 退出码 4：逐个文件看日志。`ROLLED BACK: … moved back to …` = 已移回原名，后端照常写原文件，什么都没丢；`LATE REOPEN: … came back after the wait; archive … kept` = pm2 晚到地重建了活动日志，这个文件已轮转，不用处理。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行。有 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; …` 时**不要 `pm2 kill`**，按 §3 第 8 项去掉那个 daemon（必须在下一次 `MetaSheet-PM2` 启动之前），再把这一段日志报给开发机。退出码 4 但**没有**任何 `WARNING: … stray daemon` 行时，也要执行 §3 第 8 项的第 1 步，检查是否存在一个在本次调用之前就已存在的 `pm2libDaemon.js` node 进程（脚本只认调用之后启动的 daemon，之前就在的不会被点名）。
 4. 退出码 5：把 `FAILED:` 那几行报给开发机；活动日志不会被删除（脚本从不删活动日志）。
 5. 不停服务、不挂维护标志、不碰数据库。pm2 换文件的那一瞬间（毫秒级）到达的输出会被丢弃（§5 源码第 4 条），其余不丢。
 
@@ -137,7 +137,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    (Get-ChildItem <安装根目录>\output\logs\archive -Filter 'metasheet-backend.out-0.*.log').Count
    ```
 7. 后端仍挂在 pm2-runtime 下：做法见 `handoff-r59-two-machine-20260924.md` 第 3 节第 5 步（`Win32_Process` 的 `ParentProcessId`）。这一项也是第 8 项的**探测手段**：后端 node 进程的父进程应是命令行含 `pm2-runtime` 的进程；若是命令行以 `pm2\lib\Daemon.js` 结尾的进程，说明后端已经跑在多余的 daemon 里。
-8. **多余的 pm2 daemon（stray）：识别与去除。** 何时要做：脚本日志里出现 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; stray daemon pid <pid>`（或 `its pid was not found`），或第 7 项看到 `Daemon.js` 进程。pm2-runtime 自己从不运行 `pm2\lib\Daemon.js`，所以**命令行以 `pm2\lib\Daemon.js` 结尾的 node 进程，按定义就是某次 pm2 命令（本脚本的 `reloadLogs`、手工 `pm2 list` 等）连不上 pm2-runtime 时拉起的多余 daemon**。它不会自己退出，并占着全机唯一的管道 `\\.\pipe\rpc.sock`。之后 `MetaSheet-PM2` 再启动 pm2-runtime 时（升级后的重启、机器重启）**不会报错**：pm2-runtime 作为客户端连上它，后端就跑在这个 daemon 里；`pm2 list` / `restart` / `reloadLogs` 也都对它成功，一直悄无声息，直到有人把它去掉。所以必须在**下一次 `MetaSheet-PM2` 启动之前**处理：
+8. **多余的 pm2 daemon（stray）：识别与去除。** 何时要做：脚本日志里出现 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; stray daemon pid <pid>`（或 `its pid was not found`），或第 7 项看到 `Daemon.js` 进程。pm2-runtime 自己从不运行 `pm2\lib\Daemon.js`，所以**命令行以 `pm2\lib\Daemon.js` 结尾的 node 进程，按定义就是某次 pm2 命令（本脚本的 `reloadLogs`、手工 `pm2 list` 等）连不上 pm2-runtime 时拉起的多余 daemon**。它不会自己退出，并占着全机唯一的管道 `\\.\pipe\rpc.sock`。之后 `MetaSheet-PM2` 再启动 pm2-runtime 时（升级后的重启）**不会报错**：pm2-runtime 作为客户端连上它，后端就跑在这个 daemon 里；`pm2 list` / `restart` / `reloadLogs` 也都对它成功，一直悄无声息，直到有人把它去掉。所以必须在**下一次 `MetaSheet-PM2` 启动之前**处理：
    1. 找到它：
       ```
       Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' } | Select-Object ProcessId, ParentProcessId, CreationDate
