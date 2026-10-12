@@ -4,7 +4,8 @@ import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import { acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1 } from '../../src/attendance/w4c0-identity'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { fork, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { acquireAttendanceTimezoneRuntimeLocksV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
 import { Client } from 'pg'
@@ -73,6 +74,58 @@ async function policyPreview(enabled: boolean,expectedVersion: number) {
   } catch (error) { await client.query('ROLLBACK'); throw error }
   finally { client.release() }
 }
+async function punchBusinessFingerprint() {
+  const client = await fixture.pool.connect()
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
+    const digest = createHash('sha256')
+    for (const table of ['attendance_events','attendance_records','attendance_requests',
+      'attendance_result_operations','attendance_result_event_outbox','attendance_record_calculations',
+      'attendance_timezone_context_companions']) {
+      // Exclude only the production outbox guard's four delivery bookkeeping
+      // fields. Identity, payload and every other business column remain strict.
+      const businessRow = table === 'attendance_result_event_outbox'
+        ? "to_jsonb(t) - ARRAY['delivery_state','attempts','next_attempt_at','delivered_at']::text[]"
+        : 'to_jsonb(t)'
+      const rows = await client.query(`SELECT coalesce(jsonb_agg(business_row ORDER BY business_row::text),'[]'::jsonb) AS rows
+        FROM (SELECT ${businessRow} AS business_row FROM ${table} t WHERE org_id=$1) scoped`, [fixture.orgId])
+      digest.update(table).update(JSON.stringify(rows.rows[0].rows))
+    }
+    await client.query('COMMIT')
+    return digest.digest('hex')
+  } catch (error) { await client.query('ROLLBACK'); throw error }
+  finally { client.release() }
+}
+type LoaderReply = {
+  type: 'ready' | 'result' | 'stopped' | 'error'; nodePid?: number; backendPid?: number; loaderInstances?: number;
+  context?: { timezone: string; source: string; mode: string; policyVersion: number; employeeReads: number };
+}
+function loaderCommand(child: ChildProcess, message: Record<string, unknown>): Promise<LoaderReply> {
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error, reply?: LoaderReply) => {
+      clearTimeout(timer)
+      child.off('message', onMessage); child.off('error', onError); child.off('exit', onExit)
+      if (error) reject(error); else resolve(reply!)
+    }
+    const onMessage = (reply: LoaderReply) => reply.type === 'error'
+      ? finish(new Error('MT12_CHILD_FAILED')) : finish(undefined, reply)
+    const onError = () => finish(new Error('MT12_CHILD_PROCESS_FAILED'))
+    const onExit = () => finish(new Error('MT12_CHILD_EXITED_EARLY'))
+    const timer = setTimeout(() => finish(new Error('MT12_CHILD_COMMAND_TIMEOUT')), 10_000)
+    child.once('message', onMessage); child.once('error', onError); child.once('exit', onExit)
+    child.send(message, error => { if (error) onError() })
+  })
+}
+async function stopLoaderChild(child: ChildProcess) {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  const exited = new Promise<void>(resolve => child.once('exit', () => resolve()))
+  const term = setTimeout(() => child.kill('SIGTERM'), 2000)
+  const kill = setTimeout(() => child.kill('SIGKILL'), 4000)
+  try {
+    if (child.connected) await loaderCommand(child, { type: 'stop' }).catch(() => undefined)
+    await exited
+  } finally { clearTimeout(term); clearTimeout(kill) }
+}
 describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () => {
   beforeAll(async () => { admin = await fixture.start() },180_000)
   afterAll(async () => {
@@ -100,6 +153,17 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       referenceId:(await fixture.pool.query('SELECT id FROM attendance_rules WHERE org_id=$1 AND is_default=true',[fixture.orgId])).rows[0].id,
       version:1,policyVersion:0,calculationGroupMembership:null,
     })
+  })
+  it('MT04 ordinary punch rejects an explicit illegal IANA zone with exact 422 and no business row mutation', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const before = await punchBusinessFingerprint()
+    const refused = await punch(actor,'check_in','2026-01-12T23:30:00.000Z',randomUUID(),'Invalid/Timezone')
+    expect({status:refused.status,body:refused.body}).toEqual({status:422,body:{ok:false,error:{
+      code:'ATTENDANCE_TIMEZONE_INVALID_ZONE',message:'ATTENDANCE_TIMEZONE_INVALID_ZONE',
+    }}})
+    expect(await fixture.counts(actor.userId)).toEqual({events:0,records:0,requests:0,operations:0})
+    expect(await punchBusinessFingerprint()).toBe(before)
   })
   it('ON employee authority determines the timezone day and is frozen in the actual record transaction',async () => {
     await policy(true)
@@ -1485,61 +1549,52 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       [referenceId,fixture.orgId,actor.userId,'Asia/Tokyo','2026-01-01T00:00:00Z','2026-02-01T00:00:00Z',admin.userId],
     )
     const requireModule = createRequire(import.meta.url)
-    const { createAttendanceTimezoneContextLoader } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-timezone-context-loader.cjs')
-    const { createAttendanceTimezonePolicyStore } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs')
-    const { readApprovedTrips } = requireModule('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs')
-    const clients = await Promise.all([fixture.pool.connect(),fixture.pool.connect()])
-    const inputs = {orgId:fixture.orgId,userId:actor.userId,occurredAt:new Date('2026-01-13T01:00:00Z'),workDate:'2026-01-13'}
-    const noWrites = async () => { throw new Error('MT12_READ_ONLY_ADAPTER_WRITE_FORBIDDEN') }
-    const readers = clients.map(client => {
-      const statements: string[] = []
-      const query = (sql:string,values?:unknown[]) => {
-        statements.push(sql)
-        return client.query(sql,values)
-      }
-      // Production store/loader/trip reader, created exactly once per connection.
-      // Write-only constructor capabilities are deliberately unreachable; mutations
-      // below use the real authenticated HTTP configuration route.
-      const store = createAttendanceTimezonePolicyStore({query,transaction:noWrites,authorizeManage:noWrites})
-      const load = createAttendanceTimezoneContextLoader({query,policyStore:store,readApprovedTrips})
-      return {client,statements,load}
-    })
-    const read = async (reader: typeof readers[number]) => {
-      reader.statements.length = 0
-      await reader.client.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY')
-      try {
-        await acquireAttendanceTimezoneRuntimeLocksV1(reader.client,{orgId:fixture.orgId,userId:actor.userId})
-        const result = await reader.load(inputs)
-        await reader.client.query('COMMIT')
-        return {
-          timezone:result.timezone,source:result.source,mode:result.mode,policyVersion:result.policyVersion,
-          employeeReads:reader.statements.filter(sql => sql.includes('FROM attendance_employee_timezone_overrides')).length,
-        }
-      } catch (error) {
-        await reader.client.query('ROLLBACK')
-        throw error
-      }
+    const inputs = {orgId:fixture.orgId,userId:actor.userId,occurredAt:'2026-01-13T01:00:00Z',workDate:'2026-01-13'}
+    const childEnv: NodeJS.ProcessEnv = {
+      NODE_ENV:'test',LOG_LEVEL:'error',ATTENDANCE_TEST_DATABASE_URL:process.env.ATTENDANCE_TEST_DATABASE_URL,
+      ...(process.env.TMPDIR ? {TMPDIR:process.env.TMPDIR} : {}),
     }
+    const children: ChildProcess[] = []
+    const stderrTraces: Array<{bytes:number;digest:ReturnType<typeof createHash>}> = []
     try {
-      const pids = await Promise.all(clients.map(async client => (await client.query('SELECT pg_backend_pid() AS pid')).rows[0].pid))
-      expect(new Set(pids).size).toBe(2)
-      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+      for (let index=0;index<2;index+=1) {
+        children.push(fork(new URL('../utils/attendance-timezone-loader-child.ts',import.meta.url), [], {
+          execPath:process.execPath,execArgv:['--import',requireModule.resolve('tsx')],env:childEnv,
+          stdio:['ignore','ignore','pipe','ipc'],
+        }))
+        const trace = {bytes:0,digest:createHash('sha256')}
+        stderrTraces.push(trace)
+        children[index].stderr?.on('data', (chunk: Buffer) => { trace.bytes+=chunk.length; trace.digest.update(chunk) })
+      }
+      const identities = await Promise.all(children.map(child => loaderCommand(child,{type:'init',input:inputs})))
+      expect(identities.every((identity,index) => identity.type === 'ready' && identity.loaderInstances === 1
+        && identity.nodePid === children[index].pid && identity.nodePid !== process.pid)).toBe(true)
+      expect(new Set(identities.map(identity => identity.nodePid)).size).toBe(2)
+      expect(new Set(identities.map(identity => identity.backendPid)).size).toBe(2)
+      const read = async () => {
+        const replies = await Promise.all(children.map(child => loaderCommand(child,{type:'read'})))
+        expect(replies.every((reply,index) => reply.type === 'result' && reply.nodePid === identities[index].nodePid)).toBe(true)
+        return replies.map(reply => reply.context)
+      }
+      expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:0,employeeReads:0,
       })))
       punchClock.setOnlinePunchInstantForTests('2025-12-01T00:00:00Z')
       const enabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:true,expectedVersion:0},'PUT')
       expect(enabled).toMatchObject({status:200,body:{ok:true,data:{enabled:true,version:1}}})
-      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+      expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'Asia/Tokyo',source:'employee_override',mode:'multi_timezone',policyVersion:1,employeeReads:1,
       })))
       const disabled = await fixture.request('/api/attendance/timezone-policy',admin.token,{enabled:false,expectedVersion:1},'PUT')
       expect(disabled).toMatchObject({status:200,body:{ok:true,data:{enabled:false,version:2}}})
-      expect(await Promise.all(readers.map(read))).toEqual(Array.from({length:2},() => ({
+      expect(await read()).toEqual(Array.from({length:2},() => ({
         timezone:'UTC',source:'system_default',mode:'default_only',policyVersion:2,employeeReads:0,
       })))
       expect(await fixture.counts(actor.userId)).toEqual({events:0,records:0,requests:0,operations:0})
     } finally {
-      for (const client of clients) { await client.query('ROLLBACK'); client.release() }
+      await Promise.all(children.map(stopLoaderChild))
+      console.info('MT12_CHILD_STDERR_TRACES',JSON.stringify(stderrTraces.map(trace => ({bytes:trace.bytes,sha256:trace.digest.digest('hex')}))))
+      expect(children.every(child => child.exitCode === 0 && child.signalCode === null)).toBe(true)
       await resetSources()
     }
   })
@@ -1723,6 +1778,56 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
         await resetSources()
       }
     })
+  })
+
+  it('MT01 OFF ignores a real finally approved Singapore trip and Tokyo employee authority in ordinary punch', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const tripClock = createRequire(import.meta.url)('../../../../plugins/plugin-attendance/lib/attendance-business-trip.cjs')
+    tripClock.setBusinessTripInstantForTests('2026-01-11T00:00:00.000Z')
+    punchClock.setOnlinePunchInstantForTests('2026-01-11T00:00:00.000Z')
+    try {
+      await fixture.pool.query(`INSERT INTO attendance_employee_timezone_overrides
+        (org_id,user_id,timezone,effective_from,created_by,updated_by)
+        VALUES($1,$2,'Asia/Tokyo','2026-01-01T00:00:00Z',$3,$3)`,[fixture.orgId,actor.userId,admin.userId])
+      const flow = await fixture.request('/api/attendance/approval-flows',admin.token,{
+        orgId:fixture.orgId,name:'OFF approved trip synthetic',requestType:'business_trip',steps:[{approverUserIds:[admin.userId]}],
+      })
+      expect(flow.status,flow.body.error?.code).toBe(201)
+      const made = await fixture.request('/api/attendance/business-trip-requests',actor.token,{
+        destinationTimezone:'Asia/Singapore',startAt:'2026-01-12T00:00:00.000Z',endAt:'2026-01-15T00:00:00.000Z',
+        approvalFlowId:flow.body.data.id,operationId:randomUUID(),
+      })
+      expect(made.status,made.body.error?.code).toBe(201)
+      const requestId = made.body.data.request.id
+      const cursor = (await fixture.pool.query(`SELECT ai.version,ai.current_node_key FROM attendance_requests r
+        JOIN approval_instances ai ON ai.id=r.approval_instance_id AND ai.org_id=r.org_id WHERE r.id=$1 AND r.org_id=$2`,
+        [requestId,fixture.orgId])).rows
+      expect(cursor).toHaveLength(1)
+      const approved = await fixture.request('/api/attendance/requests/'+requestId+'/approve',admin.token,{
+        operationId:randomUUID(),expectedApprovalVersion:Number(cursor[0].version),expectedApprovalNode:String(cursor[0].current_node_key),
+      })
+      expect(approved).toMatchObject({status:200,body:{data:{status:'approved'}}})
+      expect((await fixture.pool.query(`SELECT request_id,destination_timezone,start_at,effective_end_at,version
+        FROM attendance_business_trip_arrangements WHERE org_id=$1 AND user_id=$2`,[fixture.orgId,actor.userId])).rows)
+        .toEqual([{request_id:requestId,destination_timezone:'Asia/Singapore',start_at:new Date('2026-01-12T00:00:00Z'),
+          effective_end_at:new Date('2026-01-15T00:00:00Z'),version:1}])
+      expect((await fixture.pool.query('SELECT * FROM attendance_timezone_policies WHERE org_id=$1',[fixture.orgId])).rows).toEqual([])
+      const accepted = await punch(actor,'check_in','2026-01-12T23:30:00.000Z')
+      expect(accepted.status,accepted.body.error?.code).toBe(200)
+      expect(await eventRows(actor)).toEqual([{event_type:'check_in',timezone:'UTC',work_date:'2026-01-12',
+        occurred_at:new Date('2026-01-12T23:30:00.000Z')}])
+      const rule = (await fixture.pool.query('SELECT id,timezone_version FROM attendance_rules WHERE org_id=$1 AND is_default=true',[fixture.orgId])).rows
+      expect(rule).toHaveLength(1)
+      const frozen = (await fixture.pool.query('SELECT frame_snapshot FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2',
+        [fixture.orgId,actor.userId])).rows
+      expect(frozen).toHaveLength(1)
+      expect(frozen[0].frame_snapshot.timezoneContext).toEqual({timezone:'UTC',source:'system_default',mode:'default_only',
+        referenceId:rule[0].id,version:Number(rule[0].timezone_version),policyVersion:0,calculationGroupMembership:null})
+    } finally {
+      tripClock.setBusinessTripInstantForTests(null)
+      await resetSources()
+    }
   })
 
 })

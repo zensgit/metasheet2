@@ -71,8 +71,12 @@ export async function acquireBusinessTripRequestPrefixV1(
   let verify: SourceVerifier | undefined
   if (scheduleSource) {
     const schema = await trx.query("SELECT to_regclass('public.attendance_timezone_context_companions') IS NOT NULL AS present")
-    if (schema.rows.length !== 1 || typeof schema.rows[0].present !== 'boolean') {
-      throw new Error('ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE')
+    if (schema.rows.length !== 1 || schema.rows[0].present !== true) {
+      throw Object.assign(new Error('ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE'), {
+        name: 'AttendanceBusinessTripError',
+        code: 'ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE',
+        httpStatus: 503,
+      })
     }
     if (schema.rows[0].present) {
       if (!requestSourceGuard) throw new Error('ATTENDANCE_TIMEZONE_WRITE_GUARD_UNAVAILABLE')

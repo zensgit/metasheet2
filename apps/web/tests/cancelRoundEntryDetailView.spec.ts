@@ -288,7 +288,7 @@ describe('ApprovalDetailView — P-2 on a cancel-round instance', () => {
     mockActiveApproval.value = cancelRoundInstance({ status: 'rejected', cancelRoundCloseReason: 'business_blocked:SOME_CODE' })
     await mountView()
     expect(headerTag().dataset).toMatchObject({ domain: 'cancelRound', status: 'cancellation_blocked' })
-    expect(headerTag().textContent).toBe('该请假已无法撤销(业务原因)')
+    expect(headerTag().textContent).toBe('该申请已无法撤销(业务原因)')
   })
 
   it('header tag: an approver rejection (detail DTO without a close reason) renders V3', async () => {

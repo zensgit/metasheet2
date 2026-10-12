@@ -430,14 +430,14 @@ describe('「请假仍然有效」 only next to a leave that is still approved (
   it('T1 — a cancelled leave whose round was blocked because the leave is no longer approved: the block copy, and no note contradicting it', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
     const root = await mountPanel({ ...LEAVE, status: 'cancelled' })
-    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该申请已不再是已通过状态')
     expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
   })
 
   it('T4 — the block code wins over a parent row that still says approved (stale prop, or the row and the document diverged)', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
     const root = await mountPanel()
-    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该申请已不再是已通过状态')
     expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
   })
 })
@@ -638,6 +638,53 @@ describe('AttendanceView wiring', () => {
 
 describe('approved business trip cancellation entry', () => {
   const trip = { ...LEAVE, request_type: 'business_trip' }
+
+  it.each([
+    ['zh-CN', '只有已通过的申请才能发起撤销'],
+    ['en', 'Only an approved request can be cancelled'],
+  ] as const)('renders document-neutral trip launch errors in %s', async (locale, message) => {
+    useLocale().setLocale(locale)
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    writes = [() => jsonResponse(409, { ok: false, error: {
+      code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', message: 'raw server text',
+    } })]
+    const root = await mountPanel(trip)
+    $(root, 'data-cancel-round-launch')!.click()
+    await flushUi()
+    $(root, 'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect($(root, 'data-cancel-round-dialog-error')!.textContent?.trim()).toBe(message)
+    expect($(root, 'data-cancel-round-dialog')).not.toBeNull()
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect(calls()).toEqual([
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
+      ['POST', '/api/attendance/requests/req-1/cancel-round', '{}'],
+    ])
+  })
+
+  it.each([
+    ['zh-CN', 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', '该申请已不再是已通过状态(例如已被取消),本次撤销未执行', '该申请已无法撤销(业务原因)'],
+    ['en', 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', 'This request is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out', 'Cancellation blocked'],
+    ['zh-CN', 'FUTURE_CODE_X', '该申请已不可撤销(业务原因)', '该申请已无法撤销(业务原因)'],
+    ['en', 'FUTURE_CODE_X', 'This request can no longer be cancelled (business reason)', 'Cancellation blocked'],
+  ] as const)('renders document-neutral trip block %s/%s with no writes', async (locale, code, message, status) => {
+    useLocale().setLocale(locale)
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({
+      outcome: 'blocked', status: 'cancellation_blocked', closedBySystem: true,
+      closeReason: 'business_blocked:' + code, blockCode: code, canWithdraw: false,
+    }) }))]
+    const root = await mountPanel(trip)
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe(status)
+    const block = $(root, 'data-cancel-round-block')!
+    expect(block.querySelector('span')!.textContent).toBe(message)
+    expect(block.querySelector('details code')!.textContent).toBe(code)
+    expect(root.textContent).not.toContain(locale === 'zh-CN' ? '请假' : 'leave')
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect($(root, 'data-cancel-round-launch')).not.toBeNull()
+    expect($(root, 'data-cancel-round-withdraw')).toBeNull()
+    if (code === 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED') expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
+    expect(calls()).toEqual([['GET', '/api/attendance/requests/req-1/cancel-round', null]])
+  })
   it('allows the owner to explicitly submit the existing cancellation route with trip wording', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
     const root = await mountPanel(trip)

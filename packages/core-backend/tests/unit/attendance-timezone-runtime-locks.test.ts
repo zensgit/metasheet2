@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRequire } from 'node:module'
-import { acquireBusinessTripRequestPrefixV1 } from '../../src/attendance/attendance-business-trip-locks'
+import { acquireBusinessTripRequestPrefixV1, registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 import {
   acquireAttendanceTimezoneRuntimeLocksV1,
   buildAttendanceTimezoneRuntimeOrgLockKeyV1,
@@ -114,5 +114,69 @@ describe('related request prefix before external approval parents',()=>{
     await expect(acquireBusinessTripRequestPrefixV1(f.trx,{orgId,requestId,external:true}))
       .rejects.toThrow('ATTENDANCE_TIMEZONE_EXTERNAL_PREFIX_REQUIRED')
     expect(f.calls.filter(call=>call.sql.includes('pg_advisory_xact_lock'))).toEqual([])
+  })
+})
+
+
+describe('schedule request source schema is mandatory before approval parents', () => {
+  afterEach(() => registerAttendanceRequestTimezoneSourceGuardV1(null))
+  const requestId = 'f380de63-7caf-4a81-b84d-e6b3f845663d'
+
+  function fixture(requestType: string, present: unknown) {
+    const calls: string[] = []
+    const trx = { query: async (sql: string) => {
+      calls.push(sql)
+      if (sql.includes('SELECT user_id,request_type')) return { rows: [{ user_id: userId, request_type: requestType }] }
+      if (sql.includes('to_regclass')) return { rows: [{ present }] }
+      if (sql.includes('txid_current()')) return { rows: [{ transaction_id: 'schedule-source-transaction' }] }
+      if (sql.includes('FROM users u JOIN user_orgs')) return { rows: [{ id: userId }] }
+      return { rows: [] }
+    } }
+    return { trx, calls }
+  }
+
+  it.each([
+    ['shift_swap', false], ['schedule_dispatch', false],
+    ['shift_swap', null], ['schedule_dispatch', null],
+    ['shift_swap', undefined], ['schedule_dispatch', undefined],
+  ])('%s refuses missing or unproven schema (%s) without invoking the source guard or locking actor rows', async (type, present) => {
+    const f = fixture(String(type), present)
+    const guard = vi.fn(async () => async () => undefined)
+    registerAttendanceRequestTimezoneSourceGuardV1(guard)
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId }))
+      .rejects.toMatchObject({
+        name: 'AttendanceBusinessTripError',
+        code: 'ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE',
+        message: 'ATTENDANCE_TIMEZONE_SCHEMA_UNAVAILABLE',
+        httpStatus: 503,
+      })
+    expect(guard).not.toHaveBeenCalled()
+    expect(f.calls.filter(sql => sql.includes('pg_advisory_xact_lock'))).toHaveLength(3)
+    expect(f.calls.some(sql => /FOR\s+(?:UPDATE|SHARE)/i.test(sql))).toBe(false)
+    expect(f.calls.some(sql => /^\s*(?:INSERT|UPDATE|DELETE)\b/i.test(sql))).toBe(false)
+  })
+
+  it.each(['shift_swap', 'schedule_dispatch'])('%s requires and returns its same-transaction source verifier when schema exists', async type => {
+    const f = fixture(type, true)
+    const verify = vi.fn(async () => undefined)
+    const guard = vi.fn(async () => { f.calls.push('trusted-source-guard'); return verify })
+    registerAttendanceRequestTimezoneSourceGuardV1(guard)
+    const result = await acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId })
+    expect(guard).toHaveBeenCalledTimes(1)
+    expect(guard).toHaveBeenCalledWith(f.trx, { orgId, userIds: null })
+    expect(result).toBe(verify)
+    expect(f.calls.indexOf('trusted-source-guard')).toBeGreaterThan(f.calls.findIndex(sql => sql.includes('to_regclass')))
+    expect(f.calls.indexOf('trusted-source-guard')).toBeLessThan(f.calls.findIndex(sql => sql.includes('FOR SHARE')))
+    if (typeof result !== 'function') throw new Error('SOURCE_VERIFIER_REQUIRED')
+    await result()
+    expect(verify).toHaveBeenCalledOnce()
+  })
+
+  it.each(['shift_swap', 'schedule_dispatch'])('%s never substitutes schema presence for a missing trusted guard', async type => {
+    const f = fixture(type, true)
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
+    await expect(acquireBusinessTripRequestPrefixV1(f.trx, { orgId, requestId, actorId: userId }))
+      .rejects.toThrow('ATTENDANCE_TIMEZONE_WRITE_GUARD_UNAVAILABLE')
+    expect(f.calls.some(sql => /FOR\s+(?:UPDATE|SHARE)/i.test(sql))).toBe(false)
   })
 })

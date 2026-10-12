@@ -112,12 +112,15 @@ describe('W1 timeline integrity guard without DB EXCLUDE protection (service lev
   it('refuses a fresh transition when the timezone schema is missing before any DML', async () => {
     clientQueryMock.mockImplementation(async (statement: string) => {
       executedStatements.push(statement)
+      if (statement.includes('FROM attendance_groups')) return { rows: [{ id: GROUP_C }] }
+      if (statement.includes('FROM users u')) return { rows: [{ '?column?': 1 }] }
       return statement.includes('to_regclass') ? { rows: [{ present: false }] } : { rows: [] }
     })
     await expect(transitionAttendanceCalculationGroupMembership({
       orgId: ORG_ID, userId: USER_ID, targetGroupId: GROUP_C,
       effectiveOn: '2026-05-01', actorId: ACTOR_ID, reason: 'synthetic', correlationId: randomUUID(),
     })).rejects.toMatchObject({ code: 'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE', status: 503 })
+    expect(executedStatements.some((statement) => statement.includes('to_regclass'))).toBe(true)
     expect(executedStatements.some((statement) => /^\s*(INSERT|UPDATE|DELETE)/.test(statement))).toBe(false)
   })
 
