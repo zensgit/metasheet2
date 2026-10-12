@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§203）**：Automation 当前提交 `0216e45b4` 的普通检查 47/47 成功，#6337 保持草稿。经 owner 授权，冻结候选的 Firefox 隔离副本已通过本地 manual + interval 完整合成验收及原生回执复核；副本对原生 HTTP console 数量和 WebSocket 101 握手作了明确的浏览器适配，产品分支未改。这不是原 Chromium 验收通过：`130a9341c` 的完整 run `38175124419` 仍失败于 interval 的宜搭默认 OFF 阶段 POST / ABORTED，阻断保留。未采用无界正文读取、未忽略请求失败，尚无 Chromium 安全修复。独立终审未闭合；无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§204）**：Automation 当前提交 `0216e45b4` 的普通检查 47/47 成功，#6337 保持草稿。授权的 Firefox 本地 manual + interval 完整交叉验证及原生回执复核通过，浏览器差异适配见 §203。含上游修复的 Canary 157 隔离最小诊断和 manual + interval 完整诊断亦通过，原生回执复核通过；相对候选仅改两处浏览器路径，原断言和产品代码不变。尚未升级仓库依赖，Stable/Beta 对应源码未含该修复，Canary 不作为发布基线。原固定 Chromium 完整 run `38175124419` 的 POST / ABORTED 失败和独立终审阻断仍保留。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2293,3 +2293,14 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 最终同一隔离副本的 manual、interval 原完整 runner 均 exit 0、stderr 空，原生回执均为 passed，两个自建数据库均正常停删。manual 原生回执 SHA `d2dd12853ee25334020246e71030ffef87223e89e7084e378d41931216dc830e`；interval 原生回执 SHA `423b9625be7cb4502330a2639b9cd9c932efc1619e5fc991f624018029076676`。两轮均包含真实构建、467 条迁移及重放、原应用浏览器旅程、宜搭默认 OFF 及独立初始化；interval 还由原验证器确认自然触发、预激活与次数耗尽负控制、只读结果、刷新和撤销。
 - root 回执复核 exit 0：每轮验证原回执、6,572 个实际受跟踪范围的源文件、18 份阶段日志、4 份嵌套浏览器日志、owner-OFF 私有日志扫描，以及原 K3/宜搭/初始化/Automation/停止验证器；不声称这 6,572 文件是完整仓库。当前候选八个覆盖输入前后哈希不变，六段派生变更的哈希链一致。console 契约 20 个负控制拒绝、2 个变异捕获；握手契约 15 个非法升级拒绝、4 个非升级回退、2 个变异捕获。复核 SHA `04e7791a47c7c5bca5f5169043f8c56ee3c2f05580eb5f05fd9be123b6c26b54`。这些是 root 核验，不冒充独立审查。
 - 交叉验证已完成，但结论只覆盖本地 Firefox 派生验收。未将副本适配写入产品分支或替换 Chromium CI，未重新 dispatch 碰绿，历史失败原样保留，#6337 仍 draft。Chromium 完整验收与独立终审继续阻断交付；没有合并、部署、真实客户 SQL/API、真实 token 交换或宜搭发送，K3 永久禁写。
+
+## 204. 上游修复源码与隔离 Canary 诊断（2026-10-12）
+
+- [Playwright 上游记录](https://github.com/microsoft/playwright/issues/42742)在 10 月 6 日指向 [Chromium CL 8508456](https://chromium-review.googlesource.com/c/chromium/src/+/8508456)。官方 Gerrit 元数据确认该变更已 MERGED，revision `62473ad0f747e245e514c93e741bb8e168a2a207`。实际补丁在通知消费方之前记录响应流终态，避免正常结束被后续 cancel 报为取消。这是上游证据，不能单独证明本仓完整 CI 已修复。
+- 逐个读取官方版本标签的同一源码：Stable `155.0.8059.39` 和 Beta `156.0.8078.12` 均未含该修复顺序，源码 SHA 同为 `667ec6672e478ce6841cfeacdd1c09d0d560463ae461b9109beae962f5d9a037`；Canary `157.0.8099.0` 含该顺序，SHA `979ce76e70424734af0539e1858345b2e000a422fba5d34170d4748364143047`。没有仅凭版本号或提交位置推断二进制修复，也没有升级仓库 Playwright/锁文件。Canary 只作隔离诊断，不作为稳定版交付基线。
+- 官方 Chrome for Testing 的该 Linux headless-shell 压缩包 SHA `9541eafbc02f85e3ec0c24b05f8bbffe88094389949860681bf6055aef668d7b`，二进制 SHA `37164bfc553db9c17e11bc19c291738a1179c5b13529ec6f20a39bd665e91be0`。独立 Linux 副本使用原 Playwright 驱动、真实 SDK、Vite 代理和合成 HTTP；断言实际启动版本，私有 loopback、caps0/NNP，未启动生产 API 或数据库，不声称文件系统隔离。
+- 最小诊断 exit 0、stderr 空：原 SDK 的四个 no-store 正常组合（分段/不分段、延迟/不延迟）全部精确返回默认关闭，原 Request 均 requestfinished、signal 未取消、服务端 finish。其余十二个诊断对照也正常结束；主动取消正控制仍 CANCELLED/FAILED，原 SDK 的五类异常和内存 bounded-transform 对照的五类异常均被拒绝；截断仍由超时取消拒绝，不声称即时检测。累计字节守卫移除的真实 SDK 内存变体接受同一超限合法 JSON，被对照捕获。stdout SHA `20f938f8b7e8d66d18424cafea3c96fe1b3021775f011b0f36fd716794f37559`；三个实际 SDK 输入前后未变。诊断对照不是采用无界正文读取或改缓存策略的许可。
+- 完整 manual/interval 诊断在新独立源码/依赖副本运行，冻结候选 `0216e45b44cc1cf738f67fc06b9218d2f78c62a2`。相对原候选只派生两处浏览器可执行路径：不采用 Firefox 的 console/101 适配，不改原断言、请求白名单、大小限制和权限。派生器曾因结束锚点不唯一在测试启动前拒绝，已修正并保留该失败，不混称产品失败。
+- 两个原完整 runner 均 exit 0、stderr 空，原生回执 passed，自建数据库均正常停删。manual 原生回执 SHA `2be471760101ac3cce7deb0f7db0e9e511b659874086dbd54689b76448b12b0a`，interval SHA `317ffda8f09a11013dd91a4c372ffb081bfb8c1c2508901f476a30b47d83d2ea`。包含真实构建、467 条迁移及重放、应用浏览器旅程、宜搭默认 OFF 和独立初始化；定时路径由原验证器确认自然触发、预激活与预算耗尽负控制、只读结果、刷新和撤销。没有使用合成 HTTP 最小诊断代替生产应用路径。
+- root 复核 exit 0：逐轮核验原生回执、6,572 个实际受跟踪范围源文件、18 份阶段日志、4 份嵌套浏览器日志、owner-OFF 私有日志扫描，以及原停止/K3/宜搭/初始化/Automation 验证器。八个候选覆盖输入未变，派生文件逐字对比确认仅两处可执行路径不同；原 console 和 socket 断言未改。复核 SHA `81caef8439b4508114e743a98f35701f15af53bbdaf3207e8af5d967110d5e46`，driver 回执 SHA `c6a5cf09ec95af0370bdccd2e9b6357a3647c4671550318dba3071afc5d90131`。不是独立反驳审查，也不是当前固定浏览器的完整 CI 通过。
+- 原固定 Chromium 的历史失败及 #6337 draft 保留。尚无稳定浏览器基线上的完整验收，独立终审另行请求授权；不以 Canary 诊断替代它们。无合并、部署、真实客户读取、真实 token 交换或宜搭发送，K3 永久禁写。
