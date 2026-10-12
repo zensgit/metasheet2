@@ -302,7 +302,8 @@ function installOverviewMock(options?: { runtimeRuleOverride?: Record<string, un
         data: {
           userId: 'user-1',
           orgId: 'default',
-          resolvedForDate: '2026-04-15',
+          resolvedAt: new Date().toISOString(),
+          resolvedForDate: new URL(url, 'http://fixture.invalid').searchParams.get('asOf') ?? new Date().toISOString().slice(0, 10),
           assignment: { attendanceGroups: [], scheduleGroups: [] },
           runtimeRule,
           punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },

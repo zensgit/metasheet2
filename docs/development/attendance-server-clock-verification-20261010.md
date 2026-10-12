@@ -1,0 +1,156 @@
+# Attendance server clock — local verification snapshot
+
+**Date:** 2026-10-10
+**State:** Local verification snapshot, including follow-up work after the first CI failure. This records completed local evidence and remaining gates; it is not a merge, deployment, or customer-acceptance claim.
+
+## Source identity and scope
+
+The implementation worktree is based on merged prerequisite #6300: base commit `9bbbdb29e352527b93164490d17f759d321ddb68`, tree `fe89dc3a13b01d82ade8c6ebe093991cac058e93`. The merge receipt is `artifacts/attendance-server-clock-20261010/pr6300-actual-merge-receipt.json`. These identify the predecessor base, not the final tested implementation.
+
+The final implementation sources are identified by SHA-256 in `artifacts/attendance-server-clock-20261010/backend/source-final-hashes.json`; that manifest also records the base and harness hash and confirms all deliberate backend mutations were restored. It covers the attendance plugin entry point, server clock module, online request module, operation registry, live scheduled boundary, and backend index. Frontend source identity is in `artifacts/attendance-server-clock-20261010/frontend-completion-receipt.json`. The qualified successor PR head and final remote CI result are recorded separately; neither is inferred from this local snapshot.
+
+All checks below used synthetic/isolated test data. No customer data or production environment was used. No deployment, production history repair, external write, or business acceptance occurred.
+
+## Backend verification
+
+The final backend receipt qualifies 25 distinct whole files / 564 cases, all passing with zero skips; post-mutation repeats are not counted twice. Both owned databases and the isolated PostgreSQL cluster were removed, listener/process/TCP censuses were empty, and the tracked `.env` was restored byte-exactly with its private backup removed. See `backend/backend-final-receipt.json`.
+
+| Command / scope | Actual result | Receipt |
+|---|---|---|
+| `pnpm --filter @metasheet/core-backend exec vitest run tests/unit/attendance-online-punch-clock.test.ts tests/unit/attendance-online-punch-request.test.ts` | 31 passed, 0 failed, 0 pending. | `backend/unit-final.json`, `backend/unit-final.log` |
+| `pnpm --filter @metasheet/core-backend exec vitest --config vitest.integration.config.ts run tests/integration/attendance-w4c0-operation-registry.db.test.ts tests/integration/attendance-w4c2-d2-live-punch-authoritative.db.test.ts` | 35 passed, 0 failed, 0 pending. | `backend/db-internal-legacy-final-receipt.json`, `backend/db-internal-legacy-final.json` |
+| Fresh owned PostgreSQL database: migrate, compare migration ledger, run the two new integration files, census, run 18 adjacent whole files, strict fixture check, real-PostgreSQL teardown, session census and drop/absence check | Migration: 438 applied, replay 0, pending 0, ledger unchanged. New files: 38/38 passed (20 server-time + 18 replay). Adjacent files: 441/441 passed across 18 files. Rules census matched empty baseline. Strict fixture check passed. Teardown: 19/19 passed including the opt-in real-PG case; 0 skipped. Sessions before drop: 0; database dropped and absence verified. | `backend/fresh-regression-receipt.json`; stage logs under `backend/fresh-*.log` |
+
+The 18 adjacent whole-file runs were `attendance-live-punch-order.db.test.ts` (7), `attendance-outdoor-punch.test.ts` (29), `attendance-plugin.test.ts` (166), `attendance-shift-segments-writer-matrix.db.test.ts` (41), `attendance-soak-diff-families.db.test.ts` (5), `attendance-w4c2-gate-matrix-e5.db.test.ts` (31), `attendance-w4c2-live-scheduled-boundary.db.test.ts` (8), `attendance-w4c2-p2-1-canonical-freeze-anchor.db.test.ts` (16), `attendance-w4c2-p2-remediation.db.test.ts` (5), `attendance-w4c2-posture-matrix.db.test.ts` (5), `attendance-w4c3b-request-operation-routes.db.test.ts` (24), `attendance-w4c3c-record-operation-routes.db.test.ts` (35), `attendance-w7-4-read-side-labeling.db.test.ts` (18), `attendance-files-acl.test.ts` (13), `attendance-w7-1b-issuance-seam.db.test.ts` (11), `attendance-punch-org-resolution.db.test.ts` (9), `attendance-w7-1b-cutover-e2e.db.test.ts` (6), and `attendance-org-resolution-shadow.db.test.ts` (12). Each collected test passed; no skips or pending tests.
+
+Five backend guard mutations each caused assertion failures and each was restored to its recorded source hash: timestamp presence (17 failures / 20 tests), production clock seam (1/10), common claim marker (4/18), uncertain rollback (1/21), and replay liveness (2/18). The exact failed assertions, commands, pre/post hashes, and restoration flags are in `backend/mutation-receipt.json`; mutation run outputs are the corresponding `backend/mutation-*.json` and `.log` files. These results demonstrate that the focused guards detect those mutations; they do not substitute for the passing whole-file runs.
+
+Backend TypeScript final check exited 0 (`backend/unit-type-final-receipt.json`). The strict fixture verifier exited 0 and reported its pass marker without RBAC bypass (`backend/fresh-strict-fixture.log`). Core backend `.env` restoration was exact and its temporary backup was absent afterward; this report does not include environment contents (`backend/core-env-restoration.json`).
+
+## Repository and source-gate checks
+
+`pnpm validate:all` exited 0 on Node 20.20.2 / pnpm 10.33.0; plugin manifests reported 13 valid and 0 invalid. `node --test scripts/ops/global-history-flag-manifest.test.mjs` exited 0 with 46/46 checks. Receipts: `root-quality-final.json`; logs: `validate-all.log`, `global-flag-manifest.log`.
+
+The exact-source CI wiring whole-file attempt used Node 20.20.2 and exited 0: 268 passed, 0 failed, 0 skipped, with source-byte identity preserved. Its receipt is `root-ci-wiring-attempt3.receipt.json`; command and output are `root-ci-wiring-attempt3.command.json` and `.log`. Two earlier timeout-related failures are retained in the earlier attempt logs; this report does not infer their root cause from the later passing whole-file run.
+
+OpenAPI build and guard exited 0. Post-recovery OpenAPI, retired-tool and required-CI source guards total 75/75 passing; three source-gate mutations went red and were restored byte-exactly. Evidence: `openapi-build.log`, `openapi-guard-postrecovery.log`, `root-postrecovery-unit.json`, `root-mutations.json`, and `root-source-gates.json`.
+
+## Frontend evidence
+
+The exact frontend source hashes are in `frontend-completion-receipt.json`. The 12-file whole-file lane passed 323/323 with no failures, skips, or todo; `vue-tsc --noEmit -p tsconfig.app.json` exited 0. Synthetic Chromium completed 10/10 expected tests with no skip, unexpected, or flaky result. Four synthetic captures covered available/unavailable clock × desktop/mobile and were independently reviewed in `root-visual-review.json`. The earlier mounted-view baseline had 17 assertion failures; five focused frontend mutations went red and were restored. Detailed receipts are `frontend-final-wholefiles.json`, `frontend-chromium-final.json`, `frontend-negative-restoration.json`, and `frontend-mutation-*-red.json`.
+
+## First-CI source census follow-up
+
+Draft PR #6321 first ran at head `b3dd4ec1de0ac8290891f3a0ed3539fbc04ffe2c`. The core step failed with seven assertions in two files: the W7 preservation classification omitted the two new modules, and the multitable fence-holder ledger omitted the two new shared-transaction callers. Downstream database, drain and checkpoint steps were skipped and are NOT_RUN for that head. The failure is preserved in `ci/sol61-core-failure.json` and its raw/API logs; the independently reviewed cause is `ci/independent-core-failure-review-astra.json`.
+
+The follow-up adds both modules to `CALCULATION_PATH` (keeping the carve-out list empty), and records `executeOnlinePunch` and `probeOnlinePunchReplay` as row-32 attendance-only `NONWRITER` holders, each with count 1. This registers the actual source without changing production code, scan roots, guard functions or assertions. The two guard whole files and the adjacent W6 enum-parity whole file passed 124/124 after restoration: W7 13, fence census 49, enum parity 62; zero failures/skips/todo. Deleting each of the four new entries caused its matching guard to fail, and each file was restored to its exact hash before the final whole-file run. The name-filtered mutation exclusions are not counted as passing whole-file qualification. All 1409 tracked production/runtime file hashes remained unchanged.
+
+Receipts: `ci-guard-fix/final-receipt.json`, `ci-guard-fix/final-green.json`, and the independent `ci-guard-fix/independent-guard-fix-review-astra.json`. Final qualification still requires a fresh CI run on the follow-up head; the original failed head is not retroactively marked green.
+
+## Main alignment after the follow-up
+
+Main advanced to `e450de6909afb639f334b9c03dee36cb4024dc98` while the follow-up CI was running. Its single new commit, #6309, changes 13 approval frontend files; it does not change attendance code, backend code, migrations, package files or workflows. A normal merge into the Draft branch was conflict-free. All 13 incoming files match main byte-for-byte, and all 65 existing slice files other than this verification document match the prior head. The original #6300 base above remains the development starting point; `e450de6909afb639f334b9c03dee36cb4024dc98` is the new qualification base.
+
+On the merged source, eight whole frontend files passed 534/534 with zero failures, skips or todo. They cover the five changed approval specs and the attendance dashboard and two clock specs. The 26 recorded source paths did not change during the run, and the ten owned frontend source hashes match the original completion receipt. The three existing required-web targets now contain 19, 79 and 204 cases instead of 17, 75 and 181; the required scope remains 38 files and increases from 1393 to 1422 cases. Backend, attendance DB and attendance guard target counts remain 40/2377, 21/502 and 20/438 respectively. The unchanged backend source hashes preserve the applicability of the local backend evidence; they do not establish remote execution on the new head.
+
+`pnpm validate:all` on Node 20.20.2 / pnpm 10.33.0 exited 0 after the merge, including plugin validation, lint and type checks. The independent Astra alignment review passed. Evidence is under `artifacts/attendance-server-clock-20261010/main-align/`: `web-8-results.json`, `web-8-summary.json`, `web-main-source-provenance.json`, `web-owned-10-provenance.json`, `root-quality.json` and `independent-main-alignment-review-astra.json`.
+
+The follow-up head `f26257111acada8a815b0a302b91f38c696dd1c6` used the old `9bbbdb29e352527b93164490d17f759d321ddb68` base. Its completed CI facts are retained as historical evidence only; they cannot qualify the new merge head. Fresh CI must run against the new frozen head, tree and base before this Draft's CI gate can be reported complete.
+
+## Product boundary and remaining gates
+
+Calendar `today` and punch `workDate` remain distinct: the former follows calibrated server time and the aligned attendance timezone; backend shift and overnight rules determine the latter. Existing resolution remains rotation shift, assignment shift, then default rule. No device-time fallback is claimed.
+
+The future multitimezone requirement remains pending separate design: OFF means the configured system/organization default timezone even during approved travel; ON means an administrator-approved effective attendance arrangement, with a travel destination only during its approved period and the underlying arrangement afterward. This slice does not implement either mode or travel linkage. See `artifacts/attendance-server-clock-20261010/requirements-followup.md`.
+
+The owner stated that old attendance data can be discarded for future enablement. This does not mean existing rows have been physically cleared: any such asynchronous clearing remains pending and outside this verification snapshot.
+
+| Gate | Status |
+|---|---|
+| Local frontend, backend unit/integration, fresh-database migration/replay/regression, strict fixture and real-PG teardown | Complete for the source hashes and receipts listed above |
+| Local `validate:all`, feature-flag manifest, OpenAPI, retired-tool and source CI-wiring checks | Complete; no remote CI implication |
+| First-CI static registration repair, whole-file guard/neighbor checks and deletion controls | Local PASS: 3 files / 124; four deletion controls detected and exactly restored; independent review PASS |
+| Main alignment | Local PASS: 8 files / 534; 13 incoming blobs preserved; 38-file required-web scope recalibrated to 1422 cases; quality and independent review PASS |
+| Final independent Astra review | PASS for frontend/root and backend local source/evidence; remote CI remains separate |
+| Linked Draft PR head and remote exact-head CI | Pending; will be recorded separately |
+| Original 20-item QA and business acceptance | NOT_RUN |
+| Physical clearing of existing attendance data | Pending; not performed by these checks |
+| Deployment, history repair, production scope, external writes | Not authorized or performed |
+
+The successor remains Draft + CI approved as directed. That label does not mean Ready, merge-approved, deployed, or customer-accepted. The release gate to stop old ingress, drain old writers, run only the new binary, and reopen traffic after release checks remains pending and unauthorized.
+
+## Evidence index
+
+- Approved behavior contract: `docs/development/attendance-server-clock-design-lock-20261010.md`
+- Final backend source identities and mutation restoration: `artifacts/attendance-server-clock-20261010/backend/source-final-hashes.json`, `backend/mutation-receipt.json`
+- Fresh migration, new and adjacent whole-file runs, teardown: `artifacts/attendance-server-clock-20261010/backend/fresh-regression-receipt.json`
+- Backend unit/type checks: `artifacts/attendance-server-clock-20261010/backend/unit-final.json`, `backend/unit-type-final-receipt.json`
+- Independent final local review: `artifacts/attendance-server-clock-20261010/independent-backend-final-review-astra.json`, `independentfrontend-root-review.json`
+- Quality and CI wiring: `artifacts/attendance-server-clock-20261010/root-quality-final.json`, `root-ci-wiring-attempt3.receipt.json`
+- Frontend and visual evidence: `artifacts/attendance-server-clock-20261010/frontend-completion-receipt.json`, `root-visual-review.json`
+- Future timezone requirement: `artifacts/attendance-server-clock-20261010/requirements-followup.md`
+
+## Main alignment to a65 — 2026-10-11 local evidence
+
+Main advanced by two commits to `a65c1c50a203517798a1bd6691cee8ea4a36e968` after the historical `33dfab1` / `e450de6` CI qualification. A normal merge produced validated source tree `7e27e9cbbb855a9aed03a1af679df0c17b3f527d` before this verification-only append. The 20 incoming paths include two overlaps, `plugin-tests.yml` and `vitest.config.ts`; both retain the union of the two test chains. Independent review verified 18 incoming-exclusive and 64 owned-exclusive blobs. No migrations were added, and the clock/punch production sources remain unchanged.
+
+The recorded source manifest has 88 entries: 86 files and two expected-absent configuration paths. Provenance recomputation matched all 66 leaves: 63 source hashes and three metadata leaves, with zero differences. Evidence is under `artifacts/attendance-server-clock-20261010/main-align-a65/`.
+
+| Focused local scope | Actual result |
+|---|---|
+| Five web whole files: user management, stock overview, attendance dashboard and two clock specs | 234/234; zero failures/skips/todo (57 + 37 + 102 + 18 + 20) |
+| Standalone stock overview / read plugin checks | 38 passed titles / 5 passed summary checks; no per-title read claim |
+| W1 source-wiring whole file | 3/3, zero skips, after the task Python YAML dependency repair |
+| Bootstrap whole file | 29 passed, 26 PowerShell cases skipped because `pwsh` was unavailable; zero failures |
+| `pnpm validate:all` | Attempt 2 exited 0; plugin validation, lint and type checks completed |
+| Seven directory DB whole files | 150/150 (anchor 20, source-freeze 19, CRUD 15, CRUD-route 50, archive 29, cycle 10, reactivation 7) |
+| Attendance admission, replay and server-time DB whole files | 61/61 (23 + 18 + 20) |
+
+The ten database whole files passed 211/211 with zero failures/skips/todo on Node 20.20.2, pnpm 10.33.0 and an isolated PostgreSQL 15.17 through a private Unix socket. Fresh migration applied 438 unique names; replay applied 0; pending was 0. Both sorted ledgers were identical. The owned database had zero client sessions before drop; catalogue absence, PostgreSQL stop, PID/listener/TCP/directory absence and test-process absence were checked. The 505-source manifest and index tree remained unchanged. Local `.env` bytes and original permissions were restored, and its private backup was absent. No log was truncated; observed free disk space stayed above 3.84 GiB.
+
+Full DB receipt: `main-align-a65/local-db/reports/db-a65/20261011T042227Z-cab3e949/receipt.json`, SHA-256 `c632ce13fc3be0da9b2ac4ba4787f8e26ded51eb82089df04148f9d7c581989a`. Its summary lists every original JSON path/hash: `db-a65-local-pass-actual-summary.json`. The independent local review is `independent-main-local-validation-astra.json`; the non-DB summary is `macmini-non-db-final-summary-sol61.json`.
+
+Mac mini external storage holds the owned source, dependencies, cache and evidence backup; no local files were deleted. Non-DB validation ran there. Its PostgreSQL startup-locale failure, TCP timeout, and partial third attempt remain recorded separately. That third attempt migrated 438 with zero replay and passed anchor 20 and CRUD 15, but source-freeze had 13 passes and six HTTP timeouts; the route run was stopped and the remaining files were NOT_RUN. Three minimal remote HTTP controls also timed out. Controlled cleanup and remote `.env` restoration passed. This partial result is not qualified as a passing database lane and does not establish the transport failure's underlying cause.
+
+The first local retry failed before applying migrations because a 165-byte `tsx` IPC path exceeded Darwin's socket-path limit; its owned cleanup and environment restoration passed. The final run used a private shorter temporary directory and passed all ten unchanged test files. The standalone local Supertest positive control returned HTTP 200. Earlier dependency/TLS, missing-YAML and missing-`npx` failures remain in their attempt records. The successful DB report was backed up to Mac mini with all 65 file hashes matching.
+
+The directory source-freeze result of 19 is distinct from the earlier real-PG teardown result of 19. Incoming user-management and stock-overview specs are selected by the live required Web runner through their basename tokens. Their 57 and 37 local whole-file results expand the audited required-Web subset to 40 files / 1516 assertions; actual remote whole-file execution still requires fresh CI evidence. New exact-head CI must still establish all 13 required contexts and the three affected jobs, including directory 7/150, attendance DB 21/502, strict fixture, drain and checkpoint. None is inferred from local results or historical CI.
+
+This remains Draft + CI scope. Future multi-timezone/travel linkage, original 20-item QA/business acceptance, and physical clearing of existing attendance data remain pending or NOT_RUN as stated above. Ready, merge and deployment are not authorized. Final head/tree/base and remote CI are recorded in the separate final supplement after the push.
+
+## Main alignment to 14c — 2026-10-11 local evidence
+
+Main advanced by one task-realtime commit to `14c82206ce3d37d535ec5fd359580245090f98db`. The incomplete `974a276` / `a65c1c5` CI collection stopped on that advance and is archived as unqualified; its completed guard had 20 whole files / 438 assertions and Chromium 10 passes. A normal merge, without rebase or force push, produced tested source tree `3937d1e09a8270849b0e78ac6f6e3e8d36254e82` before this Markdown append. Independent review verified both sides of the two overlapping paths (`src/index.ts` and `vitest.config.ts`), all 11 incoming-exclusive and 64 owned-exclusive blobs. No migration or flag was added by this incoming commit.
+
+Seven whole unit files passed 298/298, zero failures/skips/todo: task-counts-realtime 21, task-counts-touchpoints 62, task-realtime 9, task-records-guards 72, task-deletion-lock-errors 6, task-notification-producer 19 and attendance-w6-group-effective-policy-authorization 109. The new task-m4-realtime database whole file passed 21/21, including all five existing source-mutant checks. Fresh migration applied 438 unique names; replay applied 0; pending was 0, with the identical sorted ledger SHA-256 `0151b38e41cff058f22e23c80ddca03c5dd1c952ec2b0f9b123955e922e6a3fb`.
+
+The DB test temporarily mutates three owned source files. Private byte/hash/mode backups and bounded owned-child termination protect restoration; no restoration fallback was needed on the passing attempt. Original source bytes and modes, the 1483-path DB manifest, index tree and local environment were unchanged afterward. Private backups, client sessions, database, PostgreSQL/test processes, listeners and the entire temporary cluster directory were absent. No raw log was truncated; free disk stayed above the 2 GiB runtime floor. The earlier missing-owned-TMP attempt ran no tests; the short synthetic-JWT attempt had 0 passes and 21 fixture failures. Both remain failed receipts, with verified cleanup, and are not included in the passing count.
+
+The previous a65 505-path manifest and ten DB test blobs remain identical; those 211 assertions were not rerun. Provenance was actually recomputed again: all 63 source hashes / 66 leaves matched, zero differences. `pnpm validate:all` on the new source exited 0, completing plugin validation, lint and type checks with unchanged source. Independent Astra local validation passed. Evidence is under `artifacts/attendance-server-clock-20261010/main-align-14c/`: `task-unit-seven-wholefiles-summary.json`, `task-db-14c-pass-actual-summary.json`, `independent-local-validation-astra.json`, `old-a65-clock-source-binding-14c.json`, `provenance-recomputed.json` and `root-validate-all-receipt.json`.
+
+Five newly audited unit files add 207 assertions to the unchanged 40-file / 2377 core title-Counter set, making 45 files / 2584 assertions. Required-Web remains 40 files / 1516 assertions. Fresh CI must prove the 13 required contexts, the three affected jobs and the separate tasks-realdb job with its new 21-assertion whole file. The latter uses recorders/collaboration spies and does not prove delivery to a real WebSocket client. Strict fixture, drain and checkpoint still require fresh remote evidence. This is local validation of the incoming main alignment, not new timezone/travel implementation, Ready, merge or deployment authorization.
+
+## Main alignment to a1 — 2026-10-11 local evidence
+
+Main advanced to `a1c09729180e0a0eb1fdae691fd315aa25f079ce` during the previous head's CI. That `28d3a8f` / `14c8220` collection ended with 12/13 required contexts successful and both original final auditors NOT_RUN. Its completed guard, Web and scoped Tasks DB results remain historical and unqualified; hosted Actions were not cancelled. The archived snapshot contains 52 files / 13,980,868 bytes and was copied to Mac mini with zero missing, extra or hash/size differences.
+
+A conflict-free normal merge, without rebase or force push, produced tested source tree `7b6665f2a8ebd1eb7671abf2ae819773091dfbaa` before this verification-only append. Incoming main changes 42 frontend/task paths and no backend, migration, package dependency or environment flag. Both overlapping required-Web runner files retain the independently predicted UNION; all 40 incoming-exclusive and 64 owned-exclusive bindings match. The token manifest retains 587 ordered non-comment tokens. This is a bounded incoming frontend/clock-impact and test-wiring review; it does not approve the full M4 product scope.
+
+| Current source validation | Actual result |
+|---|---|
+| 27 complete frontend files on Mac mini, without a name filter | 2080/2080; zero failures/skips/todo |
+| Tasks guard's 24 complete files, including App and neighboring task specs | 1940/1940; no overlap with the prior 40-file audited required-Web subset |
+| Attendance dashboard and two clock neighbors | 102 + 18 + 20 = 140/140; already included in the prior required-Web subset |
+| Two required-runner structure whole files | 34 + 29 = 63/63; zero failures/skips/todo |
+| Actual `pnpm validate:all` on Node 20.20.2 / pnpm 10.33.0 | Exit 0; source unchanged; existing curated lint and type-check scopes |
+| Fresh provenance computation and sealed verification | 63 hashes / 66 leaves, zero differences from the previous validated pin set |
+
+The focused frontend run used a new owned source snapshot, runtime, cache, dependencies and raw logs on Mac mini external storage. Offline installation exited 0 with no downloaded packages. Native arm64 esbuild/Rollup probes passed; all 2786 dependency symlinks resolve inside the new source root. Every selected file and complete title Counter is recorded in `main-align-a1/frontend27-actual-summary-safe.json`; the original reporter is 688130 bytes, SHA-256 `ab20daeae3d71fe0d6314c615c0adecf6d939d4160b52f55b0dcc1ec4132f809`.
+
+The final pipeline receipt is literal PASS: all 13506 old and 13538 new physical source blobs/modes, old refs/index/environment and original cache remained unchanged; new tracked core `.env` remained expected-absent with its index exception unchanged. The old remote environment's original mode was 0600. Every owned command process group was absent after completion. Receipt: `main-align-a1/safe-pipeline-final-receipt.json`, SHA-256 `fbfb231c95f3ab9bf4dbf5bdb838082cee28d6d34ecdd72eb22474482499deda`. Full raw/physical/cache evidence remains on external storage; eight original/compact files totaling 1,065,571 bytes were transferred locally byte-exactly. No local files were deleted.
+
+Earlier cache preparation attempts remain separate non-passing records. The first followed a cache projects symlink; its newly generated private copy was removed after the owned helper stopped. That direct-path inspection does not prove no environment alias was ever copied. The files/index-only retry and the pre-final safety helper were each stopped before installation or tests. Their original false receipts remain unchanged, including the incomplete original cache field in the read-only hold; independent before/after proof is retained separately. Only the subsequently reviewed helper's completed installation, tests and final cleanup are counted above.
+
+Independent Astra review of the original reporter, exact roster/arguments, source bindings and actual pipeline receipt passed: `main-align-a1/independent-frontend27-pipeline-actual-review-astra.json`. Complete physical manifests and dependency-link listings remain external; the independent review records its local receipt/hash scope explicitly.
+
+The prior backend unit and database manifests were independently rebound to this frontend-only merge and remain identical: 298 unit assertions, the 21-case task DB file and the earlier 211 DB assertions were not rerun. The audited required-Web subset becomes 64 files / 3456 assertions (1516 + 1940), without counting the three attendance neighbors twice. Core remains 45 files / 2584 exact title-Counter assertions; attendance DB remains 21/502 and directory DB 7/150. Fresh exact-head CI must still establish all 13 required contexts, all three principal jobs, strict fixture, drain, checkpoint and the scoped additional Tasks DB gate. Both original auditor algorithms and the required policy roster remain unchanged. This snapshot does not qualify the new remote head; Draft, original QA, timezone/travel, data clearing and release authorization boundaries above still apply.
