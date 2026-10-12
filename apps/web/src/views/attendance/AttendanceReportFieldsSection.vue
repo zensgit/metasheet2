@@ -158,12 +158,12 @@
       </div>
     </div>
 
-    <div
+    <details
       v-if="reportFields.length > 0"
       class="attendance-report-fields__basis attendance-report-fields__formula-reference"
       data-report-field-formula-reference
     >
-      <div class="attendance-report-fields__basis-header">
+      <summary class="attendance-report-fields__basis-header">
         <div>
           <div class="attendance-report-fields__basis-title">
             {{ tr('Formula reference', '公式参考') }}
@@ -175,7 +175,7 @@
         <span class="attendance-report-fields__status-pill attendance-report-fields__status-pill--ok">
           {{ tr('Record + summary', '单记录 + 汇总') }}
         </span>
-      </div>
+      </summary>
       <div class="attendance-report-fields__formula-reference-layout">
         <div class="attendance-report-fields__formula-reference-block">
           <div class="attendance-report-fields__formula-reference-label">
@@ -278,7 +278,13 @@
           </ul>
         </div>
       </div>
-      <div class="attendance-report-fields__formula-create" data-report-field-formula-create>
+    </details>
+
+    <div
+      v-if="reportFields.length > 0"
+      class="attendance-report-fields__basis attendance-report-fields__formula-create"
+      data-report-field-formula-create
+    >
         <div class="attendance-report-fields__formula-reference-label">
           {{ tr('Create formula field', '创建公式字段') }}
         </div>
@@ -384,7 +390,6 @@
           {{ formulaDraftStatusMessage }}
         </div>
       </div>
-    </div>
 
     <div
       v-if="formulaDependencyGraph && reportFields.length > 0 && !hasActiveFieldFilters"
@@ -521,21 +526,17 @@
       <div class="attendance-report-fields__record-sync-form">
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-from">
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-from"
             v-model="recordSyncFrom"
-            type="date"
-            data-report-record-sync-from
-          >
+            data-report-record-sync-from />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-to">
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-record-sync-to"
             v-model="recordSyncTo"
-            type="date"
-            data-report-record-sync-to
-          >
+            data-report-record-sync-to />
         </label>
         <label class="attendance-report-fields__filter" for="attendance-report-record-sync-user">
           <span>{{ tr('User ID', '员工 ID') }}</span>
@@ -664,12 +665,10 @@
           for="attendance-report-period-summary-sync-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-from"
             v-model="periodSummarySyncFrom"
-            type="date"
-            data-report-period-summary-sync-from
-          >
+            data-report-period-summary-sync-from />
         </label>
         <label
           v-if="periodSummarySyncMode === 'date_range'"
@@ -677,12 +676,10 @@
           for="attendance-report-period-summary-sync-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-period-summary-sync-to"
             v-model="periodSummarySyncTo"
-            type="date"
-            data-report-period-summary-sync-to
-          >
+            data-report-period-summary-sync-to />
         </label>
         <label
           v-if="periodSummarySyncMode === 'payroll_cycle'"
@@ -855,12 +852,10 @@
           for="attendance-report-sync-job-from"
         >
           <span>{{ tr('From date', '开始日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-from"
             v-model="reportSyncJobFrom"
-            type="date"
-            data-report-sync-job-from
-          >
+            data-report-sync-job-from />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'date_range'"
@@ -868,12 +863,10 @@
           for="attendance-report-sync-job-to"
         >
           <span>{{ tr('To date', '结束日期') }}</span>
-          <input
+          <AttendanceLocaleDateInput
             id="attendance-report-sync-job-to"
             v-model="reportSyncJobTo"
-            type="date"
-            data-report-sync-job-to
-          >
+            data-report-sync-job-to />
         </label>
         <label
           v-if="reportSyncJobPeriodMode === 'payroll_cycle'"
@@ -1252,6 +1245,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref, watch } from 'vue'
 import { apiFetch as sendApiFetch } from '../../utils/api'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'

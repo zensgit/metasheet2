@@ -218,15 +218,9 @@ describe('Attendance admin anchor navigation', () => {
     expect(sectionWorkspace?.style.display).not.toBe('none')
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar?.textContent).toContain('Import')
-
-    container!.querySelector<HTMLButtonElement>('[data-admin-task-home-return="true"]')!.click()
-    await flushUi(2)
-
-    expect(homeContext?.style.display).not.toBe('none')
-    expect(sectionWorkspace?.style.display).toBe('none')
-    expect(window.location.hash).toBe('')
-    expect(document.activeElement?.id).toBe('attendance-admin-task-home-title')
-    expect(clearSection).toHaveBeenCalledTimes(1)
+    expect(currentSectionBar?.textContent).not.toContain('Management home')
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
+    expect(clearSection).not.toHaveBeenCalled()
   })
 
   it('pins the parent navigate wiring for task-home link actions (fix 4, GATE-5086 P2-2)', async () => {
@@ -938,52 +932,45 @@ describe('Attendance admin anchor navigation', () => {
 
     const currentSectionBar = container!.querySelector<HTMLElement>('[data-admin-current-section="true"]')
     expect(currentSectionBar).toBeTruthy()
-    expect(currentSectionBar?.textContent).toContain('Current section')
     expect(currentSectionBar?.textContent).toContain('Workspace · Settings')
-    expect(currentSectionBar?.textContent).toContain('Management home')
-    expect(currentSectionBar?.textContent).not.toContain('Quick switch')
-    expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeTruthy()
-    expect(currentSectionBar?.querySelector('[data-admin-focus-toggle="true"]')).toBeNull()
-    expect(currentSectionBar?.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('')
-    expect(currentSectionBar?.querySelector('[data-admin-next-section]')?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
+    expect(currentSectionBar?.textContent).not.toContain('Current section')
+    expect(currentSectionBar?.textContent).not.toContain('Management home')
+    expect(currentSectionBar?.querySelector('[data-admin-quick-jump="true"]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-prev-section]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-next-section]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-task-home-return]')).toBeNull()
+    expect(container!.querySelector('[data-admin-reload="true"]')?.previousElementSibling?.getAttribute('data-admin-page-search')).toBe('true')
   })
 
-  it('lets operators move to the previous and next section from the current-section bar', async () => {
-    app = createApp(AttendanceView, { mode: 'admin' })
+  it('lets operators move between sections from the rail after the jump bar is removed', async () => {
+    app = createApp(AttendanceView, { mode: 'admin', initialSectionId: 'attendance-admin-settings' })
     app.mount(container!)
     await flushUi()
 
-    const nextButton = container!.querySelector<HTMLButtonElement>('[data-admin-next-section]')
-    expect(nextButton?.getAttribute('data-admin-next-section-id')).toBe('attendance-admin-user-access')
-    nextButton!.click()
+    expect(container!.querySelector('[data-admin-prev-section]')).toBeNull()
+    expect(container!.querySelector('[data-admin-next-section]')).toBeNull()
+    expect(container!.querySelector('[data-admin-quick-jump]')).toBeNull()
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-user-access"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-user-access')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · User Access')
-    expect(container!.querySelector('[data-admin-prev-section]')?.getAttribute('data-admin-prev-section-id')).toBe('attendance-admin-settings')
 
-    const previousButton = container!.querySelector<HTMLButtonElement>('[data-admin-prev-section]')
-    previousButton!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-settings"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-settings')
     expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Workspace · Settings')
   })
 
-  it('lets operators jump directly to a deep section from the current-section bar selector', async () => {
+  it('lets operators open a deep section from the rail after the quick selector is removed', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
-    expect(jumpSelect).toBeTruthy()
-    // 33 → 34: W4-1 registered the setup-readiness wizard section (attendance-admin-setup).
-    // 34 → 35: W5-1 registered the decision-trace section (attendance-admin-decision-trace).
-    // 35 → 34: A4 (A-class batch 2, 2026-08-22) deleted the dead "Group members" section.
-    expect(Array.from(jumpSelect!.querySelectorAll('option')).length).toBe(34)
-
-    jumpSelect!.value = 'attendance-admin-advanced-scheduling-workbench'
-    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(container!.querySelector('[data-admin-quick-jump="true"]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-advanced-scheduling-workbench"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-advanced-scheduling-workbench')
@@ -991,16 +978,12 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-attendance-advanced-scheduling-workbench]')).toBeTruthy()
   })
 
-  it('jumps to the comprehensive hours preview from the quick selector', async () => {
+  it('opens the comprehensive hours preview from the rail', async () => {
     app = createApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
 
-    const jumpSelect = container!.querySelector<HTMLSelectElement>('[data-admin-quick-jump="true"]')
-    expect(jumpSelect).toBeTruthy()
-
-    jumpSelect!.value = 'attendance-admin-comprehensive-hours-preview'
-    jumpSelect!.dispatchEvent(new Event('change', { bubbles: true }))
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-comprehensive-hours-preview"]')!.click()
     await flushUi(2)
 
     expect(window.location.hash).toBe('#attendance-admin-comprehensive-hours-preview')

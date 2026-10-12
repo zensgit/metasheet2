@@ -482,6 +482,7 @@
 
 <script setup lang="ts">
 import { computed, type ComputedRef, type Ref } from 'vue'
+import { useLocale } from '../../composables/useLocale'
 import {
   buildTimezoneOptionGroups,
   formatTimezoneOptionLabel,
@@ -600,8 +601,10 @@ const importGroupAutoCreate = props.workflow.importGroupAutoCreate
 const importGroupAutoAssign = props.workflow.importGroupAutoAssign
 const importGroupRuleSetId = props.workflow.importGroupRuleSetId
 const importGroupTimezone = props.workflow.importGroupTimezone
-const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone))
-const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value))
+const { isZh } = useLocale()
+const timezoneLocale = computed(() => (isZh.value ? 'zh' : 'en') as 'zh' | 'en')
+const importTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importForm.timezone, timezoneLocale.value))
+const importGroupTimezoneOptionGroups = computed(() => buildTimezoneOptionGroups(importGroupTimezone.value, timezoneLocale.value))
 const importScalabilityHint = props.workflow.importScalabilityHint
 const importPreviewTask = props.workflow.importPreviewTask
 const importAsyncJob = props.workflow.importAsyncJob
@@ -689,7 +692,7 @@ const importGroupSyncSummary = computed(() => {
   }
   const timezone = importGroupTimezone.value.trim()
   if (timezone) {
-    const timezoneLabel = formatTimezoneOptionLabel(timezone)
+    const timezoneLabel = formatTimezoneOptionLabel(timezone, new Date(), timezoneLocale.value)
     segments.push(tr(`timezone ${timezoneLabel}`, `时区 ${timezoneLabel}`))
   }
 
@@ -730,6 +733,10 @@ function formatImportLane(value: AttendanceImportPreviewLane | AttendanceImportC
 .attendance__field--checkbox {
   flex-direction: row;
   align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
   gap: 8px;
 }
 

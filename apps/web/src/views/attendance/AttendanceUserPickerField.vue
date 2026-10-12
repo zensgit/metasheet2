@@ -29,7 +29,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { useAttendanceAdminUsers } from './useAttendanceAdminUsers'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { apiFetch } from '../../utils/api'
@@ -63,6 +63,7 @@ const props = withDefaults(defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
+  'update:displayName': [value: string]
 }>()
 
 const sessionGuard = useAttendanceSessionGuard()
@@ -103,10 +104,27 @@ const displayUsers = computed(() => {
 const inputId = computed(() => props.inputId || `${props.name || 'attendance-user-picker'}-${props.label.replace(/\s+/g, '-').toLowerCase()}`)
 const searchPlaceholderText = computed(() => props.searchPlaceholder || props.tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索'))
 
+function primaryLabel(userId: string): string {
+  const selectedId = userId.trim()
+  if (!selectedId) return ''
+  const user = users.value.find((item) => item.id === selectedId)
+  if (!user) return ''
+  const name = user.name?.trim() || ''
+  if (name) return name
+  const email = typeof user.email === 'string' ? user.email.trim() : ''
+  if (email && email !== selectedId) return email
+  return ''
+}
+
 function handleChange(event: Event) {
   const value = (event.target as HTMLSelectElement).value
   emit('update:modelValue', value)
+  emit('update:displayName', primaryLabel(value))
 }
+
+watch(users, () => {
+  emit('update:displayName', primaryLabel(props.modelValue))
+})
 
 onMounted(() => {
   void loadUsers()
