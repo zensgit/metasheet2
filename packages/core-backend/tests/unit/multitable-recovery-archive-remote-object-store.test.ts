@@ -110,7 +110,7 @@ describe('seven-operation object resource over TLS', () => {
     for (const [path, data] of [['/v1/unknown', {}], ['/v1/head', { ...expected(o), extra: true }],
       ['/v1/put', { ...o, bytes: o.bytes.toString('base64') + ' ' }], ['/v1/put', { ...o, bytes: Buffer.alloc(2000).toString('base64') }],
       ['/v1/put', { bytes: 'x'.repeat(20000) }]]) {
-      await expect(post(path as string, data)).rejects.toThrow()
+      await expect(post(path as string, { storeId: f.options.storeId, request: data })).rejects.toThrow()
     }
     expect(await f.store.head(expected(o))).toBeNull()
   })

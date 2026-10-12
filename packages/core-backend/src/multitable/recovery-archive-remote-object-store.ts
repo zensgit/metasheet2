@@ -20,7 +20,7 @@ export function createRecoveryArchiveRemoteObjectStore(options: RecoveryArchiveR
   const limit = Math.ceil(maxObjectBytes / 3) * 4 + 16384
   const post = createRecoveryResourceHttps({ ...options, maxRequestBytes: limit, maxResponseBytes: limit }, 'authorization')
   const call = async (verb: string, input: unknown): Promise<unknown> => {
-    const envelope = await post(`/v1/${verb}`, input)
+    const envelope = await post(`/v1/${verb}`, { storeId, request: input })
     if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)
       || Object.keys(envelope).sort().join(',') !== 'result,storeId'
       || !('storeId' in envelope) || envelope.storeId !== storeId || !('result' in envelope)) refuseRecoveryResourceIo()
@@ -34,7 +34,8 @@ export function createRecoveryArchiveRemoteObjectStore(options: RecoveryArchiveR
     async get(request) {
       const result = await call('get', request)
       if (!result || typeof result !== 'object' || Array.isArray(result) || !('bytes' in result)) refuseRecoveryResourceIo()
-      return { ...result, bytes: new Uint8Array(decodeRecoveryResourceBase64(result.bytes, maxObjectBytes)) } as RecoveryArchiveObjectReadResult
+      const bytes = result.bytes === '' ? Buffer.alloc(0) : decodeRecoveryResourceBase64(result.bytes, maxObjectBytes)
+      return { ...result, bytes: new Uint8Array(bytes) } as RecoveryArchiveObjectReadResult
     },
     async head(request) { return await call('head', request) as Awaited<ReturnType<RecoveryArchiveObjectStoreProvider['head']>> },
     async pin(request) { return await call('pin', request) as Awaited<ReturnType<RecoveryArchiveObjectStoreProvider['pin']>> },

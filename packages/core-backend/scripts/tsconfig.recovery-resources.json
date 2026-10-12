@@ -12,6 +12,7 @@
     "../tests/unit/multitable-recovery-remote-composition.test.ts",
     "../tests/unit/multitable-recovery-resource-config.test.ts",
     "../tests/unit/multitable-recovery-resource-launchers.test.ts",
+    "../tests/unit/multitable-recovery-archive-object-wire-contract.test.ts",
     "./verify-recovery-openbao.mts",
     "./start-recovery-object-service.mts",
     "./start-recovery-remote.mts",
