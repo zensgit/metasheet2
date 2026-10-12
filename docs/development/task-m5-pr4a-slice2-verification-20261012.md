@@ -44,12 +44,12 @@
 
 ## 4. 本地（RAN）
 
-下表在 `970d23444d` 的工作树上跑（提交之前的那一遍与提交后的同一批文件逐字节相同）。命令在 `packages/core-backend` 下（ops 在仓库根）。
+下表的 type-check、新改测试文件的类型与任务单测子集在提交之后、于 `970d23444d` 上重跑过一遍，表中是重跑的结果（开发中的第一遍早于形状文件里一格字面量的改动）；其余各项只读源文件或不收集形状文件，在那次改动前后结果相同。命令在 `packages/core-backend` 下（ops 在仓库根）。
 
 | 项 | 命令 | 结果 |
 |---|---|---|
 | type-check | `tsc --noEmit -p .` | 0 errors |
-| 新改测试文件的类型 | 临时 tsconfig（`extends` 本包配置，加 `noUnusedLocals`，`include` 本切片新增与改动的 5 个测试文件），不入库 | 本切片新增与改动的行 0 条诊断；`task-lock-order.test.ts` 的 `import.meta` 一条是这份临时配置的 `module` 选项所致，既有测试文件同样用 `import.meta` |
+| 新改测试文件的类型 | 临时 tsconfig（`extends` 本包配置，加 `noUnusedLocals`，`include` 本切片新增与改动的 5 个测试文件），不入库 | 本切片新增与改动的行 0 条诊断。共 15 条诊断：`task-lock-order.test.ts` 的 `import.meta` 一条是这份临时配置的 `module` 选项所致；其余 14 条都在 `task-m3-comments-deletion.db.test.ts` 本切片没有改的旧行里（`processID` 与 `import.meta`，第 671–1135 行；本切片只改了该文件第 1203–1204 行的约束名钉） |
 | 任务单测子集 + 绊线 | `vitest run --config vitest.config.ts tests/unit/task-*.test.ts tests/unit/tasks-*.test.ts tests/unit/supertest-app-mode-tripwire.test.ts` | 50 files / 2094 passed。起点 `0edb426c55` 上同一命令是 49 files / 2077（另一台机器上跑的对照，见 §5 第 3 条）；多出的 17 格：`task-lock-order` 15、`task-ids` 2 |
 | PR-3c 普查 | 上一行里的 `task-counts-touchpoints.test.ts` | 绿，文件未改 |
 | 门 17 ④ | 上一行里的 `task-ci-coverage-enumeration.test.ts` | 绿：磁盘、`test.exclude`、lane 三个集合相等，都含新文件 |
