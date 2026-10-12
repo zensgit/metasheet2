@@ -51,6 +51,7 @@
 - owner：发送客户答复发送版；定 `stock-prep_puller` 分配；联系客户 DBA 恢复 PLM 只读登录（恢复后再核预检 / dry-run）；定日志轮转方案；定 R66 拆出角色 id（开发机推荐 `approvals_operator`）。
 - 开发机：收窄 R65 迁移的 `down()`；R66（#6348）核验完转 ready；云课堂启用步骤另帖。
 - 脚本：运维机 `metasheet-ops/releases/r65/`（wrapper 钉：迁移名、三码目录与绑定计数、六个开关非 `true`、九个 dist 标记、启动日志尾读）。
+- 日志轮转（R66 维护窗口）：runbook 已出，见 `docs/development/takeover-beiliao-20260821/runbook-backend-log-rotation-20261012.md`。
 
 ## 7. 已知问题（开发机·审批线 2026-10-12 帖，R65 已含；owner「补」）
 
