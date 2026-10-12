@@ -829,7 +829,18 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   // and keeps the explicit owner-acceptance line — the overclaims it replaced may not come back.
   assert.doesNotMatch(spec.purpose, /user_roles writes for any other role are unaffected/)
   assert.doesNotMatch(spec.purpose, /every wait is bounded by a 5 s lock_timeout/)
-  assert.match(spec.purpose, /a write that touches neither the role being written nor the grantor's own authority rows is unaffected/)
+  // Final review: "unaffected" overclaimed — such a write can still queue behind a blocked session or on the
+  // pool, and the role-row waiters (same-role port writes, appointments, members' approval / FWB / record-link
+  // sessions) and the pool they can fill are part of what the owner accepts.
+  assert.doesNotMatch(spec.purpose, /authority rows is unaffected/)
+  assert.match(spec.purpose, /a write that touches neither the role being written nor the grantor's own authority rows is not blocked directly by this write's locks \(it can still queue behind a blocked session or on the connection pool\)/)
+  assert.match(spec.purpose, /other writes of this port on X \(each takes its connection first and then waits.*about 20 of them fill the default 20-connection pool/)
+  assert.match(spec.purpose, /any session acting as a member of X that locks all of that user's roles FOR SHARE \(submitting an approval, an approval write-back \(FWB\) automation, writing a record link\)/)
+  assert.match(spec.purpose, /a sheet-permission PUT\) is blocked indirectly/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision that accepts these waits .*on other writes and appointments to the role being written, on approval submissions, FWB automations and record-link writes by its members .*and on the connection pool they can fill/)
+  assert.doesNotMatch(host, /authority rows\s+\*\s+is unaffected/)
+  assert.match(host, /is not blocked directly by this write's locks \(it can still queue behind a blocked session or on[\s*]+the connection pool/)
+  assert.match(host, /an approval[\s*]+write-back \(FWB\) automation/)
   assert.match(spec.purpose, /revoking ANY of the grantor's own authority \(.*\) waits for the in-flight write with no bound from this port/)
   assert.match(spec.purpose, /the 5 s lock_timeout bounds only THIS port's own waits/)
   assert.match(spec.purpose, /uses more pool connections while its locks are held/)

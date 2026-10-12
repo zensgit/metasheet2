@@ -69,7 +69,24 @@
  *     second).
  *     WHAT OTHER SESSIONS SEE (stated exactly, because switching the page ON is the owner's acceptance
  *     of it): a write that touches NEITHER the role being written NOR the grantor's own authority rows
- *     is unaffected. A write that touches the grantor's own authority — revoking any role they hold
+ *     is not blocked directly by this write's locks (it can still queue behind a blocked session or on
+ *     the connection pool — below). WHILE A WRITE HOLDS THE WRITTEN ROLE X's ROW LOCK (for at most
+ *     about the in-lock reads, plus — for a sheet grant — up to the 15 s budget and one more G1 call),
+ *     each of these waits on it HOLDING A POOL CONNECTION, with no bound from this port unless named:
+ *     (a) other writes of THIS port on X (update, rename, sheet grant) — each takes its connection
+ *     first and then waits on X's row (bounded by its own 5 s lock_timeout, then 409 BUSY); an update
+ *     or a rename does not go through the one-grant-per-process slot, so about 20 of them fill the
+ *     default 20-connection pool (measured in review: an unrelated `SELECT 1` waited up to ≈ 5.3 s,
+ *     and the grant's next G1 call waited ≈ 3.3 s for a connection); (b) delegation-route
+ *     appointments to X, and any session acting as a MEMBER of X that locks all of that user's roles
+ *     FOR SHARE — submitting an approval (services/approval-record-link-txn-auth.ts), an approval
+ *     write-back (FWB) automation (multitable/automation-executor.ts), writing a record link
+ *     (routes/univer-meta.ts) — one connection each, bounded only by that session's own settings.
+ *     A record-link session first holds the sheet rows it reads FOR SHARE, so a third party that needs
+ *     one of those sheet rows (e.g. a sheet-permission PUT) is blocked INDIRECTLY; if that sheet is on
+ *     this grant's list, only the G1 call's 5 s lock_timeout ends it (409 BUSY). (a) and (b) together
+ *     can fill the pool, and then every pool user of the process waits for a connection.
+ *     A write that touches the grantor's own authority — revoking any role they hold
  *     (`stock-prep_admin` included, by a platform admin, a batch unassign or a protected-role delete),
  *     removing a code from any role they hold, a direct code, a member-group membership, their
  *     admission or delegation scope, or (sheet grant) their grant on a named sheet — WAITS for the
@@ -85,9 +102,8 @@
  *     an existing grant row of the grantor's on that sheet (a role or member-group grant is not the
  *     grantor's direct row): an insert-only downgrade (above) waits on nothing, and a sheet the grant
  *     has not reached yet may still be granted after it. A G1 CALL WAITING FOR A POOL CONNECTION IS
- *     NOT A LOCK WAIT — no `lock_timeout` bounds it: while this grant holds the role row, same-role
- *     writers that queue on that row without a `lock_timeout` of their own (delegation-route
- *     appointments to the role) can fill the pool; the G1 call then waits up to the pool's connect
+ *     NOT A LOCK WAIT — no `lock_timeout` bounds it: while this grant holds the role row, the waiters
+ *     (a) and (b) above can fill the pool; the G1 call then waits up to the pool's connect
  *     timeout (10 s by default), the grant ends in a 500 (the connect-timeout error, not 409 BUSY),
  *     and every other pool user of the process waits for that time too.
  *   * PROJECT SHEETS: ADD-ONLY, WRITE LEVEL, THROUGH G1. This port never writes a sheet grant
@@ -199,7 +215,9 @@ const DEADLOCK_SQLSTATE = '40P01'
  *   2. EITHER the custom role's row `FOR UPDATE` (update, rename, sheet grant) — FIRST, the order the
  *      delegation route (admin-users.ts) and the role-assignment writers (rbac/role-assignment.ts) use:
  *      they take the same row `FOR SHARE` before they write `user_roles`, and the role editor
- *      (routes/roles.ts) takes it `FOR UPDATE` before it touches `role_permissions`, so the paths queue
+ *      (routes/roles.ts) takes it `FOR UPDATE` before it touches `role_permissions` (its DELETE too,
+ *      which for a protected role then removes the role's `user_roles` and `role_permissions` rows —
+ *      after the row lock, the same order), so the paths queue
  *      on one row instead of each holding what the other waits for (the 40P01 of the table-lock
  *      design). ONE 40P01 REMAINS, between two updates of THIS port on DIFFERENT roles whose grantors
  *      each hold the other's role (A, a member of Z, edits X while B, a member of X, edits Z): each

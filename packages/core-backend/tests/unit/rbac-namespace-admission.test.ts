@@ -140,6 +140,39 @@ describe('rbac namespace admission', () => {
     expect(state.poolQuery).toHaveBeenCalledTimes(2)
   })
 
+  // Final review (M26): the in-lock read of the grantor's codes "bypasses the 60 s cache" — the test above
+  // starts from a COLD memo, so a transaction branch that returned a cache hit first survived it. Warm
+  // the memo through the pool path, then read on a transaction query that answers a DIFFERENT set.
+  it('on a caller transaction query: a WARM memo is bypassed — the transaction\'s codes come back, no cache hit is counted, the memo is not overwritten', async () => {
+    const userId = 'user-warm-m26'
+    state.query.mockResolvedValue({ rows: [] })
+    state.poolQuery
+      .mockResolvedValueOnce({ rows: [{ code: 'workflow:read' }, { code: 'spreadsheets:read' }] })
+      .mockResolvedValueOnce({ rows: [{ permissions: [] }] })
+    expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
+    expect(state.cacheMiss).toHaveBeenCalledTimes(1)
+    // The memo is warm: a second pool-path read is a hit and issues no statement.
+    expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
+    expect(state.cacheHits).toHaveBeenCalledTimes(1)
+    const poolCalls = state.poolQuery.mock.calls.length
+
+    const txQuery = vi.fn(async (sql: string) => {
+      const text = sql.replace(/\s+/g, ' ').trim()
+      if (text.includes('AS code FROM')) return { rows: [{ code: 'workflow:read' }] }
+      if (text.startsWith('SELECT permissions FROM users')) return { rows: [{ permissions: [] }] }
+      return { rows: [] }
+    })
+    const fromTx = await listUserPermissions(userId, txQuery)
+    expect(fromTx).toEqual(['workflow:read'])
+    expect(txQuery).toHaveBeenCalled()
+    expect(state.cacheHits).toHaveBeenCalledTimes(1)
+    expect(state.cacheMiss).toHaveBeenCalledTimes(1)
+    expect(state.poolQuery).toHaveBeenCalledTimes(poolCalls)
+    // Nor written back: the pool path still serves the memo's two codes.
+    expect((await listUserPermissions(userId)).sort()).toEqual(['spreadsheets:read', 'workflow:read'])
+    expect(state.cacheHits).toHaveBeenCalledTimes(2)
+  })
+
   it('userHasEffectiveNamespaceAccess on a caller transaction query reads both admission inputs there, one after the other', async () => {
     const order: string[] = []
     const txQuery = vi.fn(async (sql: string) => {

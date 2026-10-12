@@ -1943,8 +1943,9 @@ describeDb('S5b members port — fix round 1 guards (real host wiring, real DB)'
 //     row — so only G1's lock_timeout breaks it: the grant answers 409 BUSY at ≈ 5 s, the sheet granted
 //     before stays granted, then the revoke lands and nothing is granted after it;
 //   * LR-05 (v) pool-size concurrent members writes (updates, then sheet grants whose G1 runs on the
-//     app pool like the host binding) never stall an unrelated `SELECT 1` on the app pool beyond a
-//     small bound;
+//     app pool like the host binding), EACH ON A DIFFERENT ROLE WITH NO LONG HOLDER, never stall an
+//     unrelated `SELECT 1` on the app pool beyond a small bound. It does NOT measure same-role waiters
+//     queued behind a long holder of one role's row (they can fill the pool; see the port's header);
 //   * LR-06 a role editor that commits a platform code while the PATCH waits for the role row: the
 //     PATCH reads the committed codes after the lock and refuses (409 HAS_PLATFORM_CODES);
 //   * LR-07 (2) while a members write's transaction is open, the APP pool sees no statement and no
@@ -2325,7 +2326,7 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     expect(grantorRowsOn4).toBe(0)
   }, 40_000)
 
-  it('LR-05 (v) pool-size concurrent members writes never stall an unrelated SELECT 1 on the app pool', async () => {
+  it('LR-05 (v) pool-size concurrent members writes, each on a different role with no long holder, never stall an unrelated SELECT 1 on the app pool', async () => {
     const max = Number((appPool as unknown as { options?: { max?: number } })?.options?.max ?? 20)
     const n = Math.max(2, max)
     const roleIds: string[] = []
