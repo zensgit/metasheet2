@@ -368,8 +368,9 @@ const STORED_VALUE_PREVIEW_MAX = 60
 
 /**
  * Read-only preview of a stored condition value (rendered as plain text, never as HTML): a string
- * as-is, anything else as JSON so `5` and `'5'`, `[1,2]` and `'1,2'` stay distinguishable. Line
- * breaks are flattened and the text is cut to a short length with an ellipsis.
+ * as-is, anything else as JSON, so a list (`[1,2]`) and a joined string (`'1,2'`) look different.
+ * A number and its digit string both read `5`; the issue text next to the note says which one is
+ * stored. Line breaks are flattened and the text is cut to a short length with an ellipsis.
  */
 export function conditionStoredValuePreview(value: unknown, maxLength = STORED_VALUE_PREVIEW_MAX): string {
   let text: string

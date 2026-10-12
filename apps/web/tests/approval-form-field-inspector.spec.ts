@@ -1667,6 +1667,23 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-not-effective', false))
   })
 
+  it('gate r4 P3-h: a LIST stored under eq on a select dependency is marked with the picker placeholder — never a raw option-code note', async () => {
+    // API-only shape (the editor cannot write it): the picker carries its own invalid-value
+    // placeholder, so the free-entry「stored value」note must not also print the raw option code.
+    const stale = await mountInspector(
+      [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: '', value: [OPT_A] } })],
+      { selected: 'local_2' },
+    )
+    // positive controls first: the rule loaded, is marked, and the picker shows the placeholder
+    expect(issueText(stale)).toContain(conditionValueIssueMessage('list-not-scalar', false))
+    const select = stale.select('approval-form-field-inspector-visibility-option-value')
+    expect(select.selectedOptions[0]?.disabled).toBe(true)
+    expect(select.selectedOptions[0]?.textContent?.trim()).toBe(CONDITION_VALUE_COPY_EN.invalidValue)
+    expect(stale.root.querySelector('[data-testid="approval-form-field-inspector-visibility-stored-value"]')).toBeNull()
+    expect(stale.root.textContent).not.toContain(OPT_A)
+    expect(stale.commands).toHaveLength(0)
+  })
+
   it('stale / renamed / deleted options: marked, re-picking fixes it; a rename shows the new name with the value unchanged', async () => {
     const stale = await mountInspector(
       [selectField(1), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'opt_gone' } })],

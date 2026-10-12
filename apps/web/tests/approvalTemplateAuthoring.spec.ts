@@ -6566,6 +6566,20 @@ describe('TemplateAuthoringView', () => {
       expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'level', operator: 'eq', value: '1' })
     })
 
+    it('gate r4 P3-h legacy designer: a LIST stored under eq on a select dependency is marked with the picker placeholder — never a raw option-code note', async () => {
+      // API-only shape; the option picker has its own invalid-value placeholder, so no「stored value」note.
+      const LEVEL = { id: 'level', type: 'select', label: '级别', options: [{ label: '一级', value: 'opt_lv_one' }, { label: '二级', value: 'opt_lv_two' }] }
+      const visibilityRule = { fieldId: 'level', operator: 'eq', value: ['opt_lv_one'] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [LEVEL, { ...NOTE, visibilityRule }])
+      // positive controls first: the rule loaded, is marked, and the picker shows the placeholder
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      expect(inNote('approval-field-visibility-option-value')!.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRow().textContent).not.toContain('opt_lv_one')
+      // loading never rewrites it
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
     it('legacy designer: in → isEmpty → eq on a text dependency keeps the first line (never the joined list)', async () => {
       await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule: { fieldId: 'reason', operator: 'in', values: ['a', 'b'] } }])
       await choose(inNote('approval-field-visibility-operator'), 'isEmpty')

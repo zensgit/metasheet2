@@ -768,7 +768,9 @@ const R43_TEMPLATE_URL = /\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/
 async function r43Mount(page: Page, initial: R43Json, canvasV2: boolean): Promise<void> {
   let current = initial
   await page.setViewportSize({ width: 1440, height: 900 })
-  await page.route(R43_TEMPLATE_URL, (route) => {
+  // Literal matchers (not the R43_TEMPLATE_URL const / a loop variable): delete-fallback.spec.ts
+  // statically derives every lane's route stubs and rejects arguments it cannot resolve.
+  await page.route(/\/api\/approval-templates\/afb_harness_1(?:\?.*)?$/, (route) => {
     const request = route.request()
     if (request.method() === 'PATCH') {
       const body = request.postDataJSON() as R43Json
@@ -780,13 +782,17 @@ async function r43Mount(page: Page, initial: R43Json, canvasV2: boolean): Promis
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(current) })
   })
-  for (const pattern of ['**/api/approval-templates/directory/**', '**/api/approvals/directory/**']) {
-    await page.route(pattern, (route) => route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({ users: [], roles: [], groups: [] }),
-    }))
-  }
+  const emptyDirectory = { users: [], roles: [], groups: [] }
+  await page.route('**/api/approval-templates/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(emptyDirectory),
+  }))
+  await page.route('**/api/approvals/directory/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify(emptyDirectory),
+  }))
   await page.route('**/api/plugins', (route) => route.fulfill({
     status: 200,
     contentType: 'application/json',
@@ -802,10 +808,22 @@ async function r43Mount(page: Page, initial: R43Json, canvasV2: boolean): Promis
   await expect(page.locator('[data-testid="approval-template-name"]')).toHaveValue(initial.name)
 }
 
+/**
+ * Returns only once the save round-trip has fully settled: the PATCH response arrived AND the save
+ * button left its loading state (the draft is replaced from the response before `saving` clears).
+ * Waiting on the「已保存」text alone is not enough — a clean draft shows it before any save, so an
+ * edit made right after an unchanged save could be overwritten by the late response echo.
+ */
 async function r43Save(page: Page): Promise<R43Json> {
-  const pending = page.waitForRequest((request) => request.method() === 'PATCH' && R43_TEMPLATE_URL.test(request.url()))
-  await page.click('[data-testid="approval-template-save-button"]')
+  const isTemplatePatch = (request: { method(): string; url(): string }) =>
+    request.method() === 'PATCH' && R43_TEMPLATE_URL.test(request.url())
+  const pending = page.waitForRequest(isTemplatePatch)
+  const responded = page.waitForResponse((response) => isTemplatePatch(response.request()))
+  const button = page.locator('[data-testid="approval-template-save-button"]')
+  await button.click()
   const payload = (await pending).postDataJSON() as R43Json
+  await responded
+  await expect(button).not.toHaveClass(/is-loading/)
   await expect(page.locator('[data-testid="approval-template-save-state"]')).toHaveText('已保存')
   return payload
 }
