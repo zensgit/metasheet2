@@ -1,6 +1,6 @@
 # 集成自助适配：目标、范围与验收（2026-09-30）
 
-> **当前状态（2026-10-12，§206）**：新 main `8bfeb5c91` 与 Automation `0216e45b4` 的合流候选树 `4107a1683` 已完成本地定向回归、`validate:all`、Canary 原 manual + interval 完整诊断及原生回执复核。受检 Git 原字节未改；完整诊断仅派生两处浏览器路径。尚未生成或推送四支代码 PR 的合流提交，不称新 head CI 已绿。此前授权的 Firefox 交叉验证见 §203，旧候选 Canary 诊断见 §204。固定 Chromium 的 run `38175124419` 失败及独立终审仍为阻断，Canary 不作为发布基线。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
+> **当前状态（2026-10-12，§207）**：#6337 已推送仅补原生检查点接线测试的 `5a439eff0`，本地整文件 61/61、两种单点变异和限定独立反驳完成；新 head CI 尚在运行，draft 保留。独立审查未发现限定范围内的新生产阻断，但不构成整 PR 或发布批准。§206 的 main `8bfeb5c91` 合流树证据保留；当前 main 已到 `c73d5aee6`，新候选只完成对象层合流预检，不能套用旧整链通过。固定 Chromium 的 run `38175124419` 失败继续阻断，Firefox/Canary 仅为交叉验证/诊断。无合并、部署、客户读取或发送。下方“最新”均为历史观察。
 
 > **试用资料补齐（2026-10-12，§195）**：[本地合成试用指南](yida-local-synthetic-trial-guide-20261010.md)已从旧工作区补入文档交付，核对候选`9a9ca90e0`的实际CLI及清理行为，补齐WSL/PG目录与异常清理边界。完整CI仍在运行，不是客户安装包或真实发送批准；运行结果仍以冻结head证据为准。
 
@@ -2338,3 +2338,12 @@ Grok/Kimi 的小任务校准放在后续适合的工作包，不作为这轮的�
 - 另一全新源码/依赖副本执行原 manual 和 interval 完整应用命令，使用已冻结的 Canary 157，仅改两处测试浏览器可执行路径，原 console/socket/请求/权限断言均未改。八个现有覆盖输入先与新树哈希一致才允许复制；不是用旧分支文件覆盖新 main 的差异。两轮 exit 0、stderr 空、原生 passed、自建数据库正常停删。manual 回执 SHA `1b5eedb1bdd6e82634d40c99e8c7e274e04a8385b83c80ca128a0047b8f656fb`，interval SHA `e14fc4ad7782771660aa8a7e37bde300fff12be330a94888a5a4ed8ccc1df658`。
 - root 复核 exit 0：全部 13,756 准入条目逐一核对原 manifest，除两条精确可执行路径派生外无差异；每轮再核对原生回执、6,584 个运行时受跟踪源文件、18 份阶段日志、4 份嵌套浏览器日志、467 条迁移及清理、owner-OFF 私有日志扫描、原 K3/宜搭/初始化/Automation/stop 验证器。复核 SHA `b3c00d46f02425daaedafb620891a55d7aa401e0ff2a317af70dd8aeab159fbd`，driver 回执 SHA `d400e798f593d76e51fb10ec8f25cf45497514a42c6f97995bc94373dff8cf8f`。不声称文件系统或 Unix IPC 隔离，不冒充独立反驳。
 - 证据适用于上述组合候选树，不是另外三棵切片树各自的整链验收，也不是一个已经发布的 merge commit。四支代码 PR 尚未更新；固定浏览器 CI 和独立终审仍待闭合，不能用 Canary 成功撤销旧失败或默认批准发布。没有合并、部署、真实客户 SQL/API、token 交换或宜搭发送，K3 永久禁写；目标仍 active。
+
+## 207. 限定独立反驳与原生检查点归因补强（2026-10-12）
+
+- 用户明确授权了 #6337 任务代码和脱敏证据的独立只读反驳。审查冻结 `0216e45b4`，核对 9 个关键文件与候选/实际副本、manual/interval 各 25 次完成的原生查询和 9 阶段回执；未发现限定范围内新的生产阻断。不宣称审查全部源码或原始私有日志，不作整 PR/发布批准。
+- 当前组合候选的真实临时 PostgreSQL 定向重验 5/5：两种 PostgreSQL 类型正控、首次原生 schema 查询后真实撤权、规则 ABA，加数据库前置哨兵。128 项收集、明确按名选择 5 项，其余 123 项未运行，不能称全套通过。receipt SHA `dbb8c2050b8753f7c3ab534d39f694e9aea6e70c5e8fe90b35fa69a7e9eed4e2`；owned PG 正常停删，13,756 源条目未变。首次工具环境对象原型比较失败保留，不冒充产品失败或成功。
+- 上述真实 DB 负例的双检查点删除变异**存活**：5 项仍绿，oracle 因此拒绝，receipt SHA `165b395626d7cdcfa14cbb7cbb6ca9191e384d384fd60c1dc8f138d0ad90bead`。独立读码确认 columns 投影只执行一次 SQL，随后 plugin preview 的外围 `guarded → gate → checkpoint` 仍会拒绝，故两负例不能独立证明 native beforeIO/afterIO；transform 命中也不独自证明变异函数被调用。这不是新增生产撤权漏洞，亦不删除外围守卫强求变异致红。
+- 针对归因缺口，提交 `5a439eff0cd120e84c03f1a8a604d6526c7a2ee9` 只修改既有 `data-source-read-execution.test.ts`，新增 PostgreSQL/SQL Server 各 4 案：调用真实 source-execution factory、ALS 与 adapter，精确检查每次原生查询前后顺序，并拒绝检查点失败后的结果泄露与捕获重试。after-first 使用单查询，避免后续 beforeIO 掩盖 afterIO 遗漏。管理器登记、checkpoint 和底层驱动为显式替身；这是边界接线单测，不宣称真实 ledger、客户 SQL Server 或租户授权证明。
+- 隔离副本按原 config 运行整文件，无按名过滤/重试：原实现 61/61；仅移除 before checkpoint 为 53 通过/8 失败，仅移除 after 为 55 通过/6 失败，原有 53 项三轮全通过。变异 oracle 要求 suite/hook/unhandled 为零、失败为新增用例中的断言，并覆盖两类 adapter 的对应拒绝点。receipt SHA `ee433a682048fe08e3903f0d655471055e742ae87d999f56b444134b415e70de`，新文件/提交 blob SHA `83dec86c35863dce9aff10c185251e84cdadb60440947f0c762194e11ce52267`；13,756 个基础源条目未改，仅内存测试 overlay/变异。独立复核源码与脱敏回执无 blocker。原存活变异不改判；既有 CI 已登记该整文件，无新增 workflow。
+- 新 head 已正常推到草稿 #6337，CI 待终态。当前 main `c73d5aee6aa19419081c0dd4c1486ab5a71996ff` 比 §206 多两提交，涉及角色权限收紧与共享入口；对象层合流树 `dff26a63d6879e8458690fd33956ff20449db72b` 无冲突，尚不是分支提交或已通过验收。客户交付记录正文继续排除，main 对齐、固定浏览器门和各批剩余退出条件仍待闭合。
