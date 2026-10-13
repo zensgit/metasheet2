@@ -74,8 +74,10 @@ function readErrorMessage(error: unknown, fallback: string): string {
  * Slice C (#6079): `LocalDirectoryMembershipHistoryError` (a subclass of the conflict error, so it is
  * checked first) is the account-create guard's refusal — the user already has a `user_orgs` row in
  * this org (active or deactivated) or applied deprovision evidence. It keeps 409 but carries its own
- * code so the admin panel can tell it from the duplicate-account / inactive-user 409s; the remedy is
- * the deprovision-evidence restore path, never a local account.
+ * code so the admin panel can tell it from the duplicate-account / inactive-user 409s. Its fixed
+ * sentence covers all three causes without naming which: an active row needs nothing, a deactivated
+ * row or a deprovision record goes through directory management / the deprovision-evidence process —
+ * never through a local account.
  */
 function handleLocalDirectoryError(res: Response, error: unknown, fallbackMessage: string): void {
   if (error instanceof LocalDirectoryMembershipHistoryError) {

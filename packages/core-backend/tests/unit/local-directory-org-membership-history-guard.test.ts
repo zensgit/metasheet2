@@ -150,10 +150,14 @@ import {
 import { adminDirectoryLocalRouter } from '../../src/routes/admin-directory-local'
 import { ORG_MEMBERSHIP_HISTORY_SQL } from '../../src/directory/org-membership-history'
 
+// Spelled out here (not imported) so a silent edit of the shipped sentence reds this file.
 const GUARD_SENTENCE =
-  'This user already has a membership record in this organization (active or deactivated) or applied '
-  + 'deprovision evidence; a local directory account would silently revive it. Restore access through '
-  + 'the deprovision evidence restore path instead.'
+  'This user already has a membership record in the target organization, or an open deprovision record, '
+  + 'so this endpoint cannot add them directly. An active membership needs no action; a deactivated '
+  + 'membership or a deprovision record must be handled through the directory management / deprovision '
+  + 'evidence process. '
+  + '该账号在目标组织已有归属记录，或有未结的离职记录，本接口不能直接加入；活跃归属无需处理，'
+  + '停用归属或离职记录请按目录管理 / 离职证据流程处理。'
 
 function useFixture(partial: Partial<Fixture>): void {
   state.fixture = {

@@ -17,7 +17,7 @@
    - 开关还没开时它显示 `inactive`，这是正常的，**不要点任何按钮**。在开关关闭时点「启用」，接口会返回成功，但插件仍是 inactive，页面不提示（已知怪癖）。
    - 记下当前状态。如果以前有人点过「停用」，这个状态会跨重启保留，开开关后插件也不会生效。处理办法见第 4 步。
 3. 打开「用户管理」，确认要参加试点的教师和学员账号**都有组织归属**（新建用户时「所属组织」选了 default）。没有组织的账号用云课堂时会一律收到 `ORG_CONTEXT_REQUIRED`，而且本版本没有事后补组织的界面。新建试点账号时务必选「所属组织」。
-   - **F14 补救（含切片 C 的打包点之后才适用，r65 不适用）**：零组织账号由平台管理员用既有的本地目录账号接口 `POST /api/admin/directory/local/accounts`（请求体只有 `localUserId`）加入 `default` 组织；它在一个事务里建本地目录账号与链接、写入 `default` 成员关系，用户需重新登录或刷新后才拿到组织上下文，并且会进入考勤全员名册。界面按钮随后续 PR 提供，只在「用户管理」详情的 `organizations.hasAnyRow` 与 `organizations.deprovisionApplied` 都为 `false` 时出现。接口自带护栏：只要该用户在 `default` 里已有任何成员行（活跃或已停用），或者有仍处于「已生效」的离职证据，就回 409 `DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY`，什么都不写。遇到这个码不要改用 SQL 或别的写路径绕过：有离职证据（`deprovisionApplied=true`）时走目录管理里的离职证据恢复（reactivate / force-reactivate），它会逐条撤销当时的停用效果；只有停用行、没有离职证据时，说明这个人是被某次解绑或归档移出组织的，先查清原因，再由 owner 决定怎么恢复。
+   - **F14 补救（含切片 C 的打包点之后才适用，r65 不适用）**：零组织账号由平台管理员用既有的本地目录账号接口 `POST /api/admin/directory/local/accounts`（请求体只有 `localUserId`）加入 `default` 组织；它在一个事务里建本地目录账号与链接、写入 `default` 成员关系，用户需重新登录或刷新后才拿到组织上下文，并且会进入考勤全员名册。界面按钮随后续 PR 提供，只在「用户管理」详情的 `organizations.hasAnyRow` 与 `organizations.deprovisionApplied` 都为 `false` 时出现。接口自带护栏：只要该用户在 `default` 里已有任何成员行（活跃或已停用），或者有仍处于「已生效」的离职证据，就回 409 `DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY`，什么都不写。遇到这个码不要改用 SQL 或别的写路径绕过（返回的固定提示句不区分是哪一种原因，用详情里的「所属组织」和上面两个字段判断）：已有活跃归属说明已经是成员，无需处理；有离职证据（`deprovisionApplied=true`）时走目录管理里的离职证据恢复（reactivate / force-reactivate），它会逐条撤销当时的停用效果；只有停用行、没有离职证据时，说明这个人是被某次解绑或归档移出组织的，先查清原因，再由 owner 决定怎么恢复。
 
 ## 2. 在 app.env 里加开关
 

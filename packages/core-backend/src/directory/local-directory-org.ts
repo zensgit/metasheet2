@@ -81,15 +81,25 @@ export class LocalDirectoryConflictError extends Error {
  * already has a `user_orgs` row in the org (active or deactivated) or applied deprovision evidence
  * (see org-membership-history.ts). The route answers it as 409
  * `DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY`. A subclass of the conflict error so that any handler
- * that only knows the base class still answers 409. The message is a fixed sentence — no ids.
+ * that only knows the base class still answers 409.
+ *
+ * The message is ONE fixed sentence (English, then Chinese) for all three causes — an active row
+ * (nothing to do: already a member), a deactivated row (with or without evidence) and applied
+ * deprovision evidence — and deliberately does not say which one applied: no ids, no per-user facts.
+ * The admin panel tells the causes apart from the read-only member-admission `organizations` payload
+ * (`active` for an active row, `hasAnyRow` / `deprovisionApplied` for history and evidence).
  */
+const LOCAL_ACCOUNT_MEMBERSHIP_HISTORY_MESSAGE =
+  'This user already has a membership record in the target organization, or an open deprovision record, '
+  + 'so this endpoint cannot add them directly. An active membership needs no action; a deactivated '
+  + 'membership or a deprovision record must be handled through the directory management / deprovision '
+  + 'evidence process. '
+  + '该账号在目标组织已有归属记录，或有未结的离职记录，本接口不能直接加入；活跃归属无需处理，'
+  + '停用归属或离职记录请按目录管理 / 离职证据流程处理。'
+
 export class LocalDirectoryMembershipHistoryError extends LocalDirectoryConflictError {
   constructor() {
-    super(
-      'This user already has a membership record in this organization (active or deactivated) or applied '
-        + 'deprovision evidence; a local directory account would silently revive it. Restore access through '
-        + 'the deprovision evidence restore path instead.',
-    )
+    super(LOCAL_ACCOUNT_MEMBERSHIP_HISTORY_MESSAGE)
     this.name = 'LocalDirectoryMembershipHistoryError'
   }
 }
