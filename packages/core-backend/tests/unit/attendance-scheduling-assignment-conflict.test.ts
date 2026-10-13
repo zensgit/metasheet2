@@ -138,6 +138,16 @@ describe('attendance scheduling assignment conflict guard', () => {
     expect(db.query).not.toHaveBeenCalled()
   })
 
+  it('preserves the existing endDate when payload normalization supplies undefined', () => {
+    expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({ endDate: undefined }, '2026-06-10')).toBe('2026-06-10')
+  })
+
+  it('normalizes a retained database Date before date-range validation', () => {
+    const existingEndDate = new Date(2026, 5, 10)
+    expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({}, existingEndDate)).toBe('2026-06-10')
+    expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({ endDate: undefined }, existingEndDate)).toBe('2026-06-10')
+  })
+
   it('preserves explicit null endDate on update payloads', () => {
     expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({}, '2026-06-10')).toBe('2026-06-10')
     expect(helpers.resolveAttendanceScheduleAssignmentUpdateEndDate({ endDate: null }, '2026-06-10')).toBeNull()

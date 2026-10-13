@@ -10840,7 +10840,8 @@ function normalizeAttendanceScheduleAssignmentEndDate(value) {
 }
 
 function resolveAttendanceScheduleAssignmentUpdateEndDate(payload, existingEndDate) {
-  if (!Object.prototype.hasOwnProperty.call(payload, 'endDate')) return existingEndDate
+  // Request normalization retains omitted optional keys with an undefined value.
+  if (payload.endDate === undefined) return normalizeAttendanceScheduleAssignmentEndDate(existingEndDate)
   return normalizeAttendanceScheduleAssignmentEndDate(payload.endDate)
 }
 

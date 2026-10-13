@@ -874,6 +874,8 @@ attendanceIntegrationDescribe(
     const shiftId = (shiftRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(shiftId).toBeTruthy()
 
+    // Route registration does not authorize changing the shift already punched above.
+    const assignmentDate = new Date(Date.now() + 86400000).toISOString().slice(0, 10)
     const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
       method: 'POST',
       headers: {
@@ -883,8 +885,8 @@ attendanceIntegrationDescribe(
       body: JSON.stringify({
         userId: testUserId,
         shiftId,
-        startDate: workDate,
-        endDate: workDate,
+        startDate: assignmentDate,
+        endDate: assignmentDate,
         isActive: true,
       }),
     })
@@ -902,7 +904,7 @@ attendanceIntegrationDescribe(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          workDate,
+          workDate: assignmentDate,
           requestType: 'overtime',
           overtimeRuleId,
           minutes: 90,
@@ -965,7 +967,7 @@ attendanceIntegrationDescribe(
     expect(rotationRuleRes.status).toBe(201)
     const rotationRuleId = (rotationRuleRes.body as { data?: { id?: string } } | undefined)?.data?.id
     expect(rotationRuleId).toBeTruthy()
-    const rotationStart = new Date(`${workDate}T00:00:00.000Z`)
+    const rotationStart = new Date(`${assignmentDate}T00:00:00.000Z`)
     rotationStart.setUTCDate(rotationStart.getUTCDate() + 1)
     const rotationStartDate = rotationStart.toISOString().slice(0, 10)
 
@@ -3258,6 +3260,28 @@ attendanceIntegrationDescribe(
       const updatedAssignment = (updateSlotRes.body as { data?: { assignment?: { slotIndex?: number; slot_index?: number } } } | undefined)?.data?.assignment
       expect(updatedAssignment?.slotIndex).toBe(2)
       expect(updatedAssignment?.slot_index).toBe(2)
+      // A slot-only update must not turn the bounded assignment into an open-ended one.
+      const updatedDates = await pool.query(
+        'SELECT start_date::text, end_date::text FROM attendance_shift_assignments WHERE id = $1',
+        [eveningAssignment.id],
+      )
+      expect(updatedDates.rows).toEqual([{ start_date: workDate, end_date: workDate }])
+
+      const invertedWindowRes = await requestJson(`${baseUrl}/api/attendance/assignments/${eveningAssignment.id}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ startDate: '2026-07-09' }),
+      })
+      expect(invertedWindowRes.status).toBe(400)
+      expect(invertedWindowRes.body).toEqual({
+        ok: false,
+        error: { code: 'VALIDATION_ERROR', message: 'End date must be after start date' },
+      })
+      const retainedDates = await pool.query(
+        'SELECT start_date::text, end_date::text FROM attendance_shift_assignments WHERE id = $1',
+        [eveningAssignment.id],
+      )
+      expect(retainedDates.rows).toEqual([{ start_date: workDate, end_date: workDate }])
 
       const listRes = await requestJson(`${baseUrl}/api/attendance/assignments?userId=${encodeURIComponent(multiSlotUserId)}`, {
         headers: { Authorization: `Bearer ${token}` },
