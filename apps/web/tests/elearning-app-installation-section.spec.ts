@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, type App } from 'vue'
 import Section from '../src/views/ElearningAppInstallationSection.vue'
 import { getAuthPrincipalKey, notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
+import { useLocale } from '../src/composables/useLocale'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 
 const mocks = vi.hoisted(() => ({ get: vi.fn(), install: vi.fn(), update: vi.fn(), changed: vi.fn() }))
 vi.mock('../src/services/elearningApp', () => ({
@@ -9,6 +11,36 @@ vi.mock('../src/services/elearningApp', () => ({
   installElearningApp: mocks.install,
   updateElearningAppInstallation: mocks.update,
 }))
+
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
 let app: App
 let root: HTMLDivElement
 async function flush() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await nextTick() } }
@@ -138,5 +170,69 @@ describe('installation section', () => {
     resolve({ status: 'active', notificationsEnabled: true, canManage: true }); await flush()
     expect(root.querySelector('input')).toBeNull()
     expect(mocks.changed).not.toHaveBeenCalled()
+  })
+})
+
+describe('installation section organization context', () => {
+  const realReload = elearningSessionOrgPage.reload
+  const reload = vi.fn()
+
+  beforeEach(() => {
+    elearningSessionOrgPage.reload = reload
+    reload.mockReset()
+    sessionOrgFake.load.mockReset()
+    sessionOrgFake.switch.mockReset()
+  })
+  afterEach(() => {
+    elearningSessionOrgPage.reload = realReload
+    sessionOrgFake.orgs = []
+    sessionOrgFake.currentOrgId = null
+    useLocale().setLocale('en')
+  })
+
+  function orgContextFailure(status = 403) {
+    return Object.assign(new Error('request_failed'), { status, code: 'ORG_CONTEXT_REQUIRED' })
+  }
+
+  it('explains the org-context 403 in Chinese instead of the English token', async () => {
+    useLocale().setLocale('zh-CN')
+    mocks.get.mockRejectedValue(orgContextFailure())
+    await mount()
+    const alert = root.querySelector('[role="alert"]')?.textContent ?? ''
+    expect(alert).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(alert).not.toContain('elearning_installation_request_failed')
+    expect(alert).not.toContain('ORG_CONTEXT_REQUIRED')
+  })
+
+  it('keeps the closed token for the org code on another status and for codeless failures', async () => {
+    useLocale().setLocale('zh-CN')
+    mocks.get.mockRejectedValueOnce(orgContextFailure(400))
+    await mount()
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe('elearning_installation_request_failed')
+    mocks.get.mockRejectedValueOnce(Object.assign(new Error('request_failed'), { status: 403, code: 'request_failed' }))
+    button('Retry').click(); await flush()
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe('elearning_installation_request_failed')
+  })
+
+  it('offers the session-org selector to a multi-organization member only, reloading after a switch', async () => {
+    sessionOrgFake.orgs = ['org-a']
+    sessionOrgFake.currentOrgId = 'org-a'
+    mocks.get.mockResolvedValue({ status: 'active', notificationsEnabled: false, canManage: false })
+    await mount()
+    expect(sessionOrgFake.load).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    app.unmount(); root.remove()
+
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    mocks.get.mockRejectedValue(orgContextFailure())
+    await mount()
+    const select = root.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    sessionOrgFake.switch.mockResolvedValueOnce(true)
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change'))
+    await flush()
+    expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+    expect(reload).toHaveBeenCalledTimes(1)
   })
 })

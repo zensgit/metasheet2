@@ -5,6 +5,19 @@
       <p>{{ elearningLabel('admin.subtitle', isZh) }}</p>
     </header>
 
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="busy"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
+
     <form class="elearning-admin__form" @submit.prevent="void submitPublishAndAssign()">
       <label class="elearning-field">
         <span>{{ elearningLabel('admin.videoFile', isZh) }}</span>
@@ -269,6 +282,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
 import { randomUuid } from '../utils/uuid'
 import {
   assignElearningDirect,
@@ -293,6 +308,7 @@ import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
+  elearningErrorMessage,
   elearningFailure,
   elearningLabel,
   elearningOptionAria,
@@ -301,6 +317,20 @@ import {
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  changeSessionOrg,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
 
 type OperationStage = 'uploading' | 'publishing' | 'assigning'
 
@@ -379,7 +409,7 @@ function newQuestion(): QuestionDraft {
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }

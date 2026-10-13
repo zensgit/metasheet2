@@ -165,6 +165,9 @@ function validateRevisionDraft(
 function readErrorCode(payload: unknown): string {
   if (isPlainObject(payload) && typeof payload.error === 'string') {
     const code = payload.error.trim()
+    // Same pass-through the sibling elearning clients already make: the one
+    // uppercase code the org-context gate answers with must reach the view.
+    if (code === 'ORG_CONTEXT_REQUIRED') return code
     if (STABLE_ERROR_CODE_RE.test(code)) return code
   }
   return 'request_failed'

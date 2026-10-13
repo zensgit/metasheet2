@@ -198,6 +198,8 @@ export type ElearningLabelKey =
   | 'grading.scoreRequired'
   | 'grading.scoreInteger'
   | 'grading.clientIdUnavailable'
+  // --- Shared request errors ---
+  | 'error.orgContextRequired'
   // --- Shared statuses ---
   | 'status.completed'
   | 'status.incomplete'
@@ -500,6 +502,11 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     zh: '您的浏览器不支持提交评分所需的安全标识符。',
   },
 
+  'error.orgContextRequired': {
+    en: 'This account does not have exactly one active organization: if you belong to none, ask an administrator to add you to one; if you belong to several, choose an organization above first.',
+    zh: '当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。',
+  },
+
   'status.completed': { en: 'Completed', zh: '已完成' },
   'status.incomplete': { en: 'Incomplete', zh: '未完成' },
   'status.passed': { en: 'Passed', zh: '通过' },
@@ -676,6 +683,24 @@ export function elearningTrueFalseOptions(isZh: boolean): ElearningTrueFalseOpti
 
 export function elearningFailure(code: string, status: number, isZh: boolean): string {
   return isZh ? `失败：${code}（${status}）` : `Failed: ${code} (${status})`
+}
+
+// The org-context gate on the /api/elearning* and /api/elearning-app routes answers
+// 403 {"error":"ORG_CONTEXT_REQUIRED"} when the session carries no organization
+// claim (the account has zero, or more than one, active organization). The raw
+// `失败：ORG_CONTEXT_REQUIRED（403）` tells a learner nothing, so this one code is
+// explained; every other code keeps the generic elearningFailure() text.
+export const ELEARNING_ORG_CONTEXT_REQUIRED = 'ORG_CONTEXT_REQUIRED'
+
+export function isElearningOrgContextRequired(code: unknown, status: unknown): boolean {
+  return status === 403 && code === ELEARNING_ORG_CONTEXT_REQUIRED
+}
+
+export function elearningErrorMessage(code: string, status: number, isZh: boolean): string {
+  if (isElearningOrgContextRequired(code, status)) {
+    return elearningLabel('error.orgContextRequired', isZh)
+  }
+  return elearningFailure(code, status, isZh)
 }
 
 export function elearningQuestionPoints(points: number, isZh: boolean): string {

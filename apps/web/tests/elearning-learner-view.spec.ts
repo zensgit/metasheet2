@@ -73,6 +73,36 @@ vi.mock('../src/services/elearningPractice', async () => {
   }
 })
 
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
+
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
   ElearningApiError,
@@ -80,6 +110,7 @@ import {
   type ElearningLearnerVideoStatus,
 } from '../src/services/elearning'
 import ElearningLearnerView from '../src/views/ElearningLearnerView.vue'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import {
   elearningExamAnswerProgress,
   elearningExamCountdown,
@@ -3161,5 +3192,114 @@ describe('ElearningLearnerView', () => {
     vi.advanceTimersByTime(ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS)
     await flushUi()
     expect(heartbeatBodies()).toEqual([expect.objectContaining({ positionMs: 2000, playing: true })])
+  })
+})
+
+describe('ElearningLearnerView organization context', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const realReload = elearningSessionOrgPage.reload
+  const reload = vi.fn()
+
+  function mountView() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ElearningLearnerView)
+    app.mount(container)
+    return container
+  }
+
+  function statusText(root: HTMLElement): string {
+    return root.querySelector('[data-testid="elearning-learner-status"]')?.textContent ?? ''
+  }
+
+  beforeEach(() => {
+    useLocale().setLocale('zh-CN')
+    elearningSessionOrgPage.reload = reload
+    reload.mockReset()
+    sessionOrgFake.load.mockReset()
+    sessionOrgFake.switch.mockReset()
+    h.capabilities.mockReset()
+    h.list.mockReset()
+    h.capabilities.mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    elearningSessionOrgPage.reload = realReload
+    sessionOrgFake.orgs = []
+    sessionOrgFake.currentOrgId = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED in Chinese instead of printing the raw code', async () => {
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(statusText(root)).not.toContain('ORG_CONTEXT_REQUIRED')
+    expect(root.querySelector('.elearning-status--error')).not.toBeNull()
+    expect(h.list).not.toHaveBeenCalled()
+  })
+
+  it('keeps the generic failure text for any other 403 code and for the org code on another status', async () => {
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('forbidden', 403))
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('失败：forbidden（403）')
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 400))
+    const second = mountView()
+    await flushUntil(() => statusText(second).length > 0)
+    expect(statusText(second)).toBe('失败：ORG_CONTEXT_REQUIRED（400）')
+  })
+
+  it('renders the English explanation under the English locale', async () => {
+    useLocale().setLocale('en')
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toContain('does not have exactly one active organization')
+  })
+
+  it('shows no organization selector to a single-organization member', async () => {
+    sessionOrgFake.orgs = ['org-a']
+    sessionOrgFake.currentOrgId = 'org-a'
+    const root = mountView()
+    await flushUi()
+    expect(sessionOrgFake.load).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+    expect(root.querySelector('select[name="sessionOrgId"]')).toBeNull()
+  })
+
+  it('lets a multi-organization member pick an organization and reloads only after an accepted switch', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    const switcher = root.querySelector('[data-testid="session-org-switcher"]') as HTMLElement
+    expect(switcher).not.toBeNull()
+    expect(switcher.textContent).toContain('请选择组织')
+    // The selector sits above the status line the 403 message points at ("在上方选择组织").
+    const status = root.querySelector('[data-testid="elearning-learner-status"]') as HTMLElement
+    expect(switcher.compareDocumentPosition(status) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const select = switcher.querySelector('select') as HTMLSelectElement
+    expect(Array.from(select.options).map((option) => option.value)).toEqual(['', 'org-a', 'org-b'])
+
+    sessionOrgFake.switch.mockResolvedValueOnce(false)
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-b')
+    expect(reload).not.toHaveBeenCalled()
+
+    sessionOrgFake.switch.mockResolvedValueOnce(true)
+    select.value = 'org-a'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-a')
+    expect(reload).toHaveBeenCalledTimes(1)
   })
 })

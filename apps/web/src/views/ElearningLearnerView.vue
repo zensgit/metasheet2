@@ -5,6 +5,19 @@
       <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
     </header>
 
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="busy"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
+
     <ElearningPortalHero v-if="contentEnabled" />
 
     <ElearningCreditWalletSection v-if="incentiveEnabled" />
@@ -232,6 +245,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
 import { randomUuid } from '../utils/uuid'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
@@ -270,6 +285,7 @@ import ElearningPracticeLearnerSection from './ElearningPracticeLearnerSection.v
 import ElearningWatchChallengePrompt from './ElearningWatchChallengePrompt.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
+  elearningErrorMessage,
   elearningExamAnswerProgress,
   elearningExamCountdown,
   elearningExamScore,
@@ -281,6 +297,20 @@ import {
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  changeSessionOrg,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
 
 const courses = ref<ElearningLearnerCourse[]>([])
 const loading = ref(false)
@@ -371,7 +401,7 @@ let challengeResumeAttempt: ChallengeResumeAttempt | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }
