@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Kysely, PostgresDialect } from 'kysely'
-import { Pool, type PoolClient } from 'pg'
+import { Client, Pool, type PoolClient } from 'pg'
 
 import {
   claimAttendanceCanonicalImportRegistryV1,
@@ -21,6 +21,7 @@ import {
   type LegacyImportAsyncJobSummaryV1,
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { createAttendanceLegacyPlanWorkerRepositoryV1 } from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from '../../src/attendance/w4c3a-legacy-plan-commit-connection'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -611,6 +612,41 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     } finally {
       await client.query('ROLLBACK')
       client.release()
+    }
+  })
+
+  it('legacy plan COMMIT waits within the existing bound for real deferred validation', async () => {
+    const url = new URL(dbUrl as string)
+    url.pathname = `/${scratchName}`
+    for (const adapted of [false, true]) {
+      const options = { connectionString: url.toString(), query_timeout: 40 }
+      const client = new Client(options)
+      await client.connect()
+      try {
+        const setup = (text: string) => {
+          const config = { text, query_timeout: 1000 }
+          return client.query<Record<string, unknown>>(config)
+        }
+        await setup('BEGIN')
+        await setup('CREATE TEMP TABLE delayed_plan_commit (n integer)')
+        await setup(`CREATE FUNCTION pg_temp.delay_plan_commit()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN PERFORM pg_sleep(0.1); RETURN NEW; END $$`)
+        await setup(`CREATE CONSTRAINT TRIGGER delayed_plan_validation
+          AFTER INSERT ON delayed_plan_commit DEFERRABLE INITIALLY DEFERRED
+          FOR EACH ROW EXECUTE FUNCTION pg_temp.delay_plan_commit()`)
+        await setup('INSERT INTO delayed_plan_commit VALUES (1)')
+        if (adapted) {
+          await createAttendanceLegacyPlanCommitConnectionV1(client).query('COMMIT')
+          expect((await client.query('SELECT n FROM delayed_plan_commit')).rows).toEqual([{ n: 1 }])
+        } else {
+          await expect(client.query('COMMIT')).rejects.toThrow('Query read timeout')
+        }
+      } finally {
+        // A read timeout has an ambiguous commit outcome: never reuse that
+        // connection in this control. All objects belong to its temp schema.
+        await client.end()
+      }
     }
   })
 
