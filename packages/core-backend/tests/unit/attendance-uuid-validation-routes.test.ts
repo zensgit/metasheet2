@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { Readable } from 'node:stream'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildAttendanceImportAttributionFreezeV1,
@@ -6,6 +7,8 @@ import {
 } from '../../src/attendance/w4c3a-import-proof'
 
 const require = createRequire(import.meta.url)
+const fsp = require('node:fs/promises')
+const fs = require('node:fs')
 const attendancePlugin = require('../../../../plugins/plugin-attendance/index.cjs')
 
 type RouteHandler = (req: any, res: any, next: any) => Promise<void>
@@ -77,6 +80,7 @@ async function createHarness(
   rbacBypass = 'true',
   commitSyncImportPlan?: CommitSyncImportPlan,
   attendanceW4SegmentCalculation?: Record<string, unknown>,
+  queue?: { add: ReturnType<typeof vi.fn> },
 ) {
   process.env.RBAC_BYPASS = rbacBypass
   process.env.ATTENDANCE_IMPORT_ASYNC_ENABLED = 'false'
@@ -108,6 +112,7 @@ async function createHarness(
       },
     },
     services: {
+      queue,
       // Product entry v2 phase A: plugin-attendance registers the two cancel-round routes only when
       // core lends it this port. A stub that must never be reached — every case below is answered
       // by the UUID guard before any lookup.
@@ -3169,7 +3174,12 @@ describe('attendance UUID route validation', () => {
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
         body: {
-          rows: [importAssignRow('worker-1')],
+          rows: [
+            importAssignRow('worker-1'),
+            importAssignRow('worker-1', '2026-06-11', { fields: { firstInAt: '2026-06-11T09:00:00.000Z', lastOutAt: '2026-06-11T18:00:00.000Z' } }),
+            importAssignRow('worker-1'),
+            importAssignRow('worker-1', '2026-06-12'),
+          ],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'default' },
@@ -3182,12 +3192,68 @@ describe('attendance UUID route validation', () => {
             kind: 'ensure_member',
             userId: 'worker-1',
             groupRef: 'day shift',
+            sourceOrdinals: [0, 3],
           }),
         ]),
       }))
       const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
       expectActiveOrgMemberPredicate(sql)
       expect(sql).not.toContain('INSERT INTO attendance_group_members')
+    })
+
+    it.each([
+      [false, false, true],
+      [true, true, true],
+      [true, false, false],
+    ])('uploaded async preview streams only when autoAssign=%s (active=%s)', async (autoAssignMembers, active, enqueued) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const { db, routes } = await createHarness('true', undefined, undefined, queue)
+      installImportPipelineMock(db, active ? ['worker-1'] : [])
+      const pipelineQuery = db.query.getMockImplementation()!
+      db.query.mockImplementation(async (query: unknown, params: unknown[] = []) => {
+        const sql = sqlText(query)
+        if (sql.includes('INSERT INTO attendance_import_jobs')) return []
+        if (sql.includes('FROM attendance_import_jobs AS job')) {
+          return [{ id: params[0], org_id: 'default', status: 'queued', total: 4, payload: {} }]
+        }
+        return pipelineQuery(query, params)
+      })
+      const csv = [
+        'userId,workDate,attendanceGroup,firstInAt,lastOutAt',
+        'worker-1,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        'worker-1,2026-06-11,,2026-06-11T09:00:00.000Z,2026-06-11T18:00:00.000Z',
+        'worker-1,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        'worker-1,2026-06-12,Day Shift,2026-06-12T09:00:00.000Z,2026-06-12T18:00:00.000Z',
+      ].join('\n')
+      const readFile = vi.spyOn(fsp, 'readFile').mockImplementation(async (file: unknown) => {
+        if (String(file).endsWith('.json')) return JSON.stringify({ rowCount: 4, kind: 'csv' })
+        return csv
+      })
+      const stream = vi.spyOn(fs, 'createReadStream').mockImplementation(() => Readable.from([csv]))
+
+      const res = await invokeRoute(routes, 'POST /api/attendance/import/preview-async', {
+        body: {
+          csvFileId: '00000000-0000-4000-8000-000000000499',
+          csvOptions: { headerRowIndex: 0 },
+          groupSync: { autoCreate: true, autoAssignMembers },
+        },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+
+      if (enqueued) {
+        expect(res.statusCode).toBe(200)
+        expect(res.body).toMatchObject({ ok: true, data: { job: { status: 'queued', total: 4 } } })
+        expect(queue.add).toHaveBeenCalledTimes(1)
+      } else {
+        expectMemberNotInOrg(res, [0, 3])
+        expect(queue.add).not.toHaveBeenCalled()
+      }
+      expect(readFile.mock.calls.filter(([file]) => String(file).endsWith('.csv'))).toEqual([])
+      expect(stream).toHaveBeenCalledTimes(autoAssignMembers ? 1 : 0)
+      const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
+      if (autoAssignMembers) expectActiveOrgMemberPredicate(sql)
+      else expect(sql).not.toContain('FROM user_orgs uo')
+      expect(sql.includes('INSERT INTO attendance_import_jobs')).toBe(enqueued)
     })
 
     it('async preview rejects an inactive auto-assign user before inserting a job', async () => {

@@ -1,4 +1,6 @@
 import crypto from 'node:crypto'
+import { throwAttendanceRosterOrgMembershipError } from '../w4c3a-legacy-plan-group-effects'
+import type { VerifiedAttendanceLegacyPlanV1 } from '../w4c3a-legacy-plan-worker'
 import { describe, expect, it, vi } from 'vitest'
 import {
   ATTENDANCE_LEGACY_IMPORT_BATCH_SOURCES_V1,
@@ -7,6 +9,7 @@ import {
   LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
   buildLegacyImportExecutionPlanPackageV1,
   computeLegacyImportChunkDigestV1,
+  chunkLegacyImportPlanSourceRowsV1,
   computeLegacyImportGroupStateFingerprintV1,
   computeLegacyImportPlanDigestV1,
   computeLegacyImportRecordPreconditionFingerprintV1,
@@ -273,6 +276,105 @@ function buildValid() {
 }
 
 describe('LegacyImportExecutionPlanV1', () => {
+  const memberEffect = (sourceOrdinals?: readonly number[]): LegacyImportGroupEffectPlanV1 => ({
+    kind: 'ensure_member',
+    memberId: ITEM_1,
+    groupRef: GROUP_ID,
+    userId: 'user-a',
+    membershipExistedAtPrepare: false,
+    ...(sourceOrdinals === undefined ? {} : { sourceOrdinals }),
+  })
+
+  it('preserves the old closed member variant and binds new source rows to plan/chunk digests', () => {
+    const legacy = memberEffect()
+    expect(parseLegacyImportGroupEffectPlanV1(legacy)).toEqual(legacy)
+    const build = (effect: LegacyImportGroupEffectPlanV1) => buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed: manifestSeed({ groupRevision: 1, groupStateFingerprint: HEX_A }),
+      items: items(),
+      recordWrites: [recordWrite()],
+      groupEffects: [effect],
+      groupEffectPlacements: [{ effectId: ITEM_1, firstSourceOrdinal: 0 }],
+    })
+    const oldPlan = build(legacy)
+    const current = build(memberEffect([0]))
+    for (const plan of [oldPlan, current]) {
+      const manifest = parseLegacyImportExecutionPlanManifestV1(JSON.parse(JSON.stringify(plan.manifest)))
+      const chunks = plan.chunks.map((chunk) => ({
+        ...chunk,
+        body: parseLegacyImportExecutionPlanChunkBodyV1(JSON.parse(JSON.stringify(chunk.body))),
+      }))
+      const reassembled = reassembleLegacyImportPlanChunksV1(chunks, manifest.sourceRowCount)
+      expect(computeLegacyImportPlanDigestV1({ manifest, ...reassembled })).toBe(plan.planDigest)
+      expect(reassembled.groupEffects).toEqual([plan === oldPlan ? legacy : memberEffect([0])])
+    }
+    expect(oldPlan.planDigest).not.toBe(current.planDigest)
+    expect(oldPlan.chunks[0].chunkDigest).not.toBe(current.chunks[0].chunkDigest)
+    const tampered = current.chunks.map((chunk) => ({
+      ...chunk, body: { ...chunk.body, groupEffects: [legacy] },
+    }))
+    expect(() => reassembleLegacyImportPlanChunksV1(tampered, current.manifest.sourceRowCount)).toThrowError('W4C3A_CHUNK_DIGEST_MISMATCH')
+  })
+
+  it.each([[], [0, 0], [1, 0], [-1], [0.5], [2147483648], [Number.MAX_SAFE_INTEGER], null])(
+    'rejects malformed member source ordinals %j', (sourceOrdinals) => {
+      expect(() => parseLegacyImportGroupEffectPlanV1({ ...memberEffect(), sourceOrdinals })).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+    },
+  )
+
+  it('rejects extra member fields and sources that are skipped, absent, owned by another user, or reused', () => {
+    expect(() => parseLegacyImportGroupEffectPlanV1({ ...memberEffect([0]), extra: true })).toThrowError('W4C3A_GROUP_EFFECT_PLAN_INVALID')
+    const build = (effects: readonly LegacyImportGroupEffectPlanV1[]) => buildLegacyImportExecutionPlanPackageV1({
+      manifestSeed: manifestSeed({ groupRevision: 1, groupStateFingerprint: HEX_A }),
+      items: items(), recordWrites: [recordWrite()], groupEffects: effects,
+      groupEffectPlacements: effects.map((effect) => ({
+        effectId: effect.kind === 'ensure_member' ? effect.memberId : effect.groupId,
+        firstSourceOrdinal: 0,
+      })),
+    })
+    for (const effect of [memberEffect([1]), memberEffect([2]), { ...memberEffect([0]), userId: 'other-user' }]) {
+      expect(() => build([effect])).toThrow()
+    }
+    expect(() => build([memberEffect([0]), {
+      ...memberEffect([0]), memberId: ITEM_2, groupRef: JOB_ID,
+    }])).toThrowError('W4C3A_CHUNKER_INVALID')
+  })
+
+  it('checks many member sources of one write across chunks without repeated linear searches', () => {
+    const ordinals = Array.from({ length: 512 }, (_unused, index) => index)
+    const sourceOrdinals = new Proxy(ordinals, {
+      get(target, key, receiver) {
+        if (key === 'includes') throw new Error('member provenance must use the ordinal index')
+        return Reflect.get(target, key, receiver)
+      },
+    })
+    const manyItems = ordinals.map((ordinal) => ({
+      ...items()[0], ordinal, semanticOrdinal: ordinal, rawEvidence: rawEvidence(ordinal),
+    })) as readonly LegacyImportItemPlanV1[]
+    const result = chunkLegacyImportPlanSourceRowsV1({
+      items: manyItems,
+      recordWrites: [recordWrite({ sourceOrdinals })],
+      groupEffects: [memberEffect(ordinals)],
+      groupEffectPlacements: [{ effectId: ITEM_1, firstSourceOrdinal: 0 }],
+    })
+    expect(result.chunks).toHaveLength(2)
+    expect(reassembleLegacyImportPlanChunksV1(result.chunks, ordinals.length).groupEffects).toEqual([memberEffect(ordinals)])
+  })
+
+  it('reports only frozen member rows across groups with sorted unique rejection indexes', () => {
+    const plan = {
+      recordWrites: [{ userId: 'user-a', sourceOrdinals: [0, 1, 2, 3] }],
+      groupEffects: [memberEffect([3]), { ...memberEffect([0, 2]), memberId: ITEM_2, groupRef: JOB_ID }],
+    } as unknown as VerifiedAttendanceLegacyPlanV1
+    let error: unknown
+    try { throwAttendanceRosterOrgMembershipError(plan, ['user-a', 'user-a']) } catch (caught) { error = caught }
+    expect(error).toMatchObject({ status: 404, details: [{ code: 'USER_NOT_IN_ORG', rejectedCount: 3, indexes: [0, 2, 3] }] })
+    for (const effects of [[memberEffect()], [memberEffect([0]), memberEffect()]]) {
+      try { throwAttendanceRosterOrgMembershipError({ ...plan, groupEffects: effects }, ['user-a']) } catch (caught) {
+        expect(caught).toMatchObject({ status: 404, details: [] })
+      }
+    }
+  })
+
   it('builds a frozen null-prototype plan with dense source and semantic ordinals', () => {
     const built = buildValid()
     expect(Object.getPrototypeOf(built.manifest)).toBeNull()

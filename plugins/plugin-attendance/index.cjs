@@ -9605,8 +9605,7 @@ function shouldAssignAttendanceImportGroupMember({
 
 // Rows that commit would turn into attendance_group_members writes. Invalid and
 // duplicate rows are not assigned, so they are not part of this batch.
-function collectImportGroupMemberAssignmentRows({
-  rows,
+function createImportGroupMemberAssignmentCollector({
   fallbackUserId,
   userMap,
   userMapKeyField,
@@ -9622,9 +9621,7 @@ function collectImportGroupMemberAssignmentRows({
   const seen = new Set()
   const required = Array.isArray(requiredFields) ? requiredFields : []
   const punchRequired = Array.isArray(punchRequiredFields) ? punchRequiredFields : []
-  const sourceRows = Array.isArray(rows) ? rows : []
-  for (let rowIndex = 0; rowIndex < sourceRows.length; rowIndex += 1) {
-    const row = sourceRows[rowIndex]
+  const addRow = (row, rowIndex) => {
     const workDate = row?.workDate
     const rowUserId = resolveRowUserId({
       row,
@@ -9646,9 +9643,9 @@ function collectImportGroupMemberAssignmentRows({
         return value === undefined || value === null || value === ''
       })
     }
-    if (rejected) continue
+    if (rejected) return
     const dedupKey = `${rowUserId}:${workDate}`
-    if (seen.has(dedupKey)) continue
+    if (seen.has(dedupKey)) return
     seen.add(dedupKey)
     const groupKey = resolveAttendanceGroupKey(row)
     if (!shouldAssignAttendanceImportGroupMember({
@@ -9656,13 +9653,20 @@ function collectImportGroupMemberAssignmentRows({
       groupKey,
       rowUserId,
       groupIdMap,
-      groupNames,
+      groupNames: groupNames ?? collectAttendanceGroupNames([row]),
       prepareOnly,
-    })) continue
+    })) return
     const sourceIndex = Number.isInteger(row?.__sourceIndex) ? row.__sourceIndex : rowIndex
     assignments.push({ userId: rowUserId, workDate, rowIndex: sourceIndex })
   }
-  return assignments
+  return { assignments, addRow }
+}
+
+function collectImportGroupMemberAssignmentRows({ rows, ...options }) {
+  const collector = createImportGroupMemberAssignmentCollector(options)
+  const sourceRows = Array.isArray(rows) ? rows : []
+  sourceRows.forEach((row, rowIndex) => collector.addRow(row, rowIndex))
+  return collector.assignments
 }
 
 function importMemberAssignmentDetailOptions(assignments) {
@@ -28454,13 +28458,22 @@ module.exports = {
 	        duplicates: 0,
 	      }
 	      const seenKeys = new Set()
-	      const assignmentRows = []
-	      let asyncSourceIndex = -1
-	      const rowScan = await rowSource.iterateRows((row) => {
-	        asyncSourceIndex += 1
-	        if (payload.groupSync?.autoAssignMembers) {
-	          assignmentRows.push({ ...row, __sourceIndex: asyncSourceIndex })
-	        }
+	      const asyncGroupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
+	      const asyncMemberCollector = asyncGroupSync?.autoAssignMembers
+	        ? createImportGroupMemberAssignmentCollector({
+	          fallbackUserId: payload.userId ?? requesterId,
+	          userMap: payload.userMap,
+	          userMapKeyField: payload.userMapKeyField,
+	          userMapSourceFields: payload.userMapSourceFields,
+	          requiredFields,
+	          punchRequiredFields,
+	          groupSync: asyncGroupSync,
+	          groupIdMap: asyncGroupSync.autoCreate ? null : await loadAttendanceGroupIdMap(db, orgId),
+	          prepareOnly: true,
+	        })
+	        : null
+	      const rowScan = await rowSource.iterateRows((row, rowIndex) => {
+	        asyncMemberCollector?.addRow(row, rowIndex)
 	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
@@ -28565,33 +28578,8 @@ module.exports = {
 	      if (!rowScan.rowCount) {
 	        throw new Error('No rows to preview')
 	      }
-	      const asyncGroupSync = normalizeGroupSyncOptions(
-	        payload.groupSync,
-	        payload.ruleSetId,
-	        payload.timezone,
-	      )
-	      if (asyncGroupSync?.autoAssignMembers) {
-	        const asyncGroupNames = collectAttendanceGroupNames(assignmentRows)
-	        let asyncGroupIdMap = null
-	        if (asyncGroupNames.size && !asyncGroupSync.autoCreate) {
-	          asyncGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
-	        }
-	        const asyncMemberAssignments = collectImportGroupMemberAssignmentRows({
-	          rows: assignmentRows,
-	          fallbackUserId: payload.userId ?? requesterId,
-	          userMap: payload.userMap,
-	          userMapKeyField: payload.userMapKeyField,
-	          userMapSourceFields: payload.userMapSourceFields,
-	          requiredFields,
-	          punchRequiredFields,
-	          groupSync: asyncGroupSync,
-	          groupIdMap: asyncGroupIdMap,
-	          groupNames: asyncGroupNames,
-	          prepareOnly: true,
-	        })
-	        if (asyncMemberAssignments.length) {
-	          await assertImportGroupMemberAssignmentsActive(db, orgId, asyncMemberAssignments)
-	        }
+	      if (asyncMemberCollector) {
+	        await assertImportGroupMemberAssignmentsActive(db, orgId, asyncMemberCollector.assignments)
 	      }
 	      const csvWarnings = rowScan.warnings
 
@@ -29643,6 +29631,7 @@ module.exports = {
 	                groupRef: groupKey,
 	                userId: rowUserId,
 	                firstSourceOrdinal: sourceOrdinal,
+	                sourceOrdinals: [sourceOrdinal],
 	              })
 	            } else {
 	              const groupEntry = groupIdMap.get(groupKey)
@@ -30266,7 +30255,9 @@ module.exports = {
 		            continue
 		          }
 		          const key = `${effect.groupRef}:${effect.userId}`
-		          if (!memberEffects.has(key)) memberEffects.set(key, effect)
+		          const existing = memberEffects.get(key)
+		          if (existing) existing.sourceOrdinals.push(...effect.sourceOrdinals)
+		          else memberEffects.set(key, effect)
 		        }
 		        groupEffects.push(...memberEffects.values())
 		        const legacyRowSourceKind = resolveLegacyImportRowSourceKind({ payload, csvFileId })
@@ -43697,11 +43688,6 @@ module.exports = {
 	          }
 	          else if (typeof parsed.data.csvText === 'string') total = estimateCsvRowCount(parsed.data.csvText)
 
-	          const { rows: previewGateRows } = await resolveImportRows({
-	            payload: parsed.data,
-	            orgId,
-	            fallbackUserId: parsed.data.userId ?? requesterId,
-	          })
 	          const previewGroupSync = normalizeGroupSyncOptions(
 	            parsed.data.groupSync,
 	            parsed.data.ruleSetId,
@@ -43709,13 +43695,12 @@ module.exports = {
 	          )
 	          if (previewGroupSync?.autoAssignMembers) {
 	            const previewProfile = resolveImportProfileForPayload(parsed.data)
-	            const previewGroupNames = collectAttendanceGroupNames(previewGateRows)
-	            let previewGroupIdMap = null
-	            if (previewGroupNames.size && !previewGroupSync.autoCreate) {
-	              previewGroupIdMap = await loadAttendanceGroupIdMap(db, orgId)
-	            }
-	            const previewAssignments = collectImportGroupMemberAssignmentRows({
-	              rows: previewGateRows,
+	            const previewRowSource = await resolveAsyncImportRowSource({
+	              payload: parsed.data,
+	              orgId,
+	              fallbackUserId: parsed.data.userId ?? requesterId,
+	            })
+	            const previewCollector = createImportGroupMemberAssignmentCollector({
 	              fallbackUserId: parsed.data.userId ?? requesterId,
 	              userMap: parsed.data.userMap,
 	              userMapKeyField: parsed.data.userMapKeyField,
@@ -43723,13 +43708,11 @@ module.exports = {
 	              requiredFields: previewProfile?.requiredFields ?? [],
 	              punchRequiredFields: previewProfile?.punchRequiredFields ?? [],
 	              groupSync: previewGroupSync,
-	              groupIdMap: previewGroupIdMap,
-	              groupNames: previewGroupNames,
+	              groupIdMap: previewGroupSync.autoCreate ? null : await loadAttendanceGroupIdMap(db, orgId),
 	              prepareOnly: true,
 	            })
-	            if (previewAssignments.length) {
-	              await assertImportGroupMemberAssignmentsActive(db, orgId, previewAssignments)
-	            }
+	            await previewRowSource.iterateRows((row, rowIndex) => previewCollector.addRow(row, rowIndex))
+	            await assertImportGroupMemberAssignmentsActive(db, orgId, previewCollector.assignments)
 	          }
 
 	          const sanitizedPayload = sanitizeImportJobPayload({

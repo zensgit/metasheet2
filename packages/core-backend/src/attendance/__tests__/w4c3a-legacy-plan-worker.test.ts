@@ -7,7 +7,7 @@ import {
   sha256HexOfCanonicalJsonV1,
   type LegacyImportExecutionPlanManifestV1,
 } from '../w4c3a-legacy-execution-plan'
-import { AttendanceLegacyGroupEffectError } from '../w4c3a-legacy-plan-group-effects'
+import { AttendanceLegacyGroupEffectError, throwAttendanceRosterOrgMembershipError } from '../w4c3a-legacy-plan-group-effects'
 import {
   createAttendanceLegacyPlanWorkerV1,
   type AttendanceLegacyPlanWorkerCallbacksV1,
@@ -430,6 +430,32 @@ describe('createAttendanceLegacyPlanWorkerV1', () => {
         details,
       }),
     }])
+    expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('persists a visible membership failure for legacy provenance=%s', async (legacy) => {
+    const details = legacy ? [] : [{ code: 'USER_NOT_IN_ORG', rejectedCount: 1, indexes: [0] }]
+    const captured: Array<{ reason: string; detail?: string }> = []
+    const base = await callbacks({
+      recheckPreconditions: vi.fn(async (_trx, plan) => {
+        throwAttendanceRosterOrgMembershipError({
+          ...plan,
+          groupEffects: [{
+            kind: 'ensure_member', memberId: ITEM_ID, groupRef: RECORD_ID,
+            userId: USER_ID, membershipExistedAtPrepare: false,
+            ...(legacy ? {} : { sourceOrdinals: [0] }),
+          }],
+        }, [USER_ID])
+      }),
+      markPlanFailed: vi.fn(async (_trx, _jobId, _orgId, reason, errorDetail) => {
+        captured.push({ reason, detail: errorDetail })
+      }),
+    })
+    await expect(createAttendanceLegacyPlanWorkerV1(base.hooks).process(JOB_ID)).resolves.toEqual({ kind: 'failed', reason: 'USER_NOT_IN_ORG' })
+    expect(captured).toEqual([{ reason: 'USER_NOT_IN_ORG', detail: JSON.stringify({
+      code: 'USER_NOT_IN_ORG', message: 'Target user is not an active member of this org', details,
+    }) }])
+    expect(base.hooks.executeVerifiedPlan).not.toHaveBeenCalled()
     expect(base.hooks.storeCompletedResponseAndTerminalize).not.toHaveBeenCalled()
   })
 

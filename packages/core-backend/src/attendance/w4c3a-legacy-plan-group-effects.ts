@@ -85,7 +85,9 @@ export function throwAttendanceRosterOrgMembershipError(
   const indexes = rosterWriteIndexes(plan, rejectedUserIds)
   throw new AttendanceLegacyGroupEffectError('W4C3A_MEMBER_NOT_ACTIVE_IN_ORG', {
     status: 404,
-    details: [{
+    // Older V1 plans do not freeze member source rows. Keep the visible
+    // membership failure, but require re-prepare instead of guessing indexes.
+    details: indexes === null ? [] : [{
       code: 'USER_NOT_IN_ORG',
       rejectedCount: indexes.length,
       indexes,
@@ -96,22 +98,15 @@ export function throwAttendanceRosterOrgMembershipError(
 function rosterWriteIndexes(
   plan: VerifiedAttendanceLegacyPlanV1,
   rejected: readonly string[],
-): number[] {
+): number[] | null {
   const rejectedSet = new Set(rejected)
-  const indexes: number[] = []
-  for (const write of plan.recordWrites) {
-    if (!rejectedSet.has(String(write.userId ?? ''))) continue
-    for (const ordinal of write.sourceOrdinals ?? []) {
-      if (typeof ordinal === 'number') indexes.push(ordinal)
-    }
+  const indexes = new Set<number>()
+  for (const effect of plan.groupEffects) {
+    if (effect.kind !== 'ensure_member' || !rejectedSet.has(effect.userId)) continue
+    if (effect.sourceOrdinals === undefined) return null
+    for (const ordinal of effect.sourceOrdinals) indexes.add(ordinal)
   }
-  if (indexes.length > 0) return indexes
-  plan.groupEffects.forEach((effect, index) => {
-    if (effect.kind === 'ensure_member' && rejectedSet.has(effect.userId)) {
-      indexes.push(index)
-    }
-  })
-  return indexes
+  return [...indexes].sort((left, right) => left - right)
 }
 
 /**

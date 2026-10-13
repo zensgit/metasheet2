@@ -1054,6 +1054,7 @@ function validateAttendanceLegacyImportPlanDraftBeforeSqlV1(
         memberId: effectId,
         groupRef: deterministicValidationUuid(`group-ref:${index}`),
         userId: draft.userId,
+        ...(draft.sourceOrdinals === undefined ? {} : { sourceOrdinals: draft.sourceOrdinals }),
         membershipExistedAtPrepare: false,
       })
     }
@@ -1158,6 +1159,7 @@ export function materializeAttendanceLegacyGroupEffectsV1(
       memberId,
       groupRef: groupId,
       userId: draft.userId,
+      ...(draft.sourceOrdinals === undefined ? {} : { sourceOrdinals: draft.sourceOrdinals }),
       membershipExistedAtPrepare,
     })
     placements.push({

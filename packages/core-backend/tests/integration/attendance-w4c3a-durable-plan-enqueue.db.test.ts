@@ -5,6 +5,7 @@ import { Kysely, PostgresDialect } from 'kysely'
 import { Pool, type PoolClient } from 'pg'
 import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_attendance_segment_calculation_durable_storage'
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
+import { up as memberSourcesUp } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
 import { up as rosterOrgReasonUp } from '../../src/db/migrations/zzzz20260924180000_attendance_roster_org_gate_job_reason'
 import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import {
@@ -708,6 +709,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await w4c0Up(db)
     await w4c3aUp(db)
     await rosterOrgReasonUp(db)
+    await memberSourcesUp(db)
     await pool.query(
       `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5), ($6)`,
       [
@@ -2758,16 +2760,13 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     }
   }, 30000)
 
-  it('fails the real worker as USER_NOT_IN_ORG when a member is deactivated after enqueue', async () => {
+  it.each([true, false])('fails the real worker after deactivation with legacy provenance=%s', async (legacy) => {
     const groupId = crypto.randomUUID()
     const batchId = crypto.randomUUID()
-    const memberUser = `roster-deactivated-${run}`
-    const groupName = `Roster Gate ${run}`
-    await pool.query(`INSERT INTO users (id, is_active) VALUES ($1, true)`, [memberUser])
-    await pool.query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)`,
-      [memberUser, ORG],
-    )
+    const memberUser = TARGET_USER
+    const groupName = `Roster Gate ${run}-${legacy}`
+    await pool.query(`UPDATE users SET is_active = true WHERE id = $1`, [memberUser])
+    await pool.query(`UPDATE user_orgs SET is_active = true WHERE user_id = $1 AND org_id = $2`, [memberUser, ORG])
     await pool.query(
       `INSERT INTO attendance_groups (id, org_id, name, timezone) VALUES ($1, $2, $3, 'UTC')`,
       [groupId, ORG, groupName],
@@ -2784,6 +2783,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
             groupRef: groupName,
             userId: memberUser,
             firstSourceOrdinal: 0,
+            ...(legacy ? {} : { sourceOrdinals: [0] }),
           }],
         },
       ),
@@ -2817,7 +2817,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     expect(stored).toMatchObject({
       code: 'USER_NOT_IN_ORG',
       message: 'Target user is not an active member of this org',
-      details: [{
+      details: legacy ? [] : [{
         code: 'USER_NOT_IN_ORG',
         rejectedCount: 1,
         indexes: [0],

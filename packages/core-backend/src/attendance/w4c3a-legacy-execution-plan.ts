@@ -1157,6 +1157,8 @@ export type LegacyImportGroupEffectPlanV1 =
       readonly userId: string
       /** OD-W4C-58=(a): frozen prepare-time existence of (groupRef, userId). */
       readonly membershipExistedAtPrepare: boolean
+      /** Absent only in older V1 plans; exact source rows that assign this member. */
+      readonly sourceOrdinals?: readonly number[]
     }
 
 const GROUP_ENSURE_KEYS = [
@@ -1213,7 +1215,19 @@ export function parseLegacyImportGroupEffectPlanV1(
     })
   }
   if (value.kind === 'ensure_member') {
-    const obj = requireExactKeys(value, MEMBER_ENSURE_KEYS, code)
+    const hasSourceOrdinals = Object.prototype.hasOwnProperty.call(value, 'sourceOrdinals')
+    const obj = requireExactKeys(
+      value,
+      hasSourceOrdinals ? [...MEMBER_ENSURE_KEYS, 'sourceOrdinals'] : MEMBER_ENSURE_KEYS,
+      code,
+    )
+    let sourceOrdinals: readonly number[] | undefined
+    if (hasSourceOrdinals) {
+      if (!Array.isArray(obj.sourceOrdinals) || obj.sourceOrdinals.length === 0) fail(code)
+      const ordinals = obj.sourceOrdinals.map((ordinal) => requireNonNegInt(ordinal, code))
+      if (ordinals.some((ordinal, index) => index > 0 && ordinal <= ordinals[index - 1])) fail(code)
+      sourceOrdinals = Object.freeze(ordinals)
+    }
     return freezeDeep({
       kind: 'ensure_member' as const,
       memberId: requireUuid(obj.memberId, code),
@@ -1223,6 +1237,7 @@ export function parseLegacyImportGroupEffectPlanV1(
         obj.membershipExistedAtPrepare,
         code,
       ),
+      ...(sourceOrdinals === undefined ? {} : { sourceOrdinals }),
     })
   }
   fail(code)
@@ -1692,6 +1707,33 @@ function compareGroupEffects(
   return compareUtf8(groupEffectSortKey(left), groupEffectSortKey(right))
 }
 
+function assertMemberSourceOrdinals(
+  items: readonly LegacyImportItemPlanV1[],
+  recordWrites: readonly LegacyImportRecordWritePlanV1[],
+  groupEffects: readonly LegacyImportGroupEffectPlanV1[],
+  code: string,
+): void {
+  const writesById = new Map(recordWrites.map((write) => [write.recordWriteId, write]))
+  const writeIdByOrdinal = new Map<number, string>()
+  for (const write of recordWrites) {
+    for (const ordinal of write.sourceOrdinals) writeIdByOrdinal.set(ordinal, write.recordWriteId)
+  }
+  const assignedOrdinals = new Set<number>()
+  for (const effect of groupEffects) {
+    if (effect.kind !== 'ensure_member' || effect.sourceOrdinals === undefined) continue
+    for (const ordinal of effect.sourceOrdinals) {
+      const item = items[ordinal]
+      const write = item?.kind === 'apply' ? writesById.get(item.recordWriteRef) : undefined
+      if (
+        assignedOrdinals.has(ordinal) ||
+        !write || write.userId !== effect.userId ||
+        writeIdByOrdinal.get(ordinal) !== write.recordWriteId
+      ) fail(code)
+      assignedOrdinals.add(ordinal)
+    }
+  }
+}
+
 /**
  * Partition source ordinals into dense fixed-size chunks of at most 500 rows.
  * A recordWrite is stored in the chunk containing its first contributing source
@@ -1727,6 +1769,7 @@ export function chunkLegacyImportPlanSourceRowsV1(
   for (let i = 0; i < items.length; i += 1) {
     if (items[i].ordinal !== i) fail(code)
   }
+  assertMemberSourceOrdinals(items, input.recordWrites, input.groupEffects, code)
   const sourceRowCount = items.length
   const chunkCount = Math.ceil(sourceRowCount / maxRowsPerChunk)
 
@@ -1764,6 +1807,7 @@ export function chunkLegacyImportPlanSourceRowsV1(
     if (groupEffectFirstOrdinal.has(key)) fail(code)
     const first = placementByEffectId.get(key)
     if (first === undefined) fail(code)
+    if (ge.kind === 'ensure_member' && ge.sourceOrdinals !== undefined && first !== ge.sourceOrdinals[0]) fail(code)
     groupEffectFirstOrdinal.set(key, first)
   }
 
@@ -1878,12 +1922,17 @@ export function reassembleLegacyImportPlanChunksV1(
     for (const groupEffect of chunk.body.groupEffects) {
       const effectId = groupEffectIdentity(groupEffect)
       if (groupEffectIds.has(effectId)) fail(code)
+      if (groupEffect.kind === 'ensure_member' && groupEffect.sourceOrdinals !== undefined) {
+        const first = groupEffect.sourceOrdinals[0]
+        if (first < chunk.firstSourceOrdinal || first >= chunk.firstSourceOrdinal + chunk.sourceRowCount) fail(code)
+      }
       groupEffectIds.add(effectId)
       groupEffects.push(groupEffect)
     }
     expectedFirst += chunk.sourceRowCount
   }
   if (items.length !== expectedSourceRowCount) fail(code)
+  assertMemberSourceOrdinals(items, recordWrites, groupEffects, code)
   return freezeDeep({
     items: Object.freeze(items),
     recordWrites: Object.freeze(recordWrites.sort(compareRecordWrites)),

@@ -218,3 +218,29 @@ W4 冻结计划仍不重算组是否存在。`ensure_member` 在执行前条件�
 静态 `GET /api/attendance/import/template` 与 `template.csv` 不读组织数据，但走同一个权限包装器，因此也要求已认证组织；选择器不一致同样 404，响应里没有组织数据。
 
 未改、仍用 `getOrgId(req)` 的不是导入链：排班范围 actor、打卡、记录、薪资模板等。
+
+
+### 6.5 2026-10-13 修正：流式预览与冻结成员来源
+
+异步预览关闭 `autoAssignMembers` 时只用上传元数据入队，不读取/解析 CSV 内容。
+开启时仍在入队前拒绝不活跃成员，但使用现有流式行源和 CSV 行数上限，
+只保留有效成员候选、源行号和去重键；worker 同样不保存完整原始行。
+候选和去重集合的内存仍随其数量增长，不承诺恒定内存。
+
+V1 `ensure_member` 明确支持两个 closed variant：历史五键
+`kind/memberId/groupRef/userId/membershipExistedAtPrepare`，以及额外且仅额外包含
+`sourceOrdinals` 的六键变体。历史变体解析后不得补默认字段，原字节与摘要保持不变。
+新 prepare 必须收集真正分配成员的源行，按成员效果聚合，去重并按源序递增；
+无组行、无效行和重复 user/date 行不进入该数组。新数组非空，元素为
+`0..2147483647` 整数且严格递增，每项须对应同用户的 apply item/record write，
+不同成员效果不得重复占用同一源行；总长度因此不超过冻结 source row count。
+首项必须与该效果的 chunk placement 一致，保留既有每 chunk 最多 500 源行规则。
+TS 解析、chunk 构建和 worker 执行前重组执行完整来源关联与界限校验；数据库 closed-shape 函数验证新数组的非空、有界整数和严格递增形状。既有数据库来源关联约束保持不变，不新增逐 chunk 重扫整份 job 的延迟触发器。
+
+新字段参与现有 plan/chunk canonical digest；不重写历史摘要、不回填历史计划，
+不增加 manifest version。新迁移同时接受旧、新精确键集合；down 发现任何带该字段的
+持久化计划时拒绝降级。旧计划仍可正常执行；若被拒成员缺少冻结来源，整个错误的
+`details` 为 `[]`，顶层仍为可见 `USER_NOT_IN_ORG` 错误，job 仍失败且不可重开。
+调用方需重新 prepare 才能取得精确行号，禁止用 groupEffects 下标或同用户全部记录猜测。
+发布时必须先安装兼容 schema 并停止旧 worker，再切换新 producer/worker；旧 worker
+不支持六键变体，不能混跑。本 PR 的代码与验证不授权部署或启用。
