@@ -719,14 +719,14 @@ describe('ElearningAdminView', () => {
       },
     })
     const root = mountView()
-    await fillMinimum(root)
+    await flushUi()
     expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    const publish = root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement
-    expect(publish.disabled).toBe(true)
-    publish.click()
-    await flushUi(12)
+    // F11: media is off, so the legacy video form is not rendered at all (no greyed-out publish).
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
     expect(h.upload).not.toHaveBeenCalled()
     expect(h.publish).not.toHaveBeenCalled()
     expect(h.assign).not.toHaveBeenCalled()
@@ -748,10 +748,12 @@ describe('ElearningAdminView', () => {
       },
     })
     const disabled = mountView()
-    await fillMinimum(disabled)
+    await flushUi()
     expect(disabled.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('feature_disabled')
-    ;(disabled.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
-    await flushUi(12)
+    // F11: a failed capabilities check renders neither the video form nor the no-video notice.
+    expect(disabled.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(disabled.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(disabled.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
     expect(h.upload).not.toHaveBeenCalled()
     expect(h.publish).not.toHaveBeenCalled()
     expect(h.assign).not.toHaveBeenCalled()
@@ -1262,8 +1264,8 @@ describe('ElearningAdminView', () => {
     expect(root.querySelector('[data-testid="elearning-practice-admin-section"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled)
-      .toBe(true)
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
   })
 
   it('keeps content-only and mixed content capabilities independent from legacy V0.1 readiness', async () => {
@@ -1283,7 +1285,8 @@ describe('ElearningAdminView', () => {
     expect(contentOnly.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
     expect(contentOnly.querySelector('[data-testid="elearning-content-target-user"]')).toBeNull()
     expect(contentOnly.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((contentOnly.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(contentOnly.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(contentOnly.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
 
     app?.unmount()
     container?.remove()
@@ -1303,7 +1306,62 @@ describe('ElearningAdminView', () => {
     expect(mixed.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
     expect(mixed.querySelector('[data-testid="elearning-content-target-user"]')).not.toBeNull()
     expect(mixed.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((mixed.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(mixed.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(mixed.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
+  })
+
+  it('renders the video-course form only when the capabilities response has media on (F11)', async () => {
+    const on = mountView()
+    await flushUi()
+    expect(on.querySelector('[data-testid="elearning-admin-video-form"]')).not.toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-file"]')).not.toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent?.trim())
+      .toBe('上传一段 MP4、编写客观题后发布并直接指派给一名学员。')
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: true,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const off = mountView()
+    await flushUi()
+    expect(off.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-file"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
+      .toBe('本部署未开启视频，视频课程与正式考试不可用；可发布文章 / 外链课程。')
+    expect(off.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent).not.toContain('MP4')
+    // The article / external-link course section stays available on a no-video deployment.
+    expect(off.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+
+    useLocale().setLocale('en')
+    await nextTick()
+    expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
+      .toBe('Video is not enabled on this deployment, so video courses and formal exams are unavailable. You can publish article / external-link courses.')
+  })
+
+  it('renders neither the video form nor the no-video notice before or after a failed capabilities check', async () => {
+    const pending = deferred<never>()
+    h.capabilities.mockReturnValueOnce(pending.promise)
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
+    pending.reject(new ElearningApiError('request_failed', 500))
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('request_failed')
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
   })
 })
 

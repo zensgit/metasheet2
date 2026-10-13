@@ -15,6 +15,7 @@
 // true_false.
 
 import type { ElearningLearnerVideoStatus } from '../services/elearning'
+import type { ElearningAppInstallation } from '../services/elearningApp'
 
 export type ElearningLabelKey =
   // --- Learner chrome ---
@@ -198,6 +199,26 @@ export type ElearningLabelKey =
   | 'grading.scoreRequired'
   | 'grading.scoreInteger'
   | 'grading.clientIdUnavailable'
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  | 'learner.subtitleNoMedia'
+  | 'admin.subtitleNoMedia'
+  | 'admin.videoUnavailable'
+  | 'installation.title'
+  | 'installation.intro'
+  | 'installation.working'
+  | 'installation.statusNotInstalled'
+  | 'installation.statusInactive'
+  | 'installation.statusActive'
+  | 'installation.notificationsEnabled'
+  | 'installation.notificationsDisabled'
+  | 'installation.notificationsUnavailable'
+  | 'installation.notificationsOptIn'
+  | 'installation.saveNotifications'
+  | 'installation.install'
+  | 'installation.enable'
+  | 'installation.disable'
+  | 'installation.retry'
+  | 'installation.requestFailed'
   // --- Shared request errors ---
   | 'error.orgContextRequired'
   | 'error.orgContextStaleLogin'
@@ -505,6 +526,45 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     zh: '您的浏览器不支持提交评分所需的安全标识符。',
   },
 
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  'learner.subtitleNoMedia': {
+    en: 'Video is not enabled on this deployment, so there are no formal exams yet. You can study article / external-link courses and do practice.',
+    zh: '本部署未开启视频，暂无正式考试；可学习文章 / 外链课程并做练习。',
+  },
+  'admin.subtitleNoMedia': {
+    en: 'Publish article / external-link courses and manage the other learning resources below.',
+    zh: '在下方发布文章 / 外链课程，并管理其它学习资源。',
+  },
+  'admin.videoUnavailable': {
+    en: 'Video is not enabled on this deployment, so video courses and formal exams are unavailable. You can publish article / external-link courses.',
+    zh: '本部署未开启视频，视频课程与正式考试不可用；可发布文章 / 外链课程。',
+  },
+  'installation.title': { en: 'Cloud classroom installation', zh: '云课堂安装' },
+  'installation.intro': {
+    en: 'Installation starts disabled. Deployment flags remain the upper bound; storage is managed separately.',
+    zh: '安装后默认停用。可用功能以部署开关为上限；存储另行配置。',
+  },
+  'installation.working': { en: 'Working...', zh: '处理中…' },
+  'installation.statusNotInstalled': { en: 'Not installed', zh: '未安装' },
+  'installation.statusInactive': { en: 'Installed, not enabled', zh: '已安装未启用' },
+  'installation.statusActive': { en: 'Enabled', zh: '已启用' },
+  'installation.notificationsEnabled': { en: 'Notifications: enabled', zh: '学习通知：已开启' },
+  'installation.notificationsDisabled': { en: 'Notifications: disabled', zh: '学习通知：未开启' },
+  'installation.notificationsUnavailable': {
+    en: 'Notifications: not enabled on this deployment',
+    zh: '学习通知：本部署未开启',
+  },
+  'installation.notificationsOptIn': { en: 'Opt in to learning notifications', zh: '开启学习通知' },
+  'installation.saveNotifications': { en: 'Save notifications', zh: '保存通知设置' },
+  'installation.install': { en: 'Install', zh: '安装' },
+  'installation.enable': { en: 'Enable', zh: '启用' },
+  'installation.disable': { en: 'Disable', zh: '停用' },
+  'installation.retry': { en: 'Retry', zh: '重试' },
+  'installation.requestFailed': {
+    en: 'elearning_installation_request_failed',
+    zh: '云课堂安装状态请求失败，请重试。',
+  },
+
   'error.orgContextRequired': {
     en: 'This account does not have exactly one active organization: if you belong to none, ask an administrator to add you to one; if you belong to several, choose an organization above first.',
     zh: '当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。',
@@ -665,6 +725,22 @@ export function elearningVideoStatusLabel(
       return elearningLabel('video.inProgress', isZh)
     case 'not_started':
       return elearningLabel('video.notStarted', isZh)
+  }
+}
+
+// F12: the installation panel shows a word for each status the installation API can return
+// (services/elearningApp.ts parseElearningAppInstallation), never the raw status token.
+export function elearningInstallationStatusLabel(
+  status: ElearningAppInstallation['status'],
+  isZh: boolean,
+): string {
+  switch (status) {
+    case 'not-installed':
+      return elearningLabel('installation.statusNotInstalled', isZh)
+    case 'inactive':
+      return elearningLabel('installation.statusInactive', isZh)
+    case 'active':
+      return elearningLabel('installation.statusActive', isZh)
   }
 }
 

@@ -45,26 +45,39 @@ let app: App
 let root: HTMLDivElement
 async function flush() { for (let i = 0; i < 6; i++) { await Promise.resolve(); await nextTick() } }
 function button(text: string) { return Array.from(root.querySelectorAll('button')).find((node) => node.textContent?.trim() === text)! }
-async function mount() {
+async function mount(props: { notificationsAvailable?: boolean } = {}) {
   root = document.createElement('div')
   document.body.appendChild(root)
-  app = createApp(Section, { onChanged: mocks.changed })
+  app = createApp(Section, { onChanged: mocks.changed, ...props })
   app.mount(root)
   await flush()
 }
 beforeEach(() => { localStorage.clear(); Object.values(mocks).forEach((mock) => mock.mockReset()) })
-afterEach(() => { app?.unmount(); root?.remove(); localStorage.clear() })
+afterEach(() => { app?.unmount(); root?.remove(); localStorage.clear(); useLocale().setLocale('en') })
+
+const STATUS_LABELS = {
+  'not-installed': { en: 'Not installed', zh: '未安装' },
+  inactive: { en: 'Installed, not enabled', zh: '已安装未启用' },
+  active: { en: 'Enabled', zh: '已启用' },
+} as const
+function statusText(): string | undefined {
+  return root.querySelector('[data-testid="elearning-installation-status"]')?.textContent?.trim()
+}
+function notificationsText(): string | undefined {
+  return root.querySelector('[data-testid="elearning-installation-notifications"]')?.textContent?.trim()
+}
 
 function token(org: string): string {
   return `header.${btoa(JSON.stringify({ sub: 'same-user', tenantId: org }))}.signature`
 }
 
 describe('installation section', () => {
-  it.each(['not-installed', 'inactive', 'active'])('keeps %s state readonly for learners', async (status) => {
+  it.each(['not-installed', 'inactive', 'active'] as const)('keeps %s state readonly for learners', async (status) => {
     mocks.get.mockResolvedValue({ status, notificationsEnabled: false, canManage: false })
     await mount()
-    expect(root.textContent).toContain(status)
-    expect(root.textContent).toContain('Notifications: disabled')
+    // F12: a status word, never the raw API token.
+    expect(statusText()).toBe(STATUS_LABELS[status].en)
+    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
     expect(root.querySelectorAll('button, input')).toHaveLength(0)
     expect(mocks.install).not.toHaveBeenCalled()
     expect(mocks.update).not.toHaveBeenCalled()
@@ -74,7 +87,7 @@ describe('installation section', () => {
     localStorage.setItem('auth_token', token('org-a'))
     const principal = getAuthPrincipalKey()
     mocks.get.mockResolvedValueOnce({ status: action === 'Install' ? 'not-installed' : 'inactive', notificationsEnabled: false, canManage: true })
-    await mount()
+    await mount({ notificationsAvailable: true })
     if (action === 'Save notifications') { root.querySelector('input')!.click(); await flush() }
     localStorage.setItem('auth_token', token('org-b'))
     expect(getAuthPrincipalKey()).toBe(principal)
@@ -96,7 +109,7 @@ describe('installation section', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
     await flush()
     expect(root.querySelectorAll('button, input')).toHaveLength(0)
-    expect(root.textContent).toContain('Notifications: disabled')
+    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
     expect(mocks.get).toHaveBeenCalledTimes(2)
   })
 
@@ -119,18 +132,18 @@ describe('installation section', () => {
     await flush()
     expect(mocks.changed).not.toHaveBeenCalled()
     expect(root.querySelectorAll('button, input')).toHaveLength(0)
-    expect(root.textContent).toContain('inactive')
+    expect(statusText()).toBe('Installed, not enabled')
     expect(root.querySelector('[role="alert"]')).toBeNull()
     expect(mocks.get).toHaveBeenCalledTimes(2)
   })
   it('loads without writes, installs inactive, enables with notifications off, opts in and disables', async () => {
     mocks.get.mockResolvedValue({ status: 'not-installed', notificationsEnabled: false, canManage: true })
     mocks.install.mockResolvedValue({ status: 'inactive', notificationsEnabled: false, canManage: true })
-    await mount()
+    await mount({ notificationsAvailable: true })
     expect(mocks.install).not.toHaveBeenCalled()
     expect(mocks.update).not.toHaveBeenCalled()
     button('Install').click(); await flush()
-    expect(root.textContent).toContain('inactive')
+    expect(statusText()).toBe('Installed, not enabled')
     expect(root.querySelector('input')?.checked).toBe(false)
     mocks.update.mockResolvedValueOnce({ status: 'active', notificationsEnabled: false, canManage: true })
     button('Enable').click(); await flush()
@@ -156,6 +169,46 @@ describe('installation section', () => {
     expect(root.querySelector('input')).toBeNull()
     button('Retry').click(); await flush()
     expect(button('Enable')).toBeTruthy()
+  })
+  it.each(['inactive', 'active'] as const)('hides the notification opt-in on a %s installation when the deployment has notifications off', async (status) => {
+    mocks.get.mockResolvedValue({ status, notificationsEnabled: true, canManage: true })
+    await mount()
+    expect(root.querySelector('input[type="checkbox"]')).toBeNull()
+    expect(root.textContent).not.toContain('Opt in to learning notifications')
+    expect(root.textContent).not.toContain('Save notifications')
+    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
+    // Hiding the opt-in never rewrites it: Enable/Disable sends the stored value back unchanged.
+    mocks.update.mockResolvedValueOnce({ status: status === 'active' ? 'inactive' : 'active', notificationsEnabled: true, canManage: true })
+    button(status === 'active' ? 'Disable' : 'Enable').click(); await flush()
+    expect(mocks.update).toHaveBeenCalledTimes(1)
+    expect(mocks.update).toHaveBeenLastCalledWith(status !== 'active', true)
+    expect(root.querySelector('input[type="checkbox"]')).toBeNull()
+  })
+  it.each(['not-installed', 'inactive', 'active'] as const)('renders the %s panel in Chinese with no English text or raw status token', async (status) => {
+    useLocale().setLocale('zh-CN')
+    mocks.get.mockResolvedValue({ status, notificationsEnabled: false, canManage: true })
+    await mount()
+    const section = root.querySelector('[data-testid="elearning-installation"]')!
+    expect(section.getAttribute('aria-label')).toBe('云课堂安装')
+    expect(section.querySelector('h2')?.textContent).toBe('云课堂安装')
+    expect(statusText()).toBe(STATUS_LABELS[status].zh)
+    expect(notificationsText()).toBe('学习通知：本部署未开启')
+    expect(section.textContent).not.toMatch(/[A-Za-z]/)
+    const labels = Array.from(section.querySelectorAll('button')).map((node) => node.textContent?.trim())
+    expect(labels).toEqual(status === 'not-installed' ? ['安装'] : [status === 'active' ? '停用' : '启用'])
+  })
+  it('renders the opt-in in Chinese where the deployment can deliver notifications', async () => {
+    useLocale().setLocale('zh-CN')
+    mocks.get.mockResolvedValue({ status: 'active', notificationsEnabled: false, canManage: true })
+    await mount({ notificationsAvailable: true })
+    expect(root.querySelector('label')?.textContent?.trim()).toBe('开启学习通知')
+    expect(notificationsText()).toBe('学习通知：未开启')
+    expect(button('保存通知设置').disabled).toBe(true)
+    root.querySelector('input')!.click(); await flush()
+    mocks.update.mockResolvedValueOnce({ status: 'active', notificationsEnabled: true, canManage: true })
+    button('保存通知设置').click(); await flush()
+    expect(mocks.update).toHaveBeenLastCalledWith(true, true)
+    expect(notificationsText()).toBe('学习通知：已开启')
   })
   it('locks pending actions and ignores stale results after a session change', async () => {
     let resolve!: (value: unknown) => void
@@ -204,13 +257,19 @@ describe('installation section organization context', () => {
     expect(alert).not.toContain('ORG_CONTEXT_REQUIRED')
   })
 
-  it('keeps the closed token for the org code on another status and for codeless failures', async () => {
+  it('shows the closed failure as one fixed Chinese sentence for the org code on another status and for codeless failures', async () => {
     useLocale().setLocale('zh-CN')
     mocks.get.mockRejectedValueOnce(orgContextFailure(400))
     await mount()
-    expect(root.querySelector('[role="alert"]')?.textContent).toBe('elearning_installation_request_failed')
+    expect(root.querySelector('[role="alert"]')?.textContent).toBe('云课堂安装状态请求失败，请重试。')
     mocks.get.mockRejectedValueOnce(Object.assign(new Error('request_failed'), { status: 403, code: 'request_failed' }))
-    button('Retry').click(); await flush()
+    button('重试').click(); await flush()
+    const alert = root.querySelector('[role="alert"]')?.textContent ?? ''
+    expect(alert).toBe('云课堂安装状态请求失败，请重试。')
+    expect(alert).not.toContain('elearning_installation_request_failed')
+    expect(alert).not.toContain('request_failed')
+    useLocale().setLocale('en'); await flush()
+    // The closed token remains the English text (and the stored value behind both).
     expect(root.querySelector('[role="alert"]')?.textContent).toBe('elearning_installation_request_failed')
   })
 

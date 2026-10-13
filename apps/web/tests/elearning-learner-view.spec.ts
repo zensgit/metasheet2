@@ -1502,6 +1502,35 @@ describe('ElearningLearnerView', () => {
     expect(root.textContent).toContain('已完成')
   })
 
+  it('words the subtitle from the media capability: no exam promise on a no-video deployment (F11)', async () => {
+    const subtitle = (root: HTMLElement) => root.querySelector('[data-testid="elearning-learner-subtitle"]')?.textContent?.trim()
+    h.capabilities.mockResolvedValue(v01Capabilities())
+    const on = mountView()
+    await flushUi()
+    expect(subtitle(on)).toBe('学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。')
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: true, media: false }))
+    const off = mountView()
+    await flushUi()
+    expect(subtitle(off)).toBe('本部署未开启视频，暂无正式考试；可学习文章 / 外链课程并做练习。')
+    expect(subtitle(off)).not.toContain('视频完成后开放')
+    useLocale().setLocale('en')
+    await nextTick()
+    expect(subtitle(off)).toBe('Video is not enabled on this deployment, so there are no formal exams yet. You can study article / external-link courses and do practice.')
+
+    app?.unmount()
+    container?.remove()
+    useLocale().setLocale('zh-CN')
+    // A failed capabilities check (here: master flag off) keeps the original wording.
+    h.capabilities.mockResolvedValue(v01Capabilities({ enabled: false }, { media: false }))
+    const disabled = mountView()
+    await flushUi()
+    expect(disabled.querySelector('[data-testid="elearning-learner-status"]')?.textContent).toContain('feature_disabled')
+    expect(subtitle(disabled)).toBe('学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。')
+  })
+
   it('filters assessment variants only when assessment capability is unavailable', async () => {
     h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: false, media: false }))
     h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
