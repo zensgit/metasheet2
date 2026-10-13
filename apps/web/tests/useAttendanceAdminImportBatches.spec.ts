@@ -301,13 +301,13 @@ describe('useAttendanceAdminImportBatches', () => {
 
   it('loads batches and items', async () => {
     const apiFetch = vi.fn(async (input: string) => {
-      if (input === '/api/attendance/import/batches?orgId=org-1') {
+      if (input === '/api/attendance/import/batches?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createBatch({ id: 'batch-a' })] },
         })
       }
-      if (input === '/api/attendance/import/batches/batch-a/items') {
+      if (input === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createItem({ id: 'item-a', batchId: 'batch-a' })] },
@@ -328,7 +328,7 @@ describe('useAttendanceAdminImportBatches', () => {
   it('loads exact full-batch impact through paginated item fetch', async () => {
     const apiFetch = vi.fn(async (input: string) => {
       const url = String(input)
-      if (url === '/api/attendance/import/batches?orgId=org-1') {
+      if (url === '/api/attendance/import/batches?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: {
@@ -430,13 +430,13 @@ describe('useAttendanceAdminImportBatches', () => {
     const confirm = vi.fn(() => true)
     const apiFetch = vi.fn(async (input: string, init?: RequestInit) => {
       const url = String(input)
-      if (url === '/api/attendance/import/batches?orgId=org-1') {
+      if (url === '/api/attendance/import/batches?orgId=org-1&page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createBatch({ id: 'batch-a' })] },
         })
       }
-      if (url === '/api/attendance/import/batches/batch-a/items') {
+      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
         return jsonResponse(200, {
           ok: true,
           data: { items: [createItem({ id: 'item-a', batchId: 'batch-a', previewSnapshot: { foo: 'bar' } })] },
@@ -579,5 +579,48 @@ describe('useAttendanceAdminImportBatches', () => {
     await batches.loadImportBatches({ orgId: 'org-1' })
 
     expect(adminForbidden.value).toBe(true)
+  })
+
+  it('reads import batch and item totals and loads the next page', async () => {
+    const apiFetch = vi.fn(async (input: string) => {
+      const url = String(input)
+      if (url === '/api/attendance/import/batches?orgId=org-1&page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [createBatch({ id: 'batch-a' })], total: 2 },
+        })
+      }
+      if (url === '/api/attendance/import/batches?orgId=org-1&page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [createBatch({ id: 'batch-b' })], total: 2 },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=1&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [createItem({ id: 'item-1', batchId: 'batch-a' })], total: 2 },
+        })
+      }
+      if (url === '/api/attendance/import/batches/batch-a/items?page=2&pageSize=200') {
+        return jsonResponse(200, {
+          ok: true,
+          data: { items: [createItem({ id: 'item-2', batchId: 'batch-a' })], total: 2 },
+        })
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    const batches = useAttendanceAdminImportBatches({ apiFetch, tr })
+
+    await batches.loadImportBatches({ orgId: 'org-1' })
+    expect(batches.importBatchesCursor.total).toBe(2)
+    await batches.loadMoreImportBatches()
+    expect(batches.importBatches.value.map((item) => item.id)).toEqual(['batch-a', 'batch-b'])
+
+    await batches.loadImportBatchItems('batch-a')
+    expect(batches.importBatchItemsCursor.total).toBe(2)
+    await batches.loadMoreImportBatchItems()
+    expect(batches.importBatchItems.value.map((item) => item.id)).toEqual(['item-1', 'item-2'])
+    expect(batches.importBatchItemsCursor.page).toBe(2)
   })
 })

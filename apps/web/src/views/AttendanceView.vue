@@ -213,9 +213,15 @@
             :leave-types="leaveTypes"
             :can-quick-fill="canQuickFillLeave"
             :submitting="requestSubmitting"
+            :catalog-loaded="leaveTypes.length"
+            :catalog-total="adminListCursor.leaveTypes.total"
+            :catalog-page="adminListCursor.leaveTypes.page"
+            :catalog-last-page-count="adminListCursor.leaveTypes.lastPageCount"
+            :catalog-loading="leaveTypeLoading"
             @cancel="closeDedicatedLeaveRequestCard"
             @submit="submitDedicatedLeaveRequestCard"
             @quick-fill="applyLeaveQuickFill"
+            @load-more="loadMoreLeaveTypes"
           />
           <AttendanceEmployeeMakeupRequestCard
             v-if="makeupRequestCardOpen"
@@ -233,8 +239,14 @@
             :request-form="requestForm"
             :overtime-rules="overtimeRules"
             :submitting="requestSubmitting"
+            :catalog-loaded="overtimeRules.length"
+            :catalog-total="adminListCursor.overtimeRules.total"
+            :catalog-page="adminListCursor.overtimeRules.page"
+            :catalog-last-page-count="adminListCursor.overtimeRules.lastPageCount"
+            :catalog-loading="overtimeRuleLoading"
             @cancel="closeDedicatedOvertimeRequestCard"
             @submit="submitDedicatedOvertimeRequestCard"
+            @load-more="loadMoreOvertimeRules"
           />
           <AttendanceEmployeeShiftSwapRequestCard
             v-if="shiftSwapRequestCardOpen"
@@ -244,8 +256,13 @@
             :counterparty-assignments="counterpartyShiftSwapCardOptions"
             :has-published-assignments="shiftSwapAssignmentOptions.length > 0"
             :submitting="requestSubmitting"
+            :catalog-loaded="shiftSwapAssignments.length"
+            :catalog-total="adminListCursor.shiftSwapAssignments.total"
+            :catalog-page="adminListCursor.shiftSwapAssignments.page"
+            :catalog-last-page-count="adminListCursor.shiftSwapAssignments.lastPageCount"
             @cancel="closeDedicatedShiftSwapRequestCard"
             @submit="submitDedicatedShiftSwapRequestCard"
+            @load-more="loadMoreShiftSwapAssignmentOptions"
           />
         </template>
         <template #historyFilters>
@@ -767,6 +784,15 @@
                     : tr('Only published single-day regular assignments can be submitted for this first shift-swap slice.', '首版换班仅支持已发布的单日常规排班。')
                 }}
               </p>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="shift-swap-assignments"
+                :loaded="shiftSwapAssignments.length"
+                :total="adminListCursor.shiftSwapAssignments.total"
+                :page="adminListCursor.shiftSwapAssignments.page"
+                :last-page-count="adminListCursor.shiftSwapAssignments.lastPageCount"
+                @load-more="loadMoreShiftSwapAssignmentOptions"
+              />
             </template>
             <label v-if="isLeaveRequest" class="attendance__field" for="attendance-request-leave-type">
               <span>{{ tr('Leave type', '请假类型') }}</span>
@@ -784,6 +810,16 @@
               <small v-if="leaveTypes.length === 0" class="attendance__field-hint">
                 {{ tr('Ask an attendance admin to enable an active leave type before submitting leave requests.', '请联系考勤管理员启用可用请假类型后再提交请假申请。') }}
               </small>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="leave-types"
+                :loaded="leaveTypes.length"
+                :total="adminListCursor.leaveTypes.total"
+                :page="adminListCursor.leaveTypes.page"
+                :last-page-count="adminListCursor.leaveTypes.lastPageCount"
+                :loading="leaveTypeLoading"
+                @load-more="loadMoreLeaveTypes"
+              />
             </label>
             <label v-if="isOvertimeRequest" class="attendance__field" for="attendance-request-overtime-rule">
               <span>{{ tr('Overtime rule', '加班规则') }}</span>
@@ -801,6 +837,16 @@
               <small v-if="overtimeRules.length === 0" class="attendance__field-hint">
                 {{ tr('Ask an attendance admin to enable an active overtime rule before submitting overtime requests.', '请联系考勤管理员启用可用加班规则后再提交加班申请。') }}
               </small>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="overtime-rules"
+                :loaded="overtimeRules.length"
+                :total="adminListCursor.overtimeRules.total"
+                :page="adminListCursor.overtimeRules.page"
+                :last-page-count="adminListCursor.overtimeRules.lastPageCount"
+                :loading="overtimeRuleLoading"
+                @load-more="loadMoreOvertimeRules"
+              />
             </label>
             <div
               v-if="canQuickFillLeave"
@@ -1015,6 +1061,16 @@
                 </div>
               </li>
             </ul>
+            <AttendanceListTruncationNotice
+              :tr="tr"
+              list-key="shift-swap-requests"
+              :loaded="shiftSwapRequests.length"
+              :total="adminListCursor.shiftSwapRequests.total"
+              :page="adminListCursor.shiftSwapRequests.page"
+              :last-page-count="adminListCursor.shiftSwapRequests.lastPageCount"
+              :loading="shiftSwapLoading"
+              @load-more="loadMoreShiftSwapRequests"
+            />
           </div>
 
           <div class="attendance__requests" data-schedule-dispatch-requests>
@@ -2140,6 +2196,10 @@
                       <tbody>
                         <tr><th>{{ tr('Employees', '员工数') }}</th><td>{{ missedPunchReminderConfirm.employeeCount }}</td></tr>
                         <tr><th>{{ tr('Records', '记录数') }}</th><td>{{ missedPunchReminderConfirm.recordIds.length }}</td></tr>
+                        <tr>
+                          <th>{{ tr('Loaded / total candidates', '已加载 / 候选合计') }}</th>
+                          <td data-missed-punch-reminder-coverage>{{ missedPunchReminderCandidates.length }} / {{ adminListCursor.missedPunchCandidates.total }}</td>
+                        </tr>
                         <tr><th>{{ tr('Pending requests', '待审批申请') }}</th><td>{{ missedPunchReminderConfirm.pendingCount }}</td></tr>
                         <tr><th>{{ tr('Message', '提醒内容') }}</th><td>{{ missedPunchReminderConfirm.message }}</td></tr>
                       </tbody>
@@ -2165,6 +2225,9 @@
                             :checked="missedPunchReminderAllVisibleSelected"
                             :disabled="missedPunchReminderCandidates.length === 0"
                             data-missed-punch-reminder-select-all
+                            :aria-label="adminListCursor.missedPunchCandidates.total > missedPunchReminderCandidates.length
+                              ? tr('Select loaded rows', '全选已加载')
+                              : tr('Select all candidates', '全选候选')"
                             @change="setMissedPunchReminderVisibleSelection(($event.target as HTMLInputElement).checked)"
                           />
                         </th>
@@ -2192,6 +2255,23 @@
                     </tbody>
                   </table>
                 </div>
+                <p
+                  v-if="adminListCursor.missedPunchCandidates.total > missedPunchReminderCandidates.length"
+                  class="attendance__field-hint"
+                  data-missed-punch-reminder-select-loaded
+                >
+                  {{ tr('Select all applies to loaded rows only.', '全选只作用于已加载的行。') }}
+                </p>
+                <AttendanceListTruncationNotice
+                  :tr="tr"
+                  list-key="missed-punch-candidates"
+                  :loaded="missedPunchReminderCandidates.length"
+                  :total="adminListCursor.missedPunchCandidates.total"
+                  :page="adminListCursor.missedPunchCandidates.page"
+                  :last-page-count="adminListCursor.missedPunchCandidates.lastPageCount"
+                  :loading="missedPunchReminderLoading"
+                  @load-more="loadMoreMissedPunchReminderCandidates"
+                />
                 <div class="attendance__admin-actions">
                   <button
                     class="attendance__btn attendance__btn--primary"
@@ -6830,6 +6910,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="payroll-templates"
+                :loaded="payrollTemplates.length"
+                :total="adminListCursor.payrollTemplates.total"
+                :page="adminListCursor.payrollTemplates.page"
+                :last-page-count="adminListCursor.payrollTemplates.lastPageCount"
+                :loading="payrollTemplateLoading"
+                @load-more="loadMorePayrollTemplates"
+              />
             </div>
 
             <div
@@ -7092,6 +7182,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="payroll-cycles"
+                :loaded="payrollCycles.length"
+                :total="adminListCursor.payrollCycles.total"
+                :page="adminListCursor.payrollCycles.page"
+                :last-page-count="adminListCursor.payrollCycles.lastPageCount"
+                :loading="payrollCycleLoading"
+                @load-more="loadMorePayrollCycles"
+              />
             </div>
 
             <div
@@ -7208,6 +7308,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="leave-types-admin"
+                :loaded="leaveTypes.length"
+                :total="adminListCursor.leaveTypes.total"
+                :page="adminListCursor.leaveTypes.page"
+                :last-page-count="adminListCursor.leaveTypes.lastPageCount"
+                :loading="leaveTypeLoading"
+                @load-more="loadMoreLeaveTypes"
+              />
             </div>
 
             <div
@@ -7765,6 +7875,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="overtime-rules-admin"
+                :loaded="overtimeRules.length"
+                :total="adminListCursor.overtimeRules.total"
+                :page="adminListCursor.overtimeRules.page"
+                :last-page-count="adminListCursor.overtimeRules.lastPageCount"
+                :loading="overtimeRuleLoading"
+                @load-more="loadMoreOvertimeRules"
+              />
             </div>
 
             <div
@@ -8643,6 +8763,16 @@
                   <small class="attendance__field-hint">
                     {{ tr('Separate shift IDs with commas. Use the quick append buttons below to build the sequence in order, and repeat a shift if the cycle needs duplicates.', '请用英文逗号分隔班次 ID。可用下方快捷按钮按顺序拼接，如需重复班次可重复点击。') }}
                   </small>
+                  <AttendanceListTruncationNotice
+                    :tr="tr"
+                    list-key="shift-catalog"
+                    :loaded="shifts.length"
+                    :total="adminListCursor.shifts.total"
+                    :page="adminListCursor.shifts.page"
+                    :last-page-count="adminListCursor.shifts.lastPageCount"
+                    :loading="shiftLoading"
+                    @load-more="loadMoreShifts"
+                  />
                   <div v-if="shifts.length > 0" class="attendance__sequence-builder">
                     <span class="attendance__field-hint">{{ tr('Quick append from existing shifts', '从已有班次快捷拼接') }}</span>
                     <div class="attendance__sequence-builder-actions">
@@ -8745,6 +8875,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="rotation-rules"
+                :loaded="rotationRules.length"
+                :total="adminListCursor.rotationRules.total"
+                :page="adminListCursor.rotationRules.page"
+                :last-page-count="adminListCursor.rotationRules.lastPageCount"
+                :loading="rotationRuleLoading"
+                @load-more="loadMoreRotationRules"
+              />
             </div>
 
             <div
@@ -9036,6 +9176,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="rotation-assignments"
+                :loaded="rotationAssignments.length"
+                :total="adminListCursor.rotationAssignments.total"
+                :page="adminListCursor.rotationAssignments.page"
+                :last-page-count="adminListCursor.rotationAssignments.lastPageCount"
+                :loading="rotationAssignmentLoading"
+                @load-more="loadMoreRotationAssignments"
+              />
             </div>
 
             <div
@@ -9169,6 +9319,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="shifts"
+                :loaded="shifts.length"
+                :total="adminListCursor.shifts.total"
+                :page="adminListCursor.shifts.page"
+                :last-page-count="adminListCursor.shifts.lastPageCount"
+                :loading="shiftLoading"
+                @load-more="loadMoreShifts"
+              />
             </div>
 
             <div
@@ -9722,6 +9882,16 @@
                   </tbody>
                 </table>
               </div>
+              <AttendanceListTruncationNotice
+                :tr="tr"
+                list-key="assignments"
+                :loaded="assignments.length"
+                :total="adminListCursor.assignments.total"
+                :page="adminListCursor.assignments.page"
+                :last-page-count="adminListCursor.assignments.lastPageCount"
+                :loading="assignmentLoading"
+                @load-more="loadMoreAssignments"
+              />
             </div>
 
             <div
@@ -10370,6 +10540,15 @@ import {
   type CalendarPolicyOverrideWire,
 } from './attendance/attendanceCalendarPolicyOverrides'
 import { useAttendanceAdminImportBatches } from './attendance/useAttendanceAdminImportBatches'
+import AttendanceListTruncationNotice from './attendance/AttendanceListTruncationNotice.vue'
+import {
+  attendanceAdminListPageParams,
+  attendanceListAppendRequested,
+  beginAttendanceAdminListRequest,
+  createAttendanceAdminListCursor,
+  resetAttendanceAdminListCursor,
+  storeAttendanceAdminListPage,
+} from './attendance/attendanceAdminListPage'
 import { normalizeImportPayloadColumns } from './attendance/attendanceImportPayload'
 import {
   buildImportBackupExportQuery,
@@ -12178,6 +12357,22 @@ const recordTimelineErrorById = ref<Record<string, string>>({})
 const recordTimelineSupported = ref<boolean | null>(null)
 const requests = ref<AttendanceRequest[]>([])
 const shiftSwapRequests = ref<AttendanceShiftSwapRequest[]>([])
+const adminListCursor = reactive({
+  shiftSwapRequests: createAttendanceAdminListCursor(),
+  shiftSwapAssignments: createAttendanceAdminListCursor(),
+  missedPunchCandidates: createAttendanceAdminListCursor(),
+  leaveTypes: createAttendanceAdminListCursor(),
+  overtimeRules: createAttendanceAdminListCursor(),
+  payrollTemplates: createAttendanceAdminListCursor(),
+  payrollCycles: createAttendanceAdminListCursor(),
+  rotationRules: createAttendanceAdminListCursor(),
+  rotationAssignments: createAttendanceAdminListCursor(),
+  shifts: createAttendanceAdminListCursor(),
+  assignments: createAttendanceAdminListCursor(),
+})
+let leaveTypesActiveOnly = false
+let overtimeRulesActiveOnly = false
+let missedPunchReminderLoadedQuery = { from: '', to: '', userId: '' }
 const shiftSwapLoading = ref(false)
 const scheduleDispatchRequests = ref<AttendanceScheduleDispatchRequest[]>([])
 const scheduleDispatchRequestsTotal = ref(0)
@@ -15138,10 +15333,14 @@ const {
   importBatchSelectedId,
   importBatchSnapshot,
   importBatches,
+  importBatchesCursor,
+  importBatchItemsCursor,
   importLoading: importBatchLoading,
   loadFullImportBatchImpact,
   loadImportBatchItems,
   loadImportBatches,
+  loadMoreImportBatches,
+  loadMoreImportBatchItems,
   rollbackImportBatch,
   toggleImportBatchSnapshot,
 } = useAttendanceAdminImportBatches({
@@ -15165,13 +15364,21 @@ function rollbackAttendanceImportBatch(batchId: string, confirmMessage?: string)
 const attendanceImportBatchSectionBindings = {
   importBatchLoading,
   importBatches,
+  importBatchesTotal: computed(() => importBatchesCursor.total),
+  importBatchesPage: computed(() => importBatchesCursor.page),
+  importBatchesLastPageCount: computed(() => importBatchesCursor.lastPageCount),
   importBatchImpactLoading,
   importBatchImpactReport,
   importBatchItems,
+  importBatchItemsTotal: computed(() => importBatchItemsCursor.total),
+  importBatchItemsPage: computed(() => importBatchItemsCursor.page),
+  importBatchItemsLastPageCount: computed(() => importBatchItemsCursor.lastPageCount),
   importBatchSelectedId,
   importBatchSnapshot,
   loadFullImportBatchImpact,
   reloadImportBatches: reloadAttendanceImportBatches,
+  loadMoreImportBatches,
+  loadMoreImportBatchItems,
   loadImportBatchItems,
   rollbackImportBatch: rollbackAttendanceImportBatch,
   exportImportBatchItemsCsv,
@@ -22817,29 +23024,44 @@ async function loadScheduleDispatchRequests() {
   }
 }
 
-async function loadShiftSwapRequests() {
+async function loadShiftSwapRequests(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.shiftSwapRequests, shiftSwapRequests.value.length, append)
+  if (page === null) return
   shiftSwapLoading.value = true
   try {
     const query = buildQuery({
       orgId: normalizedOrgId(),
       userId: normalizedUserId(),
-      page: '1',
-      pageSize: '20',
+      ...attendanceAdminListPageParams(page),
     })
     const response = await apiFetch(`/api/attendance/shift-swap-requests?${query.toString()}`)
     if (response.status === 403 || response.status === 404) {
-      shiftSwapRequests.value = []
+      if (!append) {
+        shiftSwapRequests.value = []
+        resetAttendanceAdminListCursor(adminListCursor.shiftSwapRequests)
+      }
       return
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
       throw createApiError(response, data, tr('Failed to load shift-swap requests', '加载换班申请失败'))
     }
-    shiftSwapRequests.value = (Array.isArray(data.data?.items) ? data.data.items : [])
+    const incoming = (Array.isArray(data.data?.items) ? data.data.items : [])
       .map((item: Record<string, any>) => normalizeShiftSwapRequest(item))
       .filter((item: AttendanceShiftSwapRequest | null): item is AttendanceShiftSwapRequest => Boolean(item))
+    shiftSwapRequests.value = storeAttendanceAdminListPage(adminListCursor.shiftSwapRequests, shiftSwapRequests.value, {
+      incoming,
+      payload: data.data,
+      page,
+      append,
+      idOf: (item) => item.requestId,
+    })
   } catch (error) {
-    shiftSwapRequests.value = []
+    if (!append) {
+      shiftSwapRequests.value = []
+      resetAttendanceAdminListCursor(adminListCursor.shiftSwapRequests)
+    }
     setStatusFromErrorWithContext(
       error,
       tr('Failed to load shift-swap requests', '加载换班申请失败'),
@@ -22851,29 +23073,54 @@ async function loadShiftSwapRequests() {
   }
 }
 
-async function loadShiftSwapAssignmentOptions() {
+function loadMoreShiftSwapRequests() {
+  return loadShiftSwapRequests({ append: true })
+}
+
+async function loadShiftSwapAssignmentOptions(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.shiftSwapAssignments, shiftSwapAssignments.value.length, append)
+  if (page === null) return
   try {
     const query = buildQuery({
       orgId: normalizedOrgId(),
       publishStatus: 'published',
-      page: '1',
-      pageSize: '200',
+      ...attendanceAdminListPageParams(page),
     })
     const response = await apiFetch(`/api/attendance/assignments?${query.toString()}`)
     if (response.status === 403 || response.status === 404) {
-      shiftSwapAssignments.value = []
+      if (!append) {
+        shiftSwapAssignments.value = []
+        resetAttendanceAdminListCursor(adminListCursor.shiftSwapAssignments)
+      }
       return
     }
     const data = await response.json().catch(() => null)
     if (!response.ok || !data?.ok) {
-      shiftSwapAssignments.value = []
+      if (!append) {
+        shiftSwapAssignments.value = []
+        resetAttendanceAdminListCursor(adminListCursor.shiftSwapAssignments)
+      }
       return
     }
-    shiftSwapAssignments.value = Array.isArray(data.data?.items) ? data.data.items : []
+    shiftSwapAssignments.value = storeAttendanceAdminListPage(adminListCursor.shiftSwapAssignments, shiftSwapAssignments.value, {
+      incoming: Array.isArray(data.data?.items) ? data.data.items : [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceAssignmentItem) => item.assignment?.id || '',
+    })
     void resolveAttendanceAssignmentUserLabels()
   } catch {
-    shiftSwapAssignments.value = []
+    if (!append) {
+      shiftSwapAssignments.value = []
+      resetAttendanceAdminListCursor(adminListCursor.shiftSwapAssignments)
+    }
   }
+}
+
+function loadMoreShiftSwapAssignmentOptions() {
+  return loadShiftSwapAssignmentOptions({ append: true })
 }
 
 async function loadFocusedAttendanceRequestBestEffort(): Promise<AttendanceRequest | null> {
@@ -22911,20 +23158,33 @@ watch(missedPunchReminderCandidates, () => {
   missedPunchReminderSelectedIds.value = missedPunchReminderSelectedIds.value.filter(id => valid.has(id))
 })
 
-async function loadMissedPunchReminderCandidates(): Promise<void> {
+async function loadMissedPunchReminderCandidates(options: { append?: boolean } | Event = {}): Promise<void> {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(
+    adminListCursor.missedPunchCandidates,
+    missedPunchReminderCandidates.value.length,
+    append,
+  )
+  if (page === null) return
+  if (!append) {
+    missedPunchReminderLoadedQuery = {
+      from: missedPunchReminderForm.from,
+      to: missedPunchReminderForm.to,
+      userId: missedPunchReminderForm.userId.trim(),
+    }
+    missedPunchReminderResult.value = null
+    missedPunchReminderConfirm.open = false
+    missedPunchReminderSelectedIds.value = []
+  }
   missedPunchReminderLoading.value = true
   missedPunchReminderError.value = ''
-  missedPunchReminderResult.value = null
-  missedPunchReminderConfirm.open = false
-  missedPunchReminderSelectedIds.value = []
   try {
     const query = buildQuery({
       orgId: normalizedOrgId(),
-      from: missedPunchReminderForm.from,
-      to: missedPunchReminderForm.to,
-      userId: missedPunchReminderForm.userId.trim() || undefined,
-      page: '1',
-      pageSize: '50',
+      from: missedPunchReminderLoadedQuery.from,
+      to: missedPunchReminderLoadedQuery.to,
+      userId: missedPunchReminderLoadedQuery.userId || undefined,
+      ...attendanceAdminListPageParams(page),
     })
     const queryString = query.toString()
     const response = await apiFetch(`/api/attendance/manual-missed-punch-reminders/candidates${queryString ? `?${queryString}` : ''}`)
@@ -22932,19 +23192,40 @@ async function loadMissedPunchReminderCandidates(): Promise<void> {
     if (!response.ok || !data.ok) {
       throw new Error(readErrorMessage(data, tr('Failed to load missed-punch candidates', '加载欠卡候选失败')))
     }
-    const items = Array.isArray(data.data?.items)
+    const incoming = Array.isArray(data.data?.items)
       ? data.data.items as MissedPunchReminderCandidate[]
       : []
-    missedPunchReminderCandidates.value = items
-    missedPunchReminderSelectedIds.value = items
-      .filter(item => item.selectedByDefault !== false)
+    const previousIds = new Set(missedPunchReminderCandidates.value.map(item => item.recordId))
+    missedPunchReminderCandidates.value = storeAttendanceAdminListPage(
+      adminListCursor.missedPunchCandidates,
+      missedPunchReminderCandidates.value,
+      {
+        incoming,
+        payload: data.data,
+        page,
+        append,
+        idOf: (item) => item.recordId,
+      },
+    )
+    const defaultIds = missedPunchReminderCandidates.value
+      .filter(item => item.selectedByDefault !== false && (!append || !previousIds.has(item.recordId)))
       .map(item => item.recordId)
+    missedPunchReminderSelectedIds.value = append
+      ? [...missedPunchReminderSelectedIds.value, ...defaultIds]
+      : defaultIds
   } catch (error: any) {
-    missedPunchReminderCandidates.value = []
+    if (!append) {
+      missedPunchReminderCandidates.value = []
+      resetAttendanceAdminListCursor(adminListCursor.missedPunchCandidates)
+    }
     missedPunchReminderError.value = readErrorMessage(error, tr('Failed to load missed-punch candidates', '加载欠卡候选失败'))
   } finally {
     missedPunchReminderLoading.value = false
   }
+}
+
+function loadMoreMissedPunchReminderCandidates() {
+  return loadMissedPunchReminderCandidates({ append: true })
 }
 
 function toggleMissedPunchReminderSelection(recordId: string, checked: boolean): void {
@@ -25396,10 +25677,18 @@ function editLeaveType(item: AttendanceLeaveType) {
   leaveTypeForm.isActive = item.isActive
 }
 
-async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
+async function loadLeaveTypes(options: { activeOnly?: boolean; append?: boolean } = {}) {
+  const append = attendanceListAppendRequested(options)
+  if (!append) leaveTypesActiveOnly = options.activeOnly === true
+  const page = beginAttendanceAdminListRequest(adminListCursor.leaveTypes, leaveTypes.value.length, append)
+  if (page === null) return
   leaveTypeLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), isActive: options.activeOnly ? 'true' : undefined })
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      isActive: leaveTypesActiveOnly ? 'true' : undefined,
+      ...attendanceAdminListPageParams(page),
+    })
     const response = await apiFetch(`/api/attendance/leave-types?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -25410,8 +25699,14 @@ async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
       throw new Error(readErrorMessage(data, tr('Failed to load leave types', '加载请假类型失败')))
     }
     adminForbidden.value = false
-    leaveTypes.value = data.data.items || []
-    if (!requestForm.leaveTypeId && leaveTypes.value.length > 0) {
+    leaveTypes.value = storeAttendanceAdminListPage(adminListCursor.leaveTypes, leaveTypes.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceLeaveType) => item.id,
+    })
+    if (!append && !requestForm.leaveTypeId && leaveTypes.value.length > 0) {
       requestForm.leaveTypeId = leaveTypes.value[0].id
     }
   } catch (error: any) {
@@ -25419,6 +25714,10 @@ async function loadLeaveTypes(options: { activeOnly?: boolean } = {}) {
   } finally {
     leaveTypeLoading.value = false
   }
+}
+
+function loadMoreLeaveTypes() {
+  return loadLeaveTypes({ append: true })
 }
 
 // 年假/法定假 L5a: read-only annual-leave balance/ledger for one user (admin console). Calls the L5a read endpoint
@@ -26609,10 +26908,18 @@ function editOvertimeRule(item: AttendanceOvertimeRule) {
   overtimeRuleForm.isActive = item.isActive
 }
 
-async function loadOvertimeRules(options: { activeOnly?: boolean } = {}) {
+async function loadOvertimeRules(options: { activeOnly?: boolean; append?: boolean } = {}) {
+  const append = attendanceListAppendRequested(options)
+  if (!append) overtimeRulesActiveOnly = options.activeOnly === true
+  const page = beginAttendanceAdminListRequest(adminListCursor.overtimeRules, overtimeRules.value.length, append)
+  if (page === null) return
   overtimeRuleLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId(), isActive: options.activeOnly ? 'true' : undefined })
+    const query = buildQuery({
+      orgId: normalizedOrgId(),
+      isActive: overtimeRulesActiveOnly ? 'true' : undefined,
+      ...attendanceAdminListPageParams(page),
+    })
     const response = await apiFetch(`/api/attendance/overtime-rules?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -26623,8 +26930,14 @@ async function loadOvertimeRules(options: { activeOnly?: boolean } = {}) {
       throw new Error(readErrorMessage(data, tr('Failed to load overtime rules', '加载加班规则失败')))
     }
     adminForbidden.value = false
-    overtimeRules.value = data.data.items || []
-    if (!requestForm.overtimeRuleId && overtimeRules.value.length > 0) {
+    overtimeRules.value = storeAttendanceAdminListPage(adminListCursor.overtimeRules, overtimeRules.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceOvertimeRule) => item.id,
+    })
+    if (!append && !requestForm.overtimeRuleId && overtimeRules.value.length > 0) {
       requestForm.overtimeRuleId = overtimeRules.value[0].id
     }
   } catch (error: any) {
@@ -26632,6 +26945,10 @@ async function loadOvertimeRules(options: { activeOnly?: boolean } = {}) {
   } finally {
     overtimeRuleLoading.value = false
   }
+}
+
+function loadMoreOvertimeRules() {
+  return loadOvertimeRules({ append: true })
 }
 
 async function saveOvertimeRule() {
@@ -27373,10 +27690,13 @@ function editRotationRule(rule: AttendanceRotationRule) {
   rotationRuleForm.isActive = rule.isActive
 }
 
-async function loadRotationRules() {
+async function loadRotationRules(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.rotationRules, rotationRules.value.length, append)
+  if (page === null) return
   rotationRuleLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     const response = await apiFetch(`/api/attendance/rotation-rules?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -27387,8 +27707,14 @@ async function loadRotationRules() {
       throw new Error(readErrorMessage(data, tr('Failed to load rotation rules', '加载轮班规则失败')))
     }
     adminForbidden.value = false
-    rotationRules.value = data.data.items || []
-    if (!rotationAssignmentForm.rotationRuleId && rotationRules.value.length > 0) {
+    rotationRules.value = storeAttendanceAdminListPage(adminListCursor.rotationRules, rotationRules.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceRotationRule) => item.id,
+    })
+    if (!append && !rotationAssignmentForm.rotationRuleId && rotationRules.value.length > 0) {
       rotationAssignmentForm.rotationRuleId = rotationRules.value[0].id
     }
   } catch (error: any) {
@@ -27396,6 +27722,10 @@ async function loadRotationRules() {
   } finally {
     rotationRuleLoading.value = false
   }
+}
+
+function loadMoreRotationRules() {
+  return loadRotationRules({ append: true })
 }
 
 async function saveRotationRule() {
@@ -27483,10 +27813,13 @@ function editRotationAssignment(item: AttendanceRotationAssignmentItem) {
   rotationAssignmentForm.isActive = item.assignment.isActive
 }
 
-async function loadRotationAssignments() {
+async function loadRotationAssignments(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.rotationAssignments, rotationAssignments.value.length, append)
+  if (page === null) return
   rotationAssignmentLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     if (rotationAssignmentPublishStatusFilter.value !== 'all') {
       query.set('publishStatus', rotationAssignmentPublishStatusFilter.value)
     }
@@ -27500,7 +27833,13 @@ async function loadRotationAssignments() {
       throw new Error(readErrorMessage(data, tr('Failed to load rotation assignments', '加载轮班分配失败')))
     }
     adminForbidden.value = false
-    rotationAssignments.value = data.data.items || []
+    rotationAssignments.value = storeAttendanceAdminListPage(adminListCursor.rotationAssignments, rotationAssignments.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceRotationAssignmentItem) => item.assignment.id,
+    })
     reconcileSelectedDraftRotationAssignmentIds()
     void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
@@ -27508,6 +27847,10 @@ async function loadRotationAssignments() {
   } finally {
     rotationAssignmentLoading.value = false
   }
+}
+
+function loadMoreRotationAssignments() {
+  return loadRotationAssignments({ append: true })
 }
 
 async function saveRotationAssignment(options: { asDraft?: boolean } = {}) {
@@ -27694,10 +28037,13 @@ function editShift(shift: AttendanceShift) {
   shiftForm.workingDays = shift.workingDays.join(',')
 }
 
-async function loadShifts() {
+async function loadShifts(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.shifts, shifts.value.length, append)
+  if (page === null) return
   shiftLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     const response = await apiFetch(`/api/attendance/shifts?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -27708,14 +28054,20 @@ async function loadShifts() {
       throw new Error(readErrorMessage(data, tr('Failed to load shifts', '加载班次失败')))
     }
     adminForbidden.value = false
-    shifts.value = data.data.items || []
-    if (!assignmentForm.shiftId && shifts.value.length > 0) {
+    shifts.value = storeAttendanceAdminListPage(adminListCursor.shifts, shifts.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceShift) => item.id,
+    })
+    if (!append && !assignmentForm.shiftId && shifts.value.length > 0) {
       assignmentForm.shiftId = shifts.value[0].id
     }
-    if (!temporaryAssignmentForm.shiftId && shifts.value.length > 0) {
+    if (!append && !temporaryAssignmentForm.shiftId && shifts.value.length > 0) {
       temporaryAssignmentForm.shiftId = shifts.value[0].id
     }
-    if (!attendanceGroupFixedSchedulePreviewForm.shiftId && shifts.value.length > 0) {
+    if (!append && !attendanceGroupFixedSchedulePreviewForm.shiftId && shifts.value.length > 0) {
       attendanceGroupFixedSchedulePreviewForm.shiftId = shifts.value[0].id
     }
   } catch (error: any) {
@@ -27723,6 +28075,10 @@ async function loadShifts() {
   } finally {
     shiftLoading.value = false
   }
+}
+
+function loadMoreShifts() {
+  return loadShifts({ append: true })
 }
 
 async function saveShift() {
@@ -27840,10 +28196,13 @@ function editAssignment(item: AttendanceAssignmentItem) {
   assignmentForm.slotIndex = assignmentSlotIndex(item.assignment)
 }
 
-async function loadAssignments() {
+async function loadAssignments(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.assignments, assignments.value.length, append)
+  if (page === null) return
   assignmentLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     if (assignmentPublishStatusFilter.value !== 'all') {
       query.set('publishStatus', assignmentPublishStatusFilter.value)
     }
@@ -27857,7 +28216,13 @@ async function loadAssignments() {
       throw new Error(readErrorMessage(data, tr('Failed to load assignments', '加载分配失败')))
     }
     adminForbidden.value = false
-    assignments.value = data.data.items || []
+    assignments.value = storeAttendanceAdminListPage(adminListCursor.assignments, assignments.value, {
+      incoming: data.data?.items || [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendanceAssignmentItem) => item.assignment.id,
+    })
     reconcileSelectedDraftAssignmentIds()
     void resolveAttendanceAssignmentUserLabels()
   } catch (error: any) {
@@ -27865,6 +28230,10 @@ async function loadAssignments() {
   } finally {
     assignmentLoading.value = false
   }
+}
+
+function loadMoreAssignments() {
+  return loadAssignments({ append: true })
 }
 
 async function saveAssignment(options: { asDraft?: boolean } = {}) {
@@ -29541,10 +29910,13 @@ function editPayrollTemplate(item: AttendancePayrollTemplate) {
   payrollTemplateForm.summaryFieldCodes = extractPayrollSummaryFieldCodes(item.config)
 }
 
-async function loadPayrollTemplates() {
+async function loadPayrollTemplates(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.payrollTemplates, payrollTemplates.value.length, append)
+  if (page === null) return
   payrollTemplateLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     const response = await apiFetch(`/api/attendance/payroll-templates?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -29555,12 +29927,22 @@ async function loadPayrollTemplates() {
       throw new Error(readErrorMessage(data, tr('Failed to load payroll templates', '加载计薪模板失败')))
     }
     adminForbidden.value = false
-    payrollTemplates.value = data.data?.items ?? []
+    payrollTemplates.value = storeAttendanceAdminListPage(adminListCursor.payrollTemplates, payrollTemplates.value, {
+      incoming: data.data?.items ?? [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendancePayrollTemplate) => item.id,
+    })
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load payroll templates', '加载计薪模板失败')), 'error')
   } finally {
     payrollTemplateLoading.value = false
   }
+}
+
+function loadMorePayrollTemplates() {
+  return loadPayrollTemplates({ append: true })
 }
 
 async function savePayrollTemplate() {
@@ -29668,10 +30050,13 @@ function editPayrollCycle(item: AttendancePayrollCycle) {
   payrollCycleSummary.value = null
 }
 
-async function loadPayrollCycles() {
+async function loadPayrollCycles(options: { append?: boolean } | Event = {}) {
+  const append = attendanceListAppendRequested(options)
+  const page = beginAttendanceAdminListRequest(adminListCursor.payrollCycles, payrollCycles.value.length, append)
+  if (page === null) return
   payrollCycleLoading.value = true
   try {
-    const query = buildQuery({ orgId: normalizedOrgId() })
+    const query = buildQuery({ orgId: normalizedOrgId(), ...attendanceAdminListPageParams(page) })
     const response = await apiFetch(`/api/attendance/payroll-cycles?${query.toString()}`)
     if (response.status === 403) {
       adminForbidden.value = true
@@ -29682,12 +30067,22 @@ async function loadPayrollCycles() {
       throw new Error(readErrorMessage(data, tr('Failed to load payroll cycles', '加载计薪周期失败')))
     }
     adminForbidden.value = false
-    payrollCycles.value = data.data?.items ?? []
+    payrollCycles.value = storeAttendanceAdminListPage(adminListCursor.payrollCycles, payrollCycles.value, {
+      incoming: data.data?.items ?? [],
+      payload: data.data,
+      page,
+      append,
+      idOf: (item: AttendancePayrollCycle) => item.id,
+    })
   } catch (error: any) {
     setStatus(readErrorMessage(error, tr('Failed to load payroll cycles', '加载计薪周期失败')), 'error')
   } finally {
     payrollCycleLoading.value = false
   }
+}
+
+function loadMorePayrollCycles() {
+  return loadPayrollCycles({ append: true })
 }
 
 async function generatePayrollCycles() {

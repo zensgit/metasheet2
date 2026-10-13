@@ -43,6 +43,16 @@
           {{ item.name }}
         </option>
       </select>
+      <AttendanceListTruncationNotice
+        :tr="tr"
+        list-key="leave-types-card"
+        :loaded="catalogLoaded ?? leaveTypes.length"
+        :total="catalogTotal ?? leaveTypes.length"
+        :page="catalogPage ?? 1"
+        :last-page-count="catalogLastPageCount ?? leaveTypes.length"
+        :loading="catalogLoading"
+        @load-more="emit('loadMore')"
+      />
       <small v-if="leaveTypes.length === 0" class="leave-card__hint" data-leave-card-empty-types>
         {{
           tr(
@@ -169,6 +179,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import AttendanceListTruncationNotice from './AttendanceListTruncationNotice.vue'
 import type { AttendanceLeaveQuickFillKind } from './halfDayLeaveHelper'
 import {
   formatLeaveDurationHours,
@@ -201,12 +212,18 @@ const props = defineProps<{
   leaveTypes: LeaveTypeOption[]
   canQuickFill: boolean
   submitting: boolean
+  catalogLoaded?: number
+  catalogTotal?: number
+  catalogPage?: number
+  catalogLastPageCount?: number
+  catalogLoading?: boolean
 }>()
 
 const emit = defineEmits<{
   cancel: []
   submit: []
   quickFill: [kind: AttendanceLeaveQuickFillKind]
+  loadMore: []
 }>()
 
 const durationUnit = ref<LeaveDurationDisplayUnit>('hours')

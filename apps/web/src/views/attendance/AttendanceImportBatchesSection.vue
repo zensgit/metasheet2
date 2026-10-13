@@ -7,11 +7,11 @@
       </button>
     </div>
     <div class="attendance__section-meta">
-      {{ tr('Batches loaded', '已加载批次') }}: {{ importBatches.length }}
+      {{ tr('Batches loaded', '已加载批次') }}: {{ importBatches.length }}<template v-if="importBatchesTotal > importBatches.length"> / {{ importBatchesTotal }}</template>
       <span v-if="batchRowCountTotal"> · {{ tr('Rows total', '总行数') }}: {{ batchRowCountTotal }}</span>
       <span v-if="visibleImportBatches.length !== importBatches.length"> · {{ tr('Visible batches', '当前可见批次') }}: {{ visibleImportBatches.length }}</span>
       <span v-if="visibleBatchRowCountTotal !== batchRowCountTotal"> · {{ tr('Visible rows', '当前可见行数') }}: {{ visibleBatchRowCountTotal }}</span>
-      <span v-if="importBatchItems.length"> · {{ tr('Current items', '当前条目') }}: {{ importBatchItems.length }}</span>
+      <span v-if="importBatchItems.length"> · {{ tr('Current items', '当前条目') }}: {{ importBatchItems.length }}<template v-if="importBatchItemsTotal > importBatchItems.length"> / {{ importBatchItemsTotal }}</template></span>
     </div>
     <div v-if="batchItemSummary.totalItems > 0" class="attendance__impact-summary">
       <div class="attendance__impact-card">
@@ -210,6 +210,16 @@
           </tr>
         </tbody>
       </table>
+      <AttendanceListTruncationNotice
+        :tr="tr"
+        list-key="import-batches"
+        :loaded="importBatches.length"
+        :total="importBatchesTotal"
+        :page="importBatchesPage"
+        :last-page-count="importBatchesLastPageCount"
+        :loading="importBatchLoading"
+        @load-more="loadMoreImportBatches"
+      />
       <div v-if="visibleImportBatches.length === 0" class="attendance__empty">
         {{ tr('No batches match the current inbox filters.', '当前批次收件箱筛选下没有匹配批次。') }}
       </div>
@@ -219,9 +229,19 @@
       <div class="attendance__subheading-row">
         <h5 class="attendance__subheading">{{ tr('Batch items', '批次条目') }}</h5>
         <div class="attendance__section-meta">
-          {{ tr('Loaded items', '已加载条目') }}: {{ importBatchItems.length }}
+          {{ tr('Loaded items', '已加载条目') }}: {{ importBatchItems.length }}<template v-if="importBatchItemsTotal > importBatchItems.length"> / {{ importBatchItemsTotal }}</template>
           <span v-if="batchItemSummary.anomalyItems"> · {{ tr('Anomalies', '异常') }}: {{ batchItemSummary.anomalyItems }}</span>
         </div>
+        <AttendanceListTruncationNotice
+          :tr="tr"
+          list-key="import-batch-items"
+          :loaded="importBatchItems.length"
+          :total="importBatchItemsTotal"
+          :page="importBatchItemsPage"
+          :last-page-count="importBatchItemsLastPageCount"
+          :loading="importBatchLoading"
+          @load-more="loadMoreImportBatchItems"
+        />
         <div class="attendance__table-actions">
           <button class="attendance__btn" :disabled="importBatchLoading" @click="setIssueFilter('all')">
             {{ tr('Reset view', '重置视图') }}
@@ -528,6 +548,7 @@
 
 <script setup lang="ts">
 import { computed, ref, type Ref } from 'vue'
+import AttendanceListTruncationNotice from './AttendanceListTruncationNotice.vue'
 import {
   buildImportBatchRollbackConfirmationMessage,
   buildImportBatchRollbackNotes,
@@ -580,13 +601,21 @@ type SavedBatchInboxView = {
 interface ImportBatchesBindings {
   importBatchLoading: Ref<boolean>
   importBatches: Ref<AttendanceImportBatch[]>
+  importBatchesTotal?: Ref<number>
+  importBatchesPage?: Ref<number>
+  importBatchesLastPageCount?: Ref<number>
   importBatchImpactLoading: Ref<boolean>
   importBatchImpactReport: Ref<AttendanceImportBatchImpactReport | null>
   importBatchItems: Ref<AttendanceImportItem[]>
+  importBatchItemsTotal?: Ref<number>
+  importBatchItemsPage?: Ref<number>
+  importBatchItemsLastPageCount?: Ref<number>
   importBatchSelectedId: Ref<string>
   importBatchSnapshot: Ref<Record<string, any> | null>
   loadFullImportBatchImpact: (batchId: string) => MaybePromise<void>
   reloadImportBatches: () => MaybePromise<void>
+  loadMoreImportBatches?: () => MaybePromise<void>
+  loadMoreImportBatchItems?: () => MaybePromise<void>
   loadImportBatchItems: (batchId: string) => MaybePromise<void>
   rollbackImportBatch: (batchId: string, confirmMessage?: string) => MaybePromise<void>
   exportImportBatchItemsCsv: (onlyAnomalies: boolean) => MaybePromise<void>
@@ -607,13 +636,21 @@ const props = defineProps<{
 const tr = props.tr
 const importBatchLoading = props.workflow.importBatchLoading
 const importBatches = props.workflow.importBatches
+const importBatchesTotal = computed(() => props.workflow.importBatchesTotal?.value ?? importBatches.value.length)
+const importBatchesPage = computed(() => props.workflow.importBatchesPage?.value ?? (importBatches.value.length > 0 ? 1 : 0))
+const importBatchesLastPageCount = computed(() => props.workflow.importBatchesLastPageCount?.value ?? importBatches.value.length)
 const importBatchImpactLoading = props.workflow.importBatchImpactLoading
 const importBatchImpactReport = props.workflow.importBatchImpactReport
 const importBatchItems = props.workflow.importBatchItems
+const importBatchItemsTotal = computed(() => props.workflow.importBatchItemsTotal?.value ?? importBatchItems.value.length)
+const importBatchItemsPage = computed(() => props.workflow.importBatchItemsPage?.value ?? (importBatchItems.value.length > 0 ? 1 : 0))
+const importBatchItemsLastPageCount = computed(() => props.workflow.importBatchItemsLastPageCount?.value ?? importBatchItems.value.length)
 const importBatchSelectedId = props.workflow.importBatchSelectedId
 const importBatchSnapshot = props.workflow.importBatchSnapshot
 const loadFullImportBatchImpact = (batchId: string) => props.workflow.loadFullImportBatchImpact(batchId)
 const reloadImportBatches = () => props.workflow.reloadImportBatches()
+const loadMoreImportBatches = () => props.workflow.loadMoreImportBatches?.()
+const loadMoreImportBatchItems = () => props.workflow.loadMoreImportBatchItems?.()
 const loadImportBatchItems = (batchId: string) => props.workflow.loadImportBatchItems(batchId)
 const rollbackImportBatch = (batchId: string, confirmMessage?: string) => props.workflow.rollbackImportBatch(batchId, confirmMessage)
 const exportImportBatchItemsCsv = (onlyAnomalies: boolean) => props.workflow.exportImportBatchItemsCsv(onlyAnomalies)

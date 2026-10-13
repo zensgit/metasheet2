@@ -57,6 +57,16 @@
       </select>
     </label>
 
+    <AttendanceListTruncationNotice
+      :tr="tr"
+      list-key="shift-swap-assignments-card"
+      :loaded="catalogLoaded ?? 0"
+      :total="catalogTotal ?? 0"
+      :page="catalogPage ?? 1"
+      :last-page-count="catalogLastPageCount ?? 0"
+      :loading="catalogLoading"
+      @load-more="emit('loadMore')"
+    />
     <p class="shift-swap-card__hint" data-shift-swap-card-hint>
       {{
         hasPublishedAssignments
@@ -106,6 +116,8 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceListTruncationNotice from './AttendanceListTruncationNotice.vue'
+
 type TranslateFn = (en: string, zh: string) => string
 
 interface ShiftSwapAssignmentOption {
@@ -126,11 +138,17 @@ defineProps<{
   counterpartyAssignments: ShiftSwapAssignmentOption[]
   hasPublishedAssignments: boolean
   submitting: boolean
+  catalogLoaded?: number
+  catalogTotal?: number
+  catalogPage?: number
+  catalogLastPageCount?: number
+  catalogLoading?: boolean
 }>()
 
 const emit = defineEmits<{
   cancel: []
   submit: []
+  loadMore: []
 }>()
 </script>
 
