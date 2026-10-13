@@ -201,6 +201,7 @@ export type ElearningLabelKey =
   // --- Shared request errors ---
   | 'error.orgContextRequired'
   | 'error.orgContextStaleLogin'
+  | 'error.analyticsExportStorageUnavailable'
   | 'sessionOrg.staleNotice'
   | 'sessionOrg.discardAndReload'
   // --- Shared statuses ---
@@ -509,6 +510,10 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     en: 'This account does not have exactly one active organization: if you belong to none, ask an administrator to add you to one; if you belong to several, choose an organization above first.',
     zh: '当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。',
   },
+  'error.analyticsExportStorageUnavailable': {
+    en: 'This deployment has no export storage configured, so analytics export is unavailable. To export, ask your operations team to configure object storage.',
+    zh: '当前部署未配置导出存储，分析导出不可用；需要导出请联系运维配置对象存储。',
+  },
   'error.orgContextStaleLogin': {
     en: 'Your sign-in predates your organization membership. Please sign out and sign in again.',
     zh: '您的登录状态早于组织归属，请退出后重新登录。',
@@ -711,9 +716,20 @@ export function isElearningOrgContextRequired(code: unknown, status: unknown): b
   return status === 403 && code === ELEARNING_ORG_CONTEXT_REQUIRED
 }
 
+// 409 {"error":"ANALYTICS_EXPORT_STORAGE_UNAVAILABLE"}: the deployment has no export
+// storage, so the export request is refused before any task is created.
+export const ELEARNING_ANALYTICS_EXPORT_STORAGE_UNAVAILABLE = 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE'
+
+export function isElearningAnalyticsExportStorageUnavailable(code: unknown, status: unknown): boolean {
+  return status === 409 && code === ELEARNING_ANALYTICS_EXPORT_STORAGE_UNAVAILABLE
+}
+
 export function elearningErrorMessage(code: string, status: number, isZh: boolean): string {
   if (isElearningOrgContextRequired(code, status)) {
     return elearningLabel('error.orgContextRequired', isZh)
+  }
+  if (isElearningAnalyticsExportStorageUnavailable(code, status)) {
+    return elearningLabel('error.analyticsExportStorageUnavailable', isZh)
   }
   return elearningFailure(code, status, isZh)
 }

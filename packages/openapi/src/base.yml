@@ -8256,6 +8256,16 @@ components:
     ElearningAnalyticsExportStatus:
       type: string
       enum: [pending, running, succeeded, failed, expired]
+    ElearningAnalyticsExportAvailability:
+      type: object
+      additionalProperties: false
+      required: [available]
+      properties:
+        available:
+          type: boolean
+        reason:
+          type: string
+          enum: [storage_unavailable]
     ElearningAnalyticsExportResult:
       type: object
       additionalProperties: false

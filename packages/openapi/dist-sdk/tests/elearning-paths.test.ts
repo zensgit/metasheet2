@@ -515,6 +515,18 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expect(JSON.stringify(schemas.ElearningAnalyticsExportResult)).not.toMatch(
       /storageKey|fileSha|fileSize|querySnapshot|snapshot|orgId|actorId|answer|trace|grade/,
     )
+
+    const availability = doc.paths?.['/api/elearning/admin/analytics/export-availability']?.get
+    expect(availability?.security).toEqual([{ bearerAuth: [] }])
+    expect(availability?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportAvailability' })
+    expect(schemas.ElearningAnalyticsExportAvailability).toMatchObject({
+      additionalProperties: false,
+      required: ['available'],
+    })
+    expect(Object.keys(schemas.ElearningAnalyticsExportAvailability?.properties ?? {}).sort())
+      .toEqual(['available', 'reason'])
+    expect(create?.description).toContain('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE')
   })
 
   it('documents playback Range 200/206/416 without a JSON success body', () => {

@@ -13406,6 +13406,24 @@
           "expired"
         ]
       },
+      "ElearningAnalyticsExportAvailability": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "storage_unavailable"
+            ]
+          }
+        }
+      },
       "ElearningAnalyticsExportResult": {
         "type": "object",
         "additionalProperties": false,
@@ -32242,11 +32260,44 @@
         }
       }
     },
+    "/api/elearning/admin/analytics/export-availability": {
+      "get": {
+        "operationId": "getElearningAnalyticsExportAvailability",
+        "summary": "Report whether this deployment can store analytics exports",
+        "description": "Same authentication, organization, RBAC, and exact feature gates as the export routes.\nLets the admin UI disable export creation up front instead of offering a button whose\ntask can only fail. Values-free: no storage provider, location, or configuration is\nreturned, only availability and a closed reason.\n",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current export storage availability.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ElearningAnalyticsExportAvailability"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/ElearningError"
+          },
+          "401": {
+            "$ref": "#/components/responses/ElearningAuthError"
+          },
+          "403": {
+            "$ref": "#/components/responses/ElearningError"
+          }
+        }
+      }
+    },
     "/api/elearning/admin/analytics/exports": {
       "post": {
         "operationId": "createElearningAnalyticsExport",
         "summary": "Create one suppressed department aggregate CSV export",
-        "description": "Requires `elearning:admin`, global administrator authority, and the exact-literal\n`ELEARNING_ENABLED=true` plus `ELEARNING_ANALYTICS_ENABLED=true` gates.\nOrganization and actor are server-derived only from the authenticated request. The closed\ncommand contains requestId, departmentId, periodStart, and periodEnd. An exact replay\nreturns the original closed nine-field result; a different payload for the same\nrequestId returns a values-free conflict. The export never contains individual answers,\ntraces, grades, or unsuppressed small-group values.\n",
+        "description": "Requires `elearning:admin`, global administrator authority, and the exact-literal\n`ELEARNING_ENABLED=true` plus `ELEARNING_ANALYTICS_ENABLED=true` gates.\nOrganization and actor are server-derived only from the authenticated request. The closed\ncommand contains requestId, departmentId, periodStart, and periodEnd. An exact replay\nreturns the original closed nine-field result; a different payload for the same\nrequestId returns a values-free conflict. The export never contains individual answers,\ntraces, grades, or unsuppressed small-group values. When this deployment has no export\nstorage the request is rejected with 409 `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before\nany export task is created.\n",
         "security": [
           {
             "bearerAuth": []

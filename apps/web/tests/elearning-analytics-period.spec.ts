@@ -5,7 +5,9 @@ const getPeriodMock = vi.fn()
 const createExportMock = vi.fn()
 const getExportMock = vi.fn()
 const downloadExportMock = vi.fn()
+const exportAvailabilityMock = vi.fn()
 vi.mock('../src/services/elearningAnalytics', () => ({
+  getElearningAnalyticsExportAvailability: (...args: unknown[]) => exportAvailabilityMock(...args),
   getElearningDepartmentStatsPeriod: (...args: unknown[]) => getPeriodMock(...args),
   createElearningAnalyticsExport: (...args: unknown[]) => createExportMock(...args),
   getElearningAnalyticsExport: (...args: unknown[]) => getExportMock(...args),
@@ -14,6 +16,10 @@ vi.mock('../src/services/elearningAnalytics', () => ({
 
 import { ElearningApiError } from '../src/services/elearning'
 import ElearningAnalyticsPeriodSection from '../src/views/ElearningAnalyticsPeriodSection.vue'
+import { elearningErrorMessage } from '../src/views/elearningLabels'
+
+const STORAGE_UNAVAILABLE_ZH = '当前部署未配置导出存储，分析导出不可用；需要导出请联系运维配置对象存储'
+const STORAGE_UNAVAILABLE_EN = 'no export storage configured'
 
 const DEPARTMENT = '11111111-1111-4111-8111-111111111111'
 const REQUEST_ONE = '22222222-2222-4222-8222-222222222222'
@@ -83,6 +89,13 @@ async function submit(root: HTMLElement): Promise<void> {
   }
 }
 
+async function flush(): Promise<void> {
+  for (let index = 0; index < 6; index += 1) {
+    await Promise.resolve()
+    await nextTick()
+  }
+}
+
 async function click(root: HTMLElement, testId: string): Promise<void> {
   ;(root.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement).click()
   for (let index = 0; index < 6; index += 1) {
@@ -96,6 +109,7 @@ beforeEach(() => {
   createExportMock.mockReset()
   getExportMock.mockReset()
   downloadExportMock.mockReset()
+  exportAvailabilityMock.mockReset().mockResolvedValue({ available: true })
 })
 afterEach(() => {
   document.body.innerHTML = ''
@@ -216,5 +230,68 @@ describe('e-learning analytics period section', () => {
     clicked.mockRestore()
     vi.restoreAllMocks()
     app.unmount()
+  })
+
+  it('disables export creation up front with an explanation when export storage is unavailable', async () => {
+    exportAvailabilityMock.mockReset().mockResolvedValue({ available: false, reason: 'storage_unavailable' })
+    const { app, root } = mount()
+    await flush()
+    expect(exportAvailabilityMock).toHaveBeenCalledTimes(1)
+    const button = root.querySelector('[data-testid="elearning-analytics-export-create"]') as HTMLButtonElement
+    expect(button.disabled).toBe(true)
+    expect(root.querySelector('[data-testid="elearning-analytics-export-unavailable"]')?.textContent)
+      .toContain(STORAGE_UNAVAILABLE_EN)
+    input(root, 'elearning-analytics-period-department', DEPARTMENT)
+    await click(root, 'elearning-analytics-export-create')
+    expect(createExportMock).not.toHaveBeenCalled()
+    app.unmount()
+  })
+
+  it('keeps export creation enabled when storage is available or availability is unknown', async () => {
+    const available = mount()
+    await flush()
+    expect((available.root.querySelector('[data-testid="elearning-analytics-export-create"]') as HTMLButtonElement).disabled)
+      .toBe(false)
+    expect(available.root.querySelector('[data-testid="elearning-analytics-export-unavailable"]')).toBeNull()
+    available.app.unmount()
+
+    exportAvailabilityMock.mockReset().mockRejectedValue(new ElearningApiError('network_error', 0))
+    const unknown = mount()
+    await flush()
+    expect((unknown.root.querySelector('[data-testid="elearning-analytics-export-create"]') as HTMLButtonElement).disabled)
+      .toBe(false)
+    expect(unknown.root.querySelector('[data-testid="elearning-analytics-export-unavailable"]')).toBeNull()
+    unknown.app.unmount()
+  })
+
+  it('turns a server-side storage-unavailable refusal into the standing notice', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValueOnce(REQUEST_ONE)
+    createExportMock.mockRejectedValueOnce(
+      new ElearningApiError('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 409),
+    )
+    const { app, root } = mount()
+    await flush()
+    input(root, 'elearning-analytics-period-department', DEPARTMENT)
+    await click(root, 'elearning-analytics-export-create')
+    expect(createExportMock).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-analytics-export-error"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-analytics-export-unavailable"]')?.textContent)
+      .toContain(STORAGE_UNAVAILABLE_EN)
+    expect((root.querySelector('[data-testid="elearning-analytics-export-create"]') as HTMLButtonElement).disabled)
+      .toBe(true)
+    vi.restoreAllMocks()
+    app.unmount()
+  })
+
+  it('maps ANALYTICS_EXPORT_STORAGE_UNAVAILABLE to the same explanation in both locales', () => {
+    expect(elearningErrorMessage('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 409, true))
+      .toContain(STORAGE_UNAVAILABLE_ZH)
+    expect(elearningErrorMessage('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 409, false))
+      .toContain(STORAGE_UNAVAILABLE_EN)
+    expect(elearningErrorMessage('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 409, true))
+      .not.toContain('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE')
+    // Only the exact 409 code is explained; anything else keeps the generic failure text.
+    expect(elearningErrorMessage('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 503, true))
+      .toContain('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE')
   })
 })
