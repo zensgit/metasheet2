@@ -601,11 +601,11 @@
                 >
                   <strong>确认将该账号加入默认组织？</strong>
                   <ol>
-                    <li>会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；</li>
+                    <li>会为该账号创建一条本地目录账号与链接（目录管理里可见）；</li>
                     <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；</li>
                     <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
                   </ol>
-                  <p data-testid="join-default-org-confirm-undo">此操作不能在本页撤销；如需撤销，请到目录管理归档该本地目录账号。</p>
+                  <p data-testid="join-default-org-confirm-undo">此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。</p>
                   <div class="user-admin__chips">
                     <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
                       确认加入
@@ -2543,7 +2543,7 @@ const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
   // createLocalAccount: an account already exists for this user in this org, or the user is inactive.
   DIRECTORY_LOCAL_CONFLICT: '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看',
   // Guard added by #6389: any user_orgs row (active or not, any org) or an applied deprovision event.
-  DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程',
+  DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。',
 }
 
 // The route answers 404 DIRECTORY_LOCAL_NOT_FOUND when the platform user no longer exists.

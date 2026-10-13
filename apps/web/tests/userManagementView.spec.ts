@@ -2317,7 +2317,7 @@ describe('UserManagementView', () => {
     const SERVER_TEXT = 'MKSLICEC a local directory account already exists for this user in this org'
     const GENERIC_FAILURE = '加入默认组织失败，请稍后重试'
     const CONFLICT_MESSAGE = '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看'
-    const HISTORY_MESSAGE = '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程'
+    const HISTORY_MESSAGE = '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。'
     const USER_GONE_MESSAGE = '该账号已不存在，请刷新列表'
     const ZERO_ORG_CLEAR = { active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false }
 
@@ -2476,12 +2476,12 @@ describe('UserManagementView', () => {
       expect(panel!.getAttribute('role')).toBe('dialog')
       const items = Array.from(panel!.querySelectorAll('li')).map((item) => item.textContent?.trim())
       expect(items).toEqual([
-        '会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；',
+        '会为该账号创建一条本地目录账号与链接（目录管理里可见）；',
         '加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；',
         '用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。',
       ])
       expect(panel!.querySelector('[data-testid="join-default-org-confirm-undo"]')!.textContent!.trim())
-        .toBe('此操作不能在本页撤销；如需撤销，请到目录管理归档该本地目录账号。')
+        .toBe('此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。')
       expect(joinCalls).toEqual([])
 
       container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-cancel"]')!.click()
