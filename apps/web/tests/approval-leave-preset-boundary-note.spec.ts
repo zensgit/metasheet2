@@ -122,7 +122,12 @@ const ElInput = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // Element Plus 2.11.8 fidelity (R-43 gate r3): no update when the typed text is unchanged.
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })

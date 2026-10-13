@@ -178,6 +178,8 @@ on:
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
+      # R-43 (B) gate r3 P3-g: the visibility-rule spec (on the required exec line + the vitest list below).
+      - 'apps/web/tests/approval-field-visibility.spec.ts'
       - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
@@ -259,6 +261,9 @@ on:
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
+      # R-43 (B): typed condition values — pure helpers shared by the visibility / branch editors and
+      # the summaries; covered by approval-field-visibility + approval-template-authoring-condition-edit.
+      - 'apps/web/src/approvals/conditionValueTyping.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
       # ApprovalNewView (same rounding family as amountAutoSum).
@@ -647,6 +652,8 @@ on:
       - 'apps/web/tests/approval-template-authoring-detail.test.ts'
       - 'apps/web/tests/approval-template-authoring-graph-preserve.test.ts'
       - 'apps/web/tests/approval-template-authoring-condition-edit.test.ts'
+      # R-43 (B) gate r3 P3-g: the visibility-rule spec (on the required exec line + the vitest list below).
+      - 'apps/web/tests/approval-field-visibility.spec.ts'
       - 'apps/web/tests/approval-template-authoring-parallel-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-cc-edit.test.ts'
       - 'apps/web/tests/approval-template-authoring-approval-node-edit.test.ts'
@@ -728,6 +735,9 @@ on:
       # authoring nodeConfigSummary + editor branch heads + the upcomingNodes/graphSummary chain.
       - 'apps/web/src/approvals/conditionSummary.ts'
       - 'apps/web/tests/approval-condition-summary.test.ts'
+      # R-43 (B): typed condition values — pure helpers shared by the visibility / branch editors and
+      # the summaries; covered by approval-field-visibility + approval-template-authoring-condition-edit.
+      - 'apps/web/src/approvals/conditionValueTyping.ts'
       - 'apps/web/tests/amountAutoSum.test.ts'
       # G-B2-16: 金额大写回显 — amountInWords.ts pure util + the declared-total caption in
       # ApprovalNewView (same rounding family as amountAutoSum).

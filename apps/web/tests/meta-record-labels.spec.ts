@@ -223,4 +223,24 @@ describe('meta-record-labels helpers', () => {
     expect(recordLabel('approval.templatesUnavailable', false))
       .toBe('No available template, or no approval read permission — ask an administrator to confirm a template is published for this table and that you have approval read permission.')
   })
+
+  // R-43 A: APPROVAL_REQUESTER_CHOICE_REQUIRED (the template's route has a 发起人自选 approver/handler,
+  // which record submission cannot carry) had NO entry, so the dialog showed only the route's English
+  // sentence. The copy must name the cause, send the actor to the approval centre, and NOT imply that a
+  // request started there stays linked to the record (it does not).
+  it('APPROVAL_REQUESTER_CHOICE_REQUIRED explains 发起人自选 and points at the approval centre (R-43 A)', () => {
+    const zh = recordApprovalErrorLabel('APPROVAL_REQUESTER_CHOICE_REQUIRED', true)!
+    const en = recordApprovalErrorLabel('APPROVAL_REQUESTER_CHOICE_REQUIRED', false)!
+    expect(zh).toBe('该模板需要发起人自选审批人或办理人，记录送审暂不支持。请到审批中心发起；在审批中心发起的申请不会关联到本记录。')
+    expect(en).toBe('This template requires the requester to choose an approver or handler, which record submission does not support yet. Start it from the approval centre instead — a request started there is not linked to this record.')
+    expect(zh).toContain('审批人或办理人')
+    expect(zh).toContain('不会关联到本记录')
+    expect(en).toContain('approver or handler')
+    expect(en).toContain('not linked to this record')
+  })
+
+  it('the approval-centre link label exists in both locales (R-43 A)', () => {
+    expect(recordLabel('approval.openApprovalCenter', true)).toBe('去审批中心发起')
+    expect(recordLabel('approval.openApprovalCenter', false)).toBe('Start in the approval centre')
+  })
 })

@@ -1650,10 +1650,7 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-admin-task-action]')).toBeNull()
   })
 
-  it('W3/4353 wiring: AttendanceAdminCenter re-emits clear-section from the real return-home flow (review P3-1)', async () => {
-    // Mounts the REAL wrapper (not a mock): entering with an explicit section keeps the task home
-    // closed; clicking Management home must propagate clear-section through AdminCenter to its
-    // parent. A regression that drops the template re-emit turns exactly this leg red.
+  it('W3/4353 wiring: the management-home return control is gone and the open section stays put', async () => {
     const onClearSection = vi.fn()
     app = createAttendanceApp(AttendanceAdminCenter, {
       initialSectionId: 'attendance-admin-groups',
@@ -1662,17 +1659,14 @@ describe('Attendance admin regressions', () => {
     app.mount(container!)
     await flushUi(16)
 
-    // Task home lives under v-show: with an explicit section it must be present-but-hidden.
     const homeContext = container!.querySelector('[data-admin-home-context]') as HTMLElement
     expect(homeContext).toBeTruthy()
     expect(homeContext.style.display).toBe('none')
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
     const returnHome = [...container!.querySelectorAll('button')].find(b => (b.textContent || '').includes('Management home'))
-    expect(returnHome, 'expected the Management home button').toBeTruthy()
-    returnHome!.click()
-    await flushUi(4)
-
-    expect(onClearSection).toHaveBeenCalledTimes(1)
-    expect((container!.querySelector('[data-admin-home-context]') as HTMLElement).style.display).not.toBe('none')
+    expect(returnHome).toBeUndefined()
+    expect(onClearSection).not.toHaveBeenCalled()
+    expect(homeContext.style.display).toBe('none')
   })
 
   it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {
@@ -1922,7 +1916,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance-admin/users/search')) {
-        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA' }])
+        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA', name: '备料一线测试账号' }])
         if (url.includes('q=userB')) return userSearchResponse([{ id: 'userB' }])
         return userSearchResponse([])
       }
@@ -1967,6 +1961,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const shown = section!.querySelector('.attendance__annual-balance')
     expect(shown).toBeTruthy()
+    expect(shown?.textContent || '').toContain('备料一线测试账号')
     expect(shown?.textContent || '').toContain('userA')
 
     // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
@@ -2085,7 +2080,9 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')
     expect(section).toBeTruthy()
-    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
+    expect(section!.querySelector('[data-attendance-help="annual-policy"]')?.textContent).toContain('Attendance help')
+    expect(section!.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    const tzInput = section!.querySelector<HTMLSelectElement>('#attendance-annual-policy-tz')!
     expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
@@ -2100,7 +2097,7 @@ describe('Attendance admin regressions', () => {
     // enabled + empty timezone → blocked client-side (no PUT).
     savedPayload = null
     tzInput.value = ''
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     await flushUi(2)
     saveBtn.click()
     await flushUi(4)
@@ -2109,7 +2106,7 @@ describe('Attendance admin regressions', () => {
     // restore timezone but make the ladder malformed (a closed last band) → blocked client-side, surfacing what the
     // backend would otherwise silently revert to the statutory preset with a 200 "saved".
     tzInput.value = 'Asia/Shanghai'
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     const maxYearsInput = section!.querySelector<HTMLInputElement>('tbody tr td:nth-child(2) input')!
     maxYearsInput.value = '10'
     maxYearsInput.dispatchEvent(new Event('input'))

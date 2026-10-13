@@ -1,4 +1,5 @@
 import type { FormField, FormFieldVisibilityRule, FormSchema } from '../types/approval'
+import { hasOptions, optionLabelForValue } from './conditionValueTyping'
 
 // Exported (UX B2-15) so `detailField.ts`'s `validateDetailRows` can reuse the exact same
 // empty-value semantics as visibility's `isEmpty`/`notEmpty` operators instead of redefining a
@@ -149,14 +150,15 @@ export function describeFieldVisibilityRule(
       }`
     : field.visibilityRule.fieldId
   const rule = field.visibilityRule
+  const dependency = reference?.field
 
   switch (rule.operator) {
     case 'eq':
-      return `当 ${dependencyLabel} 等于 ${formatVisibilityValue(rule.value)} 时显示`
+      return `当 ${dependencyLabel} 等于 ${formatVisibilityValue(rule.value, dependency)} 时显示`
     case 'neq':
-      return `当 ${dependencyLabel} 不等于 ${formatVisibilityValue(rule.value)} 时显示`
+      return `当 ${dependencyLabel} 不等于 ${formatVisibilityValue(rule.value, dependency)} 时显示`
     case 'in':
-      return `当 ${dependencyLabel} 属于 ${formatVisibilityValues(rule.values)} 时显示`
+      return `当 ${dependencyLabel} 属于 ${formatVisibilityValues(rule.values, dependency)} 时显示`
     case 'isEmpty':
       return `当 ${dependencyLabel} 为空时显示`
     case 'notEmpty':
@@ -166,14 +168,22 @@ export function describeFieldVisibilityRule(
   }
 }
 
-function formatVisibilityValue(value: unknown): string {
+// R-43 (B): a select / multi-select dependency's stored option VALUE renders as its option NAME
+// (the value is an opaque code the author never sees); a value no current option carries falls back
+// to the raw value, marked. Display only — evaluation above compares the stored value unchanged.
+function formatVisibilityValue(value: unknown, dependency?: FormField): string {
   if (value === null || value === undefined) return '空值'
-  if (typeof value === 'string') return value
+  if (typeof value === 'string') {
+    const label = optionLabelForValue(dependency, value)
+    if (label !== null) return label
+    if (value && hasOptions(dependency)) return `${value}（不在当前选项中）`
+    return value
+  }
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return JSON.stringify(value)
 }
 
-function formatVisibilityValues(values: unknown[] | undefined): string {
+function formatVisibilityValues(values: unknown[] | undefined, dependency?: FormField): string {
   if (!values || values.length === 0) return '[]'
-  return values.map((value) => formatVisibilityValue(value)).join(', ')
+  return values.map((value) => formatVisibilityValue(value, dependency)).join('、')
 }

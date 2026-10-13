@@ -806,6 +806,7 @@ jobs:
             tests/unit/attendance-timezone-policy.test.ts \
             tests/unit/attendance-timezone-policy-store.test.ts \
             tests/unit/attendance-timezone-context-loader.test.ts \
+            tests/unit/attendance-timezone-calendar-day.test.ts \
             tests/unit/attendance-timezone-policy-routes.test.ts \
             tests/unit/attendance-timezone-target-routes.test.ts \
             tests/unit/attendance-timezone-read-context.test.ts \
@@ -888,7 +889,7 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
-          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs scripts/ops/attendance-acceptance-preflight.test.mjs scripts/ops/attendance-import-perf-payload.test.mjs scripts/ops/attendance-import-perf-gate.test.mjs
           node --test scripts/verify-attendance-production-flow.test.mjs
 
       - name: Run linting

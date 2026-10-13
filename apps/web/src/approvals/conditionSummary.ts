@@ -1,4 +1,5 @@
-import type { ConditionBranch, ConditionNodeConfig, ConditionRule, FormSchema } from '../types/approval'
+import type { ConditionBranch, ConditionNodeConfig, ConditionRule, FormField, FormSchema } from '../types/approval'
+import { hasOptions, optionLabelForValue } from './conditionValueTyping'
 
 // G-B2-19 (benchmark §7.2) — readable condition-branch summaries. PURE logic module (no .vue /
 // Element Plus import) so it runs under the approval-web-guard vitest gate, mirroring the sibling
@@ -35,18 +36,27 @@ const OPERATOR_EN: Record<ConditionRule['operator'], string> = {
   isEmpty: 'is empty',
 }
 
-function fieldLabel(fieldId: string, schema?: FormSchema | null): string {
-  const label = schema?.fields?.find((field) => field.id === fieldId)?.label
+function fieldLabel(fieldId: string, field?: FormField): string {
+  const label = field?.label
   // Honest fallback: no schema / unknown field → the raw id (never blank, never throws).
   return label && label.trim() ? label : fieldId
 }
 
-function formatValue(value: unknown, isZh: boolean): string {
+// R-43 (B): a select / multi-select rule value is the option's opaque VALUE — render its option
+// NAME instead (a rename shows the new name; the stored value is unchanged). A value no current
+// option carries falls back to the raw value, marked; a field without options renders as before.
+function formatValue(value: unknown, isZh: boolean, field?: FormField): string {
   if (value === undefined || value === null) return ''
   if (typeof value === 'number') return String(value)
   if (typeof value === 'boolean') return value ? (isZh ? '是' : 'yes') : (isZh ? '否' : 'no')
-  if (Array.isArray(value)) return value.map((entry) => formatValue(entry, isZh)).join(isZh ? '、' : ', ')
-  if (typeof value === 'string') return isZh ? `「${value}」` : `"${value}"`
+  if (Array.isArray(value)) return value.map((entry) => formatValue(entry, isZh, field)).join(isZh ? '、' : ', ')
+  if (typeof value === 'string') {
+    const label = optionLabelForValue(field, value)
+    const shown = label ?? value
+    const quoted = isZh ? `「${shown}」` : `"${shown}"`
+    if (label === null && value && hasOptions(field)) return `${quoted}${isZh ? '（不在当前选项中）' : ' (not a current option)'}`
+    return quoted
+  }
   // Objects and anything exotic: JSON — still honest, still never throws.
   try {
     return JSON.stringify(value) ?? ''
@@ -62,11 +72,12 @@ function formatValue(value: unknown, isZh: boolean): string {
  * path passes the shell locale).
  */
 export function summarizeConditionRule(rule: ConditionRule, schema?: FormSchema | null, isZh = true): string {
-  const label = fieldLabel(rule.fieldId, schema)
+  const field = schema?.fields?.find((candidate) => candidate.id === rule.fieldId)
+  const label = fieldLabel(rule.fieldId, field)
   // Unknown operator (forward-compat / malformed data): raw operator fallback, never throw.
   const op = (isZh ? OPERATOR_ZH : OPERATOR_EN)[rule.operator] ?? String(rule.operator)
   if (rule.operator === 'isEmpty') return isZh ? `${label} 为空` : `${label} is empty`
-  const value = formatValue(rule.value, isZh)
+  const value = formatValue(rule.value, isZh, field)
   return value ? `${label} ${op} ${value}` : `${label} ${op}`
 }
 

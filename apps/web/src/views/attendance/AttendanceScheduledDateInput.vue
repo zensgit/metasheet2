@@ -4,9 +4,9 @@
       <input
         :id="fieldId"
         :name="fieldName"
-        :type="inputType"
+        :type="inputType === 'date' ? 'text' : inputType"
+        :placeholder="placeholder || (inputType === 'date' ? tr('yyyy-mm-dd', '年-月-日') : '')"
         :value="modelValue"
-        :placeholder="placeholder"
         @input="onInput"
         @dblclick.prevent.stop="openPicker"
       />
