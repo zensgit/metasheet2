@@ -101,7 +101,10 @@
 
             <!-- In "all" mode a complete / reopen that would change nothing (the server answers 200
                  and keeps the task as it is) is turned off, with the reason next to it
-                 (`tasks/tasksCompletion.ts`). Decided only once the viewer's id is known. -->
+                 (`tasks/tasksCompletion.ts`). Decided only once the viewer's id is known. A done
+                 "all" mode task with another assignee also offers reopening every assignee's part
+                 (scope `all`), to every viewer the detail's `canReopen` permits, as the server
+                 does; the first button keeps reopening the viewer's own part (scope `self`). -->
             <template v-if="detailResult.task.status === 'open' && detailResult.task.canComplete">
               <button
                 type="button"
@@ -123,8 +126,15 @@
                 data-testid="tasks-detail-reopen-button"
                 :disabled="detailActionPending || detailReopenSelfNoop"
                 :aria-describedby="detailReopenSelfNoop ? 'tasks-detail-reopen-reason' : undefined"
-                @click="onDetailReopen"
+                @click="onDetailReopen('self')"
               >{{ t.reopen }}</button>
+              <button
+                v-if="detailOffersReopenAll"
+                type="button"
+                data-testid="tasks-detail-reopen-all-button"
+                :disabled="detailActionPending"
+                @click="onDetailReopen('all')"
+              >{{ t.reopenAll }}</button>
               <p
                 v-if="detailReopenSelfNoop"
                 id="tasks-detail-reopen-reason"
@@ -604,6 +614,7 @@ import {
   setParent,
   type Comment,
   type CompletionMode,
+  type ReopenScope,
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
@@ -613,7 +624,7 @@ import {
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { onListsChanged } from '../../tasks/tasksListsBus'
-import { completeNoopReason, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
+import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
   buildTaskPatch,
@@ -825,6 +836,10 @@ const detailCompleteNoop = computed<CompleteNoopReason | null>(() => {
 const detailReopenSelfNoop = computed(() => {
   const state = detailResult.value
   return state.kind === 'ok' && reopenSelfIsNoop(state.task, completionViewerId.value)
+})
+const detailOffersReopenAll = computed(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && offersReopenAll(state.task, completionViewerId.value)
 })
 
 function canEditOwnComment(comment: Comment): boolean {
@@ -1097,14 +1112,17 @@ async function onDetailComplete(): Promise<void> {
   }
 }
 
-async function onDetailReopen(): Promise<void> {
+/** `'self'` reopens the viewer's own part (in any mode the server reopens the whole task either
+ *  way); `'all'` every assignee's part of a done "all" mode task, offered by `detailOffersReopenAll`. */
+async function onDetailReopen(scope: ReopenScope): Promise<void> {
   const id = taskId.value
-  if (!id || detailActionPending.value || detailReopenSelfNoop.value) return
+  if (!id || detailActionPending.value) return
+  if (scope === 'self' ? detailReopenSelfNoop.value : !detailOffersReopenAll.value) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
   try {
-    const result = await reopenTask(id, 'self')
+    const result = await reopenTask(id, scope)
     if (taskId.value !== id) {
       if (result.kind === 'ok') notifyTasksChanged()
       return

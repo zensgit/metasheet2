@@ -48,3 +48,12 @@ export function reopenSelfIsNoop(task: TaskCompletionSource, viewerId: string | 
   if (own && own.completedAt !== null) return false
   return task.assignees.every((row) => row.completedAt !== null)
 }
+
+/** Whether to offer "reopen for every assignee" (scope `all`): a done all-mode task the viewer may
+ *  reopen (`canReopen`; the server takes scope `all` from every such caller) with an assignee other
+ *  than the viewer. With the viewer's id unknown, any assignee counts. */
+export function offersReopenAll(task: TaskCompletionSource, viewerId: string | null): boolean {
+  if (task.status !== 'done' || !task.canReopen || !isAllModeWithAssignees(task)) return false
+  if (viewerId === null) return true
+  return task.assignees.some((row) => row.userId !== viewerId)
+}
