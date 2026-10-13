@@ -410,12 +410,41 @@
                 <option value="all">{{ t.modeAll }}</option>
                 <option value="any">{{ t.modeAny }}</option>
               </select>
+              <!-- The optional due date: with one, the create request carries the date (and the time
+                   when set) with the browser's zone, the same zone the detail editor fills in, and
+                   no reminder key, so the server sets the default reminder on create. A later
+                   PATCH never derives one. -->
+              <label class="tasks-view__create-due">
+                {{ t.createDueDateLabel }}
+                <input
+                  v-model="newDueDate"
+                  type="date"
+                  data-testid="tasks-create-due-date"
+                  :aria-describedby="newDueDate !== '' ? 'tasks-create-due-note' : undefined"
+                />
+              </label>
+              <label class="tasks-view__create-due">
+                {{ t.createDueTimeLabel }}
+                <input
+                  v-model="newDueTime"
+                  type="time"
+                  step="60"
+                  data-testid="tasks-create-due-time"
+                  :disabled="newDueDate === ''"
+                />
+              </label>
               <button
                 type="submit"
                 data-testid="tasks-create-submit"
                 :disabled="creating || newTitle.trim().length === 0"
               >{{ t.create }}</button>
             </form>
+            <p v-if="newDueDate !== ''" id="tasks-create-due-note" class="tasks-view__note" data-testid="tasks-create-due-note">
+              {{ t.createDueRemindNote }}
+            </p>
+            <p v-if="createDueError" class="tasks-view__message" data-testid="tasks-create-due-error" role="alert">
+              {{ createDueError === 'ZONE_UNAVAILABLE' ? t.createDueZoneUnavailable : codeMessage(createDueError, t) }}
+            </p>
             <p v-if="createErrorVisible" class="tasks-view__message" data-testid="tasks-create-error" role="alert">
               {{ createErrorInvalidTitle ? t.createInvalidTitle : createErrorCode ? codeMessage(createErrorCode, t) : t.createFailed }}
             </p>
@@ -566,6 +595,7 @@ import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { onListsChanged } from '../../tasks/tasksListsBus'
 import {
+  buildCreateDue,
   buildTaskPatch,
   checkRemindAt,
   checkTaskDates,
@@ -574,6 +604,8 @@ import {
   createEditorState,
   initDraft,
   rebaseDraft,
+  usableViewerTimeZone,
+  type CreateDueCode,
   type EditorErrorSlot,
   type EditorState,
   type TaskDraft,
@@ -636,6 +668,15 @@ const orgMissingFromAction = ref(false)
 
 const newTitle = ref('')
 const newCompletionMode = ref<CompletionMode>('all')
+// The create form's due date and time, as their controls report them (`''` when empty). Clearing
+// the date clears the time too: the time control is off without a date.
+const newDueDate = ref('')
+const newDueTime = ref('')
+watch(newDueDate, (date) => {
+  if (date === '') newDueTime.value = ''
+})
+// The pre-check result of the due fields (`buildCreateDue`); nothing is sent while it is set.
+const createDueError = ref<CreateDueCode | null>(null)
 const creating = ref(false)
 const createErrorVisible = ref(false)
 const createErrorInvalidTitle = ref(false)
@@ -643,7 +684,8 @@ const createErrorInvalidTitle = ref(false)
 // through `codeMessage` like every inline code here.
 // RULED(2026-10-07): [R17] [N2] — an assignee who is not an active member of the org is 422
 // `INACTIVE_ORG_MEMBER`. The form sends no `assignees` (the creator alone, whom the server never
-// looks up), so today no form input reaches these codes.
+// looks up), so no form input reaches that code; the date codes can come back for a due date the
+// pre-check let through.
 const createErrorCode = ref<string | null>(null)
 
 // ---------------------------------------------------------------------------------------------
@@ -883,16 +925,30 @@ function switchView(view: TaskView): void {
   void loadList()
 }
 
+/** After a create the server took: the title and the due fields are emptied (the mode stays). */
+function clearCreateForm(): void {
+  newTitle.value = ''
+  newDueDate.value = ''
+  newDueTime.value = ''
+}
+
 async function onCreate(): Promise<void> {
   const title = newTitle.value.trim()
   if (!title || creating.value) return
-  creating.value = true
   createErrorVisible.value = false
   createErrorInvalidTitle.value = false
   createErrorCode.value = null
+  createDueError.value = null
+  // The zone is read only when a date is set: no date, no zone key and no zone read.
+  const due = buildCreateDue(newDueDate.value, newDueTime.value, newDueDate.value === '' ? '' : usableViewerTimeZone())
+  if (!due.ok) {
+    createDueError.value = due.code
+    return
+  }
+  creating.value = true
   const page = listPageToken
   try {
-    const result = await createTask({ title, completionMode: newCompletionMode.value })
+    const result = await createTask({ title, completionMode: newCompletionMode.value, ...due.keys })
     // Same page-moved-on guard as `onComplete`/`onReopen` below — a late org_missing here would
     // otherwise flip `orgMissingFromAction`, which the detail-page template checks FIRST (before
     // its own states), painting the guidance block over whatever the viewer navigated to. A late
@@ -901,13 +957,13 @@ async function onCreate(): Promise<void> {
     // notifies the badge bus; it just has no current list to reload.
     if (page !== listPageToken) {
       if (result.kind === 'ok') {
-        newTitle.value = ''
+        clearCreateForm()
         notifyTasksChanged()
       }
       return
     }
     if (result.kind === 'ok') {
-      newTitle.value = ''
+      clearCreateForm()
       notifyTasksChanged()
       await loadList()
     } else if (result.kind === 'org_missing') {
@@ -1838,6 +1894,18 @@ onMounted(async () => {
 
 .tasks-view__message {
   color: var(--el-text-color-secondary, #666);
+}
+
+.tasks-view__note {
+  margin: 4px 0;
+  font-size: 0.9em;
+  color: var(--el-text-color-secondary, #666);
+}
+
+.tasks-view__create-due {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .tasks-view__detail {

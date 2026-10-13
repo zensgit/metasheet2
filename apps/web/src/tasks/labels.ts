@@ -44,6 +44,11 @@ export const TASKS_ZH = {
   reopen: '重启',
   modeAll: '全部负责人完成',
   modeAny: '任一负责人完成',
+  // the create form's optional due date: with a date, the server sets the default reminder
+  createDueDateLabel: '截止日期（可选）',
+  createDueTimeLabel: '截止时间（可选）',
+  createDueRemindNote: '将按任务设置中的「新任务的缺省提醒」生成提醒',
+  createDueZoneUnavailable: '无法读取浏览器时区：请先不填截止日期创建，再到任务详情中设置',
 
   // context states and the org-guidance block (shared by every task page)
   orgMissing: '请先选择一个组织后再查看任务',
@@ -367,6 +372,10 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   reopen: 'Reopen',
   modeAll: 'All assignees complete',
   modeAny: 'Any assignee completes',
+  createDueDateLabel: 'Due date (optional)',
+  createDueTimeLabel: 'Due time (optional)',
+  createDueRemindNote: 'A reminder is set from "Default reminder for new tasks" in the task settings',
+  createDueZoneUnavailable: 'The browser time zone could not be read: create the task without a due date, then set it on the task page',
 
   orgMissing: 'Select an organization to view tasks',
   contextUnavailable: 'Tasks are not enabled, or this service does not support them',

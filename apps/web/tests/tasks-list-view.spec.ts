@@ -731,3 +731,151 @@ describe('TasksView /tasks/:id boundary', () => {
     expect(shown(el, 'tasks-list-empty')).toBeNull()
   })
 })
+
+// The create form's optional due date. The server sets a task's default reminder (30 minutes
+// before a timed due, 18:00 on an all-day due, per the creator's own setting) only on a create
+// that carries a due date and no `remindAt` key; a later PATCH never derives one. So the form
+// sends the date, the time when set, and the zone the detail editor would use, and never a
+// reminder key; with the date left empty the body stays `{ title, completionMode }`.
+describe('TasksView create form — optional due date', () => {
+  async function fillTitle(el: HTMLElement, title = 'New task'): Promise<void> {
+    const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
+    titleInput.value = title
+    titleInput.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  async function setControl(el: HTMLElement, testid: string, value: string): Promise<void> {
+    const input = shown(el, testid) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  async function submit(el: HTMLElement): Promise<void> {
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+  }
+
+  function sentBody(): Record<string, unknown> {
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    return h.createTask.mock.calls[0][0] as Record<string, unknown>
+  }
+
+  it('a date and a time send dueDate, dueTime and the browser zone, and no remindAt key', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('Asia/Shanghai')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    const body = sentBody()
+    expect(Object.keys(body).sort()).toEqual(['completionMode', 'dueDate', 'dueTime', 'timeZone', 'title'])
+    expect(body).toEqual({ title: 'New task', completionMode: 'all', dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'Asia/Shanghai' })
+    expect('remindAt' in body).toBe(false)
+  })
+
+  it('a date alone (all-day) sends dueDate and the zone, with no dueTime and no remindAt key', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('Europe/Berlin')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+
+    expect(sentBody()).toEqual({ title: 'New task', completionMode: 'all', dueDate: '2031-03-04', timeZone: 'Europe/Berlin' })
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'dueDate', 'timeZone', 'title'])
+  })
+
+  it('a time control value with seconds is sent in the minutes form', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('UTC')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '23:05:00')
+    await submit(el)
+
+    expect(sentBody().dueTime).toBe('23:05')
+  })
+
+  it('no date: the body keeps only title and completionMode, a stray time is dropped, and the zone is not read', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    const el = await mountReady()
+
+    // The time control is off without a date.
+    expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).disabled).toBe(true)
+    expect(shown(el, 'tasks-create-due-note')).toBeNull()
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'title'])
+    expect(h.resolveViewerTimeZone).not.toHaveBeenCalled()
+  })
+
+  it('a date turns on the time control and shows the reminder note; clearing it clears the time', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    const el = await mountReady()
+
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    const time = shown(el, 'tasks-create-due-time') as HTMLInputElement
+    expect(time.disabled).toBe(false)
+    expect(shown(el, 'tasks-create-due-note')?.textContent?.trim()).toBe('将按任务设置中的「新任务的缺省提醒」生成提醒')
+    expect(shown(el, 'tasks-create-due-date')?.getAttribute('aria-describedby')).toBe('tasks-create-due-note')
+
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await setControl(el, 'tasks-create-due-date', '')
+    expect(time.value).toBe('')
+    expect(time.disabled).toBe(true)
+    expect(shown(el, 'tasks-create-due-note')).toBeNull()
+  })
+
+  it('a successful create empties the title, the date and the time', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    h.resolveViewerTimeZone.mockReturnValue('UTC')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    await submit(el)
+
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).value).toBe('')
+  })
+
+  it('a browser zone that is not a usable name sends nothing and says how to set the date instead', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+
+    expect(h.createTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-create-due-error')?.textContent?.trim()).toBe('无法读取浏览器时区：请先不填截止日期创建，再到任务详情中设置')
+    // The typed values stay for the viewer to change.
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('New task')
+    expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('2031-03-04')
+
+    // Emptying the date and submitting again creates the task without one and drops the message.
+    h.createTask.mockResolvedValue({ kind: 'ok', id: 't9' })
+    await setControl(el, 'tasks-create-due-date', '')
+    await submit(el)
+    expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'title'])
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+  })
+})

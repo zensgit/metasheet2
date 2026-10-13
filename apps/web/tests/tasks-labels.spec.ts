@@ -739,6 +739,24 @@ describe('EN locale — TasksView list page renders no CJK', () => {
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
+  it('create form due date — its labels, the reminder note and the browser-zone message', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h_.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountViewAt('/tasks')
+
+    expect(must(el, 'tasks-create-due-date').closest('label')?.textContent?.trim()).toBe('Due date (optional)')
+    expect(must(el, 'tasks-create-due-time').closest('label')?.textContent?.trim()).toBe('Due time (optional)')
+    typeInto(el, 'tasks-create-title', 'New one')
+    typeInto(el, 'tasks-create-due-date', '2031-03-04')
+    await flush()
+    expect(must(el, 'tasks-create-due-note').textContent?.trim()).toBe('A reminder is set from "Default reminder for new tasks" in the task settings')
+    await submitForm(el, 'tasks-create-form')
+    expect(must(el, 'tasks-create-due-error').textContent?.trim()).toBe(
+      'The browser time zone could not be read: create the task without a due date, then set it on the task page',
+    )
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
   it('action banner — forbidden and the generic failure', async () => {
     h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountViewAt('/tasks')

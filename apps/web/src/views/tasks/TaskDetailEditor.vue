@@ -260,12 +260,12 @@ function zoneOptionsFor(browserZone: string): TimezoneOption[] {
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { TASKS_EN, TASKS_FMT_EN, TASKS_FMT_ZH, TASKS_ZH, codeMessage, type TasksText } from '../../tasks/labels'
-import { resolveViewerTimeZone, type TaskDetail, type TaskPatch } from '../../tasks/tasksApi'
+import type { TaskDetail, TaskPatch } from '../../tasks/tasksApi'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import {
   TASK_DESCRIPTION_MAX_CODEPOINTS,
   buildTaskPatch,
-  isValidTimeZoneName,
+  usableViewerTimeZone,
   type EditorErrorSlot,
   type EditorPhase,
   type TaskDraft,
@@ -336,13 +336,8 @@ const reminderNotFollowing = computed(() => {
   return changes !== null && ('dueDate' in changes || 'dueTime' in changes) && !props.draft.remindTouched
 })
 
-/** The browser's zone when it is a usable IANA name, `''` otherwise. */
-function usableBrowserZone(): string {
-  const zone = resolveViewerTimeZone()
-  return isValidTimeZoneName(zone) ? zone : ''
-}
-
-const browserZone = usableBrowserZone()
+/** The browser's zone when it is a usable IANA name, `''` otherwise (shared with the create form). */
+const browserZone = usableViewerTimeZone()
 
 const timeZoneOptions: TimezoneOption[] = zoneOptionsFor(browserZone)
 
