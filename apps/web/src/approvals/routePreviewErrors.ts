@@ -54,7 +54,7 @@ export interface RoutePreviewErrorOptions {
 export const ROUTE_PREVIEW_REQUIRED_COPY_ZH = {
   withNames: (names: string) => `样例里有必填字段未填写：${names}。试运行和真实提交一样按完整表单校验，请先在上方补全后再试运行。`,
   withoutNames: '样例里有必填字段未填写。试运行和真实提交一样按完整表单校验，请先在上方补全后再试运行。',
-  cannotFillHint: '明细、附件、部门、关联记录、日期区间等字段无法在试运行里填写；这类字段为必填时，可在模板发布后到发起页用「按当前表单预览路径」按完整表单预览（发起页按已发布的版本计算）。',
+  cannotFillHint: '明细、附件、部门、关联记录、日期区间、多选人员等字段无法在试运行里填写（多选人员在这里只能选一人）；这类字段为必填时，可在模板发布后到发起页用「按当前表单预览路径」按完整表单预览（发起页按已发布的版本计算）。',
   nameSeparator: '、',
   quote: (label: string) => `「${label}」`,
   joiner: '',
@@ -63,7 +63,7 @@ export const ROUTE_PREVIEW_REQUIRED_COPY_ZH = {
 export const ROUTE_PREVIEW_REQUIRED_COPY_EN: typeof ROUTE_PREVIEW_REQUIRED_COPY_ZH = {
   withNames: (names: string) => `Some required fields in the sample are empty: ${names}. Try-run validates the whole form, the same as a real submission. Fill them in above and run it again.`,
   withoutNames: 'Some required fields in the sample are empty. Try-run validates the whole form, the same as a real submission. Fill them in above and run it again.',
-  cannotFillHint: 'Detail, attachment, department, linked-record and date-range fields cannot be filled in here. If one of them is required, publish the template and use "Preview the route for this form" on the submit page to preview with the whole form (the submit page uses the published version).',
+  cannotFillHint: 'Detail, attachment, department, linked-record, date-range and multi-person fields cannot be filled in here (a multi-person field only takes one person here). If one of them is required, publish the template and use "Preview the route for this form" on the submit page to preview with the whole form (the submit page uses the published version).',
   nameSeparator: ', ',
   quote: (label: string) => `"${label}"`,
   joiner: ' ',

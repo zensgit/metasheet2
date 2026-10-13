@@ -182,5 +182,9 @@ describe('describeRoutePreviewError — missing required sample fields (follow-u
     expect(zh.cannotFillHint).toContain('发布')
     expect(en.cannotFillHint).toContain('publish')
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
+    // FU gate r1 P3-1: the 试运行 user picker is single-select, so a required multi-person field can
+    // never be completed there; the hint must list it among the fields to preview on the submit page.
+    expect(zh.cannotFillHint).toContain('多选人员')
+    expect(en.cannotFillHint).toContain('multi-person')
   })
 })

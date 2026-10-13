@@ -238,6 +238,10 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     // effect" (a numeric-coded single select may still order correctly); the new copy is digit-free.
     expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain('永远成立')
     expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain('always matches')
+    // FU gate r1 NIT-1: the advice names the "in" label of BOTH display-condition editors
+    // (Designer 2.0 「包含任一」, legacy designer 「包含」).
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain(`「${CONDITION_VALUE_COPY_ZH.visibilityInLabelOption}」`)
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain('「包含」')
     expect(CONDITION_VALUE_COPY_ZH.issueTitleAdvisory).not.toContain('失效')
     expect(CONDITION_VALUE_COPY_EN.issueTitleAdvisory).not.toContain('not in effect')
     for (const key of ['issueTitleAdvisory', 'issueOperatorOptionOrder', 'issueOperatorMultiPerson'] as const) {
