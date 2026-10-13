@@ -371,11 +371,11 @@
           <button
             class="attendance__btn"
             type="button"
-            :disabled="savingFormulaCode === newFormulaDraft.code.trim()"
+            :disabled="creatingFormulaField"
             data-report-field-formula-create-save
             @click="saveNewFormulaField"
           >
-            {{ savingFormulaCode === newFormulaDraft.code.trim() ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
+            {{ creatingFormulaField ? tr('Saving...', '保存中...') : tr('Create formula', '创建公式') }}
           </button>
         </div>
         <div
@@ -1612,6 +1612,7 @@ const fieldCategoryFilter = ref('all')
 const editingFormulaCode = ref('')
 const previewingFormulaCode = ref('')
 const savingFormulaCode = ref('')
+const creatingFormulaField = ref(false)
 const formulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const newFormulaDraft = ref<FormulaDraft>(createBlankFormulaDraft())
 const formulaPreviewResult = ref<FormulaPreviewResult | null>(null)
@@ -2243,9 +2244,20 @@ async function saveEditingFormulaField(): Promise<void> {
 }
 
 async function saveNewFormulaField(): Promise<void> {
-  await saveFormulaDraft(newFormulaDraft.value)
-  if (formulaDraftStatusKind.value !== 'error') {
-    newFormulaDraft.value = createBlankFormulaDraft()
+  if (creatingFormulaField.value) return
+  // Idle `savingFormulaCode` is ''. A blank draft code must not look like an in-flight save.
+  if (!newFormulaDraft.value.code.trim()) {
+    await saveFormulaDraft(newFormulaDraft.value)
+    return
+  }
+  creatingFormulaField.value = true
+  try {
+    await saveFormulaDraft(newFormulaDraft.value)
+    if (formulaDraftStatusKind.value !== 'error') {
+      newFormulaDraft.value = createBlankFormulaDraft()
+    }
+  } finally {
+    creatingFormulaField.value = false
   }
 }
 
