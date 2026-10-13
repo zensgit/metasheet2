@@ -556,6 +556,29 @@
                 {{ memberAdmission.businessRoleIds.length > 0 ? `业务系统角色 ${memberAdmission.businessRoleIds.length}` : '未分配业务系统角色' }}
               </span>
             </div>
+            <!-- Slice B (owner ruling on #6079): read-only view of the user's active organizations, the same
+                 rows the login tenant claim reads. Nothing here writes; an older backend without the field
+                 renders nothing, and a disabled account is already explained by its chip above. -->
+            <div v-if="memberAdmissionOrganizations" class="user-admin__org-context" data-testid="member-admission-organizations">
+              <div class="user-admin__chips">
+                <strong class="user-admin__org-label">所属组织</strong>
+                <span
+                  v-for="org in memberAdmissionOrganizations.active"
+                  :key="org.orgId"
+                  class="user-admin__chip"
+                  :class="{ 'user-admin__chip--success': memberAdmissionOrganizations.hasTenantContext }"
+                  data-testid="member-admission-org-chip"
+                >
+                  {{ org.orgId }}
+                </span>
+              </div>
+              <p v-if="memberAdmissionOrganizations.active.length === 0" class="user-admin__warning" data-testid="member-admission-org-none">
+                未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
+              </p>
+              <p v-else-if="memberAdmissionOrganizations.active.length >= 2" class="user-admin__warning" data-testid="member-admission-org-multiple">
+                属于多个组织：登录后需在页面顶部选择组织
+              </p>
+            </div>
             <div v-if="memberAdmission?.directoryMemberships.length" class="user-admin__role-list">
               <article v-for="membership in memberAdmission.directoryMemberships" :key="membership.directoryAccountId" class="user-admin__role-card">
                 <strong>{{ membership.integrationName }} · {{ membership.name }}</strong>
@@ -984,6 +1007,17 @@ type MemberAdmission = {
   directoryMemberships: MemberDirectoryMembership[]
   dingtalk: DingTalkAccess
   namespaceAdmissions: NamespaceAdmission[]
+  /**
+   * null = render nothing: the field is absent (older backend), the server sent null (its
+   * user_orgs read failed, "unknown"), or the payload is malformed.
+   */
+  organizations: MemberOrganizations | null
+}
+
+type MemberOrganizations = {
+  active: Array<{ orgId: string }>
+  /** Mirrors the no-hint login rule (exactly one active row); a login carrying a stored tenant hint takes another branch. */
+  hasTenantContext: boolean
 }
 
 type NamespaceAdmission = {
@@ -1159,6 +1193,14 @@ const userSessions = ref<UserSessionRecord[]>([])
 const access = ref<UserAccess | null>(null)
 const dingtalkAccess = ref<DingTalkAccess | null>(null)
 const memberAdmission = ref<MemberAdmission | null>(null)
+// Hidden for a disabled account: the server reads memberships with the login predicate
+// (u.is_active = true), so a disabled account always reads as "no organization", which would
+// send the admin to add memberships it may already have.
+const memberAdmissionOrganizations = computed<MemberOrganizations | null>(() => {
+  const admission = memberAdmission.value
+  if (!admission || !admission.accountEnabled) return null
+  return admission.organizations ?? null
+})
 // #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
 // sentence and (when the server sent one) the request's correlation id — never in the top banner and
 // never with the server's error text.
@@ -1956,6 +1998,22 @@ function buildDirectoryManagementLocation(userId: string, membership: Pick<Membe
   return `/admin/directory?${params.toString()}`
 }
 
+// Any shape problem makes the whole field "unknown" (null, render nothing) rather than dropping the
+// bad items: dropping them could turn a list of unreadable ids into an empty list, and the empty
+// list tells the admin 「未归属任何组织」, which would be a claim the payload does not support.
+function normalizeMemberOrganizations(value: unknown): MemberOrganizations | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  if (!Array.isArray(record.active) || typeof record.hasTenantContext !== 'boolean') return null
+  const active: Array<{ orgId: string }> = []
+  for (const item of record.active) {
+    const orgId = item && typeof item === 'object' ? (item as Record<string, unknown>).orgId : null
+    if (typeof orgId !== 'string' || !orgId.trim()) return null
+    active.push({ orgId: orgId.trim() })
+  }
+  return { active, hasTenantContext: record.hasTenantContext }
+}
+
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
   if (!Array.isArray(value)) return []
   return value
@@ -2392,6 +2450,7 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     memberAdmission.value = {
       ...(data as MemberAdmission),
       namespaceAdmissions: normalizeNamespaceAdmissions(data?.namespaceAdmissions),
+      organizations: normalizeMemberOrganizations(data?.organizations),
     }
     memberAdmissionLoadFailure.value = null
   } catch {
@@ -3073,6 +3132,17 @@ onUnmounted(() => {
 .user-admin__status--error {
   background: #fef2f2;
   color: #dc2626;
+}
+
+.user-admin__org-context {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.user-admin__org-label {
+  align-self: center;
+  font-size: 13px;
 }
 
 .user-admin__block-error {
