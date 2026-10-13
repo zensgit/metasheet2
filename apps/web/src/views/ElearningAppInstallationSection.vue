@@ -1,8 +1,31 @@
 <template>
-  <section class="elearning-installation" aria-label="Cloud classroom installation" :aria-busy="pending">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="elearning-installation"
+    aria-label="Cloud classroom installation"
+    :aria-busy="pending"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <h2>Cloud classroom installation</h2>
     <p>Installation starts disabled. Deployment flags remain the upper bound; storage is managed separately.</p>
-    <p v-if="error" role="alert">{{ error }}</p>
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="pending"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
+    <p v-if="error" role="alert">{{ explainOrgContext(error) }}</p>
     <p v-if="pending" role="status">Working...</p>
     <template v-if="installation">
       <p role="status">{{ installation.status }}</p>
@@ -34,10 +57,15 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { getAuthPrincipalKey, onAuthPrincipalChange, readStoredToken } from '../composables/authPrincipal'
+import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import {
   getElearningAppInstallation, installElearningApp, updateElearningAppInstallation,
   type ElearningAppInstallation,
 } from '../services/elearningApp'
+import { elearningErrorMessage, isElearningOrgContextRequired } from './elearningLabels'
 
 const emit = defineEmits<{ changed: [] }>()
 const installation = ref<ElearningAppInstallation | null>(null)
@@ -46,6 +74,37 @@ const pending = ref(false)
 const error = ref('')
 let generation = 0
 let installationIdentity: string | null = null
+const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
+  changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
+
+// Only the org-context gate's 403 is explained (the client keeps its status and code and
+// nothing else); every other failure keeps the closed `elearning_installation_request_failed`.
+function failureText(failure: unknown): string {
+  const { code, status } = (failure && typeof failure === 'object' ? failure : {}) as {
+    code?: unknown
+    status?: unknown
+  }
+  if (isElearningOrgContextRequired(code, status)) {
+    return elearningErrorMessage(code as string, status as number, isZh.value)
+  }
+  return 'elearning_installation_request_failed'
+}
 
 function currentIdentity(): string {
   return JSON.stringify([getAuthPrincipalKey(), readStoredToken()])
@@ -91,7 +150,7 @@ async function run(action: 'load' | 'install' | 'toggle' | 'save'): Promise<void
     installationIdentity = identity
     notificationsEnabled.value = next.notificationsEnabled
     if (action !== 'load') emit('changed')
-  } catch {
+  } catch (failure) {
     if (current !== generation) return
     try {
       if (identity !== null && identity !== currentIdentity()) { reload(); return }
@@ -99,7 +158,7 @@ async function run(action: 'load' | 'install' | 'toggle' | 'save'): Promise<void
     installation.value = null
     installationIdentity = null
     notificationsEnabled.value = false
-    error.value = 'elearning_installation_request_failed'
+    error.value = failureText(failure)
   } finally {
     if (current === generation) pending.value = false
   }

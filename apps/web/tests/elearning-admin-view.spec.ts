@@ -54,7 +54,38 @@ vi.mock('../src/services/elearningPractice', async () => {
   }
 })
 
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
+
 import { ElearningApiError } from '../src/services/elearning'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import ElearningAdminView from '../src/views/ElearningAdminView.vue'
 
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
@@ -763,6 +794,17 @@ describe('ElearningAdminView', () => {
     expect(new Set(publishedIds).size).toBe(4)
   })
 
+  it('explains ORG_CONTEXT_REQUIRED inside the assessment resource section', async () => {
+    h.listBanks.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listBanks).toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+  })
+
   it('lazily opens the assessment resource section and creates a bank', async () => {
     const root = mountView()
     await flushUi()
@@ -1262,5 +1304,88 @@ describe('ElearningAdminView', () => {
     expect(mixed.querySelector('[data-testid="elearning-content-target-user"]')).not.toBeNull()
     expect(mixed.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
     expect((mixed.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('ElearningAdminView organization context', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED in Chinese and shows no selector without memberships', async () => {
+    useLocale().setLocale('zh-CN')
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ElearningAdminView)
+    app.mount(container)
+    await flushUi()
+    const status = container.querySelector('[data-testid="elearning-admin-status"]')?.textContent ?? ''
+    expect(status).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(status).not.toContain('ORG_CONTEXT_REQUIRED')
+    expect(container.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+  })
+
+  it('disables the organization selector while the admin page is busy', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    try {
+      h.capabilities.mockReset().mockReturnValue(new Promise(() => {}))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(ElearningAdminView)
+      app.mount(container)
+      await flushUi()
+      const select = container.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(select.disabled).toBe(true)
+    } finally {
+      sessionOrgFake.orgs = []
+      sessionOrgFake.currentOrgId = null
+    }
+  })
+
+  it('lets a multi-organization admin switch organization and reloads only from the stale banner', async () => {
+    const realReload = elearningSessionOrgPage.reload
+    const reload = vi.fn()
+    elearningSessionOrgPage.reload = reload
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    sessionOrgFake.switch.mockReset().mockResolvedValue(true)
+    try {
+      useLocale().setLocale('zh-CN')
+      h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(ElearningAdminView)
+      app.mount(container)
+      await flushUi()
+      const select = container.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(select.value).toBe('org-a')
+      select.value = 'org-b'
+      select.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+      // The admin form may hold unsaved input: no reload until the banner's button.
+      expect(reload).not.toHaveBeenCalled()
+      const banner = document.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+      expect(banner?.textContent).toContain('放弃未保存内容并重新加载')
+      expect(container.querySelector('.elearning-admin')?.hasAttribute('inert')).toBe(true)
+      ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
+      expect(reload).toHaveBeenCalledTimes(1)
+    } finally {
+      elearningSessionOrgPage.reload = realReload
+      sessionOrgFake.orgs = []
+      sessionOrgFake.currentOrgId = null
+    }
   })
 })

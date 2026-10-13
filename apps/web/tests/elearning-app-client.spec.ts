@@ -42,6 +42,20 @@ describe('elearning installation client', () => {
     mocks.fetch.mockResolvedValue(new Response('sensitive', { status }))
     await expect(installElearningApp()).rejects.toThrow(/^request_failed$/)
   })
+  it('keeps the status and only the org-context code, with the closed message', async () => {
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'ORG_CONTEXT_REQUIRED' }), { status: 403 }))
+    await expect(getElearningAppInstallation()).rejects.toMatchObject({
+      message: 'request_failed', status: 403, code: 'ORG_CONTEXT_REQUIRED',
+    })
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({ error: 'forbidden', detail: 'sensitive' }), { status: 403 }))
+    const other = await installElearningApp().catch((error: unknown) => error)
+    expect(other).toMatchObject({ message: 'request_failed', status: 403, code: 'request_failed' })
+    expect(JSON.stringify(other)).not.toContain('sensitive')
+    mocks.fetch.mockRejectedValueOnce(new Error('sensitive'))
+    await expect(getElearningAppInstallation()).rejects.toMatchObject({
+      message: 'request_failed', status: 0, code: 'request_failed',
+    })
+  })
   it('sanitizes network and JSON failures', async () => {
     mocks.fetch.mockRejectedValueOnce(new Error('sensitive'))
     await expect(getElearningAppInstallation()).rejects.toThrow(/^request_failed$/)

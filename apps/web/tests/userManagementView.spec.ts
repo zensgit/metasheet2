@@ -2184,6 +2184,132 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Delta')
   })
 
+  describe('slice B: read-only 所属组织 in the member-admission block (owner ruling on #6079)', () => {
+    const NONE_NOTICE = '未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐'
+    const MULTIPLE_NOTICE = '属于多个组织：登录后需在页面顶部选择组织'
+
+    // `organizations: undefined` leaves the field out of the payload entirely (an older backend).
+    function installOrganizations(organizations: unknown, overrides: { accountEnabled?: boolean } = {}): void {
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const response = await base(input, init)
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (!/^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data, ...overrides }
+        if (organizations !== undefined) data.organizations = organizations
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    function orgBlock(): HTMLElement | null {
+      return container!.querySelector('[data-testid="member-admission-organizations"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('one active organization: shows that org as a chip under 所属组织 and no warning', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }], hasTenantContext: true })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgBlock()!.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim()).toBe('成员准入')
+      expect(orgBlock()!.textContent).toContain('所属组织')
+      expect(orgChips()).toEqual(['org-alpha'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(true)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('no active organization: no chips and the 未归属任何组织 sentence', async () => {
+      installOrganizations({ active: [], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual([])
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')!.textContent!.trim()).toBe(NONE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('two active organizations: both chips and the 属于多个组织 sentence', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }, { orgId: 'org-bravo' }], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual(['org-alpha', 'org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(false)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')!.textContent!.trim()).toBe(MULTIPLE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+    })
+
+    it('older backend without the field: renders nothing for organizations, the rest of the block still renders', async () => {
+      installOrganizations(undefined)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(orgChips()).toEqual([])
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+      expect(container!.textContent).not.toContain(MULTIPLE_NOTICE)
+    })
+
+    it('a malformed field (no active list) is treated like an absent one, not as "no organization"', async () => {
+      installOrganizations({ hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    it('organizations: null from the server (its read failed, "unknown") renders nothing, not 「未归属任何组织」', async () => {
+      installOrganizations(null)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    for (const [label, organizations] of [
+      ['an item without a string orgId', { active: [{ orgId: 42 }], hasTenantContext: false }],
+      ['an item with a whitespace-only orgId', { active: [{ orgId: '   ' }], hasTenantContext: false }],
+      ['a good item next to a bad one', { active: [{ orgId: 'org-alpha' }, {}], hasTenantContext: false }],
+      ['a non-boolean hasTenantContext', { active: [{ orgId: 'org-alpha' }], hasTenantContext: 'yes' }],
+    ] as const) {
+      it(`a malformed payload (${label}) renders nothing instead of a wrong claim`, async () => {
+        installOrganizations(organizations)
+        await mountPage()
+        await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+        expect(orgBlock()).toBeNull()
+        expect(orgChips()).toEqual([])
+        expect(container!.textContent).not.toContain(NONE_NOTICE)
+      })
+    }
+
+    it('disabled account: renders nothing for organizations (the login predicate reads it as none, which is not the remedy)', async () => {
+      installOrganizations({ active: [], hasTenantContext: false }, { accountEnabled: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号未启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+  })
+
   describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
     // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
     const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'

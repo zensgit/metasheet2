@@ -44,6 +44,7 @@ function createAdminPage({ workspaceVisible }) {
   }
   const visibleQuickJump = {
     first: () => visibleQuickJump,
+    isVisible: async () => state.quickJumpVisible,
     waitFor: async ({ state: expected }) => {
       assert.equal(expected, 'visible')
       assert.equal(state.quickJumpVisible, true)
@@ -268,3 +269,186 @@ for (const name of ['fetchAuthMeFeatures', 'resolveRecoveryUserId']) {
     assert.equal(calls, 1)
   })
 }
+
+const waitMs = 45000
+const sectionId = 'attendance-admin-import'
+
+test('plugin tests run the verifier regressions alongside the existing production-flow tests', () => {
+  const workflow = readFileSync(path.join(repoRoot, '.github/workflows/plugin-tests.yml'), 'utf8')
+  assert.match(workflow, /node --test scripts\/ops\/attendance-verifier-contract\.test\.mjs/)
+  assert.match(workflow, /node --test scripts\/verify-attendance-production-flow\.test\.mjs/)
+})
+
+function adminFixture({ taskHome = false, compact = false, collapsed = false, missing = false, clickError } = {}) {
+  const state = { workspace: !taskHome, compact, collapsed, otherCollapsed: collapsed, selected: null }
+  const events = []
+  function control(name, visible, click) {
+    const locator = {
+      first: () => locator,
+      isVisible: async () => visible(),
+      waitFor: async (options) => {
+        assert.deepEqual(options, { state: 'visible', timeout: waitMs })
+        assert.ok(visible(), `${name} must be visible`)
+        events.push(`${name}.visible`)
+      },
+      click: async () => {
+        assert.ok(visible(), `${name} must be visible before clicking`)
+        events.push(`${name}.click`)
+        click()
+      },
+    }
+    return locator
+  }
+  const workspace = control('workspace', () => state.workspace)
+  const task = control('task', () => !state.workspace, () => { state.workspace = true })
+  const quickJump = control('removed-quick-jump', () => false)
+  const compactToggle = control('compact', () => state.workspace && state.compact, () => { state.compact = false })
+  const nav = control('nav', () => state.workspace && !state.compact)
+  const group = control('group', () => state.workspace && !state.compact, () => { state.collapsed = !state.collapsed })
+  group.getAttribute = async (name) => {
+    assert.equal(name, 'aria-expanded')
+    return state.collapsed ? 'false' : 'true'
+  }
+  const otherGroup = control('other-group', () => state.workspace && !state.compact, () => { state.otherCollapsed = !state.otherCollapsed })
+  otherGroup.getAttribute = async (name) => {
+    assert.equal(name, 'aria-expanded')
+    return state.otherCollapsed ? 'false' : 'true'
+  }
+  const anchor = control('anchor', () => state.workspace && !state.compact && !state.collapsed && !missing, () => {
+    if (clickError) throw clickError
+    state.selected = sectionId
+  })
+  return {
+    state, events,
+    page: {
+      locator(selector) {
+        if (selector === '[data-admin-section-workspace="true"]') return workspace
+        if (selector === 'button[data-admin-task-action]:visible') return task
+        if (selector === '[data-admin-quick-jump="true"]:visible') return quickJump
+        if (selector === '.attendance__admin-nav-toggle[aria-expanded="false"]') return compactToggle
+        if (selector === '.attendance__admin-nav') return nav
+        if (selector === '.attendance__admin-nav-group-header') {
+          return { all: async () => !state.compact ? [otherGroup, group] : [] }
+        }
+        if (selector === `button[data-admin-anchor="${sectionId}"]`) return anchor
+        throw new Error(`Unexpected selector: ${selector}`)
+      },
+    },
+  }
+}
+
+for (const [name, options, expectedEvents] of [
+  ['desktop expanded rail', {}, ['nav.visible', 'anchor.visible', 'anchor.click']],
+  ['task home', { taskHome: true }, ['task.visible', 'task.click', 'workspace.visible', 'nav.visible', 'anchor.visible', 'anchor.click']],
+  ['collapsed groups', { collapsed: true }, ['nav.visible', 'other-group.click', 'group.click', 'anchor.visible', 'anchor.click']],
+  ['compact mobile rail and collapsed groups', { compact: true, collapsed: true }, ['compact.click', 'nav.visible', 'other-group.click', 'group.click', 'anchor.visible', 'anchor.click']],
+]) {
+  test(`admin navigation selects the requested section through the ${name}`, async () => {
+    const fixture = adminFixture(options)
+    await selectAttendanceAdminWorkspaceSection(fixture.page, sectionId, waitMs)
+    assert.equal(fixture.state.selected, sectionId)
+    assert.deepEqual(fixture.events, expectedEvents)
+  })
+}
+
+test('missing current rail target fails before reporting navigation success', async () => {
+  const fixture = adminFixture({ missing: true })
+  await assert.rejects(selectAttendanceAdminWorkspaceSection(fixture.page, sectionId, waitMs), /anchor must be visible/)
+  assert.equal(fixture.state.selected, null)
+})
+
+test('current rail click failure propagates unchanged', async () => {
+  const clickError = new Error('SYNTHETIC_ANCHOR_CLICK_FAILED')
+  const fixture = adminFixture({ clickError })
+  await assert.rejects(selectAttendanceAdminWorkspaceSection(fixture.page, sectionId, waitMs), error => error === clickError)
+  assert.equal(fixture.state.selected, null)
+})
+
+// Execute the consumer's actual labels and functions without importing its
+// browser-launching entry point. No package installation or runtime IO is needed.
+const fullSource = readFileSync(new URL('../verify-attendance-full-flow.mjs', import.meta.url), 'utf8')
+
+function recordsFixture({ locale = 'zh', onReports = false, missingReload = false, reloadError } = {}) {
+  const state = { onReports, reloads: 0, reportsClicks: 0 }
+  const heading = locale === 'zh' ? '记录' : 'Records'
+  const reloadName = locale === 'zh' ? '重载' : 'Reload'
+  let headingPattern
+  const card = {
+    first: () => card,
+    count: async () => state.onReports && headingPattern.test(heading) ? 1 : 0,
+    isVisible: async () => state.onReports && headingPattern.test(heading),
+    waitFor: async ({ timeout }) => {
+      assert.equal(timeout, waitMs)
+      assert.ok(await card.isVisible(), 'records heading must match the actual UI')
+    },
+    getByRole(role, { name }) {
+      assert.equal(role, 'button')
+      const button = {
+        first: () => button,
+        click: async () => {
+          assert.ok(state.onReports)
+          assert.ok(!missingReload && name.test(reloadName), 'reload must match the visible record action')
+          if (reloadError) throw reloadError
+          state.reloads++
+        },
+      }
+      return button
+    },
+  }
+  const page = {
+    locator(selector) {
+      assert.equal(selector, 'section.attendance__card')
+      return {
+        filter({ has }) {
+          headingPattern = has.name
+          return card
+        },
+      }
+    },
+    getByRole(role, { name }) {
+      if (role === 'heading') return { name }
+      assert.equal(role, 'button')
+      const reportsName = locale === 'zh' ? '报表' : 'Reports'
+      const button = {
+        first: () => button,
+        count: async () => name.test(reportsName) ? 1 : 0,
+        click: async () => {
+          assert.ok(name.test(reportsName))
+          state.onReports = true
+          state.reportsClicks++
+        },
+      }
+      return button
+    },
+  }
+  const context = vm.createContext({ timeoutMs: waitMs, logInfo() {} })
+  vm.runInContext([
+    fullSource.slice(fullSource.indexOf('function escapeRegex('), fullSource.indexOf('\nconst textSets =')),
+    ...['getVisibleRecordsSection', 'refreshRecords'].map(name => actualFunction(fullSource, name)),
+  ].join('\n'), context)
+  return { state, refresh: () => context.refreshRecords(page) }
+}
+
+for (const locale of ['en', 'zh']) {
+  for (const onReports of [false, true]) {
+    test(`full flow reloads ${locale} Records from ${onReports ? 'Reports' : 'Overview'}`, async () => {
+      const fixture = recordsFixture({ locale, onReports })
+      await fixture.refresh()
+      assert.equal(fixture.state.reloads, 1)
+      assert.equal(fixture.state.reportsClicks, onReports ? 0 : 1)
+    })
+  }
+}
+
+test('full flow does not turn a missing Reload control into a successful refresh', async () => {
+  const fixture = recordsFixture({ missingReload: true })
+  await assert.rejects(fixture.refresh(), /reload must match/)
+  assert.equal(fixture.state.reloads, 0)
+})
+
+test('full flow propagates a Reload action failure', async () => {
+  const reloadError = new Error('SYNTHETIC_RECORD_RELOAD_FAILED')
+  const fixture = recordsFixture({ reloadError })
+  await assert.rejects(fixture.refresh(), error => error === reloadError)
+  assert.equal(fixture.state.reloads, 0)
+})

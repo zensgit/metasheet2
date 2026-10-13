@@ -32,6 +32,8 @@
 | 备份 | `pre-r64-20261012-082118.dump`（3.25 MB，`pg_restore -l` 可读） |
 | 界面回归 | 2026-10-12 08:30（演示机时间，owner 管理员会话，入口已核为 `index-BpcGWPiZ.js`），六项全过：① 角色管理可见四个内置角色，原 `stock-prep-operator` 仍在；② 考勤设置页原处是提示卡和「前往节假日」；③ 节假日页有「有效日历覆盖规则」；④ 备料首页和看板没有总览，也没有项目表行，`…/projects/:no/target` 回 404 `STOCK_PREPARATION_PROJECT_SHEETS_DISABLED`（开关关）；⑤ 顶栏没有「任务」，页面不发 `/api/tasks`；⑥ 除④那条有意的 404 外没有 4xx/5xx。见 #6079 帖 6115635629 |
 
+> **2026-10-13 订正（演示机现状）**：旧一线角色 `stock-prep-operator` 已于 2026-10-13 在演示机上删除；一线角色现为「操作人员」（`stock-prep_frontline`）+「审批与提交」（`approvals_operator`），见 `runbook-operator-merge-20261012.md`「执行记录」。
+
 ## 3. 两次都刻意未做
 
 - 上机后不触发定时试拉：客户 PLM 测试库自 10-08 起拒绝只读账号登录（`ELOGIN`，R62 已排除），owner 10-08 定「期间不主动探测 PLM」。

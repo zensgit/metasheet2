@@ -13,9 +13,8 @@ name: Approval real-DB acceptance (projection participant key parity)
 #     (GET /sheets/:sheetId/export-xlsx), and the Yjs/API-token capability choke. A genuine
 #     requester and a genuine decider each see only their own rows; an ordinary-multitable-read
 #     stranger is excluded on every surface (anti-widening control — this bug was fail-closed, not
-#     a leak); admin is unaffected. `GET /context` is asserted too, but only as a documented
-#     VACUOUS control: that route applies no projection predicate at all (a separate, already
-#     confirmed, not-yet-merged defect) and this fix does not touch it.
+#     a leak); admin is unaffected. `GET /context` is asserted on the same footing: the
+#     participant reads the sheet, and the stranger is answered exactly like an absent sheet.
 # Ephemeral first-party PostgreSQL container; no customer source, no deployment, no flag change.
 #
 # WHY A STANDALONE FILE, not a plugin-tests.yml allowlist entry: plugin-tests.yml is an s6a
@@ -43,6 +42,7 @@ on:
     # filter keeps it off unrelated PRs.
     paths:
       - 'packages/core-backend/tests/integration/approval-projection-key-parity.db.test.ts'
+      - 'packages/core-backend/tests/utils/sheet-existence-oracle.ts'
       - 'packages/core-backend/src/multitable/approval-projection-constants.ts'
       - 'packages/core-backend/src/multitable/approval-record-projection-service.ts'
       - 'packages/core-backend/src/multitable/permission-service.ts'
@@ -62,6 +62,7 @@ on:
     branches: [main]
     paths:
       - 'packages/core-backend/tests/integration/approval-projection-key-parity.db.test.ts'
+      - 'packages/core-backend/tests/utils/sheet-existence-oracle.ts'
       - 'packages/core-backend/src/multitable/approval-projection-constants.ts'
       - 'packages/core-backend/src/multitable/approval-record-projection-service.ts'
       - 'packages/core-backend/src/multitable/permission-service.ts'
@@ -150,7 +151,7 @@ jobs:
           {
             echo "evidenceKind=CONTROLLED_SYNTHETIC_FUNCTIONAL"
             echo "suites=approval-projection-key-parity.db.test.ts"
-            echo "scope=participant carve-out + both per-row deny arms + sheet-capabilities choke read the writer's namespaced projection key; four consumer surfaces (entry listing, row read, export, Yjs/API-token choke) over REAL reconcile() output; requester/decider/stranger/admin; per-row control; /context asserted only as a documented vacuous control"
+            echo "scope=participant carve-out + both per-row deny arms + sheet-capabilities choke read the writer's namespaced projection key; four consumer surfaces (entry listing, row read, export, Yjs/API-token choke) over REAL reconcile() output; requester/decider/stranger/admin; per-row control; /context answers the stranger exactly like an absent sheet"
             echo "sentinelArmed=EXPECT_DB=1"
             echo "customerSourceAccess=NOT_INVOLVED"
             echo "flagChanged=false"

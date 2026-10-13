@@ -1513,6 +1513,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
+  adminPageContentSearch.spec.ts \
   amountAutoSum \
   approval-amount-in-words \
   approval-assignee-source \
@@ -1614,6 +1615,8 @@ exec npx vitest run \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
+  attendanceAdminGuide.spec.ts \
+  attendanceAudienceChipField.spec.ts \
   attendanceCapabilityUnavailable \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
@@ -1621,7 +1624,9 @@ exec npx vitest run \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
+  attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
   AttendanceScheduledFeatureStatus \
@@ -1903,6 +1908,7 @@ exec npx vitest run \
   parallelBranchRunsView \
   personal-view-client \
   public-multitable-form \
+  recordReportPresentation.spec.ts \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
