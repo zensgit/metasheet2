@@ -38,6 +38,7 @@ import {
 import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
 import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
 import { describeRoutePreviewError, ROUTE_PREVIEW_REQUIRED_COPY_EN } from '../src/approvals/routePreviewErrors'
+import { useLocale } from '../src/composables/useLocale'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -3475,7 +3476,7 @@ describe('TemplateAuthoringView', () => {
   // R-43 follow-up (a): the server validates the 试运行 sample against the WHOLE form. A visible
   // required field left empty used to surface as the raw English "Approval form data is invalid";
   // it now gets the localized hint naming the field (name only — no value, no raw id). Any other
-  // validation failure keeps its text. The test locale is en.
+  // validation failure keeps its text. The test locale is en unless a case switches it (and restores en).
   async function runTryRunWithRejection(error: unknown): Promise<string> {
     setRouteParams({ id: 'tpl_tryrun_required' })
     getTemplateSpy.mockResolvedValue(buildTemplate({
@@ -3519,6 +3520,25 @@ describe('TemplateAuthoringView', () => {
     expect(text).not.toContain('Approval form data is invalid')
     expect(text).not.toContain('remark_field')
     expect(text).not.toContain('6000')
+  })
+
+  // FU gate r1 P2-1: the zh side of the view wiring (`isZh: tryRunIsZh.value`) is otherwise only
+  // locked through the pure function; a constant `isZh: false` would pass every other case.
+  it('follow-up (a): under zh-CN the try-run hint is Chinese', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      const { ApprovalApiError } = await import('../src/approvals/api')
+      const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['remark_field is required'] })
+      const text = await runTryRunWithRejection(error)
+      expect(text).toBe(describeRoutePreviewError(error, undefined, { isZh: true, fieldLabel: (id) => (id === 'remark_field' ? '备注' : null) }))
+      expect(text).toContain('「备注」')
+      expect(text).not.toContain('Approval form data is invalid')
+      expect(text).not.toContain('remark_field')
+      expect(text).not.toContain('6000')
+    } finally {
+      setLocale('en')
+    }
   })
 
   it('follow-up (a): any other validation failure keeps the server message', async () => {
