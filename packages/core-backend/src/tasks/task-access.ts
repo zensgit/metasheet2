@@ -323,10 +323,15 @@ export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: s
   }
 }
 
-// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) the one
-// reader of a task that may be soft-deleted is the notification delivery worker, for a `deleted`
-// event: by then the task row is soft-deleted. Every other read selects live rows through the
-// builder above. The org clause is the same single emission, so its org guarantee is the same.
+// ASSUMPTION(task-m4): [own-3b-17] (M4 PR-3b design §3.4, §7.4; owner question §13-Q14) readers
+// of a task that may be soft-deleted, each for its own reason:
+// - the notification delivery worker, for a `deleted` event: by then the task row is soft-deleted;
+// - the recurrence series reads (M5 PR-4a design §2.10, §3.2 step 3, §3.8): the anchor and the
+//   chain walk of the ordinal read the series' first occurrence by id, and series delete loads it,
+//   whether or not it is soft-deleted, because a soft-deleted occurrence still holds the chain
+//   together. The other occurrences come through `buildTaskSeriesMembersCondition` below.
+// Every other read selects live rows through the builder above. The org clause is the same single
+// emission, so its org guarantee is the same.
 /**
  * `{ sql, params }` TEXT selecting one task of one org by id, live or soft-deleted. `$1` = task id,
  * `$2` = org. A caller that appends its own parameters numbers them from `params.length + 1`.
@@ -334,6 +339,73 @@ export function buildTaskByIdCondition(input: { taskIdParam: string; orgParam: s
 export function buildTaskByIdAnyStateCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
   return {
     sql: `tasks.id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §4.7: the recurrence series reads (the ordinal of §2.10, the latest occurrence of
+// §3.2 and §3.8, series delete) select a series' occurrences through this builder, soft-deleted ones
+// included, never with an org condition of their own; `idx_tsk_recurrence_series` serves it.
+/**
+ * `{ sql, params }` TEXT selecting the tasks of one org whose `recurrence_series_id` is the given
+ * first-occurrence id, live or soft-deleted (the first occurrence itself is not among them: it is
+ * read by id through `buildTaskByIdAnyStateCondition`). `$1` = first-occurrence id, `$2` = org.
+ */
+export function buildTaskSeriesMembersCondition(input: { seriesIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.recurrence_series_id = ${TASK_ID_PLACEHOLDER} AND ${taskOrgClauseWith(TASK_ANY_ROW_STATE)}`,
+    params: [input.seriesIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §3.8 step 1, §4.7: the live children of the occurrences a series delete removes,
+// for `planSeriesDelete`'s `nodes`. `tasks_parent_fk` is a single-column key, so a join alone would
+// not keep the children inside the org; the org comes from this builder.
+/**
+ * `{ sql, params }` TEXT selecting the live tasks of one org whose `parent_id` is one of the given
+ * ids. `$1` = text array of parent ids, `$2` = org.
+ */
+export function buildLiveChildrenOfTasksCondition(input: { parentIdsParam: readonly string[]; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.parent_id = ANY(${TASK_ID_PLACEHOLDER}::text[]) AND ${taskOrgLiveClause()}`,
+    params: [[...input.parentIdsParam], input.orgParam],
+  }
+}
+
+// M5 PR-4a design §3.4, §4.7: the dependency graph of one org, read under the structure lock before
+// an edge is added (the cycle check and the per-task limit see every live edge, D4, ASSUMPTION), by
+// the candidate read (the cycle exclusion) and, anchored on one task, by the dependency lists. The org
+// is this module's single org clause on the predecessor end; the successor end is checked for
+// liveness only, because both composite foreign keys of `task_dependencies` (`(predecessor_id,
+// org_id)` and `(successor_id, org_id)` onto `tasks (id, org_id)`) put the two ends and the edge in
+// one org. Edges of a soft-deleted task stay in the table and are left out here (D17, ASSUMPTION).
+/**
+ * `{ sql, params }` TEXT selecting the rows of `task_dependencies` whose two ends are live tasks of
+ * one org, for a query `FROM task_dependencies`. `$1` = a task id, or `null` for every edge of the
+ * org; with an id only the edges that have it as predecessor or successor. `$2` = org.
+ */
+export function buildOrgDependencyEdgesCondition(input: { taskIdParam: string | null; orgParam: string }): TaskScopeCondition {
+  return {
+    sql:
+      `(${TASK_ID_PLACEHOLDER}::text IS NULL OR task_dependencies.predecessor_id = ${TASK_ID_PLACEHOLDER} ` +
+      `OR task_dependencies.successor_id = ${TASK_ID_PLACEHOLDER}) ` +
+      `AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = task_dependencies.predecessor_id AND ${taskOrgLiveClause()}) ` +
+      `AND EXISTS (SELECT 1 FROM tasks AS successor_task WHERE successor_task.id = task_dependencies.successor_id ` +
+      `AND successor_task.deleted_at IS NULL)`,
+    params: [input.taskIdParam, input.orgParam],
+  }
+}
+
+// M5 PR-4a design §3.4, §4.7: the tasks a dependency candidate list starts from. Whether the caller
+// may edit a row is decided per row from its role set (`can(roles, 'edit')`), never here.
+/**
+ * `{ sql, params }` TEXT selecting the live tasks of one org other than one task. `$1` = the task
+ * the candidates are for (left out), `$2` = org. A caller that appends its own parameters numbers
+ * them from `params.length + 1`.
+ */
+export function buildDependencyCandidateTasksCondition(input: { taskIdParam: string; orgParam: string }): TaskScopeCondition {
+  return {
+    sql: `tasks.id <> ${TASK_ID_PLACEHOLDER} AND ${taskOrgLiveClause()}`,
     params: [input.taskIdParam, input.orgParam],
   }
 }
@@ -380,4 +452,17 @@ export function canChangeTaskMembers(input: { task: TaskRoleRow; me: string }): 
     input.me,
   )
   return can(direct, 'edit')
+}
+
+// RULED(2026-10-09): six items, item 3: only the task's creator completes it for every assignee;
+// the decision reads `tasks.created_by` alone (M5 PR-4a design §3.1, §5 rule 1).
+// ASSUMPTION(task-m5a): [a-02] anyone else who asks for it gets the same 404 as a missing task.
+/**
+ * Whether `actorId` may complete, for every assignee, the task whose creator is `createdBy`. It
+ * takes no role set, so neither list identity nor an assignee or follower row can stand in for the
+ * creator (the same shape as `canChangeTaskMembers`). Used by the complete route and by the detail's
+ * `canCompleteForAll`, so the two cannot disagree.
+ */
+export function canCompleteForAll(input: { actorId: string; createdBy: string }): boolean {
+  return input.actorId === input.createdBy
 }

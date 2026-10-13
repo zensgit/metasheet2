@@ -12,6 +12,7 @@
  */
 import { query, transaction } from '../db/pg'
 import {
+  buildLiveChildrenOfTasksCondition,
   buildTaskByIdCondition,
   can,
   canChangeTaskMembers,
@@ -39,6 +40,7 @@ import {
   type TaskCommentView,
 } from '../tasks/task-comments'
 import { planDeleteTask, type TaskDeletionNodes } from '../tasks/task-deletion'
+import { planSeriesDelete, type TaskSeriesMember } from '../tasks/task-recurrence'
 import {
   canReparent,
   parentCandidates,
@@ -51,6 +53,7 @@ import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskCommentId, newTaskEventId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
 import { assertActiveOrgMembers } from './task-org-members'
+import { loadSeries, loadTaskSeriesFacts, orderSeriesChain } from './task-recurrence-records'
 import {
   assertRowAbility,
   assigneeIds,
@@ -61,6 +64,7 @@ import {
   loadRowRoles,
   loadTask,
   plainDb,
+  spawnNextOccurrenceIfDue,
   withOrgStructure,
   writeChangedAssignees,
   writeTaskDoneState,
@@ -387,6 +391,12 @@ export async function removeAssignee(input: { orgId: string; actorId: string; ta
     const written = await writeMembershipEvents(db, input.taskId, result.events, now)
     // M4 PR-3b: outbox rows for the events that notify, in this transaction.
     await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // M5 PR-4a slice 3 (design §3.2): removing the last open assignee of an `all` task flips it to
+    // done, which spawns the next occurrence of a recurring task; the removed user is not carried.
+    await spawnNextOccurrenceIfDue(db, {
+      orgId: input.orgId, taskId: input.taskId, actorId: input.actorId, now,
+      wasDone: task.status === 'done', done: result.status === 'done', recurrence: task.recurrence,
+    })
     // RULED(2026-10-07): [R16] a real removal (or a status change): the removed assignee is in the
     // set before it; never the followers.
     if (result.events.length > 0 || result.status !== task.status) {
@@ -459,6 +469,12 @@ export async function switchCompletionMode(input: { orgId: string; actorId: stri
     const written = await writeMembershipEvents(db, input.taskId, result.events, now)
     // M4 PR-3b: outbox rows for the events that notify, in this transaction.
     await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // M5 PR-4a slice 3 (design §3.2): a switch to `any` that completes the task spawns the next
+    // occurrence of a recurring task, in the new mode.
+    await spawnNextOccurrenceIfDue(db, {
+      orgId: input.orgId, taskId: input.taskId, actorId: input.actorId, now,
+      wasDone: task.status === 'done', done: result.status === 'done', recurrence: task.recurrence,
+    })
     // RULED(2026-10-07): [R16] ASSUMPTION(task-m4): [own-3c-02] every real mode change, whether or
     // not it moved the status or a completion; the same mode is a no-op and sends nothing.
     if (to !== task.mode) counts.note({ before: assigneeIds(rows), after: assigneeIds(result.rows) })
@@ -792,9 +808,13 @@ const DELETE_ROW_LOCK_TIMEOUT = '3s'
  * 57014 `query_canceled` (statement_timeout), 55P03 `lock_not_available`. */
 const DELETE_ROW_LOCK_BUSY_CODES = new Set(['57014', '55P03'])
 
-/** `FOR UPDATE` on the live task row, taken after the org structure lock and
- * before any read, so the reads below see the row as of the lock
- * (M3R2-CONC-1). Conflicts with the comment writes' `FOR KEY SHARE`; see
+/** `FOR UPDATE` on the live task row, taken after the org structure lock.
+ * On the single delete it comes before every read of the row except the
+ * series-facts read, which reads only series columns that change under the
+ * structure lock alone, so the reads after it see the row as of the lock
+ * (M3R2-CONC-1). The series delete calls it once per occurrence after
+ * reading the series under the structure lock (M5 PR-4a design §3.8 steps
+ * 1–2), so its worst-case wait is that many times the bound. Conflicts with the comment writes' `FOR KEY SHARE`; see
  * `lockLiveTaskForComment`. The statement runs under a transaction-local
  * `statement_timeout`; on success the prior value is restored for the rest
  * of the transaction. On failure the transaction is rolled back, which
@@ -837,10 +857,143 @@ async function precheckDeleteAbility(input: { orgId: string; actorId: string; ta
   if (!can(roles, 'delete')) fail(404, 'NOT_FOUND')
 }
 
-export async function deleteTaskById(input: { orgId: string; actorId: string; taskId: string }): Promise<{ id: string; deleted: true }> {
+/** One occurrence a series delete is about to soft-delete, as read under the locks. */
+interface SeriesDeleteTarget {
+  taskId: string
+  createdBy: string
+  /** Its assignees, for the counts signal (both sides of the note). */
+  assigneeIds: string[]
+}
+
+interface SeriesDeletePlan {
+  /** Target first, then the later occurrences along the chain (`planSeriesDelete`'s order). */
+  targets: SeriesDeleteTarget[]
+  /** The latest surviving occurrence whose rule is cleared, if any. */
+  clearRecurrence: { taskId: string; createdBy: string } | null
+}
+
+/**
+ * Series delete, steps 1–3 up to the plan (M5 PR-4a design §3.8), under the structure lock: load the
+ * whole series (soft-deleted occurrences included); take the bounded `FOR UPDATE` of the M3 single
+ * delete on the target and every later, live, open occurrence, in ascending id order (409 TASK_BUSY
+ * past the bound, the whole delete rolls back); read each one's roles and assignees and the live
+ * children of all of them (through `buildLiveChildrenOfTasksCondition`); then `planSeriesDelete`
+ * (RULED(2026-10-09): [S17] (b)(d): every occurrence passes task C's delete check, one refusal refuses
+ * all, 409 HAS_CHILDREN or 404). Reads and row locks only; the writes are
+ * `softDeleteSeriesOccurrences`. Completion only changes under the structure lock, so the set
+ * computed before the row locks does not change after them.
+ */
+async function lockAndPlanSeriesDelete(db: Db, input: { orgId: string; actorId: string; taskId: string }, firstId: string): Promise<SeriesDeletePlan> {
+  const series = orderSeriesChain(await loadSeries(db, input.orgId, firstId))
+  const at = series.findIndex((member) => member.id === input.taskId)
+  if (at === -1 || series[at].deleted) fail(404, 'NOT_FOUND')
+  const candidates = [series[at], ...series.slice(at + 1).filter((member) => !member.deleted && member.status === 'open')]
+  for (const id of candidates.map((member) => member.id).sort()) await lockTaskRowForDelete(db, id, input.orgId)
+  const rolesById = new Map<string, TaskRole[]>()
+  const assigneesById = new Map<string, string[]>()
+  for (const member of candidates) {
+    const { roles, assignees } = await loadRowRoles(db, { taskId: member.id, createdBy: member.createdBy, actorId: input.actorId })
+    rolesById.set(member.id, roles)
+    assigneesById.set(member.id, assigneeIds(assignees))
+  }
+  const nodes = new Map<string, { parentId: string | null }>()
+  for (const member of candidates) nodes.set(member.id, { parentId: member.parentId })
+  const children = buildLiveChildrenOfTasksCondition({ parentIdsParam: candidates.map((member) => member.id), orgParam: input.orgId })
+  const childRows = await db.query(`SELECT id, parent_id FROM tasks WHERE ${children.sql}`, children.params)
+  for (const row of childRows.rows) nodes.set(String(row.id), { parentId: String(row.parent_id) })
+  const members: TaskSeriesMember[] = series.map((member) => ({
+    id: member.id,
+    previousOccurrenceId: member.previousOccurrenceId,
+    status: member.status,
+    deleted: member.deleted,
+    hasRecurrence: member.hasRecurrence,
+    actorRoles: rolesById.get(member.id) ?? [],
+  }))
+  // The plan's event instants are not used: the writes copy `deleted_at` from the rows (M3R3-LOCK-2).
+  const plan = planSeriesDelete({ targetId: input.taskId, members, nodes, actorId: input.actorId, now: new Date() })
+  if (plan.ok === false) {
+    if (plan.reason === 'has_children') fail(409, 'HAS_CHILDREN')
+    fail(404, 'NOT_FOUND')
+  }
+  const byId = new Map(series.map((member) => [member.id, member]))
+  if (plan.deleteIds.length !== candidates.length || plan.deleteIds.some((id) => !rolesById.has(id))) {
+    throw new Error('series delete: the plan does not match the locked occurrences')
+  }
+  const cleared = plan.clearRecurrenceIds[0]
+  return {
+    targets: plan.deleteIds.map((id) => ({ taskId: id, createdBy: byId.get(id)?.createdBy ?? '', assigneeIds: assigneesById.get(id) ?? [] })),
+    clearRecurrence: cleared === undefined ? null : { taskId: cleared, createdBy: byId.get(cleared)?.createdBy ?? '' },
+  }
+}
+
+/**
+ * Series delete, step 3's writes (M5 PR-4a design §3.8; [a-41]: called only by `deleteTaskById`).
+ * One `clock_timestamp()` reading, taken after the locks, is written to `deleted_at` and
+ * `updated_at` of every target, and each target's `deleted` event copies it from its row, as the M3
+ * single delete does (M3R2-CONC-5, M3R3-LOCK-2). The latest surviving occurrence that still has a rule
+ * loses it, with a `recurrence_cleared` event at the same instant. Returns, per occurrence that got an
+ * event, the events as written, for the caller's enqueue; the counts note stays with the caller.
+ */
+async function softDeleteSeriesOccurrences(db: Db, input: { actorId: string; plan: SeriesDeletePlan }): Promise<Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }>> {
+  const targetIds = input.plan.targets.map((target) => target.taskId)
+  // One reading for every target, taken once in a materialized CTE and never leaving SQL (no JS Date,
+  // no text round trip): a `clock_timestamp()` in a plain subquery of the FROM list is evaluated again
+  // for each joined row.
+  await db.query(
+    `WITH clock AS MATERIALIZED (SELECT clock_timestamp() AS at)
+     UPDATE tasks SET deleted_at = clock.at, updated_at = clock.at FROM clock WHERE tasks.id = ANY($1::text[])`,
+    [targetIds],
+  )
+  const written: Array<{ taskId: string; createdBy: string; events: WrittenTaskEvent[] }> = []
+  for (const target of input.plan.targets) {
+    const eventId = newTaskEventId()
+    await db.query(
+      `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at)
+       SELECT $1, $2, $3, 'deleted', deleted_at FROM tasks WHERE id = $2`,
+      [eventId, target.taskId, input.actorId],
+    )
+    written.push({ taskId: target.taskId, createdBy: target.createdBy, events: [{ id: eventId, type: 'deleted', actorId: input.actorId, occurredAt: null }] })
+  }
+  const cleared = input.plan.clearRecurrence
+  if (cleared !== null) {
+    await db.query(
+      `UPDATE tasks AS t SET recurrence = NULL, updated_at = d.deleted_at
+       FROM (SELECT deleted_at FROM tasks WHERE id = $2) AS d
+       WHERE t.id = $1`,
+      [cleared.taskId, targetIds[0]],
+    )
+    const eventId = newTaskEventId()
+    await db.query(
+      `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at)
+       SELECT $1, $2, $3, 'recurrence_cleared', deleted_at FROM tasks WHERE id = $4`,
+      [eventId, cleared.taskId, input.actorId, targetIds[0]],
+    )
+    written.push({ taskId: cleared.taskId, createdBy: cleared.createdBy, events: [{ id: eventId, type: 'recurrence_cleared', actorId: input.actorId, occurredAt: null }] })
+  }
+  return written
+}
+
+export async function deleteTaskById(input: { orgId: string; actorId: string; taskId: string }): Promise<{ id: string; deleted: true; deletedIds: string[] }> {
   await precheckDeleteAbility(input)
   const counts = taskCountsSignal()
-  const response = await withOrgStructure<{ id: string; deleted: true }>(input.orgId, async (db) => {
+  const response = await withOrgStructure<{ id: string; deleted: true; deletedIds: string[] }>(input.orgId, async (db) => {
+    // M5 PR-4a slice 3 (design §3.8): a task in a recurrence series (a rule, a later occurrence, or
+    // the predecessor of one) is deleted with the later, live, open occurrences of its chain.
+    // ASSUMPTION(task-m5a): [a-19] the answer lists the deleted ids, the target first.
+    const series = await loadTaskSeriesFacts(db, input.taskId, input.orgId)
+    if (series !== null && series.inSeries) {
+      const plan = await lockAndPlanSeriesDelete(db, input, series.firstId)
+      const written = await softDeleteSeriesOccurrences(db, { actorId: input.actorId, plan })
+      // Step 4, M4 PR-3b: one enqueue per occurrence, with that occurrence's own id, creator and events
+      // (the producer loads the recipients of one task per call; `recurrence_cleared` does not notify).
+      for (const occurrence of written) {
+        await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: occurrence.taskId, createdBy: occurrence.createdBy, events: occurrence.events })
+      }
+      // Step 5, RULED(2026-10-07): [R16] every deleted occurrence leaves each of its assignees' badges;
+      // one collector for the whole delete, so each assignee is sent once after the commit.
+      for (const target of plan.targets) counts.note({ before: target.assigneeIds, after: target.assigneeIds })
+      return { id: input.taskId, deleted: true, deletedIds: plan.targets.map((target) => target.taskId) }
+    }
     await lockTaskRowForDelete(db, input.taskId, input.orgId)
     const task = await loadTask(db, input.taskId, input.orgId)
     // List roles never grant `delete`; resolved the same way as every other site so the role set
@@ -891,7 +1044,7 @@ export async function deleteTaskById(input: { orgId: string; actorId: string; ta
     })
     // RULED(2026-10-07): [R16] a deleted task leaves every assignee's badge.
     counts.note({ before: assigneeIds(assignees), after: assigneeIds(assignees) })
-    return { id: input.taskId, deleted: true }
+    return { id: input.taskId, deleted: true, deletedIds: [input.taskId] }
   })
   // RULED(2026-10-07): [R16] sent only once the transaction above committed.
   counts.publish()

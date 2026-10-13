@@ -11,6 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { usePinnedServer } from '../utils/pinned-server'
 
 const createTask = vi.fn()
+const completeTask = vi.fn()
 const patchTask = vi.fn()
 const listService = {
   createTaskList: vi.fn(),
@@ -58,7 +59,11 @@ vi.mock('../../src/rbac/rbac', () => ({
 
 vi.mock('../../src/services/task-records', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/services/task-records')>()
-  return { ...actual, createTask: (...args: unknown[]) => createTask(...args) }
+  return {
+    ...actual,
+    createTask: (...args: unknown[]) => createTask(...args),
+    completeTask: (...args: unknown[]) => completeTask(...args),
+  }
 })
 
 vi.mock('../../src/services/task-patch', async (importOriginal) => {
@@ -108,6 +113,7 @@ afterAll(() => {
 
 beforeEach(() => {
   createTask.mockReset()
+  completeTask.mockReset()
   patchTask.mockReset()
   for (const fn of Object.values(listService)) fn.mockReset()
   for (const fn of Object.values(groupService)) fn.mockReset()
@@ -163,6 +169,40 @@ describe('tasks route sendError', () => {
     const res = await request(pinned.url()).patch('/api/tasks/tsk_x').send({ expectedVersion: 1 })
     expect(res.status).toBe(409)
     expect(res.body).toEqual({ error: { code: 'VERSION_CONFLICT' } })
+  })
+
+  // M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1): the route hands the service
+  // the body's raw `scope` field, unchecked (the service checks it after the row-level checks).
+  it('complete: the service receives the path id and the raw scope field (undefined without one)', async () => {
+    completeTask.mockResolvedValue({ done: true, version: 2 })
+    const base = { orgId: 'org_route_errors', actorId: 'usr_route_errors', taskId: 'tsk_x' }
+    const cases: Array<[string, unknown, unknown]> = [
+      ['no body', undefined, undefined],
+      ['an empty object', {}, undefined],
+      ["scope 'all'", { scope: 'all' }, 'all'],
+      ["scope 'self'", { scope: 'self' }, 'self'],
+      ["scope 'x'", { scope: 'x' }, 'x'],
+      ['scope null', { scope: null }, null],
+      ['scope 1', { scope: 1 }, 1],
+      ['an array body', ['all'], undefined],
+      ['other keys only', { done: true }, undefined],
+    ]
+    for (const [label, body, scope] of cases) {
+      completeTask.mockClear()
+      const call = request(pinned.url()).post('/api/tasks/tsk_x/complete')
+      const res = body === undefined ? await call : await call.send(body as object)
+      expect(res.status, label).toBe(200)
+      expect(res.body, label).toEqual({ done: true, version: 2 })
+      expect(completeTask, label).toHaveBeenCalledTimes(1)
+      expect(completeTask.mock.calls[0]?.[0], label).toEqual({ ...base, scope })
+    }
+  })
+
+  it('complete: a 422 INVALID_SCOPE from the service is sent as-is', async () => {
+    completeTask.mockRejectedValueOnce(Object.assign(new Error('INVALID_SCOPE'), { status: 422, code: 'INVALID_SCOPE' }))
+    const res = await request(pinned.url()).post('/api/tasks/tsk_x/complete').send({ scope: 'x' })
+    expect(res.status).toBe(422)
+    expect(res.body).toEqual({ error: { code: 'INVALID_SCOPE' } })
   })
 
   it('PATCH: the service receives the path id and the raw body', async () => {

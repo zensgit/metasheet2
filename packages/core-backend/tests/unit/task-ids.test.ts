@@ -12,7 +12,8 @@ describe('task-ids', () => {
   describe('TASK_ID_PREFIXES', () => {
     // ASSUMPTION(task-d): [R23] `group`/`listEvent` added here: the R23 prefixes (ruled 2026-10-07)
     // for `task_groups.id` / `task_list_events.id`.
-    it('is the closed six-kind set (task-d adds group/listEvent per R23)', () => {
+    // RULED(2026-10-09): [S30] `field`/`attachment` added by M5 PR-4a.
+    it('is the closed eight-kind set (task-d adds group/listEvent per R23; M5 adds field/attachment per S30)', () => {
       expect(TASK_ID_PREFIXES).toEqual({
         task: 'tsk',
         list: 'tlst',
@@ -20,6 +21,8 @@ describe('task-ids', () => {
         event: 'tev',
         group: 'tgrp',
         listEvent: 'tlev',
+        field: 'tfld',
+        attachment: 'tatt',
       })
     })
   })
@@ -51,6 +54,20 @@ describe('task-ids', () => {
     it('group kind produces a tgrp_-prefixed id that passes the four-conjunct CHECK', () => {
       const id = generateTaskDomainId('group', fixedRandom)
       expect(id).toMatch(/^tgrp_[A-Za-z0-9]+$/)
+      expect(isValidTaskDomainId(id)).toBe(true)
+    })
+
+    // RULED(2026-10-09): [S30]
+    it('field kind produces a tfld_-prefixed id that passes the four-conjunct CHECK', () => {
+      const id = generateTaskDomainId('field', fixedRandom)
+      expect(id).toBe('tfld_a1B2c3D4e5F6g7H8')
+      expect(isValidTaskDomainId(id)).toBe(true)
+    })
+
+    // RULED(2026-10-09): [S30]
+    it('attachment kind produces a tatt_-prefixed id that passes the four-conjunct CHECK', () => {
+      const id = generateTaskDomainId('attachment', fixedRandom)
+      expect(id).toBe('tatt_a1B2c3D4e5F6g7H8')
       expect(isValidTaskDomainId(id)).toBe(true)
     })
 

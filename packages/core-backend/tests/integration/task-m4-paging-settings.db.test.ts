@@ -141,7 +141,8 @@ describe('R15 pagination', () => {
     expect(Object.keys(first.body).sort()).toEqual(['items', 'total'])
     expect(first.body.items).toHaveLength(100)
     expect(first.body.total).toBe(101)
-    expect(Object.keys(first.body.items[0]).sort()).toEqual(['completion_mode', 'created_by', 'due_at', 'id', 'status', 'title'])
+    // The GET /api/tasks item key set includes `is_milestone` (task-m5-pr4a-backend-design-20261010.md §3.8, [a-18]).
+    expect(Object.keys(first.body.items[0]).sort()).toEqual(['completion_mode', 'created_by', 'due_at', 'id', 'is_milestone', 'status', 'title'])
     const rest = await server.get('/api/tasks').query({ view: 'created', offset: '100' }).set(auth(me.bearer))
     expect(rest.status).toBe(200)
     expect(rest.body.items).toHaveLength(1)

@@ -14,6 +14,7 @@ import { Pool } from 'pg'
 import { afterAll, describe, expect, it } from 'vitest'
 import { poolManager } from '../../src/integration/db/connection-pool'
 import { down as m4Down, up as m4Up } from '../../src/db/migrations/zzzz20261009130000_create_task_m4_tables'
+import { down as m5Down, up as m5Up } from '../../src/db/migrations/zzzz20261012150000_create_task_m5_tables'
 import { newTaskGroupId, newTaskId, newTaskListEventId, newTaskListId } from '../../src/services/task-ids-runtime'
 import { dropTaskM4Fixtures } from '../helpers/task-m4-fixtures'
 
@@ -816,6 +817,9 @@ describe('task M4 schema (real db)', () => {
           const before = await snapshot(run)
           expect(byKey(before.columns)).toEqual(byKey(EXPECTED_COLUMNS))
 
+          // The M5 migration references task_lists and tasks_id_org_id_key, so it goes down first and
+          // comes back up after M4 (design task-m5-pr4a-backend-design-20261010.md §2.11).
+          await m5Down(trx)
           await m4Down(trx)
           for (const table of M4_TABLES) {
             const rows = await run<{ r: string | null }>(`SELECT to_regclass('public.${table}')::text AS r`)
@@ -831,6 +835,7 @@ describe('task M4 schema (real db)', () => {
           expect(tasks[0].r).toBe('tasks')
 
           await m4Up(trx)
+          await m5Up(trx)
           const after = await snapshot(run)
           expect(byKey(after.columns)).toEqual(byKey(before.columns))
           expect(after.constraints).toEqual(before.constraints)

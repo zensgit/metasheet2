@@ -777,7 +777,8 @@ describe('read', () => {
     expect(seen).toEqual(expected)
     const all = await app().get(`/api/task-lists/${listId}/items`).set(auth(reader.bearer))
     const first = all.body.items.find((item: { id: string }) => item.id === tasks[0])
-    expect(first).toEqual({ id: tasks[0], title: '备料0', status: 'open', completion_mode: 'all', created_by: owner.userId, due_at: null })
+    // M5 PR-4a slice 4 (task-m5-pr4a-backend-design-20261010.md §3.8, [a-18]): `is_milestone` follows.
+    expect(first).toEqual({ id: tasks[0], title: '备料0', status: 'open', completion_mode: 'all', created_by: owner.userId, due_at: null, is_milestone: false })
     const past = await app().get(`/api/task-lists/${listId}/items`).query({ offset: '4' }).set(auth(reader.bearer))
     expect(past.body).toEqual({ items: [], total: 4 })
     const otherPage = await app().get(`/api/task-lists/${other}/items`).set(auth(owner.bearer))

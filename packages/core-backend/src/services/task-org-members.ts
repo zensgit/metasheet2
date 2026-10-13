@@ -17,8 +17,11 @@
  * code for every failure: 422 `INACTIVE_ORG_MEMBER` does not say whether the user is unknown,
  * belongs to another org, is inactive in this org, or is inactive altogether. Callers: list member
  * add and owner transfer (`task-list-records.ts`), `createTask` (`task-records.ts`), `addAssignee`
- * and `addFollower` (`task-structure.ts`). Membership rows already written are never cleaned up
- * when a user leaves the org.
+ * and `addFollower` (`task-structure.ts`), and (M5 PR-4a slice 3) the recurrence spawn
+ * (`spawnNextOccurrenceIfDue` in `task-records.ts`), which calls `findActiveOrgMembers` once for
+ * the assignees, followers and member field values it copies and leaves out the ids that fail,
+ * instead of answering 422 (ASSUMPTION(task-m5a): [a-15]; the caller exemption does not apply
+ * there). Membership rows already written are never cleaned up when a user leaves the org.
  */
 import { fail, type Db } from './task-records'
 

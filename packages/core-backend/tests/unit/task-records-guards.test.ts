@@ -801,7 +801,9 @@ describe('task list items (M4 PR-3a S7)', () => {
     vi.mocked(query).mockClear()
     await expect(listTaskListItems({ ...base, query: { limit: '2', offset: '1' } })).resolves.toEqual({ items: [], total: 0 })
     const statements = vi.mocked(query).mock.calls.map((call) => ({ sql: String(call[0]).replace(/\s+/g, ' ').trim(), params: call[1] }))
-    const read = statements.find((call) => call.sql.startsWith('SELECT id, title, status, completion_mode, created_by, due_at FROM tasks'))
+    // M5 PR-4a slice 4 (design task-m5-pr4a-backend-design-20261010.md §3.8, [a-18]): `is_milestone`
+    // follows the item columns of `GET /api/tasks`.
+    const read = statements.find((call) => call.sql.startsWith('SELECT id, title, status, completion_mode, created_by, due_at, is_milestone FROM tasks'))
     expect(read?.sql).toContain('EXISTS (SELECT 1 FROM task_list_items tli WHERE tli.task_id = tasks.id AND tli.list_id = $1)')
     expect(read?.sql).toContain('ORDER BY tasks.updated_at DESC, tasks.id DESC LIMIT $3 OFFSET $4')
     expect(read?.params).toEqual(['tlst_1', 'org-1', 2, 1])
@@ -1420,6 +1422,9 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
     }
     if (sql.includes('FROM directory_integrations')) return { rows: [{ dingtalk_active: true }] }
     if (sql.includes('UNION ALL')) return { rows: [{ member_kind: 'follower', user_id: 'usr-9' }] }
+    // M5 PR-4a slice 3: the task has no later occurrence (not in a series), so the delete keeps the
+    // single-task path.
+    if (sql.includes('tasks.recurrence_series_id = $1')) return { rows: [] }
     if (sql.includes('FROM tasks WHERE') || sql.includes('FROM tasks t WHERE')) {
       return { rows: [{ created_by: 'usr-0', completion_mode: 'all', status: taskStatus, parent_id: null, depth: 0, version: 1 }] }
     }
@@ -1547,5 +1552,137 @@ describe('notification producer wiring (M4 PR-3b S2)', () => {
       expect(payloads.length, name).toBeGreaterThan(0)
       for (const payload of payloads) expect(payload.eventId, name).toBe(eventId)
     }
+  })
+})
+
+// M5 PR-4a slice 1, G1 (task-m5-pr4a-backend-design-20261010.md §3.1): the order of the checks of a
+// complete with `scope`, all after the structure lock: the task (404), the complete ability (404),
+// the scope (422 INVALID_SCOPE), and for 'all' the creator (404); then the write, whose `completed`
+// carries `{ scope: 'all' }` in `task_events.payload`. ASSUMPTION(task-m5a): [a-01] [a-02] [a-03].
+describe('complete scope (M5 PR-4a slice 1, G1)', () => {
+  const base = { orgId: 'org-1', taskId: 'tsk_1' }
+
+  interface ScopeSeed {
+    createdBy: string
+    mode?: 'all' | 'any'
+    status?: 'open' | 'done'
+    assignees?: string[]
+    followers?: string[]
+    /** The task row is absent. */
+    missing?: boolean
+  }
+
+  function respondWith(seed: ScopeSeed): void {
+    state.respond = (sql) => {
+      if (/^\s*(INSERT|UPDATE|DELETE)/.test(sql)) return undefined
+      if (sql.includes('FROM tasks WHERE')) {
+        if (seed.missing) return { rows: [] }
+        return { rows: [{ created_by: seed.createdBy, completion_mode: seed.mode ?? 'all', status: seed.status ?? 'open', parent_id: null, depth: 0, version: 3 }] }
+      }
+      if (sql.includes('FROM task_assignees')) return { rows: (seed.assignees ?? []).map((user_id) => ({ user_id, completed_at: null })) }
+      if (sql.includes('FROM task_followers')) return { rows: (seed.followers ?? []).map((user_id) => ({ user_id })) }
+      return undefined
+    }
+  }
+
+  function written(): Array<{ sql: string; params?: unknown[] }> {
+    return state.calls
+      .map((call) => ({ sql: call.sql.replace(/\s+/g, ' ').trim(), params: call.params }))
+      .filter((call) => /^(INSERT|UPDATE|DELETE)/.test(call.sql))
+  }
+
+  const INVALID_SCOPES: unknown[] = ['x', null, 1, 0, true, false, '', 'ALL', 'Self', ' all', ['all'], { scope: 'all' }]
+
+  beforeEach(() => {
+    state.calls.length = 0
+    state.transactions = 0
+    state.respond = undefined
+  })
+
+  it('a missing task, a follower and an outsider get the 404 whatever the scope; nothing is written', async () => {
+    const seeds: Array<[string, ScopeSeed, string]> = [
+      ['missing task', { createdBy: 'usr-0', missing: true }, 'usr-0'],
+      ['follower', { createdBy: 'usr-0', assignees: ['usr-2'], followers: ['usr-1'] }, 'usr-1'],
+      ['outsider', { createdBy: 'usr-0', assignees: ['usr-2'] }, 'usr-1'],
+    ]
+    for (const [label, seed, actorId] of seeds) {
+      respondWith(seed)
+      for (const scope of [undefined, 'self', 'all', ...INVALID_SCOPES]) {
+        state.calls.length = 0
+        await expect(completeTask({ ...base, actorId, scope }), `${label} ${JSON.stringify(scope)}`).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+        expect(written(), label).toEqual([])
+      }
+    }
+  })
+
+  it('the creator with a present scope other than self or all: 422 INVALID_SCOPE after the lock and the row checks; nothing is written', async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-2'] })
+    for (const scope of INVALID_SCOPES) {
+      state.calls.length = 0
+      await expect(completeTask({ ...base, actorId: 'usr-0', scope }), JSON.stringify(scope)).rejects.toMatchObject({ status: 422, code: 'INVALID_SCOPE' })
+      expect(state.calls[0]?.sql).toBe('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+      expect(state.calls.some((call) => call.sql.includes('FROM task_assignees'))).toBe(true)
+      expect(written()).toEqual([])
+    }
+  })
+
+  it("scope 'all' from an assignee or a list-only editor who may complete: the 404, nothing written; the same callers' own complete still writes", async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-1', 'usr-2'] })
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-1', scope: 'all' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(written()).toEqual([])
+    // Control: the assignee's own complete.
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-1', scope: 'self' })).resolves.toEqual({ done: false, version: 3 })
+    expect(written().map((call) => call.sql.split(' ').slice(0, 3).join(' '))).toEqual(['UPDATE task_assignees SET', 'INSERT INTO task_events'])
+    // A list-only editor (list identity grants `complete`, not the creator's decision).
+    state.respond = ((inner) => (sql: string, params?: unknown[]) => {
+      if (sql.includes('JOIN task_list_members tlm ')) return { rows: [{ task_id: 'tsk_1', list_id: 'tlst_1', role: 'edit' }] }
+      return inner?.(sql, params)
+    })(state.respond)
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-9', scope: 'all' })).rejects.toMatchObject({ status: 404, code: 'NOT_FOUND' })
+    expect(written()).toEqual([])
+    // Control: the list identity is live, so the 404 above is the creator check: the same editor's
+    // own complete passes the ability check (no row of theirs to stamp: 200, nothing written).
+    state.calls.length = 0
+    await expect(completeTask({ ...base, actorId: 'usr-9' })).resolves.toEqual({ done: false, version: 3 })
+    expect(written()).toEqual([])
+  })
+
+  it("the creator's scope 'all': every open row gets the same instant, the task flips once, one completed whose payload is { scope: all }", async () => {
+    respondWith({ createdBy: 'usr-0', assignees: ['usr-1', 'usr-2'] })
+    await expect(completeTask({ ...base, actorId: 'usr-0', scope: 'all' })).resolves.toEqual({ done: true, version: 4 })
+    const writes = written()
+    expect(writes.map((call) => call.sql.split(' ').slice(0, 3).join(' '))).toEqual([
+      'UPDATE task_assignees SET', 'UPDATE task_assignees SET', 'UPDATE tasks SET', 'INSERT INTO task_events',
+    ])
+    const stamps = writes.slice(0, 2).map((call) => (call.params?.[2] as Date).getTime())
+    const taskStamp = (writes[2].params?.[1] as Date).getTime()
+    const event = writes[3]
+    expect(new Set([...stamps, taskStamp, (event.params?.[5] as Date).getTime()]).size).toBe(1)
+    expect(writes.slice(0, 2).map((call) => call.params?.[1]).sort()).toEqual(['usr-1', 'usr-2'])
+    expect(event.sql).toContain('payload')
+    expect(event.params?.slice(2, 5)).toEqual(['usr-0', 'completed', '{"scope":"all"}'])
+  })
+
+  it("scope 'all' on a task that is already done: 200 with the version unchanged, nothing written", async () => {
+    respondWith({ createdBy: 'usr-0', status: 'done', assignees: ['usr-1', 'usr-2'] })
+    await expect(completeTask({ ...base, actorId: 'usr-0', scope: 'all' })).resolves.toEqual({ done: true, version: 3 })
+    expect(written()).toEqual([])
+  })
+
+  it("no scope and scope 'self' send the same statements; their events write the payload {} (the column default)", async () => {
+    const shapes: string[][] = []
+    for (const scope of [undefined, 'self']) {
+      respondWith({ createdBy: 'usr-0', assignees: ['usr-1'] })
+      state.calls.length = 0
+      await expect(completeTask({ ...base, actorId: 'usr-1', scope })).resolves.toEqual({ done: true, version: 4 })
+      const writes = written()
+      const event = writes.find((call) => call.sql.startsWith('INSERT INTO task_events'))
+      expect(event?.params?.slice(2, 5)).toEqual(['usr-1', 'completed', '{}'])
+      shapes.push(writes.map((call) => call.sql))
+    }
+    expect(shapes[1]).toEqual(shapes[0])
   })
 })

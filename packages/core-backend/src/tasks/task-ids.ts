@@ -16,6 +16,10 @@
  * `task_notification_deliveries.id` is a uuid (R23), not a generated domain id, so it gets no entry
  * here. List/task/comment/group members and
  * items use composite primary keys (R23), so they need no id prefix either.
+ *
+ * RULED(2026-10-09): [S30] `field` (`tfld`, for `task_fields.id`) and `attachment` (`tatt`, for
+ * `task_attachments.id`) are added here. Purge intents (`tpi_`) are not generated from this map:
+ * their id is derived from the storage key, so it gets no entry.
  */
 export const TASK_ID_PREFIXES = {
   task: 'tsk',
@@ -24,6 +28,8 @@ export const TASK_ID_PREFIXES = {
   event: 'tev',
   group: 'tgrp',
   listEvent: 'tlev',
+  field: 'tfld',
+  attachment: 'tatt',
 } as const
 
 export type TaskDomainIdKind = keyof typeof TASK_ID_PREFIXES
@@ -44,7 +50,8 @@ const TASK_ID_RANDOM_BYTES = 16
 
 /**
  * Server-generated id format (lock §4.1 `:92`, plus `tev`; plus `tgrp`/`tlev` — ASSUMPTION(task-d):
- * R23): `^(tsk|tlst|tcmt|tev|tgrp|tlev)_[A-Za-z0-9]+$`. PURE.
+ * R23; plus `tfld`/`tatt` — RULED(2026-10-09): [S30]): `^(tsk|tlst|tcmt|tev|tgrp|tlev|tfld|tatt)_[A-Za-z0-9]+$`.
+ * PURE.
  */
 export function generateTaskDomainId(kind: TaskDomainIdKind, random: TaskIdRandomSource): string {
   const prefix = Object.prototype.hasOwnProperty.call(TASK_ID_PREFIXES, kind)

@@ -707,8 +707,10 @@ export async function listTaskListItems(input: {
   const page = parseTaskPage({ limit: input.query.limit, offset: input.query.offset })
   const cond = buildTaskInListCondition({ listIdParam: input.listId, orgParam: input.orgId })
   const n = cond.params.length + 1
+  // M5 PR-4a slice 4 (design §3.8): the item columns of `GET /api/tasks`, `is_milestone` included
+  // (RULED(2026-10-09): [S13]; ASSUMPTION(task-m5a): [a-18]).
   const rows = await plainDb.query(
-    `SELECT id, title, status, completion_mode, created_by, due_at FROM tasks WHERE ${cond.sql}
+    `SELECT id, title, status, completion_mode, created_by, due_at, is_milestone FROM tasks WHERE ${cond.sql}
      ORDER BY ${TASK_PAGE_SORT_KEY} LIMIT $${n} OFFSET $${n + 1}`,
     [...cond.params, page.limit, page.offset],
   )

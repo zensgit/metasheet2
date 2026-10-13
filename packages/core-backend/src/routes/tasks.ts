@@ -38,6 +38,7 @@ import {
 } from '../services/task-structure'
 import { isVersionConflict, patchTask } from '../services/task-patch'
 import { actorId, orgId, sendError } from './tasks-http'
+import { registerTaskEntityRoutes } from './tasks-entity'
 import { registerTaskListRoutes } from './tasks-lists'
 import { registerTaskSettingsRoutes } from './tasks-settings'
 
@@ -179,7 +180,10 @@ export function tasksRouter(): Router | null {
         res.status(422).json({ error: { code: 'ORG_MISSING' } })
         return
       }
-      const result = await completeTask({ orgId: org, actorId: actorId(req), taskId: req.params.id })
+      // M5 PR-4a slice 1 (design §3.1): the body's raw `scope` field (undefined without one); the
+      // service checks it after the row-level checks, so it is not checked here.
+      const scope = req.body && typeof req.body === 'object' ? (req.body as { scope?: unknown }).scope : undefined
+      const result = await completeTask({ orgId: org, actorId: actorId(req), taskId: req.params.id, scope })
       res.json(result)
     } catch (err) {
       sendError(res, err)
@@ -401,6 +405,8 @@ export function tasksRouter(): Router | null {
   // new mount, no new flag read). One call per line: gate 13's negative control rewrites it.
   registerTaskSettingsRoutes(router)
   registerTaskListRoutes(router)
+  // M5 PR-4a (design §3.0): the entity routes, on this same router.
+  registerTaskEntityRoutes(router)
 
   return router
 }

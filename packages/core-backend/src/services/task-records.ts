@@ -3,7 +3,7 @@
  * This module only executes them.
  */
 import { query, transaction } from '../db/pg'
-import { acquireTaskStructureLock, type TaskAdvisoryQuery } from '../db/task-advisory-locks'
+import { withTaskLockOrder, type TaskAdvisoryQuery } from '../db/task-advisory-locks'
 import {
   buildTaskByIdCondition,
   buildTaskPendingCondition,
@@ -11,6 +11,7 @@ import {
   can,
   canChangeCompletion,
   canChangeTaskMembers,
+  canCompleteForAll,
   resolveTaskRoles,
   TASK_VIEWS,
   type TaskAbility,
@@ -28,22 +29,32 @@ import {
 } from '../tasks/task-edit'
 import {
   applyComplete,
+  applyCompleteForAll,
   applyReopen,
   computeTaskDone,
   type TaskAssigneeRow,
-  type TaskCompletionEvent,
   type TaskCompletionMode,
   type TaskReopenScope,
 } from '../tasks/task-completion'
+import { buildTaskFieldByIdCondition } from '../tasks/task-field-access'
 import { normalizeUserText } from '../tasks/task-ids'
 import { toTaskListMemberships, visibleTaskListIds, type TaskListMemberRole } from '../tasks/task-lists'
 import { parsePageParams, TASK_PAGE_SORT_KEY, type TaskPageParams } from '../tasks/task-pagination'
+import {
+  planSpawn,
+  shouldSpawnOnFlip,
+  type TaskOccurrenceSource,
+  type TaskRecurrenceRule,
+} from '../tasks/task-recurrence'
+import { computeDefaultRemindAt } from '../tasks/task-reminders'
 import { pendingScopeForBadge } from '../tasks/task-settings'
 import { isPrintableId, isStorableText, resolveCreateAssigneeIds } from './task-create'
 import { taskCountsSignal } from './task-counts-realtime'
 import { newTaskEventId, newTaskId } from './task-ids-runtime'
 import { enqueueTaskEventNotifications, type WrittenTaskEvent } from './task-notification-producer'
-import { assertActiveOrgMembers } from './task-org-members'
+import { assertActiveOrgMembers, findActiveOrgMembers } from './task-org-members'
+import { loadDependencyItems } from './task-dependency-records'
+import { canonicalRecurrence, liveSuccessorId, loadSeries, occurrenceOrdinal } from './task-recurrence-records'
 import { loadBadgeScope, loadRemindPolicy } from './task-user-settings'
 
 export type Row = Record<string, unknown>
@@ -86,6 +97,7 @@ export function assigneeIds(rows: readonly { userId: string }[]): string[] {
 
 // The structure lock is transaction-scoped. Reads of the task, the caller's
 // row role, and assignee rows must happen after it is held, on this client.
+// RULED(2026-10-09): [S09] it is taken through the lock-order wrapper (rank 1).
 export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promise<T>): Promise<T> {
   return transaction(async (client) => {
     const db: Db = {
@@ -96,7 +108,7 @@ export async function withOrgStructure<T>(orgId: string, run: (db: Db) => Promis
     }
     // First statement, so a REPEATABLE READ database default cannot freeze the snapshot.
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await acquireTaskStructureLock(asQuery(client), orgId)
+    await withTaskLockOrder(asQuery(client)).structure(orgId)
     return run(db)
   })
 }
@@ -131,7 +143,8 @@ export async function createTask(input: {
     const q = asQuery(client)
     const db: Db = { query: async (sql, params) => ({ rows: (await client.query(sql, params)).rows as Row[] }) }
     await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
-    await acquireTaskStructureLock(q, input.orgId)
+    // RULED(2026-10-09): [S09] through the lock-order wrapper, like withOrgStructure.
+    await withTaskLockOrder(q).structure(input.orgId)
     // RULED(2026-10-07): [R17] [N2] every assignee other than
     // the creator must be an active member of the org, the login test (task-org-members.ts); any
     // other id is 422 INACTIVE_ORG_MEMBER and nothing is written. Inside the transaction, after the
@@ -222,8 +235,10 @@ function taskViewCondition(input: { orgId: string; actorId: string; view: string
 export async function listTasks(input: { orgId: string; actorId: string; view: string; page?: TaskPageParams }): Promise<Row[]> {
   const cond = taskViewCondition(input)
   const paged = pageClause(cond.params, pageOrDefault(input.page))
+  // M5 PR-4a slice 4 (design §3.8): `is_milestone` after the M2 columns (RULED(2026-10-09): [S13];
+  // ASSUMPTION(task-m5a): [a-18]). `/pending` keeps its key set (lock §6.1, gate 5).
   const result = await query<Row>(
-    `SELECT id, title, status, completion_mode, created_by, due_at FROM tasks WHERE ${cond.sql} ${paged.sql}`,
+    `SELECT id, title, status, completion_mode, created_by, due_at, is_milestone FROM tasks WHERE ${cond.sql} ${paged.sql}`,
     paged.params,
   )
   return result.rows
@@ -315,7 +330,8 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
   const result = await query<Row>(
     `SELECT id, title, status, completion_mode, created_by, due_at, parent_id, depth, version,
             due_date::text AS due_date, due_time::text AS due_time, time_zone,
-            description, start_date::text AS start_date, start_time::text AS start_time, remind_at
+            description, start_date::text AS start_date, start_time::text AS start_time, remind_at,
+            recurrence, recurrence_series_id, previous_occurrence_id, is_milestone
      FROM tasks WHERE ${cond.sql}`,
     cond.params,
   )
@@ -398,7 +414,55 @@ export async function getTask(input: { orgId: string; actorId: string; taskId: s
       taskListIds: await loadTaskListIds(plainDb, input.taskId),
       memberListIds: (memberships.get(input.taskId) ?? []).map((membership) => membership.listId),
     }),
+    // M5 PR-4a slice 1 (design §3.8). ASSUMPTION(task-m5a): [a-05] true only where a complete for
+    // every assignee would change something: the caller is the creator, the task is open, in `all`
+    // mode, and has an assignee (elsewhere that call is the default complete or a no-op).
+    canCompleteForAll: canCompleteForAll({ actorId: input.actorId, createdBy: String(row.created_by) })
+      && row.status === 'open'
+      && row.completion_mode === 'all'
+      && assignees.length > 0,
+    // M5 PR-4a slice 3 (design §3.8), after the view check. ASSUMPTION(task-m5a): [a-35] the series
+    // id and the previous occurrence are this row's own columns and are not filtered (the parentId
+    // precedent); [a-17] the next occurrence is a reverse lookup and is `null` unless the caller can
+    // view it.
+    recurrence: canonicalRecurrence(row.recurrence),
+    seriesId: textOrNull(row.recurrence_series_id),
+    previousOccurrenceId: textOrNull(row.previous_occurrence_id),
+    nextOccurrenceId: await loadVisibleNextOccurrenceId({
+      orgId: input.orgId,
+      taskId: input.taskId,
+      firstId: textOrNull(row.recurrence_series_id) ?? input.taskId,
+      actorId: input.actorId,
+    }),
+    // M5 PR-4a slice 4 (design §3.8), after the view check. RULED(2026-10-09): [S13] the milestone
+    // flag; [S11] the two dependency lists, each counterpart filtered by the caller's own `view`
+    // (ASSUMPTION(task-m5a): [a-28]) and carrying `canRemove` ([a-12]); not paged (D18, ASSUMPTION).
+    isMilestone: row.is_milestone === true,
+    dependencies: await loadDependencyItems(plainDb, { orgId: input.orgId, taskId: input.taskId, actorId: input.actorId, selfRoles: roles }),
   }
+}
+
+/**
+ * The live occurrence whose `previous_occurrence_id` is `taskId`, when `actorId` can view it; else
+ * `null` (an occurrence the caller cannot view is the same `null` as none). Series rows come from the
+ * series builders (design §4.7); the view check is the detail's own (`resolveTaskRoles` with list
+ * identity).
+ */
+async function loadVisibleNextOccurrenceId(input: { orgId: string; taskId: string; firstId: string; actorId: string }): Promise<string | null> {
+  const nextId = liveSuccessorId(await loadSeries(plainDb, input.orgId, input.firstId), input.taskId)
+  if (nextId === null) return null
+  const cond = buildTaskByIdCondition({ taskIdParam: nextId, orgParam: input.orgId })
+  const next = await query<Row>(`SELECT created_by FROM tasks WHERE ${cond.sql}`, cond.params)
+  if (!next.rows[0]) return null
+  const assignees = await query<Row>(`SELECT user_id FROM task_assignees WHERE task_id = $1`, [nextId])
+  const followers = await query<Row>(`SELECT user_id FROM task_followers WHERE task_id = $1`, [nextId])
+  const memberships = await loadActorListMemberships(plainDb, [nextId], input.actorId)
+  const roles = resolveTaskRoles({
+    createdBy: String(next.rows[0].created_by),
+    assigneeIds: assignees.rows.map((entry) => String(entry.user_id)),
+    followerIds: followers.rows.map((entry) => String(entry.user_id)),
+  }, input.actorId, memberships.get(nextId) ?? [])
+  return can(roles, 'view') ? nextId : null
 }
 
 /**
@@ -537,6 +601,16 @@ export interface LoadedTask {
   parentId: string | null
   depth: number
   version: number
+  /** M5 PR-4a slice 3: the stored rule (jsonb as read), or `null`. */
+  recurrence: unknown
+  /** `recurrence_series_id`; `null` for a first occurrence or a task outside any series. */
+  seriesId: string | null
+  previousOccurrenceId: string | null
+  dueDate: string | null
+}
+
+function textOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value)
 }
 
 export async function loadTask(db: Db, id: string, orgId: string): Promise<LoadedTask> {
@@ -544,8 +618,12 @@ export async function loadTask(db: Db, id: string, orgId: string): Promise<Loade
   // so the driver never sees a value Postgres rejects as text.
   if (!isPrintableId(id)) fail(404, 'NOT_FOUND')
   const cond = buildTaskByIdCondition({ taskIdParam: id, orgParam: orgId })
+  // M5 PR-4a slice 3: the series columns follow the M2–M4 ones. A row without them maps to "no rule,
+  // not in a series" (`?? null`, design §4.1, closing part).
   const result = await db.query(
-    `SELECT created_by, completion_mode, status, parent_id, depth, version FROM tasks WHERE ${cond.sql}`,
+    `SELECT created_by, completion_mode, status, parent_id, depth, version,
+            recurrence, recurrence_series_id, previous_occurrence_id, due_date::text AS due_date
+     FROM tasks WHERE ${cond.sql}`,
     cond.params,
   )
   const row = result.rows[0]
@@ -557,6 +635,10 @@ export async function loadTask(db: Db, id: string, orgId: string): Promise<Loade
     parentId: row.parent_id === null || row.parent_id === undefined ? null : String(row.parent_id),
     depth: Number(row.depth),
     version: Number(row.version),
+    recurrence: row.recurrence ?? null,
+    seriesId: textOrNull(row.recurrence_series_id),
+    previousOccurrenceId: textOrNull(row.previous_occurrence_id),
+    dueDate: calendarDate(row.due_date),
   }
 }
 
@@ -638,47 +720,288 @@ export async function writeTaskDoneState(db: Db, taskId: string, done: boolean, 
 
 /**
  * Writes `events` and returns them as written, ids included (ASSUMPTION(task-m4): [own-3b-12]: the
- * notification producer reads the event ids, so each id is generated before its INSERT).
+ * notification producer reads the event ids, so each id is generated before its INSERT). M5 PR-4a
+ * slice 1: each event's `payload` goes into `task_events.payload`; an event without one writes `{}`,
+ * the column's default, as before.
  */
-export async function writeEvents(db: Db, taskId: string, events: TaskCompletionEvent[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
+/** An event as the pure transitions give it (completion, recurrence): `payload` absent means `{}`. */
+export interface TaskEventToWrite {
+  type: string
+  userId: string
+  occurredAt?: Date
+  payload?: Record<string, unknown>
+}
+
+export async function writeEvents(db: Db, taskId: string, events: readonly TaskEventToWrite[], fallbackAt: Date): Promise<WrittenTaskEvent[]> {
   const written: WrittenTaskEvent[] = []
   for (const event of events) {
     const id = newTaskEventId()
     const occurredAt = event.occurredAt ?? fallbackAt
+    const payload = JSON.stringify(event.payload ?? {})
     await db.query(
-      `INSERT INTO task_events (id, task_id, actor_id, event_type, occurred_at) VALUES ($1, $2, $3, $4, $5)`,
-      [id, taskId, event.userId, event.type, occurredAt],
+      `INSERT INTO task_events (id, task_id, actor_id, event_type, payload, occurred_at) VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+      [id, taskId, event.userId, event.type, payload, occurredAt],
     )
     written.push({ id, type: event.type, actorId: event.userId, occurredAt })
   }
   return written
 }
 
+// ---------------------------------------------------------------------------------------------
+// M5 PR-4a slice 3: the next occurrence of a recurring task (design §3.2, §4.1 closing part).
+// ---------------------------------------------------------------------------------------------
+
+/** Why a flip did or did not spawn; `not_due` covers "no flip", "no rule" and "already spawned". */
+export type SpawnOutcome =
+  | { spawned: true; taskId: string }
+  | { spawned: false; reason: 'not_due' | 'no_due_date' | 'series_ended' }
+
+function dateOrNull(value: unknown): Date | null {
+  if (value === null || value === undefined) return null
+  const date = value instanceof Date ? value : new Date(String(value))
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+/** The user ids of a stored member value (a JSON array of ids); anything else holds none. */
+function memberIdsOf(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+/**
+ * Called by the three writes that can flip a task from open to done (`completeTask`, G1's
+ * `scope: 'all'` included, `removeAssignee`, `switchCompletionMode`) after their own writes, in their
+ * transaction, under their structure lock, with their lock-time `now`. It reads the task as that write
+ * left it, so the assignees and the completion mode are the ones after the flip.
+ *
+ * The frozen order before `planSpawn` (design §3.2; RULED(2026-10-09): [S15] [S16]; D3, ASSUMPTION):
+ * 1. `shouldSpawnOnFlip` (open → done, a rule, and no `recurrence_spawned` event yet) is false ⇒ no spawn;
+ * 2. this occurrence has no due date ⇒ no spawn (`no_due_date`), `planSpawn` is not called;
+ * 3. the anchor (the first occurrence's current due date, read by id, soft-deleted or not) is empty ⇒
+ *    no spawn (`no_due_date`; ASSUMPTION(task-m5a): [a-33]);
+ * 4. the ordinal is counted along the chain ([a-16]) and `planSpawn` decides; a next due date after
+ *    9999-12-31 is its `series_ended` (task E), never an error caught here.
+ * Not spawning never fails the write that called it.
+ *
+ * Every write of the new occurrence is in this function's body (PR-3c census, [a-41]): the task row,
+ * its assignee rows (not completed), followers, list items and field values, and the two events.
+ * ASSUMPTION(task-m5a): [a-15] assignees, followers and the user ids of member field values that are
+ * no longer active members of the org (the R17 / N2 / S25 test, one lookup) are left out; a member
+ * value left empty writes no row. [a-30] no list event. [a-37] the new row's `created_at` /
+ * `updated_at` and the `recurrence_spawned` and `created` events take the caller's `now`.
+ * RULED(2026-10-09): [S33] neither event notifies (the producer filters them).
+ */
+export async function spawnNextOccurrenceIfDue(db: Db, input: {
+  orgId: string
+  taskId: string
+  actorId: string
+  now: Date
+  wasDone: boolean
+  done: boolean
+  /** The stored rule as `loadTask` read it, `null` without one. */
+  recurrence: unknown
+}): Promise<SpawnOutcome> {
+  const recurrence = (input.recurrence ?? null) as TaskRecurrenceRule | null
+  // D3 (ASSUMPTION): the once-only guard is the event, read under the lock; the unique index
+  // uq_tsk_previous_occurrence is the database's last line behind it.
+  const alreadySpawned = !input.wasDone && input.done && recurrence !== null
+    ? (await db.query(
+        `SELECT 1 AS spawned FROM task_events WHERE task_id = $1 AND event_type = 'recurrence_spawned' LIMIT 1`,
+        [input.taskId],
+      )).rows.length > 0
+    : false
+  if (!shouldSpawnOnFlip({ wasDone: input.wasDone, done: input.done, recurrence, alreadySpawned })) {
+    return { spawned: false, reason: 'not_due' }
+  }
+
+  const cond = buildTaskByIdCondition({ taskIdParam: input.taskId, orgParam: input.orgId })
+  const sourceRows = await db.query(
+    `SELECT title, description, completion_mode, time_zone, due_date::text AS due_date, due_time::text AS due_time,
+            start_date::text AS start_date, start_time::text AS start_time, remind_at, is_milestone, parent_id, depth,
+            created_by, recurrence_series_id
+     FROM tasks WHERE ${cond.sql}`,
+    cond.params,
+  )
+  const row = sourceRows.rows[0]
+  if (!row) fail(404, 'NOT_FOUND')
+  const dueDate = calendarDate(row.due_date)
+  if (dueDate === null) return { spawned: false, reason: 'no_due_date' }
+  const seriesId = textOrNull(row.recurrence_series_id)
+  let anchor: string | null = dueDate
+  let occurrenceNumber = 1
+  if (seriesId !== null) {
+    const series = await loadSeries(db, input.orgId, seriesId)
+    anchor = series.find((member) => member.id === seriesId)?.dueDate ?? null
+    if (anchor === null) return { spawned: false, reason: 'no_due_date' }
+    occurrenceNumber = occurrenceOrdinal(series, input.taskId)
+  }
+
+  const assignees = assigneeIds(await loadAssignees(db, input.taskId))
+  const followerRows = await db.query(`SELECT user_id FROM task_followers WHERE task_id = $1 ORDER BY user_id COLLATE "C"`, [input.taskId])
+  const followers = followerRows.rows.map((entry) => String(entry.user_id))
+  const listIds = await loadTaskListIds(db, input.taskId)
+  const valueRows = await db.query(
+    `SELECT field_id, value FROM task_field_values WHERE task_id = $1 ORDER BY field_id COLLATE "C"`,
+    [input.taskId],
+  )
+  const memberFieldIds = new Set<string>()
+  for (const fieldId of new Set(valueRows.rows.map((entry) => String(entry.field_id)))) {
+    const fieldCond = buildTaskFieldByIdCondition({ fieldIdParam: fieldId, orgParam: input.orgId })
+    const definition = await db.query(`SELECT type FROM task_fields WHERE ${fieldCond.sql}`, fieldCond.params)
+    if (definition.rows[0]?.type === 'member') memberFieldIds.add(fieldId)
+  }
+  const named = new Set<string>([...assignees, ...followers])
+  for (const entry of valueRows.rows) {
+    if (memberFieldIds.has(String(entry.field_id))) for (const userId of memberIdsOf(entry.value)) named.add(userId)
+  }
+  const active = await findActiveOrgMembers(db, input.orgId, [...named])
+  const fieldValues: { fieldId: string; value: unknown }[] = []
+  for (const entry of valueRows.rows) {
+    const fieldId = String(entry.field_id)
+    if (!memberFieldIds.has(fieldId)) {
+      fieldValues.push({ fieldId, value: entry.value })
+      continue
+    }
+    const kept = memberIdsOf(entry.value).filter((userId) => active.has(userId))
+    if (kept.length > 0) fieldValues.push({ fieldId, value: kept })
+  }
+
+  const source: TaskOccurrenceSource = {
+    id: input.taskId,
+    title: String(row.title),
+    description: typeof row.description === 'string' ? row.description : null,
+    completionMode: row.completion_mode === 'any' ? 'any' : 'all',
+    timeZone: String(row.time_zone),
+    dueDate,
+    dueTime: clockTime(row.due_time),
+    startDate: calendarDate(row.start_date),
+    startTime: clockTime(row.start_time),
+    remindAt: dateOrNull(row.remind_at),
+    isMilestone: row.is_milestone === true,
+    parentId: textOrNull(row.parent_id),
+    depth: Number(row.depth),
+    createdBy: String(row.created_by),
+    recurrence: recurrence as TaskRecurrenceRule,
+    seriesId,
+    assigneeIds: assignees.filter((userId) => active.has(userId)),
+    followerIds: followers.filter((userId) => active.has(userId)),
+    listIds,
+    fieldValues,
+  }
+  const plan = planSpawn({ source, anchorDueDate: anchor, occurrenceNumber, newTaskId: newTaskId(), actorId: input.actorId, now: input.now })
+  if (plan.ok === false) return { spawned: false, reason: plan.reason }
+
+  const next = plan.task
+  const remindAt = plan.reminder.kind === 'shifted'
+    ? plan.reminder.remindAt
+    : computeDefaultRemindAt({
+        dueDate: next.dueDate,
+        dueTime: next.dueTime,
+        dueAt: next.dueAt,
+        timeZone: next.timeZone,
+        policy: await loadRemindPolicy(db, { orgId: input.orgId, actorId: plan.reminder.policyUserId }),
+      })
+  await db.query(
+    `INSERT INTO tasks (id, org_id, title, description, completion_mode, created_by,
+                        due_date, due_time, start_date, start_time, time_zone, due_at, remind_at,
+                        is_milestone, parent_id, depth, recurrence, recurrence_series_id, previous_occurrence_id,
+                        created_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::timestamptz, $13::timestamptz,
+             $14, $15, $16, $17::jsonb, $18, $19, $20::timestamptz, $20::timestamptz)`,
+    [
+      next.id, input.orgId, next.title, next.description, next.completionMode, next.createdBy,
+      next.dueDate, next.dueTime, next.startDate, next.startTime, next.timeZone, isoOrNull(next.dueAt), isoOrNull(remindAt),
+      next.isMilestone, next.parentId, next.depth, JSON.stringify(next.recurrence), next.seriesId, next.previousOccurrenceId,
+      input.now.toISOString(),
+    ],
+  )
+  if (plan.assignees.length > 0) {
+    await db.query(
+      `INSERT INTO task_assignees (task_id, user_id, assigned_by)
+       SELECT $1, u.user_id, $3 FROM unnest($2::text[]) AS u(user_id)`,
+      [next.id, plan.assignees.map((entry) => entry.userId), next.createdBy],
+    )
+  }
+  if (plan.followerIds.length > 0) {
+    await db.query(
+      `INSERT INTO task_followers (task_id, user_id) SELECT $1, f.user_id FROM unnest($2::text[]) AS f(user_id)`,
+      [next.id, plan.followerIds],
+    )
+  }
+  if (plan.listIds.length > 0) {
+    await db.query(
+      `INSERT INTO task_list_items (list_id, task_id, org_id) SELECT l.list_id, $1, $2 FROM unnest($3::text[]) AS l(list_id)`,
+      [next.id, input.orgId, plan.listIds],
+    )
+  }
+  if (plan.fieldValues.length > 0) {
+    await db.query(
+      `INSERT INTO task_field_values (task_id, field_id, org_id, value, updated_by, updated_at)
+       SELECT $1, v.field_id, $2, v.value, $3, $4::timestamptz FROM jsonb_to_recordset($5::jsonb) AS v(field_id text, value jsonb)`,
+      [next.id, input.orgId, input.actorId, input.now.toISOString(), JSON.stringify(plan.fieldValues.map((entry) => ({ field_id: entry.fieldId, value: entry.value })))],
+    )
+  }
+  for (const event of plan.events) {
+    const written = await writeEvents(db, event.taskId, [event], input.now)
+    // M4 PR-3b: the same-transaction enqueue of every event write; neither word notifies ([S33]).
+    await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: event.taskId, createdBy: next.createdBy, events: written })
+  }
+  return { spawned: true, taskId: next.id }
+}
+
+/** The `scope` of a complete request (M5 PR-4a design §3.1). */
+type TaskCompleteScope = 'self' | 'all'
+
+// ASSUMPTION(task-m5a): [a-01] strict: an absent `scope` is 'self' (the behaviour before M5); any
+// other present value than 'self' or 'all', `null` included, is 422 INVALID_SCOPE. The reopen route
+// keeps its own reading (anything but 'all' is 'self'). Called only after the row-level checks.
+function parseCompleteScope(raw: unknown): TaskCompleteScope {
+  if (raw === undefined) return 'self'
+  if (raw === 'self' || raw === 'all') return raw
+  return fail(422, 'INVALID_SCOPE')
+}
+
 // RULED(2026-10-07): [R03] complete / reopen answer with `version`: the value read under the
 // lock, plus one when this call flipped the task's status (the only write that bumps it here).
-export async function completeTask(input: { orgId: string; actorId: string; taskId: string }): Promise<{ done: boolean; version: number }> {
+// M5 PR-4a slice 1: `scope` is the raw `scope` field of the request body. The checks run after the
+// structure lock, in the order of design §3.1: the task (404), the complete ability (404), the
+// scope (422), and for 'all' the creator (404); a caller who cannot complete the task gets the 404
+// whatever the body holds.
+export async function completeTask(input: { orgId: string; actorId: string; taskId: string; scope?: unknown }): Promise<{ done: boolean; version: number }> {
   const counts = taskCountsSignal()
   const result = await withOrgStructure(input.orgId, async (db) => {
     const task = await loadTask(db, input.taskId, input.orgId)
-    const { roles, assignees: rows } = await loadRowRoles(db, { ...input, createdBy: task.createdBy })
+    // The request's `scope` stays out of the role lookup: only the three fields it reads are passed.
+    const { roles, assignees: rows } = await loadRowRoles(db, { taskId: input.taskId, actorId: input.actorId, createdBy: task.createdBy })
     // Lock §6.2: zero-assignee tasks are completed by the creator only. Refused here as the same
     // 404 as any other missing ability, before `applyComplete` (which throws for that case).
     if (!canChangeCompletion(roles, 'complete', rows.length)) fail(404, 'NOT_FOUND')
+    const scope = parseCompleteScope(input.scope)
+    // RULED(2026-10-09): six items, item 3: creator only; ASSUMPTION(task-m5a): [a-02] 404 otherwise.
+    if (scope === 'all' && !canCompleteForAll({ actorId: input.actorId, createdBy: task.createdBy })) fail(404, 'NOT_FOUND')
+    // ASSUMPTION(task-m5a): [a-37] one application clock reading, taken under the lock, stamps the
+    // rows, the task and the event of this write, for scope 'all' as for 'self'.
     const now = new Date()
-    const next = applyComplete({
+    const transition = {
       mode: task.mode,
       rows,
       actorId: input.actorId,
       createdBy: task.createdBy,
       now,
       wasDone: task.status === 'done',
-    })
+    }
+    const next = scope === 'all' ? applyCompleteForAll(transition) : applyComplete(transition)
     await writeChangedAssignees(db, input.taskId, rows, next.rows)
     const flipped = (task.status === 'done') !== next.done
     if (flipped) await writeTaskDoneState(db, input.taskId, next.done, now)
     const written = await writeEvents(db, input.taskId, next.events, now)
     // M4 PR-3b: outbox rows for the events that notify, in this transaction.
     await enqueueTaskEventNotifications(db, { orgId: input.orgId, taskId: input.taskId, createdBy: task.createdBy, events: written })
+    // M5 PR-4a slice 3: a flip to done spawns the next occurrence of a recurring task, on both scopes
+    // (design §3.2, §5 rule 3). Its assignees are a subset of this task's, already noted below.
+    await spawnNextOccurrenceIfDue(db, {
+      orgId: input.orgId, taskId: input.taskId, actorId: input.actorId, now,
+      wasDone: task.status === 'done', done: next.done, recurrence: task.recurrence,
+    })
     // RULED(2026-10-07): [R16] the status or an assignee's completion changed: every assignee.
     if (flipped || changedAssigneeRows(rows, next.rows).length > 0) {
       counts.note({ before: assigneeIds(rows), after: assigneeIds(next.rows) })

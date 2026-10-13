@@ -6,8 +6,9 @@
  *   1. reads the database clock on a pool connection (every tick, followers included), then takes a
  *      dedicated pool client and attaches an `error` listener to it at once; on that client a
  *      transaction holds `SET LOCAL lock_timeout`, `SET LOCAL idle_in_transaction_session_timeout`,
- *      the leader lock taken through `acquireTasksSchedulerLeaderLock` (`db/task-advisory-locks.ts`,
- *      the only place the lock statement is written), and the heartbeats the scans send between
+ *      the leader lock taken through the lock-order wrapper `withTaskLockOrder`
+ *      (`db/task-advisory-locks.ts`, where the lock statement is written once, in
+ *      `acquireTasksSchedulerLeaderLock`), and the heartbeats the scans send between
  *      their pages (`SELECT 1`); no data statement;
  *   2. a tick that does not get the lock within the timeout (SQLSTATE 55P03, or 57014) is a follower:
  *      it rolls back and runs nothing;
@@ -56,7 +57,7 @@
 import { performance } from 'node:perf_hooks'
 import { Logger } from '../core/logger'
 import { pool as defaultPool, query as defaultQuery } from '../db/pg'
-import { acquireTasksSchedulerLeaderLock } from '../db/task-advisory-locks'
+import { withTaskLockOrder } from '../db/task-advisory-locks'
 import { metrics } from '../metrics/metrics'
 import { isTasksEnabled } from '../tasks/feature-flag'
 import { TASK_DELIVERY_TICK_BUDGET_MS } from '../tasks/task-delivery-protocol'
@@ -425,7 +426,9 @@ export class TaskScheduler {
         await client.query('BEGIN')
         await client.query(`SET LOCAL lock_timeout = '${this.lockTimeoutMs}ms'`)
         await client.query(`SET LOCAL idle_in_transaction_session_timeout = '${this.leaderIdleTimeoutMs}ms'`)
-        await acquireTasksSchedulerLeaderLock((sql, params) => client.query(sql, params))
+        // ASSUMPTION(task-m5a): [a-36] the leader lock is exclusive in the lock-order wrapper; a
+        // lock timeout reaches the catch below unchanged.
+        await withTaskLockOrder((sql, params) => client.query(sql, params)).schedulerLeader()
       } catch (error) {
         if (lost === null && isLockBusy(error)) {
           try {
