@@ -142,6 +142,17 @@ describe('ElearningContentAdminSection', () => {
     expect(root.querySelector('[data-testid="elearning-content-admin-status"]')?.textContent).toContain('完成指派')
   })
 
+  it('explains ORG_CONTEXT_REQUIRED instead of printing the raw code', async () => {
+    const root = mountView(false)
+    await fillArticleAndLink(root)
+    h.createRevision.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    ;(root.querySelector('[data-testid="elearning-content-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.createRevision).toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-content-admin-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+  })
+
   it('preserves the request id for retry and rotates it after body or order changes', async () => {
     const root = mountView(false)
     await fillArticleAndLink(root)
