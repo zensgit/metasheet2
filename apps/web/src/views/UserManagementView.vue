@@ -572,46 +572,50 @@
                   {{ org.orgId }}
                 </span>
               </div>
-              <p v-if="memberAdmissionOrganizations.active.length === 0" class="user-admin__warning" data-testid="member-admission-org-none">
-                未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
-              </p>
-              <!-- Slice C: one-click 加入默认组织 via the local-directory-account route. Shown only when the
-                   backend positively says the user has no membership row at all and no applied deprovision
-                   (an older backend without those two booleans keeps it hidden); a disabled account never
-                   reaches this block (see memberAdmissionOrganizations). -->
-              <div v-if="canJoinDefaultOrg" class="user-admin__chips">
-                <button
-                  class="user-admin__button"
-                  type="button"
-                  data-testid="join-default-org-button"
-                  :disabled="joiningDefaultOrg"
-                  @click="openJoinDefaultOrgConfirm"
-                >
-                  {{ joiningDefaultOrg ? '加入中...' : '加入默认组织' }}
-                </button>
-              </div>
-              <div
-                v-if="canJoinDefaultOrg && joinDefaultOrgConfirmUserId !== null && joinDefaultOrgConfirmUserId === memberAdmission?.userId"
-                class="user-admin__confirm"
-                role="dialog"
-                aria-label="确认加入默认组织"
-                data-testid="join-default-org-confirm"
-              >
-                <strong>确认将该账号加入默认组织？</strong>
-                <ol>
-                  <li>会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；</li>
-                  <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 日报会计入）；</li>
-                  <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
-                </ol>
-                <div class="user-admin__chips">
-                  <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
-                    确认加入
-                  </button>
-                  <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="join-default-org-confirm-cancel" @click="closeJoinDefaultOrgConfirm">
-                    取消
+              <template v-if="memberAdmissionOrganizations.active.length === 0">
+                <p class="user-admin__warning" data-testid="member-admission-org-none">
+                  未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
+                </p>
+                <!-- Slice C: one-click 加入默认组织 via the local-directory-account route. Shown only when the
+                     backend positively says the user has no membership row at all and no applied deprovision
+                     (an older backend without those two booleans keeps it hidden) and the admission on screen
+                     belongs to the selected user; a disabled account never reaches this block (see
+                     memberAdmissionOrganizations). -->
+                <div v-if="canJoinDefaultOrg" class="user-admin__chips">
+                  <button
+                    class="user-admin__button"
+                    type="button"
+                    data-testid="join-default-org-button"
+                    :disabled="joiningDefaultOrg"
+                    @click="openJoinDefaultOrgConfirm"
+                  >
+                    {{ joiningDefaultOrg ? '加入中...' : '加入默认组织' }}
                   </button>
                 </div>
-              </div>
+                <div
+                  v-if="canJoinDefaultOrg && joinDefaultOrgConfirmUserId !== null && joinDefaultOrgConfirmUserId === memberAdmission?.userId"
+                  class="user-admin__confirm"
+                  role="dialog"
+                  aria-label="确认加入默认组织"
+                  data-testid="join-default-org-confirm"
+                >
+                  <strong>确认将该账号加入默认组织？</strong>
+                  <ol>
+                    <li>会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；</li>
+                    <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；</li>
+                    <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
+                  </ol>
+                  <p data-testid="join-default-org-confirm-undo">此操作不能在本页撤销；如需撤销，请到目录管理归档该本地目录账号。</p>
+                  <div class="user-admin__chips">
+                    <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
+                      确认加入
+                    </button>
+                    <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="join-default-org-confirm-cancel" @click="closeJoinDefaultOrgConfirm">
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </template>
               <p v-else-if="memberAdmissionOrganizations.active.length >= 2" class="user-admin__warning" data-testid="member-admission-org-multiple">
                 属于多个组织：登录后需在页面顶部选择组织
               </p>
@@ -1246,15 +1250,22 @@ const memberAdmissionOrganizations = computed<MemberOrganizations | null>(() => 
   if (!admission || !admission.accountEnabled) return null
   return admission.organizations ?? null
 })
-// Slice C: every condition must be positively known; the server re-checks them (409) anyway.
+// Slice C: every condition must be positively known; the server re-checks them (409) anyway. "No active
+// organization" is enforced by the template: the button lives only inside the active.length === 0 branch.
 const canJoinDefaultOrg = computed<boolean>(() => {
   const organizations = memberAdmissionOrganizations.value
   if (!organizations) return false
-  return organizations.active.length === 0
-    && organizations.hasAnyRow === false
+  // The admission on screen must be the selected user's (the header and the POST both follow the selection).
+  if (memberAdmission.value?.userId !== selectedUserId.value) return false
+  return organizations.hasAnyRow === false
     && organizations.deprovisionApplied === false
 })
-const joiningDefaultOrg = ref(false)
+// Users whose join request is in flight; only the one on screen shows 加入中....
+const joiningDefaultOrgUserIds = ref<string[]>([])
+const joiningDefaultOrg = computed<boolean>(() => {
+  const userId = memberAdmission.value?.userId
+  return typeof userId === 'string' && joiningDefaultOrgUserIds.value.includes(userId)
+})
 // The user the confirm panel was opened for; the panel only renders while that user's admission is shown.
 const joinDefaultOrgConfirmUserId = ref<string | null>(null)
 // #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
@@ -2501,6 +2512,8 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
   try {
     const response = await apiFetch(`/api/admin/users/${encodeURIComponent(userId)}/member-admission`)
     const payload = await readJson(response)
+    // A late answer for a user who is no longer selected must not overwrite the selected user's panel.
+    if (userId !== selectedUserId.value) return
     if (!response.ok || payload.ok !== true) {
       memberAdmission.value = null
       memberAdmissionLoadFailure.value = readSidePanelLoadFailure(payload)
@@ -2515,6 +2528,7 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     }
     memberAdmissionLoadFailure.value = null
   } catch {
+    if (userId !== selectedUserId.value) return
     memberAdmission.value = null
     memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
@@ -2531,6 +2545,9 @@ const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
   // Guard added by #6389: any user_orgs row (active or not, any org) or an applied deprovision event.
   DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程',
 }
+
+// The route answers 404 DIRECTORY_LOCAL_NOT_FOUND when the platform user no longer exists.
+const JOIN_DEFAULT_ORG_USER_GONE = '该账号已不存在，请刷新列表'
 
 type JoinDefaultOrgResult = { ok: true } | { ok: false; status: number; code: string | null }
 
@@ -2557,6 +2574,7 @@ function describeJoinDefaultOrgFailure(result: { status: number; code: string | 
   if (result.status === 409 && result.code && Object.prototype.hasOwnProperty.call(JOIN_DEFAULT_ORG_CONFLICT_MESSAGES, result.code)) {
     return JOIN_DEFAULT_ORG_CONFLICT_MESSAGES[result.code]
   }
+  if (result.status === 404 && result.code === 'DIRECTORY_LOCAL_NOT_FOUND') return JOIN_DEFAULT_ORG_USER_GONE
   return JOIN_DEFAULT_ORG_FAILURE
 }
 
@@ -2571,22 +2589,29 @@ function closeJoinDefaultOrgConfirm(): void {
 }
 
 async function confirmJoinDefaultOrg(): Promise<void> {
-  const userId = joinDefaultOrgConfirmUserId.value
+  const confirmedUserId = joinDefaultOrgConfirmUserId.value
   closeJoinDefaultOrgConfirm()
-  if (!userId) return
-  joiningDefaultOrg.value = true
+  const userId = selectedUserId.value
+  // Only the selected user, and only when the confirmed panel and the admission on screen are that user's.
+  if (!userId || userId !== confirmedUserId || userId !== memberAdmission.value?.userId) {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+    return
+  }
+  joiningDefaultOrgUserIds.value = [...joiningDefaultOrgUserIds.value, userId]
   try {
     const result = await postJoinDefaultOrg(userId)
     if (!result.ok) {
       setStatus(describeJoinDefaultOrgFailure(result), 'error')
       return
     }
+    // The admin moved on to another user: that user's panel is not reloaded or told 已加入.
+    if (selectedUserId.value !== userId) return
     await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
     setStatus('已加入默认组织')
   } catch {
     setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
   } finally {
-    joiningDefaultOrg.value = false
+    joiningDefaultOrgUserIds.value = joiningDefaultOrgUserIds.value.filter((id) => id !== userId)
   }
 }
 
