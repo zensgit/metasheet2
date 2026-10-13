@@ -1097,9 +1097,10 @@ describe('admin-users routes', () => {
   describe('member-admission organizations (read-only user_orgs view, slice B)', () => {
     type OrgRow = { user_id: string; org_id: string; is_active: boolean }
 
-    // A small fake of the two tables the organizations read joins. It applies a filter ONLY when
-    // the route's SQL carries the matching predicate, so dropping `uo.is_active = true` or
-    // `u.is_active = true` from the route lets the filtered rows through and these cases go red.
+    // A small fake of the two tables the organizations read joins. It applies each filter ONLY when
+    // the route's SQL carries the matching predicate, so dropping `uo.user_id = $1`,
+    // `uo.is_active = true` or `u.is_active = true` from the route lets the filtered rows through
+    // and these cases go red (fixtures carry another user's rows for the user filter).
     function installOrgFake(input: { userActive: boolean; rows: OrgRow[] }) {
       const orgCalls: Array<{ sql: string; params: unknown[] }> = []
       pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
@@ -1121,10 +1122,11 @@ describe('admin-users routes', () => {
         if (sql.includes('FROM user_orgs')) {
           orgCalls.push({ sql, params })
           if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)) throw new Error('organizations read must not write')
+          const filterUser = /uo\.user_id = \$1/.test(sql)
           const filterRowActive = /uo\.is_active = true/.test(sql)
           const filterUserActive = /JOIN users u ON u\.id = uo\.user_id/.test(sql) && /u\.is_active = true/.test(sql)
           const rows = input.rows
-            .filter((row) => row.user_id === params[0])
+            .filter((row) => !filterUser || row.user_id === params[0])
             .filter((row) => !filterRowActive || row.is_active)
             .filter(() => !filterUserActive || input.userActive)
             .map((row) => ({ org_id: row.org_id }))
@@ -1150,7 +1152,10 @@ describe('admin-users routes', () => {
     it('zero active rows: empty list and no tenant context (an inactive row does not count)', async () => {
       const orgCalls = installOrgFake({
         userActive: true,
-        rows: [{ user_id: 'user-1', org_id: 'org-old', is_active: false }],
+        rows: [
+          { user_id: 'user-1', org_id: 'org-old', is_active: false },
+          { user_id: 'user-2', org_id: 'org-b', is_active: true },
+        ],
       })
       expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
       expect(orgCalls).toHaveLength(1)
@@ -1158,7 +1163,7 @@ describe('admin-users routes', () => {
     })
 
     it('exactly one active row: that org and a tenant context (the login claim predicate)', async () => {
-      installOrgFake({
+      const orgCalls = installOrgFake({
         userActive: true,
         rows: [
           { user_id: 'user-1', org_id: 'org-a', is_active: true },
@@ -1167,6 +1172,7 @@ describe('admin-users routes', () => {
         ],
       })
       expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: true })
+      expect(orgCalls.map((call) => call.params)).toEqual([['user-1']])
     })
 
     it('two active rows: both orgs listed but NO tenant context (login would need an explicit choice)', async () => {
@@ -1189,6 +1195,59 @@ describe('admin-users routes', () => {
         rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }],
       })
       expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
+    })
+
+    it('a blank org id still counts as a row for the exactly-one rule (login parity) but is not listed', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [
+          { user_id: 'user-1', org_id: '', is_active: true },
+          { user_id: 'user-1', org_id: 'org-a', is_active: true },
+        ],
+      })
+      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: false })
+    })
+
+    it('a single blank org id gives no tenant context, like login (a blank resolved id is "no tenant")', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-1', org_id: '', is_active: true }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
+    })
+
+    it('a failing user_orgs read answers 200 with organizations: null, keeps the rest, and logs values-free', async () => {
+      const MARKER = 'MARKER_orgs_q7 connect ECONNREFUSED 198.51.100.7:5432 role=fixture-role'
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots.mockResolvedValue([
+        { namespace: 'crm', enabled: true, effective: true, hasRole: true, source: 'seed_backfill', grantedBy: null, updatedBy: null, createdAt: null, updatedAt: null },
+      ])
+      installOrgFake({ userActive: true, rows: [] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('FROM user_orgs')) throw new Error(MARKER)
+        return fake(sql, params)
+      })
+
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      const data = (response.body as Record<string, any>).data
+      expect(data).toHaveProperty('organizations', null)
+      expect(data).toMatchObject({
+        userId: 'user-1',
+        accountEnabled: true,
+        namespaceAdmissions: [expect.objectContaining({ namespace: 'crm', enabled: true })],
+      })
+      expect(JSON.stringify(response.body)).not.toContain('MARKER_orgs_q7')
+      const lines = warn.mock.calls.map((call) => String(call[0]))
+      expect(lines).toEqual([expect.stringMatching(/^admin-users\.organizations-read-failed errorClass=Error(?: correlationId=\S+)?$/)])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('MARKER_orgs_q7')
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('198.51.100.7')
+      warn.mockRestore()
     })
 
     it('an unknown user is a 404 and user_orgs is never read', async () => {

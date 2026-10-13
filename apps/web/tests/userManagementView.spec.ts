@@ -2274,6 +2274,32 @@ describe('UserManagementView', () => {
       expect(container!.textContent).not.toContain(NONE_NOTICE)
     })
 
+    it('organizations: null from the server (its read failed, "unknown") renders nothing, not 「未归属任何组织」', async () => {
+      installOrganizations(null)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    for (const [label, organizations] of [
+      ['an item without a string orgId', { active: [{ orgId: 42 }], hasTenantContext: false }],
+      ['an item with a whitespace-only orgId', { active: [{ orgId: '   ' }], hasTenantContext: false }],
+      ['a good item next to a bad one', { active: [{ orgId: 'org-alpha' }, {}], hasTenantContext: false }],
+      ['a non-boolean hasTenantContext', { active: [{ orgId: 'org-alpha' }], hasTenantContext: 'yes' }],
+    ] as const) {
+      it(`a malformed payload (${label}) renders nothing instead of a wrong claim`, async () => {
+        installOrganizations(organizations)
+        await mountPage()
+        await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+        expect(orgBlock()).toBeNull()
+        expect(orgChips()).toEqual([])
+        expect(container!.textContent).not.toContain(NONE_NOTICE)
+      })
+    }
+
     it('disabled account: renders nothing for organizations (the login predicate reads it as none, which is not the remedy)', async () => {
       installOrganizations({ active: [], hasTenantContext: false }, { accountEnabled: false })
       await mountPage()

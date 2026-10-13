@@ -1007,13 +1007,16 @@ type MemberAdmission = {
   directoryMemberships: MemberDirectoryMembership[]
   dingtalk: DingTalkAccess
   namespaceAdmissions: NamespaceAdmission[]
-  /** Absent (null) when the backend predates the read-only organizations field. */
+  /**
+   * null = render nothing: the field is absent (older backend), the server sent null (its
+   * user_orgs read failed, "unknown"), or the payload is malformed.
+   */
   organizations: MemberOrganizations | null
 }
 
 type MemberOrganizations = {
   active: Array<{ orgId: string }>
-  /** True exactly when the login tenant claim resolves (one active membership). */
+  /** Mirrors the no-hint login rule (exactly one active row); a login carrying a stored tenant hint takes another branch. */
   hasTenantContext: boolean
 }
 
@@ -1995,17 +1998,20 @@ function buildDirectoryManagementLocation(userId: string, membership: Pick<Membe
   return `/admin/directory?${params.toString()}`
 }
 
+// Any shape problem makes the whole field "unknown" (null, render nothing) rather than dropping the
+// bad items: dropping them could turn a list of unreadable ids into an empty list, and the empty
+// list tells the admin 「未归属任何组织」, which would be a claim the payload does not support.
 function normalizeMemberOrganizations(value: unknown): MemberOrganizations | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const record = value as Record<string, unknown>
-  if (!Array.isArray(record.active)) return null
-  const active = record.active
-    .map((item) => {
-      const orgId = item && typeof item === 'object' ? (item as Record<string, unknown>).orgId : null
-      return typeof orgId === 'string' && orgId.trim() ? { orgId: orgId.trim() } : null
-    })
-    .filter((item): item is { orgId: string } => item !== null)
-  return { active, hasTenantContext: record.hasTenantContext === true }
+  if (!Array.isArray(record.active) || typeof record.hasTenantContext !== 'boolean') return null
+  const active: Array<{ orgId: string }> = []
+  for (const item of record.active) {
+    const orgId = item && typeof item === 'object' ? (item as Record<string, unknown>).orgId : null
+    if (typeof orgId !== 'string' || !orgId.trim()) return null
+    active.push({ orgId: orgId.trim() })
+  }
+  return { active, hasTenantContext: record.hasTenantContext }
 }
 
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {

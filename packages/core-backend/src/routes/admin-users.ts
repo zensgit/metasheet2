@@ -2061,10 +2061,12 @@ async function fetchDirectoryMemberships(userId: string) {
 // here too, otherwise this panel would tell an admin a user has a tenant context that login does
 // not give them (or the reverse). Never writes. Org ids are returned as stored: there is no
 // org-name table (directory_integrations.name names an integration, not an organization).
-async function fetchActiveOrganizations(userId: string): Promise<{
+type ActiveOrganizations = {
   active: Array<{ orgId: string }>
   hasTenantContext: boolean
-}> {
+}
+
+async function fetchActiveOrganizations(userId: string): Promise<ActiveOrganizations> {
   const result = await query<{ org_id: unknown }>(
     `SELECT uo.org_id
      FROM user_orgs uo
@@ -2075,11 +2077,40 @@ async function fetchActiveOrganizations(userId: string): Promise<{
      ORDER BY uo.org_id ASC`,
     [userId],
   )
-  const active = result.rows
-    .map((row) => row.org_id)
+  // `hasTenantContext` is decided on the RAW rows, exactly like login: login counts every matching
+  // row (two rows = no claim, even if one id is blank) and then drops a blank id as "no tenant"
+  // (AuthService login only sets tenantId when the resolved id is truthy). The `active` list below
+  // omits blank ids for display only; it must not feed the count.
+  const rawOrgIds = result.rows.map((row) => row.org_id)
+  const hasTenantContext = rawOrgIds.length === 1
+    && typeof rawOrgIds[0] === 'string'
+    && rawOrgIds[0].length > 0
+  const active = rawOrgIds
     .filter((orgId): orgId is string => typeof orgId === 'string' && orgId.length > 0)
     .map((orgId) => ({ orgId }))
-  return { active, hasTenantContext: active.length === 1 }
+  return { active, hasTenantContext }
+}
+
+// Fail-soft wrapper: login swallows a failure of the same read (AuthService resolveSessionTenantId
+// catch -> no tenant), so a failure here must not 500 the whole member-admission answer (plugin
+// toggles included). `null` means "unknown"; the panel renders nothing for it. The log line is
+// values-free like ADMIN_USERS_FAILURE_EVENT: only the error's class name and a validated
+// correlation id, never the error text.
+async function fetchActiveOrganizationsOrUnknown(userId: string): Promise<ActiveOrganizations | null> {
+  try {
+    return await fetchActiveOrganizations(userId)
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organizations-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
 }
 
 async function fetchMemberAdmissionSnapshot(userId: string) {
@@ -2094,7 +2125,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
   if (!profile) return null
   // Read after the profile check (not inside the Promise.all above) so an unknown user stays a
   // plain 404 and the order of the existing reads is unchanged.
-  const organizations = await fetchActiveOrganizations(userId)
+  const organizations = await fetchActiveOrganizationsOrUnknown(userId)
 
   return {
     userId,
