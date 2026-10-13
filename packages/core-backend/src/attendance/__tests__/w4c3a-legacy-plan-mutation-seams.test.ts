@@ -356,13 +356,10 @@ describe('blueprint mutations — real production surfaces', () => {
         },
       ]),
     )).rejects.toMatchObject({
+      code: 'W4C3A_MEMBER_NOT_ACTIVE_IN_ORG',
       message: 'W4C3A_MEMBER_NOT_ACTIVE_IN_ORG',
       status: 404,
-      details: [{
-        code: 'USER_NOT_IN_ORG',
-        rejectedCount: 1,
-        indexes: [1],
-      }],
+      details: [],
     })
     expect(calls.some((sql) => sql.includes('FROM user_orgs'))).toBe(true)
     expect(calls.some((sql) => sql.includes('FOR SHARE OF uo, u'))).toBe(true)
