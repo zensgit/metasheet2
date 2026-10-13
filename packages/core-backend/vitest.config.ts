@@ -626,6 +626,11 @@ export default defineConfig({
       // .github/workflows/approval-realdb-projection-key-parity.yml lane (NOT plugin-tests.yml — see
       // that lane's own header for the s6a sha256-pinned-provenance rationale), which arms EXPECT_DB=1.
       'tests/integration/approval-projection-key-parity.db.test.ts',
+      // GET /context read verdict: the sheet verdict, sibling list and capability block come from the
+      // shared fenced resolvers. Requires real PostgreSQL (real approval provisioning). Excluded from the
+      // no-DB default job so `describeIfDatabase` cannot skip-green it; wired as a WHOLE FILE into the
+      // standalone .github/workflows/multitable-realdb-context-read-verdict.yml lane, which arms EXPECT_DB=1.
+      'tests/integration/multitable-context-read-verdict.db.test.ts',
       // RP-1: route-preview shared substrate goldens (preview===create, zero-write, whitelist gate).
       'tests/integration/approval-route-preview-substrate.db.test.ts',
       'tests/integration/approval-route-preview-api.db.test.ts',
