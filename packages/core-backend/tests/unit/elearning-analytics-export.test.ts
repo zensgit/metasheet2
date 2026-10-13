@@ -14,6 +14,7 @@ import {
 import {
   deriveElearningAnalyticsExportStorageKey,
   getElearningAnalyticsExportStorage,
+  isElearningAnalyticsExportStorageAvailable,
   setElearningAnalyticsExportStorageForTest,
 } from '../../src/services/elearning-analytics-export-storage'
 
@@ -134,6 +135,31 @@ describe('e-learning analytics export authority', () => {
         key,
         Buffer.from('not-written'),
       )).rejects.toMatchObject({ code: 'unavailable' })
+    } finally {
+      setElearningAnalyticsExportStorageForTest(null)
+    }
+  })
+
+  it('reports storage availability from the same predicate the storage factory uses', () => {
+    setElearningAnalyticsExportStorageForTest(null)
+    try {
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'production' })).toBe(false)
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'development' })).toBe(true)
+      expect(isElearningAnalyticsExportStorageAvailable({})).toBe(true)
+      // The availability read must not create the process singleton.
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'production' })).toBe(false)
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'development' })).toBe(true)
+
+      // Once the factory has handed out the fail-closed store, it is authoritative.
+      getElearningAnalyticsExportStorage({ NODE_ENV: 'production' })
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'development' })).toBe(false)
+
+      setElearningAnalyticsExportStorageForTest({
+        put: async () => undefined,
+        get: async () => Buffer.alloc(0),
+        delete: async () => undefined,
+      })
+      expect(isElearningAnalyticsExportStorageAvailable({ NODE_ENV: 'production' })).toBe(true)
     } finally {
       setElearningAnalyticsExportStorageForTest(null)
     }

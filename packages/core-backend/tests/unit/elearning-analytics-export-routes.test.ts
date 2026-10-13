@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { createElearningAnalyticsRouter } from '../../src/routes/elearning-analytics'
 import { ElearningAnalyticsExportError } from '../../src/services/elearning-analytics-export'
+import {
+  getElearningAnalyticsExportStorage,
+  setElearningAnalyticsExportStorageForTest,
+} from '../../src/services/elearning-analytics-export-storage'
 import { usePinnedServer } from '../utils/pinned-server'
 
 const ORG = 'org-export-route'
@@ -35,6 +39,7 @@ function harness(input: {
   org?: string | null
   allow?: boolean
   error?: ElearningAnalyticsExportError
+  storageAvailable?: boolean
 } = {}) {
   const createCalls: unknown[] = []
   const readCalls: unknown[] = []
@@ -60,6 +65,9 @@ function harness(input: {
     },
     getElearningDepartmentStats: vi.fn(),
     getElearningDepartmentStatsDaily: vi.fn(),
+    ...(input.storageAvailable === undefined
+      ? {}
+      : { isAnalyticsExportStorageAvailable: () => input.storageAvailable === true }),
     createElearningAnalyticsExport: async (_db, command) => {
       createCalls.push(command)
       if (input.error) throw input.error
@@ -158,6 +166,77 @@ describe('e-learning analytics export routes', () => {
       isGlobalAdmin: true,
       exportId: EXPORT,
     }])
+  })
+
+  it('reports export storage availability to stats-guarded callers only', async () => {
+    const available = harness({ storageAvailable: true })
+    const yes = await available.api.get('/api/elearning/admin/analytics/export-availability')
+    expect(yes.status).toBe(200)
+    expect(yes.body).toEqual({ available: true })
+
+    const unavailable = harness({ storageAvailable: false })
+    const no = await unavailable.api.get('/api/elearning/admin/analytics/export-availability')
+    expect(no.status).toBe(200)
+    expect(no.body).toEqual({ available: false, reason: 'storage_unavailable' })
+    expect((await unavailable.api
+      .get('/api/elearning/admin/analytics/export-availability?x=1')).status).toBe(400)
+
+    const anonymous = harness({ actor: null, storageAvailable: false })
+    expect((await anonymous.api.get('/api/elearning/admin/analytics/export-availability')).status)
+      .toBe(401)
+    expect(anonymous.guardCalls()).toBe(0)
+    const noOrg = harness({ org: null, storageAvailable: false })
+    const noOrgResponse = await noOrg.api.get('/api/elearning/admin/analytics/export-availability')
+    expect(noOrgResponse.status).toBe(403)
+    expect(noOrgResponse.body).toEqual({ error: 'ORG_CONTEXT_REQUIRED' })
+    const denied = harness({ allow: false, storageAvailable: false })
+    const deniedResponse = await denied.api.get('/api/elearning/admin/analytics/export-availability')
+    expect(deniedResponse.status).toBe(403)
+    expect(deniedResponse.body).not.toHaveProperty('available')
+  })
+
+  it('rejects a create with a values-free 409 before any export task exists when storage is unavailable', async () => {
+    const run = harness({ storageAvailable: false })
+    const response = await run.api
+      .post('/api/elearning/admin/analytics/exports')
+      .send({
+        requestId: REQUEST,
+        departmentId: DEPARTMENT,
+        periodStart: START,
+        periodEnd: END,
+      })
+    expect(response.status).toBe(409)
+    expect(response.body).toEqual({ error: 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE' })
+    expect(run.createCalls).toHaveLength(0)
+
+    const denied = harness({ allow: false, storageAvailable: false })
+    expect((await denied.api
+      .post('/api/elearning/admin/analytics/exports')
+      .send({ requestId: REQUEST, departmentId: DEPARTMENT, periodStart: START, periodEnd: END }))
+      .status).toBe(403)
+  })
+
+  it('defaults to the storage factory predicate: a fail-closed production store blocks create', async () => {
+    setElearningAnalyticsExportStorageForTest(null)
+    try {
+      getElearningAnalyticsExportStorage({ NODE_ENV: 'production' })
+      const run = harness()
+      const availability = await run.api.get('/api/elearning/admin/analytics/export-availability')
+      expect(availability.body).toEqual({ available: false, reason: 'storage_unavailable' })
+      const response = await run.api
+        .post('/api/elearning/admin/analytics/exports')
+        .send({
+          requestId: REQUEST,
+          departmentId: DEPARTMENT,
+          periodStart: START,
+          periodEnd: END,
+        })
+      expect(response.status).toBe(409)
+      expect(response.body).toEqual({ error: 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE' })
+      expect(run.createCalls).toHaveLength(0)
+    } finally {
+      setElearningAnalyticsExportStorageForTest(null)
+    }
   })
 
   it.each([

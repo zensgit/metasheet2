@@ -10213,6 +10213,35 @@ components:
         - succeeded
         - failed
         - expired
+    ElearningAnalyticsExportAvailable:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+      properties:
+        available:
+          type: boolean
+          enum:
+            - true
+    ElearningAnalyticsExportUnavailable:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - reason
+      properties:
+        available:
+          type: boolean
+          enum:
+            - false
+        reason:
+          type: string
+          enum:
+            - storage_unavailable
+    ElearningAnalyticsExportAvailability:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningAnalyticsExportAvailable'
+        - $ref: '#/components/schemas/ElearningAnalyticsExportUnavailable'
     ElearningAnalyticsExportResult:
       type: object
       additionalProperties: false
@@ -23119,6 +23148,36 @@ paths:
         '503':
           description: unavailable
           $ref: '#/components/responses/ElearningError'
+  /api/elearning/admin/analytics/export-availability:
+    get:
+      operationId: getElearningAnalyticsExportAvailability
+      summary: Report whether this deployment can store analytics exports
+      description: >
+        Same authentication, organization, RBAC, and exact feature gates as the
+        export routes.
+
+        Lets the admin UI disable export creation up front instead of offering a
+        button whose
+
+        task can only fail. Values-free: no storage provider, location, or
+        configuration is
+
+        returned, only availability and a closed reason.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current export storage availability.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ElearningAnalyticsExportAvailability'
+        '400':
+          $ref: '#/components/responses/ElearningError'
+        '401':
+          $ref: '#/components/responses/ElearningAuthError'
+        '403':
+          $ref: '#/components/responses/ElearningError'
   /api/elearning/admin/analytics/exports:
     post:
       operationId: createElearningAnalyticsExport
@@ -23141,7 +23200,13 @@ paths:
         requestId returns a values-free conflict. The export never contains
         individual answers,
 
-        traces, grades, or unsuppressed small-group values.
+        traces, grades, or unsuppressed small-group values. When this deployment
+        has no export
+
+        storage the request is rejected with 409
+        `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before
+
+        any export task is created.
       security:
         - bearerAuth: []
       requestBody:

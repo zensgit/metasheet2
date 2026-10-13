@@ -9849,6 +9849,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/analytics/export-availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report whether this deployment can store analytics exports
+         * @description Same authentication, organization, RBAC, and exact feature gates as the export routes.
+         *     Lets the admin UI disable export creation up front instead of offering a button whose
+         *     task can only fail. Values-free: no storage provider, location, or configuration is
+         *     returned, only availability and a closed reason.
+         */
+        get: operations["getElearningAnalyticsExportAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/analytics/exports": {
         parameters: {
             query?: never;
@@ -9866,7 +9889,9 @@ export interface paths {
          *     command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
          *     returns the original closed nine-field result; a different payload for the same
          *     requestId returns a values-free conflict. The export never contains individual answers,
-         *     traces, grades, or unsuppressed small-group values.
+         *     traces, grades, or unsuppressed small-group values. When this deployment has no export
+         *     storage the request is rejected with 409 `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before
+         *     any export task is created.
          */
         post: operations["createElearningAnalyticsExport"];
         delete?: never;
@@ -21285,6 +21310,17 @@ export interface components {
         };
         /** @enum {string} */
         ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
+        ElearningAnalyticsExportAvailable: {
+            /** @enum {boolean} */
+            available: true;
+        };
+        ElearningAnalyticsExportUnavailable: {
+            /** @enum {boolean} */
+            available: false;
+            /** @enum {string} */
+            reason: "storage_unavailable";
+        };
+        ElearningAnalyticsExportAvailability: components["schemas"]["ElearningAnalyticsExportAvailable"] | components["schemas"]["ElearningAnalyticsExportUnavailable"];
         ElearningAnalyticsExportResult: {
             exportId: components["schemas"]["ElearningUuid"];
             departmentId: components["schemas"]["ElearningUuid"];
@@ -24910,6 +24946,29 @@ export interface operations {
             500: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAnalyticsExportAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current export storage availability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportAvailability"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
         };
     };
     createElearningAnalyticsExport: {
