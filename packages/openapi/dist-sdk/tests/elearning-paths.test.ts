@@ -520,12 +520,27 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expect(availability?.security).toEqual([{ bearerAuth: [] }])
     expect(availability?.responses?.['200']?.content?.['application/json']?.schema)
       .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportAvailability' })
-    expect(schemas.ElearningAnalyticsExportAvailability).toMatchObject({
+    expect(schemas.ElearningAnalyticsExportAvailability).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/ElearningAnalyticsExportAvailable' },
+        { $ref: '#/components/schemas/ElearningAnalyticsExportUnavailable' },
+      ],
+    })
+    expect(schemas.ElearningAnalyticsExportAvailable).toEqual({
+      type: 'object',
       additionalProperties: false,
       required: ['available'],
+      properties: { available: { type: 'boolean', enum: [true] } },
     })
-    expect(Object.keys(schemas.ElearningAnalyticsExportAvailability?.properties ?? {}).sort())
-      .toEqual(['available', 'reason'])
+    expect(schemas.ElearningAnalyticsExportUnavailable).toEqual({
+      type: 'object',
+      additionalProperties: false,
+      required: ['available', 'reason'],
+      properties: {
+        available: { type: 'boolean', enum: [false] },
+        reason: { type: 'string', enum: ['storage_unavailable'] },
+      },
+    })
     expect(create?.description).toContain('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE')
   })
 

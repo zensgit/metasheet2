@@ -21310,11 +21310,17 @@ export interface components {
         };
         /** @enum {string} */
         ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
-        ElearningAnalyticsExportAvailability: {
-            available: boolean;
-            /** @enum {string} */
-            reason?: "storage_unavailable";
+        ElearningAnalyticsExportAvailable: {
+            /** @enum {boolean} */
+            available: true;
         };
+        ElearningAnalyticsExportUnavailable: {
+            /** @enum {boolean} */
+            available: false;
+            /** @enum {string} */
+            reason: "storage_unavailable";
+        };
+        ElearningAnalyticsExportAvailability: components["schemas"]["ElearningAnalyticsExportAvailable"] | components["schemas"]["ElearningAnalyticsExportUnavailable"];
         ElearningAnalyticsExportResult: {
             exportId: components["schemas"]["ElearningUuid"];
             departmentId: components["schemas"]["ElearningUuid"];

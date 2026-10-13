@@ -10213,7 +10213,7 @@ components:
         - succeeded
         - failed
         - expired
-    ElearningAnalyticsExportAvailability:
+    ElearningAnalyticsExportAvailable:
       type: object
       additionalProperties: false
       required:
@@ -10221,10 +10221,27 @@ components:
       properties:
         available:
           type: boolean
+          enum:
+            - true
+    ElearningAnalyticsExportUnavailable:
+      type: object
+      additionalProperties: false
+      required:
+        - available
+        - reason
+      properties:
+        available:
+          type: boolean
+          enum:
+            - false
         reason:
           type: string
           enum:
             - storage_unavailable
+    ElearningAnalyticsExportAvailability:
+      oneOf:
+        - $ref: '#/components/schemas/ElearningAnalyticsExportAvailable'
+        - $ref: '#/components/schemas/ElearningAnalyticsExportUnavailable'
     ElearningAnalyticsExportResult:
       type: object
       additionalProperties: false

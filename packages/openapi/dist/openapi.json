@@ -13406,7 +13406,7 @@
           "expired"
         ]
       },
-      "ElearningAnalyticsExportAvailability": {
+      "ElearningAnalyticsExportAvailable": {
         "type": "object",
         "additionalProperties": false,
         "required": [
@@ -13414,7 +13414,26 @@
         ],
         "properties": {
           "available": {
-            "type": "boolean"
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          }
+        }
+      },
+      "ElearningAnalyticsExportUnavailable": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "reason"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
           },
           "reason": {
             "type": "string",
@@ -13423,6 +13442,16 @@
             ]
           }
         }
+      },
+      "ElearningAnalyticsExportAvailability": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ElearningAnalyticsExportAvailable"
+          },
+          {
+            "$ref": "#/components/schemas/ElearningAnalyticsExportUnavailable"
+          }
+        ]
       },
       "ElearningAnalyticsExportResult": {
         "type": "object",

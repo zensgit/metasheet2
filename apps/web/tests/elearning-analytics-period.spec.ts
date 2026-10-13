@@ -283,6 +283,24 @@ describe('e-learning analytics period section', () => {
     app.unmount()
   })
 
+  it('keeps a different 409 (requestId conflict) as an ordinary error with the button enabled', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValueOnce(REQUEST_ONE)
+    createExportMock.mockRejectedValueOnce(new ElearningApiError('conflict', 409))
+    const { app, root } = mount()
+    await flush()
+    input(root, 'elearning-analytics-period-department', DEPARTMENT)
+    await click(root, 'elearning-analytics-export-create')
+    expect(createExportMock).toHaveBeenCalledTimes(1)
+    expect(root.querySelector('[data-testid="elearning-analytics-export-unavailable"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-analytics-export-error"]')?.textContent)
+      .toContain('The export is not ready yet.')
+    expect((root.querySelector('[data-testid="elearning-analytics-export-create"]') as HTMLButtonElement).disabled)
+      .toBe(false)
+    expect(elearningErrorMessage('conflict', 409, true)).not.toContain(STORAGE_UNAVAILABLE_ZH)
+    vi.restoreAllMocks()
+    app.unmount()
+  })
+
   it('maps ANALYTICS_EXPORT_STORAGE_UNAVAILABLE to the same explanation in both locales', () => {
     expect(elearningErrorMessage('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE', 409, true))
       .toContain(STORAGE_UNAVAILABLE_ZH)
