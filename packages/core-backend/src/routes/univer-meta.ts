@@ -9164,43 +9164,37 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         resolvedSheetId = resolved.sheetId
       }
 
-      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order, on the one univer-meta handler
-      // the closure guard could not see. The aliased sheet-row read below filters `s.deleted_at IS
-      // NULL` and used to answer `404 … Sheet not found: <id>` BEFORE this handler's first
-      // `sendForbidden` (which sits after the base-wide sheet-list load), so a signed-in caller
-      // /context was going to refuse anyway learned which of three things a sheet id was — live
-      // (403), soft-deleted (404) or never real (404) — with the id echoed back. The guard's
-      // EXISTENCE_PROBE recognised only the single-line `FROM meta_sheets WHERE id = $1 AND
-      // deleted_at IS NULL` form, so this handler was silently absent from its ledger; the probe now
-      // recognises the aliased, multi-line form too.
+      // #5936 — AUTHORITY BEFORE EXISTENCE, the #5839 B-series order. Every refusal of an addressed
+      // sheet is decided here, from the capability lookup alone, BEFORE any sheet row, base row or sheet
+      // list is read:
+      //   1. a caller with no read authority on this sheet (`canReadWithSheetGrant` over its scope) gets
+      //      the shared 403 — identical for a live, a soft-deleted and an absent sheet;
+      //   2. a sheet the SHARED fenced resolver does not let this caller read
+      //      (`resolveSheetCapabilitiesForAccess(...).capabilities.canRead`, the verdict every other
+      //      sheet-addressed route reads) answers exactly like a sheet that does not exist FOR THIS
+      //      CALLER, whatever the sheet's liveness: a caller whose global grants include read gets the
+      //      shared values-free absent-sheet 404 from multitable/sheet-refusals.ts (what an absent id
+      //      answers them), a caller who reads only through sheet grants gets the shared 403 (what an
+      //      absent id answers them, since no grant can name it);
+      //   3. only then does liveness answer (SHEET_DELETED / NOT_FOUND, values-free).
+      // The resolver result is kept: the capability block below is taken from it, so the sheet verdict
+      // and the advertised capabilities come from one place.
       //
-      // ORDER ONLY — this gate NARROWS nothing and WIDENS nothing:
-      //   * the 403 predicate is the SAME `canReadWithSheetGrant(baseCapabilities, scope, isAdmin)`
-      //     the readable-rows filter below applies, evaluated against THIS sheet's scope, so every
-      //     caller that reached 200 before still reaches it;
-      //   * the membership check further down (`readableSheetRows.some(...)`, which additionally
-      //     requires the sheet to be listed under its base and not to be a hidden system sheet) is
-      //     untouched and still runs — this gate stands in FRONT of it, never instead of it.
-      // Deliberately NOT gated on `resolveSheetCapabilitiesForAccess`'s own `capabilities.canRead`:
-      // that additionally applies the approval-/e-learning-projection fences, which /context has
-      // never applied. That is a SEPARATE, separately-tracked defect (pinned today as a VACUOUS
-      // control in tests/integration/approval-projection-key-parity.db.test.ts); closing it here
-      // would be an unrelated behaviour change riding along inside an ordering fix.
-      //
-      // COST, disclosed rather than discovered: this is the Workbench's main load path, and the gate
-      // adds 2 DB round trips for an admin (liveness + this sheet's scope map) and 3 for a non-admin
-      // (+ the approval-projection membership lookup). One of them — loadSheetPermissionScopeMap for
-      // THIS sheet — is issued again ~20 lines below with the same parameters, where the map is
-      // loaded for the whole base sheet list. Seeding that later map from `sheetScope` would remove
-      // the duplicate, but it would also change the parameters of a query sibling specs assert on;
-      // left as a named residual rather than folded into an ordering fix.
+      // COST: the ADDRESSED sheet's resolver lookups (liveness, its scope map, the system-sheet
+      // membership lookups) run once per request and are reused for its capability block below. The
+      // sibling-list step runs the shared listing filter's own lookups.
+      let addressedSheetResolution: Awaited<ReturnType<typeof resolveSheetCapabilitiesForAccess>> | null = null
       if (resolvedSheetId) {
-        const { sheetScope, sheetLiveness } = await resolveSheetCapabilitiesForAccess(
+        addressedSheetResolution = await resolveSheetCapabilitiesForAccess(
           pool.query.bind(pool),
           resolvedSheetId,
           access,
         )
+        const { sheetScope, sheetLiveness } = addressedSheetResolution
         if (!canReadWithSheetGrant(baseCapabilities, sheetScope, access.isAdminRole)) return sendForbidden(res)
+        if (!addressedSheetResolution.capabilities.canRead) {
+          return baseCapabilities.canRead ? sendSheetNotLive(res, 'absent') : sendForbidden(res)
+        }
         if (sheetLiveness !== 'live') return sendSheetNotLive(res, sheetLiveness)
       }
 
@@ -9266,7 +9260,7 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         )
         : { rows: [] }
 
-      const baseRow = (baseRowResult as any).rows?.[0]
+      const loadedBaseRow = (baseRowResult as any).rows?.[0]
       const sheetListResult = resolvedBaseId
         ? await pool.query(
           `SELECT id, base_id, name, description, (to_jsonb(meta_sheets) ->> 'system_kind') AS system_kind,
@@ -9284,13 +9278,29 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         visibleSheetRows.map((row) => String(row.id)),
         access.userId,
       )
-      const readableSheetRows = visibleSheetRows.filter((row) =>
-        canReadWithSheetGrant(
-          baseCapabilities,
-          sheetPermissionScopeMap.get(String(row.id)),
-          access.isAdminRole,
+      // The sibling list follows the same rule as the addressed sheet: a sheet is listed only when the
+      // caller's sheet grant allows it AND the shared fenced listing filter (the one GET /sheets and
+      // GET /bases use) keeps it. The intersection can only narrow what the grant check alone listed.
+      const readableSheetRows = await filterReadableSheetRowsForAccess(
+        pool.query.bind(pool),
+        visibleSheetRows.filter((row) =>
+          canReadWithSheetGrant(
+            baseCapabilities,
+            sheetPermissionScopeMap.get(String(row.id)),
+            access.isAdminRole,
+          ),
         ),
+        access,
+        baseCapabilities,
       )
+      // A system read-model base (approval / e-learning projection) in which this caller can read no
+      // sheet answers exactly like a base that does not exist.
+      const baseRow = !access.isAdminRole
+        && readableSheetRows.length === 0
+        && typeof resolvedBaseId === 'string'
+        && (resolvedBaseId === APPROVAL_PROJECTION_BASE_ID || isElearningProjectionBaseIdCandidate(resolvedBaseId))
+        ? undefined
+        : loadedBaseRow
 
       const effectiveSheetId =
         resolvedSheetId ??
@@ -9301,29 +9311,27 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       if (!baseCapabilities.canRead && !effectiveSheetId) {
         return sendForbidden(res)
       }
-      const selectedSheetScope = effectiveSheetId
-        ? sheetPermissionScopeMap.get(effectiveSheetId)
-        : undefined
-      // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): /context composes its OWN
-      // capability object (it never ran the projection fences — see the gate comment above), so the
-      // stock-preparation overview clamp is applied here as well, or the Workbench would offer edit
-      // affordances that every write route's capability resolver then refuses. The kind comes from
-      // the row this handler ALREADY loaded for the effective sheet (both reads carry the column-tolerant
-      // `system_kind`): no extra round trip, the statement sequence is unchanged. Every person, admins
-      // included; canRead / canExport pass through exactly as resolved.
+      // The capability block comes from the SHARED fenced resolver for the effective sheet — the same
+      // result the gate above already holds when the sheet was addressed, one resolver call when it was
+      // chosen from the base's list — so every system-sheet restriction the other routes apply
+      // (approval projection, e-learning projection, stock-preparation overview) applies here too.
+      const effectiveSheetResolution = effectiveSheetId
+        ? (addressedSheetResolution && effectiveSheetId === resolvedSheetId
+            ? addressedSheetResolution
+            : await resolveSheetCapabilitiesForAccess(pool.query.bind(pool), effectiveSheetId, access))
+        : null
+      const selectedSheetScope = effectiveSheetResolution?.sheetScope
+      // S3 (ADR adr-stock-prep-project-sheets-20261008 §5, Q5 宿主级只读): the stock-preparation overview
+      // clamp is ALSO applied by sheet kind from the row this handler already loaded for the effective
+      // sheet (both reads carry the column-tolerant `system_kind`; no extra round trip). Idempotent on
+      // top of the resolver's own clamp. Every person, admins included; canRead / canExport pass through.
       const effectiveSheetKindRow = effectiveSheetId
         ? (sheetRow && String(sheetRow.id) === effectiveSheetId ? sheetRow : null)
           ?? readableSheetRows.find((row) => String(row.id) === effectiveSheetId)
           ?? null
         : null
       const capabilities = restrictStockPreparationOverviewCapabilities(
-        effectiveSheetId
-          ? applyContextSheetSchemaWriteGrant(
-              baseCapabilities,
-              selectedSheetScope,
-              access.isAdminRole,
-            )
-          : baseCapabilities,
+        effectiveSheetResolution ? effectiveSheetResolution.capabilities : baseCapabilities,
         effectiveSheetKindRow?.system_kind === STOCK_PREP_OVERVIEW_SHEET_KIND,
       )
       const capabilityOrigin = deriveCapabilityOrigin(
@@ -9442,8 +9450,8 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       // resolveCopyTargetWritable (the current base: platform admin ∨ resolveBaseWritable, projection bases refused
       // for everyone — CS-3 / §4.2 amended 2026-09-28; ONE predicate shared with the route's fast gate and the
       // in-transaction re-check) ∧ hasFullTableReadAccess (source: read on the sheet plus the three axes, no counts;
-      // the read is this handler's own `capabilities.canRead`, and /context does not apply the projection fences —
-      // see the #5936 note above — while the copy route's gate reads it as the fences leave it). The target gate runs
+      // the read is this handler's own `capabilities.canRead`, taken from the shared fenced resolver like the copy
+      // route's own gate). The target gate runs
       // first so a projection base short-circuits with no probe, as the previous inline id checks did. Display-only:
       // the server re-gates on POST …/copy. Same fail-closed posture as canDeleteSheet: a thrown probe hides the
       // entry, never 500s the load, and logs values-free.

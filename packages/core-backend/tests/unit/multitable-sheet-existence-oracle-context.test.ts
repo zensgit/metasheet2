@@ -242,8 +242,8 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
     ).toBeLessThan(sheetRow)
     expect(
       body,
-      'a 404 in GET /context echoes the sheet id again — the refusal must come from sheet-refusals.ts',
-    ).not.toMatch(/Sheet not found: \$\{/)
+      'GET /context builds its own not-found text again — every not-found answer must come from sheet-refusals.ts',
+    ).not.toMatch(/Sheet not found/)
   })
 
   for (const caller of [OUTSIDER, READ_ONLY] as const) {
@@ -497,5 +497,105 @@ describe('#5936 — GET /context: authority before the sheet row', () => {
     const dead = await probe.query('SELECT s.id FROM meta_sheets s WHERE s.id = $1 AND s.deleted_at IS NULL', [DELETED])
     expect((live.rows[0] as { id: string }).id).toBe(LIVE)
     expect(dead.rows).toEqual([])
+  })
+
+  /**
+   * (g) The shared fenced read verdict. GET /context takes the addressed sheet's read verdict from the
+   * shared fenced resolver (`resolveSheetCapabilitiesForAccess`), the one every other sheet-addressed
+   * route reads. A sheet that resolver does not let the caller read answers EXACTLY like a sheet that
+   * does not exist — same status, same body (the shared absent-sheet refusal), no id — and the decision
+   * is taken from the capability lookup alone, before any sheet row, base row or sheet list is read.
+   *
+   * The fixture's sheets are ordinary; here the approval read-model membership lookup is made to name
+   * LIVE and DELETED (the query still reaches the oracle, so the call log stays complete), which is what
+   * makes the shared resolver refuse them for a non-admin who is not a participant.
+   */
+  function withReadModelMembership(inner: OracleQuery): OracleQuery {
+    return async (sql, params = []) => {
+      const result = await inner(sql, params)
+      const flat = sql.replace(/\s+/g, ' ').trim()
+      if (/SELECT id FROM meta_sheets WHERE id = ANY\(\$1::text\[\]\) AND base_id = \$2/.test(flat)) {
+        const ids = Array.isArray(params[0]) ? (params[0] as unknown[]) : []
+        return { rows: ids.filter((id) => id === LIVE || id === DELETED).map((id) => ({ id })) }
+      }
+      return result
+    }
+  }
+
+  /** Statements that would mean the handler went past the gate for this caller. */
+  const PAST_THE_GATE = [
+    /FROM meta_sheets s LEFT JOIN meta_bases b/,
+    /FROM meta_bases WHERE id = \$1/,
+    /FROM meta_sheets WHERE base_id = \$1 AND deleted_at IS NULL/,
+    /FROM meta_views/,
+    /FROM meta_fields/,
+  ]
+
+  it('(g) a sheet the shared resolver refuses answers exactly like an absent sheet, decided before any row read', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = READ_ONLY
+    const refused = await call({ sheetId: LIVE })
+    const absent = await call({ sheetId: ABSENT })
+    expect([refused.res.status, refused.res.body]).toEqual([SHEET_NOT_LIVE_STATUS, SHEET_ABSENT_BODY])
+    expect([refused.res.status, refused.res.body]).toEqual([absent.res.status, absent.res.body])
+    expect(JSON.stringify(refused.res.body)).not.toContain('sht_oracle')
+    // Non-vacuous: the read-model membership lookup really ran about THIS sheet.
+    expect(refused.calls.some((c) => /AND base_id = \$2/.test(c.sql) && JSON.stringify(c.params).includes(LIVE))).toBe(true)
+    for (const pattern of PAST_THE_GATE) {
+      expect(refused.calls.some((c) => pattern.test(c.sql)), String(pattern)).toBe(false)
+    }
+    expect(refused.transactions).toBe(0)
+  })
+
+  it('(g) the refused verdict is taken before liveness: the answer is the absent one whatever the liveness of the sheet', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = READ_ONLY
+    const refusedDeleted = await call({ sheetId: DELETED })
+    expect([refusedDeleted.res.status, refusedDeleted.res.body]).toEqual([SHEET_NOT_LIVE_STATUS, SHEET_ABSENT_BODY])
+    expect(JSON.stringify(refusedDeleted.res.body)).not.toContain('sht_oracle')
+    for (const pattern of PAST_THE_GATE) {
+      expect(refusedDeleted.calls.some((c) => pattern.test(c.sql)), String(pattern)).toBe(false)
+    }
+  })
+
+  it('(g) a viewId that falls back to a refused sheet id answers like an absent one', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = READ_ONLY
+    const refused = await call({ viewId: LIVE })
+    const absent = await call({ viewId: ABSENT })
+    expect([refused.res.status, refused.res.body]).toEqual([absent.res.status, absent.res.body])
+    expect([refused.res.status, refused.res.body]).toEqual([SHEET_NOT_LIVE_STATUS, SHEET_ABSENT_BODY])
+  })
+
+  it('(g) authority still comes first: a caller with no read authority gets the same 403 for a refused sheet', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = OUTSIDER
+    const answers: Array<[number, unknown]> = []
+    for (const sheetId of SHEET_IDS) {
+      const { res } = await call({ sheetId })
+      answers.push([res.status, res.body])
+    }
+    expect(answers[1]).toEqual(answers[0])
+    expect(answers[2]).toEqual(answers[0])
+    expect(answers[0]).toEqual([FORBIDDEN_STATUS, FORBIDDEN])
+  })
+
+  it('(g) the sibling list follows the same verdict: a base request does not list a refused sheet', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = READ_ONLY
+    const { res } = await call({ baseId: BASE_ID })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.data.sheets).toEqual([])
+    expect(res.body.data.sheet).toBeNull()
+    expect(JSON.stringify(res.body)).not.toContain('sht_oracle')
+  })
+
+  it('(g) an ADMIN is not refused by the read-model rule and still gets the whole payload', async () => {
+    pinned.setApp(buildApp(withReadModelMembership))
+    currentUser = MANAGER
+    const { res } = await call({ sheetId: LIVE })
+    expect(res.status, JSON.stringify(res.body)).toBe(200)
+    expect(res.body.data.sheet?.id).toBe(LIVE)
+    expect((res.body.data.sheets as Array<{ id: string }>).map((s) => s.id)).toEqual([LIVE])
   })
 })
