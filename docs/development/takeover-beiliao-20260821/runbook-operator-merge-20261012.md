@@ -4,6 +4,12 @@
 > **上机版本：R66。** R65（`6d4e9fc38`，tag `onprem-r65`）已于 2026-10-12 按 owner「R65 = main 原样，不等其他」上机，**不含**本合并：R65 里没有改名迁移，R65 的脚本也不认 `--split-extra-codes-to-role`。
 > **在任何服务器上运行脚本（含 dry-run）都是 owner 动作。** 本手册在老机器上执行；不含主机、地址、口令、项目号、用户 id——这些只在私有记录里。
 
+## 执行记录（2026-10-13，演示机，owner 裁定；#6079 评论 6138127578、6139488065）
+
+- R66（`e2345ab6b`）已上机，三步均已在演示机执行：① 拆分——旧角色上的 3 个多余码（`approvals:read`、`approvals:write`、`multitable:submit-approval`）移到新建平台角色 `approvals_operator`「审批与提交」，带 1 名成员；② 搬迁——1 个成员关系 + 1 行表级授权搬到 `stock-prep_frontline`（显示名已由迁移 `zzzz20261012090000` 改为「操作人员」）；③ 删除——`--apply --delete-empty-old-role`，各项前提计数均为 0，`stock-prep-operator` 已删除。
+- 演示机备料相关角色现为：`stock-prep_admin`、`stock-prep_puller`、`stock-prep_developer`、`stock-prep_frontline`「操作人员」四个内置角色，加平台角色 `approvals_operator`「审批与提交」。
+- 再次运行脚本是空操作（`nothing to split` / `nothing to move`）。下文保留为执行时的原始手册。
+
 ## 0. 这次合并做什么
 
 - 内置角色 `stock-prep_frontline` 的显示名随 R66 迁移 `zzzz20261012090000` 从「一线填写」改为「操作人员」，**角色 id 不变**。
@@ -122,6 +128,8 @@ R66 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-r
 - **紧接着、在同一个维护窗口里、做第 4 步之前**：第 2 步 `approval designer — …` 计数大于 0 时，在审批设计器里把这些模板的审批人 / 办理人 / 兜底审批人 / 抄送对象 / 「提交人自选」角色范围从旧角色改指向 `stock-prep_frontline`（或 `approvals_operator`，视该节点需要的权限），再重新发布；脚本不改审批模板。拖到之后再改的话，这段时间里新发起的审批实例会把席位或抄送派给已经没人的旧角色（无人能办），而这些新席位 / 抄送记录又会让第 4 步被拒绝。
 
 ## 4. 可选：删除已空的旧角色
+
+> **演示机已完成（2026-10-13）**：本步已执行，旧角色已删除，见文首「执行记录」。
 
 按 0.6 的写法执行，参数为：
 
