@@ -17,17 +17,32 @@
     </p>
 
     <div class="attendance__admin-grid">
-      <label class="attendance__field" for="attendance-ta-group">
-        <span>{{ tr('Group ID', '考勤组 ID') }}</span>
-        <input id="attendance-ta-group" v-model.trim="groupId" type="text" :placeholder="tr('attendance group UUID', '考勤组 UUID')" @keydown.enter.prevent="reload" />
+      <label class="attendance__field attendance-ta__group" for="attendance-ta-group">
+        <span>{{ tr('Attendance group', '考勤组') }}</span>
+        <input
+          id="attendance-ta-group"
+          :value="groupDraft"
+          type="search"
+          autocomplete="off"
+          :placeholder="tr('Search by group name', '按考勤组名称搜索')"
+          data-attendance-team-availability-group
+          @input="onGroupInput"
+          @focus="menuOpen = true"
+          @keydown.enter.prevent="reload"
+        />
+        <ul v-if="menuOpen && groupMatches.length > 0" class="attendance-ta__group-menu" data-attendance-team-availability-group-menu>
+          <li v-for="group in groupMatches" :key="group.id">
+            <button type="button" @click="chooseGroup(group)">{{ group.name }}</button>
+          </li>
+        </ul>
       </label>
       <label class="attendance__field" for="attendance-ta-from">
         <span>{{ tr('From', '起') }}</span>
-        <input id="attendance-ta-from" v-model="from" type="date" />
+        <AttendanceLocaleDateInput id="attendance-ta-from" v-model="from" />
       </label>
       <label class="attendance__field" for="attendance-ta-to">
         <span>{{ tr('To', '止') }}</span>
-        <input id="attendance-ta-to" v-model="to" type="date" />
+        <AttendanceLocaleDateInput id="attendance-ta-to" v-model="to" />
       </label>
     </div>
 
@@ -106,7 +121,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import { computed, onMounted, ref } from 'vue'
 import type { TranslateFn } from './useAttendanceAdminRail'
 import { useTeamAvailability } from './useTeamAvailability'
 import { fetchTeamAvailability, teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
@@ -116,7 +132,12 @@ import { apiFetch } from '../../utils/api'
 const props = defineProps<{ tr: TranslateFn }>()
 const tr = props.tr
 
+interface AttendanceGroupChoice { id: string; name: string }
+
 const groupId = ref('')
+const groupDraft = ref('')
+const menuOpen = ref(false)
+const groups = ref<AttendanceGroupChoice[]>([])
 const from = ref('')
 const to = ref('')
 
@@ -128,6 +149,47 @@ const { data, loading, errorStatus, errorMessage, load } = useTeamAvailability({
 })
 
 const canLoad = computed(() => Boolean(groupId.value && from.value && to.value))
+const groupMatches = computed(() => {
+  const query = groupDraft.value.trim().toLowerCase()
+  const source = groups.value.filter(group => group.name.trim())
+  if (!query) return source.slice(0, 8)
+  return source.filter(group => group.name.toLowerCase().includes(query)).slice(0, 8)
+})
+
+async function loadGroupChoices(): Promise<void> {
+  if (groups.value.length > 0) return
+  try {
+    const response = await guardedFetch('/api/attendance/groups?pageSize=200')
+    const payload = await response.json()
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    groups.value = items
+      .map((item: { id?: string; name?: string }) => ({
+        id: String(item?.id || '').trim(),
+        name: String(item?.name || '').trim(),
+      }))
+      .filter((item: AttendanceGroupChoice) => item.id && item.name)
+  } catch {
+    groups.value = []
+  }
+}
+
+function onGroupInput(event: Event): void {
+  const text = (event.target as HTMLInputElement).value
+  groupDraft.value = text
+  const trimmed = text.trim()
+  const match = groups.value.find(group => group.name === trimmed)
+  groupId.value = match ? match.id : trimmed
+  menuOpen.value = true
+  void loadGroupChoices()
+}
+
+function chooseGroup(group: AttendanceGroupChoice): void {
+  groupDraft.value = group.name
+  groupId.value = group.id
+  menuOpen.value = false
+}
+
+onMounted(() => { void loadGroupChoices() })
 const pendingTooltip = computed(() => tr('Pending approval, not yet effective', '待审批，未生效'))
 
 const errorText = computed(() => {
@@ -166,6 +228,29 @@ async function reload(): Promise<void> {
 </script>
 
 <style scoped>
+.attendance-ta__group { position: relative; }
+.attendance-ta__group-menu {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% - 4px);
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(16, 24, 40, 0.12);
+}
+.attendance-ta__group-menu button {
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
 .attendance-ta__matrix-wrap { overflow-x: auto; }
 .attendance-ta__member { font-family: var(--font-mono, monospace); font-size: 0.85em; white-space: nowrap; }
 .attendance-ta__col--provisional { color: #b45309; }

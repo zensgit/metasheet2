@@ -344,3 +344,21 @@ Ten commits since the previous baseline. Sensitive paths are the first-parent di
 The roster org gate, streamed roster preview, `ensure_member` optional `sourceOrdinals` (the five member keys plus that field), migration `zzzz20261013090000_attendance_roster_member_source_ordinals`, the P25 member-source rollback registration, and the legacy membership error provenance stay on this tree. The generated P25 census test expects 112 sites and passed locally. Pins recomputed on this merge tree: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally on Node v22.23.3.
 
 The attendance real-DB step still sets `DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL` and does not set `EXPECT_DB`. The approval real-DB step still sets `EXPECT_DB: '1'`.
+
+## 14. Alignment to main 7960c8f42 (2026-10-13)
+
+Draft #6051 was merged onto `origin/main` `7960c8f4203ff837e8bf204b25067f761aaca151` (#5749, parent `5700830d15a8aad16043b94bec0ed6fc7e413c7a`). Nothing had landed past that SHA at fetch time. The previous alignment baseline was `67874b9bcd73d686796f57bcddf9e6aa47080a7b`. Zero conflicts. Harold approved folding the sensitive-path commits and re-running required checks. Workflow files came from main unchanged by this branch: `plugin-tests.yml`, `attendance-web-guard.yml`, `approval-realdb-projection-key-parity.yml`, and `multitable-realdb-context-read-verdict.yml` keep literal `ubuntu-latest` on `runs-on`.
+
+Five commits since the previous baseline.
+
+| Commit | What | Sensitive paths |
+|---|---|---|
+| `c5ad041df1b7` #6362 | Management-center help guide and Chinese admin controls. | `attendance-web-guard.yml`, `attendance-web-guard-workflow.spec.ts` |
+| `effa221b03d4` #6376 | Post-R66 demo role annotation. | none |
+| `f024deba3813` #6378 | R66 on-site record. | none |
+| `5700830d15a8` #6377 | Formula-field create button stays idle until save starts. | none |
+| `7960c8f4203f` #5749 | GET `/context` sheet read verdict from the shared resolver. | `approval-realdb-projection-key-parity.yml`, `multitable-realdb-context-read-verdict.yml`, `univer-meta.ts`, `vitest.config.ts` |
+
+The roster org gate, streamed roster preview, `ensure_member` optional `sourceOrdinals` (the five member keys plus that field), migration `zzzz20261013090000_attendance_roster_member_source_ordinals`, the P25 member-source rollback registration, and the legacy membership error provenance stay on this tree. The generated P25 census test expects 112 sites and passed locally. Pins recomputed on this merge tree: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally on Node v22.23.3.
+
+The attendance real-DB step still sets `DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL` and does not set `EXPECT_DB`. The approval real-DB step still sets `EXPECT_DB: '1'`.

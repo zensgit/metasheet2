@@ -1117,12 +1117,11 @@ describe('AttendanceView wiring — §5.2 template prefill contract (mounted)', 
     await flushUi(8)
     expect(dialog()).toBeNull()
 
-    // Re-enter the wizard (task home → setup) — pending prefill keeps the checklist item alive.
-    const returnHome = Array.from(container!.querySelectorAll('button')).find((b) => (b.textContent || '').includes('Management home'))
-    expect(returnHome).toBeTruthy()
-    returnHome!.click()
-    await flushUi(8)
-    container!.querySelector<HTMLButtonElement>('[data-admin-task-action="setup-readiness"]')!.click()
+    // Re-enter the wizard from the rail — pending prefill keeps the checklist item alive.
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor-group="workspace"] button')!.click()
+    await flushUi(4)
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-setup"]')!.click()
     await flushUi(16)
     const checklistItem = container!.querySelector('[data-setup-checklist-item="template-prefill"]')
     expect(checklistItem).toBeTruthy()

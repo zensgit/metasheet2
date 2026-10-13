@@ -82,11 +82,11 @@
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-from">
             <span>{{ tr('Created from', '创建起始') }}</span>
-            <input id="attendance-import-batch-created-from" v-model="batchCreatedFrom" type="date" @input="markBatchTimeSliceCustom" />
+            <AttendanceLocaleDateInput id="attendance-import-batch-created-from" v-model="batchCreatedFrom" @input="markBatchTimeSliceCustom" />
           </label>
           <label class="attendance__field" for="attendance-import-batch-created-to">
             <span>{{ tr('Created to', '创建截止') }}</span>
-            <input id="attendance-import-batch-created-to" v-model="batchCreatedTo" type="date" @input="markBatchTimeSliceCustom" />
+            <AttendanceLocaleDateInput id="attendance-import-batch-created-to" v-model="batchCreatedTo" @input="markBatchTimeSliceCustom" />
           </label>
           <label class="attendance__field attendance__field--full">
             <span>{{ tr('Time slice', '时间切片') }}</span>
@@ -527,6 +527,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref, type Ref } from 'vue'
 import {
   buildImportBatchRollbackConfirmationMessage,

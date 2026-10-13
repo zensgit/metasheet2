@@ -63,10 +63,9 @@
       </label>
       <label class="attendance__field" :for="baseStartDateInputId">
         <span>{{ tr('Base rest start date', '基础休息起始日期') }}</span>
-        <input
+        <AttendanceLocaleDateInput
           :id="baseStartDateInputId"
           v-model="form.baseRestStartDate"
-          type="date"
           data-calendar-policy-quick-base-start-date
         />
         <small class="attendance__field-hint">
@@ -105,6 +104,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, reactive, useId } from 'vue'
 import {
   buildHolidayLengthCalendarPolicyOverride,

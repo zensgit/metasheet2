@@ -418,6 +418,7 @@ owner 2026-10-08 批准：备料作为一个应用，自带角色和成员管理
 ### 11.2 命名陷阱（S0 / S5a 落实）
 
 1. 演示机现有的一线角色 id 是 `stock-prep-operator`（连字符，frontline plan `:16`）。它不匹配 `stock-prep_` 前缀，委托管理员在可选清单里看不到它、任命路由也会拒（`admin-users.ts:1009`、`:3160`）。**任务**：迁成 `stock-prep_frontline`——新角色由 S5a 播种（原写 S0，2026-10-10 订正），演示机上用 `scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs` 把成员和表级授权行搬过去，旧角色清空后经单独的 `--delete-empty-old-role` 删除；备选是在应用页里给旧 id 一个只读别名。默认走迁移，写进 §8 第 3 步。**owner 2026-10-12**：合并在上机时做（不再等开开关；随 R66，R65 未含），合并后的内置角色显示名为「操作人员」（id 不变，迁移 `zzzz20261012090000`）；旧角色上多出的平台码由脚本的 `--split-extra-codes-to-role` 按方案 ① 拆到单独的平台角色（§8 第 3 步；拆分是 T 层 `Ratified-by-default-2026-10-12`，不是 owner 原话）。
+   > **2026-10-13 订正（演示机现状）**：旧一线角色 `stock-prep-operator` 已于 2026-10-13 在演示机上删除；一线角色现为「操作人员」（`stock-prep_frontline`）+「审批与提交」（`approvals_operator`），见 `runbook-operator-merge-20261012.md`「执行记录」。
 2. **不能直接用 e-learning 的 `buildPluginRoleId`**：它把非字母数字一律换成 `_`（`rbac/plugin-role-template.ts:21-37`），`stock-prep` 会变成 `stock_prep_<kind>`，同样不匹配。四个内置角色的 id 写成字面量。（e-learning 自己的角色前缀 `plugin-elearning` 和码的命名空间 `elearning` 也不一致：`…add_elearning_role_templates.ts:17-18`。）
 3. **只有主管理员的 id 能以 `_admin` 结尾**。`deriveDelegatedAdminNamespace` 只看后缀（`namespace-admission.ts:105-106`）：如果数据管理员叫 `stock-prep_data_admin`，持有者会被当成命名空间 `stock-prep_data` 的委托管理员（这个名字对 `isNamespaceAdmissionControlledResource` 为真，`:133-137`），能进委托页；只要有人给这个命名空间配了范围，就能把 `stock-prep_data_*` 角色授给别人。自定义角色的 id 由服务端生成，同样禁止 `_admin` 结尾。
 

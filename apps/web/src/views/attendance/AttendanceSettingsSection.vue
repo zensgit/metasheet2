@@ -13,11 +13,10 @@
       </label>
       <label class="attendance__field" for="attendance-auto-absence-run-at">
         <span>{{ tr('Run at', '执行时间') }}</span>
-        <input
+        <AttendanceLocaleTimeInput
           id="attendance-auto-absence-run-at"
           v-model="settingsForm.autoAbsenceRunAt"
           name="autoAbsenceRunAt"
-          type="time"
         />
       </label>
       <label class="attendance__field" for="attendance-auto-absence-lookback">
@@ -74,6 +73,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import type { Ref } from 'vue'
 import AttendanceEmployeeQuickActionIconsField from './AttendanceEmployeeQuickActionIconsField.vue'
 import type { EmployeeQuickActionIcons } from './attendanceEmployeeWorkspaceCommonIcons'
@@ -135,7 +135,13 @@ const saveSettings = () => props.settings.saveSettings()
 }
 
 .attendance__field--checkbox {
-  justify-content: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
+  gap: 8px;
 }
 
 .attendance__btn {

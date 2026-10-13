@@ -673,13 +673,9 @@ describe('AttendanceSetupReadiness — AttendanceView wiring (section registrati
     const firstMatrix = Array.from(container!.querySelectorAll('[data-setup-step-status]'))
       .map((el) => `${el.closest('[data-setup-step]')?.getAttribute('data-setup-step')}:${el.getAttribute('data-setup-step-status')}`)
 
-    const returnHome = Array.from(container!.querySelectorAll('button')).find((b) => (b.textContent || '').includes('Management home'))
-    expect(returnHome).toBeTruthy()
-    returnHome!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-settings"]')!.click()
     await flushUi(8)
-
-    const setupAction = container!.querySelector<HTMLButtonElement>('[data-admin-task-action="setup-readiness"]')
-    setupAction!.click()
+    container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-setup"]')!.click()
     await flushUi(16)
 
     expect(setupReadinessCalls.length).toBeGreaterThan(callsAfterFirstEntry)
