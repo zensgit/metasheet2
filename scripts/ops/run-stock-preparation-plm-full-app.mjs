@@ -173,6 +173,40 @@ export async function recoverUnobservedProcessLogs({ repoRoot, scratchDir, name,
 // classification only: even an uppercase-looking error may contain a secret.
 export function publicBrowserFailure(record) {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return null
+  if (record.stage === 'isolated-browser-exit') {
+    const signals = ['SIGABRT', 'SIGBUS', 'SIGILL', 'SIGKILL', 'SIGSEGV', 'SIGTERM']
+    const boolean = value => typeof value === 'boolean' ? value : null
+    return { stage: 'isolated-browser-exit',
+      code: Number.isInteger(record.code) && record.code >= 0 && record.code <= 255 ? record.code : null,
+      signal: record.signal === null ? null : signals.includes(record.signal) ? record.signal : 'OTHER',
+      malformedFrame: boolean(record.malformedFrame), hasResult: boolean(record.hasResult),
+      captureFailed: boolean(record.captureFailed) }
+  }
+  if (record.stage === 'failed' || record.stage === 'production-stop-failed') {
+    // The host can fail after the last browser phase without a browser catch
+    // frame. Preserve that distinction, but never publish raw codes or stacks.
+    const reasons = record.stage === 'failed' ? new Map([
+      ['APP_BROWSER_ISOLATED_PROCESS_FAILED', 'BROWSER_PROCESS_FAILED'],
+      ['APP_BROWSER_CAPTURE_FAILED', 'BROWSER_CAPTURE_FAILED'],
+      ['MODULE_UNAVAILABLE', 'MODULE_UNAVAILABLE'],
+      ['ASSERTION_FAILED', 'ASSERTION_FAILED'],
+      ['STARTUP_OR_PROBE_FAILED', 'STARTUP_OR_PROBE_FAILED'],
+    ]) : new Map([
+      ['APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF', 'EARLIER_PROBE_FAILED'],
+      ['APP_CONFIGURED_MAIN_POOL_NOT_ENDED', 'MAIN_POOL_NOT_ENDED'],
+      ['APP_CONFIGURED_HTTP_NOT_CLOSED', 'HTTP_NOT_CLOSED'],
+      ['APP_CONFIGURED_COLLAB_NOT_CLOSED', 'COLLAB_NOT_CLOSED'],
+      ['APP_CONFIGURED_COLLAB_CLIENTS_REMAIN', 'COLLAB_CLIENTS_REMAIN'],
+      ['APP_CONFIGURED_COLLAB_DISCONNECT_REQUIRED', 'COLLAB_DISCONNECT_MISSING'],
+      ['APP_CONFIGURED_SOURCE_POOL_NOT_ENDED', 'SOURCE_POOL_NOT_ENDED'],
+      ['APP_CONFIGURED_SOURCE_ADAPTER_STILL_CONNECTED', 'SOURCE_ADAPTER_CONNECTED'],
+      ['APP_CONFIGURED_SOURCE_REGISTRATIONS_NOT_PRESERVED', 'SOURCE_REGISTRATIONS_CHANGED'],
+      ['APP_CONFIGURED_MAINTENANCE_REMAINS', 'MAINTENANCE_REMAINS'],
+      ['STOP_PROOF_FAILED', 'STOP_PROOF_FAILED'],
+    ])
+    return { stage: record.stage === 'failed' ? 'configured-app-failed' : record.stage,
+      reason: reasons.get(record.diagnostic) ?? 'OTHER' }
+  }
   if (record.stage === 'browser-request-failure') {
     // Re-project even already classified child frames. Never forward request
     // URLs, private identities, headers, payloads or arbitrary error strings.

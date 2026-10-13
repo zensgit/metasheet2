@@ -662,6 +662,54 @@ test('actual stage runner publishes closed browser failure diagnostics without p
   await verifyStageLogs({ ...f, stages: [result] })
 })
 
+test('actual stage runner preserves closed host failure and browser exit diagnostics on nonzero exit', async () => {
+  const f = await ownedLogFixture()
+  const secret = 'SYNTHETIC_PRIVATE_VALUE'
+  const records = [
+    { stage: 'isolated-browser-exit', code: 7, signal: null, malformedFrame: false, hasResult: false,
+      token: secret, stderr: secret },
+    { stage: 'failed', diagnostic: 'APP_BROWSER_ISOLATED_PROCESS_FAILED', code: secret, frames: [secret] },
+    { stage: 'production-stop-failed', diagnostic: 'APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF', payload: secret },
+    { stage: 'failed', diagnostic: 'APP_BROWSER_' + secret, code: secret },
+    { stage: 'production-stop-failed', diagnostic: 'APP_CONFIGURED_' + secret },
+    { stage: 'isolated-browser-exit', code: secret, signal: secret, malformedFrame: secret,
+      hasResult: secret, captureFailed: secret },
+  ]
+  const result = await f.run('host-failure', ['-e',
+    `for (const record of ${JSON.stringify(records)}) console.log('PLM_FULL_APP_PROBE ' + JSON.stringify(record)); process.exitCode = 1`],
+  cleanEnvironment(process.env))
+  assert.equal(result.code, 1)
+  assert.equal(result.complete, true)
+  assert.equal(result.markers.length, records.length)
+  const frames = f.emitted.filter(line => line.startsWith('PLM_FULL_APP_PROBE '))
+    .map(line => JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)))
+  assert.deepEqual(frames, [
+    { stage: 'isolated-browser-exit', code: 7, signal: null, malformedFrame: false, hasResult: false, captureFailed: null },
+    { stage: 'configured-app-failed', reason: 'BROWSER_PROCESS_FAILED' },
+    { stage: 'production-stop-failed', reason: 'EARLIER_PROBE_FAILED' },
+    { stage: 'configured-app-failed', reason: 'OTHER' },
+    { stage: 'production-stop-failed', reason: 'OTHER' },
+    { stage: 'isolated-browser-exit', code: null, signal: 'OTHER', malformedFrame: null, hasResult: null, captureFailed: null },
+  ])
+  assert(!f.emitted.join('\n').includes(secret))
+  await verifyStageLogs({ ...f, stages: [result] })
+})
+
+test('host failure projection accepts only exact fixed reasons and bounded lifecycle metadata', () => {
+  for (const diagnostic of ['APP_BROWSER_CAPTURE_FAILED', 'APP_CONFIGURED_MAINTENANCE_REMAINS']) {
+    const stage = diagnostic.includes('MAINTENANCE') ? 'production-stop-failed' : 'failed'
+    const result = publicBrowserFailure({ stage, diagnostic })
+    assert.notEqual(result.reason, 'OTHER')
+    assert.equal(publicBrowserFailure({ stage, diagnostic: diagnostic + '_SYNTHETIC_PRIVATE_VALUE' }).reason, 'OTHER')
+  }
+  for (const code of [-1, 256, 1.5, '1', true, { private: 'SYNTHETIC_PRIVATE_VALUE' }]) {
+    assert.equal(publicBrowserFailure({ stage: 'isolated-browser-exit', code }).code, null)
+  }
+  assert.deepEqual(publicBrowserFailure({ stage: 'isolated-browser-exit', code: 0, signal: 'SIGKILL',
+    malformedFrame: true, hasResult: true, captureFailed: true }),
+  { stage: 'isolated-browser-exit', code: 0, signal: 'SIGKILL', malformedFrame: true, hasResult: true, captureFailed: true })
+})
+
 test('actual stage runner preserves separate binary raw streams and Unicode split frames', async () => {
   const f = await ownedLogFixture()
   const marker = 'PLM_FULL_APP_PROBE ' + JSON.stringify({ stage: 'browser-phase', phase: '汉字' }) + '\n'
