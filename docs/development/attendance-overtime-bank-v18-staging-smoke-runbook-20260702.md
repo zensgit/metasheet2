@@ -11,12 +11,23 @@ Do not mark the overtime-bank v1 arc complete from this document alone. The
 closeout happens only after a real run records the PASS stamp in the section
 below **and** the operator-decision blocks in this document are resolved.
 
+**Update 2026-09-23 (#6009):** `insufficient=partial_unpaid_absence` is not an
+online mode. `PUT /api/attendance/settings` that includes it returns `422`
+`LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE` and does not save. A rule already
+stored with that mode refuses final approve (balance untouched, request stays
+pending, attendance record not projected as full leave). This smoke uses
+`insufficient=block` and requests 600 / 300 / 600 against a 600-minute pool so
+every approved leave is fully deducted. The old 900-minute case is retired: it
+must not be approved, and it must not be read as a 300-minute unpaid absence.
+Design: `attendance-leave-offset-partial-absence-honesty-design-20260923.md`.
+
 **Scope:** v1-8 closes the overtime-bank v1 arc end to end on staging:
 
 - 账1 accrual: overtime approval grants per-source comp-time lots when the bank
   is enabled, and keeps the legacy NULL-source single lot when dormant;
-- 账2 offset: a rule-driven leave approval deducts the comp-time pool FIFO,
-  with `partial_unpaid_absence` shortfall behavior;
+- 账2 offset: a rule-driven leave approval deducts the comp-time pool FIFO.
+  `insufficient` is `block` only. `partial_unpaid_absence` is fail-closed
+  (#6009, 2026-09-23): unpaid-absence minutes are not projected;
 - 账3 result: the full-attendance flag breaks on any raw leave, even when the
   pool offset it;
 - 账4 settlement: cycle close writes the immutable settlement snapshot rows
@@ -43,12 +54,11 @@ accrual → offset → settlement money path with the ratified invariants:
    `overtime_conversion:<requestId>:workday` with `overtime_source='workday'`.
 4. Replaying the approval is rejected (`400 INVALID_STATUS`) and never
    double-credits a lot or a grant ledger event.
-5. The three owner acceptance cases hold (compressed, minutes-based — see the
-   operator-decision block OQ-1): with +600 pool per user, leave of
-   600 / 300 / 900 minutes deducts 600 / 300 / 600, leaves remaining
-   0 / 300 / 0, and produces a real-absence shortfall of 0 / 0 / 300
-   (`insufficient='partial_unpaid_absence'`), with ledger conservation
-   `granted = remaining + exhausted + expired` on the read API.
+5. The offset cases hold under `insufficient=block` (see OQ-1): with +600 pool
+   per user, leave of 600 / 300 / 600 minutes deducts 600 / 300 / 600 and leaves
+   remaining 0 / 300 / 0. There is no unpaid-absence shortfall
+   (`partial_unpaid_absence` is fail-closed, #6009). Ledger conservation
+   `granted = remaining + exhausted + expired` still holds on the read API.
 6. The full-attendance flag is `false` for all three case users (any leave
    breaks it, even pool-offset leave) and `true` for the overtime-only control
    user.
@@ -76,10 +86,11 @@ accrual → offset → settlement money path with the ratified invariants:
 
 The owner acceptance table is framed as a 176h monthly schedule with hours
 (+10h overtime; 10h / 5h / 15h leave; effective hours 176/176/171). This smoke
-replays the **pool arithmetic** of those three cases in minutes
-(600 / 300 / 900 vs a 600-minute pool) and asserts pool remaining, deduction,
-shortfall (real absence), full-attendance flag, and cycle-end convertible —
-it does **not** rebuild a full month of 176 scheduled hours, and it does not
+replays the **pool arithmetic** in minutes (600 / 300 / 600 vs a 600-minute
+pool, `insufficient=block`) and asserts pool remaining, deduction,
+full-attendance flag, and cycle-end convertible. The 15h / 900-minute case and
+its real-absence shortfall are retired (#6009) — unpaid-absence minutes are
+not projected. It does **not** rebuild a full month of 176 scheduled hours, and it does not
 assert the schedule-level effective-hours aggregate (amounts and payroll
 aggregation stay out of scope by design). **OPEN QUESTION:** confirm the
 compressed replay satisfies 三例验收, or require a full-month schedule replay
@@ -340,7 +351,7 @@ curl -sS -X PUT "$BASE_URL/api/attendance/settings" \
     "overtimeBankPolicy": { "enabled": true, "pooledSources": ["workday"] },
     "leaveBalanceDeductionPolicy": {
       "enabled": true,
-      "rules": [{ "requestLeaveType": "<STAMP>-offset", "deductFrom": ["comp_time"], "insufficient": "partial_unpaid_absence" }]
+      "rules": [{ "requestLeaveType": "<STAMP>-offset", "deductFrom": ["comp_time"], "insufficient": "block" }]
     },
     "attendanceBonusPolicy": { "enabled": true, "anyLeaveBreaksFullAttendance": true, "lateBeyondThresholdBreaksFullAttendance": true }
   }'
@@ -363,16 +374,16 @@ For each case user (`case1`, `case2`, `case3`):
 4. Assert (API) `GET /api/attendance/leave-balances?userId=<user>&leaveTypeCode=comp_time`
    shows granted=600, remaining=600.
 5. As the case user: create the offset leave on the Tuesday with
-   `leaveTypeCode=<STAMP>-offset` and minutes 600 / 300 / 900 respectively,
-   stamped reason; approve as admin (case3 approves too —
-   `partial_unpaid_absence` mode).
+   `leaveTypeCode=<STAMP>-offset` and minutes 600 / 300 / 600 respectively,
+   stamped reason; approve as admin. All three approve. Do not submit the
+   retired 900-minute request under `partial_unpaid_absence` (#6009).
 6. Assert (SQL) the `leave_offset` deduct events for that leave request sum to
    600 / 300 / 600.
 7. Assert (API) the balance read shows remaining 0 / 300 / 0, exhausted
    600 / 300 / 600, expired 0, and conservation
    `granted = remaining + exhausted + expired`.
-8. Compute shortfall = requested − deducted = 0 / 0 / 300 (case3's 300 = the
-   real absence of the owner table).
+8. There is no shortfall. case3's pool is fully consumed because the request
+   was 600 minutes, not because 300 minutes were booked as unpaid absence.
 
 The `insufficient='block'` variant (422 + rollback) is covered by the CI
 real-DB matrix and is not re-proven here.
@@ -454,7 +465,7 @@ Expected:
   `must_pay_minutes=0`, `period_start_date`/`period_end_date` equal the cycle
   period, `closed_at` non-null, and `snapshot.overtimeBankPolicy.pooledSources`
   contains `workday`;
-- case3: no rows (partial offset exhausted the pool);
+- case3: no rows (block offset of the full 600 exhausted the pool);
 - mustpay: exactly one row `source='statutory_holiday'`,
   `must_pay_minutes=480` (period facts), `convertible_minutes=0` — NOT the
   9999 poison;
@@ -569,8 +580,8 @@ Backfill text:
 > **回填（YYYY-MM-DD OT-bank v1-8 staging closeout）**：staging smoke
 > `OTBANK_V18_STAGING_SMOKE_PASS` on deploy `<sha>`（stamp `<stamp>`）：dormant
 > bank kept the legacy NULL-source grant; enabled bank granted per-source
-> workday lots; owner 三例（600/300/900 leave vs 600 pool）deducted
-> 600/300/600 with remaining 0/300/0、real-absence shortfall 0/0/300、满勤
+> workday lots; offset cases（600/300/600 leave vs 600 pool, `block`）deducted
+> 600/300/600 with remaining 0/300/0 and no unpaid-absence shortfall（#6009）、满勤
 > flag false×3（overtime-only control true）; statutory-holiday OT banked
 > nothing and settled as must-pay 480 from period facts（poison 9999 lot never
 > surfaced）; cycle close snapshotted convertible 0/300/0 with frozen period
@@ -586,8 +597,12 @@ Backfill text:
   floor regressed; do not pass.
 - Replay approve credits a second lot/event: grant idempotency regressed; do
   not pass.
-- case3 approve returns `422` instead of approving with a 300 shortfall: the
-  `partial_unpaid_absence` mode is not wired; do not pass.
+- `PUT` of `insufficient=partial_unpaid_absence` returns `200`, or a final
+  approve under a stored `partial_unpaid_absence` rule returns `200` and moves
+  the pool: the #6009 fail-closed gate regressed. Do not pass. That PUT must
+  be `422 LEAVE_OFFSET_PARTIAL_ABSENCE_NOT_ONLINE`, and approve under a legacy
+  stored rule must be the same 422 with the request still pending and the pool
+  untouched.
 - Full-attendance flag is true for a case user: 账3 reads net-after-offset
   instead of raw leave; do not pass.
 - A statutory settlement row shows 9999 or a convertible amount: must-pay is
