@@ -915,6 +915,7 @@ describe('TasksView detail — complete / reopen that would change nothing', () 
   })
 
   it('complete stays on in any mode and for a task with no assignees; off for the same viewer in all mode', async () => {
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
     const el = await mountAsViewer(taskDetail({ ...OPEN_ALL_OTHERS, completionMode: 'any' }), 'u1')
     expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
     expect(shown(el, 'tasks-detail-complete-reason')).toBeNull()
