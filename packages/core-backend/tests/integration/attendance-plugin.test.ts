@@ -12155,7 +12155,7 @@ attendanceIntegrationDescribe(
         expect(cappedUsers.reduce((sum, userId) => sum + (countByUser.get(userId) ?? 0), 0)).toBe(2)
         expect(countByUser.get(lowUserId) ?? 0).toBe(0)
       } finally {
-        await saveAutoShiftSettings(adminToken, originalSettings).catch(() => undefined)
+        await saveAutoShiftSettings(adminToken, { autoShiftMatching: originalSettings.autoShiftMatching }).catch(() => undefined)
         if (previousPreviewFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED
         else process.env.ATTENDANCE_AUTO_SHIFT_MATCHING_ENABLED = previousPreviewFlag
         if (previousAutoWriteFlag === undefined) delete process.env.ATTENDANCE_AUTO_SHIFT_AUTO_WRITE_ENABLED
