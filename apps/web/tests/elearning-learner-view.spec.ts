@@ -3295,11 +3295,44 @@ describe('ElearningLearnerView organization context', () => {
     expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-b')
     expect(reload).not.toHaveBeenCalled()
 
+    expect(root.querySelector('[data-testid="elearning-session-org-stale"]')).toBeNull()
+
     sessionOrgFake.switch.mockResolvedValueOnce(true)
     select.value = 'org-a'
     select.dispatchEvent(new Event('change'))
     await flushUi()
     expect(sessionOrgFake.switch).toHaveBeenLastCalledWith('org-a')
+    // Accepted switch: nothing is discarded automatically. The page is marked stale (inert)
+    // and only the banner's button reloads — exam answer drafts may still be on screen.
+    expect(reload).not.toHaveBeenCalled()
+    const banner = document.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+    expect(banner?.textContent).toContain('放弃未保存内容并重新加载')
+    expect(root.querySelector('.elearning-learner')?.hasAttribute('inert')).toBe(true)
+    ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('tells a single-organization member with a pre-membership token to sign in again', async () => {
+    sessionOrgFake.orgs = ['org-a']
+    const root = mountView()
+    await flushUntil(() => statusText(root).length > 0)
+    expect(statusText(root)).toBe('您的登录状态早于组织归属，请退出后重新登录。')
+    expect(root.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+  })
+
+  it('disables the organization selector while a learner action is in flight', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    h.capabilities.mockReset().mockResolvedValue(v01Capabilities())
+    h.list.mockReset().mockResolvedValue({ courses: [course()] })
+    h.startWatch.mockReset().mockReturnValue(new Promise(() => {}))
+    const root = mountView()
+    await flushUi()
+    const select = root.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+    expect(select.disabled).toBe(false)
+    ;(root.querySelector('[data-testid="elearning-start-watch"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(h.startWatch).toHaveBeenCalledTimes(1)
+    expect(select.disabled).toBe(true)
   })
 })

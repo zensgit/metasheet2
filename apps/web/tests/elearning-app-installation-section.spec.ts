@@ -214,7 +214,7 @@ describe('installation section organization context', () => {
     expect(root.querySelector('[role="alert"]')?.textContent).toBe('elearning_installation_request_failed')
   })
 
-  it('offers the session-org selector to a multi-organization member only, reloading after a switch', async () => {
+  it('offers the session-org selector to a multi-organization member only, reloading only from the stale banner', async () => {
     sessionOrgFake.orgs = ['org-a']
     sessionOrgFake.currentOrgId = 'org-a'
     mocks.get.mockResolvedValue({ status: 'active', notificationsEnabled: false, canManage: false })
@@ -233,6 +233,21 @@ describe('installation section organization context', () => {
     select.dispatchEvent(new Event('change'))
     await flush()
     expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+    expect(reload).not.toHaveBeenCalled()
+    const banner = root.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+    expect(banner).not.toBeNull()
+    expect(root.querySelector('.elearning-installation')?.hasAttribute('inert')).toBe(true)
+    ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
     expect(reload).toHaveBeenCalledTimes(1)
+  })
+
+  it('disables the organization selector while an installation request is pending', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    mocks.get.mockReturnValue(new Promise(() => {}))
+    await mount()
+    const select = root.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(select.disabled).toBe(true)
   })
 })

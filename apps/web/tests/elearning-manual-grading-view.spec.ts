@@ -20,7 +20,38 @@ vi.mock('../src/services/elearningManualGrading', async () => {
   }
 })
 
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
+
 import { ElearningApiError } from '../src/services/elearning'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import ElearningManualGradingView from '../src/views/ElearningManualGradingView.vue'
 
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
@@ -578,5 +609,75 @@ describe('ElearningManualGradingView + ElearningManualGradingAttempt', () => {
       expect(q('elearning-grading-error')?.textContent).toMatch(/temporarily unavailable/)
       expect(q('elearning-grading-complete')).toBeFalsy()
     })
+  })
+})
+
+describe('ElearningManualGradingView organization context', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+  const realReload = elearningSessionOrgPage.reload
+  const reload = vi.fn()
+
+  function mountView() {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ElearningManualGradingView)
+    app.mount(container)
+    return container
+  }
+
+  beforeEach(() => {
+    elearningSessionOrgPage.reload = reload
+    reload.mockReset()
+    h.listQueue.mockReset()
+    sessionOrgFake.load.mockReset()
+    sessionOrgFake.switch.mockReset()
+  })
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    elearningSessionOrgPage.reload = realReload
+    sessionOrgFake.orgs = []
+    sessionOrgFake.currentOrgId = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED instead of the grading-permission message', async () => {
+    useLocale().setLocale('zh-CN')
+    h.listQueue.mockRejectedValueOnce(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const root = mountView()
+    await flushUi()
+    const text = root.querySelector('[data-testid="elearning-grading-error"]')?.textContent?.trim()
+    expect(text).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(text).not.toContain('您无权评阅该答卷')
+  })
+
+  it('offers the selector to a multi-organization grader, disabled while loading, reloading only from the banner', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    let rejectQueue!: (reason: unknown) => void
+    h.listQueue.mockReturnValueOnce(new Promise((_, reject) => { rejectQueue = reject }))
+    const root = mountView()
+    await flushUi()
+    const select = root.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+    expect(select).not.toBeNull()
+    expect(select.disabled).toBe(true)
+    rejectQueue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    await flushUi()
+    expect(select.disabled).toBe(false)
+    expect(root.querySelector('[data-testid="elearning-grading-error"]')?.textContent).toContain('does not have exactly one active organization')
+
+    sessionOrgFake.switch.mockResolvedValueOnce(true)
+    select.value = 'org-b'
+    select.dispatchEvent(new Event('change'))
+    await flushUi()
+    expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+    expect(reload).not.toHaveBeenCalled()
+    expect(root.querySelector('.grading-view')?.hasAttribute('inert')).toBe(true)
+    ;(root.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
+    expect(reload).toHaveBeenCalledTimes(1)
   })
 })

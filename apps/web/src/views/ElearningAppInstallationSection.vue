@@ -1,5 +1,16 @@
 <template>
-  <section class="elearning-installation" aria-label="Cloud classroom installation" :aria-busy="pending">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="elearning-installation"
+    aria-label="Cloud classroom installation"
+    :aria-busy="pending"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <h2>Cloud classroom installation</h2>
     <p>Installation starts disabled. Deployment flags remain the upper bound; storage is managed separately.</p>
     <SessionOrgSwitcher
@@ -14,7 +25,7 @@
       :has-usable-claim="Boolean(sessionOrgCurrentId)"
       @change="changeSessionOrg"
     />
-    <p v-if="error" role="alert">{{ error }}</p>
+    <p v-if="error" role="alert">{{ explainOrgContext(error) }}</p>
     <p v-if="pending" role="status">Working...</p>
     <template v-if="installation">
       <p role="status">{{ installation.status }}</p>
@@ -49,6 +60,7 @@ import { getAuthPrincipalKey, onAuthPrincipalChange, readStoredToken } from '../
 import { useLocale } from '../composables/useLocale'
 import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
 import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import {
   getElearningAppInstallation, installElearningApp, updateElearningAppInstallation,
   type ElearningAppInstallation,
@@ -71,7 +83,10 @@ const {
   loading: sessionOrgLoading,
   switching: sessionOrgSwitching,
   errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
   changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
 } = useElearningSessionOrg()
 
 function sessionOrgText(en: string, zh: string): string {

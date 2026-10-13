@@ -794,6 +794,17 @@ describe('ElearningAdminView', () => {
     expect(new Set(publishedIds).size).toBe(4)
   })
 
+  it('explains ORG_CONTEXT_REQUIRED inside the assessment resource section', async () => {
+    h.listBanks.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listBanks).toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+  })
+
   it('lazily opens the assessment resource section and creates a bank', async () => {
     const root = mountView()
     await flushUi()
@@ -1323,7 +1334,26 @@ describe('ElearningAdminView organization context', () => {
     expect(container.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
   })
 
-  it('lets a multi-organization admin switch organization from the admin page and reloads after it', async () => {
+  it('disables the organization selector while the admin page is busy', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    try {
+      h.capabilities.mockReset().mockReturnValue(new Promise(() => {}))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(ElearningAdminView)
+      app.mount(container)
+      await flushUi()
+      const select = container.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(select.disabled).toBe(true)
+    } finally {
+      sessionOrgFake.orgs = []
+      sessionOrgFake.currentOrgId = null
+    }
+  })
+
+  it('lets a multi-organization admin switch organization and reloads only from the stale banner', async () => {
     const realReload = elearningSessionOrgPage.reload
     const reload = vi.fn()
     elearningSessionOrgPage.reload = reload
@@ -1345,6 +1375,12 @@ describe('ElearningAdminView organization context', () => {
       select.dispatchEvent(new Event('change'))
       await flushUi()
       expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+      // The admin form may hold unsaved input: no reload until the banner's button.
+      expect(reload).not.toHaveBeenCalled()
+      const banner = document.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+      expect(banner?.textContent).toContain('放弃未保存内容并重新加载')
+      expect(container.querySelector('.elearning-admin')?.hasAttribute('inert')).toBe(true)
+      ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
       expect(reload).toHaveBeenCalledTimes(1)
     } finally {
       elearningSessionOrgPage.reload = realReload

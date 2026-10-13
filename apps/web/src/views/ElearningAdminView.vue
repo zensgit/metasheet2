@@ -1,5 +1,15 @@
 <template>
-  <section class="elearning-admin" aria-labelledby="elearning-admin-title">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="elearning-admin"
+    aria-labelledby="elearning-admin-title"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <header class="elearning-admin__header">
       <h1 id="elearning-admin-title">{{ elearningLabel('admin.title', isZh) }}</h1>
       <p>{{ elearningLabel('admin.subtitle', isZh) }}</p>
@@ -246,7 +256,7 @@
       role="status"
       aria-live="polite"
     >
-      {{ status }}
+      {{ explainOrgContext(status) }}
     </p>
 
     <ElearningContentAdminSection
@@ -284,6 +294,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
 import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import { randomUuid } from '../utils/uuid'
 import {
   assignElearningDirect,
@@ -325,7 +336,10 @@ const {
   loading: sessionOrgLoading,
   switching: sessionOrgSwitching,
   errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
   changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
 } = useElearningSessionOrg()
 
 function sessionOrgText(en: string, zh: string): string {
