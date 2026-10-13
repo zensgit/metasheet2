@@ -843,6 +843,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../utils/clipboard'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useAuth } from '../composables/useAuth'
 import { apiFetch } from '../utils/api'
@@ -2712,11 +2713,10 @@ async function resendInvite(record: InviteLedgerRecord): Promise<void> {
 
 async function copyInviteMessage(): Promise<void> {
   if (!createdInviteMessage.value) return
-  try {
-    await navigator.clipboard.writeText(createdInviteMessage.value)
+  if (await copyText(createdInviteMessage.value)) {
     setStatus('邀请文案已复制')
-  } catch (error) {
-    setStatus(error instanceof Error ? error.message : '复制邀请文案失败', 'error')
+  } else {
+    setStatus('复制邀请文案失败', 'error')
   }
 }
 

@@ -135,6 +135,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type { AutomationExecution, AutomationStats, AutomationStepResult } from '../types'
@@ -214,11 +215,11 @@ function setSupportPacketStatus(executionId: string, message: string) {
 
 async function copySupportPacket(log: AutomationExecution) {
   try {
-    const clipboard = navigator?.clipboard
-    if (!clipboard?.writeText) {
+    // copyText never rejects and already falls back to execCommand('copy') on plain-HTTP deployments;
+    // `false` means no copy mechanism worked at all.
+    if (!(await copyText(renderAutomationLogSupportPacketMarkdown(log)))) {
       throw new Error(automationLabel('support.clipboardUnavailable', isZh.value))
     }
-    await clipboard.writeText(renderAutomationLogSupportPacketMarkdown(log))
     setSupportPacketStatus(log.id, automationLabel('support.copied', isZh.value))
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)

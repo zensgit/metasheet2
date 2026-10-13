@@ -771,6 +771,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, shallowRef, reactive, computed, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { RouterLink, useRouter, isNavigationFailure, NavigationFailureType } from 'vue-router'
 import { AppRouteNames } from '../../router/types'
@@ -3414,18 +3415,13 @@ async function onDrawerPatch(fieldId: string, value: unknown) {
 // EMITS; this is the one clipboard write. `window.location.href` already carries `#recordId=<id>`
 // while the panel is open (the PR-A hash watcher), so the copied URL reopens this record. Status goes
 // through MetaToast's existing `aria-live="polite"` / `role="status"` region via the reserved
-// `record.copyLinkDone` / `record.copyLinkFailed` keys; a missing Clipboard API (the inspector also
-// disables its button in that case) or a rejected write both land on the failed copy — never a throw.
+// `record.copyLinkDone` / `record.copyLinkFailed` keys. `copyText` falls back to execCommand('copy')
+// when the Clipboard API is missing (plain-HTTP intranet) or refuses, and never throws; only when no
+// copy mechanism worked at all does this land on the failed copy.
 async function onCopyRecordLink() {
-  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : undefined
-  if (!clipboard || typeof clipboard.writeText !== 'function') {
-    showError(recordLabel('record.copyLinkFailed', isZh.value))
-    return
-  }
-  try {
-    await clipboard.writeText(window.location.href)
+  if (await copyText(window.location.href)) {
     showSuccess(recordLabel('record.copyLinkDone', isZh.value))
-  } catch {
+  } else {
     showError(recordLabel('record.copyLinkFailed', isZh.value))
   }
 }

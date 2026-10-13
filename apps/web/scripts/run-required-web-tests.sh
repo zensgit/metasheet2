@@ -2006,4 +2006,5 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
+  clipboard-no-bare-navigator-clipboard \
   --reporter=dot
