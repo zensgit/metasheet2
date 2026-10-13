@@ -206,6 +206,8 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
   const userF = randomUUID() // (f) FRESH — never punches; proves the 404 isn't a business-logic rejection
 
   const allUserIds = [adminUser, userA, userB, userC, userD, userP2, userE, userLB, userST, userF]
+  const defaultRuleIds = [randomUUID(), randomUUID()]
+  const seededLegacyDefaultRuleIds: string[] = []
 
   // (LB) / (ST): a BEFORE INSERT trigger on the shadow table, scoped to ONE user_id via a WHEN
   // clause, that sleeps before letting the row through — a REAL Postgres-side delay, not a JS
@@ -322,6 +324,27 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
 
+    for (const [index, orgId] of [orgX, orgY].entries()) {
+      await pool.query(
+        `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+         VALUES ($1, $2, 'org resolution timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true)`,
+        [defaultRuleIds[index], orgId],
+      )
+    }
+    const legacyDefault = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, 'default', 'org resolution legacy timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = 'default' AND is_default = true)
+       RETURNING id`,
+      [randomUUID()],
+    )
+    seededLegacyDefaultRuleIds.push(...legacyDefault.rows.map(row => row.id))
+    const legacyDefaults = await pool.query<{ timezone: string }>(
+      "SELECT timezone FROM attendance_rules WHERE org_id = 'default' AND is_default = true",
+    )
+    expect(legacyDefaults.rows).toEqual([{ timezone: 'UTC' }])
     for (const userId of allUserIds) {
       await pool.query(
         `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin, created_at, updated_at)
@@ -361,6 +384,7 @@ describeDb('POST /api/attendance/punch — org resolution shadow audit', () => {
     await pool?.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
     await pool?.query(`DELETE FROM user_roles WHERE user_id = $1`, [adminUser]).catch(() => undefined)
     await pool?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [...defaultRuleIds, ...seededLegacyDefaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorRbacBypass === undefined) delete process.env.RBAC_BYPASS

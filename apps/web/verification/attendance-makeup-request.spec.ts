@@ -2,12 +2,18 @@ import { expect, test, type Page } from '@playwright/test'
 
 const cardSelector = '[data-attendance-makeup-request-card]'
 const proof = 'https://example.com/synthetic-proof.png'
+const targetFingerprint = 'a'.repeat(64)
 
 async function mockAttendance(page: Page, withLeave = false, clock: { serverAt?: string; browserAt?: string; timezone?: string; unavailable?: boolean } = {}) {
   const posts: Record<string, unknown>[] = []
   const unexpected: string[] = []
   const rulesRequests: string[] = []
   const serverAt = clock.serverAt ?? '2026-04-15T02:00:00.000Z'
+  const timezone = clock.timezone ?? 'Asia/Shanghai'
+  const localDateParts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date(serverAt)).map(part => [part.type, part.value]))
+  const currentLocalDate = [localDateParts.year, localDateParts.month, localDateParts.day].join('-')
   await page.clock.setFixedTime(new Date(clock.browserAt ?? '2026-04-15T10:00:00+08:00'))
   await page.addInitScript(() => {
     localStorage.setItem('auth_token', 'synthetic-browser-test-token')
@@ -66,8 +72,31 @@ async function mockAttendance(page: Page, withLeave = false, clock: { serverAt?:
         userId: 'synthetic-employee', orgId: 'synthetic-org',
         resolvedForDate: new URL(request.url()).searchParams.get('asOf') ?? serverAt.slice(0, 10),
         resolvedAt: clock.unavailable ? undefined : serverAt,
+        attendanceTimeContext: {
+          resolvedForInstant: serverAt, effectiveTimezone: timezone, timezoneSource: 'system_default',
+          mode: 'default_only', policyVersion: 0, referenceId: 'synthetic-default-rule', version: 1,
+          currentLocalDate, nextEffectiveBoundary: null,
+        },
         assignment: { attendanceGroups: [], scheduleGroups: [] },
         runtimeRule: { timezone: clock.timezone ?? 'Asia/Shanghai', ...(withLeave ? { workStartTime: '09:00', workEndTime: '18:00' } : {}) }, punchPolicy: { merge: {} }, warnings: [],
+      } })
+    }
+    if (path === '/api/attendance/timezone-context/me') {
+      const workDate = new URL(request.url()).searchParams.get('workDate')
+      if (!workDate || !/^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+        unexpected.push(`${request.method()} ${path}`)
+        return route.abort()
+      }
+      return reply({ ok: true, data: {
+        orgId: 'synthetic-org', userId: 'synthetic-employee', workDate, timezone,
+        contextFingerprint: targetFingerprint, frozen: false, referenceId: 'synthetic-default-rule',
+        provenance: {
+          timezone, source: 'system_default', mode: 'default_only',
+          referenceId: 'synthetic-default-rule', version: 1, policyVersion: 0, calculationGroupMembership: null,
+        },
+        // Both fixture zones use UTC+08; the target window is the same 09:00–18:00 shift.
+        window: { startAt: workDate + 'T01:00:00.000Z', endAt: workDate + 'T10:00:00.000Z' },
+        rule: { workStartTime: '09:00', workEndTime: '18:00' }, isWorkingDay: true,
       } })
     }
     if (path === '/api/attendance/effective-calendar') {
@@ -118,7 +147,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await leave.screenshot({ path: testInfo.outputPath(`leave-${viewport.width}.png`) })
     await leave.locator('[data-leave-card-submit]').click()
     await expect(leave).toHaveCount(0)
-    expect(posts).toEqual([{ workDate: '2026-04-15', requestType: 'leave', requestedInAt: '2026-04-15T09:00', requestedOutAt: '2026-04-15T16:30', leaveTypeId: 'annual', minutes: 450, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' }])
+    expect(posts).toEqual([{ workDate: '2026-04-15', requestType: 'leave', requestedInAt: '2026-04-15T01:00:00.000Z', requestedOutAt: '2026-04-15T08:30:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, leaveTypeId: 'annual', minutes: 450, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' }])
     await page.locator('[data-selfservice-action="missing-punch"]').click()
     await expect(page.locator(cardSelector)).toBeVisible()
     await expect(leave).toHaveCount(0)
@@ -126,7 +155,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await page.locator('[data-makeup-card-time]').fill('2026-04-15T09:30')
     await page.locator('[data-makeup-card-submit]').click()
     await expect(page.locator(cardSelector)).toHaveCount(0)
-    expect(posts[1]).toEqual({ workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:30', reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' })
+    expect(posts[1]).toEqual({ workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:30:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic leave', attachmentUrl: proof, orgId: 'synthetic-org' })
     await page.locator('[data-selfservice-action="leave"]').click()
     await expect(leave).toBeVisible()
     await expect(page.locator(cardSelector)).toHaveCount(0)
@@ -158,7 +187,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await card.locator('[data-makeup-card-submit]').click()
     await expect(card).toHaveCount(0)
     expect(posts).toEqual([
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', attachmentUrl: proof, orgId: 'synthetic-org' },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, attachmentUrl: proof, orgId: 'synthetic-org' },
     ])
     expect(unexpected).toEqual([])
   })
@@ -207,8 +236,8 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(card).toHaveCount(0)
     await expect(page.locator('body')).toContainText('申请已提交。')
     expect(posts).toEqual([
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', reason: 'Synthetic proof', orgId: 'synthetic-org' },
-      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T09:00', reason: 'Synthetic proof', orgId: 'synthetic-org', attachmentUrl: proof },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic proof', orgId: 'synthetic-org' },
+      { workDate: '2026-04-15', requestType: 'missed_check_in', requestedInAt: '2026-04-15T01:00:00.000Z', expectedTimezoneContextFingerprint: targetFingerprint, reason: 'Synthetic proof', orgId: 'synthetic-org', attachmentUrl: proof },
     ])
     await expect(tools).toHaveJSProperty('open', false)
     await page.locator('[data-selfservice-action="missing-punch"]').click()
@@ -251,7 +280,7 @@ for (const scenario of [
       await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('服务器日期不可用')
     } else {
       await expect(time).toHaveText(scenario.expectedTime!)
-      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText(`考勤时区：${scenario.timezone}`)
+      await expect(page.locator('[data-attendance-hero-timezone]')).toHaveText(`考勤时区：${scenario.timezone} · 系统默认`)
       await expect(page.locator('[data-attendance-overview-greeting]')).toContainText('2026-04-15')
       expect(fixture.rulesRequests).toEqual(scenario.timezone === 'Asia/Singapore' ? ['', '?asOf=2026-04-15'] : [''])
     }

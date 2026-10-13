@@ -144,6 +144,27 @@ describe('locale date input native constraints', () => {
     return { container, state, changes, inputs, dispose: () => { app.unmount(); container.remove() } }
   }
 
+
+  it('closes the calendar when focus leaves but keeps internal calendar navigation usable', async () => {
+    const mounted = await mountDate()
+    const nextField = document.createElement('input')
+    document.body.appendChild(nextField)
+    try {
+      const input = mounted.container.querySelector('input')!
+      input.focus()
+      await flush()
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).not.toBeNull()
+      mounted.container.querySelector<HTMLButtonElement>('[aria-label="Next month"]')!.focus()
+      await flush()
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).not.toBeNull()
+      nextField.focus()
+      await flush()
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).toBeNull()
+      expect(mounted.changes).toEqual([])
+      expect(mounted.inputs).toEqual([])
+    } finally { nextField.remove(); mounted.dispose() }
+  })
+
   it.each(['disabled', 'readonly'])('blocks text, focus and calendar actions when %s', async (constraint) => {
     const mounted = await mountDate({ [constraint]: true })
     try {

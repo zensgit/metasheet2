@@ -1,3 +1,4 @@
+import { captureAttendanceRecordTimezoneFixture } from '../utils/attendance-record-timezone-fixture'
 import { describe, it, expect, beforeAll, afterEach, afterAll } from 'vitest'
 import { createRequire } from 'module'
 import {
@@ -98,20 +99,35 @@ const codeOf = (r: HttpResponse) => (r.body as { error?: { code?: string } } | u
 const requestIdOf = (r: HttpResponse) => (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id ?? ''
 
 describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', () => {
+  const recordTimezoneFixture = captureAttendanceRecordTimezoneFixture()
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
   let adminToken = ''
   let adminUserId = ''
   let originalMakeup: MakeupPolicy | undefined
+  const mintedUserIds: string[] = []
+  let ownedDefaultRuleId: string | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
   async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
-    // Lock-11 §10 W-4 fixture delta: every dev-token subject minted here may go on to create an
-    // attendance request with no org selector (arm a, falls back to getOrgId's 'default') — seed
-    // exactly one active 'default' membership so arm (a) resolves instead of 422ing.
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(ORG)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+    // Request scope and settings manage both require this users row. Token roles are not the grant.
+    const codes = perms.split(',').map((code) => code.trim()).filter(Boolean)
+    mintedUserIds.push(userId)
+    await pool.query(
+      `INSERT INTO users (id, email, username, name, password_hash, role, permissions, is_active, is_admin)
+       VALUES ($1, $2, $1, 'makeup fixture', 'disabled', 'user', '[]'::jsonb, true, false)
+       ON CONFLICT (id) DO UPDATE SET is_active = true`,
+      [userId, `${userId}@makeup-fixture.test`],
+    )
+    await pool.query(
+      `INSERT INTO user_permissions (user_id, permission_code)
+       SELECT $1, unnest($2::text[])
+       ON CONFLICT DO NOTHING`,
+      [userId, codes],
+    )
     await pool.query(
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, 'default', TRUE)
        ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
@@ -119,8 +135,11 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
     )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
-  const putSettings = (body: Record<string, unknown>) =>
-    requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+  const putSettings = async (body: Record<string, unknown>, requireSuccess = true) => {
+    const response = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: authHeaders(adminToken), body: JSON.stringify(body) })
+    if (requireSuccess) expect(response.status).toBe(200)
+    return response
+  }
   const getSettings = () => requestJson(`${baseUrl}/api/attendance/settings`, { headers: authHeaders(adminToken) })
   const createReq = (token: string, body: Record<string, unknown>) =>
     requestJson(`${baseUrl}/api/attendance/requests`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
@@ -183,7 +202,7 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
   }
 
   async function seedRecord(userId: string, workDate: string, opts: SeedRecord = {}) {
-    await pool.query(
+    await recordTimezoneFixture.seed(pool, { orgId: ORG, userId, workDate, timezone: 'UTC' }, client => client.query(
       `INSERT INTO attendance_records
        (id, user_id, org_id, work_date, timezone, first_in_at, last_out_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, meta, source_batch_id, created_at, updated_at)
        VALUES ($1, $2, $3, $4, 'UTC', $5, $6, 0, $7, $8, $9, true, $10::jsonb, NULL, now(), now())`,
@@ -199,7 +218,7 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
         opts.status ?? 'partial',
         JSON.stringify(opts.meta ?? {}),
       ],
-    )
+    ))
   }
   // A 'partial' record missing the check-IN side → fact missing_check_in (the typical 补卡 case).
   const seedMissingCheckIn = (userId: string, workDate: string) =>
@@ -298,6 +317,16 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
     adminUserId = uid('admin')
     adminToken = await mintToken(adminUserId, 'attendance:read,attendance:write,attendance:admin,attendance:approve')
+    const ruleId = randomUUID()
+    const insertedDefault = await pool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, $3, 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [ruleId, ORG, `makeup-fixture-default-${ruleId}`],
+    )
+    ownedDefaultRuleId = insertedDefault.rows[0]?.id as string | undefined
     const before = await getSettings()
     originalMakeup = (before.body as { data?: { makeupPunchPolicy?: MakeupPolicy } } | undefined)?.data?.makeupPunchPolicy
   })
@@ -313,8 +342,24 @@ describeDb('补卡规则 MP-2/MP-3 makeup punch policy (real DB, route-level)', 
   })
 
   afterAll(async () => {
-    if (adminToken && originalMakeup) await putSettings({ makeupPunchPolicy: originalMakeup }).catch(() => undefined)
-    else if (adminToken) await setMakeup({ enabled: false }).catch(() => undefined)
+    recordTimezoneFixture.restore()
+    if (adminToken && originalMakeup) await putSettings({ makeupPunchPolicy: originalMakeup }, false).catch(() => undefined)
+    else if (adminToken) await putSettings({ makeupPunchPolicy: { ...makeupBase(), enabled: false } }, false).catch(() => undefined)
+    if (ownedDefaultRuleId && pool) {
+      await pool.query(
+        `DELETE FROM attendance_rules r WHERE r.id = ANY($1::uuid[])
+          AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id = r.org_id AND a.is_active = true)
+          AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id = r.org_id AND a.is_active = true)
+          AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id = r.org_id)
+          AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id = r.org_id)`,
+        [[ownedDefaultRuleId]],
+      ).catch(() => undefined)
+    }
+    if (pool && mintedUserIds.length > 0) {
+      await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [mintedUserIds]).catch(() => undefined)
+      await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2', [mintedUserIds, ORG]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [mintedUserIds]).catch(() => undefined)
+    }
     if (server && (server as unknown as { stop?: () => Promise<void> }).stop) await (server as unknown as { stop: () => Promise<void> }).stop()
     await pool?.end().catch(() => undefined)
   })

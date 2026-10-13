@@ -1617,7 +1617,10 @@ exec npx vitest run \
   attendanceAdminEndpointCompatibility \
   attendanceAdminGuide.spec.ts \
   attendanceAudienceChipField.spec.ts \
+  attendanceBusinessTripRequestCard \
   attendanceCapabilityUnavailable \
+  attendanceCurrentTimeContext \
+  attendanceDayTimeContext \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
   attendanceEmployeeQuickActionIcons \
@@ -1629,9 +1632,13 @@ exec npx vitest run \
   attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
+  attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \
+  attendanceTimezonePolicyPanel \
+  attendanceTimezoneTarget \
   attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
+  attendanceWallTime \
   automation-action-summary \
   automation-condition-legacy-person-picker \
   automation-condition-typing-editor \
@@ -1999,6 +2006,7 @@ exec npx vitest run \
   useAttendanceAdminConfig \
   useAttendanceAdminProvisioning \
   useAttendanceAdminUsers \
+  useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
   userManagementView \

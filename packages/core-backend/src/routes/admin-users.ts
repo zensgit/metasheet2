@@ -14,6 +14,7 @@ import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
+import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
@@ -4117,6 +4118,13 @@ export function adminUsersRouter(): Router {
       // (not a second/competing one — every write below moved from `query()` to `client.query()`
       // inside this one call).
       await transaction(async (client) => {
+        if (attendanceOrgId && attendanceOnboarding && (cleanAttendanceGroupId || cleanDefaultShiftId)) {
+          // Only a new subject is admitted here. Serialize its source writes
+          // before shift/user/role locks; no existing subject is reassigned.
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+            buildAttendanceTimezoneRuntimeOrgLockKeyV1(attendanceOrgId),
+          ])
+        }
         if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
           // W3 safety erratum: this core route is a reference producer outside the
           // attendance plugin. Lock the same parent row that canonical shift delete

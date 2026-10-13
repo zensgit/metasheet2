@@ -43,6 +43,10 @@
 const TABLE_BUCKETS = Object.freeze({
   // ACP-1B OD-ATC-11R(a): immutable canonical identity authority, never operational data.
   attendance_report_projection_anchors: 'w4_canonical',
+  // Multi-timezone immutable source/freeze authority, with exact reviewed writers below.
+  attendance_timezone_context_companions: 'w4_canonical',
+  attendance_business_trip_requests: 'w4_canonical',
+  attendance_business_trip_arrangements: 'w4_canonical',
   // --- business: calculation source/effect/result -----------------------------------------
   attendance_events: 'business',
   attendance_records: 'business',
@@ -113,6 +117,11 @@ const TABLE_BUCKETS = Object.freeze({
   attendance_leave_types: 'reference',
   attendance_calculation_group_memberships: 'reference',
   attendance_calculation_group_membership_operations: 'reference',
+  // Governed timezone settings are rule inputs, not frozen calculation/result truth.
+  attendance_timezone_policies: 'reference',
+  attendance_employee_timezone_overrides: 'reference',
+  // Append-only configuration audit cannot mint attendance evidence or claim an operation.
+  attendance_timezone_policy_audit: 'operational',
 
   // --- w4_canonical: Stage A durable-storage tables, canonical-boundary-only ---------------
   attendance_record_calculations: 'w4_canonical',
@@ -342,6 +351,14 @@ function classifyTable(tableName) {
 
 // ACP grants only these reviewed writes, not a new canonical path prefix.
 const W4_EXACT_CANONICAL_SITES = Object.freeze([
+  Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs',
+    enclosingSymbol: 'bindFirst', table: 'attendance_timezone_context_companions', verb: 'insert', count: 1 }),
+  Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+    enclosingSymbol: 'execute', table: 'attendance_business_trip_requests', verb: 'insert', count: 1 }),
+  Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    enclosingSymbol: 'publish', table: 'attendance_business_trip_arrangements', verb: 'insert', count: 1 }),
+  Object.freeze({ relPath: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    enclosingSymbol: 'cancel', table: 'attendance_business_trip_arrangements', verb: 'update', count: 1 }),
   Object.freeze({ relPath: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',
     enclosingSymbol: 'refreshAttendanceReportProjectionAnchor', table: 'attendance_report_projection_anchors', verb: 'insert', count: 1 }),
   Object.freeze({ relPath: 'packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts',

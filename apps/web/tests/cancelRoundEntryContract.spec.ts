@@ -35,10 +35,12 @@ import {
   CANCEL_ROUND_STATUS_KEYS,
   CANCEL_ROUND_WORKFLOW_KEY,
   cancelRoundStatusKeyFromSummary,
+  describeCancelRoundError,
   normalizeCancelRoundDeliveries,
   normalizeCancelRoundSummary,
   normalizePendingCancelRoundList,
 } from '../src/approvals/cancelRound'
+import { resolveStatusDisplay } from '../src/utils/statusDomains'
 import { ATTENDANCE_OVERVIEW_REQUESTS_SECTION_ID } from '../src/views/attendance/attendanceOverviewRequestReveal'
 
 const REPO = join(__dirname, '../../..')
@@ -122,6 +124,14 @@ describe('summary read (P-4 + owner 14:3x 「Summary exposes entryEnabled」)', 
     expect(interfaceFields(PORT, 'CancelRoundSummaryV1')).toEqual(['documentInstanceId', 'round'])
   })
 
+  it('renders a cancelled trip separately from leave and keeps unknown outcomes unavailable', () => {
+    expect(cancelRoundStatusKeyFromSummary({ status: 'business_trip_cancelled', outcome: 'applied' })).toBe('business_trip_cancelled')
+    expect(resolveStatusDisplay('cancelRound', 'business_trip_cancelled', false)).toEqual({ tone: 'success', label: 'Business trip cancelled' })
+    expect(resolveStatusDisplay('cancelRound', 'business_trip_cancelled', true)).toEqual({ tone: 'success', label: '出差已取消' })
+    expect(cancelRoundStatusKeyFromSummary({ status: 'leave_cancelled', outcome: 'applied' })).toBe('leave_cancelled')
+    expect(cancelRoundStatusKeyFromSummary({ status: 'unknown', outcome: 'unknown' })).toBe('status_unavailable')
+  })
+
   it('status and outcome vocabularies match', () => {
     expect(unionMembers(PORT, 'CancelRoundSummaryStatusV1')).toEqual([...CANCEL_ROUND_STATUS_KEYS].sort())
     // every outcome the server can report maps to a V-word on the client, even without a status token
@@ -145,6 +155,17 @@ describe('P-5 deliveries (「Full status, no raw ids/errors」)', () => {
 })
 
 describe('error codes (P-8)', () => {
+  it('explains the required cancellation round without claiming a retry or leave reversal', () => {
+    expect(describeCancelRoundError({ code: 'CANCEL_ROUND_REQUIRED' }, false, 'fallback')).toEqual({
+      message: 'An approved business trip must be cancelled through a cancellation request',
+      cls: 'other', code: 'CANCEL_ROUND_REQUIRED', presentationKey: null,
+    })
+    expect(describeCancelRoundError({ code: 'CANCEL_ROUND_REQUIRED' }, true, 'fallback').message).toBe('已通过的出差需通过撤销申请取消')
+    expect(describeCancelRoundError({ code: 'CANCEL_ROUND_UNKNOWN' }, false, 'fallback')).toEqual({
+      message: 'fallback', cls: 'other', code: 'CANCEL_ROUND_UNKNOWN', presentationKey: null,
+    })
+  })
+
   it('every CANCEL_ROUND_* code the server source can produce has client copy', () => {
     const files: string[] = []
     const walk = (dir: string) => {

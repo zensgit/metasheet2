@@ -211,10 +211,25 @@
             :leave-types="leaveTypes"
             :can-quick-fill="canQuickFillLeave"
             :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
+            :resolve-times="requestTimezone.times"
             @cancel="closeDedicatedLeaveRequestCard"
             @submit="submitDedicatedLeaveRequestCard"
             @quick-fill="applyLeaveQuickFill"
-          />
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeLeaveRequestCard>
           <AttendanceEmployeeMakeupRequestCard
             v-if="makeupRequestCardOpen"
             :tr="tr"
@@ -222,18 +237,46 @@
             :anomalies="eligibleMakeupAnomalies"
             :today-work-date="todayWorkDateKey"
             :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
             @cancel="closeDedicatedMakeupRequestCard"
             @submit="submitDedicatedMakeupRequestCard"
-          />
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeMakeupRequestCard>
           <AttendanceEmployeeOvertimeRequestCard
             v-if="overtimeRequestCardOpen"
             :tr="tr"
             :request-form="requestForm"
             :overtime-rules="overtimeRules"
             :submitting="requestSubmitting"
+            :can-submit="requestTimezone.ready.value"
             @cancel="closeDedicatedOvertimeRequestCard"
             @submit="submitDedicatedOvertimeRequestCard"
-          />
+          >
+            <template #timezone>
+              <AttendanceRequestTimezoneFields
+                :tr="tr"
+                :target="requestTimezone.target.value"
+                :loading="requestTimezone.loading.value"
+                :failed="requestTimezone.failed.value"
+                :selected="requestTimezone.selected"
+                :resolved="requestTimezone.resolved.value"
+                @refresh="requestTimezone.refresh"
+                @select="(key, value) => { requestTimezone.selected[key] = value }"
+              />
+            </template>
+          </AttendanceEmployeeOvertimeRequestCard>
           <AttendanceEmployeeShiftSwapRequestCard
             v-if="shiftSwapRequestCardOpen"
             :tr="tr"
@@ -678,6 +721,7 @@
           v-if="showOverview"
           class="attendance__card"
           :can-decide="cancelRoundApproverVisible"
+          :org-id="normalizedOrgId()"
           :focus-request-id="focusedAttendanceRequestId"
           :format-date-time="formatDateTime"
           :format-request-type="formatRequestType"
@@ -708,7 +752,18 @@
             context-id="self-request-center"
             @evidence-link-click="handleAttendanceContextHelpEvidenceLink"
           />
+          <AttendanceBusinessTripRequestCard :tr="tr" :refresh-requests="loadRequests" />
           <div class="attendance__request-form">
+          <AttendanceRequestTimezoneFields v-if="!isShiftSwapRequest"
+            :tr="tr"
+            :target="requestTimezone.target.value"
+            :loading="requestTimezone.loading.value"
+            :failed="requestTimezone.failed.value"
+            :selected="requestTimezone.selected"
+            :resolved="requestTimezone.resolved.value"
+            @refresh="requestTimezone.refresh"
+            @select="(key, value) => { requestTimezone.selected[key] = value }"
+          />
             <label class="attendance__field" for="attendance-request-work-date">
               <span>{{ tr('Work date', '工作日期') }}</span>
               <AttendanceLocaleDateInput
@@ -845,7 +900,7 @@
                 :step="recordRequestPrefill ? 0.001 : 60"
               />
               <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
-                {{ recordRequestPrefill.inTimeZone }}
+                {{ requestTimezone.target.value?.timezone }}
               </small>
             </label>
             <label v-if="!isShiftSwapRequest" class="attendance__field" for="attendance-request-out">
@@ -858,11 +913,11 @@
                 :step="recordRequestPrefill ? 0.001 : 60"
               />
               <small v-if="recordRequestPrefill" class="attendance__field-hint" data-record-request-timezone>
-                {{ recordRequestPrefill.outTimeZone }}
+                {{ requestTimezone.target.value?.timezone }}
               </small>
             </label>
             <p v-if="recordRequestPrefill" class="attendance__field-hint attendance__field--full" data-record-request-time-policy>
-              {{ tr('Historical timezones are shown above. Unchanged times keep the original instant. Edited repeated times use the earlier occurrence.', '上方显示历史时区。未修改的时间保留原始时刻；修改后遇到重复时间时使用较早的一次。') }}
+              {{ tr('Times use the frozen target shift timezone. Unchanged times retain the original instant; edited repeated times require an offset choice.', '时间按冻结的目标班次时区显示。未修改的时间保留原始时刻；修改后的重复时间需要选择偏移。') }}
             </p>
             <label v-if="isLeaveOrOvertimeRequest" class="attendance__field" for="attendance-request-minutes">
               <span>{{ tr('Duration (min)', '时长（分钟）') }}</span>
@@ -901,7 +956,7 @@
                 :placeholder="tr('Optional', '可选')"
               />
             </label>
-            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting" @click="submitRequest">
+            <button class="attendance__btn attendance__btn--primary" :disabled="requestSubmitting || (!isShiftSwapRequest && !requestTimezone.ready.value)" @click="submitRequest">
               {{ requestSubmitting ? tr('Submitting...', '提交中...') : tr('Submit request', '提交申请') }}
             </button>
           </div>
@@ -956,8 +1011,9 @@
                 </div>
                 <!-- 请假撤销入口(撤销锁 P-1):only on LEAVE rows of this list — never the shift-swap list below. -->
                 <AttendanceCancelRoundPanel
-                  v-if="item.request_type === 'leave'"
+                  v-if="item.request_type === 'leave' || item.request_type === 'business_trip'"
                   :request="item"
+                  :org-id="orgId"
                   :current-user-id="currentUserId"
                   :format-date-time="formatDateTime"
                 />
@@ -2603,6 +2659,9 @@
             >
               <h4>{{ tr('Settings', '设置') }}</h4>
               <div class="attendance__form-stack">
+              <section class="attendance__form-card">
+                <AttendanceTimezonePolicyPanel :tr="tr" />
+              </section>
               <section class="attendance__form-card">
                 <h5>{{ tr('Auto absence', '自动缺勤') }}</h5>
                 <div class="attendance__admin-grid attendance__admin-grid--thirds">
@@ -10234,7 +10293,6 @@ import { randomUuid } from '../utils/uuid'
 import {
   ATTENDANCE_RECORD_REQUEST_PREFILL_KEY,
   formatRecordRequestTime,
-  resolveRecordRequestTime,
   readAttendanceRecordRequestPrefill,
   type AttendanceRecordRequestPrefill,
 } from './attendance/attendanceRecordRequestPrefill'
@@ -10269,6 +10327,10 @@ import AttendanceSetupTemplatePrefillDialog from './attendance/AttendanceSetupTe
 // A1 「提示与实际状态」: honest status for options that are stored but not enforced / org switches that also need
 // an ops env gate. Pure modules + one display component; no behaviour change (see the module headers).
 import AttendanceScheduledFeatureStatus from './attendance/AttendanceScheduledFeatureStatus.vue'
+import AttendanceTimezonePolicyPanel from './attendance/AttendanceTimezonePolicyPanel.vue'
+import AttendanceBusinessTripRequestCard from './attendance/AttendanceBusinessTripRequestCard.vue'
+import AttendanceRequestTimezoneFields from './attendance/AttendanceRequestTimezoneFields.vue'
+import { useAttendanceRequestTimezone } from './attendance/useAttendanceRequestTimezone'
 import {
   attendanceApprovalOptionCopy,
   withApprovalOptionSaveNotice,
@@ -10550,6 +10612,8 @@ import {
 } from './attendance/adminPageContentSearch'
 import { presentRecordInstantClock, presentRecordReportCell } from './attendance/recordReportPresentation'
 import { createAttendanceServerClock, ATTENDANCE_CLOCK_RESAMPLE_MS } from './attendance/attendanceServerClock'
+import { parseAttendanceCurrentTimeContext, currentAttendanceTimezone } from './attendance/attendanceCurrentTimeContext'
+import { attendanceDayTimezoneLabel, parseAttendanceDayTimeContext, type AttendanceDayTimeContext } from './attendance/attendanceDayTimeContext'
 
 type AttendancePageMode = 'overview' | 'reports' | 'admin'
 type ProvisionRole = 'employee' | 'approver' | 'admin'
@@ -12119,6 +12183,10 @@ let serverClockTimer: ReturnType<typeof setInterval> | null = null
 function updateHeroClock(): void {
   heroClockNow.value = attendanceSessionGuard.isCurrent() && !document.hidden
     ? serverClock.now(performance.now()) : null
+  const boundary = currentTimeContext.value?.nextEffectiveBoundary
+  if (boundary && heroClockNow.value && heroClockNow.value.getTime() >= Date.parse(boundary)
+    && !selfRulesLoading.value && showOverview.value && attendancePluginActive.value
+    && attendanceSessionGuard.isCurrent()) void loadSelfAttendanceRules(true)
 }
 function recoverServerClock(): void {
   invalidateServerClock()
@@ -12148,9 +12216,20 @@ onUnmounted(() => {
   window.removeEventListener('pageshow', onClockPageShow)
   invalidateServerClock()
 })
-const heroClockTimezone = computed(() => resolvedAttendanceTimezone.value
-  ? tr(`Attendance timezone: ${resolvedAttendanceTimezone.value}`, `考勤时区：${resolvedAttendanceTimezone.value}`)
-  : tr('Attendance timezone unavailable', '考勤时区不可用'))
+const heroClockTimezone = computed(() => {
+  const zone = resolvedAttendanceTimezone.value
+  const context = currentTimeContext.value
+  if (!zone || !context) return tr('Attendance timezone unavailable', '考勤时区不可用')
+  const sources = {
+    system_default: tr('System default', '系统默认'),
+    trip: tr('Approved business trip', '已批准出差'),
+    employee_override: tr('Employee configuration', '员工配置'),
+    calculation_group: tr('Attendance group', '考勤组'),
+  }
+  const label = tr(`Attendance timezone: ${zone}`, `考勤时区：${zone}`) + ' · ' + sources[context.timezoneSource]
+  const boundary = context.nextEffectiveBoundary ? formatAttendanceDateTime(context.nextEffectiveBoundary, isZh.value ? 'zh-CN' : 'en-US', zone) : null
+  return boundary ? label + ' · ' + tr(`Refresh at ${boundary}`, `生效边界：${boundary}`) : label
+})
 const heroClockTime = computed(() => {
   return formatAttendanceClockTime(heroClockNow.value, resolvedAttendanceTimezone.value, true) ?? tr('Server time unavailable', '服务器时间不可用')
 })
@@ -12443,10 +12522,9 @@ const timezoneOptions = computed(() =>
   ),
 )
 function selfServiceRuleTimezone(): string | null {
-  const instant = serverClock.now(performance.now())
-  const zone = normalizeAttendanceTimeZone(selfRulesData.value?.runtimeRule?.timezone)
-  return instant && !document.hidden && attendanceSessionGuard.isCurrent()
-    && formatAttendanceDateKey(instant, zone) === selfRulesData.value?.resolvedForDate ? zone : null
+  const instant = heroClockNow.value ? serverClock.now(performance.now()) : null
+  return !document.hidden && attendanceSessionGuard.isCurrent()
+    ? currentAttendanceTimezone(currentTimeContext.value, instant) : null
 }
 const reportRecordTimezoneValues = computed(() => Array.from(new Set(
   records.value
@@ -12490,7 +12568,7 @@ const calendarTimezoneContextHint = computed(() =>
   `${tr('Calendar timezone context', '日历时区上下文')}: ${overviewTimezoneLabel.value}`
 )
 const requestTimezoneContextHint = computed(() =>
-  `${tr('Request timezone context', '申请时区上下文')}: ${overviewTimezoneLabel.value}`
+  `${tr('Request timezone context', '申请时区上下文')}: ${requestTimezone.target.value?.timezone ?? tr('Awaiting target confirmation', '等待确认目标班次')}`
 )
 const summaryTimezoneContextHint = computed(() =>
   `${tr('Summary timezone context', '汇总时区上下文')}: ${overviewTimezoneLabel.value}`
@@ -12595,6 +12673,7 @@ const holidays = ref<AttendanceHoliday[]>([])
 // expose source + layer chain + overlays without polluting the admin CRUD
 // payload. Mixing them would break edit/delete (admin edits raw rows by id).
 const calendarEffectiveChips = ref<CalendarEffectiveChip[]>([])
+const calendarDayTimeContexts = ref(new Map<string, AttendanceDayTimeContext | null>())
 const currentUserId = ref<string | null>(null)
 // PR2 review fix (Codex Blocking #1): `committedCalendarUserId` is the userId
 // the overview is currently rendered against. It is set ONLY by refreshAll()
@@ -16235,6 +16314,7 @@ async function loadEffectiveCalendarForOverview(
   if (!options?.force && calendarEffectiveCacheKey === cacheKey) return
   calendarEffectiveCacheKey = cacheKey
   const loadVersion = ++calendarEffectiveLoadVersion
+  calendarDayTimeContexts.value = new Map()
   try {
     const result = await fetchEffectiveCalendar({
       from,
@@ -16247,6 +16327,9 @@ async function loadEffectiveCalendarForOverview(
     // drop this result so the newer one wins.
     if (loadVersion !== calendarEffectiveLoadVersion || !attendanceSessionGuard.isCurrent()) return
     const items = Array.isArray(result?.items) ? result.items : []
+    calendarDayTimeContexts.value = new Map(items.map(item => [
+      item.date, parseAttendanceDayTimeContext(item.attendanceTimeContext, item.date),
+    ]))
     calendarEffectiveChips.value = items
       .filter(isCalendarEffectiveItemNoteworthy)
       .map(effectiveCalendarItemToChip)
@@ -16257,6 +16340,7 @@ async function loadEffectiveCalendarForOverview(
     if (!attendanceSessionGuard.isCurrent()) return
     if (loadVersion === calendarEffectiveLoadVersion) {
       calendarEffectiveChips.value = []
+      calendarDayTimeContexts.value = new Map()
       calendarEffectiveCacheKey = null
     }
     if (error instanceof EffectiveCalendarFetchError) {
@@ -16391,6 +16475,9 @@ const calendarDays = computed<CalendarDay[]>(() => {
     } else if (calendarDisplay?.tooltip) {
       tooltip = calendarDisplay.tooltip
     }
+    if (calendarDayTimeContexts.value.has(key)) {
+      tooltip += '\n' + attendanceDayTimezoneLabel(calendarDayTimeContexts.value.get(key) ?? null, isZh.value)
+    }
     return {
       key,
       day: date.getDate(),
@@ -16420,6 +16507,19 @@ const requestForm = reactive({
 })
 
 const recordRequestPrefill = ref<AttendanceRecordRequestPrefill | null>(null)
+
+const requestTimezone = useAttendanceRequestTimezone({
+  workDate: () => requestForm.workDate,
+  userId: () => currentUserId.value ?? '',
+  enabled: () => showOverview.value && requestForm.requestType !== 'shift_swap',
+  inAt: () => requestForm.requestedInAt,
+  outAt: () => requestForm.requestedOutAt,
+  originals: () => readAttendanceRecordRequestPrefill(
+    recordRequestPrefill.value, getAuthPrincipalKey(), attendanceSessionGuard.orgId,
+  ),
+  guard: attendanceSessionGuard,
+  fetch: apiFetch,
+})
 
 const scheduleDispatchForm = reactive({
   userId: '',
@@ -17363,6 +17463,7 @@ function formatRequestType(value: string): string {
         missed_check_out: '漏打下班卡',
         time_correction: '时间更正',
         leave: '请假申请',
+        business_trip: '出差申请',
         overtime: '加班申请',
         outdoor_punch: '外勤打卡',
         shift_swap: '换班申请',
@@ -17373,6 +17474,7 @@ function formatRequestType(value: string): string {
         missed_check_out: 'Missed check-out',
         time_correction: 'Time correction',
         leave: 'Leave request',
+        business_trip: 'Business trip request',
         overtime: 'Overtime request',
         outdoor_punch: 'Outdoor punch',
         shift_swap: 'Shift-swap request',
@@ -17595,9 +17697,23 @@ async function applyRecordRequestPrefill(draft: AttendanceRecordRequestPrefill):
   clearRequestSubmitStatus()
   requestForm.workDate = draft.workDate
   requestForm.requestType = draft.requestType
-  requestForm.requestedInAt = formatRecordRequestTime(draft.requestedInAt, draft.inTimeZone)
-  requestForm.requestedOutAt = formatRecordRequestTime(draft.requestedOutAt, draft.outTimeZone)
   recordRequestPrefill.value = draft
+  const expectedPrefill = recordRequestPrefill.value
+  const beforeIn = requestForm.requestedInAt
+  const beforeOut = requestForm.requestedOutAt
+  await requestTimezone.refresh()
+  // An older prefill must not overwrite a newer draft or a manual time edit.
+  if (recordRequestPrefill.value !== expectedPrefill
+    || requestForm.workDate !== draft.workDate || requestForm.requestType !== draft.requestType
+    || requestForm.requestedInAt !== beforeIn || requestForm.requestedOutAt !== beforeOut) return
+  const target = requestTimezone.target.value
+  if (!target || target.workDate !== draft.workDate || !requestTimezone.ready.value
+    || !attendanceSessionGuard.isCurrent()) {
+    setStatus(tr('Target shift timezone could not be confirmed.', '无法确认目标班次时区。'), 'error')
+    return
+  }
+  requestForm.requestedInAt = formatRecordRequestTime(draft.requestedInAt, target.timezone)
+  requestForm.requestedOutAt = formatRecordRequestTime(draft.requestedOutAt, target.timezone)
   setStatus(tr('Request form updated from record timeline.', '已根据记录时间线填充补卡申请。'))
   await scrollToOverviewSection(ATTENDANCE_OVERVIEW_SECTION_IDS.anomalies, 'attendance-request-work-date')
 }
@@ -21460,6 +21576,8 @@ function classifyStatusError(
     message = makeupCopy.message
     if (makeupCopy.hint) meta.hint = makeupCopy.hint
     if (makeupCopy.action) meta.action = makeupCopy.action
+  } else if (code === 'ATTENDANCE_TIMEZONE_REQUEST_RANGE_CONFLICT') {
+    message = tr('This leave spans multiple attendance dates or shifts. Please split it into separate requests.', '该请假跨越多个考勤日期或班次，请拆分申请')
   } else if (code === 'COMMIT_TOKEN_INVALID' || code === 'COMMIT_TOKEN_REQUIRED') {
     message = tr('Import token expired before request completed.', '导入令牌已过期，请重试。')
     meta.hint = tr('Click retry to refresh commit token and submit again.', '点击重试以刷新导入令牌并重新提交。')
@@ -22977,7 +23095,8 @@ async function loadFocusedAttendanceRequest(): Promise<AttendanceRequest | null>
   const requestId = focusedAttendanceRequestId.value
   if (!requestId) return null
 
-  const response = await apiFetch(`/api/attendance/requests/${encodeURIComponent(requestId)}`)
+  const query = buildQuery({ orgId: normalizedOrgId() })
+  const response = await apiFetch(`/api/attendance/requests/${encodeURIComponent(requestId)}?${query.toString()}`)
   const data = await response.json()
   if (!response.ok || !data.ok) {
     throw new Error(readErrorMessage(data, tr('Failed to load focused request', '加载待处理申请失败')))
@@ -23435,7 +23554,7 @@ function validateRequestForm(): string | null {
   const hasOut = Boolean(requestForm.requestedOutAt)
 
   const times = recordRequestTimes()
-  if (!times) return tr('Enter a valid time in the historical timezone; skipped daylight-saving times are unavailable.', '请输入历史时区中的有效时间；夏令时跳过的时间不可用。')
+  if (!times) return tr('Confirm the target shift timezone and any repeated time offset; skipped local times are unavailable.', '请确认目标班次时区及重复时间的偏移；不存在的当地时间不可用。')
   if (hasIn && hasOut) {
     const inTime = new Date(times.requestedInAt).getTime()
     const outTime = new Date(times.requestedOutAt).getTime()
@@ -23485,13 +23604,12 @@ function validateRequestForm(): string | null {
   return null
 }
 
-function recordRequestTimes(): { requestedInAt: string; requestedOutAt: string } | null {
+function recordRequestTimes(): { requestedInAt: string; requestedOutAt: string; expectedTimezoneContextFingerprint?: string } | null {
+  if (requestForm.requestType === 'shift_swap') return { requestedInAt: '', requestedOutAt: '' }
   const source = recordRequestPrefill.value
-  if (!source) return { requestedInAt: requestForm.requestedInAt, requestedOutAt: requestForm.requestedOutAt }
-  if (!attendanceSessionGuard.isCurrent() || !readAttendanceRecordRequestPrefill(source, getAuthPrincipalKey(), attendanceSessionGuard.orgId)) return null
-  const requestedInAt = resolveRecordRequestTime(requestForm.requestedInAt, source.requestedInAt, source.inTimeZone)
-  const requestedOutAt = resolveRecordRequestTime(requestForm.requestedOutAt, source.requestedOutAt, source.outTimeZone)
-  return requestedInAt === null || requestedOutAt === null ? null : { requestedInAt, requestedOutAt }
+  if (source && (!attendanceSessionGuard.isCurrent()
+    || !readAttendanceRecordRequestPrefill(source, getAuthPrincipalKey(), attendanceSessionGuard.orgId))) return null
+  return requestTimezone.times()
 }
 
 async function submitRequest() {
@@ -23533,6 +23651,7 @@ async function submitRequest() {
       requestType: requestForm.requestType,
       requestedInAt: times.requestedInAt || undefined,
       requestedOutAt: times.requestedOutAt || undefined,
+      expectedTimezoneContextFingerprint: times.expectedTimezoneContextFingerprint,
       reason: requestForm.reason || undefined,
       leaveTypeId: requestForm.leaveTypeId || undefined,
       overtimeRuleId: requestForm.overtimeRuleId || undefined,
@@ -25550,6 +25669,7 @@ interface AttendanceSelfRulesData {
   orgId?: string
   resolvedForDate?: string
   resolvedAt?: string
+  attendanceTimeContext?: unknown
   assignment?: {
     attendanceGroups?: AttendanceSelfRulesGroupSummary[]
     scheduleGroups?: AttendanceSelfRulesGroupSummary[]
@@ -25594,11 +25714,12 @@ const annualBalanceSubjectLabel = computed(() => formatAnnualBalanceSubject(
 ))
 
 const selfRulesSnapshot = ref<AttendanceSelfRulesData | null>(null)
+const currentTimeContext = computed(() => parseAttendanceCurrentTimeContext(selfRulesSnapshot.value?.attendanceTimeContext))
 const lastAlignedRuleZone = ref<string | null>(null)
 let selfRulesRoundVersion = 0
 const selfRulesData = computed(() => {
   const snapshot = selfRulesSnapshot.value
-  const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+  const zone = currentAttendanceTimezone(currentTimeContext.value, heroClockNow.value)
   const date = formatAttendanceDateKey(heroClockNow.value, zone)
   return snapshot && date && date === snapshot.resolvedForDate ? snapshot : null
 })
@@ -25721,8 +25842,9 @@ const selectedLeaveType = computed<AttendanceLeaveType | null>(
 )
 
 const leaveQuickFillShiftWindow = computed<AttendanceLeaveQuickFillShiftWindow | null>(() => {
-  const rule = selfRulesData.value?.runtimeRule
-  if (!rule) return null
+  const rule = requestTimezone.target.value?.rule
+  if (!requestTimezone.ready.value || !rule
+    || typeof rule.workStartTime !== 'string' || typeof rule.workEndTime !== 'string') return null
   return { workStartTime: rule.workStartTime, workEndTime: rule.workEndTime }
 })
 
@@ -25881,11 +26003,13 @@ async function loadSelfAttendanceRules(background = false): Promise<void> {
         throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
       }
       const snapshot = data.data as AttendanceSelfRulesData | null
-      if (!serverClock.accept(sample, snapshot?.resolvedAt, sent, received)) {
+      const timeContext = parseAttendanceCurrentTimeContext(snapshot?.attendanceTimeContext)
+      if (!timeContext || timeContext.resolvedForInstant !== snapshot?.resolvedAt
+        || !serverClock.accept(sample, snapshot?.resolvedAt, sent, received)) {
         throw new Error('ATTENDANCE_SERVER_CLOCK_UNAVAILABLE')
       }
       updateHeroClock()
-      const zone = normalizeAttendanceTimeZone(snapshot?.runtimeRule?.timezone)
+      const zone = currentAttendanceTimezone(timeContext, heroClockNow.value)
       const target = formatAttendanceDateKey(heroClockNow.value, zone)
       if (target && snapshot?.resolvedForDate === target) {
         lastAlignedRuleZone.value = zone
