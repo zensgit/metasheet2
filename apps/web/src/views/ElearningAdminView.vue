@@ -38,7 +38,7 @@
       data-testid="elearning-admin-video-unavailable"
       role="note"
     >
-      {{ elearningLabel('admin.videoUnavailable', isZh) }}
+      {{ elearningAdminVideoUnavailable(contentEnabled, isZh) }}
     </p>
     <form
       v-else-if="mediaEnabled === true"
@@ -334,6 +334,7 @@ import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
+  elearningAdminVideoUnavailable,
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
   elearningErrorMessage,

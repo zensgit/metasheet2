@@ -1338,7 +1338,7 @@ describe('ElearningAdminView', () => {
     expect(off.querySelector('[data-testid="elearning-admin-file"]')).toBeNull()
     expect(off.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
     expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
-      .toBe('本部署未开启视频，视频课程与正式考试不可用；可发布文章 / 外链课程。')
+      .toBe('本部署未开启视频，视频课程不可用；学员端无正式考试入口；可发布文章 / 外链课程。')
     expect(off.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent).not.toContain('MP4')
     // The article / external-link course section stays available on a no-video deployment.
     expect(off.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
@@ -1347,7 +1347,30 @@ describe('ElearningAdminView', () => {
     useLocale().setLocale('en')
     await nextTick()
     expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
-      .toBe('Video is not enabled on this deployment, so video courses and formal exams are unavailable. You can publish article / external-link courses.')
+      .toBe('Video is not enabled on this deployment, so video courses are unavailable and learners have no formal exam entry. You can publish article / external-link courses.')
+  })
+
+  it.each([
+    { content: true, zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口；可发布文章 / 外链课程。' },
+    { content: false, zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口。' },
+  ])('offers the article / link clause in the no-video notice only when content is on (content=$content)', async ({ content, zh }) => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content,
+        assignment: false,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim()).toBe(zh)
+    expect(root.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent?.trim())
+      .toBe('在下方管理本部署已开启的学习资源。')
+    expect(root.querySelector('[data-testid="elearning-content-admin-section"]') !== null).toBe(content)
   })
 
   it('renders neither the video form nor the no-video notice before or after a failed capabilities check', async () => {

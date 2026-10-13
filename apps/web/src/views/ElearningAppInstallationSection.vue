@@ -89,8 +89,9 @@ const INSTALLATION_REQUEST_FAILED = 'elearning_installation_request_failed'
 // GET /api/elearning-app/installation (exactly status/notificationsEnabled/canManage) nor
 // GET /api/elearning/capabilities (no notifications key) exposes the server's
 // ELEARNING_NOTIFICATIONS_ENABLED flag today, and no caller passes this prop, so the opt-in
-// stays hidden. Hiding it never rewrites the stored opt-in: Enable/Disable still sends the
-// stored notificationsEnabled value back unchanged.
+// stays hidden. Enable/Disable still sends the stored notificationsEnabled value back
+// unchanged (the server itself persists `enabled && notificationsEnabled`, so a Disable
+// stores false; that is pre-existing server behaviour).
 const props = withDefaults(defineProps<{ notificationsAvailable?: boolean }>(), {
   notificationsAvailable: false,
 })
@@ -130,7 +131,8 @@ const errorText = computed(() => (
 ))
 
 const notificationsText = computed(() => {
-  if (!notificationsAvailable.value) return elearningLabel('installation.notificationsUnavailable', isZh.value)
+  // The panel cannot see the server flag, so this line only says what the panel offers.
+  if (!notificationsAvailable.value) return elearningLabel('installation.notificationsNotOffered', isZh.value)
   return elearningLabel(
     installation.value?.notificationsEnabled ? 'installation.notificationsEnabled' : 'installation.notificationsDisabled',
     isZh.value,

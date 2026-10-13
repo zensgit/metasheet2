@@ -55,6 +55,9 @@ async function mount(props: { notificationsAvailable?: boolean } = {}) {
 beforeEach(() => { localStorage.clear(); Object.values(mocks).forEach((mock) => mock.mockReset()) })
 afterEach(() => { app?.unmount(); root?.remove(); localStorage.clear(); useLocale().setLocale('en') })
 
+// The panel cannot see ELEARNING_NOTIFICATIONS_ENABLED, so the line never claims the deployment
+// state, only that this panel does not offer the setting.
+const NOT_OFFERED_EN = 'Notification settings: not offered here (decided by operations through the deployment flag)'
 const STATUS_LABELS = {
   'not-installed': { en: 'Not installed', zh: '未安装' },
   inactive: { en: 'Installed, not enabled', zh: '已安装未启用' },
@@ -77,7 +80,7 @@ describe('installation section', () => {
     await mount()
     // F12: a status word, never the raw API token.
     expect(statusText()).toBe(STATUS_LABELS[status].en)
-    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
+    expect(notificationsText()).toBe(NOT_OFFERED_EN)
     expect(root.querySelectorAll('button, input')).toHaveLength(0)
     expect(mocks.install).not.toHaveBeenCalled()
     expect(mocks.update).not.toHaveBeenCalled()
@@ -109,7 +112,7 @@ describe('installation section', () => {
     window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token' }))
     await flush()
     expect(root.querySelectorAll('button, input')).toHaveLength(0)
-    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
+    expect(notificationsText()).toBe(NOT_OFFERED_EN)
     expect(mocks.get).toHaveBeenCalledTimes(2)
   })
 
@@ -176,8 +179,9 @@ describe('installation section', () => {
     expect(root.querySelector('input[type="checkbox"]')).toBeNull()
     expect(root.textContent).not.toContain('Opt in to learning notifications')
     expect(root.textContent).not.toContain('Save notifications')
-    expect(notificationsText()).toBe('Notifications: not enabled on this deployment')
-    // Hiding the opt-in never rewrites it: Enable/Disable sends the stored value back unchanged.
+    expect(notificationsText()).toBe(NOT_OFFERED_EN)
+    // The client sends the stored opt-in back unchanged (the server then persists
+    // `enabled && notificationsEnabled`; that server rule is pre-existing and not under test here).
     mocks.update.mockResolvedValueOnce({ status: status === 'active' ? 'inactive' : 'active', notificationsEnabled: true, canManage: true })
     button(status === 'active' ? 'Disable' : 'Enable').click(); await flush()
     expect(mocks.update).toHaveBeenCalledTimes(1)
@@ -192,7 +196,7 @@ describe('installation section', () => {
     expect(section.getAttribute('aria-label')).toBe('云课堂安装')
     expect(section.querySelector('h2')?.textContent).toBe('云课堂安装')
     expect(statusText()).toBe(STATUS_LABELS[status].zh)
-    expect(notificationsText()).toBe('学习通知：本部署未开启')
+    expect(notificationsText()).toBe('学习通知设置：本界面不提供（由运维按部署开关决定）')
     expect(section.textContent).not.toMatch(/[A-Za-z]/)
     const labels = Array.from(section.querySelectorAll('button')).map((node) => node.textContent?.trim())
     expect(labels).toEqual(status === 'not-installed' ? ['安装'] : [status === 'active' ? '停用' : '启用'])

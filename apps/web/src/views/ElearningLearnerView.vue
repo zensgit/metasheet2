@@ -13,7 +13,9 @@
     <header class="elearning-learner__header">
       <h1 id="elearning-learner-title">{{ elearningLabel('learner.title', isZh) }}</h1>
       <p data-testid="elearning-learner-subtitle">
-        {{ elearningLabel(mediaEnabled === false ? 'learner.subtitleNoMedia' : 'learner.subtitle', isZh) }}
+        {{ mediaEnabled === false
+          ? elearningLearnerNoMediaSubtitle(contentEnabled, practiceEnabled, isZh)
+          : elearningLabel('learner.subtitle', isZh) }}
       </p>
     </header>
 
@@ -305,6 +307,7 @@ import {
   elearningFailure,
   elearningLabel,
   elearningLatestAttempt,
+  elearningLearnerNoMediaSubtitle,
   elearningLearnerVideoProgressLabel,
   elearningQuestionPoints,
 } from './elearningLabels'

@@ -1531,6 +1531,23 @@ describe('ElearningLearnerView', () => {
     expect(subtitle(disabled)).toBe('学习必修或可见自学课程。考试仅在服务端确认视频完成后开放。')
   })
 
+  it.each([
+    { content: true, assessment: true, zh: '本部署未开启视频，暂无正式考试；可学习文章 / 外链课程并做练习。' },
+    { content: true, assessment: false, zh: '本部署未开启视频，暂无正式考试；可学习文章 / 外链课程。' },
+    { content: false, assessment: true, zh: '本部署未开启视频，暂无正式考试；可做练习。' },
+    { content: false, assessment: false, zh: '本部署未开启视频，暂无正式考试。' },
+  ])('names only the enabled no-video surfaces in the subtitle (content=$content, practice=$assessment)', async ({ content, assessment, zh }) => {
+    // Practice is gated by isElearningPracticeReady (master + assessment); incentive keeps the
+    // all-off case mounted without a feature_disabled failure.
+    h.capabilities.mockResolvedValue(v01Capabilities({}, { content, assessment, media: false, incentive: true }))
+    h.list.mockResolvedValue({ courses: [] })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-learner-status"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-learner-subtitle"]')?.textContent?.trim()).toBe(zh)
+    expect(root.querySelector('[data-testid="elearning-practice-learner-section"]') !== null).toBe(assessment)
+  })
+
   it('filters assessment variants only when assessment capability is unavailable', async () => {
     h.capabilities.mockResolvedValue(v01Capabilities({}, { assessment: false, media: false }))
     h.list.mockResolvedValue({ courses: [course(), contentCourse()] })
