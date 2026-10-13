@@ -1654,6 +1654,7 @@ exec npx vitest run \
   cancelRoundEntrySurfaces \
   cancelRoundEntryTodoCenter \
   categoryCandidateInput \
+  clipboard-no-bare-navigator-clipboard \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
@@ -2006,5 +2007,4 @@ exec npx vitest run \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \
-  clipboard-no-bare-navigator-clipboard \
   --reporter=dot
