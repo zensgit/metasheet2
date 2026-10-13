@@ -1430,7 +1430,7 @@
                   v-for="column in recordReportColumns"
                   :key="column.code"
                   :class="recordReportColumnClass(column)"
-                  :title="column.description || column.label"
+                  :title="column.description || undefined"
                 >
                   {{ column.label }}
                 </th>
@@ -33001,7 +33001,7 @@ defineExpose({
   list-style: none;
   margin: 4px 0 0;
   padding: 4px;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--ms-border-light);
   border-radius: 8px;
   background: #fff;
   display: grid;

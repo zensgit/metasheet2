@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 import { copyFileSync, mkdirSync } from 'node:fs'
 
 const OUT = 'verification-output'
-const ARTIFACT = '/opt/cursor/artifacts/attendance-ui'
+const ARTIFACT = process.env.ATTENDANCE_UI_ARTIFACT_DIR || 'verification-output/attendance-ui'
 const HARNESS = '/verification/attendance-admin-calendar-policy-move-harness.html'
 
 function publish(name: string): void {
@@ -120,7 +120,7 @@ test.describe('attendance admin calendar policy lives on Holidays', () => {
     const hours = page.locator('label[for="attendance-holiday-first-day-hours"]')
     await expect(hours).toContainText('小时')
     await expect(page.locator('label[for="attendance-auto-absence-lookback"]')).toContainText('天')
-    await expect(page.locator('[data-attendance-locale-time]')).toContainText('上午')
+    await expect(settings.locator('label[for="attendance-auto-absence-run-at"] [data-attendance-locale-time]')).toContainText('上午')
     const fieldFill = await page.locator('label.attendance__field--compact-control').first().evaluate((node) => {
       const grid = node.parentElement
       if (!(grid instanceof HTMLElement)) return 1

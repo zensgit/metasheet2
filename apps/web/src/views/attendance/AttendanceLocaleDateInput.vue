@@ -1,11 +1,15 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, useAttrs, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, useAttrs, watch, watchPostEffect } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 
 defineOptions({ inheritAttrs: false })
 
 const props = defineProps<{
   modelValue?: string
+  disabled?: boolean
+  readonly?: boolean
+  min?: string
+  max?: string
 }>()
 
 const emit = defineEmits<{
@@ -16,6 +20,18 @@ const emit = defineEmits<{
 const attrs = useAttrs()
 const { isZh } = useLocale()
 const open = ref(false)
+const input = ref<HTMLInputElement | null>(null)
+const blocked = computed(() => props.disabled || props.readonly)
+
+watch(blocked, (value) => {
+  if (value) open.value = false
+})
+
+watchPostEffect(() => {
+  input.value?.setCustomValidity(isOutsideRange(props.modelValue || '')
+    ? (isZh.value ? '日期超出可选范围。' : 'Date is outside the allowed range.')
+    : '')
+})
 const root = ref<HTMLElement | null>(null)
 const viewYear = ref(new Date().getFullYear())
 const viewMonth = ref(new Date().getMonth())
@@ -47,6 +63,11 @@ function parseIso(value?: string): Date | null {
   return date
 }
 
+function isOutsideRange(value: string): boolean {
+  if (!parseIso(value)) return false
+  return Boolean((parseIso(props.min) && value < props.min!) || (parseIso(props.max) && value > props.max!))
+}
+
 function toIso(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
@@ -74,12 +95,14 @@ const cells = computed(() => {
       iso: toIso(date),
       label: String(date.getDate()),
       outside: date.getMonth() !== viewMonth.value,
+      disabled: isOutsideRange(toIso(date)),
       selected: Boolean(selected && toIso(selected) === toIso(date)),
     }
   })
 })
 
 function commit(value: string, event?: Event): void {
+  if (blocked.value) return
   emit('update:modelValue', value)
   emit('input', event || new Event('input', { bubbles: true }))
 }
@@ -88,7 +111,14 @@ function onTextInput(event: Event): void {
   commit((event.target as HTMLInputElement).value, event)
 }
 
+function showCalendar(): void {
+  if (blocked.value) return
+  open.value = true
+  syncView(props.modelValue)
+}
+
 function toggle(): void {
+  if (blocked.value) return
   open.value = !open.value
   if (open.value) syncView(props.modelValue)
 }
@@ -100,6 +130,7 @@ function shiftMonth(delta: number): void {
 }
 
 function pick(iso: string): void {
+  if (blocked.value || isOutsideRange(iso)) return
   commit(iso)
   open.value = false
 }
@@ -133,17 +164,22 @@ onBeforeUnmount(() => {
 <template>
   <span ref="root" class="attendance-locale-date" data-attendance-locale-date :data-locale-date="isZh ? 'zh' : 'en'">
     <input
+      ref="input"
       class="attendance-locale-date__input"
       v-bind="attrs"
       type="text"
       inputmode="numeric"
       autocomplete="off"
+      :disabled="disabled"
+      :readonly="readonly"
+      :min="min"
+      :max="max"
       :value="modelValue || ''"
       :placeholder="placeholder"
       @input="onTextInput"
-      @focus="open = true; syncView(modelValue)"
+      @focus="showCalendar"
     />
-    <button class="attendance-locale-date__button" type="button" :aria-label="isZh ? '打开日历' : 'Open calendar'" @click="toggle">
+    <button class="attendance-locale-date__button" type="button" :disabled="blocked" :aria-label="isZh ? '打开日历' : 'Open calendar'" @click="toggle">
       {{ isZh ? '日历' : 'Cal' }}
     </button>
     <span v-if="open" class="attendance-locale-date__popup" data-attendance-locale-date-popup @pointerdown.stop>
@@ -161,6 +197,7 @@ onBeforeUnmount(() => {
           :key="cell.iso + cell.label"
           type="button"
           :data-date="cell.iso"
+          :disabled="cell.disabled"
           :class="{ 'is-outside': cell.outside, 'is-selected': cell.selected }"
           @click="pick(cell.iso)"
         >
@@ -169,7 +206,7 @@ onBeforeUnmount(() => {
       </span>
       <span class="attendance-locale-date__actions">
         <button type="button" data-attendance-locale-date-clear @click="clearValue">{{ isZh ? '清除' : 'Clear' }}</button>
-        <button type="button" data-attendance-locale-date-today @click="pickToday">{{ isZh ? '今天' : 'Today' }}</button>
+        <button type="button" :disabled="isOutsideRange(toIso(new Date()))" data-attendance-locale-date-today @click="pickToday">{{ isZh ? '今天' : 'Today' }}</button>
       </span>
     </span>
   </span>

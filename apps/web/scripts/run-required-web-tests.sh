@@ -1610,6 +1610,12 @@ exec npx vitest run \
   attendance-record-timeline \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
+  adminPageContentSearch.spec.ts \
+  attendanceAdminGuide.spec.ts \
+  attendanceAudienceChipField.spec.ts \
+  attendanceLocaleControls.spec.ts \
+  attendancePayrollHelp.spec.ts \
+  recordReportPresentation.spec.ts \
   attendance-selfservice-dashboard \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \

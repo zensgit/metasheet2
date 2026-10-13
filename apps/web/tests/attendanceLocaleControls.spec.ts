@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createApp, nextTick } from 'vue'
+import { createApp, h, nextTick, reactive } from 'vue'
 import AttendanceAnnualPolicyHelp from '../src/views/attendance/AttendanceAnnualPolicyHelp.vue'
 import AttendanceLocaleDateInput from '../src/views/attendance/AttendanceLocaleDateInput.vue'
 import AttendanceWeekdayChipField from '../src/views/attendance/AttendanceWeekdayChipField.vue'
@@ -121,5 +121,115 @@ describe('locale date input', () => {
     useLocale().setLocale('en')
     app.unmount()
     container.remove()
+  })
+})
+
+
+describe('locale date input native constraints', () => {
+  async function mountDate(attrs: Record<string, unknown> = {}) {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const changes: string[] = []
+    const inputs: Event[] = []
+    const state = reactive<Record<string, unknown> & { modelValue: string }>({ modelValue: '2026-10-12', ...attrs })
+    const app = createApp({
+      render: () => h(AttendanceLocaleDateInput, {
+        ...state,
+        'onUpdate:modelValue': (value: string) => { changes.push(value); state.modelValue = value },
+        onInput: (event: Event) => inputs.push(event),
+      }),
+    })
+    app.mount(container)
+    await flush()
+    return { container, state, changes, inputs, dispose: () => { app.unmount(); container.remove() } }
+  }
+
+  it.each(['disabled', 'readonly'])('blocks text, focus and calendar actions when %s', async (constraint) => {
+    const mounted = await mountDate({ [constraint]: true })
+    try {
+      const input = mounted.container.querySelector('input')!
+      const calendar = mounted.container.querySelector<HTMLButtonElement>('.attendance-locale-date__button')!
+      expect(constraint === 'disabled' ? input.disabled : input.readOnly).toBe(true)
+      expect(calendar.disabled).toBe(true)
+      calendar.click()
+      input.dispatchEvent(new Event('focus'))
+      input.value = '2026-10-13'
+      input.dispatchEvent(new Event('input'))
+      await flush()
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).toBeNull()
+      expect(mounted.changes).toEqual([])
+      expect(mounted.inputs).toEqual([])
+    } finally { mounted.dispose() }
+  })
+
+  it.each(['disabled', 'readonly'])('closes an open calendar and blocks a queued selection when %s changes', async (constraint) => {
+    const mounted = await mountDate({ [constraint]: false })
+    try {
+      mounted.container.querySelector<HTMLButtonElement>('.attendance-locale-date__button')!.click()
+      await flush()
+      const date = mounted.container.querySelector<HTMLButtonElement>('[data-date="2026-10-13"]')!
+      expect(date).toBeTruthy()
+      mounted.state[constraint] = true
+      await flush()
+      const input = mounted.container.querySelector('input')!
+      expect(constraint === 'disabled' ? input.disabled : input.readOnly).toBe(true)
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).toBeNull()
+      date.click()
+      await flush()
+      expect(mounted.container.querySelector('[data-attendance-locale-date-popup]')).toBeNull()
+      expect(mounted.changes).toEqual([])
+      expect(mounted.inputs).toEqual([])
+    } finally { mounted.dispose() }
+  })
+
+  it('keeps enabled text and calendar changes emitting the ISO date and input event', async () => {
+    const mounted = await mountDate({ disabled: false, readonly: false })
+    try {
+      const input = mounted.container.querySelector('input')!
+      input.value = '2026-10-14'
+      input.dispatchEvent(new Event('input'))
+      await flush()
+      input.dispatchEvent(new Event('focus'))
+      await flush()
+      mounted.container.querySelector<HTMLButtonElement>('[data-date="2026-10-13"]')!.click()
+      await flush()
+      expect(mounted.changes).toEqual(['2026-10-14', '2026-10-13'])
+      expect(mounted.inputs).toHaveLength(2)
+      expect(mounted.inputs.every(event => event.type === 'input')).toBe(true)
+    } finally { mounted.dispose() }
+  })
+
+  it('disables calendar dates outside min/max and preserves text range validity including both boundaries', async () => {
+    const mounted = await mountDate({ min: '2026-10-12', max: '2026-10-14' })
+    try {
+      const input = mounted.container.querySelector('input')!
+      mounted.container.querySelector<HTMLButtonElement>('.attendance-locale-date__button')!.click()
+      await flush()
+      for (const date of ['2026-10-11', '2026-10-15']) {
+        const button = mounted.container.querySelector<HTMLButtonElement>(`[data-date="${date}"]`)!
+        expect(button.disabled).toBe(true)
+        button.click()
+      }
+      expect(mounted.changes).toEqual([])
+      mounted.container.querySelector<HTMLButtonElement>('[data-date="2026-10-14"]')!.click()
+      await flush()
+      expect(mounted.changes).toEqual(['2026-10-14'])
+      const native = document.createElement('input')
+      native.type = 'date'
+      native.min = '2026-10-12'
+      native.max = '2026-10-14'
+      for (const [value, valid] of [['2026-10-11', false], ['2026-10-15', false], ['2026-10-12', true], ['2026-10-14', true], ['', true]] as const) {
+        input.value = value
+        input.dispatchEvent(new Event('input'))
+        await flush()
+        native.value = value
+        expect(native.checkValidity(), value).toBe(valid)
+        expect(input.checkValidity(), value).toBe(native.checkValidity())
+      }
+      mounted.state.min = '2026-10-15'
+      mounted.state.modelValue = '2026-10-14'
+      await flush()
+      expect(input.checkValidity()).toBe(false)
+    } finally { mounted.dispose() }
   })
 })
