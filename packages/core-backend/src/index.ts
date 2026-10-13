@@ -6,6 +6,7 @@
 
 import type { Application, Request, Response, NextFunction, RequestHandler } from 'express';
 import type { Server as HttpServer } from 'http';
+import type { Socket } from 'net'
 import express from 'express'
 import { createServer } from 'http'
 import cors from 'cors'
@@ -594,6 +595,7 @@ const automationReadTransaction: AutomationReadLedgerDependencies['transaction']
 export class MetaSheetServer {
   private app: Application
   private httpServer: HttpServer
+  private readonly httpSockets = new Set<Socket>()
   private logger: Logger
   private eventBus: EventEmitter
   private pluginStatus = new Map<string, PluginRuntimeState>()
@@ -722,6 +724,10 @@ export class MetaSheetServer {
     
     this.app = express()
     this.httpServer = createServer(this.app)
+    this.httpServer.on('connection', socket => {
+      this.httpSockets.add(socket)
+      socket.once('close', () => this.httpSockets.delete(socket))
+    })
     this.eventBus = new EventEmitter()
     this.logger = new Logger('MetaSheetServer')
     this.portLocked = typeof options.port === 'number'
@@ -3733,6 +3739,12 @@ export class MetaSheetServer {
           this.logger.info('HTTP server closed')
           resolve()
         })
+        // Node's idle-HTTP cleanup does not close TCP preconnections that have
+        // sent no bytes. They own no admitted request, but can otherwise hold
+        // this drain open until the header timeout. Never cut a received request.
+        for (const socket of this.httpSockets) {
+          if (socket.bytesRead === 0) socket.destroy()
+        }
       } catch {
         reject(new Error('HTTP_SERVER_DRAIN_FAILED'))
       }

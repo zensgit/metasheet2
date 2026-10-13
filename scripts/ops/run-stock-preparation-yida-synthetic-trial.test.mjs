@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
@@ -185,6 +186,42 @@ test('migrated worker retains fixed OFF/bootstrap/build/loopback and independent
   assert.match(parent, /acceptancePassed: false/u)
   assert.match(child, /bootstrapParentNodeGuardAttested: false, browserNetworkAttested: false/u)
   // These are static wiring checks only, not a lifecycle/namespace/full-app pass.
+})
+
+test('actual trial identity uses a short login while owner, tenant and password stay fresh', () => {
+  const worker = actualFunction(typedSource, 'ownedWorker')
+  const parsed = ts.createSourceFile('actual.ts', worker, ts.ScriptTarget.ES2022, true)
+  const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node))
+  const identityDeclarations = declaration.body.statements.filter(node => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some(item => ['identifier', 'password'].includes(item.name.getText(parsed))))
+  assert.equal(identityDeclarations.length, 2)
+  const actual = identityDeclarations.map(node => node.getText(parsed)).join('\n')
+  const exercise = source => {
+    // Run only the actual identity-producing declarations, using real crypto;
+    // importing the complete worker here would start PG and the HTTP host.
+    const produce = new Function('randomUUID', 'randomBytes', source + '\nreturn { owner, tenant, identifier, password }')
+    const owners = new Set(), tenants = new Set(), passwords = new Set()
+    for (let index = 0; index < 32; index++) {
+      const identity = produce(randomUUID, randomBytes)
+      assert.equal(identity.identifier, 'trial@example.invalid')
+      assert.match(identity.owner, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/u)
+      assert.match(identity.tenant, /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/u)
+      assert.notEqual(identity.owner, identity.tenant)
+      assert.match(identity.password, /^[A-Za-z0-9_-]{32}$/u)
+      owners.add(identity.owner); tenants.add(identity.tenant); passwords.add(identity.password)
+    }
+    assert.equal(owners.size, 32); assert.equal(tenants.size, 32); assert.equal(passwords.size, 32)
+  }
+  exercise(actual)
+  for (const [before, after] of [
+    ["'trial@example.invalid'", "'unexpected@example.invalid'"],
+    ["randomBytes(24).toString('base64url')", "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'"],
+    ['owner = randomUUID()', "owner = '11111111-1111-4111-8111-111111111111'"],
+    ['tenant = randomUUID()', "tenant = '22222222-2222-4222-8222-222222222222'"],
+  ]) {
+    assert.equal(actual.split(before).length, 2)
+    assert.throws(() => exercise(actual.replace(before, after)), { code: 'ERR_ASSERTION' })
+  }
 })
 
 test('strict config checks actual transitive declarations without emitted files or stub types', () => {

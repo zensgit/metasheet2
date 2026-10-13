@@ -369,7 +369,9 @@ async function ownedWorker(scratch: string, ttlSeconds: number, migrationCount: 
   const { assertRequiredMainMigrationInventory } = await import('../tests/utils/stock-preparation-main-migration-contract.ts')
   assertRequiredMainMigrationInventory(names, ledger)
   assert.deepEqual(ledger, names)
-  const owner = randomUUID(), tenant = randomUUID(), identifier = `synthetic-yida-${randomUUID()}@example.invalid`
+  // This login exists only in this run's freshly owned synthetic database.
+  // Keep principal IDs and the password fresh; the email need not be a secret.
+  const owner = randomUUID(), tenant = randomUUID(), identifier = 'trial@example.invalid'
   let password = randomBytes(24).toString('base64url'), token = ''
   const bcrypt = requireCore('bcryptjs') as typeof import('bcryptjs')
   await query(`INSERT INTO users (id,email,name,password_hash,role,permissions,is_active,must_change_password,activation_status,local_password_set)
