@@ -630,7 +630,7 @@ export class AutomationScheduler {
         const wakeAt = Date.now()
         // Arm first: a synchronous callback may replace/unregister this rule.
         // Never install the old handle over its replacement after the callback.
-        this.armDateFieldTimer(rule, config)
+        this.armDateFieldTimer(rule, config, wakeAt)
         if (dateReminderTimeOfDayPassed(config.timeOfDay, wakeAt, config.timezone)) {
           this.runScheduledRule(rule, Object.freeze({ triggerType: 'schedule.date_field', scheduledAtMs: wakeAt }))
         }
@@ -703,24 +703,30 @@ export class AutomationScheduler {
    * so the `=== timer` guard stops the re-arm). No boot-time anchoring. Leader-only (caller guards). The handle
    * lives in `this.timers`, so `unregister`'s clear cancels a pending fire.
    */
-  private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>): void {
+  private armDateFieldTimer(rule: AutomationRule, config: Partial<ScheduleDateFieldConfig>, now = Date.now()): void {
     if (this.destroyed || !this.isLeader) return
-    const now = Date.now(), delay = nextDateReminderTimerDelayMs(config.timeOfDay, now, config.timezone)
+    const delay = nextDateReminderTimerDelayMs(config.timeOfDay, now, config.timezone)
     const occurrence = containsAutomationReadAction(undefined, undefined, rule.actions)
       ? Object.freeze({ triggerType: 'schedule.date_field' as const, scheduledAtMs: now + delay }) : undefined
-    const timer = setTimeout(() => {
-      if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
-      if (occurrence && Date.now() < occurrence.scheduledAtMs) { this.armDateFieldTimer(rule, config); return }
-      if (occurrence) this.runScheduledRule(rule, occurrence)
-      else this.runScheduledRule(rule)
-      if (!this.destroyed && this.isLeader && this.timers.get(rule.id) === timer) {
-        this.armDateFieldTimer(rule, config)
+    const arm = (): void => {
+      if (this.destroyed || !this.isLeader) return
+      const timer = setTimeout(() => {
+        if (this.destroyed || !this.isLeader || this.timers.get(rule.id) !== timer) return
+        // An early tick or wall-clock rollback retains this planned day. A
+        // fresh daily calculation here could skip it or choose an earlier day.
+        if (occurrence && Date.now() < occurrence.scheduledAtMs) { arm(); return }
+        if (occurrence) this.runScheduledRule(rule, occurrence)
+        else this.runScheduledRule(rule)
+        if (!this.destroyed && this.isLeader && this.timers.get(rule.id) === timer) {
+          this.armDateFieldTimer(rule, config)
+        }
+      }, occurrence ? Math.min(MAX_TIMEOUT_DELAY_MS, Math.max(1, occurrence.scheduledAtMs - Date.now())) : delay)
+      if (typeof timer.unref === 'function') {
+        timer.unref()
       }
-    }, delay)
-    if (typeof timer.unref === 'function') {
-      timer.unref()
+      this.timers.set(rule.id, timer)
     }
-    this.timers.set(rule.id, timer)
+    arm()
     const tzLabel = config.timezone && config.timezone !== 'UTC' ? config.timezone : 'UTC'
     logger.info(`Registered date-reminder schedule for rule ${rule.id} (next scan in ${delay}ms, timeOfDay=${config.timeOfDay ?? '09:00'} ${tzLabel})`)
   }
