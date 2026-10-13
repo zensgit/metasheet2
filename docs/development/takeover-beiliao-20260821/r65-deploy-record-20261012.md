@@ -2,6 +2,8 @@
 
 > values-free：不含主机地址、口令、令牌、项目号、账号名；只指位置与计数。承接 `r64-deploy-record-20261012.md`。打包帖、上机帖与开发机回帖见 #6079（2026-10-12）。
 
+> **2026-10-13 订正（演示机现状）**：旧一线角色 `stock-prep-operator` 已于 2026-10-13 在演示机上删除；一线角色现为「操作人员」（`stock-prep_frontline`）+「审批与提交」（`approvals_operator`），见 `runbook-operator-merge-20261012.md`「执行记录」。下文「原一线角色持有 `approvals:write`」「五个备料角色」描述的是 R65 当时的状态；该码现由 `approvals_operator` 持有。
+
 ## 0. 先说与打包帖的差异
 
 打包帖 §4 按「三个审批权限码上机前目录 0 行、绑定 0 行」写。实际 **`approvals:write` 早已在目录里**，并且**由原一线角色 `stock-prep-operator` 持有 1 行**——一线提交审批要用它；按开发机回帖，`zzzz20260920130000` 迁移文件头写明刻意不登记该码，这一行是当初给一线开审批提交时手工加的。R65 迁移是 `ON CONFLICT DO NOTHING`，不碰这一行，只新增 `approvals:act` 与 `approval-templates:manage`。上机脚本据此改为「绑定恰为 1、上机前后不变」。
