@@ -30,9 +30,12 @@ function isAllModeWithAssignees(task: TaskCompletionSource): boolean {
 
 /** For an open all-mode task: `'not_assignee'` when the viewer has no assignee row, `'own_part_done'`
  *  when their row is already complete; `null` when the click would complete their part, or when
- *  the rule does not apply. */
+ *  the rule does not apply. An open task whose every assignee row is already complete is never a
+ *  no-op: the server recomputes the task from the rows on any permitted complete and marks it
+ *  done. */
 export function completeNoopReason(task: TaskCompletionSource, viewerId: string | null): CompleteNoopReason | null {
   if (viewerId === null || task.status !== 'open' || !isAllModeWithAssignees(task)) return null
+  if (task.assignees.every((row) => row.completedAt !== null)) return null
   const own = task.assignees.find((row) => row.userId === viewerId)
   if (!own) return 'not_assignee'
   if (own.completedAt !== null) return 'own_part_done'

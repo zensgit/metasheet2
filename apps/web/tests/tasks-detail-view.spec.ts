@@ -934,6 +934,31 @@ describe('TasksView detail — complete / reopen that would change nothing', () 
     expect(button(el3, 'tasks-detail-complete-button').disabled).toBe(true)
   })
 
+  it('complete stays on for a non-assignee when every assignee row is already done (the task is then marked done); off while one is open', async () => {
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
+    const allRowsDone = taskDetail({
+      ...OPEN_ALL_OTHERS,
+      assignees: [
+        { userId: 'u2', completedAt: '2026-10-01T09:00:00Z' },
+        { userId: 'u3', completedAt: '2026-10-01T10:00:00Z' },
+      ],
+    })
+    const el = await mountAsViewer(allRowsDone, 'u1')
+    expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
+    expect(shown(el, 'tasks-detail-complete-reason')).toBeNull()
+    button(el, 'tasks-detail-complete-button').click()
+    await flush()
+    expect(h_.completeTask).toHaveBeenCalledWith('t1')
+
+    app?.unmount()
+    container?.remove()
+    const el2 = await mountAsViewer(
+      taskDetail({ ...allRowsDone, assignees: [{ userId: 'u2', completedAt: '2026-10-01T09:00:00Z' }, { userId: 'u3', completedAt: null }] }),
+      'u1',
+    )
+    expect(button(el2, 'tasks-detail-complete-button').disabled).toBe(true)
+  })
+
   it('an unknown viewer id (unresolved, or still resolving) keeps complete on; a known one turns it off', async () => {
     const el = await mountAsViewer(OPEN_ALL_OTHERS, null)
     expect(button(el, 'tasks-detail-complete-button').disabled).toBe(false)
