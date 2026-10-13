@@ -184,7 +184,14 @@ describe('describeRoutePreviewError — missing required sample fields (follow-u
     expect(Object.keys(en).sort()).toEqual(Object.keys(zh).sort())
     // FU gate r1 P3-1: the 试运行 user picker is single-select, so a required multi-person field can
     // never be completed there; the hint must list it among the fields to preview on the submit page.
-    expect(zh.cannotFillHint).toContain('多选人员')
-    expect(en.cannotFillHint).toContain('multi-person')
+    // FU gate r2 NIT-B: assert the LIST fragment itself (the parenthesis also mentions the field kind).
+    expect(zh.cannotFillHint).toContain('日期区间、多选人员等字段')
+    expect(en.cannotFillHint).toContain('date-range and multi-person fields')
+    // FU gate r2 NIT-A: the parenthesis must not read as "pick one person and it will run" — a single
+    // value on a multi-person field is rejected by the server, so the hint says it cannot be filled.
+    expect(zh.cannotFillHint).toContain('填不了')
+    expect(zh.cannotFillHint).not.toContain('只能选一人）')
+    expect(en.cannotFillHint).toContain('cannot fill a multi-person field')
+    expect(en.cannotFillHint).not.toContain('only takes one person here')
   })
 })

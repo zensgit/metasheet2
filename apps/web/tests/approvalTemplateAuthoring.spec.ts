@@ -6886,6 +6886,28 @@ describe('TemplateAuthoringView', () => {
       expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['operator-multi-person'], false))
       expect(noteRule(await saveFields())).toStrictEqual(legacyRule)
     })
+
+    // FU gate r2 P2-1: the default Designer 2.0 surface narrows through the PRODUCTION builder
+    // (ApprovalFormBuilder passes `listValued` with the dependency descriptor) — not a test-built prop.
+    it('follow-up (b) Designer 2.0 (flag on): through the PRODUCTION builder a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is marked and saved unchanged', async () => {
+      const legacyRule = { fieldId: 'signers', operator: 'eq', value: 'u1' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], true, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
+      ;(cards[cards.length - 1] as HTMLElement).click()
+      await flushUi()
+      const operator = container!.querySelector('[data-testid="approval-form-field-inspector-visibility-operator"]') as HTMLSelectElement | null
+      expect(operator).not.toBeNull()
+      expect(operator!.value).toBe('eq')
+      expect(Array.from(operator!.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(Array.from(operator!.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty', 'notEmpty'])
+      expect(container!.querySelector('[data-testid="approval-form-field-inspector-visibility-issue"]')?.textContent?.trim())
+        .toBe(conditionValueIssueText(['operator-multi-person'], false))
+      const fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'note').visibilityRule).toStrictEqual(legacyRule)
+    })
   })
   })
 

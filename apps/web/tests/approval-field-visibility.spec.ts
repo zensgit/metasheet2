@@ -242,6 +242,9 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     // (Designer 2.0 「包含任一」, legacy designer 「包含」).
     expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain(`「${CONDITION_VALUE_COPY_ZH.visibilityInLabelOption}」`)
     expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain('「包含」')
+    // FU gate r2 NIT-B: the English copy names both labels too.
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain(`"${CONDITION_VALUE_COPY_EN.visibilityInLabelOption.toLowerCase()}" in display conditions`)
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain('"contains" in the legacy designer')
     expect(CONDITION_VALUE_COPY_ZH.issueTitleAdvisory).not.toContain('失效')
     expect(CONDITION_VALUE_COPY_EN.issueTitleAdvisory).not.toContain('not in effect')
     for (const key of ['issueTitleAdvisory', 'issueOperatorOptionOrder', 'issueOperatorMultiPerson'] as const) {
