@@ -287,8 +287,8 @@ async function runPreview() {
 
 .attendance__calendar-preview-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px 20px;
+  grid-template-columns: minmax(0, 28rem);
+  gap: 12px;
 }
 
 .attendance__calendar-preview-result {

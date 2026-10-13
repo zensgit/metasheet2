@@ -13,17 +13,13 @@
       </label>
       <label class="attendance__field" for="attendance-rule-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select id="attendance-rule-timezone" v-model="ruleForm.timezone" name="ruleTimezone">
-          <optgroup
-            v-for="group in ruleTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-rule-timezone"
+          name="ruleTimezone"
+          v-model="ruleForm.timezone"
+          :tr="tr"
+          :groups="ruleTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-rule-start">
         <span>{{ tr('Work start', '上班时间') }}</span>
@@ -73,21 +69,13 @@
       </label>
       <label class="attendance__field" for="attendance-rotation-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-rotation-timezone"
-          v-model="rotationRuleForm.timezone"
           name="rotationTimezone"
-        >
-          <optgroup
-            v-for="group in rotationRuleTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          v-model="rotationRuleForm.timezone"
+          :tr="tr"
+          :groups="rotationRuleTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
         <span>{{ tr('Shift sequence (IDs)', '班次序列（ID）') }}</span>
@@ -285,10 +273,11 @@
       <AttendanceUserPickerField
         v-model="rotationAssignmentForm.userId"
         :tr="tr"
+        typeahead
         :label="tr('User', '用户')"
         name="rotationUserId"
-        :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
-        :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+        :help-text="tr('Type a name or email. Matches appear as you type.', '输入姓名或邮箱，输入时自动匹配。')"
+        :search-placeholder="tr('Name or email', '姓名或邮箱')"
         :full-width="false"
         input-id="attendance-rotation-user"
         endpoint="/api/attendance-admin/users/search"
@@ -409,17 +398,13 @@
       </label>
       <label class="attendance__field" for="attendance-shift-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select id="attendance-shift-timezone" v-model="shiftForm.timezone" name="shiftTimezone">
-          <optgroup
-            v-for="group in shiftTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-shift-timezone"
+          name="shiftTimezone"
+          v-model="shiftForm.timezone"
+          :tr="tr"
+          :groups="shiftTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-shift-start">
         <span>{{ tr('Work start', '上班开始') }}</span>
@@ -682,6 +667,7 @@
 
 <script setup lang="ts">
 import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import AttendanceWeekdayChipField from './AttendanceWeekdayChipField.vue'
 import { computed, type Ref } from 'vue'

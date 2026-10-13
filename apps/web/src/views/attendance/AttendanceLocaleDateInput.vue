@@ -184,7 +184,10 @@ onBeforeUnmount(() => {
       @focus="showCalendar"
     />
     <button class="attendance-locale-date__button" type="button" :disabled="blocked" :aria-label="isZh ? '打开日历' : 'Open calendar'" @click="toggle">
-      {{ isZh ? '日历' : 'Cal' }}
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2" />
+        <path d="M2 6.5h12M5 2v2.5M11 2v2.5" fill="none" stroke="currentColor" stroke-width="1.2" />
+      </svg>
     </button>
     <span v-if="open" class="attendance-locale-date__popup" data-attendance-locale-date-popup @pointerdown.stop>
       <span class="attendance-locale-date__nav">
@@ -234,14 +237,23 @@ onBeforeUnmount(() => {
 
 .attendance-locale-date__button {
   flex: 0 0 auto;
-  min-height: 32px;
-  padding: 4px 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   border: 1px solid var(--ms-border, #d0d5dd);
   border-radius: 8px;
   background: var(--ms-bg-card, #fff);
-  color: var(--ms-text-2, #667085);
-  font-size: 12px;
+  color: var(--ms-text-3, #667085);
   cursor: pointer;
+}
+
+.attendance-locale-date__button svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .attendance-locale-date__popup {

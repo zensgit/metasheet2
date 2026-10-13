@@ -222,3 +222,56 @@ export function buildTimezoneOptionGroups(
     })
     .filter((group): group is TimezoneOptionGroupEntry => Boolean(group))
 }
+
+export interface TimezoneChoice {
+  value: string
+  label: string
+  offsetMinutes?: number
+}
+
+const OFFSET_IN_LABEL = /(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::(\d{2}))?/i
+
+/** Minutes east of UTC. Null when the text is a city or IANA search, not an offset. */
+export function parseTimezoneOffsetQuery(raw: string): number | null {
+  const text = raw.trim().replace(/\s+/g, '').toLowerCase()
+  if (!text) return null
+  const signed = /^(?:utc|gmt)?([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(text)
+  if (signed) {
+    const sign = signed[1] === '-' ? -1 : 1
+    const hours = Number(signed[2])
+    const minutes = signed[3] ? Number(signed[3]) : 0
+    if (hours > 14 || minutes > 59) return null
+    return sign * (hours * 60 + minutes)
+  }
+  const unsigned = /^(?:utc|gmt)?(\d{1,2})(?::(\d{2}))?$/.exec(text)
+  if (!unsigned) return null
+  const hours = Number(unsigned[1])
+  const minutes = unsigned[2] ? Number(unsigned[2]) : 0
+  if (hours > 14 || minutes > 59) return null
+  return hours * 60 + minutes
+}
+
+export function timezoneChoiceOffsetMinutes(choice: TimezoneChoice, at = new Date()): number | null {
+  if (typeof choice.offsetMinutes === 'number' && Number.isFinite(choice.offsetMinutes)) {
+    return choice.offsetMinutes
+  }
+  const fromLabel = choice.label.match(OFFSET_IN_LABEL)
+  if (fromLabel) {
+    const sign = fromLabel[1] === '-' ? -1 : 1
+    return sign * (Number(fromLabel[2]) * 60 + Number(fromLabel[3] || '0'))
+  }
+  const formatted = formatTimezoneOffsetLabel(choice.value, at)
+  const fromFormatted = formatted.match(OFFSET_IN_LABEL)
+  if (!fromFormatted) return null
+  const sign = fromFormatted[1] === '-' ? -1 : 1
+  return sign * (Number(fromFormatted[2]) * 60 + Number(fromFormatted[3] || '0'))
+}
+
+export function timezoneChoiceMatchesQuery(choice: TimezoneChoice, query: string, at = new Date()): boolean {
+  const trimmed = query.trim()
+  if (!trimmed) return true
+  const offset = parseTimezoneOffsetQuery(trimmed)
+  if (offset !== null) return timezoneChoiceOffsetMinutes(choice, at) === offset
+  const needle = trimmed.toLowerCase()
+  return choice.label.toLowerCase().includes(needle) || choice.value.toLowerCase().includes(needle)
+}

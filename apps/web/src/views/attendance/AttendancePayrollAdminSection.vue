@@ -20,21 +20,13 @@
       </label>
       <label class="attendance__field" for="attendance-payroll-template-timezone">
         <span>{{ tr('Timezone', '时区') }}</span>
-        <select
+        <AttendanceTimezoneSelect
           id="attendance-payroll-template-timezone"
-          v-model="payrollTemplateForm.timezone"
           name="payrollTemplateTimezone"
-        >
-          <optgroup
-            v-for="group in payrollTemplateTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+          v-model="payrollTemplateForm.timezone"
+          :tr="tr"
+          :groups="payrollTemplateTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field" for="attendance-payroll-template-start">
         <span>{{ tr('Start day', '起始日') }}</span>
@@ -458,6 +450,7 @@
 
 <script setup lang="ts">
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import { computed, type Ref } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import type {
