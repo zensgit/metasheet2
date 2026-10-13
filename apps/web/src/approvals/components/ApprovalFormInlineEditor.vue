@@ -496,10 +496,11 @@
           <el-form-item label="显隐规则" class="template-authoring__wide">
             <div class="template-authoring__visibility">
               <el-select
-                v-model="field.visibility.dependsOnFieldId"
+                :model-value="field.visibility.dependsOnFieldId"
                 :disabled="readOnly"
                 class="ms-w-200"
                 data-testid="approval-field-visibility-depends"
+                @update:model-value="(id: string | null | undefined) => onVisibilityDependsChange(field, id)"
               >
                 <el-option label="无（始终显示）" value="" />
                 <el-option
@@ -511,43 +512,120 @@
               </el-select>
               <template v-if="field.visibility.dependsOnFieldId">
                 <el-select
-                  v-model="field.visibility.operator"
+                  :model-value="field.visibility.operator"
                   :disabled="readOnly"
                   class="ms-w-130"
                   data-testid="approval-field-visibility-operator"
+                  @update:model-value="(operator: FormFieldVisibilityOperator) => onVisibilityOperatorChange(field, operator)"
                 >
-                  <el-option label="等于" value="eq" />
-                  <el-option label="不等于" value="neq" />
-                  <el-option label="包含" value="in" />
-                  <el-option label="为空" value="isEmpty" />
-                  <el-option label="不为空" value="notEmpty" />
+                  <el-option
+                    v-for="choice in visibilityOperatorChoices(field)"
+                    :key="choice.value"
+                    :label="choice.label"
+                    :value="choice.value"
+                    :disabled="choice.disabled"
+                  />
                 </el-select>
+                <!-- R-43 (B): the value control follows the dependency field's type. -->
+                <template v-if="visibilityIsOption(field) && visibilityNeedsValue(field)">
+                  <span
+                    v-if="visibilityDependencyOptions(field).length === 0"
+                    class="template-authoring__hint"
+                    data-testid="approval-field-visibility-no-options"
+                  >{{ conditionCopy.noOptions }}</span>
+                  <el-select
+                    v-else-if="field.visibility.operator !== 'in'"
+                    :model-value="visibilityOptionScalar(field)"
+                    :disabled="readOnly"
+                    :placeholder="conditionCopy.chooseOption"
+                    clearable
+                    class="ms-w-240"
+                    data-testid="approval-field-visibility-option-value"
+                    @update:model-value="(value: string | null | undefined) => onVisibilityOptionScalarChange(field, value)"
+                  >
+                    <el-option
+                      v-for="option in visibilityDependencyOptions(field)"
+                      :key="option.value"
+                      :label="option.label"
+                      :value="option.value"
+                    />
+                    <el-option
+                      v-if="visibilityOptionScalarStale(field)"
+                      :label="conditionCopy.invalidValue"
+                      :value="visibilityOptionScalar(field)"
+                      disabled
+                    />
+                  </el-select>
+                  <el-select
+                    v-else
+                    :model-value="visibilityOptionList(field)"
+                    :disabled="readOnly"
+                    :placeholder="conditionCopy.chooseOptions"
+                    multiple
+                    collapse-tags
+                    class="ms-w-240"
+                    data-testid="approval-field-visibility-option-values"
+                    @update:model-value="(values: string[]) => onVisibilityOptionListChange(field, values)"
+                  >
+                    <el-option
+                      v-for="option in visibilityDependencyOptions(field)"
+                      :key="option.value"
+                      :label="option.label"
+                      :value="option.value"
+                    />
+                  </el-select>
+                </template>
                 <el-input
-                  v-if="field.visibility.operator === 'in'"
-                  v-model="field.visibility.valueText"
+                  v-else-if="field.visibility.operator === 'in'"
+                  :model-value="visibilityDraftListText(field.visibility, visibilityKindOf(field))"
                   :disabled="readOnly"
                   type="textarea"
                   :rows="2"
-                  placeholder="每行一个值"
+                  :placeholder="visibilityKindOf(field) === 'number' ? conditionCopy.oneNumberPerLine : conditionCopy.oneValuePerLine"
                   class="ms-w-240"
                   data-testid="approval-field-visibility-values"
+                  @update:model-value="(text: string) => onVisibilityListTextChange(field, text)"
+                />
+                <el-input-number
+                  v-else-if="visibilityKindOf(field) === 'number' && visibilityNeedsValue(field)"
+                  :model-value="visibilityNumberScalar(field)"
+                  :disabled="readOnly"
+                  :controls="false"
+                  :placeholder="conditionCopy.enterNumber"
+                  class="ms-w-240"
+                  data-testid="approval-field-visibility-number-value"
+                  @update:model-value="(value: number | null | undefined) => onVisibilityNumberChange(field, value)"
                 />
                 <el-input
                   v-else-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'"
-                  v-model="field.visibility.valueText"
+                  :model-value="visibilityDraftScalarText(field.visibility, 'text')"
                   :disabled="readOnly"
                   placeholder="比较值"
                   class="ms-w-240"
                   data-testid="approval-field-visibility-value"
+                  @update:model-value="(text: string) => onVisibilityScalarTextChange(field, text)"
                 />
               </template>
             </div>
             <div v-if="field.visibility.dependsOnFieldId" class="template-authoring__hint">
               仅当依赖字段满足条件时才显示本字段。
-              <template v-if="field.visibility.operator === 'eq' || field.visibility.operator === 'neq'">
+              <!-- R-43 gate r3 NIT-c: not while a marked stored value is shown empty (the box is empty
+                   but what is saved is not an empty value). -->
+              <template v-if="visibilityKindOf(field) === 'text' && (field.visibility.operator === 'eq' || field.visibility.operator === 'neq') && !visibilityIssueText(field)">
                 比较值留空表示「{{ field.visibility.operator === 'eq' ? '等于' : '不等于' }}空值」；要取消规则请把依赖字段设为「无」。
               </template>
             </div>
+            <div
+              v-if="visibilityIssueText(field)"
+              class="template-authoring__hint template-authoring__hint--issue"
+              role="note"
+              data-testid="approval-field-visibility-issue"
+            >{{ visibilityIssueText(field) }}</div>
+            <div
+              v-if="visibilityStoredValueNote(field) !== null"
+              class="template-authoring__hint template-authoring__stored-value"
+              data-testid="approval-field-visibility-stored-value"
+            >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-field-visibility-stored-value-text">{{ visibilityStoredValueNote(field) }}</span></div>
           </el-form-item>
         </div>
       </div>
@@ -601,7 +679,39 @@
  *
  * No injections are used.
  */
-import type { AuthorableFieldType, DetailColumnDraft, FieldAuthoringDraft } from '../templateAuthoring'
+import { computed } from 'vue'
+import type { FormFieldVisibilityOperator, FormOption } from '../../types/approval'
+import {
+  buildVisibilityRule,
+  visibilityStoredValuePreview,
+  visibilityDependencyValueField,
+  visibilityDraftForDependencyChange,
+  visibilityDraftList,
+  visibilityDraftListText,
+  visibilityDraftScalar,
+  visibilityDraftScalarText,
+  visibilityDraftWithList,
+  visibilityDraftWithListText,
+  visibilityDraftWithOperator,
+  visibilityDraftWithScalar,
+  visibilityDraftWithScalarText,
+  type AuthorableFieldType,
+  type DetailColumnDraft,
+  type FieldAuthoringDraft,
+} from '../templateAuthoring'
+import {
+  conditionValueCopy,
+  conditionValueIssueText,
+  conditionValueKind,
+  isCurrentOptionValue,
+  isOptionKind,
+  STALE_OPTION_KEY,
+  visibilityOperatorsFor,
+  visibilityRuleValueIssues,
+  type ConditionValueField,
+  type ConditionValueKind,
+} from '../conditionValueTyping'
+import { useLocale } from '../../composables/useLocale'
 import ApprovalDepartmentPicker, { type ApprovalDepartmentValue } from './ApprovalDepartmentPicker.vue'
 
 interface ApprovalFormFieldPaletteEntry {
@@ -632,7 +742,7 @@ interface ApprovalFormDetailLeafTypeOption {
   label: string
 }
 
-defineProps<{
+const props = defineProps<{
   fields: FieldAuthoringDraft[]
   readOnly: boolean
   templateName: string
@@ -667,6 +777,127 @@ const emit = defineEmits<{
 
 function addFieldOfType(type: AuthorableFieldType): void {
   emit('add-field-of-type', type)
+}
+
+// --- R-43 (B): typed visibility values ------------------------------------------------------------
+// The legacy editor edits the parent-owned draft in place (pre-existing pattern); each handler
+// replaces `field.visibility` with a NEW draft built by the shared templateAuthoring writers, so this
+// surface and Designer 2.0 store identical shapes. Labels of the existing operators stay as before.
+const { isZh } = useLocale()
+const conditionCopy = computed(() => conditionValueCopy(isZh.value))
+const LEGACY_VISIBILITY_OPERATOR_LABELS: Record<FormFieldVisibilityOperator, string> = {
+  eq: '等于',
+  neq: '不等于',
+  in: '包含',
+  isEmpty: '为空',
+  notEmpty: '不为空',
+}
+
+function visibilityDependency(field: FieldAuthoringDraft): ConditionValueField | null {
+  return visibilityDependencyValueField(field.visibility.dependsOnFieldId, props.fields)
+}
+function visibilityKindOf(field: FieldAuthoringDraft): ConditionValueKind {
+  return conditionValueKind(visibilityDependency(field))
+}
+function visibilityIsOption(field: FieldAuthoringDraft): boolean {
+  return isOptionKind(visibilityKindOf(field))
+}
+function visibilityNeedsValue(field: FieldAuthoringDraft): boolean {
+  const operator = field.visibility.operator
+  return operator === 'eq' || operator === 'neq' || operator === 'in'
+}
+function visibilityDependencyOptions(field: FieldAuthoringDraft): FormOption[] {
+  return [...(visibilityDependency(field)?.options ?? [])]
+}
+function visibilityOperatorChoices(field: FieldAuthoringDraft) {
+  const choices = visibilityOperatorsFor(visibilityKindOf(field)).map((operator) => ({
+    value: operator,
+    label: LEGACY_VISIBILITY_OPERATOR_LABELS[operator],
+    disabled: false,
+  }))
+  const current = field.visibility.operator
+  if (!choices.some((choice) => choice.value === current)) {
+    choices.push({
+      value: current,
+      label: `${LEGACY_VISIBILITY_OPERATOR_LABELS[current] ?? current}${conditionCopy.value.notApplicableSuffix}`,
+      disabled: true,
+    })
+  }
+  return choices
+}
+/** R-43 (B): the saved value its box shows EMPTY because the rule is marked (read-only), or null. */
+function visibilityStoredValueNote(field: FieldAuthoringDraft): string | null {
+  if (!field.visibility.dependsOnFieldId) return null
+  return visibilityStoredValuePreview(field.visibility, visibilityDependency(field))
+}
+function visibilityIssueText(field: FieldAuthoringDraft): string {
+  if (!field.visibility.dependsOnFieldId) return ''
+  return conditionValueIssueText(
+    visibilityRuleValueIssues(buildVisibilityRule(field.visibility), visibilityDependency(field)),
+    isZh.value,
+  )
+}
+/**
+ * Option values are strings: a non-string stored value (API-written, e.g. the number 1 against an
+ * option '1') never matches `===`, so it shows as the invalid placeholder — never as that option
+ * selected — and re-picking the option is a real change that fixes it.
+ */
+function visibilityOptionScalarStale(field: FieldAuthoringDraft): boolean {
+  const scalar = visibilityDraftScalar(field.visibility)
+  if (scalar === undefined || scalar === null || scalar === '' || (Array.isArray(scalar) && scalar.length === 0)) return false
+  return !isCurrentOptionValue(visibilityDependency(field), scalar)
+}
+function visibilityOptionScalar(field: FieldAuthoringDraft): string {
+  const scalar = visibilityDraftScalar(field.visibility)
+  if (visibilityOptionScalarStale(field)) return typeof scalar === 'string' ? scalar : STALE_OPTION_KEY
+  return typeof scalar === 'string' ? scalar : ''
+}
+/** Only current option values enter the multi-select model (a stale one would render raw). */
+function visibilityOptionList(field: FieldAuthoringDraft): string[] {
+  const list = visibilityDraftList(field.visibility)
+  return visibilityDependencyOptions(field)
+    .map((option) => option.value)
+    .filter((value) => list.includes(value))
+}
+function visibilityNumberScalar(field: FieldAuthoringDraft): number | undefined {
+  // Never hand a non-number to el-input-number: it coerces on mount and would rewrite an untouched rule.
+  const scalar = visibilityDraftScalar(field.visibility)
+  return typeof scalar === 'number' && Number.isFinite(scalar) ? scalar : undefined
+}
+function onVisibilityDependsChange(field: FieldAuthoringDraft, id: string | null | undefined): void {
+  const next = id ?? ''
+  field.visibility = visibilityDraftForDependencyChange(
+    field.visibility,
+    next,
+    visibilityDependency(field),
+    visibilityDependencyValueField(next, props.fields),
+  )
+}
+function onVisibilityOperatorChange(field: FieldAuthoringDraft, operator: FormFieldVisibilityOperator): void {
+  field.visibility = visibilityDraftWithOperator(field.visibility, operator)
+}
+function onVisibilityOptionScalarChange(field: FieldAuthoringDraft, value: string | null | undefined): void {
+  field.visibility = value
+    ? visibilityDraftWithScalar(field.visibility, value)
+    : visibilityDraftWithScalarText(field.visibility, '')
+}
+function onVisibilityOptionListChange(field: FieldAuthoringDraft, values: string[]): void {
+  const picked = new Set(values ?? [])
+  const ordered = visibilityDependencyOptions(field)
+    .map((option) => option.value)
+    .filter((value) => picked.has(value))
+  field.visibility = visibilityDraftWithList(field.visibility, ordered)
+}
+function onVisibilityNumberChange(field: FieldAuthoringDraft, value: number | null | undefined): void {
+  field.visibility = typeof value === 'number' && Number.isFinite(value)
+    ? visibilityDraftWithScalar(field.visibility, value)
+    : visibilityDraftWithScalarText(field.visibility, '')
+}
+function onVisibilityListTextChange(field: FieldAuthoringDraft, text: string): void {
+  field.visibility = visibilityDraftWithListText(field.visibility, text, visibilityKindOf(field))
+}
+function onVisibilityScalarTextChange(field: FieldAuthoringDraft, text: string): void {
+  field.visibility = visibilityDraftWithScalarText(field.visibility, text)
 }
 function onPaletteDragStart(type: AuthorableFieldType, event: DragEvent): void {
   emit('palette-drag-start', type, event)
@@ -778,6 +1009,14 @@ function detailColumnRowKey(row: DetailColumnDraft): string {
   font-size: 12px;
   line-height: 1.5;
   color: var(--el-text-color-secondary);
+}
+
+.template-authoring__hint--issue {
+  color: var(--el-color-danger);
+}
+
+.template-authoring__stored-value {
+  overflow-wrap: anywhere;
 }
 
 .template-authoring__detail {

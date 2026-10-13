@@ -34,6 +34,15 @@
  *     `showApprovalSubmit` flag outlives any single record: a record that disappears under an OPEN
  *     dialog must not leave the flag set and auto-open the dialog against the NEXT record's id.
  *     Drop the `showApprovalSubmit.value = false` reset in the `props.record` watcher ⇒ red.
+ *
+ * R-43 A (owner 2026-10-12) adds:
+ * 13. 显示条件: the dialog shows/hides fields with the approval centre's OWN evaluator over the TYPED
+ *     values; hidden fields are not required, lose their draft, and are pruned from the payload; an
+ *     unsupported field still refuses the whole template even when hidden; a rule-less template is
+ *     unchanged.
+ * 14. 发起人自选: a 422 APPROVAL_REQUESTER_CHOICE_REQUIRED renders localized guidance to the approval
+ *     centre (link only where a router exists, no query), and the dialog predicts it before submit only
+ *     when the served version IS the active one.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, ref, type App } from 'vue'
@@ -69,6 +78,8 @@ const SIMPLE_FORM = {
   formFields: [
     { id: 'reason', type: 'text', label: '事由', required: true },
     { id: 'days', type: 'number', label: '天数' },
+    // FIXTURE-ONLY type: the server's form-field type list has no `checkbox`, so a real template never
+    // carries one. It is kept to exercise the dialog's boolean branch (submit shape: unchecked ⇒ `false` is sent).
     { id: 'urgent', type: 'checkbox', label: '加急' },
   ],
 }
@@ -151,6 +162,7 @@ function mountInspector(options: HarnessOptions = {}): {
       routes: [
         { path: '/', name: 'home', component: { template: '<div />' } },
         { path: '/approvals/:id', name: 'approval-detail', component: { template: '<div />' } },
+        { path: '/approvals/new/:templateId', name: 'approval-create', component: { template: '<div />' } },
       ],
     })
     app.use(router)
@@ -842,5 +854,528 @@ describe('选中记录消失时的对话框状态 / dialog state across a record
     record.value = { id: 'rec_1', version: 4, data: { fld_title: 'Alpha 2' } } as unknown as MetaRecord
     await flushUi(6)
     expect(dialog()).not.toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------
+// R-43 A — 显示条件 / visibility rules in the record submit dialog.
+// ---------------------------------------------------------------------------------------------------
+
+const VISIBILITY_FORM = {
+  id: 'tpl_leave',
+  name: '请假申请',
+  status: 'published',
+  formFields: [
+    {
+      id: 'kind', type: 'select', label: '类型', required: true,
+      options: [{ label: '年假', value: 'annual' }, { label: '病假', value: 'sick' }, { label: '事假', value: 'personal' }],
+    },
+    { id: 'cert', type: 'text', label: '病假证明', required: true, visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
+    { id: 'certMissing', type: 'text', label: '无证明说明', required: true, visibilityRule: { fieldId: 'cert', operator: 'isEmpty' } },
+    { id: 'scope', type: 'text', label: '假期范围', visibilityRule: { fieldId: 'kind', operator: 'in', values: ['annual', 'personal'] } },
+    { id: 'days', type: 'number', label: '天数' },
+    { id: 'longNote', type: 'text', label: '长假说明', required: true, visibilityRule: { fieldId: 'days', operator: 'eq', value: 5 } },
+    // A legacy rule authored with the STRING '5' against a number field: the server compares with ===
+    // against the number it receives, so it never matches — the dialog must agree (no silent loosening).
+    { id: 'legacyNote', type: 'text', label: '旧规则说明', visibilityRule: { fieldId: 'days', operator: 'eq', value: '5' } },
+    { id: 'reasonText', type: 'text', label: '事由' },
+    { id: 'otherNote', type: 'text', label: '其他说明', visibilityRule: { fieldId: 'reasonText', operator: 'eq', value: '其他' } },
+    // FIXTURE-ONLY type (the server never serves `checkbox`, see SIMPLE_FORM): it pins the
+    // submit-time prune layer, which for real types sits behind the hide-clears-draft watcher.
+    { id: 'proof', type: 'checkbox', label: '已附证明', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
+  ],
+}
+
+const fieldControl = (fieldId: string) =>
+  document.querySelector<HTMLInputElement>(`[data-testid="record-approval-field-${fieldId}"]`)
+
+function setSelectValue(fieldId: string, value: string) {
+  const control = document.querySelector<HTMLSelectElement>(`[data-testid="record-approval-field-${fieldId}"]`)
+  expect(control).not.toBeNull()
+  control!.value = value
+  control!.dispatchEvent(new Event('change'))
+}
+
+async function openVisibilityForm(form: unknown = VISIBILITY_FORM) {
+  const client = fakeApiClient({ getApprovalTemplate: vi.fn().mockResolvedValue(form) })
+  const { container } = mountInspector({ canSubmitApproval: true, client })
+  await flushUi()
+  await openDialog(container)
+  await pickTemplate('tpl_leave')
+  return client
+}
+
+async function submitAndCapture(client: ReturnType<typeof fakeApiClient>) {
+  submitBtn()!.click()
+  await flushUi(8)
+  const lastCall = client.submitRecordApproval.mock.calls.at(-1) as unknown[] | undefined
+  return lastCall?.[2] as { templateId: string; formData: Record<string, unknown> } | undefined
+}
+
+describe('显示条件 / visibility rules in the record submit dialog (R-43 A)', () => {
+  it('single-select eq: the dependent field appears only for the matching option (rule-less fields always shown)', async () => {
+    await openVisibilityForm()
+    expect(fieldControl('cert')).toBeNull()
+    for (const always of ['kind', 'days', 'reasonText']) expect(fieldControl(always)).not.toBeNull()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    expect(fieldControl('cert')).not.toBeNull()
+    const certLabel = Array.from(dialog()!.querySelectorAll('label')).find((node) => node.textContent?.includes('病假证明'))!
+    expect(certLabel.textContent).toContain('*')
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    expect(fieldControl('cert')).toBeNull()
+    for (const always of ['kind', 'days', 'reasonText']) expect(fieldControl(always)).not.toBeNull()
+  })
+
+  it('single-select in: shown for any listed option, hidden otherwise and when empty', async () => {
+    await openVisibilityForm()
+    expect(fieldControl('scope')).toBeNull()
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    expect(fieldControl('scope')).not.toBeNull()
+    setSelectValue('kind', 'personal')
+    await flushUi()
+    expect(fieldControl('scope')).not.toBeNull()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    expect(fieldControl('scope')).toBeNull()
+    setSelectValue('kind', '')
+    await flushUi()
+    expect(fieldControl('scope')).toBeNull()
+  })
+
+  it('number rules compare the TYPED value (5), not the string draft (\'5\') — same as the server', async () => {
+    await openVisibilityForm()
+    setFieldValue('days', '5')
+    await flushUi()
+    expect(fieldControl('longNote')).not.toBeNull()
+    // Negative control: a legacy string-valued rule does NOT match the number 5 (server agrees).
+    expect(fieldControl('legacyNote')).toBeNull()
+    setFieldValue('days', '4')
+    await flushUi()
+    expect(fieldControl('longNote')).toBeNull()
+    expect(fieldControl('legacyNote')).toBeNull()
+  })
+
+  it('text eq: exact match shows, any other text hides', async () => {
+    await openVisibilityForm()
+    expect(fieldControl('otherNote')).toBeNull()
+    setFieldValue('reasonText', '其他')
+    await flushUi()
+    expect(fieldControl('otherNote')).not.toBeNull()
+    setFieldValue('reasonText', '其它')
+    await flushUi()
+    expect(fieldControl('otherNote')).toBeNull()
+  })
+
+  it('dependency chain: a field whose dependency is hidden is hidden too, even if its own rule would hold', async () => {
+    await openVisibilityForm()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    // cert visible and empty ⇒ certMissing (isEmpty) visible
+    expect(fieldControl('cert')).not.toBeNull()
+    expect(fieldControl('certMissing')).not.toBeNull()
+    setFieldValue('cert', '诊断书')
+    await flushUi()
+    expect(fieldControl('certMissing')).toBeNull()
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    // cert is hidden (and its value is empty, so isEmpty WOULD hold) — certMissing must still be hidden.
+    expect(fieldControl('cert')).toBeNull()
+    expect(fieldControl('certMissing')).toBeNull()
+  })
+
+  it('hidden required fields are not required: submit unlocks once the VISIBLE required ones are filled', async () => {
+    await openVisibilityForm()
+    // kind (required, visible) is empty ⇒ blocked
+    expect(submitBtn()!.disabled).toBe(true)
+    expect(document.querySelector('[data-testid="record-approval-required-notice"]')).not.toBeNull()
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    // cert / certMissing / longNote are required but hidden
+    expect(submitBtn()!.disabled).toBe(false)
+    expect(document.querySelector('[data-testid="record-approval-required-notice"]')).toBeNull()
+    // a visible required field still blocks
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(true)
+  })
+
+  it('a hidden field loses its value: hide → re-show comes back empty, and hidden values are never sent', async () => {
+    const client = await openVisibilityForm()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    setFieldValue('cert', '诊断书')
+    await flushUi()
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    expect(fieldControl('cert')!.value).toBe('')
+    // cert is required again and empty
+    expect(submitBtn()!.disabled).toBe(true)
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    const body = await submitAndCapture(client)
+    expect(body).toEqual({ templateId: 'tpl_leave', formData: { kind: 'annual' } })
+  })
+
+  it('a hidden checkbox is pruned — no `false` is sent for a field the actor never saw', async () => {
+    const client = await openVisibilityForm()
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    const body = await submitAndCapture(client)
+    expect(body!.formData).not.toHaveProperty('proof')
+  })
+
+  it('a VISIBLE unchecked checkbox still sends false (pre-existing behaviour kept)', async () => {
+    const client = await openVisibilityForm()
+    setSelectValue('kind', 'sick')
+    await flushUi()
+    setFieldValue('cert', '诊断书')
+    await flushUi()
+    const body = await submitAndCapture(client)
+    expect(body!.formData).toEqual({ kind: 'sick', cert: '诊断书', proof: false })
+  })
+
+  it('a rule-less template is unchanged: every field rendered, same payload as before', async () => {
+    const client = await openVisibilityForm(SIMPLE_FORM)
+    for (const id of ['reason', 'days', 'urgent']) expect(fieldControl(id)).not.toBeNull()
+    setFieldValue('reason', '年假')
+    setFieldValue('days', '2')
+    await flushUi()
+    const body = await submitAndCapture(client)
+    expect(body).toEqual({ templateId: 'tpl_leave', formData: { reason: '年假', days: 2, urgent: false } })
+  })
+
+  it('an unsupported field still refuses the whole template even while its rule hides it', async () => {
+    await openVisibilityForm({
+      id: 'tpl_leave',
+      formFields: [
+        { id: 'kind', type: 'select', label: '类型', options: [{ label: '年假', value: 'annual' }, { label: '病假', value: 'sick' }] },
+        { id: 'items', type: 'detail', label: '明细', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
+      ],
+    })
+    setSelectValue('kind', 'annual')
+    await flushUi()
+    expect(document.querySelector('[data-testid="record-approval-unsupported-notice"]')).not.toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-field-unsupported-items"]')).not.toBeNull()
+    expect(submitBtn()!.disabled).toBe(true)
+  })
+})
+
+describe('发起人自选 / requester choice in the record submit dialog (R-43 A)', () => {
+  const requesterChoiceRefusal = () => Object.assign(new Error('Approval creation was rejected'), {
+    status: 422,
+    code: 'APPROVAL_REQUESTER_CHOICE_REQUIRED',
+  })
+
+  it('422 APPROVAL_REQUESTER_CHOICE_REQUIRED renders Chinese guidance, not the English sentence (no router ⇒ no link)', async () => {
+    useLocale().setLocale('zh-CN')
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(requesterChoiceRefusal()) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    const notice = document.querySelector('[data-testid="record-approval-requester-choice-notice"]')
+    expect(notice).not.toBeNull()
+    expect(notice!.textContent).toContain('发起人自选')
+    expect(notice!.textContent).toContain('审批中心')
+    expect(notice!.textContent).toContain('不会关联到本记录')
+    expect(dialog()!.textContent).not.toContain('Approval creation was rejected')
+    expect(document.querySelector('[data-testid="record-approval-submit-error"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-link"]')).toBeNull()
+    // Resubmitting from here can never succeed.
+    expect(submitBtn()!.disabled).toBe(true)
+  })
+
+  it('English locale + router: the guidance is English and links to the approval-centre start page with NO query', async () => {
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(requesterChoiceRefusal()) })
+    const { container } = mountInspector({ canSubmitApproval: true, client, withRouter: true })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', 'leave')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    const notice = document.querySelector('[data-testid="record-approval-requester-choice-notice"]')!
+    expect(notice.textContent).toContain('approval centre')
+    expect(notice.textContent).toContain('not linked to this record')
+    expect(notice.textContent).not.toContain('Approval creation was rejected')
+    const link = document.querySelector<HTMLAnchorElement>('[data-testid="record-approval-requester-choice-link"]')
+    expect(link).not.toBeNull()
+    expect(link!.getAttribute('href')).toBe('/approvals/new/tpl_leave')
+    expect(link!.textContent).toContain('Start in the approval centre')
+  })
+
+  it('predicts it BEFORE submit when the served version is the active one (equal ids)', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({
+        ...SIMPLE_FORM, activeVersionId: 'v1', latestVersionId: 'v1', servedGraphRequiresRequesterChoice: true,
+      }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).not.toBeNull()
+    // `reason` is required and still empty, yet no "fill the required fields" hint: filling them would
+    // not make this template submittable, and the hint would suggest it does.
+    expect(document.querySelector('[data-testid="record-approval-required-notice"]')).toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(true)
+    submitBtn()!.click()
+    await flushUi(4)
+    expect(client.submitRecordApproval).not.toHaveBeenCalled()
+  })
+
+  it('does NOT predict when the served version is an unpublished draft (ids differ) — the server decides', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({
+        ...SIMPLE_FORM, activeVersionId: 'v1', latestVersionId: 'v2', servedGraphRequiresRequesterChoice: true,
+      }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-template-draft-notice"]')).not.toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('does NOT predict for an active served version WITHOUT a requester-choice node', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({ ...SIMPLE_FORM, activeVersionId: 'v1', latestVersionId: 'v1' }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('does NOT predict when the version ids are missing', async () => {
+    const client = fakeApiClient({
+      getApprovalTemplate: vi.fn().mockResolvedValue({ ...SIMPLE_FORM, servedGraphRequiresRequesterChoice: true }),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('switching template clears a previous refusal', async () => {
+    const client = fakeApiClient({ submitRecordApproval: vi.fn().mockRejectedValue(requesterChoiceRefusal()) })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(8)
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).not.toBeNull()
+    // A refusal must not lock the picker: switching template is the actor's way out.
+    expect(templateSelect()!.disabled).toBe(false)
+    await pickTemplate('tpl_purchase')
+    await pickTemplate('tpl_leave')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('locks the template picker while a submit is in flight, so its failure stays visible on its own template', async () => {
+    useLocale().setLocale('zh-CN')
+    let rejectSubmit: (reason: unknown) => void = () => {}
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSubmit = reject
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    // Nothing is in flight yet, so the picker must be usable before any template is chosen.
+    expect(templateSelect()!.disabled).toBe(false)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    expect(templateSelect()!.disabled).toBe(false)
+    submitBtn()!.click()
+    await flushUi(4)
+    expect(client.submitRecordApproval).toHaveBeenCalledTimes(1)
+    // Asserted DIRECTLY: jsdom still dispatches a synthetic `change` on a disabled <select>, so a blocked
+    // pickTemplate() would prove nothing — the attribute itself is what stops a real actor switching.
+    expect(templateSelect()!.disabled).toBe(true)
+    rejectSubmit(Object.assign(new Error('Approval template is not published'), {
+      status: 400,
+      code: 'RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED',
+    }))
+    await flushUi(8)
+    expect(templateSelect()!.value).toBe('tpl_leave')
+    const error = document.querySelector<HTMLElement>('[data-testid="record-approval-submit-error"]')
+    expect(error).not.toBeNull()
+    expect(error!.textContent).toContain('该审批模板未发布。')
+    expect(templateSelect()!.disabled).toBe(false)
+  })
+
+  it('a LATE 422 for the previous template does not block the template picked while it was in flight', async () => {
+    let rejectSubmit: (reason: unknown) => void = () => {}
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectSubmit = reject
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    await pickTemplate('tpl_leave')
+    setFieldValue('reason', '年假')
+    await flushUi()
+    submitBtn()!.click()
+    await flushUi(4)
+    expect(client.submitRecordApproval).toHaveBeenCalledTimes(1)
+    // Switch while tpl_leave's request is still in flight, THEN let its refusal arrive. The picker is
+    // disabled in flight (pinned above); jsdom's synthetic `change` bypasses that and stands in for the
+    // path the guard really covers — close/reopen, then pick another template.
+    await pickTemplate('tpl_purchase')
+    rejectSubmit(requesterChoiceRefusal())
+    await flushUi(8)
+    expect(templateSelect()!.value).toBe('tpl_purchase')
+    expect(document.querySelector('[data-testid="record-approval-requester-choice-notice"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-submit-error"]')).toBeNull()
+    expect(document.querySelector('[data-testid="record-approval-in-flight-notice"]')).toBeNull()
+    setFieldValue('reason', '采购')
+    await flushUi()
+    expect(submitBtn()!.disabled).toBe(false)
+  })
+
+  it('a LATE coded failure / 409 for the previous template is dropped the same way', async () => {
+    const rejects: Array<(reason: unknown) => void> = []
+    const client = fakeApiClient({
+      submitRecordApproval: vi.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejects.push(reject)
+      })),
+    })
+    const { container } = mountInspector({ canSubmitApproval: true, client })
+    await flushUi()
+    await openDialog(container)
+    for (const late of [
+      Object.assign(new Error('Approval template is not published'), { status: 400, code: 'RECORD_APPROVAL_TEMPLATE_NOT_PUBLISHED' }),
+      Object.assign(new Error('in flight'), {
+        status: 409,
+        name: 'MultitableRecordApprovalInFlightError',
+        code: 'RECORD_APPROVAL_IN_FLIGHT',
+        approvalInstanceId: 'inst_9',
+        requestNo: 'AP-2026-0009',
+      }),
+    ]) {
+      await pickTemplate('tpl_leave')
+      setFieldValue('reason', '年假')
+      await flushUi()
+      submitBtn()!.click()
+      await flushUi(4)
+      await pickTemplate('tpl_purchase')
+      rejects.at(-1)!(late)
+      await flushUi(8)
+      expect(document.querySelector('[data-testid="record-approval-submit-error"]')).toBeNull()
+      expect(document.querySelector('[data-testid="record-approval-in-flight-notice"]')).toBeNull()
+    }
+  })
+})
+
+describe('client tier — 显示条件 + requester-choice flag normalization (R-43 A)', () => {
+  function clientWith(fetchFn: ReturnType<typeof vi.fn>) {
+    return new MultitableApiClient({ fetchFn: fetchFn as never })
+  }
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
+
+  it('carries visibilityRule VERBATIM (no value coercion) and adds no key to a rule-less field', async () => {
+    const values = ['annual', 'personal']
+    const fetchFn = vi.fn().mockResolvedValue(json({
+      id: 'tpl_leave',
+      formSchema: {
+        fields: [
+          { id: 'kind', type: 'select', label: '类型', options: [{ label: '年假', value: 'annual' }] },
+          { id: 'a', type: 'text', label: 'A', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
+          { id: 'b', type: 'text', label: 'B', visibilityRule: { fieldId: 'days', operator: 'eq', value: 5 } },
+          { id: 'c', type: 'text', label: 'C', visibilityRule: { fieldId: 'kind', operator: 'in', values } },
+          { id: 'd', type: 'text', label: 'D', visibilityRule: { fieldId: ' kind ', operator: 'isEmpty' } },
+        ],
+      },
+    }))
+    const detail = await clientWith(fetchFn).getApprovalTemplate('tpl_leave')
+    expect(detail.formFields).toEqual([
+      { id: 'kind', type: 'select', label: '类型', options: [{ label: '年假', value: 'annual' }] },
+      { id: 'a', type: 'text', label: 'A', visibilityRule: { fieldId: 'kind', operator: 'eq', value: 'sick' } },
+      { id: 'b', type: 'text', label: 'B', visibilityRule: { fieldId: 'days', operator: 'eq', value: 5 } },
+      { id: 'c', type: 'text', label: 'C', visibilityRule: { fieldId: 'kind', operator: 'in', values: ['annual', 'personal'] } },
+      { id: 'd', type: 'text', label: 'D', visibilityRule: { fieldId: 'kind', operator: 'isEmpty' } },
+    ])
+    expect(detail.formFields[0]).not.toHaveProperty('visibilityRule')
+    // the number stays a number (a String() coercion here would make the dialog disagree with the server)
+    expect(detail.formFields[2].visibilityRule!.value).toBe(5)
+    expect(detail.formFields[4].visibilityRule).not.toHaveProperty('value')
+  })
+
+  it('drops a malformed rule rather than inventing one', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(json({
+      id: 'tpl_leave',
+      formSchema: {
+        fields: [
+          { id: 'a', type: 'text', label: 'A', visibilityRule: 'x' },
+          { id: 'b', type: 'text', label: 'B', visibilityRule: { operator: 'eq', value: 1 } },
+          { id: 'c', type: 'text', label: 'C', visibilityRule: { fieldId: 'a', operator: 'gt', value: 1 } },
+        ],
+      },
+    }))
+    const detail = await clientWith(fetchFn).getApprovalTemplate('tpl_leave')
+    for (const field of detail.formFields) expect(field).not.toHaveProperty('visibilityRule')
+  })
+
+  it('flags a requester-choice approval/handler node as a boolean only, never carrying the graph', async () => {
+    const graphWith = (nodes: unknown[]) => json({ id: 'tpl_leave', formSchema: { fields: [] }, approvalGraph: { nodes, edges: [] } })
+    const choice = { kind: 'requester_choice', mode: 'single', scope: { type: 'company' } }
+    const approvalDetail = await clientWith(vi.fn().mockResolvedValue(graphWith([
+      { key: 'start_node_k', type: 'start' },
+      { key: 'approval_node_k', type: 'approval', config: { assigneeSources: [choice] } },
+    ]))).getApprovalTemplate('tpl_leave')
+    expect(approvalDetail.servedGraphRequiresRequesterChoice).toBe(true)
+    expect(JSON.stringify(approvalDetail)).not.toContain('approval_node_k')
+
+    const handlerDetail = await clientWith(vi.fn().mockResolvedValue(graphWith([
+      { key: 'handler_node_k', type: 'handler', config: { assigneeSources: [choice] } },
+    ]))).getApprovalTemplate('tpl_leave')
+    expect(handlerDetail.servedGraphRequiresRequesterChoice).toBe(true)
+
+    // Only approval / handler nodes count (same scan as the server).
+    const ccOnly = await clientWith(vi.fn().mockResolvedValue(graphWith([
+      { key: 'cc_node_k', type: 'cc', config: { assigneeSources: [choice] } },
+      { key: 'start_node_k', type: 'start', config: { assigneeSources: [choice] } },
+    ]))).getApprovalTemplate('tpl_leave')
+    expect(ccOnly).not.toHaveProperty('servedGraphRequiresRequesterChoice')
+
+    const noGraph = await clientWith(vi.fn().mockResolvedValue(json({ id: 'tpl_leave', formSchema: { fields: [] } })))
+      .getApprovalTemplate('tpl_leave')
+    expect(noGraph).not.toHaveProperty('servedGraphRequiresRequesterChoice')
   })
 })

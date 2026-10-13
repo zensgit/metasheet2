@@ -321,3 +321,26 @@ Four commits since the previous baseline. The first three do not change a sensit
 #6358 adds `apps/web/src/utils/uuid.ts` to the attendance-web-guard path filter and to the module-graph wiring in both workflows. Job names stay `attendance-web-guard` and `browser-verify`. `plugin-tests.yml` still uses literal `ubuntu-latest` on every `runs-on`.
 
 Pins recomputed on this merge tree: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally on Node v22.23.3.
+
+## 13. Alignment to main 67874b9bc (2026-10-13)
+
+Draft #6051 was merged onto `origin/main` `67874b9bcd73d686796f57bcddf9e6aa47080a7b` (#6371, parent `0e02495a3c2f973af228dd8e8315918ef322a7b9`). Nothing had landed past that SHA at fetch time. The previous alignment baseline was `5acc139a44e6e4eb0e8e23a9b0f4e6b2f16d0ed6`. Zero conflicts. Harold approved folding the sensitive-path commits and re-running required checks. Workflow files came from main unchanged by this branch: every `runs-on` in `plugin-tests.yml` stays the literal `ubuntu-latest`.
+
+Ten commits since the previous baseline. Sensitive paths are the first-parent diff.
+
+| Commit | What | Sensitive paths |
+|---|---|---|
+| `389c9d71d1bc` #6359 | Locale replacement token tenant. | none |
+| `7f9f0d98edea` #6360 | Smoke request readback bound to the organization. | none |
+| `58f4842e0be5` #6363 | On-prem backend log rotation. | `plugin-tests.yml` |
+| `b7096129df28` #6364 | Narrow the R65 permission-catalogue migration `down()`. | `zzzz20261010120000_add_approval_write_act_template_manage_permissions.ts` |
+| `d9882a8ad01a` #6361 | Open history filters in the production verifier. | `plugin-tests.yml` |
+| `625d18ae4767` #6365 | Honour each T9 pwsh suite exit code. | `plugin-tests.yml` |
+| `94de2994d566` #6367 | Record submit dialog visibility rules. | none |
+| `e2345ab6b4a1` #6368 | Condition values follow the field type. | `approval-web-guard.yml` |
+| `0e02495a3c2f` #6372 | Bind performance tenant and runtime provenance. | `attendance-import-perf-baseline.yml`, `attendance-import-perf-highscale.yml`, `attendance-import-perf-longrun.yml`, `plugin-tests.yml`, `attendance-import-perf-gate.mjs`, `attendance-import-perf-gate.test.mjs`, `attendance-import-perf.mjs` |
+| `67874b9bcd73` #6371 | R65 record: narrowed `down()` ships from the re-cut package. | none |
+
+The roster org gate, streamed roster preview, `ensure_member` optional `sourceOrdinals` (the five member keys plus that field), migration `zzzz20261013090000_attendance_roster_member_source_ordinals`, the P25 member-source rollback registration, and the legacy membership error provenance stay on this tree. The generated P25 census test expects 112 sites and passed locally. Pins recomputed on this merge tree: 63 SHA-256 values, 66 leaf fields, 0 differing fields. The pin file was not rewritten. `sealed-export-package-provenance.test.cjs` passed locally on Node v22.23.3.
+
+The attendance real-DB step still sets `DATABASE_URL` and `ATTENDANCE_TEST_DATABASE_URL` and does not set `EXPECT_DB`. The approval real-DB step still sets `EXPECT_DB: '1'`.

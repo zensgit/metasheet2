@@ -645,9 +645,20 @@ jobs:
         shell: pwsh
         run: |
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-onprem-acceptance.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./scripts/ops/__tests__/stock-preparation-rca-window.behavior.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Backend log rotation (runbook-backend-log-rotation-20261012): hermetic, pm2 / schtasks /
+          # ScheduledTasks replaced by functions. The Windows-only cases self-report SKIP here; the
+          # script's PowerShell 5.1 grammar is pinned statically by the suite itself. The explicit
+          # exit check is required: a `shell: pwsh` step only fails on the LAST command's
+          # $LASTEXITCODE, so a script that exits 1 before another script is otherwise swallowed.
+          ./scripts/ops/__tests__/multitable-onprem-backend-log-rotate.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Static wiring + the not-applicable branches only: there is no icacls / NTFS here, so the
           # ACL layers self-report SKIP. The real-icacls coverage lives in the stock-prep-powershell51
           # job, now in .github/workflows/stock-prep-powershell51.yml.
@@ -860,7 +871,8 @@ jobs:
       - name: Run attendance window-runner pipeline contract
         run: |
           node --test scripts/ops/attendance-window-runner-pipeline.test.mjs
-          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs
+          node --test scripts/ops/attendance-import-scope.test.mjs scripts/ops/attendance-history-reconcile.test.mjs scripts/ops/attendance-acceptance-preflight.test.mjs scripts/ops/attendance-import-perf-payload.test.mjs scripts/ops/attendance-import-perf-gate.test.mjs
+          node --test scripts/verify-attendance-production-flow.test.mjs
 
       - name: Run linting
         if: matrix.node-version == '20.x'

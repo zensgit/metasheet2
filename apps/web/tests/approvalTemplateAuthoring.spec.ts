@@ -27,7 +27,16 @@ import {
   validateTemplateDraft,
   validateTemplateFormFields,
   validateTemplateBasicInfo,
+  buildVisibilityRule,
+  visibilityDraftForDependencyChange,
+  visibilityDraftWithListText,
+  visibilityDraftWithOperator,
+  visibilityDraftWithScalar,
+  visibilityDraftWithScalarText,
+  type FieldVisibilityDraft,
 } from '../src/approvals/templateAuthoring'
+import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
+import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -166,11 +175,22 @@ const ElInput = defineComponent({
   props: { modelValue: [String, Number], disabled: Boolean, type: String, rows: Number, placeholder: String, size: String },
   emits: ['update:modelValue'],
   render() {
-    return h('input', {
+    // R-43 (B) stub fidelity: a real `type="textarea"` el-input renders a <textarea>, which keeps
+    // newlines (a jsdom <input> strips them). Placeholder is rendered so a test can find an
+    // otherwise unlabelled textarea; reads/writes still go through `.value` + `input`.
+    return h(this.type === 'textarea' ? 'textarea' : 'input', {
+      placeholder: this.placeholder,
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', (event.target as HTMLInputElement).value),
+      // R-43 gate r3 (F3-1) stub fidelity: Element Plus 2.11.8 `ElInput.handleInput` emits nothing
+      // when the typed text equals the text it already shows (`String(modelValue ?? '')`), so
+      // re-entering a value exactly as displayed is NOT an edit. The stub must not paper over that.
+      onInput: (event: Event) => {
+        const text = (event.target as HTMLInputElement).value
+        if (text === String(this.modelValue ?? '')) return
+        this.$emit('update:modelValue', text)
+      },
     })
   },
 })
@@ -185,7 +205,11 @@ const ElInputNumber = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
-      onInput: (event: Event) => this.$emit('update:modelValue', Number((event.target as HTMLInputElement).value)),
+      // Gate r1 P3-8 stub fidelity: a cleared real el-input-number emits null (not Number('') = 0).
+      onInput: (event: Event) => {
+        const raw = (event.target as HTMLInputElement).value
+        this.$emit('update:modelValue', raw.trim() === '' ? null : Number(raw))
+      },
     })
   },
 })
@@ -199,6 +223,9 @@ const ElSelect = defineComponent({
       value: this.modelValue ?? '',
       disabled: this.disabled,
       'data-testid': (this.$attrs as any)?.['data-testid'],
+      // R-43 (B): a `multiple` select's DOM selection does not survive re-render (the stub patches
+      // `value` with the array's string form), so tests read the bound model back from here.
+      'data-model-value': JSON.stringify(this.modelValue ?? null),
       onChange: (event: Event) => {
         const target = event.target as HTMLSelectElement
         // W1-1a stub fidelity (test-only; mirrors approval-template-authoring-canvas-inspector.spec.ts's
@@ -217,9 +244,9 @@ const ElSelect = defineComponent({
 
 const ElOption = defineComponent({
   name: 'ElOption',
-  props: { label: String, value: String },
+  props: { label: String, value: String, disabled: Boolean },
   render() {
-    return h('option', { value: this.value }, this.label)
+    return h('option', { value: this.value, disabled: this.disabled }, this.label)
   },
 })
 
@@ -3944,7 +3971,11 @@ describe('TemplateAuthoringView', () => {
     operatorSelect.value = 'eq'
     operatorSelect.dispatchEvent(new Event('change'))
     await flushUi()
-    const valueInput = inRow('approval-field-visibility-value') as HTMLInputElement
+    // R-43 (B): `amount` is a NUMBER field, so the value control is the number input and the saved
+    // rule value is the number 1000. (This test used to pin `value: '1000'` — a string the
+    // evaluator's `===` never matches against the number the requester submits.)
+    expect(inRow('approval-field-visibility-value')).toBeNull()
+    const valueInput = inRow('approval-field-visibility-number-value') as HTMLInputElement
     valueInput.value = '1000'
     valueInput.dispatchEvent(new Event('input'))
     await flushUi()
@@ -3954,7 +3985,7 @@ describe('TemplateAuthoringView', () => {
 
     expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
     const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
-    expect(payload.formSchema.fields[1].visibilityRule).toEqual({ fieldId: 'amount', operator: 'eq', value: '1000' })
+    expect(payload.formSchema.fields[1].visibilityRule).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1000 })
   })
 
   it('clearing the dependency in the mounted view drops the rule from the saved payload', async () => {
@@ -6078,6 +6109,641 @@ describe('TemplateAuthoringView', () => {
       expect(inEditor('approval-node-empty-policy')).toBeNull()
     })
   })
+
+  // R-43 (B) — condition values by field type, mounted. Branch rules are edited in BOTH hosts of the
+  // shared condition editor (the flag-off structured list and the Canvas inspector); visibility rules
+  // here go through the flag-off legacy inline editor (Designer 2.0 is covered by
+  // approval-form-field-inspector.spec.ts). The test locale is en, so new copy is the EN table.
+  describe('R-43 (B) typed condition values (mounted)', () => {
+    type Rule = { fieldId: string; operator: string; value?: unknown }
+    const OPTION_FIELDS = [
+      { id: 'amount', type: 'number', label: '金额', required: true },
+      { id: 'kind', type: 'select', label: '类型', options: [{ label: '出差', value: 'opt_trip' }, { label: '其他', value: 'opt_other' }] },
+      { id: 'tags', type: 'multi-select', label: '标签', options: [{ label: '加急', value: 'opt_urgent' }, { label: '普通', value: 'opt_normal' }] },
+      { id: 'reason', type: 'text', label: '事由' },
+      { id: 'reviewer', type: 'user', label: '审批人', required: true },
+    ]
+    function typedTemplate(rules: Rule[], extraFields: unknown[] = []) {
+      return buildTemplate({
+        formSchema: { fields: [...OPTION_FIELDS, ...extraFields] } as any,
+        approvalGraph: {
+          nodes: [
+            { key: 'start', type: 'start', name: '发起', config: {} },
+            { key: 'cond_1', type: 'condition', name: '判断', config: { branches: [{ edgeKey: 'e-a', rules }], defaultEdgeKey: 'e-b' } },
+            { key: 'app_a', type: 'approval', name: 'A', config: { assigneeSources: [{ kind: 'dept_head' }], approvalMode: 'single', emptyAssigneePolicy: 'error' } },
+            { key: 'end', type: 'end', name: '结束', config: {} },
+          ],
+          edges: [
+            { key: 'e-start-c', source: 'start', target: 'cond_1' },
+            { key: 'e-a', source: 'cond_1', target: 'app_a' },
+            { key: 'e-b', source: 'cond_1', target: 'end' },
+            { key: 'e-a-end', source: 'app_a', target: 'end' },
+          ],
+        } as any,
+      })
+    }
+    async function mountTyped(rules: Rule[], canvas = false, extraFields: unknown[] = []): Promise<ParentNode> {
+      approvalCanvasV2.value = canvas
+      setRouteParams({ id: 'tpl_typed' })
+      getTemplateSpy.mockResolvedValue(typedTemplate(rules, extraFields))
+      await mountView()
+      await flushUi()
+      if (!canvas) return container!
+      ;(container!.querySelector(
+        '[data-testid="approval-canvas-node"][data-node-type="condition"] [data-testid="approval-canvas-node-select"]',
+      ) as HTMLButtonElement).click()
+      await flushUi()
+      const inspector = container!.querySelector('[data-testid="approval-canvas-inspector"]')
+      expect(inspector).not.toBeNull()
+      return inspector!
+    }
+    const rows = (scope: ParentNode) => Array.from(scope.querySelectorAll('[data-testid="approval-condition-rule"]')) as HTMLElement[]
+    const inRule = (scope: ParentNode, index: number, testId: string) =>
+      rows(scope)[index]?.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+    async function choose(el: HTMLSelectElement | null, value: string) {
+      expect(el).not.toBeNull()
+      el!.value = value
+      el!.dispatchEvent(new Event('change'))
+      await flushUi()
+    }
+    async function type(el: HTMLInputElement | HTMLTextAreaElement | null, value: string) {
+      expect(el).not.toBeNull()
+      el!.value = value
+      el!.dispatchEvent(new Event('input'))
+      await flushUi()
+    }
+    async function saveRules(): Promise<Rule[]> {
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      const payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      return payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules
+    }
+    async function saveFields(): Promise<any[]> {
+      ;(container!.querySelector('[data-testid="approval-template-save-button"]') as HTMLButtonElement).click()
+      await flushUi()
+      expect(updateTemplateSpy).toHaveBeenCalledTimes(1)
+      return (updateTemplateSpy.mock.calls[0]?.[1] as any).formSchema.fields
+    }
+    const branchHead = (scope: ParentNode) =>
+      (scope.querySelector('[data-testid="approval-condition-branch"]')?.textContent ?? '')
+
+    it('marks every rule that can never take effect, and an unedited save keeps all of them byte-identical (no rewrite, no blocker)', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'kind', operator: 'eq', value: 'opt_gone' },
+        { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' },
+        { fieldId: 'amount', operator: 'eq', value: '5000' },
+        { fieldId: 'reason', operator: 'in', value: 'a' },
+        { fieldId: 'amount', operator: 'gt', value: '5000' },
+        // Gate r1 F1: a LIST under a single-value operator (eq never matches, neq always matches).
+        { fieldId: 'kind', operator: 'eq', value: ['opt_trip'] },
+        { fieldId: 'reason', operator: 'neq', value: ['a', 'b'] },
+        { fieldId: 'amount', operator: 'gte', value: [1, 2] },
+      ]
+      const scope = await mountTyped(rules)
+      const issue = (index: number) => inRule(scope, index, 'approval-condition-rule-issue')?.textContent ?? ''
+      expect(issue(0)).toBe(conditionValueIssueText(['value-not-option'], false))
+      expect(issue(1)).toBe(conditionValueIssueText(['operator-not-effective'], false))
+      expect(issue(2)).toBe(conditionValueIssueText(['not-number'], false))
+      expect(issue(3)).toBe(conditionValueIssueText(['in-not-list'], false))
+      expect(inRule(scope, 4, 'approval-condition-rule-issue')).toBeNull() // gt normalises '5000': in effect today
+      // …and its number box shows that number (display only), while eq's ineffective string shows empty.
+      expect((inRule(scope, 4, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('5000')
+      expect((inRule(scope, 2, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('')
+      const tagOperator = inRule(scope, 1, 'approval-condition-rule-operator')!
+      const eqChoice = Array.from(tagOperator.options).find((option) => option.value === 'eq')
+      expect(eqChoice?.disabled).toBe(true)
+      expect(eqChoice?.textContent).toContain(CONDITION_VALUE_COPY_EN.notApplicableSuffix.trim())
+      for (const index of [5, 6, 7]) expect(issue(index)).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      // Gate r3 F3-1: a marked value in a free-text box shows EMPTY; the saved value is a read-only note.
+      const storedNote = (index: number) => inRule(scope, index, 'approval-condition-rule-stored-value-text')?.textContent ?? null
+      expect(inRule(scope, 3, 'approval-condition-rule-values')!.value).toBe('')
+      expect(storedNote(3)).toBe('a')
+      expect((inRule(scope, 6, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(storedNote(6)).toBe('["a","b"]')
+      // gate r4 NIT-f: the number box left empty by eq's string shows the saved value read-only too
+      expect(storedNote(2)).toBe('5000')
+      expect(storedNote(7)).toBe('[1,2]')
+      // option pickers keep their own placeholders (no note); an unmarked rule has none
+      for (const index of [0, 1, 4, 5]) expect(storedNote(index)).toBeNull()
+      // The single-option picker shows the invalid placeholder for the list (never an option picked).
+      const listPicker = inRule(scope, 5, 'approval-condition-rule-option-value')!
+      expect(listPicker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(Array.from(listPicker.options).find((option) => option.value === STALE_OPTION_KEY)?.disabled).toBe(true)
+      expect(await saveRules()).toStrictEqual(rules)
+    })
+
+    for (const canvas of [false, true]) {
+      const host = canvas ? 'Canvas inspector' : 'structured list'
+      it(`${host}: a select rule picks an option NAME and saves the option VALUE; the branch summary shows the name`, async () => {
+        const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_other' }], canvas)
+        const select = inRule(scope, 0, 'approval-condition-rule-option-value')!
+        expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['出差', '其他'])
+        expect(select.textContent).not.toContain('opt_')
+        expect(inRule(scope, 0, 'approval-condition-rule-value')).toBeNull()
+        await choose(select, 'opt_trip')
+        expect(branchHead(scope)).toContain('出差')
+        expect(branchHead(scope)).not.toContain('opt_trip')
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+      })
+
+      it(`${host}: multi-select offers only in / isEmpty; in saves an ARRAY of option values in option order (select too)`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' },
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+        ], canvas)
+        const operator = inRule(scope, 0, 'approval-condition-rule-operator')!
+        expect(Array.from(operator.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty'])
+        await choose(operator, 'in')
+        const tagValues = inRule(scope, 0, 'approval-condition-rule-option-values')!
+        expect(JSON.parse(tagValues.getAttribute('data-model-value')!)).toEqual(['opt_urgent'])
+        pickOptions(tagValues, ['opt_normal', 'opt_urgent'])
+        await flushUi()
+        expect(JSON.parse(inRule(scope, 0, 'approval-condition-rule-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_urgent', 'opt_normal'])
+        await choose(inRule(scope, 1, 'approval-condition-rule-operator'), 'in')
+        pickOptions(inRule(scope, 1, 'approval-condition-rule-option-values')!, ['opt_trip', 'opt_other'])
+        await flushUi()
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] },
+          { fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] },
+        ])
+      })
+
+      it(`${host}: in → isEmpty → eq/gt keeps the FIRST entry (never a list under a single-value operator)`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+          { fieldId: 'kind', operator: 'in', value: ['opt_trip', 'opt_other'] },
+          { fieldId: 'amount', operator: 'in', value: [1, 2] },
+          { fieldId: 'amount', operator: 'in', value: [3, 4] },
+        ], canvas)
+        for (const [index, next] of [[0, 'eq'], [1, 'eq'], [2, 'eq'], [3, 'gt']] as const) {
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'isEmpty')
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), next)
+        }
+        expect((inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('a')
+        expect(inRule(scope, 1, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('"opt_trip"')
+        expect((inRule(scope, 2, 'approval-condition-rule-number-value') as unknown as HTMLInputElement).value).toBe('1')
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+        expect(branchHead(scope)).toContain('事由 = 「a」 且 类型 = 「出差」 且 金额 = 1 且 金额 > 3')
+        expect(branchHead(scope)).not.toContain('、')
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'reason', operator: 'eq', value: 'a' },
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+          { fieldId: 'amount', operator: 'eq', value: 1 },
+          { fieldId: 'amount', operator: 'gt', value: 3 },
+        ])
+      })
+
+      it(`${host}: in → isEmpty → in keeps the WHOLE list (isEmpty leaves the value untouched)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+          { fieldId: 'tags', operator: 'in', value: ['opt_urgent', 'opt_normal'] },
+          { fieldId: 'amount', operator: 'in', value: [1, 2] },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        for (const index of [0, 1, 2]) {
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'isEmpty')
+          await choose(inRule(scope, index, 'approval-condition-rule-operator'), 'in')
+        }
+        expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('a\nb')
+        expect(JSON.parse(inRule(scope, 1, 'approval-condition-rule-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_urgent', 'opt_normal'])
+        expect(inRule(scope, 2, 'approval-condition-rule-values')!.value).toBe('1\n2')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      it(`${host}: number rules save NUMBERS (eq and in); text in saves a list and keeps the typed newlines`, async () => {
+        const scope = await mountTyped([
+          { fieldId: 'amount', operator: 'eq', value: 1 },
+          { fieldId: 'amount', operator: 'in', value: [1] },
+          { fieldId: 'reason', operator: 'in', value: ['x'] },
+        ], canvas)
+        expect(inRule(scope, 0, 'approval-condition-rule-value')).toBeNull()
+        await type(inRule(scope, 0, 'approval-condition-rule-number-value'), '5000')
+        const numbers = inRule(scope, 1, 'approval-condition-rule-values')!
+        expect(numbers.tagName).toBe('TEXTAREA')
+        await type(numbers, '1000\n2000\n')
+        expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('1000\n2000\n')
+        await type(inRule(scope, 2, 'approval-condition-rule-values'), 'a\nb')
+        expect(inRule(scope, 2, 'approval-condition-rule-values')!.value).toBe('a\nb')
+        const saved = await saveRules()
+        expect(saved).toStrictEqual([
+          { fieldId: 'amount', operator: 'eq', value: 5000 },
+          { fieldId: 'amount', operator: 'in', value: [1000, 2000] },
+          { fieldId: 'reason', operator: 'in', value: ['a', 'b'] },
+        ])
+        expect(typeof saved[0].value).toBe('number')
+      })
+
+      // Gate r3 F3-1: Element Plus emits nothing when the typed text equals what the box shows (the
+      // ElInput stub above is faithful to that), so a marked value is shown EMPTY — re-entering it
+      // exactly as it was saved is then a real edit that stores the working shape.
+      it(`${host}: gate r3 F3-1 — re-entering a marked value as it was saved corrects it (box empty, saved value shown read-only)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: 'a' }, // scalar `in` (pre-R-43 shape)
+          { fieldId: 'amount', operator: 'in', value: 5 }, // scalar `in` on a number field
+          { fieldId: 'reason', operator: 'eq', value: ['a'] }, // one-entry list under eq
+          { fieldId: 'reason', operator: 'eq', value: 5 }, // number on a text field
+          { fieldId: 'reason', operator: 'in', value: [1, 2] }, // numbers in a text `in`
+          { fieldId: 'reason', operator: 'gt', value: 3 }, // control: in effect, never marked
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        const box = (index: number) => (
+          inRule(scope, index, 'approval-condition-rule-values') ?? inRule(scope, index, 'approval-condition-rule-value')
+        ) as HTMLInputElement | HTMLTextAreaElement
+        const storedNote = (index: number) => inRule(scope, index, 'approval-condition-rule-stored-value-text')?.textContent ?? null
+        const issue = (index: number) => inRule(scope, index, 'approval-condition-rule-issue')?.textContent ?? null
+        expect(issue(0)).toBe(conditionValueIssueText(['in-not-list'], false))
+        expect(issue(1)).toBe(conditionValueIssueText(['in-not-list'], false))
+        expect(issue(2)).toBe(conditionValueIssueText(['list-not-scalar'], false))
+        expect(issue(3)).toBe(conditionValueIssueText(['not-text'], false))
+        expect(issue(4)).toBe(conditionValueIssueText(['not-text'], false))
+        expect(issue(5)).toBeNull()
+        expect([0, 1, 2, 3, 4].map((index) => box(index).value)).toEqual(['', '', '', '', ''])
+        expect([0, 1, 2, 3, 4].map(storedNote)).toEqual(['a', '5', '["a"]', '5', '[1,2]'])
+        expect(inRule(scope, 0, 'approval-condition-rule-stored-value')!.textContent)
+          .toBe(`${CONDITION_VALUE_COPY_EN.storedValuePrefix}a`)
+        expect(box(5).value).toBe('3')
+        expect(storedNote(5)).toBeNull()
+
+        // re-enter each value exactly as it was saved
+        for (const [index, text] of [[0, 'a'], [1, '5'], [2, 'a'], [3, '5'], [4, '1\n2'], [5, '3']] as const) {
+          await type(box(index), text)
+        }
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+        expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-stored-value"]'))).toBe(false)
+        expect(await saveRules()).toStrictEqual([
+          { fieldId: 'reason', operator: 'in', value: ['a'] },
+          { fieldId: 'amount', operator: 'in', value: [5] },
+          { fieldId: 'reason', operator: 'eq', value: 'a' },
+          { fieldId: 'reason', operator: 'eq', value: '5' },
+          { fieldId: 'reason', operator: 'in', value: ['1', '2'] },
+          // the unmarked gt box showed '3': re-typing it is no edit, so the number stays as saved
+          { fieldId: 'reason', operator: 'gt', value: 3 },
+        ])
+      })
+
+      it(`${host}: gate r3 F3-1 — loading a marked rule never rewrites it (an untouched save is byte-identical)`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'reason', operator: 'in', value: 'a' },
+          { fieldId: 'reason', operator: 'eq', value: ['a'] },
+          { fieldId: 'reason', operator: 'eq', value: 5 },
+        ]
+        await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      // Gate r5 P3-j: the「saved value」note follows what the `in` textarea actually SHOWS — never
+      // the author's unsaved lines, never a duplicate of text already in the box.
+      it(`${host}: gate r5 P3-j — typing a non-number line into a valid number list marks it but shows no saved-value note`, async () => {
+        const scope = await mountTyped([{ fieldId: 'amount', operator: 'in', value: [1, 2] }], canvas)
+        const box = () => inRule(scope, 0, 'approval-condition-rule-values')!
+        const issue = () => inRule(scope, 0, 'approval-condition-rule-issue')?.textContent ?? null
+        const storedNote = () => inRule(scope, 0, 'approval-condition-rule-stored-value')
+        expect(box().value).toBe('1\n2')
+        expect(issue()).toBeNull()
+        await type(box(), '1\nabc')
+        // positive control: the line is kept in the box and marked
+        expect(box().value).toBe('1\nabc')
+        expect(issue()).toBe(conditionValueIssueText(['not-number'], false))
+        expect(storedNote()).toBeNull()
+        await type(box(), '1\n2')
+        expect(issue()).toBeNull()
+        expect(storedNote()).toBeNull()
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'amount', operator: 'in', value: [1, 2] }])
+      })
+
+      it(`${host}: gate r5 P3-j — a number list stored as digit STRINGS shows an empty box plus the saved value; untouched it saves unchanged`, async () => {
+        const rules: Rule[] = [{ fieldId: 'amount', operator: 'in', value: ['1', '2'] }]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule, value: [...(rule.value as string[])] })), canvas)
+        expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('')
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+        expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('["1","2"]')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+    }
+
+    it('gate r3 F3-2: a scalar in on a MULTI-person field takes effect (not marked); on a single-person field it is', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'signers', operator: 'in', value: 'u1' },
+        { fieldId: 'reviewer', operator: 'in', value: 'u1' },
+      ]
+      const scope = await mountTyped(rules.map((rule) => ({ ...rule })), false, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+      ])
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      expect(inRule(scope, 0, 'approval-condition-rule-values')!.value).toBe('u1')
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['in-not-list'], false))
+      expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('')
+      expect(await saveRules()).toStrictEqual(rules)
+    })
+
+    it('gate r3 F3-3: gt on a DATE field with a non-date value is marked; re-typing the number keeps the mark, a date clears it', async () => {
+      const scope = await mountTyped([
+        { fieldId: 'due', operator: 'gt', value: 3 },
+        { fieldId: 'due', operator: 'lte', value: '2026-01-01' },
+      ], false, [{ id: 'due', type: 'date', label: '截止日期' }])
+      const notDate = conditionValueIssueText(['not-date'], false)
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')).toBeNull()
+      const box = inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement
+      // not a shape problem: the box shows what is saved (no read-only note)
+      expect(box.value).toBe('3')
+      expect(inRule(scope, 0, 'approval-condition-rule-stored-value')).toBeNull()
+      await type(box, '3')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      await type(box, '20260101')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notDate)
+      await type(box, '2026-01-01')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      expect(await saveRules()).toStrictEqual([
+        { fieldId: 'due', operator: 'gt', value: '2026-01-01' },
+        { fieldId: 'due', operator: 'lte', value: '2026-01-01' },
+      ])
+    })
+
+    it('gate r2 P3-b: an EMPTY list stored under eq/neq is marked and saved unchanged', async () => {
+      const rules: Rule[] = [
+        { fieldId: 'kind', operator: 'neq', value: [] },
+        { fieldId: 'reason', operator: 'eq', value: [] },
+      ]
+      const scope = await mountTyped(rules)
+      for (const index of [0, 1]) {
+        expect(inRule(scope, index, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      }
+      expect(await saveRules()).toStrictEqual(rules)
+    })
+
+    it('switching the rule field clears a value that means nothing for the new field and picks an effective operator', async () => {
+      const scope = await mountTyped([{ fieldId: 'amount', operator: 'eq', value: 5000 }])
+      await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'kind')
+      expect(inRule(scope, 0, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('""')
+      expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('eq')
+      await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'tags')
+      expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('in')
+      expect(await saveRules()).toStrictEqual([{ fieldId: 'tags', operator: 'in' }])
+    })
+
+    it('renaming an option shows the new name with the stored value unchanged; deleting it marks the rule', async () => {
+      const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+      const kindRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+      const optionsBox = () => kindRow.querySelector('textarea[placeholder="每行一个选项，格式：显示名:值"]') as HTMLTextAreaElement
+      await type(optionsBox(), '差旅:opt_trip\n其他:opt_other')
+      const select = inRule(scope, 0, 'approval-condition-rule-option-value')!
+      expect(Array.from(select.options).map((option) => option.textContent)).toEqual(['差旅', '其他'])
+      expect(select.getAttribute('data-model-value')).toBe('"opt_trip"')
+      expect(branchHead(scope)).toContain('差旅')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+      await type(optionsBox(), '其他:opt_other')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['value-not-option'], false))
+      expect(await saveRules()).toStrictEqual([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }])
+    })
+
+    // ── default (flag-on) Designer 2.0 surface: the PRODUCTION builder wiring (ApprovalFormBuilder
+    // passes the dependency's type + options to the inspector) and the live option names reaching
+    // the Canvas branch editor ──
+    it('Designer 2.0 (flag on): a select dependency picks an option name and saves the option value; renaming the option in the inspector renames it in the Canvas branch editor', async () => {
+      const scope = await mountTyped([{ fieldId: 'kind', operator: 'eq', value: 'opt_trip' }], true, [{ id: 'note', type: 'text', label: '备注' }])
+      const card = (fieldId: string) => {
+        const index = [...OPTION_FIELDS.map((field) => field.id), 'note'].indexOf(fieldId)
+        return container!.querySelectorAll('[data-testid="approval-form-builder-card"]')[index] as HTMLElement
+      }
+      const inInspector = (testId: string) =>
+        container!.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLInputElement | null
+      card('note').click()
+      await flushUi()
+      await choose(inInspector('approval-form-field-inspector-visibility-depends'), 'kind')
+      const valueSelect = inInspector('approval-form-field-inspector-visibility-option-value')!
+      expect(Array.from(valueSelect.options).map((option) => option.textContent?.trim()))
+        .toEqual([CONDITION_VALUE_COPY_EN.chooseOption, '出差', '其他'])
+      expect(inInspector('approval-form-field-inspector-visibility-value')).toBeNull()
+      await choose(valueSelect, 'opt_trip')
+
+      card('kind').click()
+      await flushUi()
+      const label = inInspector('approval-form-field-inspector-option-label-0')!
+      label.value = '差旅'
+      label.dispatchEvent(new Event('input'))
+      label.dispatchEvent(new Event('blur'))
+      await flushUi()
+      const branchSelect = inRule(scope, 0, 'approval-condition-rule-option-value')!
+      expect(Array.from(branchSelect.options).map((option) => option.textContent)).toEqual(['差旅', '其他'])
+      expect(branchSelect.getAttribute('data-model-value')).toBe('"opt_trip"')
+
+      const fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'note').visibilityRule).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'opt_trip' })
+      expect(fields.find((field: any) => field.id === 'kind').options).toEqual([
+        { label: '差旅', value: 'opt_trip' },
+        { label: '其他', value: 'opt_other' },
+      ])
+    })
+
+    // ── legacy (flag-off) form designer: visibility rules ──
+    const NOTE = { id: 'note', type: 'text', label: '备注' }
+    const noteRow = () => {
+      const rowsList = container!.querySelectorAll('[data-testid="approval-template-field-row"]')
+      return rowsList[rowsList.length - 1] as HTMLElement
+    }
+    const inNote = (testId: string) => noteRow().querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+    const noteRule = (fields: any[]) => fields.find((field) => field.id === 'note').visibilityRule
+
+    it('legacy designer: a select dependency picks an option name (eq) and several names (in); saved as option values', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [NOTE])
+      await choose(inNote('approval-field-visibility-depends'), 'kind')
+      const single = inNote('approval-field-visibility-option-value')!
+      expect(Array.from(single.options).map((option) => option.textContent)).toEqual(['出差', '其他'])
+      expect(inNote('approval-field-visibility-value')).toBeNull()
+      await choose(single, 'opt_trip')
+      await choose(inNote('approval-field-visibility-operator'), 'in')
+      const multiple = inNote('approval-field-visibility-option-values')!
+      expect(JSON.parse(multiple.getAttribute('data-model-value')!)).toEqual(['opt_trip'])
+      pickOptions(multiple, ['opt_other', 'opt_trip'])
+      await flushUi()
+      expect(JSON.parse(inNote('approval-field-visibility-option-values')!.getAttribute('data-model-value')!)).toEqual(['opt_trip', 'opt_other'])
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'kind', operator: 'in', values: ['opt_trip', 'opt_other'] })
+    })
+
+    it('legacy designer: a number dependency saves a NUMBER for eq and numbers for in; a text dependency in keeps one value per line', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [NOTE, { ...NOTE, id: 'note_text', label: '说明' }])
+      const rowsList = () => Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]')) as HTMLElement[]
+      const textRow = () => rowsList()[rowsList().length - 1]
+      const numberRow = () => rowsList()[rowsList().length - 2]
+      const inRow = (row: HTMLElement, testId: string) => row.querySelector(`[data-testid="${testId}"]`) as HTMLSelectElement & HTMLTextAreaElement | null
+      await choose(inRow(numberRow(), 'approval-field-visibility-depends'), 'amount')
+      await type(inRow(numberRow(), 'approval-field-visibility-number-value'), '1500')
+      await choose(inRow(textRow(), 'approval-field-visibility-depends'), 'reason')
+      await choose(inRow(textRow(), 'approval-field-visibility-operator'), 'in')
+      await type(inRow(textRow(), 'approval-field-visibility-values'), 'a\nb\n')
+      expect(inRow(textRow(), 'approval-field-visibility-values')!.value).toBe('a\nb\n')
+      let fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1500 })
+      expect(fields.find((field: any) => field.id === 'note_text').visibilityRule).toStrictEqual({ fieldId: 'reason', operator: 'in', values: ['a', 'b'] })
+
+      updateTemplateSpy.mockClear()
+      await choose(inRow(numberRow(), 'approval-field-visibility-operator'), 'in')
+      await type(inRow(numberRow(), 'approval-field-visibility-values'), '1\n2')
+      expect(inRow(numberRow(), 'approval-field-visibility-values')!.value).toBe('1\n2')
+      fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+    })
+
+    it('legacy designer: a non-string value on a select dependency shows the invalid placeholder (not the look-alike option); re-picking fixes it', async () => {
+      const LEVEL = { id: 'level', type: 'select', label: '级别', options: [{ label: '一级', value: '1' }, { label: '二级', value: '2' }] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [LEVEL, { ...NOTE, visibilityRule: { fieldId: 'level', operator: 'eq', value: 1 } }])
+      const picker = inNote('approval-field-visibility-option-value')!
+      expect(picker.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['value-not-option'], false))
+      await choose(picker, '1')
+      expect(inNote('approval-field-visibility-option-value')!.getAttribute('data-model-value')).toBe('"1"')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'level', operator: 'eq', value: '1' })
+    })
+
+    it('gate r4 P3-h legacy designer: a LIST stored under eq on a select dependency is marked with the picker placeholder — never a raw option-code note', async () => {
+      // API-only shape; the option picker has its own invalid-value placeholder, so no「stored value」note.
+      const LEVEL = { id: 'level', type: 'select', label: '级别', options: [{ label: '一级', value: 'opt_lv_one' }, { label: '二级', value: 'opt_lv_two' }] }
+      const visibilityRule = { fieldId: 'level', operator: 'eq', value: ['opt_lv_one'] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [LEVEL, { ...NOTE, visibilityRule }])
+      // positive controls first: the rule loaded, is marked, and the picker shows the placeholder
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['list-not-scalar'], false))
+      expect(inNote('approval-field-visibility-option-value')!.getAttribute('data-model-value')).toBe(JSON.stringify(STALE_OPTION_KEY))
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRow().textContent).not.toContain('opt_lv_one')
+      // loading never rewrites it
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
+    it('gate r4 NIT-f legacy designer: a numeric STRING under eq on a number dependency shows an empty box plus the saved value; entering the number fixes it', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'eq', value: '5000' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect((inNote('approval-field-visibility-number-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('5000')
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+      updateTemplateSpy.mockClear()
+      await type(inNote('approval-field-visibility-number-value') as unknown as HTMLInputElement, '5000')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 5000 })
+    })
+
+    it('gate r5 P3-j legacy designer: typing a non-number line into a valid number list marks it but shows no saved-value note', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'in', values: [1, 2] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-values')!.value).toBe('1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      await type(inNote('approval-field-visibility-values'), '1\nabc')
+      // positive control: the line is kept in the box and marked
+      expect(inNote('approval-field-visibility-values')!.value).toBe('1\nabc')
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      await type(inNote('approval-field-visibility-values'), '1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
+    it('gate r5 P3-j legacy designer: a number list stored as digit STRINGS shows an empty box plus the saved value; untouched it saves unchanged', async () => {
+      const visibilityRule = { fieldId: 'amount', operator: 'in', values: ['1', '2'] }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule: { ...visibilityRule, values: [...visibilityRule.values] } }])
+      expect(inNote('approval-field-visibility-values')!.value).toBe('')
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['not-number'], false))
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('["1","2"]')
+      expect(noteRule(await saveFields())).toStrictEqual(visibilityRule)
+    })
+
+    it('legacy designer: in → isEmpty → eq on a text dependency keeps the first line (never the joined list)', async () => {
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [{ ...NOTE, visibilityRule: { fieldId: 'reason', operator: 'in', values: ['a', 'b'] } }])
+      await choose(inNote('approval-field-visibility-operator'), 'isEmpty')
+      await choose(inNote('approval-field-visibility-operator'), 'eq')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(noteRule(await saveFields())).toStrictEqual({ fieldId: 'reason', operator: 'eq', value: 'a' })
+    })
+
+    it('gate r2 F2-1 legacy designer: retyping a referenced NUMBER field to text marks the number values (visibility + branch), saves them unchanged, and re-entering saves strings that match', async () => {
+      const branchRules: Rule[] = [
+        { fieldId: 'amount', operator: 'eq', value: 5 },
+        { fieldId: 'amount', operator: 'in', value: [1, 2] },
+        { fieldId: 'amount', operator: 'gt', value: 3 },
+      ]
+      const visibilityRule = { fieldId: 'amount', operator: 'eq', value: 5 }
+      const scope = await mountTyped(branchRules.map((rule) => ({ ...rule })), false, [{ ...NOTE, visibilityRule }])
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      const amountRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[0] as HTMLElement
+      await choose(amountRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement, 'text')
+
+      const notText = conditionValueIssueText(['not-text'], false)
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(notText)
+      // shown empty (like a non-number on a number field): what is stored never matches a text value
+      expect((inNote('approval-field-visibility-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(notText)
+      expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(notText)
+      // gt/gte/lt/lte normalise both sides in the executor — still in effect, never marked
+      expect(inRule(scope, 2, 'approval-condition-rule-issue')).toBeNull()
+      // Gate r3 F3-1 / NIT-e: the branch boxes show EMPTY too (aligned with the visibility box), and
+      // every marked value is shown read-only next to its box.
+      expect((inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('')
+      expect(inRule(scope, 1, 'approval-condition-rule-values')!.value).toBe('')
+      expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('5')
+      expect(inRule(scope, 1, 'approval-condition-rule-stored-value-text')?.textContent).toBe('[1,2]')
+      expect((inRule(scope, 2, 'approval-condition-rule-value') as unknown as HTMLInputElement).value).toBe('3')
+      expect(inRule(scope, 2, 'approval-condition-rule-stored-value')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value-text')?.textContent).toBe('5')
+      // Gate r3 NIT-c: no 「比较值留空表示等于空值」 while the empty box stands for a marked saved value.
+      expect(noteRow().textContent).not.toContain('比较值留空')
+
+      let fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'amount').type).toBe('text')
+      expect(noteRule(fields)).toStrictEqual(visibilityRule)
+      let payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules).toStrictEqual(branchRules)
+      // negative control: the unchanged number rule never shows the field for the text value '5'
+      expect(getVisibleFormFields({ fields } as any, { amount: '5' }).map((field) => field.id)).not.toContain('note')
+
+      updateTemplateSpy.mockClear()
+      await type(inNote('approval-field-visibility-value') as unknown as HTMLInputElement, '5')
+      await type(inRule(scope, 0, 'approval-condition-rule-value') as unknown as HTMLInputElement, '5')
+      await type(inRule(scope, 1, 'approval-condition-rule-values'), '1\n2')
+      expect(inNote('approval-field-visibility-issue')).toBeNull()
+      expect(rows(scope).some((row) => row.querySelector('[data-testid="approval-condition-rule-issue"]'))).toBe(false)
+      expect(container!.querySelector('[data-testid="approval-condition-rule-stored-value"]')).toBeNull()
+      expect(inNote('approval-field-visibility-stored-value')).toBeNull()
+      // NIT-c control: the hint is back once the rule is a working text comparison
+      expect(noteRow().textContent).toContain('比较值留空')
+      fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: '5' })
+      payload = updateTemplateSpy.mock.calls[0]?.[1] as any
+      expect(payload.approvalGraph.nodes.find((node: any) => node.key === 'cond_1').config.branches[0].rules).toStrictEqual([
+        { fieldId: 'amount', operator: 'eq', value: '5' },
+        { fieldId: 'amount', operator: 'in', value: ['1', '2'] },
+        { fieldId: 'amount', operator: 'gt', value: 3 },
+      ])
+      // positive control: the re-entered string rule now shows the field
+      expect(getVisibleFormFields({ fields } as any, { amount: '5' }).map((field) => field.id)).toContain('note')
+    })
+
+    it('legacy designer: a stored multi-select eq rule is marked (operator shown disabled) and saved unchanged; retyping the dependency marks instead of clearing', async () => {
+      const legacyRule = { fieldId: 'tags', operator: 'eq', value: 'opt_urgent' }
+      const kindRule = { fieldId: 'kind', operator: 'eq', value: 'opt_trip' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [
+        { ...NOTE, id: 'note_kind', visibilityRule: kindRule },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const operator = inNote('approval-field-visibility-operator')!
+      expect(operator.value).toBe('eq')
+      expect(Array.from(operator.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['operator-not-effective'], false))
+
+      const kindRow = container!.querySelectorAll('[data-testid="approval-template-field-row"]')[1] as HTMLElement
+      await choose(kindRow.querySelector('[data-testid="approval-field-type"]') as HTMLSelectElement, 'number')
+      const rowsList = Array.from(container!.querySelectorAll('[data-testid="approval-template-field-row"]')) as HTMLElement[]
+      const kindDependent = rowsList[rowsList.length - 2]
+      expect(kindDependent.querySelector('[data-testid="approval-field-visibility-issue"]')?.textContent)
+        .toBe(conditionValueIssueText(['not-number'], false))
+      const fields = await saveFields()
+      expect(noteRule(fields)).toStrictEqual(legacyRule)
+      expect(fields.find((field: any) => field.id === 'note_kind').visibilityRule).toStrictEqual(kindRule)
+    })
+  })
   })
 
 describe('L8-C: formatted-number authoring (docs/development/approval-lock8-field-vocabulary-20260817.md §1.3, OD-L8-6)', () => {
@@ -6216,5 +6882,108 @@ describe('L8-C: formatted-number authoring (docs/development/approval-lock8-fiel
       } as any,
     }))
     expect(unauthorable).not.toBeNull()
+  })
+})
+
+// R-43 (B) — typed visibility drafts. The draft keeps the three-key text shape for any value a
+// trimmed string expresses losslessly, and carries a typed value otherwise, so a number-field rule
+// saves a NUMBER and an API-authored typed rule survives an edit-and-save round trip.
+describe('R-43 (B) typed visibility drafts', () => {
+  const visibilityTemplate = (rules: Record<string, unknown>) => buildTemplate({
+    formSchema: {
+      fields: [
+        { id: 'amount', type: 'number', label: '金额' },
+        { id: 'kind', type: 'select', label: '类型', options: [{ label: '出差', value: 'opt_trip' }] },
+        ...Object.entries(rules).map(([id, visibilityRule]) => ({ id, type: 'text', label: id, visibilityRule })),
+      ],
+    } as any,
+  })
+
+  it('round-trips typed and string rules verbatim through draft → formSchema', () => {
+    const rules = {
+      n_eq: { fieldId: 'amount', operator: 'eq', value: 5000 },
+      n_in: { fieldId: 'amount', operator: 'in', values: [1, 2] },
+      null_eq: { fieldId: 'amount', operator: 'eq', value: null },
+      s_eq: { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+      s_in: { fieldId: 'kind', operator: 'in', values: ['a', 'b'] },
+      padded: { fieldId: 'kind', operator: 'neq', value: ' a' },
+    }
+    const schema = buildFormSchema(draftFromTemplate(visibilityTemplate(rules)))
+    for (const [id, rule] of Object.entries(rules)) {
+      expect(schema.fields.find((field) => field.id === id)?.visibilityRule).toStrictEqual(rule)
+    }
+  })
+
+  it('a plain string rule hydrates to the three-key draft (no carrier keys)', () => {
+    const draft = draftFromTemplate(visibilityTemplate({
+      s_eq: { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+      s_in: { fieldId: 'kind', operator: 'in', values: ['a', 'b'] },
+    }))
+    expect(draft.fields[2].visibility).toStrictEqual({ dependsOnFieldId: 'kind', operator: 'eq', valueText: 'opt_trip' })
+    expect(draft.fields[3].visibility).toStrictEqual({ dependsOnFieldId: 'kind', operator: 'in', valueText: 'a\nb' })
+  })
+
+  it('writers: list text parses numbers for a number dependency; scalar writes keep the type; text writes drop the carrier', () => {
+    const base: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'in', valueText: '' }
+    expect(buildVisibilityRule(visibilityDraftWithListText(base, '1\n2\n', 'number'))).toEqual({ fieldId: 'amount', operator: 'in', values: [1, 2] })
+    expect(buildVisibilityRule(visibilityDraftWithListText(base, 'a\nb', 'text'))).toEqual({ fieldId: 'amount', operator: 'in', values: ['a', 'b'] })
+    const eq: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'eq', valueText: '' }
+    expect(buildVisibilityRule(visibilityDraftWithScalar(eq, 1500))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1500 })
+    const typed = visibilityDraftWithScalar(eq, 5)
+    expect(buildVisibilityRule(visibilityDraftWithScalarText(typed, 'x'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 'x' })
+  })
+
+  it('operator and dependency changes carry or clear the value sensibly', () => {
+    const eqOption: FieldVisibilityDraft = { dependsOnFieldId: 'kind', operator: 'eq', valueText: 'opt_a' }
+    expect(buildVisibilityRule(visibilityDraftWithOperator(eqOption, 'in'))).toEqual({ fieldId: 'kind', operator: 'in', values: ['opt_a'] })
+    const inNumbers: FieldVisibilityDraft = { dependsOnFieldId: 'amount', operator: 'in', valueText: '1\n2', values: [1, 2] }
+    expect(buildVisibilityRule(visibilityDraftWithOperator(inNumbers, 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1 })
+    const toEmpty = visibilityDraftWithOperator(eqOption, 'isEmpty')
+    expect(toEmpty.valueText).toBe('opt_a')
+    expect(buildVisibilityRule(toEmpty)).toStrictEqual({ fieldId: 'kind', operator: 'isEmpty' })
+
+    // Gate r1 P3-1: coming BACK from isEmpty/notEmpty shapes the kept value for the new operator —
+    // `in → isEmpty → eq` keeps the first entry (never the newline-joined list `===` cannot match).
+    const via = (draft: FieldVisibilityDraft, ...ops: FieldVisibilityDraft['operator'][]) =>
+      ops.reduce((acc, op) => visibilityDraftWithOperator(acc, op), draft)
+    const inText: FieldVisibilityDraft = { dependsOnFieldId: 'reason', operator: 'in', valueText: 'a\nb' }
+    expect(buildVisibilityRule(via(inText, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'reason', operator: 'eq', value: 'a' })
+    expect(buildVisibilityRule(via(inText, 'notEmpty', 'neq'))).toStrictEqual({ fieldId: 'reason', operator: 'neq', value: 'a' })
+    expect(buildVisibilityRule(via(inNumbers, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 1 })
+    const inOptions: FieldVisibilityDraft = { dependsOnFieldId: 'kind', operator: 'in', valueText: 'opt_a\nopt_b' }
+    expect(buildVisibilityRule(via(inOptions, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'opt_a' })
+    // …while a single value is untouched (a padded text keeps its padding; a number stays a number)…
+    const padded = visibilityDraftWithScalar({ dependsOnFieldId: 'reason', operator: 'neq', valueText: '' }, ' a')
+    expect(buildVisibilityRule(via(padded, 'isEmpty', 'neq'))).toStrictEqual({ fieldId: 'reason', operator: 'neq', value: ' a' })
+    const eqNumber = visibilityDraftWithScalar({ dependsOnFieldId: 'amount', operator: 'eq', valueText: '' }, 5)
+    expect(buildVisibilityRule(via(eqNumber, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'amount', operator: 'eq', value: 5 })
+    // …and `eq → isEmpty → in` wraps the kept value (a number carrier is no longer dropped).
+    expect(buildVisibilityRule(via(eqNumber, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'amount', operator: 'in', values: [5] })
+    expect(buildVisibilityRule(via(eqOption, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'kind', operator: 'in', values: ['opt_a'] })
+    expect(buildVisibilityRule(via(inText, 'isEmpty', 'in'))).toStrictEqual({ fieldId: 'reason', operator: 'in', values: ['a', 'b'] })
+    // Gate r2 NIT-a: a stored eq value that itself contains a newline rides the carrier, so the
+    // isEmpty round trip never mistakes it for an `in` list and truncates it.
+    const multiline = draftFromTemplate(visibilityTemplate({ ml: { fieldId: 'kind', operator: 'eq', value: 'line1\nline2' } })).fields[2].visibility
+    expect(multiline.value).toBe('line1\nline2')
+    expect(buildVisibilityRule(via(multiline, 'isEmpty', 'eq'))).toStrictEqual({ fieldId: 'kind', operator: 'eq', value: 'line1\nline2' })
+
+    const text = { type: 'text' as const, options: [] }
+    const select = { type: 'select' as const, options: [{ label: '甲', value: 'opt_a' }] }
+    const multi = { type: 'multi-select' as const, options: [{ label: '甲', value: 'opt_a' }] }
+    const eqText: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'keep' }
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, text)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: 'keep' })
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, select)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: '' })
+    expect(visibilityDraftForDependencyChange(eqText, 'b', text, multi)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
+    expect(visibilityDraftForDependencyChange(eqText, '', text, null)).toStrictEqual({ dependsOnFieldId: '', operator: 'eq', valueText: '' })
+  })
+
+  it('the "in needs a value" check reads the typed carrier (no new blocker added)', () => {
+    const draft = draftFromTemplate(visibilityTemplate({}))
+    const field = { ...draft.fields[0], id: 'dependent', visibility: { dependsOnFieldId: 'kind', operator: 'in' as const, valueText: '', values: [1] } }
+    const withCarrier = validateTemplateFormFields({ ...draft, fields: [...draft.fields, field] }, null, null)
+    expect(withCarrier.some((message) => message.includes('包含'))).toBe(false)
+    const emptyCarrier = { ...field, visibility: { ...field.visibility, values: [] } }
+    const withEmpty = validateTemplateFormFields({ ...draft, fields: [...draft.fields, emptyCarrier] }, null, null)
+    expect(withEmpty.some((message) => message.includes('包含'))).toBe(true)
   })
 })
