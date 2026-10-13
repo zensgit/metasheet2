@@ -4,13 +4,22 @@ const { createHash } = require('node:crypto')
 
 const { createAttendanceTimezonePolicyStore, AttendanceTimezonePolicyError } = require('./attendance-timezone-policy-store.cjs')
 const { createAttendanceTimezoneContextLoader } = require('./attendance-timezone-context-loader.cjs')
+const { buildCalendarTimezoneDay, calendarCandidateKey } = require('./attendance-timezone-calendar-day.cjs')
 
 function createAttendanceTimezoneRuntime({
   HttpError, loadPublishedCandidates, resolveLocalWallTime, validateIanaTimezone,
   addDaysToDateKey, normalizeTimeString, readApprovedTrips, mapRuleRow, mapHolidayRow, resolveRuleContext: resolveBaseRuleContext, authorizeRequestTarget, prepareRuleContextBatch, loadShiftById, toWorkDate, resolveOvernightFlag,
-  loadAttributionTail, loadApprovedOvertime, resolveScheduledCandidate, acquireRuntimeLocks, serverNow, lockOrgPolicy, prepareTripSourceChange, loadCalendarOverrides, readCalculationDefinition, validateFrozenContext, validateFrozenAttribution,
+  loadAttributionTail, loadApprovedOvertime, resolveScheduledCandidate, acquireRuntimeLocks, serverNow, lockOrgPolicy, prepareTripSourceChange, loadCalendarOverrides, selectCalendarCandidates, readCalculationDefinition, validateFrozenContext, validateFrozenAttribution,
 }) {
   function fail(code, status = 422) { throw new HttpError(status, code, code) }
+  // Only proven ambiguity from this runtime may become a scheduled review target.
+  // Keep public errors unchanged; the context-conflict code also covers zero contexts.
+  const attributionAmbiguityErrors = new WeakSet()
+  function failAttributionAmbiguity(code) {
+    const error = new HttpError(409,code,code)
+    attributionAmbiguityErrors.add(error)
+    throw error
+  }
   function queryFor(trx) {
     return async (text, values) => ({ rows: await trx.query(text, values) })
   }
@@ -292,7 +301,7 @@ function createAttendanceTimezoneRuntime({
       candidates.splice(0, candidates.length, ...relevantCandidates)
       const tail = await loadAttributionTail(trx)
       const overtime = await loadApprovedOvertime(trx, { orgId, userId, workDates: dates })
-      const { createAttendanceWorkDateResolver, buildAbsoluteWindow, buildAttributionWindow, isInstantInWindow } =
+      const { createAttendanceWorkDateResolver, buildAbsoluteWindow, buildAttributionWindow } =
         require('./attendance-work-date-resolver.cjs')
       const built = candidates.map(candidate => {
         const absoluteWindow = buildAbsoluteWindow({
@@ -306,9 +315,6 @@ function createAttendanceTimezoneRuntime({
         })
         return { ...candidate, absoluteWindow, attributionWindow }
       })
-      if (built.filter(candidate => isInstantInWindow(occurredAt, candidate.attributionWindow)).length > 1) {
-        fail('ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS', 409)
-      }
       const resolver = createAttendanceWorkDateResolver({
         toWorkDate, buildZonedDate: uniqueWallInstant, addDaysToDateKey, normalizeTimeString,
         resolveOvernightFlag,
@@ -417,7 +423,7 @@ function createAttendanceTimezoneRuntime({
         const resolution = await resolveScheduledCandidate(trx,{
           orgId,userId,timezone:target.timezone,calendarWorkDate:workDate,effectiveTimezone:target.timezone,
         })
-        if (resolution.kind === 'ambiguous') fail('ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS',409)
+        if (resolution.kind === 'ambiguous') failAttributionAmbiguity('ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS')
         let attributionWindow
         if (window.shiftId !== null) {
           const winner = resolution.fullWinner
@@ -521,7 +527,17 @@ function createAttendanceTimezoneRuntime({
     const members = []
     for (const row of users) {
       const input = {orgId,userId:row.user_id,workDate}
-      const target = await prepareScheduledContext(trx,input)
+      let target
+      try {
+        target = await prepareScheduledContext(trx,input)
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 409
+          || (error.code !== 'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT'
+            && error.code !== 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS')
+          || !attributionAmbiguityErrors.has(error)) throw error
+        members.push({userId:row.user_id,targetKind:'review',reviewReasonCode:'WORK_DATE_ATTRIBUTION_AMBIGUOUS'})
+        continue
+      }
       if (!target.isWorkday) continue
       const frame = scheduledFrameFor(trx,input)
       const resolution = frame?.resolution
@@ -585,6 +601,16 @@ function createAttendanceTimezoneRuntime({
         }
       }
     }
+    if (batch?.calendarSelection) {
+      // Read-only display proof; never used by the single-target/write callers below.
+      const day = buildCalendarTimezoneDay([...contexts.values()], {
+        candidateOrder: batch.candidates.filter(candidate => candidate.workDate === workDate).map(calendarCandidateKey),
+        fingerprint: canonicalContextFingerprint,
+      })
+      if (!day) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
+      return day
+    }
+    if (contexts.size > 1) failAttributionAmbiguity('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT')
     if (contexts.size !== 1) fail('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',409)
     return [...contexts.values()][0]
   }
@@ -696,6 +722,12 @@ function createAttendanceTimezoneRuntime({
         await store.readDefault({orgId})
         batch.calendarOverrides = await loadCalendarOverrides(batchTrx)
         batch.candidates = await loadPublishedCandidates(batchTrx,{orgId,userId,workDates:freshDates,strictSources:true})
+        if (typeof selectCalendarCandidates !== 'function') fail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
+        const selected = await selectCalendarCandidates(batchTrx,{orgId,userId,workDates:freshDates,candidates:batch.candidates})
+        batch.candidates = selected.candidates
+        batch.multiShiftDay = selected.multiShiftDay
+        batch.calendarPrefetch = selected.prefetched
+        batch.calendarSelection = true
         const holidays = await trx.query(`SELECT id,org_id,holiday_date::text AS holiday_date,name,is_working_day,origin
           FROM attendance_holidays WHERE org_id=$1 AND holiday_date=ANY($2::date[])`,[orgId,freshDates])
         for (const row of holidays) {
@@ -728,7 +760,7 @@ function createAttendanceTimezoneRuntime({
         details.set(workDate,requestTargetFacts.get(batchTrx))
       }
       requestTargetBatchFacts.set(trx,details)
-      calendarSourceFacts.set(trx,{calendarOverrides:batch.calendarOverrides,byDate:details})
+      calendarSourceFacts.set(trx,{calendarOverrides:batch.calendarOverrides,multiShiftDay:batch.multiShiftDay,prefetched:batch.calendarPrefetch,byDate:details})
       return result
     } catch (error) {
       if (error instanceof HttpError) throw error

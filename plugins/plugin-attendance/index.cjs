@@ -18135,10 +18135,23 @@ async function resolveEffectiveCalendar(db, args) {
   if (mode === 'userId') {
     if (!targetDays || [...targetDays.values()].some(day => !day.target.frozen)) {
       scopeContext = await loadAttendanceScopeContextForUser(db, orgId, args.userId, { strictSources: Boolean(targetDays) })
-      shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
-      const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
-      rotationByUser = rotationPrefetch.assignmentsByUser
-      rotationShiftsById = rotationPrefetch.shiftsById
+      if (targetDays) {
+        // Reuse the same transaction's selected sources instead of loading them twice.
+        const prefetched = args.calendarSourceFacts.prefetched
+        if (!(prefetched?.shiftAssignmentsByUser instanceof Map)
+          || !(prefetched.rotationAssignmentsByUser instanceof Map)
+          || !(prefetched.rotationShiftsById instanceof Map)) {
+          throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+        }
+        shiftAssignmentsByUser = prefetched.shiftAssignmentsByUser
+        rotationByUser = prefetched.rotationAssignmentsByUser
+        rotationShiftsById = prefetched.rotationShiftsById
+      } else {
+        shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+        const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+        rotationByUser = rotationPrefetch.assignmentsByUser
+        rotationShiftsById = rotationPrefetch.shiftsById
+      }
     }
     overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
     if (args.includePending === true) {
@@ -18260,9 +18273,13 @@ async function resolveEffectiveCalendar(db, args) {
     if (sourceContext) {
       profile = sourceContext.rule
       profileSource = sourceContext.source
-      directShiftSlots = profileSource === 'shift'
-        ? directShiftSlots.filter(entry => entry.assignment?.id === sourceContext.assignment?.id)
-        : []
+      const calendarWindows = args.calendarSourceFacts.byDate.get(date)?.window?.calendarWindows
+      const selectedIds = calendarWindows?.filter(window => window.source === 'shift').map(window => window.assignmentId)
+      if (!Array.isArray(selectedIds) || (profileSource === 'shift'
+        && JSON.stringify(directShiftSlots.map(entry => entry.assignment?.id)) !== JSON.stringify(selectedIds))) {
+        throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+      }
+      if (profileSource !== 'shift') directShiftSlots = []
     }
     const holiday = sourceContext ? sourceContext.holiday ?? null : holidaysByDate.get(date) ?? null
     const layers = []
@@ -25910,8 +25927,36 @@ module.exports = {
         const issued = await issueW4FrozenContextViaW7SeamV1(mirrorTrx, {
           ...args,effectiveTimezone:args.timezone,purpose:'mirror',
         })
+        if (issued?.arm === 'blocked') {
+          throw new HttpError(409,'W4C2_W7_CONTEXT_SOURCE_SUSPENDED','W4C2_W7_CONTEXT_SOURCE_SUSPENDED')
+        }
         if (!issued?.context) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID','ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID')
         return issued.context
+      },
+      selectCalendarCandidates: async (trx,{orgId,userId,workDates,candidates}) => {
+        const settings = await attendanceTimezoneReadContext.readCalendarSettings(trx)
+        const multiShiftDay = normalizeMultiShiftDaySetting(settings.multiShiftDay)
+        const from = workDates[0],to = workDates[workDates.length-1]
+        const shifts = await loadShiftAssignmentMapForUsersRange(trx,orgId,[userId],from,to)
+        const rotations = await loadRotationAssignmentMapForUsersRange(trx,orgId,[userId],from,to)
+        const selected = []
+        for (const workDate of workDates) {
+          const rotation = resolveRotationInfoFromPrefetch(rotations.assignmentsByUser.get(userId),workDate,rotations.shiftsById)
+          const slots = rotation?.shift ? [{source:'rotation',assignment:rotation.assignment}]
+            : resolveShiftAssignmentsFromPrefetch(shifts.get(userId),workDate,{multiShiftDay})
+                .map(entry => ({source:'shift',assignment:entry.assignment}))
+          for (const slot of slots) {
+            const matches = candidates.filter(candidate => candidate.workDate === workDate
+              && candidate.source === slot.source && candidate.assignmentId === slot.assignment.id)
+            if (matches.length !== 1) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID','ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+            selected.push(matches[0])
+          }
+        }
+        return {candidates:selected,multiShiftDay,prefetched:{
+          shiftAssignmentsByUser:shifts,
+          rotationAssignmentsByUser:rotations.assignmentsByUser,
+          rotationShiftsById:rotations.shiftsById,
+        }}
       },
       loadCalendarOverrides: async trx => {
         const rows = await trx.query('SELECT value FROM system_configs WHERE key=$1',[SETTINGS_KEY])
@@ -31812,11 +31857,10 @@ module.exports = {
 	            return port.resolveOrgSegmentCalculationPosture(trx, orgId)
 	          })
 
-	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
-	            orgId,
-	            userIds: [targetUserId],
-	            workDates: rows.map((row) => row.work_date),
-	          })
+	          const storedContexts = await db.transaction(trx => attendanceTimezoneReadContext.readStoredContexts(trx, {
+	            orgId, userId: targetUserId, actorId: requesterId,
+	            records: rows.map(row => ({ ...row, work_date: normalizeDateOnly(row.work_date) })),
+	          }))
 
 	          const requestRows = await db.query(
 	            `SELECT id, work_date, request_type, status
@@ -31856,13 +31900,7 @@ module.exports = {
 	            const suggestedRequestType = suggestRequestType(row)
 	            const owedPunch = classifyOwedPunchRecord(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
-	            const resolvedContext = resolveWorkContextFromPrefetch({
-	              orgId,
-	              userId: targetUserId,
-	              workDate,
-	              defaultRule: workContextPrefetch.defaultRule,
-	              prefetched: workContextPrefetch.prefetched,
-	            })
+	            const storedContext = storedContexts.get(workDate)
 
 	            const expectedCalculation = resolveW4c3cExpectedCalculation(
 	              row,
@@ -31886,12 +31924,12 @@ module.exports = {
 	              owedPunch: owedPunch.owedPunch,
 	              missingSide: owedPunch.missingSide,
 	              owedPunchReason: owedPunch.owedPunchReason,
-	              workdayContext: buildWorkdayContextSummary({
-	                workDate,
-	                storedIsWorkday: row.is_workday,
-	                storedTimezone: row.timezone,
-	                resolvedContext,
-	              }),
+	              workdayContext: {
+	                storedIsWorkday: typeof row.is_workday === 'boolean' ? row.is_workday : null,
+	                resolvedIsWorkday: null, matchesStored: null, source: storedContext.timezoneSource,
+	                sourceName: null, timezone: storedContext.effectiveTimezone,
+	                weekday: getWeekdayFromDateKey(workDate), workingDays: null, holiday: null,
+	              },
 	              state,
 	              request: requestSummary.pending ?? requestSummary.latest,
 	              suggestedRequestType,
@@ -50658,7 +50696,8 @@ module.exports = {
             const sourceFacts = hasFreshDates ? attendanceTimezoneRuntime.readCalendarSourceFactsFor(trx)
               : { calendarOverrides: [], byDate: new Map() }
             if (contexts && (!sourceFacts || (hasFreshDates
-              && JSON.stringify(sourceFacts.calendarOverrides) !== JSON.stringify(sourceSettings.calendarPolicy.overrides)))) {
+              && (JSON.stringify(sourceFacts.calendarOverrides) !== JSON.stringify(sourceSettings.calendarPolicy.overrides)
+                || JSON.stringify(sourceFacts.multiShiftDay) !== JSON.stringify(normalizeMultiShiftDaySetting(sourceSettings.multiShiftDay)))))) {
               throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
             }
             const calendar = await resolveEffectiveCalendar(trx, {

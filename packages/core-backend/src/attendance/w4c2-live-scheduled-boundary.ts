@@ -1893,8 +1893,11 @@ async function prepareAttendanceLiveTimezoneContextV1(
   if (!adapters.assertLiveTimezoneTarget || !adapters.bindLiveTimezoneContext) {
     boundaryFail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
   }
-  await adapters.prepareLiveTimezoneContext(pluginTrx,input,org === null ? 'exclusive' : 'shared')
-  if (org !== null) await lockShadowParentRecord(trx,org,input.userId,input.workDate)
+  // Legacy commands admit historical text users without minting W4 target identities.
+  // The exclusive runtime prefix serializes their parent/companion writes instead.
+  const legacy = org === null || org.acceptedWritePosture === 'legacy_projection_only'
+  await adapters.prepareLiveTimezoneContext(pluginTrx,input,legacy ? 'exclusive' : 'shared')
+  if (org !== null && !legacy) await lockShadowParentRecord(trx,org,input.userId,input.workDate)
   await adapters.assertLiveTimezoneTarget(pluginTrx,input)
 }
 

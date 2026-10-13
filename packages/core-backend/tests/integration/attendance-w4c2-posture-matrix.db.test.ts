@@ -29,9 +29,9 @@ import { requestOnlinePunchFixture, executeHistoricalPunchFixture } from '../uti
  * V2 freeze (lock 5.1/5.2 "request creation or a previous calculation freezes
  * the absolute/attribution windows; changing tail/overtime/assignment later
  * must not move them"): a resolved_v2 shadow calculation pins the candidate
- * windows as literals; a subsequent SHIFT DEFINITION change (1) moves the NEXT
- * calculation's windows (positive control that config changes do reach fresh
- * resolutions) while (2) the earlier stored snapshot re-reads byte-identical,
+ * windows as literals; a subsequent SHIFT DEFINITION change (1) preserves the
+ * same-class checkout window and reaches the NEXT workday's fresh check-in
+ * (positive control) while (2) the earlier snapshot re-reads byte-identical,
  * and (3) a direct UPDATE of the stored snapshot is trigger-denied
  * (W4C0_IMMUTABLE) — the freeze is absolute at the storage layer too.
  *
@@ -98,6 +98,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let priorAllowlistEnv: string | undefined
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
@@ -135,6 +136,16 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, orgId === freezeOrg ? 'Asia/Shanghai' : 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   async function insertRolloutRow(orgId: string, state: 'legacy' | 'shadow'): Promise<void> {
@@ -259,6 +270,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     }
     if (priorAllowlistEnv === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlistEnv
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
   }, 60000)
@@ -432,7 +444,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     expect((await outboxRows(eligibleOrg)).length).toBe(1)
   })
 
-  it('V2 freeze — a shift change after a calculation moves the NEXT window but never the frozen one; the stored snapshot is UPDATE-denied', async () => {
+  it('V2 freeze — same-class checkout keeps the frozen window, the next workday sees the shift change, and the stored snapshot is UPDATE-denied', async () => {
     const token = await mintToken(freezeUser)
 
     // Calculation 1: strict check_in inside the assigned shift => resolved_v2
@@ -471,9 +483,8 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     // Assignment/shift change AFTER the calculation: end moves 18:00 -> 19:00.
     await pool.query(`UPDATE attendance_shifts SET work_end_time = '19:00' WHERE id = $1`, [freezeShiftId])
 
-    // Calculation 2 (fresh resolution): the NEW window end — the positive
-    // control that shift changes DO reach fresh resolutions, so the identical
-    // window on calc 1 below is a real freeze, not a constant.
+    // Calculation 2: checkout of the original class reuses its frozen window.
+    // A later shift definition cannot move that class's absolute end.
     const opB = randomUUID()
     const second = await punch(token, {
       eventType: 'check_out',
@@ -489,12 +500,32 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     expect(calc2.attribution_snapshot.posture).toBe('resolved_v2')
     expect(calc2.attribution_snapshot.value.absoluteWindow).toEqual({
       startAt: '2026-07-20T01:00:00.000Z',
-      endAt: '2026-07-20T11:00:00.000Z',
+      endAt: '2026-07-20T10:00:00.000Z',
     })
+
+    // A fresh check-in on the next workday observes the changed shift.
+    const opC = randomUUID()
+    const third = await punch(token, {
+      eventType: 'check_in',
+      occurredAt: '2026-07-21T01:05:00.000Z',
+      orgId: freezeOrg,
+      operationId: opC,
+    })
+    expect(third.status, third.raw).toBe(200)
+    calcs = await calculationRowsForUser(freezeUser)
+    expect(calcs.length).toBe(3)
+    const calc3 = calcs.find(row => row.operation_id === opC)
+    expect(calc3?.outcome).toBe('completed')
+    expect(calc3?.attribution_snapshot.posture).toBe('resolved_v2')
+    expect(calc3?.attribution_snapshot.value.absoluteWindow).toEqual({
+      startAt: '2026-07-21T01:00:00.000Z',
+      endAt: '2026-07-21T11:00:00.000Z',
+    })
+    expect(calc3?.record_id).not.toBe(calc1.record_id)
 
     // The frozen windows did NOT move: byte-identical re-read.
     const reread = await calculationRowsForUser(freezeUser)
-    expect(JSON.stringify(reread[0].attribution_snapshot)).toBe(frozenSnapshotBytes)
+    expect(JSON.stringify(reread.find(row => row.id === calc1.id)?.attribution_snapshot)).toBe(frozenSnapshotBytes)
 
     // Storage-level freeze: the stored snapshot cannot be rewritten at all.
     await expect(
@@ -520,7 +551,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
     expect(probe!.getState()).toEqual({ gated: true })
 
     // Pending rows produced by the legs above: shadow(1) + eligible control(1)
-    // + freeze(2). This ORG-SCOPED count is the exact claim, and it is what the
+    // + freeze(3). This ORG-SCOPED count is the exact claim, and it is what the
     // module header's intent sentence names: the closure delivers every pending
     // row THIS SUITE created.
     //
@@ -564,7 +595,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
         [[shadowOrg, eligibleOrg, freezeOrg]],
       )).rows[0].n)
     const pendingBefore = await pendingScoped()
-    expect(pendingBefore).toBe(4)
+    expect(pendingBefore).toBe(5)
 
     // The production closure, drained until this suite's own rows are gone. It
     // takes ONE pass whenever the shared backlog is within the batch limit; the
@@ -582,7 +613,7 @@ describeDb('W4C-2 posture matrix + V2 freeze + env-gated outbox drain (real DB, 
       expect(passes).toBeLessThanOrEqual(10)   // terminates; never spins
     }
     // Non-vacuous: the first pass really did claim work — at minimum this
-    // suite's own four rows were in reach of it.
+    // suite's own five rows were in reach of it.
     expect(firstPass).not.toBeNull()
     expect(firstPass!.claimed).toBeGreaterThanOrEqual(pendingBefore)
 

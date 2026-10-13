@@ -8,8 +8,8 @@ import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixt
  *
  *  1. "fresh W2 ambiguity creates no parent/result; existing parent may append
  *     only unsupported review with zero children/no pointer" — live leg: two
- *     overlapping published assignments are refused by the PRESERVED legacy
- *     route contract (R5/OD-4556-8 closed 422 `WORK_DATE_ATTRIBUTION_AMBIGUOUS`
+ *     overlapping published assignments are refused by the authoritative timezone
+ *     route contract (closed 409 `ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS`
  *     — never a silent work-date pick) with ZERO event/record/operation/
  *     calculation/outbox rows: fresh live W2 ambiguity structurally cannot
  *     create a parent or result under effective shadow, because the refusal
@@ -189,13 +189,17 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let priorAllowlistEnv: string | undefined
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
 
+  const settingsAdminUserId = randomUUID()
+  const settingsAdminOrg = randomUUID()
+
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
-  async function mintToken(userId: string, perms = 'attendance:read,attendance:write'): Promise<string> {
+  async function mintToken(userId: string, perms = 'attendance:read,attendance:write', tenantId?: string): Promise<string> {
     const res = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`,
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}`,
     )
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
@@ -287,6 +291,16 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, orgId === ambOrg || orgId === mergeOrg ? 'Asia/Shanghai' : 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   async function insertRolloutRow(orgId: string, state: 'legacy' | 'shadow'): Promise<void> {
@@ -555,11 +569,16 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    await insertActiveUser(settingsAdminUserId, settingsAdminOrg)
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+      [settingsAdminUserId],
+    )
 
     // Deployment-wide settings row: throttle off for multi-punch users; exact
     // restore in afterAll (merge flag is toggled ONLY inside leg 10).
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    const adminToken = await mintToken(settingsAdminUserId, 'attendance:read,attendance:write,attendance:admin', settingsAdminOrg)
     const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
       method: 'PUT',
       headers: authHeaders(adminToken),
@@ -696,11 +715,21 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     }
     if (priorAllowlistEnv === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlistEnv
+    await pool?.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [settingsAdminUserId, 'admin']).catch(() => undefined)
+    await pool?.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [settingsAdminUserId, settingsAdminOrg]).catch(() => undefined)
+    await pool?.query('DELETE FROM users WHERE id = $1', [settingsAdminUserId]).catch(() => undefined)
+    // Keep the original owned default with its retained immutable history and sources.
+    await pool?.query(`DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+      AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+      AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+      AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+      AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+    [seededDefaultRuleIds])
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
   }, 60000)
 
-  it('leg 1 — W2 ambiguity: positive control resolves completed; two overlapping assignments are refused by the preserved legacy 422 with ZERO parent/result rows', async () => {
+  it('leg 1 — W2 ambiguity: positive control resolves completed; two overlapping assignments are refused by the timezone 409 with ZERO parent/result rows', async () => {
     // POSITIVE CONTROL first: single assignment on the same org => resolved_v2
     // completed. The ambiguous refusal below cannot pass vacuously.
     const controlToken = await mintToken(ambControlUser)
@@ -730,7 +759,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     })
 
     // Ambiguity: punch inside BOTH absolute windows (10:00 local Asia/Shanghai).
-    // The preserved legacy route contract (R5/OD-4556-8) refuses the silent
+    // The authoritative timezone preflight refuses the silent
     // work-date pick BEFORE the boundary — under effective shadow exactly as
     // under legacy — so fresh live W2 ambiguity creates NO parent and NO
     // result: zero events, zero records, zero operations, zero calculations,
@@ -742,8 +771,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     const res = await punch(token, {
       eventType: 'check_in', occurredAt: '2026-07-20T02:00:00.000Z', orgId: ambOrg, operationId,
     })
-    expect(res.status).toBe(422)
-    expect(res.body?.error?.code).toBe('WORK_DATE_ATTRIBUTION_AMBIGUOUS')
+    expect(res.status, res.raw).toBe(409)
+    expect(res.body).toEqual({ ok: false, error: {
+      code: 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS', message: 'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS',
+    } })
     expect(await eventCount(ambUser)).toBe(0)
     expect(await recordCount(ambUser)).toBe(0)
     expect((await calculationRowsForUser(ambUser)).length).toBe(0)
@@ -2228,7 +2259,7 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
   it('leg 10 — P02 single-write discriminator: a merge-flipping internal punch touches attendance_records EXACTLY ONCE and lands the merged boundary', async () => {
     // Enable the merge policy (deployment-wide setting; restored below and the
     // whole row is exact-restored in afterAll).
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    const adminToken = await mintToken(settingsAdminUserId, 'attendance:read,attendance:write,attendance:admin', settingsAdminOrg)
     const enable = await requestJson(`${baseUrl}/api/attendance/settings`, {
       method: 'PUT',
       headers: authHeaders(adminToken),
@@ -2236,21 +2267,44 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
     })
     expect(enable.status).toBe(200)
     try {
-      // Fixture mimicking the S3 approved-outdoor writer (the route itself
-      // refuses the reserved source): an approved outdoor check_in at 00:30Z
-      // owns the record's first-in boundary.
+      // Use the real HTTP writer to establish the original record and companion.
       const workDate = '2026-07-20'
-      await pool.query(
-        `INSERT INTO attendance_events (id, user_id, org_id, work_date, occurred_at, event_type, source, timezone, location, meta)
-         VALUES ($1, $2, $3, $4, '2026-07-20T00:30:00.000Z', 'check_in', 'outdoor_approval', 'Asia/Shanghai', '{}'::jsonb, '{}'::jsonb)`,
-        [randomUUID(), mergeUser, mergeOrg, workDate],
+      const token = await mintToken(mergeUser)
+      expect(await eventCount(mergeUser)).toBe(0)
+      expect(await recordCount(mergeUser)).toBe(0)
+      const first = await punch(token, {
+        eventType: 'check_in', occurredAt: '2026-07-20T00:30:00.000Z', orgId: mergeOrg, source: 'manual',
+      })
+      expect(first.status, first.raw).toBe(200)
+      expect(await eventCount(mergeUser)).toBe(1)
+      const initial = (await pool.query(
+        'SELECT id::text AS id, work_date::text AS work_date, timezone, first_in_at FROM attendance_records WHERE org_id = $1 AND user_id = $2',
+        [mergeOrg, mergeUser],
+      )).rows
+      expect(initial).toHaveLength(1)
+      expect(initial[0]).toMatchObject({ work_date: workDate, timezone: 'Asia/Shanghai' })
+      expect(new Date(initial[0].first_in_at as string | Date).toISOString()).toBe('2026-07-20T00:30:00.000Z')
+      const companions = (await pool.query(
+        'SELECT * FROM attendance_timezone_context_companions WHERE org_id = $1 AND user_id = $2 AND work_date = $3',
+        [mergeOrg, mergeUser, workDate],
+      )).rows
+      expect(companions).toHaveLength(1)
+      expect(companions[0]).toMatchObject({ record_id: initial[0].id, timezone: 'Asia/Shanghai',
+        frame_snapshot: { workDate, timezone: 'Asia/Shanghai' } })
+
+      // As in live-punch-order, model approved outdoor provenance on only the
+      // owned first event; keep the real record and companion untouched.
+      const firstEventId = (first.body as { data?: { event?: { id?: string } } } | undefined)?.data?.event?.id
+      expect(firstEventId).toBeTruthy()
+      const outdoor = await pool.query(
+        `UPDATE attendance_events SET source = 'outdoor_approval'
+          WHERE id = $1 AND org_id = $2 AND user_id = $3 AND event_type = 'check_in'
+          RETURNING id::text AS id, work_date::text AS work_date, timezone,
+            (occurred_at AT TIME ZONE timezone)::date::text AS calendar_work_date`,
+        [firstEventId, mergeOrg, mergeUser],
       )
-      await pool.query(
-        `INSERT INTO attendance_records
-           (user_id, org_id, work_date, timezone, first_in_at, work_minutes, late_minutes, early_leave_minutes, status, is_workday, created_at, updated_at)
-         VALUES ($1, $2, $3, 'Asia/Shanghai', '2026-07-20T00:30:00.000Z', 0, 0, 0, 'normal', true, now(), now())`,
-        [mergeUser, mergeOrg, workDate],
-      )
+      expect(outdoor.rows).toEqual([{ id: firstEventId, work_date: workDate,
+        timezone: 'Asia/Shanghai', calendar_work_date: workDate }])
 
       // Count ONLY the punch below.
       await pool.query(`DELETE FROM ${AUDIT_TABLE} WHERE user_id = $1`, [mergeUser])
@@ -2259,7 +2313,6 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       // internalWinsOnIn protects the earliest INTERNAL check_in => the merge
       // decision flips the boundary to 01:00 — the P02-lifted path applies it
       // in ONE write (the removed legacy flow needed append + a second UPDATE).
-      const token = await mintToken(mergeUser)
       const res = await punch(token, {
         eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z', orgId: mergeOrg, source: 'manual',
       })
@@ -2282,6 +2335,10 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
       expect((await operationRows(mergeOrg)).length).toBe(0)
       expect((await calculationRowsForUser(mergeUser)).length).toBe(0)
       expect((await outboxRows(mergeOrg)).length).toBe(0)
+      expect((await pool.query(
+        'SELECT * FROM attendance_timezone_context_companions WHERE org_id = $1 AND user_id = $2 AND work_date = $3',
+        [mergeOrg, mergeUser, workDate],
+      )).rows).toEqual(companions)
     } finally {
       const disable = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
@@ -2289,6 +2346,54 @@ describeDb('W4C-2 Stage E gate matrix (real DB: isolation, forged authz, freeze 
         body: JSON.stringify({ punchPolicy: { merge: { internalWinsOnIn: false } } }),
       })
       expect(disable.status).toBe(200)
+    }
+  })
+
+  it('legacy record without a companion refuses an HTTP punch with zero business changes', async () => {
+    const orgId = randomUUID()
+    const userId = randomUUID()
+    const recordId = randomUUID()
+    const workDate = '2026-07-20'
+    await insertActiveUser(userId, orgId)
+    try {
+      // Preserve the former untracked-history boundary as its own refusal case.
+      await pool.query(
+        `INSERT INTO attendance_records
+           (id, user_id, org_id, work_date, timezone, first_in_at, status, is_workday, projection_owner)
+         VALUES ($1, $2, $3, $4, 'UTC', '2026-07-20T09:00:00.000Z', 'partial', true, 'legacy_untracked')`,
+        [recordId, userId, orgId, workDate],
+      )
+      const snapshot = async () => {
+        const rows: Record<string, unknown[]> = {}
+        for (const table of ['attendance_records', 'attendance_events', 'attendance_requests',
+          'attendance_result_operations', 'attendance_record_calculations', 'attendance_record_segments',
+          'attendance_result_event_outbox', 'attendance_timezone_context_companions']) {
+          rows[table] = (await pool.query(
+            `SELECT to_jsonb(t) AS row FROM ${table} t WHERE org_id = $1 ORDER BY to_jsonb(t)::text`, [orgId],
+          )).rows
+        }
+        return rows
+      }
+      const before = await snapshot()
+      expect(await recordCount(userId)).toBe(1)
+      expect(before.attendance_records).toHaveLength(1)
+      expect(before.attendance_timezone_context_companions).toEqual([])
+      expect(before.attendance_events).toEqual([])
+      const token = await mintToken(userId)
+      const refused = await punch(token, {
+        eventType: 'check_in', occurredAt: '2026-07-20T10:00:00.000Z', orgId, source: 'manual',
+      })
+      expect(refused.status, refused.raw).toBe(409)
+      expect(refused.body).toEqual({ ok: false, error: {
+        code: 'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
+        message: 'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED',
+      } })
+      expect(await snapshot()).toEqual(before)
+    } finally {
+      await pool.query('DELETE FROM attendance_events WHERE org_id = $1 AND user_id = $2', [orgId, userId]).catch(() => undefined)
+      await pool.query('DELETE FROM attendance_records WHERE id = $1 AND org_id = $2', [recordId, orgId]).catch(() => undefined)
+      await pool.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [userId, orgId]).catch(() => undefined)
+      await pool.query('DELETE FROM users WHERE id = $1', [userId]).catch(() => undefined)
     }
   })
 

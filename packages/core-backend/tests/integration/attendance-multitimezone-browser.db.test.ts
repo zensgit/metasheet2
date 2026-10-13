@@ -468,6 +468,18 @@ describe('multi-timezone actual browser login, API and isolated PostgreSQL', () 
       { timezone: 'Asia/Singapore', event_type: 'check_out', occurred_at: tripOut },
     ])
     expect((await fixture.pool.query('SELECT context_fingerprint FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2 AND work_date=$3::date', [fixture.orgId, employee.userId, tripWorkDate])).rows).toEqual(frozen.rows)
+    await employeePage.waitForFunction(() => {
+      const hero = document.querySelector('[data-testid="attendance-hero-punch"]')
+      const timezone = hero?.querySelector('[data-attendance-hero-timezone]')?.textContent ?? ''
+      const clock = hero?.querySelector('[data-testid="attendance-hero-time"]')?.textContent?.trim() ?? ''
+      const status = document.querySelector('[data-attendance-overview-primary] .attendance__status')
+      return /^\d{2}:\d{2}:\d{2}$/.test(clock)
+        && timezone.includes('Approved business trip') && timezone.includes('Asia/Singapore')
+        && Boolean(hero?.querySelector('[data-attendance-clock-state="complete"]'))
+        && !hero?.querySelector('[data-testid="attendance-refreshing-indicator"]')
+        && Boolean(status?.textContent?.includes('Check out recorded'))
+        && !status?.classList.contains('attendance__status--error')
+    })
     await employeePage.screenshot({ path: path.join(output, 'employee-real-trip-correction-checkout.png'), fullPage: true })
     expect(pageErrors).toEqual([])
   }, 240_000)

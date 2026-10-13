@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module'
 import { describe, expect, it, vi } from 'vitest'
+import { resolveAttendanceLocalWallTimeV1, validateAttendanceIanaTimezoneV1 } from '../../src/attendance/w4c1-strict-time'
 
 const require = createRequire(import.meta.url)
 type Row = Record<string, unknown>
@@ -297,5 +298,131 @@ describe('request-only timezone target capability', () => {
     h.authorized.delete(h.trx)
     await expect(h.runtime.readTargetTimezoneContext(h.trx,h.input))
       .rejects.toMatchObject({status:403,code:'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED'})
+  })
+})
+
+
+describe('scheduled timezone membership ambiguity classification', () => {
+  const {createAttendanceTimezoneRuntime:createRuntime} = require('../../../../plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs')
+  class ScheduledSourceError extends Error {
+    constructor(public status:number,public code:string,message:string) { super(message) }
+  }
+
+  // Extend the production-runtime style used by requestScopeHarness above:
+  // source rows are synthetic; context selection, wall conversion, companion
+  // checks and scheduled membership classification execute production code.
+  function scheduledHarness(mode:'normal'|'multiple-contexts'|'zero-contexts' = 'normal') {
+    const input = {orgId:'scheduled-org',workDate:'2026-10-12'}
+    const firstUser = 'scheduled-first',normalUser = 'scheduled-normal'
+    const rule = {id:'scheduled-rule',timezone:'UTC',workStartTime:'09:00',workEndTime:'18:00',
+      workingDays:[0,1,2,3,4,5,6],isOvernight:false}
+    const interval = mode === 'zero-contexts'
+      ? {start:new Date(input.workDate+'T08:00:00Z'),end:new Date(input.workDate+'T19:00:00Z'),zone:'Pacific/Honolulu'}
+      : {start:new Date(input.workDate+'T12:00:00Z'),end:new Date(input.workDate+'T15:00:00Z'),zone:'UTC'}
+    const query = vi.fn(async (sql:string,values:unknown[] = []) => {
+      if (sql.includes('FROM user_orgs uo JOIN users')) return [{user_id:firstUser},{user_id:normalUser}]
+      if (sql.includes('FROM users u JOIN user_orgs')) return [{id:values[0]}]
+      if (sql.includes('FROM attendance_timezone_policies')) return [{enabled:true,version:1}]
+      if (sql.includes('FROM attendance_rules')) return [{id:rule.id,timezone:'UTC',timezone_version:1}]
+      if (sql.includes('SELECT effective_from AS start_at')) {
+        return mode !== 'normal' && values[1] === firstUser ? [{start_at:interval.start,end_at:interval.end}] : []
+      }
+      if (sql.includes('FROM attendance_employee_timezone_overrides')) {
+        const at = values[2] as Date
+        return mode !== 'normal' && values[1] === firstUser && interval.start <= at && at < interval.end
+          ? [{id:'scheduled-override',timezone:interval.zone,version:1,effective_from:interval.start,effective_to:interval.end}] : []
+      }
+      if (sql.includes('attendance_timezone_context_companions') || sql.includes('FROM attendance_records')
+        || sql.includes('attendance_calculation_group_memberships')) return []
+      throw new Error('UNEXPECTED_SCHEDULED_MEMBERSHIP_SQL')
+    })
+    const trx = {query}
+    const resolveScheduledCandidate = vi.fn(async (_trx:unknown,_input:Row):Promise<Row> =>
+      ({kind:'unresolved',reasonCode:'UNSCHEDULED_NO_SHIFT'}))
+    const loadPublishedCandidates = vi.fn(async () => [])
+    const runtime = createRuntime({
+      HttpError:ScheduledSourceError,acquireRuntimeLocks:vi.fn(async () => undefined),
+      loadPublishedCandidates,readApprovedTrips:async () => [],loadCalendarOverrides:async () => [],
+      mapRuleRow:() => rule,
+      resolveRuleContext:async (value:Row) => ({
+        rule:{...rule,timezone:(value.timezoneContext as {timezone:string}).timezone},
+        source:'rule',isWorkingDay:true,holiday:null,
+      }),
+      resolveScheduledCandidate,loadAttributionTail:async () => 120,loadApprovedOvertime:async () => [],
+      validateFrozenContext:() => false,validateFrozenAttribution:() => false,
+      normalizeTimeString:(time:string) => time,
+      validateIanaTimezone:validateAttendanceIanaTimezoneV1,
+      addDaysToDateKey:(date:string,days:number) => new Date(Date.parse(date+'T00:00:00Z')+days*86400000).toISOString().slice(0,10),
+      toWorkDate:(date:Date,timezone:string) => new Intl.DateTimeFormat('en-CA',{
+        timeZone:timezone,year:'numeric',month:'2-digit',day:'2-digit',
+      }).format(date),
+      resolveLocalWallTime:resolveAttendanceLocalWallTimeV1,
+    })
+    return {input,firstUser,normalUser,trx,query,resolveScheduledCandidate,loadPublishedCandidates,runtime}
+  }
+
+  it('reviews two actual effective contexts and continues to the normal member without writes',async () => {
+    const h = scheduledHarness('multiple-contexts')
+    await expect(h.runtime.resolveScheduledMembers(h.trx,h.input)).resolves.toEqual([
+      {userId:h.firstUser,targetKind:'review',reviewReasonCode:'WORK_DATE_ATTRIBUTION_AMBIGUOUS'},
+      {userId:h.normalUser,targetKind:'generate',reviewReasonCode:null},
+    ])
+    expect(h.resolveScheduledCandidate.mock.calls.map(([,input]) => input.userId)).toEqual([h.normalUser])
+    expect(h.query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true)
+    expect(h.runtime.scheduledFrameFor(h.trx,{...h.input,userId:h.normalUser})).toBeNull()
+  })
+
+  it('reviews the actual resolver ambiguous arm and continues to the normal member',async () => {
+    const h = scheduledHarness()
+    h.resolveScheduledCandidate.mockResolvedValueOnce({kind:'ambiguous',reasonCode:'MULTIPLE_PUBLISHED_CANDIDATES'})
+    await expect(h.runtime.resolveScheduledMembers(h.trx,h.input)).resolves.toEqual([
+      {userId:h.firstUser,targetKind:'review',reviewReasonCode:'WORK_DATE_ATTRIBUTION_AMBIGUOUS'},
+      {userId:h.normalUser,targetKind:'generate',reviewReasonCode:null},
+    ])
+    expect(h.resolveScheduledCandidate.mock.calls.map(([,input]) => input.userId)).toEqual([h.firstUser,h.normalUser])
+    expect(h.query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true)
+  })
+
+  it('keeps zero valid contexts as the original 409, although its public code matches multiple contexts',async () => {
+    const h = scheduledHarness('zero-contexts')
+    // UTC 09-18 is outside the default-active intervals (<08 or >=19).
+    // Honolulu 09-18 is 19Z-04Z, outside its only active interval [08Z,19Z).
+    await expect(h.runtime.resolveScheduledMembers(h.trx,h.input)).rejects.toMatchObject({
+      status:409,code:'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',
+      message:'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT',
+    })
+    expect(h.resolveScheduledCandidate).not.toHaveBeenCalled()
+    expect(h.query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true)
+  })
+
+  it.each([
+    [409,'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT'],
+    [409,'ATTENDANCE_TIMEZONE_WORK_DATE_AMBIGUOUS'],
+    [503,'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE'],
+    [422,'ATTENDANCE_TIMEZONE_INVALID_REFERENCE'],
+    [409,'W4C2_W7_CONTEXT_SOURCE_SUSPENDED'],
+  ] as const)('rethrows the identical unmarked source error %s/%s',async (status,code) => {
+    const h = scheduledHarness()
+    const failure = new ScheduledSourceError(status,code,code)
+    // This is an error object from a source adapter, not a runtime ambiguity result.
+    h.resolveScheduledCandidate.mockRejectedValueOnce(failure)
+    await expect(h.runtime.resolveScheduledMembers(h.trx,h.input)).rejects.toBe(failure)
+    expect(h.resolveScheduledCandidate.mock.calls.map(([,input]) => input.userId)).toEqual([h.firstUser])
+    expect(h.query.mock.calls.every(([sql]) => /^\s*SELECT\b/.test(sql))).toBe(true)
+  })
+
+  it('does not accept an ambiguity marked by another runtime instance',async () => {
+    const producer = scheduledHarness('multiple-contexts')
+    const failure = await producer.runtime.readTargetTimezoneContext(producer.trx,{
+      ...producer.input,userId:producer.firstUser,
+    }).then(
+      () => { throw new Error('EXPECTED_RUNTIME_AMBIGUITY') },
+      (error:unknown) => error,
+    )
+    expect(failure).toBeInstanceOf(ScheduledSourceError)
+    expect(failure).toMatchObject({status:409,code:'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT'})
+    const consumer = scheduledHarness()
+    consumer.resolveScheduledCandidate.mockRejectedValueOnce(failure)
+    await expect(consumer.runtime.resolveScheduledMembers(consumer.trx,consumer.input)).rejects.toBe(failure)
   })
 })

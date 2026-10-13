@@ -419,6 +419,11 @@ attendanceIntegrationDescribe(
   let settingsRowPool: Pool | undefined
   let settingsRowSnapshot: AttendanceSettingsRowSnapshot | undefined
   const seededImportIdentityIds = new Set<string>()
+  const seededNeutralIdentityIds = new Set<string>()
+  const seededNeutralMemberships: Array<{ userId: string; orgId: string }> = []
+  const seededDefaultRuleIds: string[] = []
+  const seededMutableShiftAssignmentIds = new Set<string>()
+  const seededMutableRotationAssignmentIds = new Set<string>()
   const sharedImportUserId = randomUUID()
 
   async function ensureActiveImportIdentitiesForTest(
@@ -459,6 +464,61 @@ attendanceIntegrationDescribe(
       )
       seededImportIdentityIds.add(userId)
     }
+  }
+
+  // Explicit opt-in for legitimate admin fixtures; forged/low-permission tokens use requestJson.
+  async function requestAdminFixtureToken(url: string): Promise<HttpResponse> {
+    const target = new URL(url)
+    const userId = target.searchParams.get('userId')
+    if (!userId || target.searchParams.get('roles') !== 'admin') {
+      throw new Error('admin identity fixture requires an explicit admin subject')
+    }
+    const orgId = target.searchParams.get('tenantId') || 'default'
+    await ensureActiveImportIdentitiesForTest(userId, orgId)
+    target.searchParams.set('tenantId', orgId)
+    return requestJson(target.href)
+  }
+
+  async function seedNeutralAttendanceSubjectForTest(userId: string, orgId = 'default'): Promise<void> {
+    if (!settingsRowPool) throw new Error('attendance integration identity fixture pool is unavailable')
+    const inserted = await settingsRowPool.query<{ id: string }>(
+      `INSERT INTO users (
+         id, email, username, name, password_hash, role, permissions,
+         is_active, is_admin, activation_status, created_at, updated_at
+       ) VALUES ($1, $2, $1, 'Attendance Subject Test User', 'x', 'user', '[]'::jsonb,
+         true, false, 'activated', now(), now())
+       ON CONFLICT (id) DO NOTHING RETURNING id`,
+      [userId, `${userId}@example.test`],
+    )
+    inserted.rows.forEach(row => seededNeutralIdentityIds.add(row.id))
+    const membership = await settingsRowPool.query<{ user_id: string; org_id: string }>(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true)
+       ON CONFLICT (user_id, org_id) DO NOTHING RETURNING user_id, org_id`,
+      [userId, orgId],
+    )
+    membership.rows.forEach(row => seededNeutralMemberships.push({ userId: row.user_id, orgId: row.org_id }))
+  }
+
+  async function requestNeutralFixtureToken(url: string): Promise<HttpResponse> {
+    const target = new URL(url)
+    const userId = target.searchParams.get('userId')
+    if (!userId) throw new Error('neutral identity fixture requires a subject')
+    await seedNeutralAttendanceSubjectForTest(userId, target.searchParams.get('tenantId') || 'default')
+    return requestJson(url)
+  }
+
+  async function seedShanghaiPunchOrgForTest(): Promise<string> {
+    if (!settingsRowPool) throw new Error('attendance integration identity fixture pool is unavailable')
+    const orgId = `attendance-shanghai-punch-${randomUUID()}`
+    const ruleId = randomUUID()
+    await settingsRowPool.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       VALUES ($1, $2, 'owned Shanghai punch fixture', 'Asia/Shanghai', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true)`,
+      [ruleId, orgId],
+    )
+    seededDefaultRuleIds.push(ruleId)
+    return orgId
   }
 
   beforeAll(async () => {
@@ -541,6 +601,19 @@ attendanceIntegrationDescribe(
     settingsRowPool = new Pool({ connectionString: dbUrl, max: 1 })
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(settingsRowPool)
     await ensureActiveImportIdentitiesForTest(sharedImportUserId)
+    const defaultRule = await settingsRowPool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, 'default', 'owned plugin timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = 'default' AND is_default = true)
+       RETURNING id`,
+      [randomUUID()],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
+    expect((await settingsRowPool.query(
+      `SELECT timezone FROM attendance_rules WHERE org_id = 'default' AND is_default = true`,
+    )).rows).toEqual([{ timezone: 'UTC' }])
+
 
     // Important: load MetaSheetServer only after DATABASE_URL is set,
     // since the DB pool is initialized during module import.
@@ -581,23 +654,48 @@ attendanceIntegrationDescribe(
 
   afterAll(async () => {
     if (settingsRowPool) {
+      const seededIdentityIds = [...new Set([...seededImportIdentityIds, ...seededNeutralIdentityIds])]
+      // Only IDs returned by successful creates in this suite are removable.
+      await settingsRowPool.query('DELETE FROM attendance_shift_assignments WHERE id=ANY($1::uuid[])',
+        [[...seededMutableShiftAssignmentIds]])
+      await settingsRowPool.query('DELETE FROM attendance_rotation_assignments WHERE id=ANY($1::uuid[])',
+        [[...seededMutableRotationAssignmentIds]])
+      for (const { userId, orgId } of seededNeutralMemberships) {
+        await settingsRowPool.query(
+          'DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [userId, orgId],
+        ).catch(() => undefined)
+      }
       await restoreAttendanceSettingsRow(settingsRowPool, settingsRowSnapshot).catch(() => undefined)
       await settingsRowPool.query(
         `DELETE FROM user_roles WHERE user_id = ANY($1::text[])`,
-        [[...seededImportIdentityIds]],
+        [seededIdentityIds],
       ).catch(() => undefined)
       await settingsRowPool.query(
         `DELETE FROM user_namespace_admissions WHERE user_id = ANY($1::text[])`,
-        [[...seededImportIdentityIds]],
+        [seededIdentityIds],
       ).catch(() => undefined)
       await settingsRowPool.query(
         `DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`,
-        [[...seededImportIdentityIds]],
+        [seededIdentityIds],
       ).catch(() => undefined)
       await settingsRowPool.query(
         `DELETE FROM users WHERE id = ANY($1::text[])`,
-        [[...seededImportIdentityIds]],
+        [seededIdentityIds],
       ).catch(() => undefined)
+      // retainHistoryInIsolatedDatabase: append-only companions and their records
+      // keep their existing unique owned default; later NOT EXISTS seeds reuse it.
+      await settingsRowPool.query(`DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+        AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+        AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+        AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+        AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id)`,
+      [seededDefaultRuleIds])
+      const invalidRetainedDefaults = await settingsRowPool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+         AND (r.is_default IS DISTINCT FROM true OR r.timezone_version IS NULL OR r.timezone_version<1)`,
+        [seededDefaultRuleIds],
+      )
+      expect(invalidRetainedDefaults.rows).toEqual([{ n: 0 }])
       await settingsRowPool.end().catch(() => undefined)
     }
     if (server && (server as any).stop) {
@@ -794,6 +892,7 @@ attendanceIntegrationDescribe(
     expect(assignmentRes.status).toBe(201)
     const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(assignmentId).toBeTruthy()
+    if (assignmentId) seededMutableShiftAssignmentIds.add(assignmentId)
 
     if (overtimeRuleId) {
       const overtimeRequestRes = await requestJson(`${baseUrl}/api/attendance/requests`, {
@@ -887,6 +986,7 @@ attendanceIntegrationDescribe(
     expect(rotationAssignmentRes.status).toBe(201)
     const rotationAssignmentId = (rotationAssignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(rotationAssignmentId).toBeTruthy()
+    if (rotationAssignmentId) seededMutableRotationAssignmentIds.add(rotationAssignmentId)
 
     const ruleSetRes = await requestJson(`${baseUrl}/api/attendance/rule-sets`, {
       method: 'POST',
@@ -1546,9 +1646,10 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
+    const orgId = await seedShanghaiPunchOrgForTest()
     const primaryUserId = `attendance-punch-events-${runSuffix}`
-    const adminTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(primaryUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const adminTokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(primaryUserId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
     expect(adminToken).toBeTruthy()
@@ -1564,6 +1665,7 @@ attendanceIntegrationDescribe(
         method: 'POST',
         headers: {
           Authorization: `Bearer ${adminToken}`,
+          'x-org-id': orgId,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
@@ -1574,6 +1676,7 @@ attendanceIntegrationDescribe(
     const listRes = await requestJson(`${baseUrl}/api/attendance/punch/events?from=2026-03-28&to=2026-03-28`, {
       headers: {
         Authorization: `Bearer ${adminToken}`,
+        'x-org-id': orgId,
       },
     })
     expect(listRes.status).toBe(200)
@@ -1596,8 +1699,8 @@ attendanceIntegrationDescribe(
     expect(items[0].occurred_at).toContain('2026-03-28')
 
     const secondUserId = `attendance-punch-events-other-${runSuffix}`
-    const secondTokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(secondUserId)}&roles=user&perms=attendance:read,attendance:write`
+    const secondTokenRes = await requestNeutralFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(secondUserId)}&tenantId=${encodeURIComponent(orgId)}&roles=user&perms=attendance:read,attendance:write`
     )
     const secondToken = (secondTokenRes.body as { token?: string } | undefined)?.token
     expect(secondToken).toBeTruthy()
@@ -1607,6 +1710,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${secondToken}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -1622,6 +1726,7 @@ attendanceIntegrationDescribe(
       {
         headers: {
           Authorization: `Bearer ${adminToken}`,
+          'x-org-id': orgId,
         },
       }
     )
@@ -1635,6 +1740,7 @@ attendanceIntegrationDescribe(
       {
         headers: {
           Authorization: `Bearer ${adminToken}`,
+          'x-org-id': orgId,
         },
       }
     )
@@ -1645,6 +1751,7 @@ attendanceIntegrationDescribe(
     const invalidDateRes = await requestJson(`${baseUrl}/api/attendance/punch/events?from=2026/03/28&to=2026-03-28`, {
       headers: {
         Authorization: `Bearer ${adminToken}`,
+        'x-org-id': orgId,
       },
     })
     expect(invalidDateRes.status).toBe(400)
@@ -2809,7 +2916,7 @@ attendanceIntegrationDescribe(
     const adminUserId = `attendance-multishift-admin-${runSuffix}`
     const workDate = '2026-07-08'
     const saturdayDate = '2026-07-11'
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -2854,6 +2961,7 @@ attendanceIntegrationDescribe(
     }
 
     async function createAssignment(userId: string, shiftId: string, slotIndex?: number, date: string = workDate) {
+      await seedNeutralAttendanceSubjectForTest(userId)
       const body: Record<string, unknown> = {
         userId,
         shiftId,
@@ -2967,6 +3075,30 @@ attendanceIntegrationDescribe(
       expect(effectiveSlots.map(slot => slot.shiftId)).toEqual([morningShiftId, eveningShiftId])
       expect(effectiveSlots.map(slot => slot.plannedMinutes)).toEqual([240, 240])
       expect(effectiveItems[0]?.effective?.plannedMinutes).toBe(480)
+
+      // Calendar display may compose selected slots; live writes still require one context.
+      const multiSlotTokenRes = await requestJson(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(multiSlotUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`,
+      )
+      expect(multiSlotTokenRes.status).toBe(200)
+      const multiSlotToken = (multiSlotTokenRes.body as { token?: string } | undefined)?.token
+      expect(multiSlotToken).toBeTruthy()
+      const rejectedTarget = await requestJson(`${baseUrl}/api/attendance/timezone-context/me?workDate=${workDate}`, {
+        headers: { Authorization: `Bearer ${multiSlotToken}` },
+      })
+      expect(rejectedTarget.status).toBe(409)
+      expect(rejectedTarget.body).toEqual({ ok: false, error: { code: 'ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT' } })
+      const rejectedPunch = await requestJson(`${baseUrl}/api/attendance/punch`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${multiSlotToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ eventType: 'check_in', occurredAt: `${workDate}T08:30:00.000Z`, timezone: 'UTC' }),
+      })
+      expect(rejectedPunch.status).toBe(409)
+      expect((rejectedPunch.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('ATTENDANCE_TIMEZONE_WORK_DATE_CONTEXT_CONFLICT')
+      for (const table of ['attendance_events', 'attendance_records', 'attendance_timezone_context_companions']) {
+        const unchanged = await pool.query(`SELECT COUNT(*)::int AS count FROM ${table} WHERE org_id=$1 AND user_id=$2`, ['default', multiSlotUserId])
+        expect(unchanged.rows).toEqual([{ count: 0 }])
+      }
 
       const comprehensivePreviewRes = await requestJson(`${baseUrl}/api/attendance/comprehensive-hours/preview`, {
         method: 'POST',
@@ -3268,7 +3400,7 @@ attendanceIntegrationDescribe(
     let groupId: string | undefined
     let rotationRuleId: string | undefined
 
-    const adminTokenRes = await requestJson(
+    const adminTokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const employeeTokenRes = await requestJson(
@@ -3305,6 +3437,9 @@ attendanceIntegrationDescribe(
     }
 
     try {
+      for (const userId of [employeeUserId, rotationUserId, conflictUserId]) {
+        await seedNeutralAttendanceSubjectForTest(userId)
+      }
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
         headers: { Authorization: `Bearer ${adminToken}` },
       })
@@ -3540,7 +3675,7 @@ attendanceIntegrationDescribe(
     const shiftIds: string[] = []
     const rotationRuleIds: string[] = []
 
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -3844,7 +3979,7 @@ attendanceIntegrationDescribe(
     const shiftIds: string[] = []
     const rotationRuleIds: string[] = []
 
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -4100,7 +4235,7 @@ attendanceIntegrationDescribe(
     let failedFirstApplyGroupId: string | undefined
     let failedFirstRebuildGroupId: string | undefined
 
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -4169,6 +4304,8 @@ attendanceIntegrationDescribe(
     }
 
     try {
+      await seedNeutralAttendanceSubjectForTest(userId)
+      await seedNeutralAttendanceSubjectForTest(fixedUserId)
       const settingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -4641,7 +4778,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const adminUserId = `attendance-shift-edit-window-admin-${runSuffix}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -4858,7 +4995,7 @@ attendanceIntegrationDescribe(
          ON CONFLICT DO NOTHING`,
         [adminUserId, employeeUserId],
       )
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(employeeUserId)}&tenantId=default&roles=user&perms=attendance:read,attendance:write`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       const employeeToken = (employeeTokenRes.body as { token?: string } | undefined)?.token
@@ -4950,7 +5087,7 @@ attendanceIntegrationDescribe(
       // Compliance enforcement is orthogonal to RBAC (it runs after the dispatch check, inside the
       // txn). Bypass RBAC so each save path reaches the guard without per-route permission plumbing.
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -5131,7 +5268,7 @@ attendanceIntegrationDescribe(
     let shiftId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const adminTokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
@@ -5355,7 +5492,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     const runSuffix = Date.now().toString(36)
     const adminId = `al-l2b-admin-${runSuffix}`
-    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
     if (!token) { await pool.end().catch(() => undefined); return }
@@ -5482,7 +5619,7 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const adminId = `al-l4a-admin-${runSuffix}`
     const org = `al-l4a-org-${runSuffix}` // unique org → accrual enumerates ONLY my seeded users (no cross-test pollution)
-    const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${adminId}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) { await pool.end().catch(() => undefined); return }
     const headers = { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
@@ -6105,7 +6242,7 @@ attendanceIntegrationDescribe(
     const asOf = utcDateKeyOffset(0)
     const scheduleFrom = utcDateKeyOffset(-10)
     const scheduleTo = utcDateKeyOffset(10)
-    const adminTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+    const adminTokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
     const employeeTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(meId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
     const noGroupTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(otherId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
     const foreignOnlyTokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(foreignOnlyId)}&tenantId=${encodeURIComponent(orgId)}&roles=employee&perms=attendance:read`)
@@ -6125,7 +6262,7 @@ attendanceIntegrationDescribe(
     const originalSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: { Authorization: `Bearer ${adminToken}` } })
     const originalSettings = (originalSettingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
     try {
-      await requestJson(`${baseUrl}/api/attendance/settings`, {
+      const settingsUpdateRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
         method: 'PUT',
         headers: adminHeaders,
         body: JSON.stringify({
@@ -6137,6 +6274,7 @@ attendanceIntegrationDescribe(
           geoFence: { lat: 31.23, lng: 121.47, radiusMeters: 300 },
         }),
       })
+      expect(settingsUpdateRes.status, settingsUpdateRes.raw).toBe(200)
       await pool.query(
         `INSERT INTO users (id, email, name, password_hash, is_active)
          VALUES ($1, $2, $3, 'no-login', true), ($4, $5, $6, 'no-login', true), ($7, $8, $9, 'no-login', true)
@@ -6265,8 +6403,12 @@ attendanceIntegrationDescribe(
       expect(noGroupWarningCodes.has('DEFAULT_RULE_FALLBACK')).toBe(true)
 
       const foreignOrgRes = await requestJson(`${baseUrl}/api/attendance/rules/me?asOf=${asOf}`, { headers: foreignOnlyHeaders })
-      expect(foreignOrgRes.status).toBe(404)
-      expect((foreignOrgRes.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('USER_NOT_IN_ORG')
+      // Current timezone reads require active membership before exposing rule details.
+      expect(foreignOrgRes.status).toBe(403)
+      expect(foreignOrgRes.body).toEqual({
+        ok: false,
+        error: { code: 'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED', message: 'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED' },
+      })
 
       await pool.query(
         `INSERT INTO attendance_groups (id, org_id, name, code, timezone, attendance_type, created_at, updated_at)
@@ -6424,7 +6566,7 @@ attendanceIntegrationDescribe(
     const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(pool, userId)
@@ -6841,7 +6983,7 @@ attendanceIntegrationDescribe(
     let overtimeRuleId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -7037,7 +7179,7 @@ attendanceIntegrationDescribe(
     }
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(pool, userId)
@@ -7214,7 +7356,7 @@ attendanceIntegrationDescribe(
     const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(pool, userId)
@@ -7353,7 +7495,7 @@ attendanceIntegrationDescribe(
     let originalSettings: Record<string, unknown> = {}
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(settingsRowPool!, userId)
@@ -7424,7 +7566,7 @@ attendanceIntegrationDescribe(
     let overtimeRuleId: string | undefined
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -7576,14 +7718,23 @@ attendanceIntegrationDescribe(
     }
     let adminToken: string | undefined
     let originalSettings: Record<string, unknown> = {}
+    async function putSettings(body: Record<string, unknown>): Promise<void> {
+      const headers = { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }
+      const saved = await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers, body: JSON.stringify(body) })
+      expect(saved.status).toBe(200)
+      const loaded = await requestJson(`${baseUrl}/api/attendance/settings`, { headers })
+      expect(loaded.status).toBe(200)
+      expect((loaded.body as { data?: { leaveBalanceDeductionPolicy?: unknown } } | undefined)?.data?.leaveBalanceDeductionPolicy).toEqual(body.leaveBalanceDeductionPolicy)
+    }
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenFor = async (uid: string) => {
-        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        const r = await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
         return (r.body as { token?: string } | undefined)?.token
       }
       const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
-      adminToken = await tokenFor(`attendance-v12b-admin-${runSuffix}`)
+      const adminTokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`attendance-v12b-admin-${runSuffix}`)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
       if (!adminToken) return
       const tokens: Record<string, string> = {}
       for (const [k, uid] of Object.entries(users)) { const t = await tokenFor(uid); if (!t) return; await seedAttendanceOrgMembershipForTest(pool, uid); tokens[k] = t }
@@ -7606,8 +7757,9 @@ attendanceIntegrationDescribe(
         expect(r.status).toBe(201); const id = (r.body as { data?: { request?: { id?: string } } } | undefined)?.data?.request?.id; createdRequestIds.push(id as string); return id as string
       }
       const approve = (token: string, id: string) => requestJson(`${baseUrl}/api/attendance/requests/${id}/approve`, { method: 'POST', headers: hdr(token), body: JSON.stringify({ comment: 'ok' }) })
-      const putSettings = (body: Record<string, unknown>) => requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: hdr(adminToken!), body: JSON.stringify(body) })
-      originalSettings = ((await requestJson(`${baseUrl}/api/attendance/settings`, { headers: hdr(adminToken!) })).body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
+      const originalSettingsRes = await requestJson(`${baseUrl}/api/attendance/settings`, { headers: hdr(adminToken!) })
+      expect(originalSettingsRes.status).toBe(200)
+      originalSettings = (originalSettingsRes.body as { data?: Record<string, unknown> } | undefined)?.data ?? {}
 
       // (1) DORMANT (policy off): personal_leave deducts NOWHERE → comp_time untouched (byte-identical floor).
       await putSettings({ leaveBalanceDeductionPolicy: { enabled: false, rules: [] } })
@@ -7641,14 +7793,17 @@ attendanceIntegrationDescribe(
       expect((await approve(tokens.nodbl, await createLeave(tokens.nodbl, compTimeLtId, '2026-09-20', 60))).status).toBe(200)
       expect(await compRemaining(users.nodbl)).toBe(60)
     } finally {
-      if (adminToken && Object.keys(originalSettings).length > 0) await requestJson(`${baseUrl}/api/attendance/settings`, { method: 'PUT', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(originalSettings) }).catch(() => undefined)
-      for (const uid of Object.values(users)) {
-        await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id=$1', [uid]).catch(() => undefined)
-        await pool.query('DELETE FROM attendance_leave_balances WHERE user_id=$1', [uid]).catch(() => undefined)
+      try {
+        if (adminToken && Object.keys(originalSettings).length > 0) await putSettings(originalSettings)
+      } finally {
+        for (const uid of Object.values(users)) {
+          await pool.query('DELETE FROM attendance_leave_balance_events WHERE user_id=$1', [uid]).catch(() => undefined)
+          await pool.query('DELETE FROM attendance_leave_balances WHERE user_id=$1', [uid]).catch(() => undefined)
+        }
+        if (createdRequestIds.length) await pool.query(`DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])`, [createdRequestIds]).catch(() => undefined)
+        await pool.end().catch(() => undefined)
+        if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
       }
-      if (createdRequestIds.length) await pool.query(`DELETE FROM attendance_requests WHERE id = ANY($1::uuid[])`, [createdRequestIds]).catch(() => undefined)
-      await pool.end().catch(() => undefined)
-      if (previousRbacBypass === undefined) delete process.env.RBAC_BYPASS; else process.env.RBAC_BYPASS = previousRbacBypass
     }
   })
 
@@ -7666,7 +7821,7 @@ attendanceIntegrationDescribe(
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenFor = async (uid: string) => {
-        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        const r = await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
         return (r.body as { token?: string } | undefined)?.token
       }
       const tokenOk = await tokenFor(uOk)
@@ -7784,7 +7939,7 @@ attendanceIntegrationDescribe(
     const createdRequestIds: string[] = []
     const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' })
     const tokenFor = async (uid: string) => {
-      const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const r = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       return (r.body as { token?: string } | undefined)?.token
     }
     let adminTok: string | undefined
@@ -7956,7 +8111,7 @@ attendanceIntegrationDescribe(
     const createdShiftIds = new Set<string>()
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(pool, userId)
@@ -8893,13 +9048,14 @@ attendanceIntegrationDescribe(
     // check-out D+1 05:55 must both store work_date=D and yield one 470-minute normal row
     // (calendar-date anchoring previously split them into two partial rows).
     const runSuffix = Date.now().toString(36)
+    const orgId = await seedShanghaiPunchOrgForTest()
     const userId = `attendance-live-overnight-${runSuffix}`
     const workDate = utcDateKeyOffset(-3)
     const nextDate = addDaysToDateKeyForTest(workDate, 1)
     const firstInAt = new Date(`${workDate}T22:05:00+08:00`).toISOString()
     const lastOutAt = new Date(`${nextDate}T05:55:00+08:00`).toISOString()
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -8907,6 +9063,7 @@ attendanceIntegrationDescribe(
 
     const headers = {
       Authorization: `Bearer ${token}`,
+      'x-org-id': orgId,
       'Content-Type': 'application/json',
     }
     let shiftId: string | undefined
@@ -8936,7 +9093,7 @@ attendanceIntegrationDescribe(
       const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, endDate: workDate, isActive: true }),
       })
       expect(assignmentRes.status).toBe(201)
 
@@ -8971,7 +9128,7 @@ attendanceIntegrationDescribe(
            FROM attendance_events
           WHERE user_id = $1 AND org_id = $2
           ORDER BY occurred_at`,
-        [userId, 'default']
+        [userId, orgId]
       )
       expect(events.rows).toEqual([
         { work_date: workDate, event_type: 'check_in' },
@@ -8983,7 +9140,7 @@ attendanceIntegrationDescribe(
            FROM attendance_records
           WHERE user_id = $1 AND org_id = $2
           ORDER BY work_date`,
-        [userId, 'default']
+        [userId, orgId]
       )
       expect(records.rows).toHaveLength(1)
       expect(records.rows[0]?.work_date).toBe(workDate)
@@ -9009,12 +9166,13 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
+    const orgId = await seedShanghaiPunchOrgForTest()
     const userId = `attendance-live-dayshift-${runSuffix}`
     const workDate = utcDateKeyOffset(-3)
     const firstInAt = new Date(`${workDate}T09:05:00+08:00`).toISOString()
     const lastOutAt = new Date(`${workDate}T17:55:00+08:00`).toISOString()
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9022,6 +9180,7 @@ attendanceIntegrationDescribe(
 
     const headers = {
       Authorization: `Bearer ${token}`,
+      'x-org-id': orgId,
       'Content-Type': 'application/json',
     }
     let shiftId: string | undefined
@@ -9051,7 +9210,7 @@ attendanceIntegrationDescribe(
       const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ userId, shiftId, startDate: workDate, isActive: true }),
+        body: JSON.stringify({ userId, shiftId, startDate: workDate, endDate: workDate, isActive: true }),
       })
       expect(assignmentRes.status).toBe(201)
 
@@ -9078,7 +9237,7 @@ attendanceIntegrationDescribe(
            FROM attendance_events
           WHERE user_id = $1 AND org_id = $2
           ORDER BY occurred_at`,
-        [userId, 'default']
+        [userId, orgId]
       )
       expect(events.rows).toEqual([
         { work_date: workDate, event_type: 'check_in' },
@@ -9090,7 +9249,7 @@ attendanceIntegrationDescribe(
            FROM attendance_records
           WHERE user_id = $1 AND org_id = $2
           ORDER BY work_date`,
-        [userId, 'default']
+        [userId, orgId]
       )
       expect(records.rows).toHaveLength(1)
       expect(records.rows[0]?.work_date).toBe(workDate)
@@ -9115,12 +9274,13 @@ attendanceIntegrationDescribe(
     // D overnight 22:00–06:00 + D+1 morning 06:00–14:00: a punch at the exact
     // shared boundary matches both windows. Current day must win.
     const runSuffix = Date.now().toString(36)
+    const orgId = await seedShanghaiPunchOrgForTest()
     const userId = `attendance-live-overlap-${runSuffix}`
     const overnightDate = utcDateKeyOffset(-3)
     const morningDate = addDaysToDateKeyForTest(overnightDate, 1)
     const overlapPunchAt = new Date(`${morningDate}T06:00:00+08:00`).toISOString()
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -9128,6 +9288,7 @@ attendanceIntegrationDescribe(
 
     const headers = {
       Authorization: `Bearer ${token}`,
+      'x-org-id': orgId,
       'Content-Type': 'application/json',
     }
     let overnightShiftId: string | undefined
@@ -9219,7 +9380,7 @@ attendanceIntegrationDescribe(
            FROM attendance_events
           WHERE user_id = $1 AND org_id = $2
           ORDER BY occurred_at`,
-        [userId, 'default']
+        [userId, orgId]
       )
       expect(events.rows).toEqual([
         { work_date: morningDate, event_type: 'check_in' },
@@ -9879,8 +10040,9 @@ attendanceIntegrationDescribe(
   it('keeps /api/attendance/calendar available as records compatibility alias', async () => {
     if (!baseUrl) return
 
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=attendance-calendar-test&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const fixtureUserId = randomUUID()
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(fixtureUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -10138,7 +10300,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const testUserId = `attendance-request-dedupe-${Date.now().toString(36)}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestNeutralFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -10205,7 +10367,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenUserId = `attendance-export-${Date.now().toString(36)}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -10275,7 +10437,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenUserId = `attendance-export-json-${Date.now().toString(36)}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -10477,7 +10639,7 @@ attendanceIntegrationDescribe(
     const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
     if (!dbUrl) return
     const userId = `attendance-annual-l0-guard-${Date.now().toString(36)}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -10545,7 +10707,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const tokenUserId = `attendance-punch-guard-${Date.now().toString(36)}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(tokenUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -10718,7 +10880,7 @@ attendanceIntegrationDescribe(
 
     async function getAdminToken(userId: string): Promise<string | undefined> {
       if (!baseUrl) return undefined
-      const tokenRes = await requestJson(
+      const tokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
       )
       return (tokenRes.body as { token?: string } | undefined)?.token
@@ -12008,7 +12170,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-request-item-${runSuffix}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestNeutralFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -12087,7 +12249,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-reject-note-${runSuffix}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestNeutralFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -12279,7 +12441,7 @@ attendanceIntegrationDescribe(
 
     const runSuffix = Date.now().toString(36)
     const testUserId = `attendance-request-record-${runSuffix}`
-    const tokenRes = await requestJson(
+    const tokenRes = await requestNeutralFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -12415,7 +12577,7 @@ attendanceIntegrationDescribe(
     if (!baseUrl) return
 
     const runSuffix = Date.now().toString(36)
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-item-${runSuffix}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -12557,7 +12719,7 @@ attendanceIntegrationDescribe(
       )
       await pool.query('DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2', ['default', dates.manualDeleted])
 
-      const tokenRes = await requestJson(
+      const tokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=attendance-holiday-sync-${runSuffix}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -12636,7 +12798,7 @@ attendanceIntegrationDescribe(
   it('rejects negative leave type daily_minutes aliases, empty holiday names, and exposes holiday type fields', async () => {
     if (!baseUrl) return
 
-    const tokenRes = await requestJson(
+    const tokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=attendance-leave-guard-${Date.now().toString(36)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -13142,6 +13304,7 @@ attendanceIntegrationDescribe(
 
   it('exposes persisted-timezone workday context for holiday overrides and shift schedules', async () => {
     if (!baseUrl) return
+    const pool = settingsRowPool as Pool
 
     const userId = randomUUID()
     await ensureActiveImportIdentitiesForTest(userId)
@@ -13200,6 +13363,9 @@ attendanceIntegrationDescribe(
       }),
     })
     expect(assignmentRes.status).toBe(201)
+    const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
+    expect(assignmentId).toBeTruthy()
+    if (assignmentId) seededMutableShiftAssignmentIds.add(assignmentId)
 
     const holidayName = `Midweek Holiday ${Date.now().toString(36)}`
     const holidayRes = await requestJson(`${baseUrl}/api/attendance/holidays`, {
@@ -13215,6 +13381,87 @@ attendanceIntegrationDescribe(
       }),
     })
     expect([201, 409]).toContain(holidayRes.status)
+
+    const businessSnapshot = async () => {
+      const result: Record<string, unknown[]> = {}
+      for (const [table, subject] of [
+        ['attendance_records', 't.user_id = $1'],
+        ['attendance_events', 't.user_id = $1'],
+        ['attendance_requests', 't.user_id = $1'],
+        ['attendance_record_calculations', 't.attendance_record_id IN (SELECT id FROM attendance_records WHERE user_id = $1)'],
+        ['attendance_record_segments', 't.calculation_id IN (SELECT c.id FROM attendance_record_calculations c JOIN attendance_records r ON r.id = c.attendance_record_id WHERE r.user_id = $1)'],
+        ['attendance_result_operations', 't.actor_id = $1'],
+        ['attendance_result_event_outbox', "t.payload->>'userId' = $1"],
+        ['attendance_timezone_context_companions', 't.user_id = $1'],
+      ] as const) {
+        result[table] = (await pool.query(
+          `SELECT to_jsonb(t) AS row FROM ${table} t WHERE t.org_id = 'default' AND ${subject} ORDER BY to_jsonb(t)::text`,
+          [userId],
+        )).rows
+      }
+      return result
+    }
+    const readHistoricalRecords = async () => {
+      const response = await requestJson(
+        `${baseUrl}/api/attendance/records?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
+        { headers: { Authorization: `Bearer ${token}` } },
+      )
+      expect(response.status, response.raw).toBe(200)
+      const rows = (response.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+      expect(rows).toHaveLength(2)
+      // Report formulas are a current presentation layer, outside stored history.
+      return rows.map(({ report_values: _reportValues, ...record }) => record)
+        .sort((a, b) => a.work_date.localeCompare(b.work_date))
+    }
+
+    // Rich source explanations belong to fresh previews, before import creates history.
+    const defaultRules = (await pool.query(
+      `SELECT id, working_days FROM attendance_rules WHERE org_id = 'default' AND is_default = true`,
+    )).rows
+    expect(defaultRules).toHaveLength(1)
+    expect(defaultRules[0].working_days).toEqual([1, 2, 3, 4, 5])
+    const holidayRows = (await pool.query(
+      `SELECT id, name, is_working_day FROM attendance_holidays WHERE org_id = 'default' AND holiday_date = $1`,
+      [wednesdayDate],
+    )).rows
+    expect(holidayRows).toHaveLength(1)
+    expect(holidayRows[0].is_working_day).toBe(false)
+    const beforeFreshReads = await businessSnapshot()
+    expect(beforeFreshReads.attendance_records).toEqual([])
+    const calendarRes = await requestJson(
+      `${baseUrl}/api/attendance/effective-calendar?from=${rangeFrom}&to=${rangeTo}&userId=${encodeURIComponent(userId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    )
+    expect(calendarRes.status, calendarRes.raw).toBe(200)
+    const calendarItems = (calendarRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const sundayCalendar = calendarItems.find(row => row.date === sundayDate)
+    expect(sundayCalendar?.base).toEqual({ isWorkingDay: true, source: 'shift' })
+    expect(sundayCalendar?.effective).toEqual({ isWorkingDay: true, source: 'shift' })
+    const wednesdayCalendar = calendarItems.find(row => row.date === wednesdayDate)
+    expect(wednesdayCalendar?.base).toMatchObject({
+      isWorkingDay: false, source: 'manual', holidayId: holidayRows[0].id, name: holidayRows[0].name,
+    })
+    expect(wednesdayCalendar?.effective).toEqual({ isWorkingDay: false, source: 'manual', label: holidayRows[0].name })
+    expect(wednesdayCalendar?.layers).toContainEqual({
+      kind: 'holiday', source: 'manual', isWorkingDay: false, label: holidayRows[0].name, refId: holidayRows[0].id,
+    })
+    for (const [workDate, item, rule, isWorkingDay] of [
+      [sundayDate, sundayCalendar, { id: shiftId, name: shiftName, workingDays: [0] }, true],
+      [wednesdayDate, wednesdayCalendar, { id: defaultRules[0].id, workingDays: defaultRules[0].working_days }, false],
+    ] as const) {
+      const targetRes = await requestJson(`${baseUrl}/api/attendance/timezone-context/me?workDate=${workDate}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      expect(targetRes.status, targetRes.raw).toBe(200)
+      const target = (targetRes.body as { data?: any } | undefined)?.data
+      expect(target).toMatchObject({ workDate, timezone: 'UTC', frozen: false, isWorkingDay, rule })
+      expect(item.attendanceTimeContext).toEqual({
+        targetWorkDate: workDate, effectiveTimezone: target.timezone,
+        timezoneSource: target.provenance.source, mode: target.provenance.mode,
+        policyVersion: target.provenance.policyVersion, contextFingerprint: target.contextFingerprint, frozen: false,
+      })
+    }
+    expect(await businessSnapshot()).toEqual(beforeFreshReads)
 
     const prepareRes = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
       method: 'POST',
@@ -13262,6 +13509,20 @@ attendanceIntegrationDescribe(
     })
     expect(importRes.status).toBe(200)
 
+    const storedAfterImport = await businessSnapshot()
+    expect(storedAfterImport.attendance_timezone_context_companions).toEqual([])
+    expect(storedAfterImport.attendance_records.map(({ row }: any) => ({
+      workDate: row.work_date, timezone: row.timezone, isWorkday: row.is_workday,
+      firstInAt: new Date(row.first_in_at).toISOString(), lastOutAt: new Date(row.last_out_at).toISOString(),
+    })).sort((a, b) => a.workDate.localeCompare(b.workDate))).toEqual([
+      { workDate: sundayDate, timezone: 'UTC', isWorkday: true,
+        firstInAt: `${sundayDate}T09:30:00.000Z`, lastOutAt: `${sundayDate}T18:00:00.000Z` },
+      { workDate: wednesdayDate, timezone: 'UTC', isWorkday: false,
+        firstInAt: `${wednesdayDate}T09:00:00.000Z`, lastOutAt: `${wednesdayDate}T18:00:00.000Z` },
+    ])
+    const historyBeforeShiftChange = await readHistoricalRecords()
+    expect(await businessSnapshot()).toEqual(storedAfterImport)
+
     const updateShiftRes = await requestJson(`${baseUrl}/api/attendance/shifts/${shiftId}`, {
       method: 'PUT',
       headers: {
@@ -13272,50 +13533,42 @@ attendanceIntegrationDescribe(
     })
     expect(updateShiftRes.status).toBe(200)
 
-    const recordsRes = await requestJson(
-      `${baseUrl}/api/attendance/records?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      }
-    )
-    expect(recordsRes.status).toBe(200)
-    const items = (recordsRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
-    expect(Array.isArray(items)).toBe(true)
+    expect((await pool.query('SELECT timezone FROM attendance_shifts WHERE id = $1', [shiftId])).rows)
+      .toEqual([{ timezone: 'Asia/Shanghai' }])
+    const items = await readHistoricalRecords()
+    expect(items).toEqual(historyBeforeShiftChange)
+    expect(await businessSnapshot()).toEqual(storedAfterImport)
 
     const sundayRecord = items.find((row) => String(row?.work_date ?? '').slice(0, 10) === sundayDate)
     expect(sundayRecord).toBeTruthy()
     expect(sundayRecord?.is_workday).toBe(true)
-    expect(sundayRecord?.workday_context).toMatchObject({
-      storedIsWorkday: true,
-      resolvedIsWorkday: true,
-      matchesStored: true,
-      source: 'shift',
-      sourceName: shiftName,
-      timezone: 'UTC',
-      weekday: 0,
-      workingDays: [0],
-      holiday: null,
+    expect(sundayRecord?.workday_context).toEqual({
+      storedIsWorkday: true, resolvedIsWorkday: null, matchesStored: null,
+      source: 'legacy_record', sourceName: null, timezone: 'UTC', weekday: 0,
+      workingDays: null, holiday: null,
     })
 
     const wednesdayRecord = items.find((row) => String(row?.work_date ?? '').slice(0, 10) === wednesdayDate)
     expect(wednesdayRecord).toBeTruthy()
     expect(wednesdayRecord?.is_workday).toBe(false)
-    expect(wednesdayRecord?.workday_context).toMatchObject({
-      storedIsWorkday: false,
-      resolvedIsWorkday: false,
-      matchesStored: true,
-      source: 'rule',
-      timezone: 'UTC',
-      weekday: 3,
-      workingDays: [1, 2, 3, 4, 5],
-      holiday: {
-        isWorkingDay: false,
-        type: 'holiday',
-      },
+    expect(wednesdayRecord?.workday_context).toEqual({
+      storedIsWorkday: false, resolvedIsWorkday: null, matchesStored: null,
+      source: 'legacy_record', sourceName: null, timezone: 'UTC', weekday: 3,
+      workingDays: null, holiday: null,
     })
-    expect(typeof wednesdayRecord?.workday_context?.holiday?.name).toBe('string')
+    for (const [record, workDate, firstIn, lastOut] of [
+      [sundayRecord, sundayDate, `${sundayDate}T09:30:00.000Z`, `${sundayDate}T18:00:00.000Z`],
+      [wednesdayRecord, wednesdayDate, `${wednesdayDate}T09:00:00.000Z`, `${wednesdayDate}T18:00:00.000Z`],
+    ] as const) {
+      expect(record?.work_date).toBe(workDate)
+      expect(record?.timezone).toBe('UTC')
+      expect(new Date(record.first_in_at).toISOString()).toBe(firstIn)
+      expect(new Date(record.last_out_at).toISOString()).toBe(lastOut)
+      expect(record?.attendanceTimeContext).toEqual({
+        targetWorkDate: workDate, effectiveTimezone: 'UTC', timezoneSource: 'legacy_record',
+        mode: null, policyVersion: null, contextFingerprint: null, frozen: true,
+      })
+    }
 
     const anomaliesRes = await requestJson(
       `${baseUrl}/api/attendance/anomalies?from=${encodeURIComponent(rangeFrom)}&to=${encodeURIComponent(rangeTo)}&userId=${encodeURIComponent(userId)}`,
@@ -13329,6 +13582,27 @@ attendanceIntegrationDescribe(
     const anomalyItems = (anomaliesRes.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
     const sundayAnomaly = anomalyItems.find((row) => String(row?.workDate ?? '').slice(0, 10) === sundayDate)
     expect(sundayAnomaly?.workdayContext?.timezone).toBe('UTC')
+    expect(sundayAnomaly?.recordId).toBe(sundayRecord.id)
+    expect(sundayAnomaly?.workdayContext).toEqual(sundayRecord.workday_context)
+    const changed = await pool.query(
+      `UPDATE attendance_shifts SET working_days = '[1]'::jsonb WHERE id = $1 AND org_id = 'default' RETURNING working_days`,
+      [shiftId],
+    )
+    expect(changed.rows).toEqual([{ working_days: [1] }])
+    expect(await businessSnapshot()).toEqual(storedAfterImport)
+    const anomaliesAfter = await requestJson(
+      `${baseUrl}/api/attendance/anomalies?from=${rangeFrom}&to=${rangeTo}&userId=${encodeURIComponent(userId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    )
+    expect(anomaliesAfter.status, anomaliesAfter.raw).toBe(200)
+    const afterItems = (anomaliesAfter.body as { data?: { items?: any[] } } | undefined)?.data?.items ?? []
+    const sameAnomaly = afterItems.find(row => row.recordId === sundayRecord.id)
+    expect(sameAnomaly).toBeTruthy()
+    expect(await readHistoricalRecords()).toEqual(historyBeforeShiftChange)
+    expect(await businessSnapshot()).toEqual(storedAfterImport)
+    // Regression: historical explanation must not follow the changed source.
+    expect(sameAnomaly.workdayContext).toEqual(sundayAnomaly.workdayContext)
+    expect(await businessSnapshot()).toEqual(storedAfterImport)
   })
 
   it('keeps existing records after rolling back a later update batch', async () => {
@@ -14317,10 +14591,13 @@ attendanceIntegrationDescribe(
   it('exports attendance admin audit logs as CSV', async () => {
     if (!baseUrl) return
 
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    const auditUserId = randomUUID()
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(auditUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
+    expect(tokenRes.status).toBe(200)
     const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
     if (!token) return
 
     // Create one attendance write action to ensure export has runtime data.
@@ -14332,7 +14609,7 @@ attendanceIntegrationDescribe(
       },
       body: JSON.stringify({ eventType: 'check_in' }),
     })
-    expect([200, 429]).toContain(punchRes.status)
+    expect(punchRes.status).toBe(200)
 
     const exportRes = await requestJson(`${baseUrl}/api/attendance-admin/audit-logs/export.csv?limit=50`, {
       method: 'GET',
@@ -16537,7 +16814,7 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestAdminFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       expect(token).toBeTruthy()
       if (!token) return
@@ -16698,7 +16975,7 @@ attendanceIntegrationDescribe(
         [randomUuidV4(), holidayDate, randomUuidV4(), workdayOverrideDate]
       )
 
-      const tokenRes = await requestJson(
+      const tokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -16773,6 +17050,7 @@ attendanceIntegrationDescribe(
 
     const pool = new Pool({ connectionString: dbUrl })
     try {
+      await seedNeutralAttendanceSubjectForTest(testUserId)
       // Setup: holiday on targetDate (national)
       await pool.query(
         'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2',
@@ -16797,7 +17075,7 @@ attendanceIntegrationDescribe(
         [groupId, testUserId]
       )
 
-      const adminTokenRes = await requestJson(
+      const adminTokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
@@ -16879,7 +17157,7 @@ attendanceIntegrationDescribe(
       expect(orgPolicyLayers).toEqual(['org'])
     } finally {
       if (originalSettings) {
-        const cleanupTokenRes = await requestJson(
+        const cleanupTokenRes = await requestAdminFixtureToken(
           `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
         )
         const cleanupToken = (cleanupTokenRes.body as { token?: string } | undefined)?.token
@@ -16924,6 +17202,8 @@ attendanceIntegrationDescribe(
 
     const pool = new Pool({ connectionString: dbUrl })
     try {
+      await seedNeutralAttendanceSubjectForTest(shortUserId)
+      await seedNeutralAttendanceSubjectForTest(longUserId)
       await pool.query(
         'DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date BETWEEN $2 AND $3',
         [orgId, rangeFrom, rangeTo]
@@ -16956,7 +17236,7 @@ attendanceIntegrationDescribe(
         [shortGroupId, shortUserId, longGroupId, longUserId]
       )
 
-      const adminTokenRes = await requestJson(
+      const adminTokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin,attendance:approve`
       )
       const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
@@ -17020,7 +17300,7 @@ attendanceIntegrationDescribe(
       expect(longItems.every(item => item.effective.source === 'national')).toBe(true)
       expect(longItems.flatMap(item => item.layers).some((layer: any) => layer.kind === 'calendar_policy')).toBe(false)
     } finally {
-      const cleanupTokenRes = await requestJson(
+      const cleanupTokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(`${adminUserId}-cleanup`)}&tenantId=default&roles=admin&perms=attendance:admin`
       ).catch(() => null)
       const cleanupToken = (cleanupTokenRes?.body as { token?: string } | undefined)?.token
@@ -17079,7 +17359,7 @@ attendanceIntegrationDescribe(
         [leaveId, testUserId, targetDate, overtimeId, correctionId]
       )
 
-      const tokenRes = await requestJson(
+      const tokenRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(testUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const token = (tokenRes.body as { token?: string } | undefined)?.token
@@ -17131,6 +17411,8 @@ attendanceIntegrationDescribe(
     const pool = new Pool({ connectionString: dbUrl })
 
     try {
+      await seedNeutralAttendanceSubjectForTest(requesterId)
+      await seedNeutralAttendanceSubjectForTest(targetId)
       process.env.RBAC_BYPASS = 'false'
       await pool.query(
         `INSERT INTO permissions (code, name, description)
@@ -17162,7 +17444,7 @@ attendanceIntegrationDescribe(
       )
       const approveToken = (approveRes.body as { token?: string } | undefined)?.token
       // Admin token for groupId / 404 case
-      const adminRes = await requestJson(
+      const adminRes = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
       )
       const adminToken = (adminRes.body as { token?: string } | undefined)?.token
@@ -17302,6 +17584,7 @@ attendanceIntegrationDescribe(
     }
 
     try {
+      await seedNeutralAttendanceSubjectForTest(actorId, orgId)
       process.env.RBAC_BYPASS = 'false'
       await pool.query(
         `INSERT INTO permissions (code, name, description)
@@ -17434,7 +17717,7 @@ attendanceIntegrationDescribe(
     const roleId = `attendance-effcal-role-${runSuffix}`
     const roleName = `Effective Calendar Role ${runSuffix}`
 
-    const adminTokenRes = await requestJson(
+    const adminTokenRes = await requestAdminFixtureToken(
       `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(adminUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:admin`
     )
     const adminToken = (adminTokenRes.body as { token?: string } | undefined)?.token
@@ -17459,6 +17742,8 @@ attendanceIntegrationDescribe(
          ON CONFLICT DO NOTHING`,
         [testUserId, roleId],
       )
+
+      await seedNeutralAttendanceSubjectForTest(testUserId)
 
       // Role and roleTags both resolve from the DB-backed role alias set:
       // users.role + assigned RBAC role ids/names. There is no dedicated
@@ -17550,17 +17835,18 @@ attendanceIntegrationDescribe(
     const todayUtc = new Date().toISOString().slice(0, 10)
     expect(targetDate < todayUtc).toBe(true)
     const userId = `attendance-step5-user-${runSuffix}`
+    const scenarioUserIds = [userId, userId + '-org', userId + '-role']
     const adminId = `attendance-step5-admin-${runSuffix}`
     const roleId = `attendance-step5-role-${runSuffix}`
     const roleName = `Step 5 Role ${runSuffix}`
-    const orgId = 'default'
+    const orgId = await seedShanghaiPunchOrgForTest()
     const occurredAt = `${targetDate}T01:00:00.000Z` // 09:00 in Asia/Shanghai
 
     const pool = new Pool({ connectionString: dbUrl })
 
     async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
-      const res = await requestJson(
-        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=${role}&perms=${perms}`
+      const res = await (role === 'admin' ? requestAdminFixtureToken : requestJson)(
+        `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&tenantId=${encodeURIComponent(orgId)}&roles=${role}&perms=${perms}`
       )
       return (res.body as { token?: string } | undefined)?.token ?? null
     }
@@ -17583,41 +17869,42 @@ attendanceIntegrationDescribe(
       }
     }
 
-    async function punchAndReadIsWorkday(userToken: string): Promise<boolean | null> {
-      // Clear prior state so each scenario gets a clean row to read.
-      await pool.query(`DELETE FROM attendance_records WHERE user_id = $1 AND work_date = $2`, [userId, targetDate])
-      await pool.query(`DELETE FROM attendance_events WHERE user_id = $1 AND work_date = $2`, [userId, targetDate])
+    async function punchAndReadIsWorkday(subjectId: string): Promise<boolean> {
+      // Each scenario creates its own immutable history on the same calendar date.
+      const userToken = await tokenFor(subjectId, 'user', 'attendance:read,attendance:write')
+      expect(userToken).toBeTruthy()
       const punchRes = await requestJson(`${baseUrl}/api/attendance/punch`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${userToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ eventType: 'check_in', occurredAt, timezone: 'Asia/Shanghai' }),
+        body: JSON.stringify({ orgId, eventType: 'check_in', occurredAt, timezone: 'Asia/Shanghai' }),
       })
       expect(punchRes.status).toBe(200)
       const rows = await pool.query(
-        `SELECT is_workday FROM attendance_records WHERE user_id = $1 AND work_date = $2`,
-        [userId, targetDate],
+        `SELECT is_workday FROM attendance_records WHERE user_id = $1 AND work_date = $2 AND org_id = $3`,
+        [subjectId, targetDate, orgId],
       )
-      if (rows.rows.length === 0) return null
+      expect(rows.rows).toHaveLength(1)
       return rows.rows[0].is_workday === true
     }
 
     try {
       await pool.query(
-        `INSERT INTO users (id, email, password_hash, name, role, is_active)
-         VALUES ($1, $2, 'no-login', 'Step5 Role User', $3, true)
-         ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name, role = EXCLUDED.role, is_active = true`,
-        [userId, `${userId}@example.com`, roleId],
-      )
-      await pool.query(
         `INSERT INTO roles (id, name) VALUES ($1, $2)
          ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name`,
         [roleId, roleName],
       )
-      await pool.query(
-        `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)
-         ON CONFLICT DO NOTHING`,
-        [userId, roleId],
-      )
+      for (const subjectId of scenarioUserIds) {
+        await pool.query(
+          `INSERT INTO users (id, email, password_hash, name, role, is_active)
+           VALUES ($1, $2, 'no-login', 'Step5 Role User', $3, true)`,
+          [subjectId, `${subjectId}@example.com`, roleId],
+        )
+        await pool.query(
+          `INSERT INTO user_roles (user_id, role_id) VALUES ($1, $2)`,
+          [subjectId, roleId],
+        )
+        await seedNeutralAttendanceSubjectForTest(subjectId, orgId)
+      }
 
       // Setup: a national holiday on targetDate (is_working_day=false). The
       // pre-Step-5 calc would always treat this day as rest; Step 5 lets
@@ -17628,21 +17915,19 @@ attendanceIntegrationDescribe(
       )
       await pool.query(
         `INSERT INTO attendance_holidays (id, org_id, holiday_date, name, is_working_day, origin)
-         VALUES ($1, 'default', $2, 'Step 5 National Rest', false, 'national')`,
-        [randomUuidV4(), targetDate],
+         VALUES ($1, $2, $3, 'Step 5 National Rest', false, 'national')`,
+        [randomUuidV4(), orgId, targetDate],
       )
 
       const adminToken = await tokenFor(adminId, 'admin', 'attendance:read,attendance:write,attendance:admin,attendance:approve')
-      const userToken = await tokenFor(userId, 'user', 'attendance:read,attendance:write')
       expect(adminToken).toBeTruthy()
-      expect(userToken).toBeTruthy()
-      if (!adminToken || !userToken) return
+      if (!adminToken) throw new Error('STEP5_ADMIN_TOKEN_REQUIRED')
 
       // Ensure no leftover policy from earlier tests
       await putCalendarPolicy(adminToken, [])
 
       // --- (a) baseline: no policy → holiday wins, is_workday=false ---
-      const baselineWorkday = await punchAndReadIsWorkday(userToken)
+      const baselineWorkday = await punchAndReadIsWorkday(scenarioUserIds[0])
       expect(baselineWorkday).toBe(false)
 
       // --- (b) org override flips the holiday to a working day ---
@@ -17652,7 +17937,7 @@ attendanceIntegrationDescribe(
           effective: { isWorkingDay: true, label: 'Step 5 org flip', source: 'org' },
         },
       ])
-      const flippedWorkday = await punchAndReadIsWorkday(userToken)
+      const flippedWorkday = await punchAndReadIsWorkday(scenarioUserIds[1])
       expect(flippedWorkday).toBe(true)
 
       // --- (c) role-source override flips after resolver loads DB role context ---
@@ -17663,24 +17948,28 @@ attendanceIntegrationDescribe(
           effective: { isWorkingDay: true, label: 'Step 5 role flip', source: 'role' },
         },
       ])
-      const roleWorkday = await punchAndReadIsWorkday(userToken)
+      const roleWorkday = await punchAndReadIsWorkday(scenarioUserIds[2])
       expect(roleWorkday).toBe(true)
     } finally {
-      const cleanToken = await tokenFor(`${adminId}-cleanup`, 'admin', 'attendance:admin')
-      if (cleanToken) {
-        await requestJson(`${baseUrl}/api/attendance/settings`, {
+      try {
+        const cleanToken = await tokenFor(`${adminId}-cleanup`, 'admin', 'attendance:admin')
+        expect(cleanToken).toBeTruthy()
+        if (!cleanToken) throw new Error('STEP5_CLEANUP_TOKEN_REQUIRED')
+        const reset = await requestJson(`${baseUrl}/api/attendance/settings`, {
           method: 'PUT',
           headers: { Authorization: `Bearer ${cleanToken}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ calendarPolicy: { overrides: [] } }),
-        }).catch(() => undefined)
+        })
+        expect(reset.status).toBe(200)
+        // Retain paired record/events/companion history until this isolated DB is disposed.
+        await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [orgId, targetDate])
+        await pool.query(`DELETE FROM user_roles WHERE user_id = ANY($1::text[])`, [scenarioUserIds])
+        await pool.query(`DELETE FROM roles WHERE id = $1`, [roleId])
+        await pool.query('DELETE FROM user_orgs WHERE user_id = ANY($1::text[]) AND org_id = $2', [scenarioUserIds, orgId])
+        await pool.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [scenarioUserIds])
+      } finally {
+        await pool.end()
       }
-      await pool.query(`DELETE FROM attendance_events WHERE user_id = $1`, [userId]).catch(() => undefined)
-      await pool.query(`DELETE FROM attendance_records WHERE user_id = $1`, [userId]).catch(() => undefined)
-      await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1 AND holiday_date = $2`, [orgId, targetDate]).catch(() => undefined)
-      await pool.query(`DELETE FROM user_roles WHERE user_id = $1`, [userId]).catch(() => undefined)
-      await pool.query(`DELETE FROM roles WHERE id = $1`, [roleId]).catch(() => undefined)
-      await pool.query(`DELETE FROM users WHERE id = $1`, [userId]).catch(() => undefined)
-      await pool.end()
     }
   })
 
@@ -17703,9 +17992,8 @@ attendanceIntegrationDescribe(
     // workDate >= UTC today. Use definitively-past dates anchored to a
     // fixed past year. Codex Step 5 review (Blocking #2 v2): use a
     // unique orgId so the auto-absence fanout cannot touch any other
-    // active user. The unique-org route also exercises the
-    // org-fallback path in loadDefaultRule (no attendance_rules row
-    // exists for this org → DEFAULT_RULE shape with Mon-Fri workdays).
+    // active user. An owned explicit UTC default preserves the old
+    // DEFAULT_RULE calendar with Mon-Fri workdays under strict loading.
     const orgId = `step5-absence-org-${runSuffix}`
     // 2024-01-15 is a Monday (Jan 1 2024 was Monday); inserting a
     // holiday row there makes it a rest day under the default rule.
@@ -17723,9 +18011,10 @@ attendanceIntegrationDescribe(
     const userId = `attendance-step5-absence-${runSuffix}`
     const adminId = `attendance-step5-absence-admin-${runSuffix}`
     const pool = new Pool({ connectionString: dbUrl })
+    let ownedDefaultRuleId: string | undefined
 
     async function tokenFor(uid: string, role: string, perms: string): Promise<string | null> {
-      const res = await requestJson(
+      const res = await (role === 'admin' ? requestAdminFixtureToken : requestJson)(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=${role}&perms=${perms}`
       )
       return (res.body as { token?: string } | undefined)?.token ?? null
@@ -17749,6 +18038,15 @@ attendanceIntegrationDescribe(
     }
 
     try {
+      const defaultRule = await pool.query<{ id: string }>(
+        `INSERT INTO attendance_rules
+           (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+         SELECT $1, $2, 'owned Step5 UTC fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+         WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+         RETURNING id`,
+        [randomUUID(), orgId],
+      )
+      ownedDefaultRuleId = defaultRule.rows[0]?.id
       // Seed user + user_orgs against the ISOLATED org so the
       // auto-absence fanout finds exactly one user.
       await pool.query(`DELETE FROM user_orgs WHERE user_id = $1`, [userId])
@@ -17848,6 +18146,7 @@ attendanceIntegrationDescribe(
       await pool.query(`DELETE FROM attendance_holidays WHERE org_id = $1`, [orgId]).catch(() => undefined)
       await pool.query(`DELETE FROM user_orgs WHERE org_id = $1`, [orgId]).catch(() => undefined)
       await pool.query(`DELETE FROM users WHERE id = $1`, [userId]).catch(() => undefined)
+      if (ownedDefaultRuleId) await pool.query('DELETE FROM attendance_rules WHERE id = $1', [ownedDefaultRuleId]).catch(() => undefined)
       await pool.end()
     }
   })
@@ -17858,7 +18157,7 @@ attendanceIntegrationDescribe(
     const reportDigestSeam = () => (getAttendancePluginForTest() as any).__attendanceReportDigestForTests
 
     async function digestAdminToken(uid: string): Promise<string | undefined> {
-      const res = await requestJson(
+      const res = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
       )
       return (res.body as { token?: string } | undefined)?.token
@@ -18478,7 +18777,7 @@ attendanceIntegrationDescribe(
     const schedSeam = () => (getAttendancePluginForTest() as any).__attendanceReportFieldCatalogForTests
 
     async function schedAdminToken(uid: string): Promise<string | undefined> {
-      const res = await requestJson(
+      const res = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
       )
       return (res.body as { token?: string } | undefined)?.token
@@ -18871,7 +19170,7 @@ attendanceIntegrationDescribe(
     const annualSchedSeam = () => (getAttendancePluginForTest() as any).__attendanceReportFieldCatalogForTests
 
     async function annualSchedAdminToken(uid: string): Promise<string | undefined> {
-      const res = await requestJson(
+      const res = await requestAdminFixtureToken(
         `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`,
       )
       return (res.body as { token?: string } | undefined)?.token
@@ -19079,6 +19378,15 @@ attendanceIntegrationDescribe(
         const logger = { warn() {}, error() {}, info() {} }
         const emitted: Array<{ type: string; data: unknown }> = []
         const emitEvent = (type: string, data: unknown) => emitted.push({ type, data })
+        const ownedEvents = () => emitted.filter(event => (event.data as { orgId: string }).orgId === org)
+        const assertEmittedForRanOrgs = (events: typeof emitted, orgs: Array<{ orgId: string; ran: boolean }>) => {
+          const emittedOrgIds = events.map(event => {
+            expect(event.type).toBe('attendance.annual_leave_accrual.run')
+            return (event.data as { orgId: string }).orgId
+          })
+          expect(emittedOrgIds.sort()).toEqual(orgs.filter(item => item.ran === true).map(item => item.orgId).sort())
+          expect(new Set(emittedOrgIds).size).toBe(emittedOrgIds.length)
+        }
 
         // (1) first scheduler tick: due (no prior real run) → grants exactly one lot, stamps triggered_by='scheduler'.
         const first = await withAnnualSchedTriggerEnv('true', () =>
@@ -19100,21 +19408,25 @@ attendanceIntegrationDescribe(
         const lotsAfterFirst = await annualSchedLotsForUser(pool, uid)
         expect(lotsAfterFirst).toHaveLength(1)
         expect(lotsAfterFirst[0].source_key).toBe(`annual_accrual:${uid}:annual:2026`)
-        expect(emitted).toHaveLength(1)
-        expect(emitted[0]).toMatchObject({
+        expect(ownedEvents()).toHaveLength(1)
+        expect(ownedEvents()[0]).toMatchObject({
           type: 'attendance.annual_leave_accrual.run',
           data: { orgId: org, periodKey: 'annual:2026', dryRun: false, granted: 1, skipped: 0, triggeredBy: 'scheduler' },
         })
 
-        // (2) second scheduler tick, SAME now (same org-local month) → due-gate no-op: zero new run rows,
-        // zero new lots, zero new events.
+        assertEmittedForRanOrgs(emitted, first.orgs)
+
+        // (2) second scheduler tick, SAME now (same org-local month) → owned-org due-gate no-op:
+        // zero new owned run rows, lots, or events; other orgs retain their own due gate.
+        const emitsBeforeSecond = emitted.length
         const second = await withAnnualSchedTriggerEnv('true', () =>
           seam.runAnnualLeaveAccrualScheduledTriggerOnce(pluginDb, logger, { now, emitEvent }))
         const mineAgain = second.orgs.find((o: { orgId: string }) => o.orgId === org)
         expect(mineAgain).toEqual({ orgId: org, ran: false, reason: 'not_due', period: 2026, periodKey: 'annual:2026' })
         expect(await annualSchedRunsForOrgPeriod(pool, org, 'annual:2026')).toHaveLength(1)
         expect(await annualSchedLotsForUser(pool, uid)).toHaveLength(1)
-        expect(emitted).toHaveLength(1) // no second emit
+        expect(ownedEvents()).toHaveLength(1) // no second owned emit
+        assertEmittedForRanOrgs(emitted.slice(emitsBeforeSecond), second.orgs)
 
         // (3) a MANUAL run for the SAME period afterward (bypassing the scheduler's own due-gate entirely,
         // since the manual route has none) proves the DEEPER lot-level idempotency (source_key) still holds:
@@ -19470,7 +19782,7 @@ attendanceIntegrationDescribe(
     try {
       process.env.RBAC_BYPASS = 'true'
       const tokenFor = async (uid: string) => {
-        const r = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+        const r = await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
         return (r.body as { token?: string } | undefined)?.token
       }
       const token = await tokenFor(userId)
@@ -19579,7 +19891,7 @@ attendanceIntegrationDescribe(
     const createdRequestIds: string[] = []
     try {
       process.env.RBAC_BYPASS = 'true'
-      const tokenRes = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
+      const tokenRes = await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`)
       const token = (tokenRes.body as { token?: string } | undefined)?.token
       if (!token) return
       await seedAttendanceOrgMembershipForTest(pool, userId)
@@ -19671,7 +19983,7 @@ attendanceIntegrationDescribe(
         [adminU, otherU],
       )
       const tokenFor = async (uid: string, perms: string) =>
-        ((await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=user&perms=${perms}`)).body as { token?: string } | undefined)?.token
+        ((await requestNeutralFixtureToken(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(uid)}&roles=user&perms=${perms}`)).body as { token?: string } | undefined)?.token
       const adminToken = await tokenFor(adminU, 'attendance:read,attendance:write,attendance:admin')
       const otherToken = await tokenFor(otherU, 'attendance:read,attendance:write')
       if (!adminToken || !otherToken) return
