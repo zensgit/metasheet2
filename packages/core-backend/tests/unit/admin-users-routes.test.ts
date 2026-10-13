@@ -1096,14 +1096,56 @@ describe('admin-users routes', () => {
 
   describe('member-admission organizations (read-only user_orgs view, slice B)', () => {
     type OrgRow = { user_id: string; org_id: string; is_active: boolean }
+    type EvidenceRow = { local_user_id: string; status: string }
+
+    // Slice C (#6079): the history statement shared with the local-account guard
+    // (directory/org-membership-history.ts) is answered from the same fixtures. Like the active read
+    // below, each predicate is applied ONLY when the statement carries it, so dropping the user
+    // filter, adding an `is_active` filter (ignoring deactivated rows), dropping the `'applied'`
+    // status filter or turning the event/effect OR into AND reds the slice C cases below.
+    const historyCalls: Array<{ sql: string; params: unknown[] }> = []
+
+    function evaluateHistory(
+      sql: string,
+      params: unknown[],
+      input: { rows: OrgRow[]; events: EvidenceRow[]; effects: EvidenceRow[] },
+    ) {
+      const [anySegment = '', afterAny = ''] = sql.split('AS has_any_row')
+      const [orgSegment = '', evidenceSegment = ''] = afterAny.split('AS has_org_row')
+      const userRows = (segment: string) => input.rows
+        .filter((row) => !/uo\.user_id = \$1/.test(segment) || row.user_id === params[0])
+        .filter((row) => !/is_active/.test(segment) || row.is_active)
+      const eventsSegment = evidenceSegment.split('directory_deprovision_effects')[0] ?? ''
+      const effectsSegment = evidenceSegment.split('directory_deprovision_effects')[1] ?? ''
+      const liveEvidence = (rows: EvidenceRow[], segment: string, alias: 'event' | 'effect') => rows
+        .filter((row) => !new RegExp(`${alias}[.]local_user_id = [$]1`).test(segment) || row.local_user_id === params[0])
+        .filter((row) => !new RegExp(`${alias}[.]status = 'applied'`).test(segment) || row.status === 'applied')
+        .length > 0
+      const eventLive = liveEvidence(input.events, eventsSegment, 'event')
+      const effectLive = liveEvidence(input.effects, effectsSegment, 'effect')
+      const combinedWithOr = /[)]\s*OR\s+EXISTS/.test(evidenceSegment)
+      return {
+        has_any_row: userRows(anySegment).length > 0,
+        has_org_row: userRows(orgSegment)
+          .filter((row) => !/uo\.org_id = \$2/.test(orgSegment) || row.org_id === params[1])
+          .length > 0,
+        deprovision_applied: combinedWithOr ? eventLive || effectLive : eventLive && effectLive,
+      }
+    }
 
     // A small fake of the two tables the organizations read joins. It applies each filter ONLY when
     // the route's SQL carries the matching predicate, so dropping `uo.user_id = $1`,
     // `uo.is_active = true` or `u.is_active = true` from the route lets the filtered rows through
     // and these cases go red (fixtures carry another user's rows for the user filter).
-    function installOrgFake(input: { userActive: boolean; rows: OrgRow[] }) {
+    function installOrgFake(input: { userActive: boolean; rows: OrgRow[]; events?: EvidenceRow[]; effects?: EvidenceRow[] }) {
       const orgCalls: Array<{ sql: string; params: unknown[] }> = []
+      historyCalls.length = 0
       pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) {
+          historyCalls.push({ sql, params })
+          if (/^\s*(INSERT|UPDATE|DELETE)/i.test(sql)) throw new Error('organizations read must not write')
+          return { rows: [evaluateHistory(sql, params, { rows: input.rows, events: input.events ?? [], effects: input.effects ?? [] })] }
+        }
         if (/FROM users\s+WHERE id = \$1/.test(sql)) {
           return {
             rows: [{
@@ -1157,7 +1199,8 @@ describe('admin-users routes', () => {
           { user_id: 'user-2', org_id: 'org-b', is_active: true },
         ],
       })
-      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
+      // The deactivated `org-old` row is history: no tenant context, but `hasAnyRow` is true.
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
       expect(orgCalls).toHaveLength(1)
       expect(orgCalls[0].params).toEqual(['user-1'])
     })
@@ -1171,7 +1214,7 @@ describe('admin-users routes', () => {
           { user_id: 'user-2', org_id: 'org-b', is_active: true },
         ],
       })
-      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: true })
+      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false })
       expect(orgCalls.map((call) => call.params)).toEqual([['user-1']])
     })
 
@@ -1186,6 +1229,8 @@ describe('admin-users routes', () => {
       expect(await readOrganizations()).toEqual({
         active: [{ orgId: 'org-a' }, { orgId: 'org-b' }],
         hasTenantContext: false,
+        hasAnyRow: true,
+        deprovisionApplied: false,
       })
     })
 
@@ -1194,7 +1239,8 @@ describe('admin-users routes', () => {
         userActive: false,
         rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }],
       })
-      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
+      // History is about rows, not about the user's own active flag: the row still counts.
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
     })
 
     it('a blank org id still counts as a row for the exactly-one rule (login parity) but is not listed', async () => {
@@ -1205,7 +1251,7 @@ describe('admin-users routes', () => {
           { user_id: 'user-1', org_id: 'org-a', is_active: true },
         ],
       })
-      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: false })
+      expect(await readOrganizations()).toEqual({ active: [{ orgId: 'org-a' }], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
     })
 
     it('a single blank org id gives no tenant context, like login (a blank resolved id is "no tenant")', async () => {
@@ -1213,7 +1259,7 @@ describe('admin-users routes', () => {
         userActive: true,
         rows: [{ user_id: 'user-1', org_id: '', is_active: true }],
       })
-      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
     })
 
     it('a failing user_orgs read answers 200 with organizations: null, keeps the rest, and logs values-free', async () => {
@@ -1250,6 +1296,104 @@ describe('admin-users routes', () => {
       warn.mockRestore()
     })
 
+    // ---- Slice C (#6079): hasAnyRow / deprovisionApplied, the read-only mirror of the
+    // POST /api/admin/directory/local/accounts guard (one shared statement). ----
+
+    it('slice C: no user_orgs row at all and no applied evidence: hasAnyRow=false, deprovisionApplied=false (the only shape the panel may offer "join")', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-2', org_id: 'default', is_active: false }],
+        events: [{ local_user_id: 'user-2', status: 'applied' }],
+        effects: [{ local_user_id: 'user-2', status: 'applied' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false })
+      expect(historyCalls).toHaveLength(1)
+      // The user id and NO org: the field is about any org; the guard passes its own org.
+      expect(historyCalls[0].params).toEqual(['user-1', null])
+      expect(historyCalls[0].sql).toMatch(/^\s*SELECT/)
+    })
+
+    it('slice C: a deactivated row in any org is history: hasAnyRow=true while active stays empty', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [{ user_id: 'user-1', org_id: 'default', is_active: false }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: true, deprovisionApplied: false })
+    })
+
+    it('slice C: an applied deprovision event alone gives deprovisionApplied=true and leaves hasAnyRow=false (the two fields are not swapped)', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'applied' }],
+        effects: [{ local_user_id: 'user-1', status: 'superseded' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: true })
+    })
+
+    it('slice C: an applied deprovision effect alone (its event no longer applied) also gives deprovisionApplied=true', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'fully_resolved' }],
+        effects: [{ local_user_id: 'user-1', status: 'applied' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: true })
+    })
+
+    it('slice C: only resolved / superseded evidence is not "applied": deprovisionApplied=false', async () => {
+      installOrgFake({
+        userActive: true,
+        rows: [],
+        events: [{ local_user_id: 'user-1', status: 'superseded' }, { local_user_id: 'user-1', status: 'fully_resolved' }],
+        effects: [{ local_user_id: 'user-1', status: 'superseded' }, { local_user_id: 'user-1', status: 'reversed' }],
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false })
+    })
+
+    it('slice C: a failing history read keeps active / hasTenantContext, answers hasAnyRow / deprovisionApplied as null, and logs values-free', async () => {
+      const MARKER = 'MARKER_hist_k4 connect ECONNREFUSED 198.51.100.9:5432 role=fixture-role'
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      installOrgFake({ userActive: true, rows: [{ user_id: 'user-1', org_id: 'org-a', is_active: true }] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) throw new Error(MARKER)
+        return fake(sql, params)
+      })
+
+      const response = await invokeRoute('get', '/api/admin/users/:userId/member-admission', {
+        params: { userId: 'user-1' },
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect((response.body as Record<string, any>).data.organizations).toEqual({
+        active: [{ orgId: 'org-a' }],
+        hasTenantContext: true,
+        hasAnyRow: null,
+        deprovisionApplied: null,
+      })
+      expect(JSON.stringify(response.body)).not.toContain('MARKER_hist_k4')
+      const lines = warn.mock.calls.map((call) => String(call[0]))
+      expect(lines).toEqual([expect.stringMatching(/^admin-users\.organization-history-read-failed errorClass=Error(?: correlationId=\S+)?$/)])
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('MARKER_hist_k4')
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('198.51.100.9')
+      warn.mockRestore()
+    })
+
+    it('slice C: a history read that answers a non-boolean is "unknown" (null), never coerced to false', async () => {
+      const { Logger } = await import('../../src/core/logger')
+      const warn = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined)
+      installOrgFake({ userActive: true, rows: [] })
+      const fake = pgMocks.query.getMockImplementation()!
+      pgMocks.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+        if (sql.includes('AS has_any_row')) return { rows: [{ has_any_row: null, has_org_row: false, deprovision_applied: 'f' }] }
+        return fake(sql, params)
+      })
+      expect(await readOrganizations()).toEqual({ active: [], hasTenantContext: false, hasAnyRow: null, deprovisionApplied: null })
+      warn.mockRestore()
+    })
+
     it('an unknown user is a 404 and user_orgs is never read', async () => {
       const orgCalls: string[] = []
       pgMocks.query.mockImplementation(async (sql: string) => {
@@ -1274,6 +1418,7 @@ describe('admin-users routes', () => {
       })
       expect(response.statusCode).toBe(403)
       expect(orgCalls).toEqual([])
+      expect(historyCalls).toEqual([])
     })
   })
 
