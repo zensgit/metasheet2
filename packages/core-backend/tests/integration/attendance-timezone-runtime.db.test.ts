@@ -3,7 +3,7 @@ import { applyAttendanceLegacyGroupEffectsV1 } from '../../src/attendance/w4c3a-
 import type { VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
 import type { AttendanceW4TransactionClientV1 } from '../../src/attendance/w4c0-identity'
 import { acquireAttendanceCalculationRolloutLock, parseCanonicalAttendanceRolloutOrgKeyV1 } from '../../src/attendance/w4c0-identity'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createHash, randomUUID } from 'node:crypto'
 import { fork, type ChildProcess } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -1857,6 +1857,67 @@ describe('effective timezone ordinary online punch (real HTTP/PostgreSQL)', () =
       tripClock.setBusinessTripInstantForTests(null)
       await resetSources()
     }
+  })
+
+  it('empty group creation avoids unrelated member window reads and preserves a started shift', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const started = await punch(actor,'check_in','2026-01-12T09:00:00.000Z')
+    expect(started.status,started.body.error?.code).toBe(200)
+    const before = await punchBusinessFingerprint()
+    const querySpy = vi.spyOn(Client.prototype,'query')
+    try {
+      const created = await fixture.request('/api/attendance/groups',admin.token,{
+        name:'Empty timezone group '+randomUUID(),timezone:'Asia/Tokyo',attendanceType:'scheduled_shift',
+      })
+      expect(created.status,created.body.error?.code).toBe(200)
+      const queries = querySpy.mock.calls.map(([input]) => typeof input === 'string' ? input
+        : input && typeof input === 'object' && 'text' in input && typeof input.text === 'string' ? input.text : '')
+      expect(queries.length).toBeGreaterThan(0)
+      const windowReads = queries.filter(text => /\b(?:FROM|JOIN)\s+"?(?:attendance_shift_assignments|attendance_timezone_context_companions)"?\b/i.test(text))
+      expect(windowReads).toHaveLength(0)
+      const groupId = created.body.data.id
+      expect((await fixture.pool.query('SELECT timezone FROM attendance_groups WHERE org_id=$1 AND id=$2',
+        [fixture.orgId,groupId])).rows).toEqual([{timezone:'Asia/Tokyo'}])
+      expect((await fixture.pool.query('SELECT user_id FROM attendance_group_members WHERE org_id=$1 AND group_id=$2',
+        [fixture.orgId,groupId])).rows).toEqual([])
+    } finally { querySpy.mockRestore() }
+    expect(await punchBusinessFingerprint()).toBe(before)
+    expect(await eventRows(actor)).toEqual([{event_type:'check_in',timezone:'UTC',work_date:'2026-01-12',
+      occurred_at:new Date('2026-01-12T09:00:00.000Z')}])
+  })
+
+  it('empty group creation retains ON started group provenance protection', async () => {
+    await resetSources()
+    const actor = await fixture.user()
+    const groupId = randomUUID()
+    await fixture.pool.query(`INSERT INTO attendance_groups(id,org_id,name,timezone)
+      VALUES($1::uuid,$2,$1::text,'UTC')`,[groupId,fixture.orgId])
+    await fixture.pool.query(`INSERT INTO attendance_calculation_group_memberships(
+      id,org_id,user_id,group_id,effective_from,assigned_by,assigned_reason,assigned_correlation_id)
+      VALUES($1,$2,$3,$4,'2026-01-13',$5,'synthetic empty group guard',$6)`,
+    [randomUUID(),fixture.orgId,actor.userId,groupId,admin.userId,randomUUID()])
+    await policy(true)
+    try {
+      const started = await punch(actor,'check_in','2026-01-13T09:00:00.000Z')
+      expect(started.status,started.body.error?.code).toBe(200)
+      const frozen = (await fixture.pool.query(`SELECT frame_snapshot FROM attendance_timezone_context_companions
+        WHERE org_id=$1 AND user_id=$2`,[fixture.orgId,actor.userId])).rows
+      expect(frozen).toHaveLength(1)
+      expect(frozen[0].frame_snapshot.timezoneContext).toMatchObject({source:'calculation_group',referenceId:groupId})
+      const before = await punchBusinessFingerprint()
+      const groups = (await fixture.pool.query('SELECT * FROM attendance_groups WHERE org_id=$1 ORDER BY id',[fixture.orgId])).rows
+      const revision = (await fixture.pool.query('SELECT * FROM attendance_group_effect_revisions WHERE org_id=$1',[fixture.orgId])).rows
+      const created = await fixture.request('/api/attendance/groups',admin.token,{
+        name:'Empty ON timezone group '+randomUUID(),timezone:'Asia/Tokyo',attendanceType:'scheduled_shift',
+      })
+      expect(created).toMatchObject({status:409,body:{ok:false,error:{
+        code:'ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT',message:'ATTENDANCE_TIMEZONE_STARTED_CONTEXT_CONFLICT',
+      }}})
+      expect((await fixture.pool.query('SELECT * FROM attendance_groups WHERE org_id=$1 ORDER BY id',[fixture.orgId])).rows).toEqual(groups)
+      expect((await fixture.pool.query('SELECT * FROM attendance_group_effect_revisions WHERE org_id=$1',[fixture.orgId])).rows).toEqual(revision)
+      expect(await punchBusinessFingerprint()).toBe(before)
+    } finally { await resetSources() }
   })
 
 })

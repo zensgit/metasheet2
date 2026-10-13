@@ -46576,7 +46576,7 @@ module.exports = {
         const description = parsed.data.description?.trim() || null
 
         try {
-          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,mutation:{kind:'empty_group_create'}},async () => trx.query(
             `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, attendance_type, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
              RETURNING *`,

@@ -810,6 +810,16 @@ function createAttendanceTimezoneRuntime({
   }
   async function prepareSourceChange(trx, { orgId, userIds = null, now = serverNow(), mutation, policyProjection }) {
     await lockOrgPolicy(trx, orgId)
+    if (mutation?.kind === 'empty_group_create') {
+      const query = queryFor(trx)
+      const store = createAttendanceTimezonePolicyStore({
+        query,transaction:work => work(query),authorizeManage:async () => false,
+      })
+      const policy = await store.readPolicy({orgId})
+      // Empty groups have no OFF effect. ON still changes the organization-wide
+      // group revision, so existing group-sourced windows require the full guard.
+      userIds = policy.enabled === false ? [] : null
+    }
     const members = await trx.query(`SELECT uo.user_id FROM user_orgs uo JOIN users u ON u.id=uo.user_id
       WHERE uo.org_id=$1 AND uo.is_active=true AND u.is_active=true
       AND ($2::text[] IS NULL OR uo.user_id::text=ANY($2::text[])) ORDER BY uo.user_id`,[orgId,userIds])
