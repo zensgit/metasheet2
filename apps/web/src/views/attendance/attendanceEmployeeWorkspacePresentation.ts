@@ -38,35 +38,33 @@ export function formatWorkDurationMinutes(
 }
 
 /**
- * Display-only leave-day length for the employee self-balance card.
- *
- * The `/me` balance summary is minutes-only (no per-type day length on that
- * wire). This matches the existing attendance web default already used as:
- * - leave-type `defaultMinutesPerDay` seed (`AttendanceView.vue`)
- * - annual policy `standardDayMinutes` seed
- * - calendar chip `normalizeFullDayMinutes` fallback
- * - half-day helper fixtures (`computeLeaveMinutesDaysEquivalent(..., 480)`)
- *
- * Backend minutes stay the source of truth. Do not use this to change punch,
- * policy, approval, or API contracts.
+ * Policy seed for `annualLeavePolicy.standardDayMinutes` and leave-type
+ * `defaultMinutesPerDay`. Not a display default: the employee balance card
+ * folds days only when `/me` sends that live standard day (#5969).
  */
 export const ATTENDANCE_LEAVE_DAY_MINUTES = 480
 
 /**
- * Format a leave-balance minute total as days plus leftover hours/minutes.
- * Leftover hours and minutes reuse `formatWorkDurationMinutes` so the
- * employee workspace does not grow a second duration dialect.
+ * Format a leave-balance minute total.
+ *
+ * Pass a positive integer `minutesPerDay` (the annual bank day) to fold days.
+ * Omit it, or pass a non-positive value, to show hours and minutes only —
+ * the card must not guess 480 when the wire has no day ruler. Comp time
+ * always uses the hours path.
  */
 export function formatLeaveBalanceMinutes(
   minutes: number | null | undefined,
   tr: WorkspaceTranslateFn,
-  minutesPerDay: number = ATTENDANCE_LEAVE_DAY_MINUTES,
+  minutesPerDay?: number | null,
 ): string {
   if (minutes == null || !Number.isFinite(minutes) || minutes < 0) return '—'
-  const perDay = Number.isFinite(minutesPerDay) && minutesPerDay > 0
-    ? minutesPerDay
-    : ATTENDANCE_LEAVE_DAY_MINUTES
   const rounded = Math.round(minutes)
+  const perDay = Number(minutesPerDay)
+  const canFoldDays = Number.isInteger(perDay) && perDay > 0
+  if (!canFoldDays) {
+    if (rounded === 0) return tr('0m', '0分')
+    return formatWorkDurationMinutes(rounded, tr)
+  }
   if (rounded === 0) return tr('0 days', '0天')
 
   const days = Math.floor(rounded / perDay)

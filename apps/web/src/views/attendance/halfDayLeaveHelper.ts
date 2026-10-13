@@ -11,7 +11,8 @@
 //     effective shift window (`GET /api/attendance/rules/me` -> `runtimeRule.workStartTime` /
 //     `workEndTime`) and the selected leave type's `defaultMinutesPerDay` (`GET
 //     /api/attendance/leave-types`). Nothing here reads or fabricates an org-level
-//     `standardDayMinutes` -- that field isn't on the employee wire (deferred, §5).
+//     `standardDayMinutes`. The balance card reads the live value from `/me` `dayBasis` (#5969);
+//     this helper still does not, and request duration stays on the leave-type day.
 //   - One-time seed, not a binding: callers apply a result once (on button click) into the free
 //     `requestForm` fields; nothing here re-applies on every render, so a user's subsequent manual
 //     edit is never clobbered.
@@ -164,6 +165,10 @@ export function buildLeaveQuickFill(
  * G2's "≈ N day(s)" conversion: `minutes / defaultMinutesPerDay`, rounded to one decimal place.
  * Returns `null` (hint hidden) when `minutesInput` is empty/non-numeric/negative, or when
  * `defaultMinutesPerDay` isn't a finite positive number (avoids a divide-by-zero / NaN hint).
+ *
+ * This hint is the leave-type day only. Annual balance days use
+ * `annualLeavePolicy.standardDayMinutes` from `/me` `dayBasis` (#5969). This
+ * helper still does not read that field.
  */
 export function computeLeaveMinutesDaysEquivalent(
   minutesInput: string | number | null | undefined,
@@ -179,4 +184,20 @@ export function computeLeaveMinutesDaysEquivalent(
   if (!Number.isFinite(minutes) || minutes < 0) return null
 
   return Math.round((minutes / perDay) * 10) / 10
+}
+
+/** Same sentence as the general leave form, so the dedicated card cannot grow a second day ruler. */
+export function formatLeaveTypeDaysHint(
+  minutesInput: string | number | null | undefined,
+  defaultMinutesPerDay: number | null | undefined,
+  tr: (en: string, zh: string) => string,
+): string {
+  const perDay = Number(defaultMinutesPerDay)
+  const days = computeLeaveMinutesDaysEquivalent(minutesInput, defaultMinutesPerDay)
+  if (days === null || !Number.isFinite(perDay) || perDay <= 0) return ''
+  const daysText = days.toFixed(1)
+  return tr(
+    `≈ ${daysText} day(s) (based on this leave type's standard day of ${perDay} min)`,
+    `≈ ${daysText} 天（按该假种标准日 ${perDay} 分钟）`,
+  )
 }
