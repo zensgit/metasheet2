@@ -70,7 +70,9 @@ describe('attendance import permission wiring', () => {
     const end = pluginSource.indexOf('\n}\n', start) + 2
     const helper = pluginSource.slice(start, end)
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(helper).toContain('user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId')
+    // Blank user.orgId / workspaceId are skipped so they cannot hide authenticatedTenantId.
+    expect(helper).toContain('[user?.orgId, user?.workspaceId, req.authenticatedTenantId]')
+    expect(helper).toContain('raw.trim().length > 0')
     expect(helper).not.toContain('user?.tenantId')
     expect(helper).not.toContain("req.headers['x-org-id']")
     expect(helper).not.toContain('DEFAULT_ORG_ID')
