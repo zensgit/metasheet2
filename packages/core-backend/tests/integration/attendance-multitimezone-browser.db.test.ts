@@ -440,6 +440,7 @@ describe('multi-timezone actual browser login, API and isolated PostgreSQL', () 
     await employeePage.locator('[data-request-timezone]').filter({ hasText: 'Asia/Singapore' }).waitFor()
     await employeePage.locator('#attendance-request-in').fill(tripWorkDate + 'T09:00')
     await employeePage.locator('#attendance-request-out').fill(tripWorkDate + 'T18:00')
+    expect(await employeePage.locator('.attendance__request-form [data-attendance-locale-date-popup]').count()).toBe(0)
     const requested = employeePage.waitForResponse(response => new URL(response.url()).pathname === '/api/attendance/requests' && response.request().method() === 'POST')
     await employeePage.locator('.attendance__request-form').getByRole('button', { name: /^(Submit request|提交申请)$/ }).click()
     const correction = await requested

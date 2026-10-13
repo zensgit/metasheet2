@@ -144,6 +144,10 @@ function pickToday(): void {
   pick(toIso(new Date()))
 }
 
+function onFocusOut(event: FocusEvent): void {
+  if (!(event.relatedTarget instanceof Node) || !root.value?.contains(event.relatedTarget)) open.value = false
+}
+
 function onDocumentPointer(event: Event): void {
   const target = event.target
   if (!(target instanceof Node) || !root.value?.contains(target)) open.value = false
@@ -162,7 +166,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <span ref="root" class="attendance-locale-date" data-attendance-locale-date :data-locale-date="isZh ? 'zh' : 'en'">
+  <span ref="root" class="attendance-locale-date" data-attendance-locale-date :data-locale-date="isZh ? 'zh' : 'en'" @focusout="onFocusOut">
     <input
       ref="input"
       class="attendance-locale-date__input"
