@@ -10286,6 +10286,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../utils/clipboard'
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { getAuthPrincipalKey } from '../composables/authPrincipal'
@@ -20260,11 +20261,9 @@ async function copyImportTemplateHeader() {
     setStatus(tr('Load the import template to pick fields first.', '请先加载导入模板并勾选字段。'), 'error')
     return
   }
-  try {
-    if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
-    await navigator.clipboard.writeText(headerLine)
+  if (await copyText(headerLine)) {
     setStatus(tr('Template header copied.', '模板表头已复制。'))
-  } catch {
+  } else {
     setStatus(tr('Copy failed — please copy the header preview manually.', '复制失败——请手动复制表头预览。'), 'error')
   }
 }

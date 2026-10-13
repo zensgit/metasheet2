@@ -1661,6 +1661,7 @@ exec npx vitest run \
   cancelRoundEntrySurfaces \
   cancelRoundEntryTodoCenter \
   categoryCandidateInput \
+  clipboard-no-bare-navigator-clipboard \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \

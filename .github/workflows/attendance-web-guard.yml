@@ -157,6 +157,11 @@
 # (itself imported by utils/api.ts) and by AttendanceView.vue, so it joins the same module graph;
 # listed at both wiring points for the same reason as delete-fallback.ts. Its spec
 # (apps/web/tests/uuid-no-bare-randomuuid.spec.ts) runs in the always-on required-web-tests lane.
+# Clipboard helper (2026-10-13): apps/web/src/utils/clipboard.ts (copyText with the execCommand
+# fallback for plain-HTTP deployments) is imported by AttendanceView.vue and by
+# views/attendance/useAttendanceAdminRail.ts + AttendanceImportBatchesSection.vue, so it joins this
+# lane's module graph the same way uuid.ts does; listed at both wiring points. Its spec
+# (apps/web/tests/clipboard-no-bare-navigator-clipboard.spec.ts) runs in the required-web-tests lane.
 # A1 "hints and actual status" (2026-10-09, gate r1 P3-2): the slice's five attendance specs -
 # attendance-approval-option-hint.spec.ts, attendance-approval-option-wiring.spec.ts,
 # attendance-scheduled-feature-status.spec.ts, attendance-scheduled-feature-status-wiring.spec.ts and
@@ -191,6 +196,7 @@ on:
       - 'apps/web/src/utils/delete-fallback.ts'
       - 'apps/web/src/utils/explicitSessionOrg.ts'
       - 'apps/web/src/utils/uuid.ts'
+      - 'apps/web/src/utils/clipboard.ts'
       - 'apps/web/src/services/attendance/effectiveCalendar.ts'
       - 'apps/web/src/services/attendance/teamAvailability.ts'
       - 'apps/web/tests/useAuth.spec.ts'
@@ -365,6 +371,7 @@ jobs:
               apps/web/src/utils/delete-fallback.ts|\
               apps/web/src/utils/explicitSessionOrg.ts|\
               apps/web/src/utils/uuid.ts|\
+              apps/web/src/utils/clipboard.ts|\
               apps/web/src/services/attendance/effectiveCalendar.ts|\
               apps/web/src/services/attendance/teamAvailability.ts|\
               apps/web/tests/useAuth.spec.ts|\
