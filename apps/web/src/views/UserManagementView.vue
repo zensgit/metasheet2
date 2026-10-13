@@ -575,6 +575,43 @@
               <p v-if="memberAdmissionOrganizations.active.length === 0" class="user-admin__warning" data-testid="member-admission-org-none">
                 未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐
               </p>
+              <!-- Slice C: one-click 加入默认组织 via the local-directory-account route. Shown only when the
+                   backend positively says the user has no membership row at all and no applied deprovision
+                   (an older backend without those two booleans keeps it hidden); a disabled account never
+                   reaches this block (see memberAdmissionOrganizations). -->
+              <div v-if="canJoinDefaultOrg" class="user-admin__chips">
+                <button
+                  class="user-admin__button"
+                  type="button"
+                  data-testid="join-default-org-button"
+                  :disabled="joiningDefaultOrg"
+                  @click="openJoinDefaultOrgConfirm"
+                >
+                  {{ joiningDefaultOrg ? '加入中...' : '加入默认组织' }}
+                </button>
+              </div>
+              <div
+                v-if="canJoinDefaultOrg && joinDefaultOrgConfirmUserId !== null && joinDefaultOrgConfirmUserId === memberAdmission?.userId"
+                class="user-admin__confirm"
+                role="dialog"
+                aria-label="确认加入默认组织"
+                data-testid="join-default-org-confirm"
+              >
+                <strong>确认将该账号加入默认组织？</strong>
+                <ol>
+                  <li>会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；</li>
+                  <li>加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 日报会计入）；</li>
+                  <li>用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。</li>
+                </ol>
+                <div class="user-admin__chips">
+                  <button class="user-admin__button" type="button" data-testid="join-default-org-confirm-submit" @click="void confirmJoinDefaultOrg()">
+                    确认加入
+                  </button>
+                  <button class="user-admin__button user-admin__button--secondary" type="button" data-testid="join-default-org-confirm-cancel" @click="closeJoinDefaultOrgConfirm">
+                    取消
+                  </button>
+                </div>
+              </div>
               <p v-else-if="memberAdmissionOrganizations.active.length >= 2" class="user-admin__warning" data-testid="member-admission-org-multiple">
                 属于多个组织：登录后需在页面顶部选择组织
               </p>
@@ -1018,6 +1055,13 @@ type MemberOrganizations = {
   active: Array<{ orgId: string }>
   /** Mirrors the no-hint login rule (exactly one active row); a login carrying a stored tenant hint takes another branch. */
   hasTenantContext: boolean
+  /**
+   * Slice C: whether the user has ANY user_orgs row (active or not) / any applied deprovision event.
+   * null = unknown (an older backend without the field, or a non-boolean value); unknown never shows
+   * the 加入默认组织 button.
+   */
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
 }
 
 type NamespaceAdmission = {
@@ -1201,6 +1245,17 @@ const memberAdmissionOrganizations = computed<MemberOrganizations | null>(() => 
   if (!admission || !admission.accountEnabled) return null
   return admission.organizations ?? null
 })
+// Slice C: every condition must be positively known; the server re-checks them (409) anyway.
+const canJoinDefaultOrg = computed<boolean>(() => {
+  const organizations = memberAdmissionOrganizations.value
+  if (!organizations) return false
+  return organizations.active.length === 0
+    && organizations.hasAnyRow === false
+    && organizations.deprovisionApplied === false
+})
+const joiningDefaultOrg = ref(false)
+// The user the confirm panel was opened for; the panel only renders while that user's admission is shown.
+const joinDefaultOrgConfirmUserId = ref<string | null>(null)
 // #6163: a failed load of these two side-panel reads is shown inside its own block, with this page's
 // sentence and (when the server sent one) the request's correlation id — never in the top banner and
 // never with the server's error text.
@@ -2011,7 +2066,12 @@ function normalizeMemberOrganizations(value: unknown): MemberOrganizations | nul
     if (typeof orgId !== 'string' || !orgId.trim()) return null
     active.push({ orgId: orgId.trim() })
   }
-  return { active, hasTenantContext: record.hasTenantContext }
+  return {
+    active,
+    hasTenantContext: record.hasTenantContext,
+    hasAnyRow: typeof record.hasAnyRow === 'boolean' ? record.hasAnyRow : null,
+    deprovisionApplied: typeof record.deprovisionApplied === 'boolean' ? record.deprovisionApplied : null,
+  }
 }
 
 function normalizeNamespaceAdmissions(value: unknown): NamespaceAdmission[] {
@@ -2458,6 +2518,74 @@ async function loadMemberAdmission(userId?: string): Promise<void> {
     memberAdmissionLoadFailure.value = { correlationId: null }
   } finally {
     loadingAdmission.value = false
+  }
+}
+
+// Slice C: the 409 codes POST /api/admin/directory/local/accounts can answer with, in this page's words.
+// The server's message text is never shown (values-free UI); any other failure gets the generic sentence.
+const JOIN_DEFAULT_ORG_FAILURE = '加入默认组织失败，请稍后重试'
+const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
+  // createLocalAccount: an account already exists for this user in this org, or the user is inactive.
+  DIRECTORY_LOCAL_CONFLICT: '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看',
+  // Guard added by the backend slice-C PR: any prior membership row or applied deprovision event.
+  LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY: '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程',
+}
+
+type JoinDefaultOrgResult = { ok: true } | { ok: false; status: number; code: string | null }
+
+async function postJoinDefaultOrg(userId: string): Promise<JoinDefaultOrgResult> {
+  const response = await apiFetch('/api/admin/directory/local/accounts', {
+    method: 'POST',
+    body: JSON.stringify({ localUserId: userId }),
+  })
+  const payload = await readJson(response)
+  if (response.ok && payload.ok === true) {
+    const data = payload.data
+    const account = data && typeof data === 'object' ? (data as Record<string, unknown>).account : null
+    if (account && typeof account === 'object' && typeof (account as Record<string, unknown>).id === 'string') {
+      return { ok: true }
+    }
+    return { ok: false, status: response.status, code: null }
+  }
+  const error = payload.error
+  const code = error && typeof error === 'object' ? (error as Record<string, unknown>).code : undefined
+  return { ok: false, status: response.status, code: typeof code === 'string' ? code : null }
+}
+
+function describeJoinDefaultOrgFailure(result: { status: number; code: string | null }): string {
+  if (result.status === 409 && result.code && Object.prototype.hasOwnProperty.call(JOIN_DEFAULT_ORG_CONFLICT_MESSAGES, result.code)) {
+    return JOIN_DEFAULT_ORG_CONFLICT_MESSAGES[result.code]
+  }
+  return JOIN_DEFAULT_ORG_FAILURE
+}
+
+function openJoinDefaultOrgConfirm(): void {
+  const userId = memberAdmission.value?.userId
+  if (!userId) return
+  joinDefaultOrgConfirmUserId.value = userId
+}
+
+function closeJoinDefaultOrgConfirm(): void {
+  joinDefaultOrgConfirmUserId.value = null
+}
+
+async function confirmJoinDefaultOrg(): Promise<void> {
+  const userId = joinDefaultOrgConfirmUserId.value
+  closeJoinDefaultOrgConfirm()
+  if (!userId) return
+  joiningDefaultOrg.value = true
+  try {
+    const result = await postJoinDefaultOrg(userId)
+    if (!result.ok) {
+      setStatus(describeJoinDefaultOrgFailure(result), 'error')
+      return
+    }
+    await refreshCurrentDetailMemberAdmissionIfNeeded([userId])
+    setStatus('已加入默认组织')
+  } catch {
+    setStatus(JOIN_DEFAULT_ORG_FAILURE, 'error')
+  } finally {
+    joiningDefaultOrg.value = false
   }
 }
 
@@ -3143,6 +3271,21 @@ onUnmounted(() => {
 .user-admin__org-label {
   align-self: center;
   font-size: 13px;
+}
+
+.user-admin__confirm {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.user-admin__confirm ol {
+  margin: 0;
+  padding-left: 20px;
 }
 
 .user-admin__block-error {

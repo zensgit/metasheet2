@@ -2310,6 +2310,251 @@ describe('UserManagementView', () => {
     })
   })
 
+  describe('slice C: 加入默认组织 for a zero-org user (owner 2026-10-13)', () => {
+    const JOIN_PATH = '/api/admin/directory/local/accounts'
+    const ADMISSION_PATH = '/api/admin/users/user-1/member-admission'
+    // What a server might put in an error body; it must never reach the page.
+    const SERVER_TEXT = 'MKSLICEC a local directory account already exists for this user in this org'
+    const GENERIC_FAILURE = '加入默认组织失败，请稍后重试'
+    const CONFLICT_MESSAGE = '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看'
+    const HISTORY_MESSAGE = '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程'
+    const ZERO_ORG_CLEAR = { active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false }
+
+    type JoinResponder = () => ReturnType<typeof createJsonResponse> | Promise<ReturnType<typeof createJsonResponse>>
+    let joinCalls: Array<{ method: string | undefined; body: unknown }> = []
+
+    // Before any successful POST the member-admission read answers `organizations` (left out when undefined, an
+    // older backend); after one it answers the `default` membership the route creates.
+    function installJoin(
+      organizations: unknown,
+      options: { accountEnabled?: boolean; respond?: JoinResponder } = {},
+    ): void {
+      joinCalls = []
+      let joined = false
+      const respond: JoinResponder = options.respond
+        ?? (() => createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (pathname === JOIN_PATH) {
+          callLog.push(String(input))
+          joinCalls.push({ method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+          const response = await respond()
+          if (response.ok) joined = true
+          return response
+        }
+        const response = await base(input, init)
+        // Every user's admission read answers the same `organizations`; only user-1 ever joins in these tests.
+        if (!pathname.startsWith('/api/admin/users/') || !pathname.endsWith('/member-admission')) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data }
+        if (options.accountEnabled !== undefined) data.accountEnabled = options.accountEnabled
+        if (joined && pathname === ADMISSION_PATH) {
+          data.organizations = { active: [{ orgId: 'default' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false }
+        } else if (organizations !== undefined) {
+          data.organizations = organizations
+        }
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+      await waitForCondition(() => container!.textContent?.includes('平台账号') ?? false)
+    }
+
+    function joinButton(): HTMLButtonElement | null {
+      return container!.querySelector('[data-testid="join-default-org-button"]')
+    }
+
+    function confirmPanel(): HTMLElement | null {
+      return container!.querySelector('[data-testid="join-default-org-confirm"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    function admissionLoads(): number {
+      return callLog.filter((url) => url.includes(ADMISSION_PATH)).length
+    }
+
+    function errorStatus(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() ?? ''
+    }
+
+    async function confirmJoin(): Promise<void> {
+      joinButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-submit"]')!.click()
+      await waitForCondition(() => joinCalls.length === 1)
+      await flushUi(12)
+    }
+
+    for (const [label, organizations, accountEnabled] of [
+      ['an older backend without organizations', undefined, true],
+      ['organizations without the two slice-C booleans', { active: [], hasTenantContext: false }, true],
+      ['hasAnyRow missing', { active: [], hasTenantContext: false, deprovisionApplied: false }, true],
+      ['deprovisionApplied missing', { active: [], hasTenantContext: false, hasAnyRow: false }, true],
+      ['hasAnyRow as a non-boolean', { ...ZERO_ORG_CLEAR, hasAnyRow: 'false' }, true],
+      ['one active organization', { ...ZERO_ORG_CLEAR, active: [{ orgId: 'org-alpha' }] }, true],
+      ['a prior membership row (hasAnyRow)', { ...ZERO_ORG_CLEAR, hasAnyRow: true }, true],
+      ['an applied deprovision', { ...ZERO_ORG_CLEAR, deprovisionApplied: true }, true],
+      ['a disabled account', ZERO_ORG_CLEAR, false],
+    ] as const) {
+      it(`hides 加入默认组织 for ${label}`, async () => {
+        installJoin(organizations, { accountEnabled })
+        await mountPage()
+
+        expect(joinButton()).toBeNull()
+        expect(container!.textContent).not.toContain('加入默认组织')
+      })
+    }
+
+    it('shows 加入默认组织 only when all conditions are positively clear, and asks before writing', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      expect(joinButton()!.textContent!.trim()).toBe('加入默认组织')
+      expect(confirmPanel()).toBeNull()
+
+      joinButton()!.click()
+      await flushUi()
+      const panel = confirmPanel()
+      expect(panel).not.toBeNull()
+      expect(panel!.getAttribute('role')).toBe('dialog')
+      const items = Array.from(panel!.querySelectorAll('li')).map((item) => item.textContent?.trim())
+      expect(items).toEqual([
+        '会为该账号创建一条本地目录账号与链接（目录管理里可见，可归档撤销）；',
+        '加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 日报会计入）；',
+        '用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。',
+      ])
+      expect(joinCalls).toEqual([])
+
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-cancel"]')!.click()
+      await flushUi()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    it('on confirm posts the user id, reloads the admission and shows the default chip', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      const loadsBefore = admissionLoads()
+
+      await confirmJoin()
+
+      expect(joinCalls).toEqual([{ method: 'POST', body: { localUserId: 'user-1' } }])
+      await waitForCondition(() => orgChips().length > 0)
+      expect(admissionLoads()).toBeGreaterThan(loadsBefore)
+      expect(orgChips()).toEqual(['default'])
+      expect(joinButton()).toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.textContent).toContain('已加入默认组织')
+      expect(errorStatus()).toBe('')
+    })
+
+    it('disables the button while the request is in flight', async () => {
+      let release: (() => void) | null = null
+      installJoin(ZERO_ORG_CLEAR, {
+        respond: () => new Promise((resolve) => {
+          release = () => resolve(createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+        }),
+      })
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      await confirmJoin()
+
+      expect(joinButton()!.disabled).toBe(true)
+      expect(joinButton()!.textContent!.trim()).toBe('加入中...')
+      release!()
+      await waitForCondition(() => orgChips().length > 0)
+      expect(joinButton()).toBeNull()
+    })
+
+    it('a confirm panel opened for one user is not shown for another user', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      joinButton()!.click()
+      await flushUi()
+      expect(confirmPanel()).not.toBeNull()
+
+      const bravoRow = findUserRow(container!, 'Bravo')
+      const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+      bravoDetailButton!.click()
+      await waitForCondition(() => callLog.includes('/api/admin/users/user-2/member-admission'))
+      await flushUi(12)
+
+      expect(joinButton()).not.toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    for (const [label, respond, expected] of [
+      [
+        '409 DIRECTORY_LOCAL_CONFLICT (existing account / inactive user)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 409),
+        CONFLICT_MESSAGE,
+      ],
+      [
+        '409 LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY (prior membership or deprovision)',
+        () => createJsonResponse({ ok: false, error: { code: 'LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY', message: SERVER_TEXT } }, 409),
+        HISTORY_MESSAGE,
+      ],
+      [
+        '409 with an unknown code',
+        () => createJsonResponse({ ok: false, error: { code: 'SOMETHING_ELSE', message: SERVER_TEXT } }, 409),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a known conflict code on a non-409 status',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 400),
+        GENERIC_FAILURE,
+      ],
+      [
+        '500',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_INTERNAL_ERROR', message: SERVER_TEXT } }, 500),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a 2xx without the created account',
+        () => createJsonResponse({ ok: true, data: { message: SERVER_TEXT } }),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a network failure',
+        () => Promise.reject(new Error(SERVER_TEXT)),
+        GENERIC_FAILURE,
+      ],
+    ] as const) {
+      it(`maps ${label} to this page's sentence, never the server text, and does not reload`, async () => {
+        installJoin(ZERO_ORG_CLEAR, { respond })
+        await mountPage()
+        await waitForCondition(() => joinButton() !== null)
+        const loadsBefore = admissionLoads()
+
+        await confirmJoin()
+
+        expect(errorStatus()).toBe(expected)
+        expect(container!.textContent).not.toContain('MKSLICEC')
+        expect(container!.textContent).not.toContain('已加入默认组织')
+        expect(admissionLoads()).toBe(loadsBefore)
+        expect(joinButton()).not.toBeNull()
+      })
+    }
+  })
+
   describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
     // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
     const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'
