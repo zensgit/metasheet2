@@ -21,7 +21,9 @@ import { CONDITION_RULE_OPERATORS } from './conditionEdit'
 // (eq/neq/in) against a text-type field (e.g. a number left behind when the field was retyped from
 // number to text: `'5' === 5` never matches), a non-date value ordered (gt/gte/lt/lte) against a
 // date field (the executor turns the date into a timestamp, so the result never depends on the
-// date), or an operator a multi-select cannot use. Marking is display-only: never a save/publish
+// date), or an operator a multi-select cannot use. Follow-up (b) (owner Q2) also narrows a
+// single-choice field (no gt/gte/lt/lte) and a multi-person picker (`in` / empty checks only) and
+// marks stored rules that use the removed operators. Marking is display-only: never a save/publish
 // blocker, never a rewrite.
 
 export type ConditionValueKind = 'option-single' | 'option-multi' | 'number' | 'text'
@@ -53,6 +55,16 @@ export function isOptionKind(kind: ConditionValueKind): boolean {
 const MULTI_VISIBILITY_OPERATORS: readonly FormFieldVisibilityOperator[] = ['in', 'isEmpty', 'notEmpty']
 const ALL_VISIBILITY_OPERATORS: readonly FormFieldVisibilityOperator[] = ['eq', 'neq', 'in', 'isEmpty', 'notEmpty']
 const MULTI_CONDITION_OPERATORS: readonly ConditionRule['operator'][] = ['in', 'isEmpty']
+/**
+ * R-43 follow-up (b), owner Q2: a single-choice field no longer offers gt/gte/lt/lte. The executor
+ * orders the stored option CODES (a numeric code numerically, any other code as a string), never the
+ * option names or their order, so the result has nothing to do with what the options mean. A stored
+ * rule of that kind still runs as before (it may work for numeric codes), so it is only MARKED as
+ * advisory (`operator-option-order`), never rewritten or blocked.
+ */
+const SINGLE_OPTION_CONDITION_OPERATORS: readonly ConditionRule['operator'][] = CONDITION_RULE_OPERATORS.filter(
+  (operator) => operator === 'eq' || operator === 'neq' || operator === 'in' || operator === 'isEmpty',
+)
 
 /**
  * Visibility operators that can take effect for this kind. A multi-select value is an array, so
@@ -63,9 +75,30 @@ export function visibilityOperatorsFor(kind: ConditionValueKind): FormFieldVisib
   return kind === 'option-multi' ? [...MULTI_VISIBILITY_OPERATORS] : [...ALL_VISIBILITY_OPERATORS]
 }
 
-/** Branch-condition operators that can take effect for this kind (same reasoning; `in` + `isEmpty`). */
+/**
+ * Branch-condition operators offered for this kind: a multi-select only gets `in` + `isEmpty` (same
+ * reasoning as above); a single-choice field gets no ordering (see SINGLE_OPTION_CONDITION_OPERATORS).
+ */
 export function conditionOperatorsFor(kind: ConditionValueKind): ConditionRule['operator'][] {
-  return kind === 'option-multi' ? [...MULTI_CONDITION_OPERATORS] : [...CONDITION_RULE_OPERATORS]
+  if (kind === 'option-multi') return [...MULTI_CONDITION_OPERATORS]
+  if (kind === 'option-single') return [...SINGLE_OPTION_CONDITION_OPERATORS]
+  return [...CONDITION_RULE_OPERATORS]
+}
+
+/**
+ * Per FIELD (R-43 follow-up (b), owner Q2): a multi-person picker (`listValued`) submits a LIST, so
+ * like a multi-select it only gets `in` + `isEmpty` — eq never matches, neq always matches and
+ * gt/gte/lt/lte never match a list. Everything else follows its kind.
+ */
+export function conditionOperatorsForField(field: ConditionValueField | null | undefined): ConditionRule['operator'][] {
+  if (field?.listValued) return [...MULTI_CONDITION_OPERATORS]
+  return conditionOperatorsFor(conditionValueKind(field))
+}
+
+/** Visibility counterpart: a multi-person picker gets what a multi-select gets (in / isEmpty / notEmpty). */
+export function visibilityOperatorsForField(field: ConditionValueField | null | undefined): FormFieldVisibilityOperator[] {
+  if (field?.listValued) return [...MULTI_VISIBILITY_OPERATORS]
+  return visibilityOperatorsFor(conditionValueKind(field))
 }
 
 /** A finite number from a number or a trimmed numeric string; null otherwise. */
@@ -123,12 +156,26 @@ export const STALE_OPTION_KEY = '\u0000condition-value-not-an-option'
 
 export type ConditionValueIssue =
   | 'operator-not-effective'
+  | 'operator-option-order'
+  | 'operator-multi-person'
   | 'value-not-option'
   | 'in-not-list'
   | 'list-not-scalar'
   | 'not-number'
   | 'not-text'
   | 'not-date'
+
+/**
+ * The issue for an operator the field does not offer: a multi-select keeps its original category; a
+ * multi-person picker and a single-choice field (ordering only) get their own (owner Q2).
+ */
+function operatorIssueFor(field: ConditionValueField): ConditionValueIssue {
+  const kind = conditionValueKind(field)
+  if (kind === 'option-multi') return 'operator-not-effective'
+  if (field.listValued) return 'operator-multi-person'
+  if (kind === 'option-single') return 'operator-option-order'
+  return 'operator-not-effective'
+}
 
 function isBlankValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
@@ -196,8 +243,7 @@ export function visibilityRuleValueIssues(
   field: ConditionValueField | null,
 ): ConditionValueIssue[] {
   if (!rule || !field) return []
-  const kind = conditionValueKind(field)
-  if (!visibilityOperatorsFor(kind).includes(rule.operator)) return ['operator-not-effective']
+  if (!visibilityOperatorsForField(field).includes(rule.operator)) return [operatorIssueFor(field)]
   if (rule.operator === 'isEmpty' || rule.operator === 'notEmpty') return []
   // eq/neq compare one value with `===` / `!==`: a stored LIST (even an empty one) never / always matches.
   if (rule.operator !== 'in' && Array.isArray(rule.value)) return ['list-not-scalar']
@@ -219,7 +265,7 @@ export function conditionRuleValueIssues(
 ): ConditionValueIssue[] {
   if (!field) return []
   const kind = conditionValueKind(field)
-  if (!conditionOperatorsFor(kind).includes(rule.operator)) return ['operator-not-effective']
+  if (!conditionOperatorsForField(field).includes(rule.operator)) return [operatorIssueFor(field)]
   if (rule.operator === 'isEmpty') return []
   const value = rule.value
   if (isBlankValue(value)) return []
@@ -246,7 +292,11 @@ export function conditionRuleValueIssues(
 
 export interface ConditionValueCopy {
   issueTitle: string
+  /** Title used when every issue is advisory (the rule may still work; see ADVISORY_ISSUES). */
+  issueTitleAdvisory: string
   issueOperatorNotEffective: string
+  issueOperatorOptionOrder: string
+  issueOperatorMultiPerson: string
   issueValueNotOption: string
   issueInNotList: string
   issueListNotScalar: string
@@ -271,7 +321,10 @@ export interface ConditionValueCopy {
 
 export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
   issueTitle: '条件已失效：',
+  issueTitleAdvisory: '条件可能无法按预期生效：',
   issueOperatorNotEffective: '多选字段不能使用这个条件类型（「等于」类永远不成立，「不等于」永远成立），无法按预期生效，请重新选择条件类型。',
+  issueOperatorOptionOrder: '单选字段不再提供「大于 / 小于」类条件：它比较的是选项编码，不是选项名称，也不是选项的排列顺序，结果通常与选项含义无关。请确认后改用「等于」「不等于」或「包含于」。',
+  issueOperatorMultiPerson: '多选人员字段的值是一组人员，「等于」类条件永远不成立，「不等于」永远成立，「大于 / 小于」类永远不成立，无法按预期生效。请改用「包含于」（显示条件里为「包含任一」）或「为空」类条件。',
   issueValueNotOption: '已保存的值不在当前选项中（选项可能已被删除），此条件不会生效，请重新选择。',
   issueInNotList: '「包含于」需要一组值，当前只保存了单个值，此条件不会生效，请重新填写或选择。',
   issueListNotScalar: '这个条件类型只能比较单个值，当前保存的是一组值，无法按预期生效，请重新填写或选择。',
@@ -295,7 +348,10 @@ export const CONDITION_VALUE_COPY_ZH: ConditionValueCopy = {
 
 export const CONDITION_VALUE_COPY_EN: ConditionValueCopy = {
   issueTitle: 'Condition not in effect: ',
+  issueTitleAdvisory: 'Condition may not work as intended: ',
   issueOperatorNotEffective: 'This condition type does not work on a multi-select field ("equals"-type conditions never match, "not equals" always matches). Choose another condition type.',
+  issueOperatorOptionOrder: 'Single-choice fields no longer offer "greater than / less than" conditions: they compare option codes, not option names or their order, so the result usually has nothing to do with what the options mean. Check it and use "equals", "not equals" or "in" instead.',
+  issueOperatorMultiPerson: 'A multi-person field holds a list of people: "equals"-type conditions never match, "not equals" always matches, and "greater than / less than" never match, so the condition does not work as intended. Use "in" ("contains any" in display conditions) or an empty check instead.',
   issueValueNotOption: 'The saved value is not one of the current options (it may have been deleted), so this condition never takes effect. Choose again.',
   issueInNotList: 'The "in" condition needs a list of values; it holds a single value and never takes effect. Enter or choose the values again.',
   issueListNotScalar: 'This condition type compares a single value, but a list of values is saved, so it does not work as intended. Enter or choose the value again.',
@@ -326,6 +382,10 @@ export function conditionValueIssueMessage(issue: ConditionValueIssue, isZh: boo
   switch (issue) {
     case 'operator-not-effective':
       return copy.issueOperatorNotEffective
+    case 'operator-option-order':
+      return copy.issueOperatorOptionOrder
+    case 'operator-multi-person':
+      return copy.issueOperatorMultiPerson
     case 'value-not-option':
       return copy.issueValueNotOption
     case 'in-not-list':
@@ -341,11 +401,18 @@ export function conditionValueIssueMessage(issue: ConditionValueIssue, isZh: boo
   }
 }
 
+/**
+ * Issues whose rule may still work: a single-choice ordering compares option codes, which does what
+ * the author meant only by accident (e.g. numeric codes) — so it is not called "not in effect".
+ */
+const ADVISORY_ISSUES: readonly ConditionValueIssue[] = ['operator-option-order']
+
 /** Title + every issue message, one line (empty when there are no issues). */
 export function conditionValueIssueText(issues: readonly ConditionValueIssue[], isZh: boolean): string {
   if (issues.length === 0) return ''
   const copy = conditionValueCopy(isZh)
-  return `${copy.issueTitle}${issues.map((issue) => conditionValueIssueMessage(issue, isZh)).join(' ')}`
+  const title = issues.every((issue) => ADVISORY_ISSUES.includes(issue)) ? copy.issueTitleAdvisory : copy.issueTitle
+  return `${title}${issues.map((issue) => conditionValueIssueMessage(issue, isZh)).join(' ')}`
 }
 
 // --- marked values the text boxes show EMPTY ----------------------------------------------------

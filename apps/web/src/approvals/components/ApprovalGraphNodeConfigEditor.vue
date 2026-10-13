@@ -1491,7 +1491,7 @@ import {
 } from '../nodeConfigEditorContext'
 import type { ConditionRuleEdit, ConditionRuleOperator } from '../conditionEdit'
 import {
-  conditionOperatorsFor,
+  conditionOperatorsForField,
   conditionRuleValueIssues,
   conditionStoredValueNoteShown,
   conditionStoredValuePreview,
@@ -1675,7 +1675,7 @@ function ruleFieldOptions(rule: ConditionRuleEdit) {
   return [...(ruleField(rule)?.options ?? [])]
 }
 function ruleOperatorChoices(rule: ConditionRuleEdit) {
-  const choices = conditionOperatorsFor(ruleKind(rule)).map((operator) => ({
+  const choices = conditionOperatorsForField(ruleField(rule)).map((operator) => ({
     value: operator,
     label: conditionOperatorLabel(operator),
     disabled: false,
@@ -1720,7 +1720,11 @@ function ruleScalarText(rule: ConditionRuleEdit): string {
 function isBlankRuleValue(value: unknown): boolean {
   return value === undefined || value === null || value === ''
 }
-/** A value meaningful for the NEXT field: only a text→text or number→number move keeps it. */
+/**
+ * A value meaningful for the NEXT field: only a text→text or number→number move keeps it. When the
+ * next field does not offer the current operator, the switch goes through `onRuleOperatorChange` so
+ * the kept value is reshaped too (e.g. single person eq `u1` → multi-person picker ⇒ in `[u1]`).
+ */
 function onRuleFieldChange(rule: ConditionRuleEdit, fieldId: string | null | undefined): void {
   const previousKind = ruleKind(rule)
   rule.fieldId = fieldId ?? ''
@@ -1728,8 +1732,8 @@ function onRuleFieldChange(rule: ConditionRuleEdit, fieldId: string | null | und
   if (!(previousKind === nextKind && (nextKind === 'text' || nextKind === 'number'))) {
     rule.value = undefined
   }
-  const allowed = conditionOperatorsFor(nextKind)
-  if (!allowed.includes(rule.operator)) rule.operator = allowed[0]!
+  const allowed = conditionOperatorsForField(ruleField(rule))
+  if (!allowed.includes(rule.operator)) onRuleOperatorChange(rule, allowed[0]!)
   ruleListTextBuffers.delete(rule)
 }
 /**

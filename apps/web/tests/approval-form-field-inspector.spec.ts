@@ -1695,6 +1695,42 @@ describe('ApprovalFormFieldInspector — R-43 (B) typed visibility values', () =
     expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-not-effective', false))
   })
 
+  // R-43 follow-up (b), owner Q2: a multi-person picker (user + selection multi) submits a LIST, so it
+  // is treated like a multi-select. This also locks that the inspector keeps `listValued` when it
+  // rebuilds the dependency description (it used to drop it).
+  it('follow-up (b): a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is shown disabled, marked and never rewritten', async () => {
+    const person = (index: number, selection: 'single' | 'multi') => field(index, { type: 'user', userSelection: selection })
+    const inspector = await mountInspector([person(1, 'multi'), field(2)], { selected: 'local_2' })
+    await inspector.changeSelect('approval-form-field-inspector-visibility-depends', 'field_1')
+    expect(visibilityOf(inspector, 1).operator).toBe('in')
+    const enabled = Array.from(inspector.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(enabled).toEqual(['in', 'isEmpty', 'notEmpty'])
+
+    const legacy = await mountInspector(
+      [person(1, 'multi'), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' } })],
+      { selected: 'local_2' },
+    )
+    const operator = legacy.select('approval-form-field-inspector-visibility-operator')
+    expect(operator.value).toBe('eq')
+    expect(operator.selectedOptions[0]?.disabled).toBe(true)
+    expect(issueText(legacy)).toContain(conditionValueIssueMessage('operator-multi-person', false))
+    expect(legacy.commands).toHaveLength(0)
+    expect(visibilityOf(legacy, 1)).toStrictEqual({ dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' })
+
+    // a single person keeps every operator and is not marked
+    const single = await mountInspector(
+      [person(1, 'single'), field(2, { visibility: { dependsOnFieldId: 'field_1', operator: 'eq', valueText: 'u1' } })],
+      { selected: 'local_2' },
+    )
+    const singleEnabled = Array.from(single.select('approval-form-field-inspector-visibility-operator').options)
+      .filter((option) => !option.disabled)
+      .map((option) => option.value)
+    expect(singleEnabled).toEqual(['eq', 'neq', 'in', 'isEmpty', 'notEmpty'])
+    expect(issueText(single)).toBe('')
+  })
+
   it('gate r4 P3-h: a LIST stored under eq on a select dependency is marked with the picker placeholder — never a raw option-code note', async () => {
     // API-only shape (the editor cannot write it): the picker carries its own invalid-value
     // placeholder, so the free-entry「stored value」note must not also print the raw option code.

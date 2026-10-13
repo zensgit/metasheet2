@@ -6481,6 +6481,54 @@ describe('TemplateAuthoringView', () => {
         expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('["1","2"]')
         expect(await saveRules()).toStrictEqual(rules)
       })
+
+      // R-43 follow-up (b), owner Q2: single select drops gt/gte/lt/lte; a multi-person picker only
+      // gets in / isEmpty. A stored rule using a removed operator is MARKED, never rewritten.
+      const SIGNERS = { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } }
+      const enabledOperators = (el: HTMLSelectElement) =>
+        Array.from(el.options).filter((option) => !option.disabled).map((option) => option.value)
+
+      it(`${host}: follow-up (b) — a select rule offers only eq / neq / in / isEmpty; a stored gt is marked (advisory), shown disabled and saved unchanged`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+          { fieldId: 'kind', operator: 'gt', value: 'opt_trip' },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        expect(enabledOperators(inRule(scope, 0, 'approval-condition-rule-operator')!)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+        const stored = inRule(scope, 1, 'approval-condition-rule-operator')!
+        expect(stored.value).toBe('gt')
+        expect(Array.from(stored.options).find((option) => option.value === 'gt')?.disabled).toBe(true)
+        expect(enabledOperators(stored)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+        expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['operator-option-order'], false))
+        expect(inRule(scope, 1, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('"opt_trip"')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      it(`${host}: follow-up (b) — a multi-person rule offers only in / isEmpty; a stored eq is marked, shown disabled and saved unchanged`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'signers', operator: 'eq', value: 'u1' },
+          { fieldId: 'reviewer', operator: 'eq', value: 'u1' },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas, [SIGNERS])
+        const stored = inRule(scope, 0, 'approval-condition-rule-operator')!
+        expect(stored.value).toBe('eq')
+        expect(Array.from(stored.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+        expect(enabledOperators(stored)).toEqual(['in', 'isEmpty'])
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['operator-multi-person'], false))
+        // a single person keeps every operator and is not marked
+        expect(enabledOperators(inRule(scope, 1, 'approval-condition-rule-operator')!)).toEqual(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
+        expect(inRule(scope, 1, 'approval-condition-rule-issue')).toBeNull()
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      it(`${host}: follow-up (b) — switching a single-person eq rule to the multi-person field moves it to in and keeps the person as a one-entry list`, async () => {
+        const scope = await mountTyped([{ fieldId: 'reviewer', operator: 'eq', value: 'u1' }], canvas, [SIGNERS])
+        await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'signers')
+        expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('in')
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'signers', operator: 'in', value: ['u1'] }])
+      })
     }
 
     it('gate r3 F3-2: a scalar in on a MULTI-person field takes effect (not marked); on a single-person field it is', async () => {
@@ -6804,6 +6852,20 @@ describe('TemplateAuthoringView', () => {
       expect(noteRule(fields)).toStrictEqual(legacyRule)
       expect(fields.find((field: any) => field.id === 'note_kind').visibilityRule).toStrictEqual(kindRule)
     })
+
+    it('follow-up (b) legacy designer: a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is marked (operator shown disabled) and saved unchanged', async () => {
+      const legacyRule = { fieldId: 'signers', operator: 'eq', value: 'u1' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const operator = inNote('approval-field-visibility-operator')!
+      expect(operator.value).toBe('eq')
+      expect(Array.from(operator.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(Array.from(operator.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty', 'notEmpty'])
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['operator-multi-person'], false))
+      expect(noteRule(await saveFields())).toStrictEqual(legacyRule)
+    })
   })
   })
 
@@ -7036,6 +7098,17 @@ describe('R-43 (B) typed visibility drafts', () => {
     expect(visibilityDraftForDependencyChange(eqText, 'b', text, select)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: '' })
     expect(visibilityDraftForDependencyChange(eqText, 'b', text, multi)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
     expect(visibilityDraftForDependencyChange(eqText, '', text, null)).toStrictEqual({ dependsOnFieldId: '', operator: 'eq', valueText: '' })
+    // Follow-up (b): single person → multi-person picker forces eq ⇒ in, and the eq scalar does not
+    // ride along into the `in` rule (both are text kind, but the operator changed).
+    const person = { type: 'user' as const, options: [] }
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    const eqPerson: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'u1', value: 'u1' }
+    expect(visibilityDraftForDependencyChange(eqPerson, 'b', person, multiPerson)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
+    // an operator the multi-person picker offers keeps the text → text value
+    const inPerson: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] }
+    expect(visibilityDraftForDependencyChange(inPerson, 'b', person, multiPerson)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] })
+    // back to a single person keeps eq-free `in` as it is
+    expect(visibilityDraftForDependencyChange(inPerson, 'b', multiPerson, person)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] })
   })
 
   it('the "in needs a value" check reads the typed carrier (no new blocker added)', () => {
