@@ -707,7 +707,11 @@ watch(newDueDate, (date) => {
   if (date === '') newDueTime.value = ''
 })
 // The pre-check result of the due fields (`buildCreateDue`); nothing is sent while it is set.
+// Any edit of the date or the time drops it, so it never outlives the values it was about.
 const createDueError = ref<CreateDueCode | null>(null)
+watch([newDueDate, newDueTime], () => {
+  createDueError.value = null
+})
 const creating = ref(false)
 const createErrorVisible = ref(false)
 const createErrorInvalidTitle = ref(false)

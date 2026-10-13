@@ -878,4 +878,25 @@ describe('TasksView create form — optional due date', () => {
     expect(Object.keys(sentBody()).sort()).toEqual(['completionMode', 'title'])
     expect(shown(el, 'tasks-create-due-error')).toBeNull()
   })
+
+  it('the due message goes away as soon as the viewer edits the time or the date', async () => {
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
+    h.resolveViewerTimeZone.mockReturnValue('')
+    const el = await mountReady()
+
+    await fillTitle(el)
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await submit(el)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+
+    await submit(el)
+    expect(shown(el, 'tasks-create-due-error')).not.toBeNull()
+
+    await setControl(el, 'tasks-create-due-date', '')
+    expect(shown(el, 'tasks-create-due-error')).toBeNull()
+    expect(h.createTask).not.toHaveBeenCalled()
+  })
 })
