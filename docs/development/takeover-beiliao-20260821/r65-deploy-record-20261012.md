@@ -49,7 +49,7 @@
 ## 6. 待办
 
 - owner：发送客户答复发送版；定 `stock-prep_puller` 分配；联系客户 DBA 恢复 PLM 只读登录（恢复后再核预检 / dry-run）；定日志轮转方案；定 R66 拆出角色 id（开发机推荐 `approvals_operator`）。
-- 开发机：收窄 R65 迁移的 `down()`——已由 #6364 完成（`down()` 不再删任何授予，只删无绑定的目录行，有绑定的码连同授予保留）；R66（#6348）核验完转 ready；云课堂启用步骤另帖。收窄后的 `down()` 从 R67 包起才随包发出：`onprem-r65` 与 `onprem-r66` 两个包里仍是旧的级联 `down()`，第 9 行「演示机绝不能执行这条迁移的 `down()`」对这两个包继续有效。
+- 开发机：收窄 R65 迁移的 `down()`——已由 #6364 完成（`down()` 不再删任何授予，只删无绑定的目录行，有绑定的码连同授予保留）；R66（#6348）核验完转 ready；云课堂启用步骤另帖。收窄后的 `down()` 从重切的 R66 包（main 在 b7096129d 之后）起随包发出：只有 `onprem-r65` 包里仍是旧的级联 `down()`；第 9 行的规则（演示机绝不能执行这条迁移的 `down()`，回退 = 上一个包加 `-RunMigrations 0`）不论哪个包都照旧作为操作规则。
 - 脚本：运维机 `metasheet-ops/releases/r65/`（wrapper 钉：迁移名、三码目录与绑定计数、六个开关非 `true`、九个 dist 标记、启动日志尾读）。
 - 日志轮转（R66 维护窗口）：runbook 已出，见 `docs/development/takeover-beiliao-20260821/runbook-backend-log-rotation-20261012.md`。
 
