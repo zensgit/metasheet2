@@ -37,6 +37,8 @@ import {
 } from '../src/approvals/templateAuthoring'
 import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
 import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
+import { describeRoutePreviewError, ROUTE_PREVIEW_REQUIRED_COPY_EN } from '../src/approvals/routePreviewErrors'
+import { useLocale } from '../src/composables/useLocale'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -93,6 +95,9 @@ const dryRunApprovalConditionFormulaSpy = vi.fn()
 // observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders"
 // without each test having to configure it individually.
 const listTemplateCategoriesSpy = vi.fn()
+// R-43 follow-up (a): the 试运行 button calls previewTemplateRoute; the mock module previously had
+// no such export (no test here clicked the button).
+const previewTemplateRouteSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
@@ -130,6 +135,7 @@ vi.mock('../src/approvals/api', () => ({
   },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
   listTemplateCategories: () => listTemplateCategoriesSpy(),
+  previewTemplateRoute: (id: string, body: unknown) => previewTemplateRouteSpy(id, body),
 }))
 
 // T2 (record-link target pickers on the default Designer 2.0 surface): the record-link catalog is
@@ -1490,6 +1496,7 @@ describe('TemplateAuthoringView', () => {
     getTemplateSpy.mockReset()
     dryRunApprovalConditionFormulaSpy.mockReset()
     listTemplateCategoriesSpy.mockReset()
+    previewTemplateRouteSpy.mockReset()
     listTemplateCategoriesSpy.mockResolvedValue(['差旅', '采购'])
     pushSpy.mockClear()
     replaceSpy.mockClear()
@@ -3464,6 +3471,80 @@ describe('TemplateAuthoringView', () => {
     expect(datetimePickers[0].getAttribute('placeholder')).toBe('请选择日期和时间')
     // An author-written placeholder still wins.
     expect(datetimePickers[1].getAttribute('placeholder')).toBe('请填写航班落地时间')
+  })
+
+  // R-43 follow-up (a): the server validates the 试运行 sample against the WHOLE form. A visible
+  // required field left empty used to surface as the raw English "Approval form data is invalid";
+  // it now gets the localized hint naming the field (name only — no value, no raw id). Any other
+  // validation failure keeps its text. The test locale is en unless a case switches it (and restores en).
+  async function runTryRunWithRejection(error: unknown): Promise<string> {
+    setRouteParams({ id: 'tpl_tryrun_required' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          { id: 'reviewer', type: 'user', label: '审批人', required: true },
+          { id: 'remark_field', type: 'text', label: '备注', required: true },
+        ],
+      } as any,
+    }))
+    previewTemplateRouteSpy.mockRejectedValue(error)
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    const amountSample = container!.querySelector(
+      '[data-testid="approval-template-tryrun-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    expect(amountSample).not.toBeNull()
+    amountSample.value = '6000'
+    amountSample.dispatchEvent(new Event('input'))
+    await flushUi()
+    const button = container!.querySelector('button[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi()
+    expect(previewTemplateRouteSpy).toHaveBeenCalledTimes(1)
+    expect(previewTemplateRouteSpy.mock.calls[0]?.[0]).toBe('tpl_tryrun_required')
+    return (container!.querySelector('[data-testid="approval-template-tryrun-error"]')?.textContent ?? '').trim()
+  }
+
+  it('follow-up (a): an empty required sample field shows the localized hint with the field NAME (no server English, no id, no value)', async () => {
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['remark_field is required'] })
+    const text = await runTryRunWithRejection(error)
+    expect(text).toBe(describeRoutePreviewError(error, undefined, { isZh: false, fieldLabel: (id) => (id === 'remark_field' ? '备注' : null) }))
+    expect(text).toContain('"备注"')
+    expect(text).toContain(ROUTE_PREVIEW_REQUIRED_COPY_EN.cannotFillHint)
+    expect(text).not.toContain('Approval form data is invalid')
+    expect(text).not.toContain('remark_field')
+    expect(text).not.toContain('6000')
+  })
+
+  // FU gate r1 P2-1: the zh side of the view wiring (`isZh: tryRunIsZh.value`) is otherwise only
+  // locked through the pure function; a constant `isZh: false` would pass every other case.
+  it('follow-up (a): under zh-CN the try-run hint is Chinese', async () => {
+    const { setLocale } = useLocale()
+    setLocale('zh-CN')
+    try {
+      const { ApprovalApiError } = await import('../src/approvals/api')
+      const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['remark_field is required'] })
+      const text = await runTryRunWithRejection(error)
+      expect(text).toBe(describeRoutePreviewError(error, undefined, { isZh: true, fieldLabel: (id) => (id === 'remark_field' ? '备注' : null) }))
+      expect(text).toContain('「备注」')
+      expect(text).not.toContain('Approval form data is invalid')
+      expect(text).not.toContain('remark_field')
+      expect(text).not.toContain('6000')
+    } finally {
+      setLocale('en')
+    }
+  })
+
+  it('follow-up (a): any other validation failure keeps the server message', async () => {
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['amount must be a number'] })
+    expect(await runTryRunWithRejection(error)).toBe('Approval form data is invalid')
   })
 
   it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
@@ -6420,6 +6501,54 @@ describe('TemplateAuthoringView', () => {
         expect(inRule(scope, 0, 'approval-condition-rule-stored-value-text')?.textContent).toBe('["1","2"]')
         expect(await saveRules()).toStrictEqual(rules)
       })
+
+      // R-43 follow-up (b), owner Q2: single select drops gt/gte/lt/lte; a multi-person picker only
+      // gets in / isEmpty. A stored rule using a removed operator is MARKED, never rewritten.
+      const SIGNERS = { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } }
+      const enabledOperators = (el: HTMLSelectElement) =>
+        Array.from(el.options).filter((option) => !option.disabled).map((option) => option.value)
+
+      it(`${host}: follow-up (b) — a select rule offers only eq / neq / in / isEmpty; a stored gt is marked (advisory), shown disabled and saved unchanged`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'kind', operator: 'eq', value: 'opt_trip' },
+          { fieldId: 'kind', operator: 'gt', value: 'opt_trip' },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas)
+        expect(enabledOperators(inRule(scope, 0, 'approval-condition-rule-operator')!)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+        const stored = inRule(scope, 1, 'approval-condition-rule-operator')!
+        expect(stored.value).toBe('gt')
+        expect(Array.from(stored.options).find((option) => option.value === 'gt')?.disabled).toBe(true)
+        expect(enabledOperators(stored)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+        expect(inRule(scope, 1, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['operator-option-order'], false))
+        expect(inRule(scope, 1, 'approval-condition-rule-option-value')!.getAttribute('data-model-value')).toBe('"opt_trip"')
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      it(`${host}: follow-up (b) — a multi-person rule offers only in / isEmpty; a stored eq is marked, shown disabled and saved unchanged`, async () => {
+        const rules: Rule[] = [
+          { fieldId: 'signers', operator: 'eq', value: 'u1' },
+          { fieldId: 'reviewer', operator: 'eq', value: 'u1' },
+        ]
+        const scope = await mountTyped(rules.map((rule) => ({ ...rule })), canvas, [SIGNERS])
+        const stored = inRule(scope, 0, 'approval-condition-rule-operator')!
+        expect(stored.value).toBe('eq')
+        expect(Array.from(stored.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+        expect(enabledOperators(stored)).toEqual(['in', 'isEmpty'])
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')?.textContent).toBe(conditionValueIssueText(['operator-multi-person'], false))
+        // a single person keeps every operator and is not marked
+        expect(enabledOperators(inRule(scope, 1, 'approval-condition-rule-operator')!)).toEqual(['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'isEmpty'])
+        expect(inRule(scope, 1, 'approval-condition-rule-issue')).toBeNull()
+        expect(await saveRules()).toStrictEqual(rules)
+      })
+
+      it(`${host}: follow-up (b) — switching a single-person eq rule to the multi-person field moves it to in and keeps the person as a one-entry list`, async () => {
+        const scope = await mountTyped([{ fieldId: 'reviewer', operator: 'eq', value: 'u1' }], canvas, [SIGNERS])
+        await choose(inRule(scope, 0, 'approval-condition-rule-field'), 'signers')
+        expect(inRule(scope, 0, 'approval-condition-rule-operator')!.value).toBe('in')
+        expect(inRule(scope, 0, 'approval-condition-rule-issue')).toBeNull()
+        expect(await saveRules()).toStrictEqual([{ fieldId: 'signers', operator: 'in', value: ['u1'] }])
+      })
     }
 
     it('gate r3 F3-2: a scalar in on a MULTI-person field takes effect (not marked); on a single-person field it is', async () => {
@@ -6743,6 +6872,42 @@ describe('TemplateAuthoringView', () => {
       expect(noteRule(fields)).toStrictEqual(legacyRule)
       expect(fields.find((field: any) => field.id === 'note_kind').visibilityRule).toStrictEqual(kindRule)
     })
+
+    it('follow-up (b) legacy designer: a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is marked (operator shown disabled) and saved unchanged', async () => {
+      const legacyRule = { fieldId: 'signers', operator: 'eq', value: 'u1' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], false, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const operator = inNote('approval-field-visibility-operator')!
+      expect(operator.value).toBe('eq')
+      expect(Array.from(operator.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(Array.from(operator.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty', 'notEmpty'])
+      expect(inNote('approval-field-visibility-issue')?.textContent).toBe(conditionValueIssueText(['operator-multi-person'], false))
+      expect(noteRule(await saveFields())).toStrictEqual(legacyRule)
+    })
+
+    // FU gate r2 P2-1: the default Designer 2.0 surface narrows through the PRODUCTION builder
+    // (ApprovalFormBuilder passes `listValued` with the dependency descriptor) — not a test-built prop.
+    it('follow-up (b) Designer 2.0 (flag on): through the PRODUCTION builder a multi-person dependency offers only in / isEmpty / notEmpty; a stored eq is marked and saved unchanged', async () => {
+      const legacyRule = { fieldId: 'signers', operator: 'eq', value: 'u1' }
+      await mountTyped([{ fieldId: 'amount', operator: 'gte', value: 1 }], true, [
+        { id: 'signers', type: 'user', label: '会签人', props: { selection: 'multi', maxSelections: 3 } },
+        { ...NOTE, visibilityRule: legacyRule },
+      ])
+      const cards = container!.querySelectorAll('[data-testid="approval-form-builder-card"]')
+      ;(cards[cards.length - 1] as HTMLElement).click()
+      await flushUi()
+      const operator = container!.querySelector('[data-testid="approval-form-field-inspector-visibility-operator"]') as HTMLSelectElement | null
+      expect(operator).not.toBeNull()
+      expect(operator!.value).toBe('eq')
+      expect(Array.from(operator!.options).find((option) => option.value === 'eq')?.disabled).toBe(true)
+      expect(Array.from(operator!.options).filter((option) => !option.disabled).map((option) => option.value)).toEqual(['in', 'isEmpty', 'notEmpty'])
+      expect(container!.querySelector('[data-testid="approval-form-field-inspector-visibility-issue"]')?.textContent?.trim())
+        .toBe(conditionValueIssueText(['operator-multi-person'], false))
+      const fields = await saveFields()
+      expect(fields.find((field: any) => field.id === 'note').visibilityRule).toStrictEqual(legacyRule)
+    })
   })
   })
 
@@ -6975,6 +7140,17 @@ describe('R-43 (B) typed visibility drafts', () => {
     expect(visibilityDraftForDependencyChange(eqText, 'b', text, select)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'eq', valueText: '' })
     expect(visibilityDraftForDependencyChange(eqText, 'b', text, multi)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
     expect(visibilityDraftForDependencyChange(eqText, '', text, null)).toStrictEqual({ dependsOnFieldId: '', operator: 'eq', valueText: '' })
+    // Follow-up (b): single person → multi-person picker forces eq ⇒ in, and the eq scalar does not
+    // ride along into the `in` rule (both are text kind, but the operator changed).
+    const person = { type: 'user' as const, options: [] }
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    const eqPerson: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'eq', valueText: 'u1', value: 'u1' }
+    expect(visibilityDraftForDependencyChange(eqPerson, 'b', person, multiPerson)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: '' })
+    // an operator the multi-person picker offers keeps the text → text value
+    const inPerson: FieldVisibilityDraft = { dependsOnFieldId: 'a', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] }
+    expect(visibilityDraftForDependencyChange(inPerson, 'b', person, multiPerson)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] })
+    // back to a single person keeps eq-free `in` as it is
+    expect(visibilityDraftForDependencyChange(inPerson, 'b', multiPerson, person)).toStrictEqual({ dependsOnFieldId: 'b', operator: 'in', valueText: 'u1\nu2', values: ['u1', 'u2'] })
   })
 
   it('the "in needs a value" check reads the typed carrier (no new blocker added)', () => {

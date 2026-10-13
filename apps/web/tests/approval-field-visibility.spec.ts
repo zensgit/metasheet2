@@ -13,6 +13,7 @@ import {
   parseConditionNumber,
   sameConditionList,
   visibilityOperatorsFor,
+  visibilityOperatorsForField,
   visibilityRuleValueIssues,
 } from '../src/approvals/conditionValueTyping'
 import type { FormSchema } from '../src/types/approval'
@@ -142,6 +143,28 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     }
   })
 
+  it('follow-up (b): per-field operators — a multi-person picker gets what a multi select gets; everything else is unchanged', () => {
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    expect(visibilityOperatorsForField(multiPerson)).toEqual(['in', 'isEmpty', 'notEmpty'])
+    for (const field of [single, number, text, { type: 'user' as const, options: [] }, null]) {
+      expect(visibilityOperatorsForField(field)).toEqual(['eq', 'neq', 'in', 'isEmpty', 'notEmpty'])
+    }
+    expect(visibilityOperatorsForField(multi)).toEqual(['in', 'isEmpty', 'notEmpty'])
+  })
+
+  it('follow-up (b): a stored eq / neq on a multi-person picker is marked with its own category; in / empty checks are not', () => {
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(visibilityRuleValueIssues({ operator, value: 'u1' }, multiPerson)).toEqual(['operator-multi-person'])
+    }
+    expect(visibilityRuleValueIssues({ operator: 'in', values: ['u1'] }, multiPerson)).toEqual([])
+    expect(visibilityRuleValueIssues({ operator: 'isEmpty' }, multiPerson)).toEqual([])
+    expect(visibilityRuleValueIssues({ operator: 'notEmpty' }, multiPerson)).toEqual([])
+    // single select visibility has no ordering operators, so it is unaffected
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: 'opt_a' }, single)).toEqual([])
+    expect(visibilityRuleValueIssues({ operator: 'eq', value: 'u1' }, { type: 'user' as const, options: [] })).toEqual([])
+  })
+
   it('visibilityRuleValueIssues marks rules that can never take effect (and nothing else)', () => {
     expect(visibilityRuleValueIssues({ operator: 'eq', value: 'opt_a' }, multi)).toEqual(['operator-not-effective'])
     expect(visibilityRuleValueIssues({ operator: 'eq', value: 'opt_gone' }, single)).toEqual(['value-not-option'])
@@ -197,7 +220,7 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
       expect(CJK.test(rendered), key).toBe(false)
       expect(rendered).not.toContain('opt_')
     }
-    for (const issue of ['operator-not-effective', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number', 'not-text', 'not-date'] as const) {
+    for (const issue of ['operator-not-effective', 'operator-option-order', 'operator-multi-person', 'value-not-option', 'in-not-list', 'list-not-scalar', 'not-number', 'not-text', 'not-date'] as const) {
       expect(CJK.test(conditionValueIssueMessage(issue, true))).toBe(true)
       expect(CJK.test(conditionValueIssueMessage(issue, false))).toBe(false)
     }
@@ -211,5 +234,22 @@ describe('R-43 (B) conditionValueTyping helpers', () => {
     // Gate r1 P3-4: a multi-select eq never matches but neq ALWAYS matches — the copy says both.
     expect(CONDITION_VALUE_COPY_ZH.issueOperatorNotEffective).toContain('永远成立')
     expect(CONDITION_VALUE_COPY_EN.issueOperatorNotEffective).toContain('always matches')
+    // Follow-up (b): the multi-person copy says the same; the advisory title never claims "not in
+    // effect" (a numeric-coded single select may still order correctly); the new copy is digit-free.
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain('永远成立')
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain('always matches')
+    // FU gate r1 NIT-1: the advice names the "in" label of BOTH display-condition editors
+    // (Designer 2.0 「包含任一」, legacy designer 「包含」).
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain(`「${CONDITION_VALUE_COPY_ZH.visibilityInLabelOption}」`)
+    expect(CONDITION_VALUE_COPY_ZH.issueOperatorMultiPerson).toContain('「包含」')
+    // FU gate r2 NIT-B: the English copy names both labels too.
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain(`"${CONDITION_VALUE_COPY_EN.visibilityInLabelOption.toLowerCase()}" in display conditions`)
+    expect(CONDITION_VALUE_COPY_EN.issueOperatorMultiPerson).toContain('"contains" in the legacy designer')
+    expect(CONDITION_VALUE_COPY_ZH.issueTitleAdvisory).not.toContain('失效')
+    expect(CONDITION_VALUE_COPY_EN.issueTitleAdvisory).not.toContain('not in effect')
+    for (const key of ['issueTitleAdvisory', 'issueOperatorOptionOrder', 'issueOperatorMultiPerson'] as const) {
+      expect(CONDITION_VALUE_COPY_ZH[key]).not.toMatch(/\d/)
+      expect(CONDITION_VALUE_COPY_EN[key]).not.toMatch(/\d/)
+    }
   })
 })

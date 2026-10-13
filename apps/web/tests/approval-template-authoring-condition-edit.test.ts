@@ -17,7 +17,12 @@ import {
 } from '../src/approvals/conditionEdit'
 import {
   conditionOperatorsFor,
+  conditionOperatorsForField,
   conditionRuleValueIssues,
+  conditionValueIssueText,
+  conditionValueIssueMessage,
+  CONDITION_VALUE_COPY_EN,
+  CONDITION_VALUE_COPY_ZH,
   conditionStoredValueNoteShown,
   conditionStoredValuePreview,
   conditionValueShowsBlank,
@@ -607,11 +612,67 @@ describe('R-43 (B) typed branch condition values', () => {
   const number = { type: 'number' as const, options: [] }
   const text = { type: 'text' as const, options: [] }
 
-  it('multi select offers only in / isEmpty; every other kind keeps the full operator set in order', () => {
+  it('multi select offers only in / isEmpty; single select drops gt/gte/lt/lte (owner Q2); number / text keep the full set in order', () => {
     expect(conditionOperatorsFor('option-multi')).toEqual(['in', 'isEmpty'])
-    for (const kind of ['option-single', 'number', 'text'] as const) {
+    // R-43 follow-up (b), intended change: single select no longer offers the ordering operators
+    expect(conditionOperatorsFor('option-single')).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+    for (const kind of ['number', 'text'] as const) {
       expect(conditionOperatorsFor(kind)).toEqual([...CONDITION_RULE_OPERATORS])
     }
+  })
+
+  it('follow-up (b): per-field operators — a multi-person picker gets only in / isEmpty, a single person the full set', () => {
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    const person = { type: 'user' as const, options: [] }
+    expect(conditionOperatorsForField(multiPerson)).toEqual(['in', 'isEmpty'])
+    expect(conditionOperatorsForField(person)).toEqual([...CONDITION_RULE_OPERATORS])
+    expect(conditionOperatorsForField(single)).toEqual(['eq', 'neq', 'in', 'isEmpty'])
+    expect(conditionOperatorsForField(multi)).toEqual(['in', 'isEmpty'])
+    expect(conditionOperatorsForField(number)).toEqual([...CONDITION_RULE_OPERATORS])
+    expect(conditionOperatorsForField(null)).toEqual([...CONDITION_RULE_OPERATORS])
+  })
+
+  it('follow-up (b): stored rules using a removed operator are MARKED (new categories), the rest is unchanged', () => {
+    for (const operator of ['gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, single)).toEqual(['operator-option-order'])
+    }
+    for (const operator of ['eq', 'neq'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'opt_a' }, single)).toEqual([])
+    }
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['opt_a'] }, single)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, single)).toEqual([])
+
+    const multiPerson = { type: 'user' as const, options: [], listValued: true }
+    for (const operator of ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'] as const) {
+      expect(conditionRuleValueIssues({ operator, value: 'u1' }, multiPerson)).toEqual(['operator-multi-person'])
+    }
+    // gate r3 F3-2 does not regress: a scalar `in` still works against a list value
+    expect(conditionRuleValueIssues({ operator: 'in', value: 'u1' }, multiPerson)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'in', value: ['u1', 'u2'] }, multiPerson)).toEqual([])
+    expect(conditionRuleValueIssues({ operator: 'isEmpty' }, multiPerson)).toEqual([])
+    // a single person keeps every operator
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'u1' }, { type: 'user' as const, options: [] })).toEqual([])
+    // a multi-select keeps its original category
+    expect(conditionRuleValueIssues({ operator: 'eq', value: 'opt_a' }, multi)).toEqual(['operator-not-effective'])
+  })
+
+  it('follow-up (b): the single-select mark is advisory (it may still work for numeric codes); the multi-person mark is not', () => {
+    expect(conditionValueIssueText(['operator-option-order'], true)).toBe(
+      `${CONDITION_VALUE_COPY_ZH.issueTitleAdvisory}${CONDITION_VALUE_COPY_ZH.issueOperatorOptionOrder}`,
+    )
+    expect(conditionValueIssueText(['operator-option-order'], false)).toBe(
+      `${CONDITION_VALUE_COPY_EN.issueTitleAdvisory}${CONDITION_VALUE_COPY_EN.issueOperatorOptionOrder}`,
+    )
+    expect(conditionValueIssueText(['operator-option-order'], true).startsWith('条件可能无法按预期生效：')).toBe(true)
+    expect(conditionValueIssueText(['operator-option-order'], false).startsWith('Condition may not work as intended: ')).toBe(true)
+    expect(conditionValueIssueText(['operator-multi-person'], true)).toBe(
+      `${CONDITION_VALUE_COPY_ZH.issueTitle}${conditionValueIssueMessage('operator-multi-person', true)}`,
+    )
+    expect(conditionValueIssueText(['operator-multi-person'], false)).toBe(
+      `${CONDITION_VALUE_COPY_EN.issueTitle}${conditionValueIssueMessage('operator-multi-person', false)}`,
+    )
+    // a mix with any non-advisory issue keeps the "not in effect" title
+    expect(conditionValueIssueText(['operator-option-order', 'value-not-option'], true).startsWith(CONDITION_VALUE_COPY_ZH.issueTitle)).toBe(true)
   })
 
   it('conditionRuleValueIssues mirrors the backend executor', () => {
@@ -749,7 +810,7 @@ describe('R-43 (B) typed branch condition values', () => {
     expect(conditionValueShowsBlank(['in-not-list'])).toBe(true)
     expect(conditionValueShowsBlank(['list-not-scalar'])).toBe(true)
     expect(conditionValueShowsBlank(['in-not-list', 'not-text'])).toBe(true)
-    for (const issue of ['not-number', 'not-date', 'value-not-option', 'operator-not-effective'] as const) {
+    for (const issue of ['not-number', 'not-date', 'value-not-option', 'operator-not-effective', 'operator-option-order', 'operator-multi-person'] as const) {
       expect(conditionValueShowsBlank([issue])).toBe(false)
     }
     expect(conditionValueShowsBlank([])).toBe(false)
@@ -758,7 +819,7 @@ describe('R-43 (B) typed branch condition values', () => {
     for (const issue of ['not-text', 'in-not-list', 'list-not-scalar', 'not-number'] as const) {
       expect(conditionStoredValueNoteShown([issue])).toBe(true)
     }
-    for (const issue of ['not-date', 'value-not-option', 'operator-not-effective'] as const) {
+    for (const issue of ['not-date', 'value-not-option', 'operator-not-effective', 'operator-option-order', 'operator-multi-person'] as const) {
       expect(conditionStoredValueNoteShown([issue])).toBe(false)
     }
     expect(conditionStoredValueNoteShown([])).toBe(false)

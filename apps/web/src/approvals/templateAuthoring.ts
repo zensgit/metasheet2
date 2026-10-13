@@ -45,7 +45,7 @@ import {
   isOptionKind,
   parseConditionListText,
   sameConditionList,
-  visibilityOperatorsFor,
+  visibilityOperatorsForField,
   visibilityRuleValueIssues,
   type ConditionValueField,
   type ConditionValueKind,
@@ -714,9 +714,10 @@ export function visibilityDraftWithOperator(
 
 /**
  * Dependency change. '' resets the rule. Otherwise the operator is kept when it can take effect on
- * the new dependency, else the first one that can (multi-select ⇒ `in`). The value survives only a
- * text → text move (the pre-R-43 behaviour); any typed kind on either side clears it, because an
- * option value / number of one field means nothing for another.
+ * the new dependency, else the first one that can (multi-select / multi-person picker ⇒ `in`). The
+ * value survives only a text → text move that keeps the operator (the pre-R-43 behaviour); any typed
+ * kind on either side, or a forced operator change, clears it, because an option value / number of
+ * one field means nothing for another (and an eq scalar is not an `in` list).
  */
 export function visibilityDraftForDependencyChange(
   visibility: FieldVisibilityDraft,
@@ -726,9 +727,11 @@ export function visibilityDraftForDependencyChange(
 ): FieldVisibilityDraft {
   if (!nextDependsOnFieldId) return emptyVisibilityDraft()
   const nextKind = conditionValueKind(next)
-  const allowed = visibilityOperatorsFor(nextKind)
+  const allowed = visibilityOperatorsForField(next)
   const operator = allowed.includes(visibility.operator) ? visibility.operator : allowed[0]!
-  if (conditionValueKind(prev) === 'text' && nextKind === 'text') {
+  // A forced operator change (e.g. single person → multi-person picker: eq ⇒ in) clears the value
+  // too: an eq scalar is not an `in` list.
+  if (conditionValueKind(prev) === 'text' && nextKind === 'text' && operator === visibility.operator) {
     const kept: FieldVisibilityDraft = { ...visibility, dependsOnFieldId: nextDependsOnFieldId, operator }
     if (Array.isArray(visibility.values)) kept.values = [...visibility.values]
     return kept
