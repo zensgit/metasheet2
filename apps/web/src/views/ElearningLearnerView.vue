@@ -12,7 +12,11 @@
   >
     <header class="elearning-learner__header">
       <h1 id="elearning-learner-title">{{ elearningLabel('learner.title', isZh) }}</h1>
-      <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
+      <p data-testid="elearning-learner-subtitle">
+        {{ mediaEnabled === false
+          ? elearningLearnerNoMediaSubtitle(contentEnabled, practiceEnabled, isZh)
+          : elearningLabel('learner.subtitle', isZh) }}
+      </p>
     </header>
 
     <SessionOrgSwitcher
@@ -303,6 +307,7 @@ import {
   elearningFailure,
   elearningLabel,
   elearningLatestAttempt,
+  elearningLearnerNoMediaSubtitle,
   elearningLearnerVideoProgressLabel,
   elearningQuestionPoints,
 } from './elearningLabels'
@@ -335,6 +340,9 @@ const contentEnabled = ref(false)
 const enrollmentEnabled = ref(false)
 const incentiveEnabled = ref(false)
 const practiceEnabled = ref(false)
+// F11: null until GET /api/elearning/capabilities answers, then the deployment's MEDIA
+// capability under the master flag. Only a known-off answer swaps the subtitle.
+const mediaEnabled = ref<boolean | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const activeCourseVersionId = ref<string | null>(null)
@@ -841,6 +849,7 @@ async function ensureV01Ready(): Promise<void> {
   ) {
     throw new ElearningApiError('feature_disabled', 404)
   }
+  mediaEnabled.value = capabilities.enabled === true && capabilities.capabilities.media === true
   ready.value = assessmentReady.value || contentEnabled.value
 }
 

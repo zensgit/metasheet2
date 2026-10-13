@@ -12,7 +12,9 @@
   >
     <header class="elearning-admin__header">
       <h1 id="elearning-admin-title">{{ elearningLabel('admin.title', isZh) }}</h1>
-      <p>{{ elearningLabel('admin.subtitle', isZh) }}</p>
+      <p data-testid="elearning-admin-subtitle">
+        {{ elearningLabel(mediaEnabled === false ? 'admin.subtitleNoMedia' : 'admin.subtitle', isZh) }}
+      </p>
     </header>
 
     <SessionOrgSwitcher
@@ -28,7 +30,22 @@
       @change="changeSessionOrg"
     />
 
-    <form class="elearning-admin__form" @submit.prevent="void submitPublishAndAssign()">
+    <!-- F11: the legacy video-course form only renders once the capabilities response says
+         this deployment has video (MEDIA); a no-video deployment gets a notice instead. -->
+    <p
+      v-if="mediaEnabled === false"
+      class="elearning-admin__notice"
+      data-testid="elearning-admin-video-unavailable"
+      role="note"
+    >
+      {{ elearningAdminVideoUnavailable(contentEnabled, isZh) }}
+    </p>
+    <form
+      v-else-if="mediaEnabled === true"
+      class="elearning-admin__form"
+      data-testid="elearning-admin-video-form"
+      @submit.prevent="void submitPublishAndAssign()"
+    >
       <label class="elearning-field">
         <span>{{ elearningLabel('admin.videoFile', isZh) }}</span>
         <input
@@ -317,6 +334,7 @@ import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
+  elearningAdminVideoUnavailable,
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
   elearningErrorMessage,
@@ -381,6 +399,9 @@ const analyticsEnabled = ref(false)
 const contentEnabled = ref(false)
 const assignmentEnabled = ref(false)
 const practiceEnabled = ref(false)
+// F11: null until GET /api/elearning/capabilities answers (and again after it fails), then the
+// deployment's MEDIA capability under the master flag.
+const mediaEnabled = ref<boolean | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -579,6 +600,7 @@ async function ensureV01Ready(): Promise<void> {
     && capabilities.capabilities.analytics === true
   practiceEnabled.value = isElearningPracticeReady(capabilities)
   ready.value = isElearningV01Ready(capabilities)
+  mediaEnabled.value = capabilities.enabled === true && capabilities.capabilities.media === true
   if (
     !ready.value
     && !contentEnabled.value
@@ -672,6 +694,7 @@ onMounted(() => {
   void ensureV01Ready()
     .catch((error) => {
       ready.value = false
+      mediaEnabled.value = null
       statusTone.value = 'error'
       status.value = formatError(error)
     })
@@ -800,6 +823,14 @@ onMounted(() => {
   border-radius: 8px;
   background: #eef7ff;
   color: #123154;
+}
+
+.elearning-admin__notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff7e6;
+  color: #8a5a00;
 }
 
 .elearning-status {

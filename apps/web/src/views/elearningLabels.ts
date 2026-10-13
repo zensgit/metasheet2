@@ -15,6 +15,7 @@
 // true_false.
 
 import type { ElearningLearnerVideoStatus } from '../services/elearning'
+import type { ElearningAppInstallation } from '../services/elearningApp'
 
 export type ElearningLabelKey =
   // --- Learner chrome ---
@@ -198,6 +199,30 @@ export type ElearningLabelKey =
   | 'grading.scoreRequired'
   | 'grading.scoreInteger'
   | 'grading.clientIdUnavailable'
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  | 'learner.subtitleNoMedia'
+  | 'learner.noMediaContentAndPractice'
+  | 'learner.noMediaContent'
+  | 'learner.noMediaPractice'
+  | 'admin.subtitleNoMedia'
+  | 'admin.videoUnavailable'
+  | 'admin.videoUnavailableContent'
+  | 'installation.title'
+  | 'installation.intro'
+  | 'installation.working'
+  | 'installation.statusNotInstalled'
+  | 'installation.statusInactive'
+  | 'installation.statusActive'
+  | 'installation.notificationsEnabled'
+  | 'installation.notificationsDisabled'
+  | 'installation.notificationsNotOffered'
+  | 'installation.notificationsOptIn'
+  | 'installation.saveNotifications'
+  | 'installation.install'
+  | 'installation.enable'
+  | 'installation.disable'
+  | 'installation.retry'
+  | 'installation.requestFailed'
   // --- Shared request errors ---
   | 'error.orgContextRequired'
   | 'error.orgContextStaleLogin'
@@ -505,6 +530,60 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
     zh: '您的浏览器不支持提交评分所需的安全标识符。',
   },
 
+  // --- No-video deployment copy (F11) + app installation panel (F12) ---
+  // Clause pieces: composed by elearningLearnerNoMediaSubtitle / elearningAdminVideoUnavailable
+  // (zh pieces carry no final punctuation; the composer adds 「；」 and 「。」).
+  'learner.subtitleNoMedia': {
+    en: 'Video is not enabled on this deployment, so there are no formal exams yet.',
+    zh: '本部署未开启视频，暂无正式考试',
+  },
+  'learner.noMediaContentAndPractice': {
+    en: 'You can study article / external-link courses and do practice.',
+    zh: '可学习文章 / 外链课程并做练习',
+  },
+  'learner.noMediaContent': {
+    en: 'You can study article / external-link courses.',
+    zh: '可学习文章 / 外链课程',
+  },
+  'learner.noMediaPractice': { en: 'You can do practice.', zh: '可做练习' },
+  'admin.subtitleNoMedia': {
+    en: 'Manage the learning resources enabled on this deployment below.',
+    zh: '在下方管理本部署已开启的学习资源。',
+  },
+  'admin.videoUnavailable': {
+    en: 'Video is not enabled on this deployment, so video courses are unavailable and learners have no formal exam entry.',
+    zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口',
+  },
+  'admin.videoUnavailableContent': {
+    en: 'You can publish article / external-link courses.',
+    zh: '可发布文章 / 外链课程',
+  },
+  'installation.title': { en: 'Cloud classroom installation', zh: '云课堂安装' },
+  'installation.intro': {
+    en: 'Installation starts disabled. Deployment flags remain the upper bound; storage is managed separately.',
+    zh: '安装后默认停用。可用功能以部署开关为上限；存储另行配置。',
+  },
+  'installation.working': { en: 'Working...', zh: '处理中…' },
+  'installation.statusNotInstalled': { en: 'Not installed', zh: '未安装' },
+  'installation.statusInactive': { en: 'Installed, not enabled', zh: '已安装未启用' },
+  'installation.statusActive': { en: 'Enabled', zh: '已启用' },
+  'installation.notificationsEnabled': { en: 'Notifications: enabled', zh: '学习通知：已开启' },
+  'installation.notificationsDisabled': { en: 'Notifications: disabled', zh: '学习通知：未开启' },
+  'installation.notificationsNotOffered': {
+    en: 'Notification settings: not offered here (decided by operations through the deployment flag)',
+    zh: '学习通知设置：本界面不提供（由运维按部署开关决定）',
+  },
+  'installation.notificationsOptIn': { en: 'Opt in to learning notifications', zh: '开启学习通知' },
+  'installation.saveNotifications': { en: 'Save notifications', zh: '保存通知设置' },
+  'installation.install': { en: 'Install', zh: '安装' },
+  'installation.enable': { en: 'Enable', zh: '启用' },
+  'installation.disable': { en: 'Disable', zh: '停用' },
+  'installation.retry': { en: 'Retry', zh: '重试' },
+  'installation.requestFailed': {
+    en: 'elearning_installation_request_failed',
+    zh: '云课堂安装状态请求失败，请重试。',
+  },
+
   'error.orgContextRequired': {
     en: 'This account does not have exactly one active organization: if you belong to none, ask an administrator to add you to one; if you belong to several, choose an organization above first.',
     zh: '当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。',
@@ -666,6 +745,57 @@ export function elearningVideoStatusLabel(
     case 'not_started':
       return elearningLabel('video.notStarted', isZh)
   }
+}
+
+// F12: the installation panel shows a word for each status the installation API can return
+// (services/elearningApp.ts parseElearningAppInstallation), never the raw status token.
+export function elearningInstallationStatusLabel(
+  status: ElearningAppInstallation['status'],
+  isZh: boolean,
+): string {
+  switch (status) {
+    case 'not-installed':
+      return elearningLabel('installation.statusNotInstalled', isZh)
+    case 'inactive':
+      return elearningLabel('installation.statusInactive', isZh)
+    case 'active':
+      return elearningLabel('installation.statusActive', isZh)
+  }
+}
+
+function elearningNoMediaClauses(base: string, clause: string | null, isZh: boolean): string {
+  if (isZh) return clause ? `${base}；${clause}。` : `${base}。`
+  return clause ? `${base} ${clause}` : base
+}
+
+// F11: learner subtitle on a no-video deployment. Only names the surfaces the capabilities
+// response actually enables (content = article / external-link courses; practice = the
+// objective practice section, gated by isElearningPracticeReady).
+export function elearningLearnerNoMediaSubtitle(
+  contentEnabled: boolean,
+  practiceEnabled: boolean,
+  isZh: boolean,
+): string {
+  const clause = contentEnabled && practiceEnabled
+    ? elearningLabel('learner.noMediaContentAndPractice', isZh)
+    : contentEnabled
+      ? elearningLabel('learner.noMediaContent', isZh)
+      : practiceEnabled
+        ? elearningLabel('learner.noMediaPractice', isZh)
+        : null
+  return elearningNoMediaClauses(elearningLabel('learner.subtitleNoMedia', isZh), clause, isZh)
+}
+
+// F11: admin notice in place of the video-course form. Exam authoring stays available with
+// media off (server: isElearningAssessmentSurfaceEnabled), but the learner exam runtime needs
+// media (isElearningExamSurfaceEnabled; the learner view drops assessment courses), so the
+// notice only says learners have no exam entry. The article / link clause needs content.
+export function elearningAdminVideoUnavailable(contentEnabled: boolean, isZh: boolean): string {
+  return elearningNoMediaClauses(
+    elearningLabel('admin.videoUnavailable', isZh),
+    contentEnabled ? elearningLabel('admin.videoUnavailableContent', isZh) : null,
+    isZh,
+  )
 }
 
 // durationMs is already server-validated >= 1; in-progress stays 0..99 until status=completed.
