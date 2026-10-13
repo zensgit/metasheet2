@@ -1615,9 +1615,9 @@ exec npx vitest run \
   attendance-server-clock-view.spec.ts \
   attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
-  attendanceBusinessTripRequestCard \
   attendanceAdminGuide.spec.ts \
   attendanceAudienceChipField.spec.ts \
+  attendanceBusinessTripRequestCard \
   attendanceCapabilityUnavailable \
   attendanceCurrentTimeContext \
   attendanceDayTimeContext \
