@@ -5,6 +5,7 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminPageContentSearch.spec.ts
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
@@ -153,6 +154,8 @@ attendance-selfservice-dashboard
 attendance-server-clock-view.spec.ts
 attendance-server-clock.spec.ts
 attendanceAdminEndpointCompatibility
+attendanceAdminGuide.spec.ts
+attendanceAudienceChipField.spec.ts
 attendanceCapabilityUnavailable
 attendanceEmployeeLeaveRequestCard
 attendanceEmployeeMakeupRequestCard
@@ -160,7 +163,9 @@ attendanceEmployeeQuickActionIcons
 attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
+attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
+attendancePayrollHelp.spec.ts
 attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
 AttendanceScheduledFeatureStatus
@@ -455,6 +460,7 @@ platform-app-entry-mismatch-inventory
 platform-app-launcher
 platform-app-shell
 public-multitable-form
+recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
