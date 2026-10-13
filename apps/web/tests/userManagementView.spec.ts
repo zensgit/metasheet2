@@ -2403,6 +2403,9 @@ describe('UserManagementView', () => {
       ['hasAnyRow missing', { active: [], hasTenantContext: false, deprovisionApplied: false }, true],
       ['deprovisionApplied missing', { active: [], hasTenantContext: false, hasAnyRow: false }, true],
       ['hasAnyRow as a non-boolean', { ...ZERO_ORG_CLEAR, hasAnyRow: 'false' }, true],
+      ['hasAnyRow: null (its read failed)', { ...ZERO_ORG_CLEAR, hasAnyRow: null }, true],
+      ['deprovisionApplied: null (its read failed)', { ...ZERO_ORG_CLEAR, deprovisionApplied: null }, true],
+      ['both slice-C booleans null', { ...ZERO_ORG_CLEAR, hasAnyRow: null, deprovisionApplied: null }, true],
       ['one active organization', { ...ZERO_ORG_CLEAR, active: [{ orgId: 'org-alpha' }] }, true],
       ['a prior membership row (hasAnyRow)', { ...ZERO_ORG_CLEAR, hasAnyRow: true }, true],
       ['an applied deprovision', { ...ZERO_ORG_CLEAR, deprovisionApplied: true }, true],
@@ -2508,8 +2511,8 @@ describe('UserManagementView', () => {
         CONFLICT_MESSAGE,
       ],
       [
-        '409 LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY (prior membership or deprovision)',
-        () => createJsonResponse({ ok: false, error: { code: 'LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY', message: SERVER_TEXT } }, 409),
+        '409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY (prior membership or deprovision)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY', message: SERVER_TEXT } }, 409),
         HISTORY_MESSAGE,
       ],
       [

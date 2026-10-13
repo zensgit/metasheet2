@@ -1057,7 +1057,8 @@ type MemberOrganizations = {
   hasTenantContext: boolean
   /**
    * Slice C: whether the user has ANY user_orgs row (active or not) / any applied deprovision event.
-   * null = unknown (an older backend without the field, or a non-boolean value); unknown never shows
+   * null = unknown (an older backend without the field, the server sent null because that read failed
+   * (#6389), or a non-boolean value); unknown never shows
    * the 加入默认组织 button.
    */
   hasAnyRow: boolean | null
@@ -2527,8 +2528,8 @@ const JOIN_DEFAULT_ORG_FAILURE = '加入默认组织失败，请稍后重试'
 const JOIN_DEFAULT_ORG_CONFLICT_MESSAGES: Readonly<Record<string, string>> = {
   // createLocalAccount: an account already exists for this user in this org, or the user is inactive.
   DIRECTORY_LOCAL_CONFLICT: '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看',
-  // Guard added by the backend slice-C PR: any prior membership row or applied deprovision event.
-  LOCAL_ACCOUNT_ORG_MEMBERSHIP_HISTORY: '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程',
+  // Guard added by #6389: any user_orgs row (active or not, any org) or an applied deprovision event.
+  DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY: '该账号曾有组织归属或离职记录，不能直接加入；请走离职证据恢复流程',
 }
 
 type JoinDefaultOrgResult = { ok: true } | { ok: false; status: number; code: string | null }
