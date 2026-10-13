@@ -1,3 +1,7 @@
+import { timezoneCityLabel } from '../../utils/timezoneCityLabels'
+
+export type TimezoneDisplayLocale = 'en' | 'zh'
+
 const FALLBACK_TIMEZONES = [
   'UTC',
   'Asia/Shanghai',
@@ -141,22 +145,38 @@ export function formatTimezoneOffsetLabel(timezone?: string | null, date = new D
   }
 }
 
-export function formatTimezoneOptionLabel(timezone?: string | null, date = new Date()): string {
+function timezonePlaceName(timezone: string, locale: TimezoneDisplayLocale): string {
+  if (locale !== 'zh') return timezone
+  return timezoneCityLabel(timezone) || timezone
+}
+
+export function formatTimezoneOptionLabel(
+  timezone?: string | null,
+  date = new Date(),
+  locale: TimezoneDisplayLocale = 'en',
+): string {
   const normalized = normalizeTimezoneValue(timezone)
   if (!normalized) return ''
 
   const offsetLabel = formatTimezoneOffsetLabel(normalized, date)
-  return offsetLabel ? `${normalized} (${offsetLabel})` : normalized
+  const place = timezonePlaceName(normalized, locale)
+  return offsetLabel ? `${place} (${offsetLabel})` : place
 }
 
-export function buildTimezoneOptionEntries(currentValue?: string | null): TimezoneOptionEntry[] {
+export function buildTimezoneOptionEntries(
+  currentValue?: string | null,
+  locale: TimezoneDisplayLocale = 'en',
+): TimezoneOptionEntry[] {
   return buildTimezoneOptions(currentValue).map((value) => ({
     value,
-    label: formatTimezoneOptionLabel(value),
+    label: formatTimezoneOptionLabel(value, new Date(), locale),
   }))
 }
 
-export function buildTimezoneOptionGroups(currentValue?: string | null): TimezoneOptionGroupEntry[] {
+export function buildTimezoneOptionGroups(
+  currentValue?: string | null,
+  locale: TimezoneDisplayLocale = 'en',
+): TimezoneOptionGroupEntry[] {
   const options = buildTimezoneOptions(currentValue)
   const normalizedCurrent = normalizeTimezoneValue(currentValue)
   const localTimezone = normalizeTimezoneValue(resolveLocalTimezone())
@@ -196,7 +216,7 @@ export function buildTimezoneOptionGroups(currentValue?: string | null): Timezon
         labelZh: group.labelZh,
         options: entries.map((value) => ({
           value,
-          label: formatTimezoneOptionLabel(value),
+          label: formatTimezoneOptionLabel(value, new Date(), locale),
         })),
       }
     })

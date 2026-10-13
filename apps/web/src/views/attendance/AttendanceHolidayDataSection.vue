@@ -103,7 +103,7 @@
         <div class="attendance__admin-grid">
           <label class="attendance__field" for="attendance-holiday-date">
             <span>{{ tr('Date', '日期') }}</span>
-            <input id="attendance-holiday-date" v-model="holidayForm.date" name="holidayDate" type="date" />
+            <AttendanceLocaleDateInput id="attendance-holiday-date" v-model="holidayForm.date" name="holidayDate" />
           </label>
           <label class="attendance__field" for="attendance-holiday-name">
             <span>{{ tr('Name', '名称') }}</span>
@@ -134,6 +134,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref, watch, type Ref } from 'vue'
 import type { AttendanceHoliday } from './useAttendanceAdminScheduling'
 import {
@@ -313,7 +314,7 @@ void syncMonthRange(calendarMonth.value)
 .attendance__field { display: flex; flex-direction: column; gap: 6px; min-width: 0; color: var(--ms-text-2); font-size: 12px; font-weight: 600; }
 .attendance__field input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 36px; padding: 8px 12px; border: 1px solid var(--ms-border); border-radius: var(--ms-radius-md); background: var(--ms-bg-card); color: var(--ms-text-1); font-size: 14px; font-weight: 400; }
 .attendance__field--full { grid-column: 1 / -1; }
-.attendance__field--checkbox { flex-direction: row; align-items: center; justify-content: space-between; min-height: 40px; padding: 8px 12px; border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-md); background: var(--ms-bg-page); }
+.attendance__field--checkbox { flex-direction: row; align-items: center; justify-content: flex-start; justify-self: start; width: fit-content; max-width: 100%; gap: 8px; min-height: 40px; padding: 8px 12px; border: 1px solid var(--ms-border-light); border-radius: var(--ms-radius-md); background: var(--ms-bg-page); }
 .attendance__field--checkbox input { width: 16px; min-width: 16px; min-height: 16px; height: 16px; accent-color: var(--ms-color-primary); }
 .attendance__field-hint { color: var(--ms-text-3); font-size: 12px; line-height: 1.5; }
 .attendance__section-meta { color: var(--ms-text-2); font-size: 13px; align-self: center; }

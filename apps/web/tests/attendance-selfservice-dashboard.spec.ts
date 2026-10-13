@@ -862,7 +862,8 @@ describe('Attendance self-service dashboard', () => {
 
     expect(container!.textContent).toContain('Request report timezone context: UTC+08:00 · Asia/Shanghai')
     expect(container!.textContent).toContain('Records timezone context: UTC+08:00 · Asia/Shanghai')
-    expect(container!.textContent).toContain('9:18:00 AM')
+    expect(container!.textContent).toContain('09:18')
+    expect(container!.textContent).not.toContain('9:18:00 AM')
     expect(container!.textContent).not.toContain('1:18:00 AM')
   })
 
@@ -941,7 +942,8 @@ describe('Attendance self-service dashboard', () => {
     expect(container!.textContent).toContain('Some report record timezones are unavailable')
     const recordRows = container!.querySelectorAll('[data-report-card="records"] tbody > tr')
     expect(recordRows).toHaveLength(2)
-    expect(recordRows[0]?.textContent).toContain('9:18:00 AM')
+    expect(recordRows[0]?.textContent).toContain('09:18')
+    expect(recordRows[0]?.textContent).not.toContain('9:18:00 AM')
     expect(recordRows[1]?.textContent).toContain('--')
     expect(recordRows[1]?.textContent).not.toContain('8:34:00 AM')
 
