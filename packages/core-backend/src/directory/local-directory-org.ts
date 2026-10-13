@@ -45,6 +45,7 @@ import {
   lockUsersForAccessGraphWrite,
   supersedeDeprovisionEvidenceForAccessGraphWrite,
 } from './access-graph-mutex'
+import { readOrgMembershipHistory } from './org-membership-history'
 
 function normalizeText(value: unknown): string {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim()
@@ -72,6 +73,24 @@ export class LocalDirectoryConflictError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'LocalDirectoryConflictError'
+  }
+}
+
+/**
+ * Slice C (#6079): `createLocalAccount({ refuseMembershipHistory: true })` refused because the user
+ * already has a `user_orgs` row in the org (active or deactivated) or applied deprovision evidence
+ * (see org-membership-history.ts). The route answers it as 409
+ * `DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY`. A subclass of the conflict error so that any handler
+ * that only knows the base class still answers 409. The message is a fixed sentence — no ids.
+ */
+export class LocalDirectoryMembershipHistoryError extends LocalDirectoryConflictError {
+  constructor() {
+    super(
+      'This user already has a membership record in this organization (active or deactivated) or applied '
+        + 'deprovision evidence; a local directory account would silently revive it. Restore access through '
+        + 'the deprovision evidence restore path instead.',
+    )
+    this.name = 'LocalDirectoryMembershipHistoryError'
   }
 }
 
@@ -516,6 +535,20 @@ export interface CreateLocalAccountInput {
   mobile?: string | null
   title?: string | null
   actorId?: string
+  /**
+   * Slice C (#6079): refuse with `LocalDirectoryMembershipHistoryError` when the user already has ANY
+   * `user_orgs` row for `orgId` (active or deactivated) or applied deprovision evidence, instead of
+   * reviving the row (`upsertActiveUserOrgMembership`) and superseding the evidence
+   * (`supersedeDeprovisionEvidenceForAccessGraphWrite`).
+   *
+   * Opt-in, set by `POST /api/admin/directory/local/accounts` (the only production caller). It is NOT
+   * the service default because service-level callers rely on the designed access-graph override
+   * semantics that this guard would refuse: an explicit administrator binding supersedes open
+   * evidence (directory-access-graph-mutex.db.test.ts, "local account create and archive both
+   * invalidate open evidence"), and a local account may sit next to an existing directory binding in
+   * the same org (attendance-w4pre1b-user-orgs-lifecycle.db.test.ts F3 double binding).
+   */
+  refuseMembershipHistory?: boolean
 }
 
 /**
@@ -573,6 +606,18 @@ export async function createLocalAccount(input: CreateLocalAccountInput): Promis
         ],
       )
       const accountId = (inserted.rows[0] as { id: string }).id
+
+      // Slice C guard. Runs under the user's access-graph row lock taken above and BEFORE the link,
+      // the membership upsert and the evidence supersede; a refusal rolls back the whole transaction
+      // (the account row just inserted and the anchor included). It sits after the account INSERT on
+      // purpose: an existing local account for this user in this org keeps answering the unchanged
+      // duplicate 409 (unique violation, mapped below) rather than this guard's code.
+      if (input.refuseMembershipHistory === true) {
+        const history = await readOrgMembershipHistory(client, { userId: localUserId, orgId: input.orgId })
+        if (history.hasOrgRow || history.deprovisionApplied) {
+          throw new LocalDirectoryMembershipHistoryError()
+        }
+      }
 
       // Same ON CONFLICT (directory_account_id) DO UPDATE shape directory-sync.ts's own
       // admission/link paths use (see e.g. syncDirectoryIntegration's link upsert).

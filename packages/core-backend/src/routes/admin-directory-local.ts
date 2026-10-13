@@ -22,6 +22,7 @@ import {
 } from '../directory/local-directory-org-request-schema'
 import {
   LocalDirectoryConflictError,
+  LocalDirectoryMembershipHistoryError,
   LocalDirectoryNotFoundError,
   LocalDirectoryValidationError,
   addLocalMembership,
@@ -66,11 +67,21 @@ function readErrorMessage(error: unknown, fallback: string): string {
 }
 
 /**
- * Maps the three typed local-directory-org.ts errors to their HTTP status; anything else is an
- * unexpected 500. Error `.message` on all three thrown types is a static, developer-authored
+ * Maps the typed local-directory-org.ts errors to their HTTP status; anything else is an
+ * unexpected 500. Error `.message` on every thrown type is a static, developer-authored
  * string (never a client-supplied value), so surfacing it stays values-free.
+ *
+ * Slice C (#6079): `LocalDirectoryMembershipHistoryError` (a subclass of the conflict error, so it is
+ * checked first) is the account-create guard's refusal — the user already has a `user_orgs` row in
+ * this org (active or deactivated) or applied deprovision evidence. It keeps 409 but carries its own
+ * code so the admin panel can tell it from the duplicate-account / inactive-user 409s; the remedy is
+ * the deprovision-evidence restore path, never a local account.
  */
 function handleLocalDirectoryError(res: Response, error: unknown, fallbackMessage: string): void {
+  if (error instanceof LocalDirectoryMembershipHistoryError) {
+    jsonError(res, 409, 'DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY', error.message)
+    return
+  }
   if (error instanceof LocalDirectoryValidationError) {
     jsonError(res, 400, 'DIRECTORY_LOCAL_INVALID_INPUT', error.message)
     return
@@ -283,6 +294,10 @@ export function adminDirectoryLocalRouter(): Router {
         mobile,
         title,
         actorId: adminUserId,
+        // Slice C (#6079): over HTTP a local account never revives an existing (active or
+        // deactivated) membership row in this org nor supersedes applied deprovision evidence — it
+        // answers 409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY instead (see createLocalAccount).
+        refuseMembershipHistory: true,
       })
       await auditLog({
         actorId: adminUserId,

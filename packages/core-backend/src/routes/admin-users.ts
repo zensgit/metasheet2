@@ -64,6 +64,7 @@ import {
   type AccessGraphTransactionClient,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { readOrgMembershipHistory } from '../directory/org-membership-history'
 import {
   classifyRecoveryConflict,
   RECOVERY_CONFLICT_HTTP_CODE,
@@ -2113,6 +2114,54 @@ async function fetchActiveOrganizationsOrUnknown(userId: string): Promise<Active
   }
 }
 
+// Slice C (#6079): the `organizations` payload also says whether the local-account guard of
+// `POST /api/admin/directory/local/accounts` would refuse this user — `hasAnyRow` (any user_orgs row
+// for the user, any org, active or deactivated) and `deprovisionApplied` (an applied deprovision
+// event or effect for the user), read by the SAME statement the guard runs
+// (directory/org-membership-history.ts). Read-only and advisory: the guard stays the enforcement
+// point. `active` / `hasTenantContext` above are unchanged; when the active read fails the whole
+// `organizations` stays `null` as before and the history read is not attempted. When only the
+// history read fails, `hasAnyRow` / `deprovisionApplied` are `null` ("unknown") and the line below is
+// logged, values-free like the one above.
+type MemberAdmissionOrganizations = ActiveOrganizations & {
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
+}
+
+async function fetchOrgMembershipHistoryOrUnknown(
+  userId: string,
+): Promise<{ hasAnyRow: boolean; deprovisionApplied: boolean } | null> {
+  try {
+    const history = await readOrgMembershipHistory(
+      { query: (statement, params) => query(statement, params) },
+      { userId, orgId: null },
+    )
+    return { hasAnyRow: history.hasAnyRow, deprovisionApplied: history.deprovisionApplied }
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organization-history-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
+}
+
+async function fetchMemberAdmissionOrganizations(userId: string): Promise<MemberAdmissionOrganizations | null> {
+  const organizations = await fetchActiveOrganizationsOrUnknown(userId)
+  if (!organizations) return null
+  const history = await fetchOrgMembershipHistoryOrUnknown(userId)
+  return {
+    ...organizations,
+    hasAnyRow: history ? history.hasAnyRow : null,
+    deprovisionApplied: history ? history.deprovisionApplied : null,
+  }
+}
+
 async function fetchMemberAdmissionSnapshot(userId: string) {
   const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups, namespaceAdmissions] = await Promise.all([
     fetchUserProfile(userId),
@@ -2125,7 +2174,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
   if (!profile) return null
   // Read after the profile check (not inside the Promise.all above) so an unknown user stays a
   // plain 404 and the order of the existing reads is unchanged.
-  const organizations = await fetchActiveOrganizationsOrUnknown(userId)
+  const organizations = await fetchMemberAdmissionOrganizations(userId)
 
   return {
     userId,
