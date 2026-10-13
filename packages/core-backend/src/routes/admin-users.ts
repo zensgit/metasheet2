@@ -2053,6 +2053,35 @@ async function fetchDirectoryMemberships(userId: string) {
   }))
 }
 
+// Read-only view of the user's active organization rows (user_orgs), for the admin detail panel.
+// The predicate MUST stay identical to the session tenant claim in AuthService
+// (src/auth/AuthService.ts resolveSessionTenantId, no-requested-org branch, and
+// listActiveMembershipOrgIds): `uo.is_active = true AND u.is_active = true`, and a login gets a
+// tenant claim only when EXACTLY ONE such row exists. If that predicate changes there, change it
+// here too, otherwise this panel would tell an admin a user has a tenant context that login does
+// not give them (or the reverse). Never writes. Org ids are returned as stored: there is no
+// org-name table (directory_integrations.name names an integration, not an organization).
+async function fetchActiveOrganizations(userId: string): Promise<{
+  active: Array<{ orgId: string }>
+  hasTenantContext: boolean
+}> {
+  const result = await query<{ org_id: unknown }>(
+    `SELECT uo.org_id
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.is_active = true
+       AND u.is_active = true
+     ORDER BY uo.org_id ASC`,
+    [userId],
+  )
+  const active = result.rows
+    .map((row) => row.org_id)
+    .filter((orgId): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+    .map((orgId) => ({ orgId }))
+  return { active, hasTenantContext: active.length === 1 }
+}
+
 async function fetchMemberAdmissionSnapshot(userId: string) {
   const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups, namespaceAdmissions] = await Promise.all([
     fetchUserProfile(userId),
@@ -2063,6 +2092,9 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     listUserNamespaceAdmissionSnapshots(userId),
   ])
   if (!profile) return null
+  // Read after the profile check (not inside the Promise.all above) so an unknown user stays a
+  // plain 404 and the order of the existing reads is unchanged.
+  const organizations = await fetchActiveOrganizations(userId)
 
   return {
     userId,
@@ -2074,6 +2106,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     directoryMemberships,
     dingtalk: dingtalkAccess,
     namespaceAdmissions,
+    organizations,
   }
 }
 
