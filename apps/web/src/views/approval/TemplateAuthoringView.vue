@@ -1718,6 +1718,7 @@ import {
   stepAutoApprovalPolicy,
   stepSamePersonControlState,
   withEmptyAssigneeFallbackIds,
+  conditionValueFieldFromDraft,
 } from '../../approvals/templateAuthoring'
 import {
   addConditionBranch,
@@ -2383,7 +2384,8 @@ const conditionFieldOptions = computed(() =>
       && field.type !== 'explanation'
       && field.type !== 'department'
     ))
-    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field) })),
+    // R-43 (B): type + options let the branch editor pick values by field type.
+    .map((field) => ({ id: field.id.trim(), label: fieldDisplayLabel(field), ...conditionValueFieldFromDraft(field) })),
 )
 const conditionFormulaInsertOptions = computed(() =>
   approvalFormulaInsertOptions(buildFormSchema(draft.value)),

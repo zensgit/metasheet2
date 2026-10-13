@@ -98,13 +98,14 @@
             data-testid="approval-condition-rule"
           >
             <el-select
-              v-model="rule.fieldId"
+              :model-value="rule.fieldId"
               size="small"
               filterable
               placeholder="字段"
               :disabled="readOnly"
               class="ms-w-160"
               data-testid="approval-condition-rule-field"
+              @update:model-value="(fieldId: string | null | undefined) => onRuleFieldChange(rule, fieldId)"
             >
               <el-option
                 v-for="field in conditionFieldOptions"
@@ -114,29 +115,113 @@
               />
             </el-select>
             <el-select
-              v-model="rule.operator"
+              :model-value="rule.operator"
               size="small"
               :disabled="readOnly"
               class="ms-w-120"
               data-testid="approval-condition-rule-operator"
+              @update:model-value="(operator: ConditionRuleOperator) => onRuleOperatorChange(rule, operator)"
             >
               <el-option
-                v-for="operator in CONDITION_RULE_OPERATORS"
-                :key="operator"
-                :label="conditionOperatorLabel(operator)"
-                :value="operator"
+                v-for="choice in ruleOperatorChoices(rule)"
+                :key="choice.value"
+                :label="choice.label"
+                :value="choice.value"
+                :disabled="choice.disabled"
               />
             </el-select>
-            <el-input
-              v-if="rule.operator !== 'isEmpty'"
-              :model-value="conditionRuleValueText(rule)"
-              size="small"
-              placeholder="比较值"
-              :disabled="readOnly"
-              class="ms-w-160"
-              data-testid="approval-condition-rule-value"
-              @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
-            />
+            <!-- R-43 (B): the value control follows the rule field's type (option name shown,
+                 option value saved; numbers saved as numbers; `in` saved as a list). -->
+            <template v-if="rule.operator !== 'isEmpty'">
+              <template v-if="ruleIsOption(rule)">
+                <span
+                  v-if="ruleFieldOptions(rule).length === 0"
+                  class="template-authoring__hint"
+                  data-testid="approval-condition-rule-no-options"
+                >{{ conditionCopy.noOptions }}</span>
+                <el-select
+                  v-else-if="rule.operator !== 'in'"
+                  :model-value="ruleOptionScalar(rule)"
+                  size="small"
+                  clearable
+                  :placeholder="conditionCopy.chooseOption"
+                  :disabled="readOnly"
+                  class="ms-w-160"
+                  data-testid="approval-condition-rule-option-value"
+                  @update:model-value="(value: string | null | undefined) => setRuleOptionScalar(rule, value)"
+                >
+                  <el-option
+                    v-for="option in ruleFieldOptions(rule)"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                  <el-option
+                    v-if="ruleOptionScalarStale(rule)"
+                    :label="conditionCopy.invalidValue"
+                    :value="ruleOptionScalar(rule)"
+                    disabled
+                  />
+                </el-select>
+                <el-select
+                  v-else
+                  :model-value="ruleOptionList(rule)"
+                  size="small"
+                  multiple
+                  collapse-tags
+                  :placeholder="conditionCopy.chooseOptions"
+                  :disabled="readOnly"
+                  class="ms-w-200"
+                  data-testid="approval-condition-rule-option-values"
+                  @update:model-value="(values: string[]) => setRuleOptionList(rule, values)"
+                >
+                  <el-option
+                    v-for="option in ruleFieldOptions(rule)"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+                <span
+                  v-if="rule.operator === 'in' && ruleOptionListStaleCount(rule) > 0"
+                  class="template-authoring__hint"
+                  data-testid="approval-condition-rule-stale-count"
+                >{{ conditionCopy.staleListHint(ruleOptionListStaleCount(rule)) }}</span>
+              </template>
+              <el-input
+                v-else-if="rule.operator === 'in'"
+                :model-value="ruleListText(rule)"
+                type="textarea"
+                :rows="2"
+                size="small"
+                :placeholder="ruleKind(rule) === 'number' ? conditionCopy.oneNumberPerLine : conditionCopy.oneValuePerLine"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-values"
+                @update:model-value="(text: string) => setRuleListText(rule, text)"
+              />
+              <el-input-number
+                v-else-if="ruleKind(rule) === 'number'"
+                :model-value="ruleNumberValue(rule)"
+                size="small"
+                :controls="false"
+                :placeholder="conditionCopy.enterNumber"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-number-value"
+                @update:model-value="(value: number | null | undefined) => setRuleNumberValue(rule, value)"
+              />
+              <el-input
+                v-else
+                :model-value="ruleScalarText(rule)"
+                size="small"
+                placeholder="比较值"
+                :disabled="readOnly"
+                class="ms-w-160"
+                data-testid="approval-condition-rule-value"
+                @update:model-value="(text: string) => setConditionRuleValue(rule, text)"
+              />
+            </template>
             <el-button
               size="small"
               type="danger"
@@ -144,6 +229,19 @@
               data-testid="approval-condition-rule-remove"
               @click="removeConditionRule(branch, ruleIndex)"
             >删除</el-button>
+            <p
+              v-if="ruleIssueText(rule)"
+              class="template-authoring__hint template-authoring__hint--issue template-authoring__condition-rule-issue"
+              role="note"
+              data-testid="approval-condition-rule-issue"
+            >{{ ruleIssueText(rule) }}</p>
+            <!-- R-43 (B): a marked value the box shows EMPTY (so re-entering it is a real edit) is
+                 shown here read-only; plain-text interpolation, cut short. -->
+            <p
+              v-if="ruleStoredValueShown(rule)"
+              class="template-authoring__hint template-authoring__condition-rule-issue template-authoring__condition-rule-stored"
+              data-testid="approval-condition-rule-stored-value"
+            >{{ conditionCopy.storedValuePrefix }}<span data-testid="approval-condition-rule-stored-value-text">{{ conditionStoredValuePreview(rule.value) }}</span></p>
           </div>
         </template>
         <el-button
@@ -1391,8 +1489,28 @@ import { NODE_FIELD_ACCESS_VALUES } from '../../types/approval'
 import {
   APPROVAL_NODE_CONFIG_EDITOR_KEY,
 } from '../nodeConfigEditorContext'
+import type { ConditionRuleEdit, ConditionRuleOperator } from '../conditionEdit'
 import {
-  CONDITION_RULE_OPERATORS,
+  conditionOperatorsFor,
+  conditionRuleValueIssues,
+  conditionStoredValueNoteShown,
+  conditionStoredValuePreview,
+  conditionValueCopy,
+  conditionValueIssueText,
+  conditionValueKind,
+  conditionValueShowsBlank,
+  formatConditionListText,
+  isCurrentOptionValue,
+  isOptionKind,
+  parseConditionListText,
+  parseConditionNumber,
+  sameConditionList,
+  STALE_OPTION_KEY,
+  type ConditionValueField,
+  type ConditionValueKind,
+} from '../conditionValueTyping'
+import { useLocale } from '../../composables/useLocale'
+import {
   PARALLEL_JOIN_MODES,
   CC_TARGET_TYPES,
   NODE_TIMEOUT_MAX_AFTER_MINUTES,
@@ -1529,6 +1647,166 @@ const formulaRoles = computed(() => unwrap(api.formulaRoles))
 // Lock-1 §K1: org-scoped bound-group picker options + loading flag.
 const memberGroupOptions = computed(() => unwrap(api.memberGroupOptions))
 const memberGroupOptionsLoading = computed(() => Boolean(unwrap(api.memberGroupOptionsLoading)))
+
+// ── R-43 (B) typed branch condition values ────────────────────────────────────────────────────
+// The rule edit (`ConditionRuleEdit.value: unknown`) already carries any JSON value verbatim; this
+// editor now WRITES the type the backend executor compares against. Rules that can never take
+// effect are only MARKED (display) — never rewritten on load, never a save/publish blocker.
+const { isZh } = useLocale()
+const conditionCopy = computed(() => conditionValueCopy(isZh.value))
+// `in` textarea text per rule, so a half-typed line (trailing newline) survives the re-render.
+const ruleListTextBuffers = new WeakMap<ConditionRuleEdit, string>()
+
+function ruleField(rule: ConditionRuleEdit): ConditionValueField | null {
+  const id = typeof rule.fieldId === 'string' ? rule.fieldId.trim() : ''
+  const option = conditionFieldOptions.value.find((candidate) => candidate.id === id)
+  if (!option?.type) return null
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
+}
+function ruleKind(rule: ConditionRuleEdit): ConditionValueKind {
+  return conditionValueKind(ruleField(rule))
+}
+function ruleIsOption(rule: ConditionRuleEdit): boolean {
+  return isOptionKind(ruleKind(rule))
+}
+function ruleFieldOptions(rule: ConditionRuleEdit) {
+  return [...(ruleField(rule)?.options ?? [])]
+}
+function ruleOperatorChoices(rule: ConditionRuleEdit) {
+  const choices = conditionOperatorsFor(ruleKind(rule)).map((operator) => ({
+    value: operator,
+    label: conditionOperatorLabel(operator),
+    disabled: false,
+  }))
+  if (!choices.some((choice) => choice.value === rule.operator)) {
+    choices.push({
+      value: rule.operator,
+      label: `${conditionOperatorLabel(rule.operator)}${conditionCopy.value.notApplicableSuffix}`,
+      disabled: true,
+    })
+  }
+  return choices
+}
+function ruleIssues(rule: ConditionRuleEdit) {
+  return conditionRuleValueIssues(rule, ruleField(rule))
+}
+function ruleIssueText(rule: ConditionRuleEdit): string {
+  return conditionValueIssueText(ruleIssues(rule), isZh.value)
+}
+/**
+ * A free-entry value box (text / number / one-per-line list) shows a marked stored value EMPTY:
+ * `el-input` emits nothing when the typed text equals what it shows, so re-entering the value as
+ * displayed would change nothing. The stored value is never rewritten on load; it is shown
+ * read-only next to the box instead. Option pickers have their own invalid-value placeholders.
+ */
+function ruleValueShownBlank(rule: ConditionRuleEdit): boolean {
+  return !ruleIsOption(rule) && rule.operator !== 'isEmpty' && conditionValueShowsBlank(ruleIssues(rule))
+}
+/**
+ * The read-only note: every blanked text box, plus a number box left empty by a non-number. Decided
+ * by what the box actually SHOWS: an `in` textarea that shows text (the author's in-progress lines,
+ * a non-number one included) has nothing hidden to explain, so it gets no note — only the issue mark.
+ */
+function ruleStoredValueShown(rule: ConditionRuleEdit): boolean {
+  if (ruleIsOption(rule) || rule.operator === 'isEmpty' || isBlankRuleValue(rule.value)) return false
+  if (rule.operator === 'in' && ruleListText(rule) !== '') return false
+  return conditionStoredValueNoteShown(ruleIssues(rule))
+}
+function ruleScalarText(rule: ConditionRuleEdit): string {
+  return ruleValueShownBlank(rule) ? '' : conditionRuleValueText(rule)
+}
+function isBlankRuleValue(value: unknown): boolean {
+  return value === undefined || value === null || value === ''
+}
+/** A value meaningful for the NEXT field: only a text→text or number→number move keeps it. */
+function onRuleFieldChange(rule: ConditionRuleEdit, fieldId: string | null | undefined): void {
+  const previousKind = ruleKind(rule)
+  rule.fieldId = fieldId ?? ''
+  const nextKind = ruleKind(rule)
+  if (!(previousKind === nextKind && (nextKind === 'text' || nextKind === 'number'))) {
+    rule.value = undefined
+  }
+  const allowed = conditionOperatorsFor(nextKind)
+  if (!allowed.includes(rule.operator)) rule.operator = allowed[0]!
+  ruleListTextBuffers.delete(rule)
+}
+/**
+ * Shape the value for the NEW operator (never by the previous one: `in → isEmpty → eq` must not
+ * leave a list under a single-value operator, which the executor never / always matches).
+ * `in` wraps a scalar in a one-entry list; eq/neq/gt/gte/lt/lte keep a list's first entry;
+ * `isEmpty` keeps the value untouched (ignored there, restored by the next operator).
+ */
+function onRuleOperatorChange(rule: ConditionRuleEdit, operator: ConditionRuleOperator): void {
+  if (operator === 'in') {
+    if (!isBlankRuleValue(rule.value) && !Array.isArray(rule.value)) rule.value = [rule.value]
+  } else if (operator !== 'isEmpty' && Array.isArray(rule.value)) {
+    rule.value = rule.value.length > 0 ? rule.value[0] : undefined
+  }
+  rule.operator = operator
+  ruleListTextBuffers.delete(rule)
+}
+/** A stored value no current option carries (a non-string one included) shows as the invalid placeholder. */
+function ruleOptionScalarStale(rule: ConditionRuleEdit): boolean {
+  if (isBlankRuleValue(rule.value) || (Array.isArray(rule.value) && rule.value.length === 0)) return false
+  return !isCurrentOptionValue(ruleField(rule), rule.value)
+}
+function ruleOptionScalar(rule: ConditionRuleEdit): string {
+  if (ruleOptionScalarStale(rule)) return typeof rule.value === 'string' ? rule.value : STALE_OPTION_KEY
+  return typeof rule.value === 'string' ? rule.value : ''
+}
+function setRuleOptionScalar(rule: ConditionRuleEdit, value: string | null | undefined): void {
+  rule.value = value ? value : undefined
+}
+function ruleValueList(rule: ConditionRuleEdit): unknown[] {
+  if (Array.isArray(rule.value)) return rule.value
+  return isBlankRuleValue(rule.value) ? [] : [rule.value]
+}
+/** Only current option values enter the multi-select model (a stale one would render raw). */
+function ruleOptionList(rule: ConditionRuleEdit): string[] {
+  const list = ruleValueList(rule)
+  return ruleFieldOptions(rule)
+    .map((option) => option.value)
+    .filter((value) => list.includes(value))
+}
+function ruleOptionListStaleCount(rule: ConditionRuleEdit): number {
+  const field = ruleField(rule)
+  return ruleValueList(rule).filter((value) => !isCurrentOptionValue(field, value)).length
+}
+/** Re-picking drops stale values; the list is saved in option order. */
+function setRuleOptionList(rule: ConditionRuleEdit, values: string[] | null | undefined): void {
+  const picked = new Set(values ?? [])
+  const ordered = ruleFieldOptions(rule)
+    .map((option) => option.value)
+    .filter((value) => picked.has(value))
+  rule.value = ordered.length > 0 ? ordered : undefined
+}
+function ruleNumberValue(rule: ConditionRuleEdit): number | undefined {
+  // Never hand a non-number to el-input-number: it coerces on mount and would rewrite an untouched rule.
+  if (typeof rule.value === 'number' && Number.isFinite(rule.value)) return rule.value
+  // gt/gte/lt/lte normalise a numeric string in the executor (it works today): show its number
+  // without rewriting the stored value. eq/neq compare strictly, so a string shows empty + the mark.
+  const comparesNormalised = rule.operator === 'gt' || rule.operator === 'gte' || rule.operator === 'lt' || rule.operator === 'lte'
+  return comparesNormalised ? parseConditionNumber(rule.value) ?? undefined : undefined
+}
+function setRuleNumberValue(rule: ConditionRuleEdit, value: number | null | undefined): void {
+  rule.value = typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+function ruleListText(rule: ConditionRuleEdit): string {
+  const kind = ruleKind(rule)
+  const list = ruleValueList(rule)
+  const buffered = ruleListTextBuffers.get(rule)
+  if (buffered !== undefined && sameConditionList(parseConditionListText(buffered, kind), list)) return buffered
+  if (ruleValueShownBlank(rule)) return ''
+  if (kind === 'number' && !list.every((value) => typeof value === 'number' && Number.isFinite(value))) return ''
+  return formatConditionListText(list)
+}
+function setRuleListText(rule: ConditionRuleEdit, text: string): void {
+  ruleListTextBuffers.set(rule, text)
+  const list = parseConditionListText(text, ruleKind(rule))
+  rule.value = list.length > 0 ? list : undefined
+}
 
 const conditionEditFor = api.conditionEditFor
 const parallelEditFor = api.parallelEditFor
@@ -1978,6 +2256,19 @@ const { node } = toRefs(props)
   font-size: 13px;
   color: var(--el-text-color-regular);
   min-width: 0;
+}
+
+.template-authoring__hint--issue {
+  color: var(--el-color-danger);
+}
+
+.template-authoring__condition-rule-issue {
+  flex-basis: 100%;
+  margin: 0;
+}
+
+.template-authoring__condition-rule-stored {
+  overflow-wrap: anywhere;
 }
 
 .template-authoring__condition-rule {

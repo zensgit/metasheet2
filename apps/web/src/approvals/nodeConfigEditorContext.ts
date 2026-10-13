@@ -6,6 +6,8 @@ import type {
   ApprovalNode,
   ApprovalType,
   EmptyAssigneePolicy,
+  FormFieldType,
+  FormOption,
   HandlerMode,
   NodeFieldAccess,
   NodeTimeoutConfig,
@@ -26,6 +28,19 @@ import type {
 import type { FormulaInsertOption } from './conditionEdit'
 
 /**
+ * A branch-rule field choice. R-43 (B): the optional `type` / `options` let the condition editor
+ * pick values by field type (option names for select / multi-select, numbers for number).
+ */
+export interface ConditionFieldOption {
+  id: string
+  label: string
+  type?: FormFieldType
+  options?: readonly FormOption[]
+  /** R-43 (B): the submitted form value is a list (a multi-person picker). */
+  listValued?: boolean
+}
+
+/**
  * Shared context for G-2..G-5 node config editors. Canvas inspector and structured-list mode both
  * inject this so they mutate the SAME draft.conditionEdits / parallelEdits / ccEdits /
  * approvalNodeEdits handlers — one source of truth (Canvas V2 Slice A).
@@ -36,7 +51,7 @@ export interface ApprovalNodeConfigEditorApi {
   parallelEditFor: (nodeKey: string) => ParallelNodeEdit | undefined
   ccEditFor: (nodeKey: string) => CcNodeEdit | undefined
   approvalNodeEditFor: (nodeKey: string) => ApprovalNodeSourceEdit | undefined
-  conditionFieldOptions: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
+  conditionFieldOptions: ComputedRef<ConditionFieldOption[]> | ConditionFieldOption[]
   userFields: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
   conditionFormulaInsertOptions: ComputedRef<FormulaInsertOption[]> | FormulaInsertOption[]
   fieldPermissionFields: ComputedRef<Array<{ id: string; label: string }>> | Array<{ id: string; label: string }>
