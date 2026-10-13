@@ -65,6 +65,7 @@ const P25_CALL_PATH_CLASSIFICATIONS = Object.freeze([
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'down', 'attendance_import_legacy_execution_plan_chunks', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'down', 'attendance_import_legacy_terminal_responses', 'read', 'select', 1, 'schema_migration', 'migration'),
   entry('packages/core-backend/src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan.ts', 'down', 'attendance_import_upload_cleanup_commands', 'read', 'select', 1, 'schema_migration', 'migration'),
+  entry('packages/core-backend/src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals.ts', 'down', 'attendance_import_legacy_execution_plan_chunks', 'read', 'select', 1, 'schema_migration', 'migration'),
   // #6164 step 1 (encrypted-store probe): ONE read-only SELECT of the integration config's appSecret to count
   // values the current ENCRYPTION_KEY/SALT can no longer decrypt; counts only, never a value, no write.
   entry('packages/core-backend/src/security/encrypted-store-probe.ts', 'catalogEntry', 'attendance_integrations', 'read', 'select', 1, 'configuration_maintenance', 'encrypted_store_probe'),
