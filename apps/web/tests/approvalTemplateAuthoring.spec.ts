@@ -37,6 +37,7 @@ import {
 } from '../src/approvals/templateAuthoring'
 import { CONDITION_VALUE_COPY_EN, STALE_OPTION_KEY, conditionValueIssueText } from '../src/approvals/conditionValueTyping'
 import { getVisibleFormFields } from '../src/approvals/fieldVisibility'
+import { describeRoutePreviewError, ROUTE_PREVIEW_REQUIRED_COPY_EN } from '../src/approvals/routePreviewErrors'
 
 const pushSpy = vi.fn().mockResolvedValue(undefined)
 const replaceSpy = vi.fn().mockResolvedValue(undefined)
@@ -93,6 +94,9 @@ const dryRunApprovalConditionFormulaSpy = vi.fn()
 // observe both "the endpoint was called" (C1 first conjunct) and "a fetched candidate renders"
 // without each test having to configure it individually.
 const listTemplateCategoriesSpy = vi.fn()
+// R-43 follow-up (a): the 试运行 button calls previewTemplateRoute; the mock module previously had
+// no such export (no test here clicked the button).
+const previewTemplateRouteSpy = vi.fn()
 
 vi.mock('../src/approvals/api', () => ({
   // The real class, not a stand-in: templateAuthoringErrors.ts does `instanceof ApprovalApiError`
@@ -130,6 +134,7 @@ vi.mock('../src/approvals/api', () => ({
   },
   dryRunApprovalConditionFormula: (payload: unknown) => dryRunApprovalConditionFormulaSpy(payload),
   listTemplateCategories: () => listTemplateCategoriesSpy(),
+  previewTemplateRoute: (id: string, body: unknown) => previewTemplateRouteSpy(id, body),
 }))
 
 // T2 (record-link target pickers on the default Designer 2.0 surface): the record-link catalog is
@@ -1490,6 +1495,7 @@ describe('TemplateAuthoringView', () => {
     getTemplateSpy.mockReset()
     dryRunApprovalConditionFormulaSpy.mockReset()
     listTemplateCategoriesSpy.mockReset()
+    previewTemplateRouteSpy.mockReset()
     listTemplateCategoriesSpy.mockResolvedValue(['差旅', '采购'])
     pushSpy.mockClear()
     replaceSpy.mockClear()
@@ -3464,6 +3470,61 @@ describe('TemplateAuthoringView', () => {
     expect(datetimePickers[0].getAttribute('placeholder')).toBe('请选择日期和时间')
     // An author-written placeholder still wins.
     expect(datetimePickers[1].getAttribute('placeholder')).toBe('请填写航班落地时间')
+  })
+
+  // R-43 follow-up (a): the server validates the 试运行 sample against the WHOLE form. A visible
+  // required field left empty used to surface as the raw English "Approval form data is invalid";
+  // it now gets the localized hint naming the field (name only — no value, no raw id). Any other
+  // validation failure keeps its text. The test locale is en.
+  async function runTryRunWithRejection(error: unknown): Promise<string> {
+    setRouteParams({ id: 'tpl_tryrun_required' })
+    getTemplateSpy.mockResolvedValue(buildTemplate({
+      formSchema: {
+        fields: [
+          { id: 'amount', type: 'number', label: '金额', required: true },
+          { id: 'reviewer', type: 'user', label: '审批人', required: true },
+          { id: 'remark_field', type: 'text', label: '备注', required: true },
+        ],
+      } as any,
+    }))
+    previewTemplateRouteSpy.mockRejectedValue(error)
+    await mountView()
+    await flushUi()
+    ;(container!.querySelector('[data-testid="approval-template-section-review"]') as HTMLButtonElement).click()
+    await flushUi()
+    const amountSample = container!.querySelector(
+      '[data-testid="approval-template-tryrun-panel"] input[type="number"]',
+    ) as HTMLInputElement
+    expect(amountSample).not.toBeNull()
+    amountSample.value = '6000'
+    amountSample.dispatchEvent(new Event('input'))
+    await flushUi()
+    const button = container!.querySelector('button[data-testid="approval-template-tryrun-button"]') as HTMLButtonElement
+    expect(button).not.toBeNull()
+    expect(button.disabled).toBe(false)
+    button.click()
+    await flushUi()
+    expect(previewTemplateRouteSpy).toHaveBeenCalledTimes(1)
+    expect(previewTemplateRouteSpy.mock.calls[0]?.[0]).toBe('tpl_tryrun_required')
+    return (container!.querySelector('[data-testid="approval-template-tryrun-error"]')?.textContent ?? '').trim()
+  }
+
+  it('follow-up (a): an empty required sample field shows the localized hint with the field NAME (no server English, no id, no value)', async () => {
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['remark_field is required'] })
+    const text = await runTryRunWithRejection(error)
+    expect(text).toBe(describeRoutePreviewError(error, undefined, { isZh: false, fieldLabel: (id) => (id === 'remark_field' ? '备注' : null) }))
+    expect(text).toContain('"备注"')
+    expect(text).toContain(ROUTE_PREVIEW_REQUIRED_COPY_EN.cannotFillHint)
+    expect(text).not.toContain('Approval form data is invalid')
+    expect(text).not.toContain('remark_field')
+    expect(text).not.toContain('6000')
+  })
+
+  it('follow-up (a): any other validation failure keeps the server message', async () => {
+    const { ApprovalApiError } = await import('../src/approvals/api')
+    const error = new ApprovalApiError('Approval form data is invalid', 400, 'VALIDATION_ERROR', { errors: ['amount must be a number'] })
+    expect(await runTryRunWithRejection(error)).toBe('Approval form data is invalid')
   })
 
   it('FC-5 wiring: formula dry-run calls the dry-run endpoint with typed 试运行 sample values and does not change the saved graph payload', async () => {
