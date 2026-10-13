@@ -884,6 +884,17 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     h_.deleteTask.mockResolvedValue({ kind: 'conflict', code: 'HAS_CHILDREN' })
     h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
     h_.listComments.mockResolvedValue({ kind: 'ok', items: [comment({ id: 'c1', authorId: 'u1' })], total: 1 })
+    // The viewer (u1) is also an open assignee here, so "complete" would change their own part and
+    // stays on; the default fixture's viewer is not an assignee, for whom it is off.
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({
+        assignees: [
+          { userId: 'u1', completedAt: null },
+          { userId: 'u2', completedAt: '2026-09-20T10:00:00Z' },
+        ],
+      }),
+    })
     const el = await mountViewAt('/tasks/t1')
 
     typeInto(el, 'tasks-detail-set-parent-input', 'p2')
@@ -916,6 +927,35 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     await click(el, 'tasks-detail-complete-button')
     expect(must(el, 'tasks-action-error').textContent?.trim()).toBe('You do not have permission to change this task')
 
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
+  it('complete / reopen that would change nothing — the three reasons', async () => {
+    // The default fixture: the viewer (u1) created the all-mode task and is not an assignee.
+    let el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-complete-reason').textContent?.trim()).toBe(
+      'You are not an assignee: in "All assignees complete" mode each assignee completes their own part',
+    )
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    app?.unmount()
+    container?.remove()
+
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ assignees: [{ userId: 'u1', completedAt: '2026-09-20T10:00:00Z' }, { userId: 'u2', completedAt: null }] }),
+    })
+    el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-complete-reason').textContent?.trim()).toBe('Your part is done; waiting for the other assignees')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+    app?.unmount()
+    container?.remove()
+
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ status: 'done', assignees: [{ userId: 'u2', completedAt: '2026-09-20T10:00:00Z' }] }),
+    })
+    el = await mountViewAt('/tasks/t1')
+    expect(must(el, 'tasks-detail-reopen-reason').textContent?.trim()).toBe('You have no completed part to reopen')
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 

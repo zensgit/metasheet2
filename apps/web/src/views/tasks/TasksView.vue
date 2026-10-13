@@ -99,20 +99,39 @@
               {{ codeMessage(membershipError, t) }}
             </p>
 
-            <button
-              v-if="detailResult.task.status === 'open' && detailResult.task.canComplete"
-              type="button"
-              data-testid="tasks-detail-complete-button"
-              :disabled="detailActionPending"
-              @click="onDetailComplete"
-            >{{ t.complete }}</button>
-            <button
-              v-if="detailResult.task.status === 'done' && detailResult.task.canReopen"
-              type="button"
-              data-testid="tasks-detail-reopen-button"
-              :disabled="detailActionPending"
-              @click="onDetailReopen"
-            >{{ t.reopen }}</button>
+            <!-- In "all" mode a complete / reopen that would change nothing (the server answers 200
+                 and keeps the task as it is) is turned off, with the reason next to it
+                 (`tasks/tasksCompletion.ts`). Decided only once the viewer's id is known. -->
+            <template v-if="detailResult.task.status === 'open' && detailResult.task.canComplete">
+              <button
+                type="button"
+                data-testid="tasks-detail-complete-button"
+                :disabled="detailActionPending || detailCompleteNoop !== null"
+                :aria-describedby="detailCompleteNoop !== null ? 'tasks-detail-complete-reason' : undefined"
+                @click="onDetailComplete"
+              >{{ t.complete }}</button>
+              <p
+                v-if="detailCompleteNoop !== null"
+                id="tasks-detail-complete-reason"
+                class="tasks-view__note"
+                data-testid="tasks-detail-complete-reason"
+              >{{ detailCompleteNoop === 'not_assignee' ? t.completeNoopNotAssignee : t.completeNoopOwnPartDone }}</p>
+            </template>
+            <template v-if="detailResult.task.status === 'done' && detailResult.task.canReopen">
+              <button
+                type="button"
+                data-testid="tasks-detail-reopen-button"
+                :disabled="detailActionPending || detailReopenSelfNoop"
+                :aria-describedby="detailReopenSelfNoop ? 'tasks-detail-reopen-reason' : undefined"
+                @click="onDetailReopen"
+              >{{ t.reopen }}</button>
+              <p
+                v-if="detailReopenSelfNoop"
+                id="tasks-detail-reopen-reason"
+                class="tasks-view__note"
+                data-testid="tasks-detail-reopen-reason"
+              >{{ t.reopenSelfNoop }}</p>
+            </template>
 
             <!-- M4 (design §2.4, §4.3): the editor and the lists section, both stateless — their state
                  is held below, because this whole block is re-created on every `loadDetail`. The
@@ -594,6 +613,7 @@ import {
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { onListsChanged } from '../../tasks/tasksListsBus'
+import { completeNoopReason, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
   buildTaskPatch,
@@ -794,6 +814,18 @@ async function ensureCurrentUser(): Promise<void> {
   currentUserId.value = id
   currentUserStatus.value = id ? 'known' : 'unavailable'
 }
+
+// The viewer's id for the complete / reopen no-op rules: only once it is known; until then (and
+// when it cannot be resolved) the buttons stay as the detail's `canComplete` / `canReopen` say.
+const completionViewerId = computed(() => (currentUserStatus.value === 'known' ? currentUserId.value : null))
+const detailCompleteNoop = computed<CompleteNoopReason | null>(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' ? completeNoopReason(state.task, completionViewerId.value) : null
+})
+const detailReopenSelfNoop = computed(() => {
+  const state = detailResult.value
+  return state.kind === 'ok' && reopenSelfIsNoop(state.task, completionViewerId.value)
+})
 
 function canEditOwnComment(comment: Comment): boolean {
   if (comment.deleted) return false
@@ -1041,7 +1073,7 @@ let detailActionToken = 0
 
 async function onDetailComplete(): Promise<void> {
   const id = taskId.value
-  if (!id || detailActionPending.value) return
+  if (!id || detailActionPending.value || detailCompleteNoop.value !== null) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
@@ -1067,7 +1099,7 @@ async function onDetailComplete(): Promise<void> {
 
 async function onDetailReopen(): Promise<void> {
   const id = taskId.value
-  if (!id || detailActionPending.value) return
+  if (!id || detailActionPending.value || detailReopenSelfNoop.value) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
