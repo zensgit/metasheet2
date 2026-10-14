@@ -332,12 +332,13 @@ async function waitForImportUploadCleanup(
   throw new Error(`ATTENDANCE_IMPORT_UPLOAD_CLEANUP_NOT_OBSERVED:${remainingCount}`)
 }
 
-async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
+async function fetchImportJob(baseUrl: string, token: string, jobId: string, orgId?: string): Promise<any> {
   const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      ...(orgId ? { 'x-org-id': orgId } : {}),
     },
   })
   expect(jobRes.status).toBe(200)
@@ -349,6 +350,7 @@ async function waitForImportJobCompletion(
   token: string,
   jobId: string,
   {
+    orgId,
     attempts = 480,
     intervalMs = 250,
     failureMessage = 'async import job failed',
@@ -356,6 +358,7 @@ async function waitForImportJobCompletion(
     settleAttempts = 40,
     settleIntervalMs = 250,
   }: {
+    orgId?: string
     attempts?: number
     intervalMs?: number
     failureMessage?: string
@@ -373,7 +376,7 @@ async function waitForImportJobCompletion(
   let lastJobData: any = null
 
   for (let index = 0; index < attempts; index += 1) {
-    lastJobData = await fetchImportJob(baseUrl, token, jobId)
+    lastJobData = await fetchImportJob(baseUrl, token, jobId, orgId)
     const status = String(lastJobData?.status || '')
     if (status === 'completed') {
       if (!settle) return lastJobData
@@ -383,7 +386,7 @@ async function waitForImportJobCompletion(
         // eslint-disable-next-line no-await-in-loop
         await delay(settleIntervalMs)
         // eslint-disable-next-line no-await-in-loop
-        lastJobData = await fetchImportJob(baseUrl, token, jobId)
+        lastJobData = await fetchImportJob(baseUrl, token, jobId, orgId)
       }
       throw new Error(
         `Import job ${jobId} reached 'completed' but its summary did not settle within ` +
@@ -14296,8 +14299,20 @@ attendanceIntegrationDescribe(
   it('keeps large rows payload for commit-async jobs when csv payload is absent', async () => {
     if (!baseUrl) return
 
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    // This stress fixture retains append-only history after rollback. Keep it out
+    // of the shared default org used by later calendar/source-change tests.
+    const orgId = randomUUID()
+    const ruleId = randomUUID()
+    await settingsRowPool!.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       VALUES ($1, $2, 'owned large rows fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true)`,
+      [ruleId, orgId],
+    )
+    seededDefaultRuleIds.push(ruleId)
+
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14306,6 +14321,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: '{}',
@@ -14318,7 +14334,7 @@ attendanceIntegrationDescribe(
     const totalRows = 5_001
     const distinctUsers = 500
     const largeUserIds = Array.from({ length: distinctUsers }, () => randomUUID())
-    for (const userId of largeUserIds) await seedNeutralAttendanceSubjectForTest(userId)
+    for (const userId of largeUserIds) await seedNeutralAttendanceSubjectForTest(userId, orgId)
     const rows = Array.from({ length: totalRows }, (_, index) => {
       const dayOffset = Math.floor(index / distinctUsers)
       const rowDate = new Date(seedDate)
@@ -14337,6 +14353,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-rows-large-${Date.now().toString(36)}`
 
     const commitPayload = {
+      orgId,
       userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
@@ -14349,6 +14366,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commitPayload),
@@ -14363,6 +14381,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(retryPayload),
@@ -14373,6 +14392,7 @@ attendanceIntegrationDescribe(
     expect(retryData?.idempotent).toBe(true)
 
     const completedJob = await waitForImportJobCompletion(baseUrl, token, initialJobId, {
+      orgId,
       attempts: 3000,
       intervalMs: 50,
       failureMessage: 'large rows async job failed',
@@ -14384,8 +14404,8 @@ attendanceIntegrationDescribe(
     expect(Number(completedJob?.processedRows ?? 0)).toBe(totalRows)
     expect(Number(completedJob?.failedRows ?? 0)).toBe(0)
     const writtenRows = await settingsRowPool!.query<{ n: number }>(
-      'SELECT count(*)::int AS n FROM attendance_records WHERE source_batch_id = $1',
-      [batchId],
+      'SELECT count(*)::int AS n FROM attendance_records WHERE source_batch_id = $1 AND org_id = $2',
+      [batchId, orgId],
     )
     expect(writtenRows.rows).toEqual([{ n: totalRows }])
 
@@ -14393,6 +14413,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: '{}',

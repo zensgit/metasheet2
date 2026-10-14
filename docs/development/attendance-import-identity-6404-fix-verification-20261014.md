@@ -15,7 +15,7 @@
 | 3 文件核心单元 | 协调后 183 PASS / 0 skipped；含三入口 UUID/邮箱/用户名/手机号正控、拒绝零写、混合源与空 CSV 大小回归 |
 | 3 文件邻近单元 | 23 PASS / 0 skipped；导入权限、raw evidence 与 calculation graph |
 | 4 文件前端 | 79 PASS / 0 skipped；回退文件 BOM/内容和 payload 原值保护，picker/prefs 不减断言 |
-| 真 PostgreSQL SQL | 15 PASS / 0 skipped；现代/缺可选列、必需授权列缺失、NULL/停用/其他组织、Unicode 与格式化手机号碰撞 |
+| 真 PostgreSQL SQL | 24 PASS / 0 skipped；现代/缺可选列、必需授权列缺失、NULL/停用/其他组织、Unicode 与格式化手机号碰撞 |
 | 真 HTTP 完整集成 | 完整文件 167 PASS / 0 skipped；含邮箱预览/提交/未知邮箱跳过/批次撤销，scope UUID/邮箱及范围外 403；大 payload 保留 5001 行/500 活动普通员工，实际写入 5001 条、零失败行，幂等及回滚通过 |
 | 全新迁移及重放 | 两轮 HTTP 场景均 exit 0；owned 集群已停止，源文件状态未漂移 |
 | 守卫 mutation | 在独立副本去掉活动过滤或歧义拒绝，各产生 6 个真实 PG 断言失败；匹配目标反例，无 lookup failure；原模块 SHA 未变 |
@@ -24,7 +24,7 @@
 | 独立复审 | sol 6.1 high 实现；Astra ultra 实际 JS/stub 29/29 PASS，无范围内未解决源码阻断；其探针不替代真实 PG/HTTP |
 | 最终 CI | 推送后重跑 13 项必需检查，以当前 PR 和最终交付 MD 为准 |
 
-生产模块 SHA-256：`4ede4bbb81ee81ede5e06d567688d177f048268b4e3bec6c28431056d12da3d1`；index SHA-256：`f6958ca663605da39ed8c68df05804b50ce932d3a75308ed71e85a38b30eef3c`。
+生产模块 SHA-256：`23ba81dc1759c879696aedfd18ba6abcf796bd0e3b395ae61dee688b9b312dbb`；index SHA-256：`f6958ca663605da39ed8c68df05804b50ce932d3a75308ed71e85a38b30eef3c`。
 
 ## 失败迭代与边界
 
@@ -51,3 +51,17 @@
 在全新自有 PG 集群迁移及重放后，整个文件 167 PASS / 0 skipped（测试 252.931 秒）；集群已停止，源文件状态未漂移。自有隔离数据库及日志保留，不声称业务历史被物理删除或吞异常的既有 fixture 清理零残留。测试 runtime 的 Git 基线为 e264 加同步修复源文件，不能冒称 clean 的最终提交；生产两模块哈希和同步测试文件作为对应证据，最终 Git 合并树由 CI 验证。
 
 `3c1a47e91e` 的 CI 在本地发现该已知后续失败后主动取消，不能计为 13/13 全绿；该轮已通过后端全套、drain 和 checkpoint。最终验收只使用夹具修正后的新 head 全套 CI。
+
+## 手机号候选补验（2026-10-15）
+
+等待 CI 期间发现 SQL 未覆盖 JS 既有的 country-digits / 带加号国家码等价规则。新增单独查询的国际号码、+86 短号码、非 1 开头本地号码正控与跨 username/mobile 碰撞负控。首轮 17 项中 2 项变红；进一步补验 24 项中 4 项变红。SQL 增加去掉加号的紧凑候选及去掉开头 +86 的候选，最终仍由原 JS 规则分类；没有扩展产品手机号语义。3 项无效加号号码测试证明数据库确实返回候选，而 JS 将其排除。
+
+全新隔离 PostgreSQL 迁移和重放均 exit 0；最终 SQL 24 + HTTP 167 = 191 PASS / 0 skipped，集群停止。定向单元 183、前端 79 再次全部通过。Astra ultra 使用实际 JS 与 SQL 等价谓词模拟检查 7290 对输入，其中 219 对有效匹配均被覆盖；该源码模拟不替代真实 PostgreSQL。
+
+## 37c CI 失败及压力夹具隔离（2026-10-15）
+
+37c39084b7 的必需检查 12/13，通过旧 head 不作为最终验收。Node 20 考勤主矩阵有 8 项失败：两个 CSV 异步用例未完成/回滚 404，六个后续日历/打卡用例 30 秒超时；日志含真实数据库锁等待超时。新压力用例在共享 default 组织写入 5001 条后，撤销保留不可变历史，会增加后续全组织源校验成本。本地同一环境后续单项出现约 9–20 秒耗时，CI 更慢；隔离夹具以消除该干扰，不把锁错误当作可豁免超时。
+
+压力用例改用随机自有组织及 UTC 默认规则；操作者和 500 名普通员工显式加入该组织；prepare、commit、retry、poll、rollback 使用相同组织选择器。5001 行规模、实际写入查询、零失败、幂等及回滚断言保留，查询加强组织条件。仓库 timeout 和生产时区源校验均未放宽，发布依赖 #6051 不变。完整主矩阵和最终 CI 以最终验证 MD 为准。
+
+夹具隔离迭代：独立复审先发现 prepare/poll selector 与 actor membership 漏配，已补齐。真实 PG 再拒绝 prefix+UUID 组织键（W4C0_ROLLOUT_ORG_KEY_INVALID），现用 canonical randomUUID 组织键，不更改生产解析器。中止的 v6（误混入独立矩阵）、v7（本地启动 hook 超时）、v10（非法组织夹具）均不计通过；其自有 PG 已停止。最终本地完整矩阵只抽取 workflow 第一条命令的 128 文件，多时区第二条命令保持独立环境；本地启动 hook 180 秒适配 Mac，单项 testTimeout 仍为 CI 的 30 秒。最终 CI 必须在仓库原 15 秒 hook 下通过。

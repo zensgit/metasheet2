@@ -133,6 +133,8 @@ async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers
             OR lower(btrim(normalize(COALESCE(u.email, ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
             OR lower(btrim(normalize(COALESCE(to_jsonb(u)->>'username', ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
             OR translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()', '') = ANY($4::text[])
+            OR translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()+', '') = ANY($4::text[])
+            OR regexp_replace(translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()', ''), '^[+]86', '') = ANY($4::text[])
             OR octet_length(COALESCE(u.email, '')) <> length(COALESCE(u.email, ''))
             OR octet_length(COALESCE(to_jsonb(u)->>'username', '')) <> length(COALESCE(to_jsonb(u)->>'username', ''))
             OR octet_length(COALESCE(to_jsonb(u)->>'mobile', '')) <> length(COALESCE(to_jsonb(u)->>'mobile', ''))
