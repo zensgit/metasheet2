@@ -39,3 +39,7 @@
 推送时远端新增 `28931ad9e5`，已普通合并保留提交历史，不强推。该提交的 opaque ID 直接透传无法通过真实 W4 UUID 写入约束；本修复保留严格 canonical 输出，未知文本 ID 为无效行/跳过，不声称旧文本 ID 可写。前端仍保留服务器 CSV 优先、网络故障回退和手改 payload 保护；远端正文所述与实际删除回退的源码差异已复审。协调后的源文件与 CI 证据以最终验证 MD 为准。
 
 协调后新增 1 个 resolver 及 3 个 scoped 路由回归，核心三文件共 183 PASS；commit/legacy 正控调用真实 W4 UUID parser。Astra ultra 对最终协调差异复审 PASS，生产模块及 index 哈希与前一验证轮相同。
+
+## CI 首轮收尾修正（2026-10-15）
+
+`f3ddaa7cf8` 的 12/13 必需检查通过；Node 20 的后端全套唯一失败是 W7 清单漏登新身份模块（21115 PASS / 1 FAIL，1751 为既有跳过，不算通过）。新模块现已加入 `CALCULATION_PATH`，两项 aggregate 禁止规则均适用，未添加排除。既有真实扫描正控增加该模块，分别证明违规 require、HTTP 调用及两者组合都会被发现。Mac mini 的守卫与身份/路由三个文件共 175 PASS、零 skip。清理步骤的连接拒绝是前序失败导致 PG 尚未启动；没有放宽 workflow。最终 CI 在补齐登记的新 head 上重新运行。
