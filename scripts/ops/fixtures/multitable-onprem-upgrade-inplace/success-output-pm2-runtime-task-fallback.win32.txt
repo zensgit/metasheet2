@@ -33,9 +33,11 @@ BACKUP_PATH=<ROOT>/backups/upgrade-backup-<TIMESTAMP>
 [multitable-onprem-upgrade-inplace] Run database migrations (<ROOT>/live/packages/core-backend/dist/src/db/migrate.js)
 migrate-ok marker=from-app-env
 [multitable-onprem-upgrade-inplace] === Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ===
+[multitable-onprem-upgrade-inplace] Pre-restart gate: nothing listens on the backend port (127.0.0.1:<PORT>).
 [multitable-onprem-upgrade-inplace] PM2_PRE_RESTART_TASK_PATH: no pm2 daemon listens on //./pipe/rpc.sock (pm2-runtime exited after the stop), so no pm2 command is run; starting scheduled task '/MetaSheet-PM2' instead.
 [multitable-onprem-upgrade-inplace] Scheduled task 'MetaSheet-PM2' started; the health polling below decides whether the backend came back.
 [multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health)
+[multitable-onprem-upgrade-inplace] Listener-age gate: the process behind http://127.0.0.1:<PORT>/health started at or after T0.
 [multitable-onprem-upgrade-inplace] PM2_TASK_PARENT_UNCONFIRMED: could not tell which process hosts the backend behind http://127.0.0.1:<PORT>/health; check by hand that its parent is pm2-runtime, not pm2/lib/Daemon.js (handoff-r59-two-machine-20260924.md section 3 step 5).
 [multitable-onprem-upgrade-inplace] Post-restart gate: <ROOT>/live/output/logs/metasheet-backend.out-0.log shows 'Plugin loaded: plugin-integration-core' stamped <PM2_TIMESTAMP>, at or after T0 <PM2_TIMESTAMP>; dropping the maintenance gate before the nginx probe
 [multitable-onprem-upgrade-inplace] Maintenance flag removed: <ROOT>/live/output/maintenance.flag

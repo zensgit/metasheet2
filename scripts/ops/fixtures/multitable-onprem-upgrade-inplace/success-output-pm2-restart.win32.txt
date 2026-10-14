@@ -31,10 +31,12 @@ BACKUP_PATH=<ROOT>/backups/upgrade-backup-<TIMESTAMP>
 [multitable-onprem-upgrade-inplace] === Step 6/8: run migrations ===
 [multitable-onprem-upgrade-inplace] RunMigrations=0: skipped
 [multitable-onprem-upgrade-inplace] === Step 7/8: restart pm2 + healthcheck (backend direct first, then nginx) ===
+[multitable-onprem-upgrade-inplace] Pre-restart gate: nothing listens on the backend port (127.0.0.1:<PORT>).
  0  metasheet-backend  default  fork  1234  stopped  0%  10.0mb
 [multitable-onprem-upgrade-inplace] Pre-restart gate: pm2's pipe is there and pm2 list shows 'metasheet-backend' stopped.
 [multitable-onprem-upgrade-inplace] Restart result gate: pm2 restart metasheet-backend --update-env exited 0, no 'not found', no daemon spawned.
 [multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health)
+[multitable-onprem-upgrade-inplace] Listener-age gate: the process behind http://127.0.0.1:<PORT>/health started at or after T0.
 [multitable-onprem-upgrade-inplace] Post-restart gate: <ROOT>/live/output/logs/metasheet-backend.out-0.log shows 'Plugin loaded: plugin-integration-core' stamped <PM2_TIMESTAMP>, at or after T0 <PM2_TIMESTAMP>; dropping the maintenance gate before the nginx probe
 [multitable-onprem-upgrade-inplace] Maintenance flag removed: <ROOT>/live/output/maintenance.flag
 [multitable-onprem-upgrade-inplace] Plugins summary:

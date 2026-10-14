@@ -298,8 +298,8 @@ test('the entire mutation window is wrapped in one failure handler that stops pm
   // not one handler per assertion. It also nests exactly ONE defensive try/catch
   // of its own, around the Stop-Pm2App call inside it (so a failure THERE cannot
   // prevent the restore block from still printing). R67 adds exactly one more, on
-  // the outermost try/finally: it only maps an R67 restart gate's error to that
-  // gate's exit code (20-23) and rethrows everything else. So exactly three
+  // the outermost try/finally: it maps a run in which an R67 restart gate fired to
+  // that gate's exit code (20-23) and rethrows everything else. So exactly three
   // `} catch {` occurrences are expected in Main, not one flat handler and not a
   // patchwork of several.
   const catchCount = (main.match(/\}\s*catch\s*\{/g) || []).length
@@ -311,8 +311,8 @@ test('the entire mutation window is wrapped in one failure handler that stops pm
   const gateCatch = main.slice(main.lastIndexOf('} catch {'))
   assert.match(
     gateCatch,
-    /^\} catch \{\s*\n(?:\s*#[^\n]*\n)*\s*if \(\(\$null -ne \$script:RestartGateFailure\) -and \(\$_\.Exception\.Message -eq \$script:RestartGateFailure\.Message\)\) \{\s*\n\s*\$restartGateExit = \[int\]\$script:RestartGateFailure\.ExitCode\s*\n\s*\} else \{\s*\n\s*throw\s*\n\s*\}\s*\n\s*\} finally \{/,
-    'the R67 catch maps only the gate that ended the run to its exit code and rethrows every other error unchanged',
+    /^\} catch \{\s*\n(?:\s*#[^\n]*\n)*\s*if \(\$null -ne \$script:RestartGateFailure\) \{\s*\n\s*\$restartGateExit = \[int\]\$script:RestartGateFailure\.ExitCode\s*\n\s*\} else \{\s*\n\s*throw\s*\n\s*\}\s*\n\s*\} finally \{/,
+    'the R67 catch maps a run in which a gate fired to that gate\'s exit code (the flag is kept then) and rethrows every other error unchanged',
   )
 
   const outerCatchStart = main.indexOf('Write-Err $_.Exception.Message')
@@ -578,7 +578,9 @@ $requiredOk = @(
   '^ok \d+ - R67 restart gates:',
   '^ok \d+ - R67 post-restart gate:',
   '^ok \d+ - end-to-end \(acid fixture, R67 pre-restart gate\):',
-  '^ok \d+ - end-to-end \(acid fixture, R67 post-restart gate\):'
+  '^ok \d+ - end-to-end \(acid fixture, R67 post-restart gate\):',
+  '^ok \d+ - end-to-end \(acid fixture, R67 round 1 port gate\):',
+  '^ok \d+ - end-to-end \(acid fixture, R67 round 1 backend already down\):'
 )
 $missing = @()
 foreach ($pattern in $requiredOk) {
@@ -1140,7 +1142,9 @@ function mkLongTempDir(prefix) {
 //                  backend the task's pm2-runtime starts would print).
 //   taskState:     R67 -- the State the task reports ('Ready' by default). 'Running'
 //                  stays Running for the first runningPolls state reads, then 'Ready'.
-function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPath = '\\', taskPresent, extraTasks = [], startBehavior = 'start-runtime', runtimeStartedMarker = null, taskLogPath, strayDaemonMarkerPath = null, pluginLogPath = null, taskState = 'Ready', runningPolls = 0 }) {
+//   backendRoot:   R67 round 1 -- a successful start also starts <backendRoot>'s fake
+//                  backend (the new process the task's pm2-runtime would start).
+function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPath = '\\', taskPresent, extraTasks = [], startBehavior = 'start-runtime', runtimeStartedMarker = null, taskLogPath, strayDaemonMarkerPath = null, pluginLogPath = null, taskState = 'Ready', runningPolls = 0, backendRoot = null }) {
   const sawDaemonLine = strayDaemonMarkerPath
     ? `  Add-Content -LiteralPath ${psSingleQuote(taskLogPath)} -Value ('start-saw-daemon=' + $(if (Test-Path -LiteralPath ${psSingleQuote(strayDaemonMarkerPath)}) { 'yes' } else { 'no' }))`
     : ''
@@ -1149,6 +1153,7 @@ function scheduledTaskStubSource({ taskName = 'MetaSheet-PM2', taskPath = '\\', 
       ? "  throw 'STUB_TASK_SCHEDULER_REFUSED: the task could not be started'"
       : [
           `  Set-Content -LiteralPath ${psSingleQuote(runtimeStartedMarker)} -Value 'runtime-started'`,
+          ...(backendRoot ? [`  & ${psSingleQuote(process.execPath)} ${psSingleQuote(fakeBackendPaths().ctl)} start ${psSingleQuote(backendRoot)}`] : []),
           ...(pluginLogPath
             ? [
                 `  New-Item -ItemType Directory -Force -Path ${psSingleQuote(path.dirname(pluginLogPath))} | Out-Null`,
@@ -1706,6 +1711,10 @@ test('R67 restart gates: no pm2 pipe means no pm2 command at all (the task inste
       { label: 'TASK_STILL_RUNNING', pipe: 'false', task: true, taskState: 'Running', runningPolls: 1000 },
       { label: 'TASK_LEAVES_RUNNING', pipe: 'false', task: true, taskState: 'Running', runningPolls: 1 },
       { label: 'NOT_WINDOWS', machinePipe: false, pipe: 'false', task: true },
+      // R67 round 1 (#6412 finding 1): something already listens on the backend port.
+      { label: 'PORT_BUSY', pipe: 'true', task: true, port: 'busy' },
+      { label: 'PORT_BUSY_TASK_PATH', pipe: 'false', task: true, port: 'busy' },
+      { label: 'PORT_UNKNOWN', pipe: 'true', task: true, port: 'unknown' },
     ]
     const results = {}
     for (const c of cases) {
@@ -1728,8 +1737,17 @@ test('R67 restart gates: no pm2 pipe means no pm2 command at all (the task inste
         `  Add-Content -LiteralPath ${psSingleQuote(c.pm2Log)} -Value 'STRAY-LOOKUP'`,
         `  return ${c.strayPids || '@()'}`,
         '}',
+        'function global:Get-PortListener {',
+        '  param([int]$Port)',
+        `  Add-Content -LiteralPath ${psSingleQuote(c.pm2Log)} -Value ('PORT ' + $Port)`,
+        ...(c.port === 'busy'
+          ? ["  return [pscustomobject]@{ State = 'busy'; Reason = ''; Processes = @([pscustomobject]@{ Pid = 6161; CreationDate = (Get-Date).AddHours(-2); CommandLine = 'node C:\\metasheet\\packages\\core-backend\\dist\\src\\index.js'; ParentPid = 1; ParentCommandLine = '' }) }"]
+          : c.port === 'unknown'
+          ? ["  return [pscustomobject]@{ State = 'unknown'; Reason = 'stub: cannot tell'; Processes = @() }"]
+          : ["  return [pscustomobject]@{ State = 'free'; Reason = ''; Processes = @() }"]),
+        '}',
         '$script:RestartGateFailure = $null',
-        `try { $r = Start-BackendWithRestartGates -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} -ScheduledTaskName 'MetaSheet-PM2' -Since (Get-Date) -TaskIdleTimeoutSec 2; ` +
+        `try { $r = Start-BackendWithRestartGates -Pm2Command ${psSingleQuote(stub)} -Name 'metasheet-backend' -Pm2Home ${psSingleQuote(home)} -ScheduledTaskName 'MetaSheet-PM2' -Since (Get-Date) -TaskIdleTimeoutSec 2 -BackendPort 8913; ` +
           `Write-Host ('${c.label}=RETURNED ' + $r) } catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
         `Write-Host ('${c.label}-EXIT=' + $(if ($null -eq $script:RestartGateFailure) { 'none' } else { [string]$script:RestartGateFailure.ExitCode + ' ' + $script:RestartGateFailure.Code }))`,
         '',
@@ -1747,6 +1765,27 @@ test('R67 restart gates: no pm2 pipe means no pm2 command at all (the task inste
       }
     }
     const r = (label) => results[label]
+
+    // a0. PORT (round 1): every Windows-branch case asks the backend port first, before
+    // the pipe and before any pm2 command or task start.
+    for (const [label, result] of Object.entries(results)) {
+      if (label === 'NOT_WINDOWS') {
+        assert.ok(!result.pm2.includes('PORT'), 'off Windows the port gate does not apply')
+        continue
+      }
+      assert.equal(result.pm2[0], 'PORT', `${label}: the port is checked first: ${JSON.stringify(result.pm2)}`)
+      result.pm2 = result.pm2.slice(1)
+    }
+    for (const label of ['PORT_BUSY', 'PORT_BUSY_TASK_PATH']) {
+      assert.match(r(label).outcome, /^THREW PM2_PRE_RESTART_PORT_BUSY: something already listens on the backend port \(127\.0\.0\.1:8913\) before 'metasheet-backend' is started: pid 6161 \(started \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}; node C:\\metasheet\\packages\\core-backend\\dist\\src\\index\.js\)\. .*Nothing was started and nothing was stopped/, r(label).stdout)
+      assert.equal(r(label).exit, '20 PM2_PRE_RESTART_PORT_BUSY', label)
+      assert.deepEqual(r(label).pm2, [], `${label}: no pipe probe, no pm2 command`)
+      assert.deepEqual(r(label).starts, [], `${label}: the task is not started either`)
+    }
+    assert.equal(r('PORT_UNKNOWN').outcome, 'RETURNED pm2-restart', r('PORT_UNKNOWN').stdout)
+    assert.match(r('PORT_UNKNOWN').stdout, /PM2_PRE_RESTART_PORT_UNCONFIRMED: could not check the backend port \(127\.0\.0\.1:8913\): stub: cannot tell\./)
+    assert.deepEqual(r('PORT_UNKNOWN').pm2, ['PROBE', 'list', 'restart'])
+    assert.match(r('APP_ONLINE').stdout, /Pre-restart gate: nothing listens on the backend port \(127\.0\.0\.1:8913\)\./)
 
     // a. PRE-RESTART: no pipe -> no pm2 command at all.
     assert.match(r('PIPE_ABSENT_NO_TASK').outcome, /^THREW PM2_PRE_RESTART_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock and there is no single scheduled task 'MetaSheet-PM2' to start\. No pm2 command was run/, r('PIPE_ABSENT_NO_TASK').stdout)
@@ -1820,9 +1859,10 @@ test('R67 post-restart gate: Read-FileTail never reads more than -MaxBytes of a 
       "for ($i = 0; $i -lt 2200; $i++) { $w.WriteLine((& $stamp $t0.AddHours(-1)) + ': filler ' + $pad) }",
       // TAIL: the previous start's line (before T0), another plugin, a name with a suffix.
       "$w.WriteLine((& $stamp $t0.AddMinutes(-5)) + ': Plugin loaded: plugin-integration-core v1 PREVIOUS-START')",
+      // pm2 stamps per chunk: an unstamped line inherits the stamp before it -- here pre-T0.
+      "$w.WriteLine('Plugin loaded: plugin-integration-core v1 UNSTAMPED-PREVIOUS-CHUNK')",
       "$w.WriteLine((& $stamp $t0.AddSeconds(1)) + ': Plugin loaded: plugin-elearning v0.1.0')",
       "$w.WriteLine((& $stamp $t0.AddSeconds(1)) + ': Plugin loaded: plugin-integration-core-extra v1')",
-      "$w.WriteLine('Plugin loaded: plugin-integration-core v1 UNSTAMPED')",
       '$w.Close()',
       '$len = (Get-Item -LiteralPath $big).Length',
       '$tail = Read-FileTail -Path $big -MaxBytes (1MB)',
@@ -1831,6 +1871,11 @@ test('R67 post-restart gate: Read-FileTail never reads more than -MaxBytes of a 
       "Write-Host ('HAS_HEAD=' + $tail.Text.Contains('BEYOND-THE-TAIL'))",
       "Write-Host ('HAS_TAIL=' + $tail.Text.Contains('PREVIOUS-START'))",
       "Write-Host ('FOUND_BEFORE=[' + (Find-PluginLoadedLineSince -Text $tail.Text -Since $t0) + ']')",
+      // Round 1 (#6412 finding 5): an unstamped line after a post-T0 stamp counts with that
+      // stamp; one before any stamped line never counts.
+      "$chunk = (& $stamp $t0.AddSeconds(2)) + ': [Server] starting' + [Environment]::NewLine + '[PluginLoader] Plugin loaded: plugin-integration-core v0.1.0'",
+      "Write-Host ('FOUND_CHUNK=[' + ((Find-PluginLoadedLineSince -Text $chunk -Since $t0) -eq (& $stamp $t0.AddSeconds(2))) + ']')",
+      "Write-Host ('FOUND_NO_STAMP_AT_ALL=[' + (Find-PluginLoadedLineSince -Text 'Plugin loaded: plugin-integration-core v0.1.0' -Since $t0) + ']')",
       "$wait = Wait-PluginLoadedSince -LogPathCandidate $big -RootDir 'unused' -AppName 'metasheet-backend' -Since $t0 -TailMB 1 -TimeoutSec 1 -PollMilliseconds 200",
       "Write-Host ('WAIT_BEFORE=' + $wait.Ok + ' | ' + $wait.Reason)",
       // The restart's own line arrives: now the gate passes.
@@ -1856,7 +1901,9 @@ test('R67 post-restart gate: Read-FileTail never reads more than -MaxBytes of a 
     assert.equal(Number(line('READ')), 1024 * 1024, 'exactly -MaxBytes are read from a larger file, never the whole file')
     assert.equal(line('HAS_HEAD'), 'False', 'the head of the file lies outside the tail and must never be decoded')
     assert.equal(line('HAS_TAIL'), 'True')
-    assert.equal(line('FOUND_BEFORE'), '[]', 'neither an earlier start, another plugin, a longer name nor an unstamped line counts')
+    assert.equal(line('FOUND_BEFORE'), '[]', 'neither an earlier start, an unstamped line of that earlier chunk, another plugin nor a longer name counts')
+    assert.equal(line('FOUND_CHUNK'), '[True]', 'an unstamped line inherits the post-T0 stamp of its chunk')
+    assert.equal(line('FOUND_NO_STAMP_AT_ALL'), '[]', 'a line with no stamped line before it never counts')
     assert.match(line('WAIT_BEFORE'), /^False \| the last 1 MB of .*big\.out\.log \(1048576 bytes read\) show no 'Plugin loaded: plugin-integration-core' line stamped at or after T0$/)
     assert.equal(line('WAIT_AFTER'), 'True True')
     assert.match(line('WAIT_NO_LOG'), /^False \| no backend out log \(metasheet-backend\.out\.log or metasheet-backend\.out-<pm_id>\.log under .*\); pass -BackendOutLogPath$/)
@@ -1908,11 +1955,115 @@ test('R67 scheduled-task gate: a backend the task started whose listener is a ch
   // LF throughout: a Windows checkout (core.autocrlf) has CRLF on disk.
   const lfSource = scriptSource.split('\r\n').join('\n')
   const main = lfSource.slice(lfSource.indexOf("if ($MyInvocation.InvocationName -ne '.') {"))
-  const assertIdx = main.indexOf("if ($backendStartedVia -eq 'scheduled-task' -and (Test-Pm2UsesMachinePipe)) {\n            Assert-BackendNotUnderStrayDaemon -BackendHealthUrl $resolvedBackendHealthUrl")
+  const ageIdx = main.indexOf('if (Test-Pm2UsesMachinePipe) {\n            # R67 round 1 listener-age gate, both paths: the process answering\n            # must have started at or after T0 (Windows; throws, flag kept).\n            Assert-BackendListenerStartedSince -BackendHealthUrl $resolvedBackendHealthUrl -Since $restartT0\n')
+  const assertIdx = main.indexOf("if ($backendStartedVia -eq 'scheduled-task') {\n              Assert-BackendNotUnderStrayDaemon -BackendHealthUrl $resolvedBackendHealthUrl")
   const pluginIdx = main.indexOf('$pluginLoad = Wait-PluginLoadedSince ')
   const removeIdx = main.indexOf('Remove-MaintenanceFlag -FlagPath $maintenanceFlagPath | Out-Null', pluginIdx)
+  assert.ok(ageIdx > -1, 'Main must check the listener age on both paths (Windows)')
   assert.ok(assertIdx > -1, 'Main must check the backend host after a scheduled-task start')
-  assert.ok(main.indexOf('if ($backendHealth.Ok) {') < assertIdx && assertIdx < pluginIdx && pluginIdx < removeIdx, 'order: backend answered, host check, plugin-loaded gate, then the flag comes down')
+  assert.ok(main.indexOf('if ($backendHealth.Ok) {') < ageIdx && ageIdx < assertIdx && assertIdx < pluginIdx && pluginIdx < removeIdx, 'order: backend answered, listener age (both paths), host check (task path), plugin-loaded gate, then the flag comes down')
+})
+
+test('R67 round 1 listener-age gate: a backend-port listener that started before T0 fails with exit 23 (pid, start time and command line named, nothing stopped); one started at or after T0 passes; an unreadable age, a free port or an unknown state is reported as PM2_LISTENER_AGE_UNCONFIRMED and never failed (runs on every OS)', () => {
+  const scratch = mkLongTempDir('ms2-upgrade-r67-')
+  try {
+    const longCommand = 'node ' + 'x'.repeat(300)
+    const cases = [
+      { label: 'OLDER', listener: "[pscustomobject]@{ State = 'busy'; Reason = ''; Processes = @([pscustomobject]@{ Pid = 7001; CreationDate = $t0.AddMinutes(-30); CommandLine = 'node C:\\old\\index.js'; ParentPid = 1; ParentCommandLine = '' }) }" },
+      { label: 'MIXED', listener: "[pscustomobject]@{ State = 'busy'; Reason = ''; Processes = @([pscustomobject]@{ Pid = 7002; CreationDate = $t0.AddSeconds(3); CommandLine = 'node new'; ParentPid = 1; ParentCommandLine = '' }, [pscustomobject]@{ Pid = 7003; CreationDate = $t0.AddSeconds(-1); CommandLine = '" + longCommand + "'; ParentPid = 1; ParentCommandLine = '' }) }" },
+      { label: 'NEWER', listener: "[pscustomobject]@{ State = 'busy'; Reason = ''; Processes = @([pscustomobject]@{ Pid = 7004; CreationDate = $t0.AddSeconds(2); CommandLine = 'node new'; ParentPid = 1; ParentCommandLine = '' }) }" },
+      { label: 'NO_AGE', listener: "[pscustomobject]@{ State = 'busy'; Reason = ''; Processes = @([pscustomobject]@{ Pid = 7005; CreationDate = $null; CommandLine = ''; ParentPid = 0; ParentCommandLine = '' }) }" },
+      { label: 'FREE', listener: "[pscustomobject]@{ State = 'free'; Reason = ''; Processes = @() }" },
+      { label: 'UNKNOWN', listener: "[pscustomobject]@{ State = 'unknown'; Reason = 'stub: cannot tell'; Processes = @() }" },
+    ]
+    const harness = [
+      dotSourcePrelude(scratch),
+      '$t0 = Get-Date',
+      'function global:Get-PortListener { param([int]$Port) Write-Host (\'PORT-ASKED=\' + $Port); return $global:StubListener }',
+      ...cases.map((c) => [
+        '$script:RestartGateFailure = $null',
+        `$global:StubListener = ${c.listener}`,
+        `Write-Host '--- ${c.label}'`,
+        `try { Assert-BackendListenerStartedSince -BackendHealthUrl 'http://127.0.0.1:8913/health' -Since $t0; Write-Host '${c.label}=PASSED' } catch { Write-Host ('${c.label}=THREW ' + $_.Exception.Message) }`,
+        `Write-Host ('${c.label}-EXIT=' + $(if ($null -eq $script:RestartGateFailure) { 'none' } else { [string]$script:RestartGateFailure.ExitCode }))`,
+      ].join('\n')),
+      // Round 1 (#6412 finding 3): the printed start commands never say `pm2 kill` after a
+      // gate fired; without a gate they are the pre-R67 ones.
+      "$script:RestartGateFailure = $null",
+      "Write-Host '--- COMMANDS_NO_GATE'",
+      "Write-BackendStartCommands -Pm2AppName 'metasheet-backend' -Pm2Home 'C:\\h' -ScheduledTaskName 'MetaSheet-PM2' -ScheduledTaskPath '\\'",
+      "$null = Register-RestartGateFailure -Code 'PM2_RESTART_RESULT_FAILED' -ExitCode 21 -Detail 'stub'",
+      "Write-Host '--- COMMANDS_AFTER_GATE'",
+      "Write-BackendStartCommands -Pm2AppName 'metasheet-backend' -Pm2Home 'C:\\h' -ScheduledTaskName 'MetaSheet-PM2' -ScheduledTaskPath '\\'",
+      "Write-Host '--- END'",
+      '',
+    ].join('\n')
+    const run = runPwshHarness(harness)
+    assert.equal(run.status, 0, run.stderr || run.stdout || String(run.error))
+    const noGate = run.stdout.slice(run.stdout.indexOf('--- COMMANDS_NO_GATE'), run.stdout.indexOf('--- COMMANDS_AFTER_GATE'))
+    const afterGate = run.stdout.slice(run.stdout.indexOf('--- COMMANDS_AFTER_GATE'), run.stdout.indexOf('--- END'))
+    assert.match(noGate, /\n\s*pm2 kill\s*\r?\n/, 'without a gate the pre-R67 commands stand')
+    assert.doesNotMatch(afterGate, /\n\s*pm2 kill\s*\r?\n/, 'after a gate the printed commands never say pm2 kill')
+    assert.match(afterGate, /do NOT pm2 kill:/)
+    assert.match(afterGate, /Stop-Process -Id <that pid> -- unless the backend runs under it/)
+    assert.match(afterGate, /Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '\\'/)
+    const line = (key) => (run.stdout.split(/\r?\n/).find((l) => l.startsWith(`${key}=`)) || '').slice(key.length + 1)
+    const section = (label) => run.stdout.slice(run.stdout.indexOf(`--- ${label}`), run.stdout.indexOf('--- ', run.stdout.indexOf(`--- ${label}`) + 4) >>> 0 || undefined)
+    assert.equal(line('PORT-ASKED'), '8913')
+    assert.match(line('OLDER'), /^THREW PM2_BACKEND_LISTENER_PREDATES_T0: the backend answers, but the process listening on 127\.0\.0\.1:8913 started before T0 \S+: pid 7001 \(started \S+; node C:\\old\\index\.js\)\. That is not the backend this run started\. Nothing was stopped/)
+    assert.equal(line('OLDER-EXIT'), '23')
+    assert.match(line('MIXED'), /^THREW PM2_BACKEND_LISTENER_PREDATES_T0: .*pid 7003 \(started \S+; node x{155}\.\.\.\)/, 'any older listener fails; a long command line is cut at 160 characters')
+    assert.doesNotMatch(line('MIXED'), /pid 7002/, 'only the older listener is named')
+    assert.equal(line('MIXED-EXIT'), '23')
+    assert.equal(line('NEWER'), 'PASSED')
+    assert.equal(line('NEWER-EXIT'), 'none')
+    assert.match(section('NEWER'), /Listener-age gate: the process behind http:\/\/127\.0\.0\.1:8913\/health started at or after T0\./)
+    for (const label of ['NO_AGE', 'FREE', 'UNKNOWN']) {
+      assert.equal(line(label), 'PASSED', `${label}: reported, never failed`)
+      assert.equal(line(`${label}-EXIT`), 'none', label)
+      assert.match(section(label), /PM2_LISTENER_AGE_UNCONFIRMED: /, label)
+    }
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
+})
+
+test('R67 round 1 Get-PortListener reads the real listener on Windows -- busy with this pid, its start time and command line; a closed port is free -- and is unknown (never busy) off Windows (runs on every OS)', async () => {
+  const scratch = mkLongTempDir('ms2-upgrade-r67-')
+  const listener = net.createServer()
+  await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve))
+  const busyPort = listener.address().port
+  const freePort = await freeTcpPort()
+  try {
+    const harness = [
+      dotSourcePrelude(scratch),
+      `$busy = Get-PortListener -Port ${busyPort}`,
+      "Write-Host ('BUSY_STATE=' + $busy.State)",
+      "Write-Host ('BUSY_PID=' + (@($busy.Processes | ForEach-Object { $_.Pid }) -join ','))",
+      "Write-Host ('BUSY_HAS_AGE=' + (@($busy.Processes | Where-Object { $null -ne $_.CreationDate -and $_.CreationDate -lt (Get-Date) }).Count))",
+      "Write-Host ('BUSY_CMD_NODE=' + (@($busy.Processes | Where-Object { $_.CommandLine -match 'node' }).Count))",
+      `Write-Host ('FREE_STATE=' + (Get-PortListener -Port ${freePort}).State)`,
+      "Write-Host ('ZERO_STATE=' + (Get-PortListener -Port 0).State)",
+      '',
+    ].join('\n')
+    const run = await runPwshHarnessAsync(harness)
+    assert.equal(run.status, 0, run.stderr || run.stdout)
+    const line = (key) => (run.stdout.split(/\r?\n/).find((l) => l.startsWith(`${key}=`)) || '').slice(key.length + 1)
+    if (IS_WINDOWS) {
+      assert.equal(line('BUSY_STATE'), 'busy', run.stdout)
+      assert.equal(line('BUSY_PID'), String(process.pid), 'the owning pid is this test process')
+      assert.equal(line('BUSY_HAS_AGE'), '1', 'its start time is read and lies in the past')
+      assert.equal(line('BUSY_CMD_NODE'), '1', 'its command line is read')
+      assert.equal(line('FREE_STATE'), 'free')
+    } else {
+      assert.equal(line('BUSY_STATE'), 'unknown', 'off Windows the port is never reported busy')
+      assert.equal(line('FREE_STATE'), 'unknown')
+    }
+    assert.equal(line('ZERO_STATE'), 'unknown')
+  } finally {
+    listener.close()
+    fs.rmSync(scratch, { recursive: true, force: true })
+  }
 })
 
 test('R67 Get-Pm2AppStatusFromList reads the status word on the app\'s own row -- through box drawing decoded in the wrong code page and ANSI colours -- and never matches a longer app name (runs on every OS)', () => {
@@ -2347,6 +2498,9 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
   if (process.platform === 'win32') {
     const pluginLine = pluginLogPath ? `"${process.execPath}" "${writerPath}" "${pluginLogPath}"` : 'rem no plugin-loaded line requested'
     const restartOutputLine = restartOutput ? `echo ${restartOutput}` : 'rem no extra restart output'
+    // R67 round 1: a stop removes the fake backend; a successful restart starts a new one.
+    const backendStopLine = `if /i "%1"=="stop" ${fakeBackendCtlCommand('stop', liveRoot)}`
+    const backendStartLine = fakeBackendCtlCommand('start', liveRoot)
     const listLines = [
       'if /i not "%1"=="list" goto afterlist',
       ...(restartNeedsHomeMarker ? ['if not defined PM2_HOME exit /b 0', `if not exist "%PM2_HOME%\\${PM2_APP_ALIVE_MARKER}" exit /b 0`] : []),
@@ -2379,6 +2533,7 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
           'if not defined PM2_HOME goto notfound',
           `if not exist "%PM2_HOME%\\${PM2_APP_ALIVE_MARKER}" goto notfound`,
           restartOutputLine,
+          backendStartLine,
           pluginLine,
           'exit /b 0',
           ':notfound',
@@ -2386,8 +2541,8 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
           'echo [PM2][ERROR] Process or Namespace %2 not found 1>&2',
           'exit /b 1',
         ]
-      : ['if /i not "%1"=="restart" exit /b 0', restartOutputLine, ...(restartExitCode === 0 ? [pluginLine] : []), `exit /b ${restartExitCode}`]
-    fs.writeFileSync(stubPath, ['@echo off', `echo %* >> "${pm2LogPath}"`, witnessLine, homeLine, ...listLines, ...killLines, ...restartLines, ''].join('\r\n'))
+      : ['if /i not "%1"=="restart" exit /b 0', restartOutputLine, ...(restartExitCode === 0 ? [backendStartLine, pluginLine] : []), `exit /b ${restartExitCode}`]
+    fs.writeFileSync(stubPath, ['@echo off', `echo %* >> "${pm2LogPath}"`, witnessLine, homeLine, backendStopLine, ...listLines, ...killLines, ...restartLines, ''].join('\r\n'))
   } else {
     // pwsh's `&` call operator execs the file directly on non-Windows — the .cmd
     // extension is irrelevant there, only the shebang and the executable bit are.
@@ -2398,6 +2553,9 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
       : ''
     const homeLine = homeLogPath ? `echo "HOME=[$PM2_HOME] $*" >> "${homeLogPath}"\n` : ''
     const shPluginLine = pluginLogPath ? `  "${process.execPath}" "${writerPath}" "${pluginLogPath}"\n` : ''
+    // R67 round 1: a stop removes the fake backend; a successful restart starts a new one.
+    const shBackendStop = `if [ "$1" = "stop" ]; then ${fakeBackendCtlCommand('stop', liveRoot)}; fi\n`
+    const shBackendStart = `  ${fakeBackendCtlCommand('start', liveRoot)}\n`
     const shRestartOutput = restartOutput ? `  echo "${restartOutput}"\n` : ''
     const listLines = [
       'if [ "$1" = "list" ]; then',
@@ -2425,12 +2583,12 @@ function writePm2Stub(liveRoot, pm2LogPath, witness = null, pm2Behavior = {}) {
           '    echo "[PM2][ERROR] Process or Namespace $2 not found" >&2',
           '    exit 1',
           '  fi',
-          `${shRestartOutput}${shPluginLine}  exit 0`,
+          `${shRestartOutput}${shBackendStart}${shPluginLine}  exit 0`,
           'fi',
           '',
         ].join('\n')
-      : `if [ "$1" = "restart" ]; then\n${shRestartOutput}${restartExitCode === 0 ? shPluginLine : ''}  exit ${restartExitCode}\nfi\n`
-    fs.writeFileSync(stubPath, `#!/bin/sh\necho "$*" >> "${pm2LogPath}"\n${witnessLine}${homeLine}${listLines}${killLines}${restartLines}exit 0\n`)
+      : `if [ "$1" = "restart" ]; then\n${shRestartOutput}${restartExitCode === 0 ? shBackendStart + shPluginLine : ''}  exit ${restartExitCode}\nfi\n`
+    fs.writeFileSync(stubPath, `#!/bin/sh\necho "$*" >> "${pm2LogPath}"\n${witnessLine}${homeLine}${shBackendStop}${listLines}${killLines}${restartLines}exit 0\n`)
     fs.chmodSync(stubPath, 0o755)
   }
   return stubPath
@@ -2535,19 +2693,145 @@ function assertFailureHandlerPm2Stop(combined) {
 }
 
 // R67: on Windows the pre-restart gate asks pm2's machine-wide pipe \\.\pipe\rpc.sock
-// whether a pm2 daemon is there before it runs any pm2 command. An end-to-end run that
-// models "pm2 holds the app" holds that pipe itself for the duration of the run; one
-// that models the R59 host (pm2-runtime exited) holds nothing. Off Windows the gate
-// does not apply and this is a no-op. Like the real pm2 on a dev box (see
-// setUpR59Fixture), a pm2 daemon already running on the test machine makes this fail.
+// whether a pm2 daemon is there before it runs any pm2 command (and since round 1 the
+// step 2 stop asks too). An end-to-end run that models "pm2 holds the app" holds that
+// pipe itself for the duration of the run; one that models the R59 host holds it until
+// the step 2 stop and then lets it go (pm2-runtime exits once its only app is stopped);
+// one that models "no pm2 daemon at all" holds nothing. Off Windows the gates do not
+// apply and this is a no-op. Like the real pm2 on a dev box (see setUpR59Fixture), a pm2
+// daemon already running on the test machine makes this fail. A pipe the previous test
+// is still closing is retried for a moment.
 async function holdPm2PipeOnWindows(enabled = true) {
   if (process.platform !== 'win32' || !enabled) return { close: async () => {} }
   const server = net.createServer((socket) => socket.destroy())
-  await new Promise((resolve, reject) => {
-    server.once('error', reject)
-    server.listen('\\\\.\\pipe\\rpc.sock', resolve)
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await new Promise((resolve, reject) => {
+        server.once('error', reject)
+        server.listen('\\\\.\\pipe\\rpc.sock', () => {
+          server.removeListener('error', reject)
+          resolve()
+        })
+      })
+      break
+    } catch (error) {
+      if (error.code !== 'EADDRINUSE' || attempt >= 40) throw error
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+  let closed = false
+  return {
+    close: () => new Promise((resolve) => {
+      if (closed) return resolve()
+      closed = true
+      server.close(() => resolve())
+    }),
+  }
+}
+
+// R67 round 1 (#6412 review finding 1): on Windows the script refuses to start the
+// backend while anything already listens on the backend port, and after the health
+// check it requires the listening process to have started at or after T0. So the
+// backend an end-to-end run talks to is a SEPARATE process on the backend port: a tiny
+// HTTP forwarder (FAKE_BACKEND_SOURCE) in front of this test's in-process server, which
+// still decides every answer (backendUp, gateWired) and records every request. The
+// "old" forwarder is started before the run (the backend step 2 stops); the pm2 stub's
+// `stop` removes it and its successful `restart` -- or the task stub's start -- starts a
+// NEW one, through FAKE_BACKEND_CTL_SOURCE. The ctl finds the fixture by the PORT in
+// <RootDir>/docker/app.env and does nothing for a root without one. The ctl only ASKS
+// for a start (a marker file); this test process starts the forwarder: a process the
+// ctl started would inherit the pm2 call's output pipe (Windows handle inheritance) and
+// the script's `& pm2 ... 2>&1` would wait on it forever -- the R59 session-bound daemon
+// in miniature. So a test that needs a backend start must run the script asynchronously.
+const FAKE_BACKEND_SOURCE = `const http = require('http')
+const fs = require('fs')
+const [port, target, pidFile, ownerPid] = process.argv.slice(2)
+const server = http.createServer((req, res) => {
+  const upstream = http.request({ host: '127.0.0.1', port: Number(target), path: req.url, method: req.method, headers: req.headers }, (answer) => {
+    res.writeHead(answer.statusCode, answer.headers)
+    answer.pipe(res)
   })
-  return { close: () => new Promise((resolve) => server.close(() => resolve())) }
+  upstream.on('error', () => { res.writeHead(502); res.end('upstream down') })
+  req.pipe(upstream)
+})
+server.on('error', () => process.exit(1))
+server.listen(Number(port), '127.0.0.1', () => fs.writeFileSync(pidFile, String(process.pid)))
+setInterval(() => { try { process.kill(Number(ownerPid), 0) } catch { process.exit(0) } }, 1000)
+`
+const FAKE_BACKEND_CTL_SOURCE = `const fs = require('fs')
+const net = require('net')
+const os = require('os')
+const path = require('path')
+const [action, liveRoot] = process.argv.slice(2)
+let port = 0
+try {
+  const match = fs.readFileSync(path.join(liveRoot, 'docker', 'app.env'), 'utf8').match(/^PORT=(\\d+)\\s*$/m)
+  if (match) port = Number(match[1])
+} catch {}
+const ctlFile = path.join(os.tmpdir(), 'ms2-upgrade-fake-backend-' + port + '.json')
+if (!port || !fs.existsSync(ctlFile)) process.exit(0)
+const ctl = JSON.parse(fs.readFileSync(ctlFile, 'utf8'))
+const listening = () => new Promise((resolve) => {
+  const socket = net.connect(port, '127.0.0.1')
+  socket.once('connect', () => { socket.destroy(); resolve(true) })
+  socket.once('error', () => resolve(false))
+})
+const waitFor = async (want) => {
+  for (let i = 0; i < 200; i += 1) {
+    if ((await listening()) === want) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+}
+;(async () => {
+  if (action === 'stop') {
+    fs.writeFileSync(ctl.stopMarker, 'stopped')
+    if (ctl.keepOnStop) return
+    let pid = 0
+    try { pid = Number(fs.readFileSync(ctl.pidFile, 'utf8')) } catch {}
+    if (pid) { try { process.kill(pid) } catch {} }
+    await waitFor(false)
+  } else if (action === 'start') {
+    // The test process starts the new backend: a process started from here would
+    // inherit this pm2 call's output pipe and keep the script's \`& pm2\` waiting.
+    fs.writeFileSync(ctl.startRequest, 'start')
+    await waitFor(true)
+  }
+})()
+`
+let fakeBackendFiles = null
+function fakeBackendPaths() {
+  if (!fakeBackendFiles) {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-fake-backend-'))
+    process.on('exit', () => fs.rmSync(dir, { recursive: true, force: true }))
+    fakeBackendFiles = { backend: path.join(dir, 'fake-backend.cjs'), ctl: path.join(dir, 'fake-backend-ctl.cjs') }
+    fs.writeFileSync(fakeBackendFiles.backend, FAKE_BACKEND_SOURCE)
+    fs.writeFileSync(fakeBackendFiles.ctl, FAKE_BACKEND_CTL_SOURCE)
+  }
+  return fakeBackendFiles
+}
+
+function freeTcpPort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer()
+    probe.once('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+async function waitForTcp(port, want) {
+  for (let i = 0; i < 200; i += 1) {
+    const up = await new Promise((resolve) => {
+      const socket = net.connect(port, '127.0.0.1')
+      socket.once('connect', () => { socket.destroy(); resolve(true) })
+      socket.once('error', () => resolve(false))
+    })
+    if (up === want) return
+    await new Promise((resolve) => setTimeout(resolve, 25))
+  }
+  throw new Error(`port ${port} never became ${want ? 'busy' : 'free'}`)
 }
 
 function runUpgradeScript(args, envOverrides = {}) {
@@ -2586,39 +2870,87 @@ function runUpgradeScriptAsync(args, envOverrides = {}) {
 // preStopProbes: the one silent backend-direct request step 2 makes right before the
 // stop (Test-BackendAnswersNow, tagged X-Upgrade-Prestop-Probe) is recorded there and
 // NOT in `requests`, which stays the health POLLING the tests below count.
-function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false } = {}) {
-  return new Promise((resolve) => {
-    const requests = []
-    const preStopProbes = []
-    const server = http.createServer((req, res) => {
-      // backendUp only governs the backend-direct /health path: it lets the R59
-      // fixtures model "the backend is down until the scheduled task starts it".
-      const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
-      const up = req.url === '/health' ? Boolean(backendUp()) : !gated
-      const log = req.headers['x-upgrade-prestop-probe'] === '1' ? preStopProbes : requests
-      log.push({
-        url: req.url,
-        flagExists: flagPath ? fs.existsSync(flagPath) : null,
-        // The one-shot "is the gate actually wired on this host" probe tags
-        // itself; nginx's `if (-f ...)` is header-blind, so the tag cannot
-        // change what the probe measures on a real box — it only lets these
-        // fixtures tell that request apart from the two health probes.
-        gateProbe: req.headers['x-upgrade-gate-probe'] === '1',
-        backendUp: up,
-      })
-      if (!up) {
-        res.writeHead(503, { 'content-type': 'text/plain' })
-        res.end('backend down')
-        return
-      }
-      res.writeHead(200, { 'content-type': 'text/plain' })
-      res.end('ok')
+// R67 round 1: `port` (what a test writes into docker/app.env as PORT) is the FAKE
+// BACKEND's port, a separate process forwarding here; `url` (the nginx -HealthUrl)
+// stays this server's own. oldBackend: a forwarder is already listening before the run
+// (the backend step 2 stops). keepOnStop: the pm2 stub's stop leaves it running (an
+// orphan). pm2Daemon: 'alive' (pm2's pipe held for the whole run, Windows),
+// 'exits-on-stop' (held until the first pm2 stop -- the R59 host), 'none'.
+async function startHealthServer({ flagPath = null, backendUp = () => true, gateWired = false, pm2Daemon = 'alive', oldBackend = true, keepOnStop = false } = {}) {
+  const requests = []
+  const preStopProbes = []
+  const server = http.createServer((req, res) => {
+    // backendUp only governs the backend-direct /health path: it lets the R59
+    // fixtures model "the backend is down until the scheduled task starts it".
+    const gated = gateWired && req.url !== '/health' && Boolean(flagPath) && fs.existsSync(flagPath)
+    const up = req.url === '/health' ? Boolean(backendUp()) : !gated
+    const log = req.headers['x-upgrade-prestop-probe'] === '1' ? preStopProbes : requests
+    log.push({
+      url: req.url,
+      flagExists: flagPath ? fs.existsSync(flagPath) : null,
+      // The one-shot "is the gate actually wired on this host" probe tags
+      // itself; nginx's `if (-f ...)` is header-blind, so the tag cannot
+      // change what the probe measures on a real box — it only lets these
+      // fixtures tell that request apart from the two health probes.
+      gateProbe: req.headers['x-upgrade-gate-probe'] === '1',
+      backendUp: up,
     })
-    server.listen(0, '127.0.0.1', () => {
-      const { port } = server.address()
-      resolve({ server, port, requests, preStopProbes, url: `http://127.0.0.1:${port}/api/health` })
-    })
+    if (!up) {
+      res.writeHead(503, { 'content-type': 'text/plain' })
+      res.end('backend down')
+      return
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' })
+    res.end('ok')
   })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const target = server.address().port
+  const backendPort = await freeTcpPort()
+  const files = fakeBackendPaths()
+  const ctlFile = path.join(os.tmpdir(), `ms2-upgrade-fake-backend-${backendPort}.json`)
+  const pidFile = `${ctlFile}.pid`
+  const stopMarker = `${ctlFile}.stopped`
+  const startRequest = `${ctlFile}.start-requested`
+  fs.writeFileSync(ctlFile, JSON.stringify({ target, pidFile, stopMarker, startRequest, keepOnStop, backendPath: files.backend, ownerPid: process.pid }))
+  const startBackend = () => spawn(process.execPath, [files.backend, String(backendPort), String(target), pidFile, String(process.pid)], { stdio: 'ignore', windowsHide: true })
+  const started = []
+  const startWatch = setInterval(() => {
+    if (fs.existsSync(startRequest)) {
+      fs.rmSync(startRequest, { force: true })
+      started.push(startBackend())
+    }
+  }, 20)
+  const pipe = await holdPm2PipeOnWindows(pm2Daemon !== 'none')
+  let pipeWatch = null
+  if (pm2Daemon === 'exits-on-stop') {
+    pipeWatch = setInterval(() => {
+      if (fs.existsSync(stopMarker)) {
+        clearInterval(pipeWatch)
+        pipe.close()
+      }
+    }, 25)
+  }
+  if (oldBackend) {
+    started.push(startBackend())
+    await waitForTcp(backendPort, true)
+  }
+  const close = () => {
+    if (pipeWatch) clearInterval(pipeWatch)
+    clearInterval(startWatch)
+    pipe.close()
+    for (const child of started) {
+      try { child.kill() } catch {}
+    }
+    for (const file of [ctlFile, pidFile, stopMarker, startRequest]) fs.rmSync(file, { force: true })
+    server.close()
+  }
+  return { server: { close }, port: backendPort, requests, preStopProbes, url: `http://127.0.0.1:${target}/api/health` }
+}
+
+// The pm2 stub's / task stub's command that stops or starts the fake backend of
+// <liveRoot> (FAKE_BACKEND_CTL_SOURCE); nothing for a root without one.
+function fakeBackendCtlCommand(action, liveRoot) {
+  return `"${process.execPath}" "${fakeBackendPaths().ctl}" ${action} "${liveRoot}"`
 }
 
 test('end-to-end (acid fixture): a clean upgrade passes under the real walk — deep files, the decoy, the loose root file, node_modules isolation, all hold', async () => {
@@ -2626,7 +2958,6 @@ test('end-to-end (acid fixture): a clean upgrade passes under the real walk — 
   const liveRoot = path.join(root, 'live')
   const witness = maintenanceWitnessPaths(root, liveRoot)
   const health = await startHealthServer({ flagPath: witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
   try {
     const backupRoot = path.join(root, 'backups')
     const stagingRoot = path.join(root, 'staging')
@@ -2778,7 +3109,6 @@ test('end-to-end (acid fixture): a clean upgrade passes under the real walk — 
     assert.match(result.stdout, /stock-prep-acceptance-bootstrap\.mjs/)
     assert.doesNotMatch(result.stdout, /RESTORE REQUIRED/, 'a clean run must never print the restore block')
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -2829,8 +3159,12 @@ test('end-to-end (acid fixture): checksum mismatch refuses BEFORE touching pm2 o
   }
 })
 
-test('end-to-end (acid fixture): a package missing the preflight file fails the F22 tripwire, stops pm2, and prints the restore block (RED-witnessed)', () => {
+test('end-to-end (acid fixture): a package missing the preflight file fails the F22 tripwire, stops pm2, and prints the restore block (RED-witnessed)', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  // pm2 holds the app: on Windows its pipe is there (R67 round 1 pipe-gates the step 2
+  // stop, so a run without it would stop nothing). spawnSync below blocks this process,
+  // but the pipe stays visible by name.
+  const pipe = await holdPm2PipeOnWindows()
   try {
     const liveRoot = path.join(root, 'live')
     const backupRoot = path.join(root, 'backups')
@@ -2861,19 +3195,24 @@ test('end-to-end (acid fixture): a package missing the preflight file fails the 
     const backupDirs = fs.existsSync(backupRoot) ? fs.readdirSync(backupRoot) : []
     assert.equal(backupDirs.length, 1, 'a backup snapshot must exist even though the upgrade ultimately refused')
 
-    // pm2 was stopped at step 2, AND again by the failure handler (off Windows; on
-    // Windows the handler finds no pm2 daemon pipe and runs no pm2 -- R60 review, #6079).
+    // pm2 was stopped at step 2, AND again by the failure handler (a daemon holds pm2's
+    // pipe here on every OS; the no-daemon branch is the R59 tests' and the unit test's).
     const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
-    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length)
-    assertFailureHandlerPm2Stop(combined)
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 2)
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED/)
     assert.doesNotMatch(pm2Log, /restart/, 'pm2 restart must never be reached after the tripwire fires')
   } finally {
+    await pipe.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
 
-test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs) still stops pm2 and prints the restore block (RED-witnessed)', () => {
+test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs) still stops pm2 and prints the restore block (RED-witnessed)', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  // pm2 holds the app: on Windows its pipe is there (R67 round 1 pipe-gates the step 2
+  // stop, so a run without it would stop nothing). spawnSync below blocks this process,
+  // but the pipe stays visible by name.
+  const pipe = await holdPm2PipeOnWindows()
   try {
     const liveRoot = path.join(root, 'live')
     const backupRoot = path.join(root, 'backups')
@@ -2917,9 +3256,10 @@ test('end-to-end (acid fixture): a mid-swap exception (before ANY assertion runs
     )
     assert.match(combined, /BACKUP_PATH=/)
     const pm2Log = fs.readFileSync(pm2LogPath, 'utf8')
-    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 1 + FAILURE_HANDLER_PM2_CALLS.length, 'the failure handler must deal with pm2 even on the earliest possible failure')
-    assertFailureHandlerPm2Stop(combined)
+    assert.equal((pm2Log.match(/stop metasheet-backend/g) || []).length, 2, 'the failure handler must deal with pm2 even on the earliest possible failure')
+    assert.doesNotMatch(combined, /PM2_STOP_SKIPPED/)
   } finally {
+    await pipe.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
@@ -2931,7 +3271,6 @@ test('end-to-end (acid fixture): a failed nginx healthcheck stops the now-broken
   // The BACKEND answers (so the run gets past the first probe and drops the gate);
   // the nginx URL points at a dead port, which is the failure under test here.
   const backend = await startHealthServer({ flagPath: witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
   try {
     const backupRoot = path.join(root, 'backups')
     const stagingRoot = path.join(root, 'staging')
@@ -2974,7 +3313,6 @@ test('end-to-end (acid fixture): a failed nginx healthcheck stops the now-broken
     assert.deepEqual(calls, ['stop', ...RESTART_STEP7_PM2_CALLS, 'stop'])
     assert.doesNotMatch(combined, /PM2_STOP_SKIPPED_NO_DAEMON/, 'a daemon holds the pipe: the handler stops pm2')
   } finally {
-    await pipe.close()
     backend.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3021,8 +3359,12 @@ test('end-to-end (acid fixture): when the BACKEND never answers directly, the ng
   }
 })
 
-test('end-to-end (acid fixture): the gate is raised BEFORE pm2 is stopped and the finally drops it even when the upgrade throws mid-swap (RED-witnessed)', () => {
+test('end-to-end (acid fixture): the gate is raised BEFORE pm2 is stopped and the finally drops it even when the upgrade throws mid-swap (RED-witnessed)', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ms2-upgrade-acid-'))
+  // pm2 holds the app: on Windows its pipe is there (R67 round 1 pipe-gates the step 2
+  // stop, so a run without it would stop nothing). spawnSync below blocks this process,
+  // but the pipe stays visible by name.
+  const pipe = await holdPm2PipeOnWindows()
   try {
     const liveRoot = path.join(root, 'live')
     const witness = maintenanceWitnessPaths(root, liveRoot)
@@ -3076,6 +3418,7 @@ test('end-to-end (acid fixture): the gate is raised BEFORE pm2 is stopped and th
     )
     assert.ok(combined.includes(`Maintenance flag: ${witness.flagPath}`))
   } finally {
+    await pipe.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
 })
@@ -3142,7 +3485,6 @@ test('end-to-end (acid fixture, R67 post-restart gate): an out log whose only "P
   const liveRoot = path.join(root, 'live')
   const witness = maintenanceWitnessPaths(root, liveRoot)
   const health = await startHealthServer({ flagPath: witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
   try {
     const pm2LogPath = path.join(root, 'pm2-calls.log')
     // The restart logs nothing (pluginLogPath null); the out log only holds the line the
@@ -3175,7 +3517,6 @@ test('end-to-end (acid fixture, R67 post-restart gate): an out log whose only "P
     assert.deepEqual(nginxProbes, [], 'the nginx probe is never attempted while the plugin load is unconfirmed')
     assert.ok(health.requests.some((entry) => entry.url === '/health' && entry.flagExists === true), 'the backend-direct probe ran with the flag up')
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3186,7 +3527,6 @@ test('end-to-end (acid fixture, R67 post-restart gate): an out log whose only "P
   const liveRoot2 = path.join(root2, 'live')
   const witness2 = maintenanceWitnessPaths(root2, liveRoot2)
   const health2 = await startHealthServer({ flagPath: witness2.flagPath })
-  const pipe2 = await holdPm2PipeOnWindows()
   try {
     buildAcidLiveRoot(liveRoot2, { pm2LogPath: path.join(root2, 'pm2-calls.log'), backendPort: health2.port, witness: witness2 })
     const { archivePath } = buildAcidArchive(root2)
@@ -3200,7 +3540,6 @@ test('end-to-end (acid fixture, R67 post-restart gate): an out log whose only "P
     assert.equal(probes[probes.length - 1].url, '/api/health')
     assert.equal(probes[probes.length - 1].flagExists, false, 'the flag comes down after the post-restart gate, before the nginx probe')
   } finally {
-    await pipe2.close()
     health2.server.close()
     fs.rmSync(root2, { recursive: true, force: true })
   }
@@ -3210,7 +3549,8 @@ test('end-to-end (acid fixture, R67 pre-restart gate): on Windows, with no pm2 d
   const root = mkLongTempDir('ms2-upgrade-r67-')
   const liveRoot = path.join(root, 'live')
   const witness = maintenanceWitnessPaths(root, liveRoot)
-  const health = await startHealthServer({ flagPath: witness.flagPath })
+  // No pm2 daemon (no pipe) and the backend is already down (nothing on its port).
+  const health = await startHealthServer({ flagPath: witness.flagPath, pm2Daemon: 'none', oldBackend: false })
   try {
     const pm2LogPath = path.join(root, 'pm2-calls.log')
     buildAcidLiveRoot(liveRoot, { pm2LogPath, backendPort: health.port, witness })
@@ -3224,7 +3564,9 @@ test('end-to-end (acid fixture, R67 pre-restart gate): on Windows, with no pm2 d
     if (process.platform === 'win32') {
       assert.equal(result.status, 20, report)
       assert.match(combined, /PM2_PRE_RESTART_NO_DAEMON: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock/)
-      assert.deepEqual(calls, ['stop'], 'only the step 2 stop: no list, no restart, no kill -- and the failure handler skips pm2 too')
+      // R67 round 1: the step 2 stop is pipe-gated too -- not one pm2 call in the whole run.
+      assert.deepEqual(calls, [], 'no pm2 call at all: no step 2 stop, no list, no restart, no kill, no handler stop')
+      assert.match(combined, /PM2_STOP_SKIPPED_NO_PIPE/)
       assert.match(combined, /PM2_STOP_SKIPPED_NO_DAEMON/)
       assert.match(combined, /RESTORE REQUIRED/)
       assert.match(combined, /KEPT: PM2_PRE_RESTART_NO_DAEMON stopped this run/)
@@ -3347,8 +3689,12 @@ function setUpR59Fixture(root, { runtimeHomeExists = true, runtimeAlive = false 
     taskLogPath: fx.taskLogPath,
     strayDaemonMarkerPath: fx.strayDaemonMarker,
     pluginLogPath: defaultPluginLogPath(liveRoot),
+    backendRoot: liveRoot,
     ...overrides,
   })
+  // R67 round 1: how pm2's pipe behaves for this shape (startHealthServer pm2Daemon):
+  // pm2-runtime holds the app all along, or exits once the step 2 stop took its app.
+  fx.pm2Daemon = runtimeAlive ? 'alive' : 'exits-on-stop'
   fx.baseParams = {
     RootDir: liveRoot,
     EnvFile: path.join(liveRoot, 'docker/app.env'),
@@ -3373,7 +3719,7 @@ test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtim
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   // The backend stays DOWN until the scheduled task has started pm2-runtime again.
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -3438,8 +3784,7 @@ test('end-to-end (acid fixture, R59 replay): restart "not found" on a pm2-runtim
 test('end-to-end (acid fixture, R59): when pm2-runtime still holds the app, stop AND restart run under the auto-detected .pm2-runtime home and the task is never started (RED on the pre-fix script)', async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: true })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -3458,7 +3803,6 @@ test('end-to-end (acid fixture, R59): when pm2-runtime still holds the app, stop
     assert.match(result.stdout, /backend started:\s+pm2-restart/)
     assert.doesNotMatch(result.stdout + result.stderr, /RESTORE REQUIRED/)
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3468,7 +3812,7 @@ for (const taskFolder of ['\\', '\\MetaSheet\\']) {
 test(`end-to-end (acid fixture, R59): if the scheduled task (in folder ${taskFolder}) cannot be started, the run still stops pm2, prints RESTORE REQUIRED (the pm2 home, then the restart, then a pm2 kill, then the task by its folder) and drops the gate`, async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -3514,7 +3858,7 @@ test(`end-to-end (acid fixture, R59): if the scheduled task (in folder ${taskFol
 test('end-to-end (acid fixture, R59): a MetaSheet-PM2 task in a SUBFOLDER is detected, started by its own folder (-TaskPath) and the run recovers -- Start-ScheduledTask by name alone only looks in \\ (RED on the pre-fix script)', async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPath: '\\MetaSheet\\' }), {
@@ -3542,8 +3886,7 @@ test('end-to-end (acid fixture, R59): on an unmanaged host whose docker/app.env 
   const appEnvHome = path.join(root, 'app-env-pm2-home')
   fs.mkdirSync(appEnvHome, { recursive: true })
   fs.writeFileSync(path.join(appEnvHome, PM2_APP_ALIVE_MARKER), 'alive')
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
+  const health = await startHealthServer({ pm2Daemon: 'alive', flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     fs.appendFileSync(path.join(fx.liveRoot, 'docker/app.env'), `PM2_HOME=${appEnvHome}\n`)
@@ -3564,7 +3907,6 @@ test('end-to-end (acid fixture, R59): on an unmanaged host whose docker/app.env 
     assert.ok(reportLine.includes(`inherited PM2_HOME=${appEnvHome}`), `the final report must name the inherited home:\n${reportLine}`)
     assert.doesNotMatch(reportLine, /pm2 default/, 'the report must not claim no home was in effect')
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3573,7 +3915,7 @@ test('end-to-end (acid fixture, R59): on an unmanaged host whose docker/app.env 
 test('end-to-end (acid fixture, R59): if the task starts but the backend never answers, the health polling fails the run into RESTORE REQUIRED', async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => false })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => false })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -3628,7 +3970,8 @@ test('end-to-end (acid fixture, R59): an UNMANAGED host (a stray .pm2-runtime bu
     const homes = readPm2HomeLog(fx.homeLogPath)
     assert.deepEqual(
       homes.map((entry) => `${entry.command}@${entry.home}`),
-      ['stop@', ...(IS_WINDOWS ? [] : ['restart@']), ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@`)],
+      // R67 round 1: on Windows the step 2 stop is pipe-gated too -- no pm2 call at all.
+      [...(IS_WINDOWS ? [] : ['stop@', 'restart@']), ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@`)],
       'no PM2_HOME may be injected on an unmanaged host, and no daemon may be killed there',
     )
     assertFailureHandlerPm2Stop(combined)
@@ -3673,8 +4016,15 @@ test('end-to-end (acid fixture, R59): on a pm2-runtime host a restart failure th
     assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'only "not found" may trigger the task fallback')
     assert.match(combined, /RESTORE REQUIRED/)
     // The failure handler: off Windows a plain stop (no pipe check there); on Windows the
-    // test holds pm2's pipe, so on this pm2-runtime host the handler stops AND kills (R60).
-    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...RESTART_STEP7_PM2_CALLS, ...(IS_WINDOWS ? ['stop', 'kill'] : FAILURE_HANDLER_PM2_CALLS)])
+    // test holds pm2's pipe, so the handler stops -- and since R67 round 1 never kills
+    // after a restart gate (exit 21 here), although this is a pm2-runtime host.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command), ['stop', ...RESTART_STEP7_PM2_CALLS, ...(IS_WINDOWS ? ['stop'] : FAILURE_HANDLER_PM2_CALLS)])
+    if (IS_WINDOWS) {
+      const restoreBlock = combined.slice(combined.indexOf('RESTORE REQUIRED'))
+      assert.doesNotMatch(restoreBlock, /\n\s*pm2 kill\s*\r?\n/, 'after a gate the printed commands never say pm2 kill')
+      assert.match(restoreBlock, /do NOT pm2 kill:/)
+      assert.match(restoreBlock, /Stop-Process -Id <that pid>/)
+    }
     if (!IS_WINDOWS) assertFailureHandlerPm2Stop(combined)
     assert.equal(fs.existsSync(fx.witness.flagPath), IS_WINDOWS, 'the flag is kept only after an R67 gate (judge M1)')
   } finally {
@@ -3692,8 +4042,7 @@ for (const variant of ['parameter', 'environment']) {
     const chosenHome = path.join(root, 'chosen-pm2-home')
     fs.mkdirSync(chosenHome, { recursive: true })
     fs.writeFileSync(path.join(chosenHome, PM2_APP_ALIVE_MARKER), 'alive')
-    const health = await startHealthServer({ flagPath: fx.witness.flagPath })
-    const pipe = await holdPm2PipeOnWindows()
+    const health = await startHealthServer({ pm2Daemon: 'alive', flagPath: fx.witness.flagPath })
     try {
       const archivePath = buildR59LiveRootAndArchive(fx, health.port)
       const params = { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' }
@@ -3711,7 +4060,6 @@ for (const variant of ['parameter', 'environment']) {
       assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [])
       assert.match(result.stdout, new RegExp(`source: ${variant === 'parameter' ? 'parameter -Pm2Home' : 'environment PM2_HOME'}`))
     } finally {
-      await pipe.close()
       health.server.close()
       fs.rmSync(root, { recursive: true, force: true })
     }
@@ -3747,7 +4095,7 @@ test('end-to-end (acid fixture, R59): -Pm2ScheduledTaskName \'\' disables the fa
     assert.deepEqual(readLogLines(fx.taskLogPath), [], 'with the fallback disabled by name the scheduler must be neither queried nor started')
     assert.deepEqual(
       readPm2HomeLog(fx.homeLogPath).map((entry) => `${entry.command}@${entry.home}`),
-      [`stop@${fx.runtimeHome}`, ...(IS_WINDOWS ? [] : [`restart@${fx.runtimeHome}`]), ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@${fx.runtimeHome}`)],
+      [...(IS_WINDOWS ? [] : [`stop@${fx.runtimeHome}`, `restart@${fx.runtimeHome}`]), ...FAILURE_HANDLER_PM2_CALLS.map((command) => `${command}@${fx.runtimeHome}`)],
       'the explicit home must still apply to every pm2 call, and nothing may be killed',
     )
     assertFailureHandlerPm2Stop(combined)
@@ -3761,7 +4109,7 @@ test('end-to-end (acid fixture, R59): -Pm2ScheduledTaskName \'\' disables the fa
 test('end-to-end (acid fixture, R59): a non-default -Pm2ScheduledTaskName is the task that is detected, started and reported — never the default MetaSheet-PM2', async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     // Only 'Custom-PM2' exists; starting any other name fails like the real cmdlet.
@@ -3799,8 +4147,7 @@ test('end-to-end (acid fixture, R59): a RELATIVE -Pm2Home is resolved once, agai
   const absoluteHome = path.join(operatorCwd, relativeName)
   fs.mkdirSync(absoluteHome, { recursive: true })
   fs.writeFileSync(path.join(absoluteHome, PM2_APP_ALIVE_MARKER), 'alive')
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
+  const health = await startHealthServer({ pm2Daemon: 'alive', flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub({ taskPresent: false }), {
@@ -3824,7 +4171,6 @@ test('end-to-end (acid fixture, R59): a RELATIVE -Pm2Home is resolved once, agai
       `the report must name the absolute home:\n${result.stdout}`,
     )
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -3946,7 +4292,7 @@ test('Write-RestoreBlock (R59): the $env:PM2_HOME and Start-ScheduledTask lines 
 test('end-to-end (acid fixture, R59): RestartService=0 on a pm2-runtime host reaches the final report with "backend started: skipped (RestartService=0)" -- pm2 is stopped and never restarted or killed, the task is never started, there is no health polling', async () => {
   const root = mkLongTempDir('ms2-upgrade-r59-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4069,8 +4415,9 @@ test('R60 wiring (#6079): Main refuses a -BackupPaths that misses a replaced or 
 
   const stopCalls = (main.match(/Stop-Pm2App -Pm2Command[^\n]*/g) || []).map((call) => call.trim())
   assert.equal(stopCalls.length, 2)
-  assert.equal(stopCalls[0], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home', 'the step 2 stop stays unconditional')
-  assert.equal(stopCalls[1], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:($null -ne $restoreTask)')
+  assert.equal(stopCalls[0], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home', 'the step 2 stop: no -AfterFailure, no kill (pipe-gated inside Stop-Pm2App since R67 round 1)')
+  // R67 round 1: after a restart gate the handler stops but never kills.
+  assert.equal(stopCalls[1], 'Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:(($null -ne $restoreTask) -and ($null -eq $script:RestartGateFailure))')
   const handler = main.slice(main.indexOf('Write-Err $_.Exception.Message'))
   const lookupIdx = handler.indexOf('$restoreTask = Get-Pm2ScheduledTask -TaskName $Pm2ScheduledTaskName')
   const handlerStopIdx = handler.indexOf('Stop-Pm2App -Pm2Command')
@@ -4268,7 +4615,7 @@ test('end-to-end (acid fixture, R60 review #6079): a -BackupPaths without packag
   }
 })
 
-test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pipe means no pm2 command at all; a present or unqueryable pipe means stop -- and on a pm2-runtime host stop, pm2 kill, then the pipe wait, in that order, under the one home; an unmanaged host is never killed; off Windows, and at step 2, the stop runs as before (runs on every OS)', () => {
+test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pipe means no pm2 command at all; a present or unqueryable pipe means stop -- and on a pm2-runtime host stop, pm2 kill, then the pipe wait, in that order, under the one home; an unmanaged host is never killed; off Windows the stop runs as before; since R67 round 1 the step 2 stop is pipe-gated the same way and never kills (runs on every OS)', () => {
   const scratch = mkLongTempDir('ms2-upgrade-unit-')
   try {
     const home = path.join(scratch, 'runtime-home')
@@ -4284,7 +4631,13 @@ test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pi
       { label: 'UNKNOWN_UNMANAGED', pipe: 'null', kill: false, expect: ['PROBE', 'stop'] },
       { label: 'STILL_OPEN_RUNTIME_HOST', pipe: 'true', kill: true, wait: 'still-open', expect: ['PROBE', 'stop', 'kill', 'WAIT'] },
       { label: 'NOT_WINDOWS_RUNTIME_HOST', machinePipe: false, pipe: 'false', kill: true, expect: ['stop'] },
-      { label: 'STEP2', afterFailure: false, pipe: 'false', kill: false, expect: ['stop'] },
+      // R67 round 1 (#6412 finding 2): step 2's stop is pipe-gated too -- no pipe, no pm2.
+      { label: 'STEP2', afterFailure: false, pipe: 'false', kill: false, expect: ['PROBE'] },
+      { label: 'STEP2_PIPE', afterFailure: false, pipe: 'true', kill: false, expect: ['PROBE', 'stop'] },
+      // Step 2 never kills, even if a caller passed -KillDaemonAfterStop.
+      { label: 'STEP2_PIPE_KILL_FLAG', afterFailure: false, pipe: 'true', kill: true, expect: ['PROBE', 'stop'] },
+      { label: 'STEP2_UNKNOWN', afterFailure: false, pipe: 'null', kill: false, expect: ['PROBE', 'stop'] },
+      { label: 'STEP2_NOT_WINDOWS', afterFailure: false, machinePipe: false, pipe: 'false', kill: false, expect: ['stop'] },
     ]
     const prelude =
       dotSourcePrelude(scratch) +
@@ -4358,6 +4711,9 @@ test('Stop-Pm2App -AfterFailure (R60 review #6079): on Windows, no pm2 daemon pi
     assert.doesNotMatch(section('PRESENT_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE/)
     assert.match(section('STILL_OPEN_RUNTIME_HOST'), /PM2_DAEMON_NOT_CONFIRMED_GONE: after 'pm2 kill' the pipe \\\\\.\\pipe\\rpc\.sock is 'still-open'/)
     assert.match(section('UNKNOWN_UNMANAGED'), /could not be queried; stopping 'metasheet-backend' anyway/)
+    assert.deepEqual(readPm2HomeLog(byLabel.STEP2.homeLog), [], 'step 2 with no pipe: pm2 must not be run at all')
+    assert.match(section('STEP2'), /PM2_STOP_SKIPPED_NO_PIPE: no pm2 daemon listens on \\\\\.\\pipe\\rpc\.sock, so 'metasheet-backend' is not running under pm2/)
+    assert.doesNotMatch(section('STEP2'), /PM2_STOP_SKIPPED_NO_DAEMON/)
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true })
   }
@@ -4459,7 +4815,7 @@ test('stop gap (#6079): a backup that fails after the step 2 stop -- nothing rep
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   // The backend answers until the step 2 stop, then stays DOWN until the scheduled task
   // has started pm2-runtime again.
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const before = liveInstallSnapshot(fx.liveRoot)
@@ -4569,7 +4925,7 @@ test('stop gap wiring (#6079): everything after the step 2 stop sits in the one 
 
   const unapplied = fnBody('Start-BackendAfterUnappliedUpgrade')
   // R67: the way step 7 starts it is Start-BackendWithRestartGates.
-  assert.match(unapplied, /\$startedVia = Start-BackendWithRestartGates -Pm2Command \$Pm2Command -Name \$Name -Pm2Home \$Pm2Home -ScheduledTaskName \$ScheduledTaskName -Since \(Get-Date\) -TaskIdleTimeoutSec \$TaskIdleTimeoutSec\n/, 'the backend must be started the way step 7 starts it')
+  assert.match(unapplied, /\$startedVia = Start-BackendWithRestartGates -Pm2Command \$Pm2Command -Name \$Name -Pm2Home \$Pm2Home -ScheduledTaskName \$ScheduledTaskName -Since \(Get-Date\) -TaskIdleTimeoutSec \$TaskIdleTimeoutSec -BackendPort \(Get-UrlPort -Url \$BackendHealthUrl\)\n/, 'the backend must be started the way step 7 starts it')
   assert.doesNotMatch(unapplied, /Write-RestoreBlock|Stop-Pm2App|Remove-Item|Copy-Item/, 'nothing replaced: no restore, no stop, no file operation')
   assert.match(unapplied, /\[Parameter\(Mandatory = \$true\)\]\[bool\]\$BackendAnsweredBeforeStop/, 'the pre-stop evidence has no default: every caller must say what it saw')
   assert.equal((unapplied.match(/Start-BackendWithRestartGates -Pm2Command/g) || []).length, 1)
@@ -4599,8 +4955,7 @@ test('stop gap (#6079): the decision rests on the first write, not on the step -
   const root = mkLongTempDir('ms2-upgrade-gap-')
   // pm2-runtime still holds the app: the plain `pm2 restart` brings it back.
   const fx = setUpR59Fixture(root, { runtimeAlive: true })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
-  const pipe = await holdPm2PipeOnWindows()
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath })
   try {
     buildAcidLiveRoot(fx.liveRoot, {
       pm2LogPath: fx.pm2LogPath,
@@ -4632,7 +4987,6 @@ test('stop gap (#6079): the decision rests on the first write, not on the step -
     assert.deepEqual(liveInstallSnapshot(fx.liveRoot), before, 'no file of the installed version may have changed')
     assert.ok(!fs.existsSync(fx.witness.flagPath))
   } finally {
-    await pipe.close()
     health.server.close()
     fs.rmSync(root, { recursive: true, force: true })
   }
@@ -4641,7 +4995,7 @@ test('stop gap (#6079): the decision rests on the first write, not on the step -
 test('stop gap (#6079): once the first live path is being replaced, the backend is NEVER started by the script -- a copy that fails right after packages/core-backend/dist was deleted gets the failure handler\'s stop and RESTORE REQUIRED, no restart, no task start, no health polling', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
@@ -4681,7 +5035,7 @@ test('stop gap (#6079): once the first live path is being replaced, the backend 
 test('stop gap (#6079): a delete that stops halfway through the first live directory has already replaced something -- the fact is recorded BEFORE the delete, so the backend is never started and RESTORE REQUIRED is printed', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
@@ -4715,7 +5069,7 @@ test('stop gap (#6079): a delete that stops halfway through the first live direc
 test('stop gap (#6079): when starting the backend again itself fails (the task cannot be started), the operator is told the site is DOWN, with the commands to start it by hand -- the pm2 home, pm2 restart, pm2 kill, the task by its folder -- and the run fails on the original error; no restore block', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4755,7 +5109,7 @@ test('stop gap (#6079): a backend that is started again but never answers is rep
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   // Answering until the step 2 stop; the task starts pm2-runtime, but the backend never
   // answers again (a crash loop, or a start slower than the attempts).
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx, { comesBackWithTask: false }) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx, { comesBackWithTask: false }) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4800,7 +5154,7 @@ test('stop gap (#6079): a backend that is started again but never answers is rep
 test('stop gap (#6079, review F1): a re-run that meets a backend which does NOT answer (an earlier run replaced files, failed, and was never restored) and then fails before replacing anything does NOT start the backend -- the half-replaced tree stays stopped, and the operator is told why and to restore that run first', async () => {
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const liveDist = path.join(fx.liveRoot, 'packages', 'core-backend', 'dist')
@@ -4826,14 +5180,17 @@ test('stop gap (#6079, review F1): a re-run that meets a backend which does NOT 
     assertEndsOnError(run2, 'STUB_COPY_FAILED: cannot write')
     assert.doesNotMatch(run2.stdout, /BACKUP_PATH=/, 'run 2 must have failed inside the backup step')
 
-    // Nothing starts run 1's half-replaced tree: run 2's step 2 stop, and no pm2 call,
-    // no task start and no health polling after it.
-    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).slice(pm2CallsBefore).map((entry) => entry.command), ['stop'], `the backend must not be started on a tree an earlier run half-replaced.\n${report}`)
+    // Nothing starts run 1's half-replaced tree: run 2's step 2 stop (off Windows; on
+    // Windows run 1 left no pm2 daemon on the pipe, so since R67 round 1 run 2 runs no
+    // pm2 command at all), and no pm2 call, no task start and no health polling after it.
+    assert.deepEqual(readPm2HomeLog(fx.homeLogPath).slice(pm2CallsBefore).map((entry) => entry.command), IS_WINDOWS ? [] : ['stop'], `the backend must not be started on a tree an earlier run half-replaced.\n${report}`)
     assert.deepEqual(readLogLines(fx.taskLogPath).slice(taskCallsBefore).filter((line) => line.startsWith('start')), [], 'the task must not be started')
     assert.ok(!fs.existsSync(fx.runtimeStartedMarker), 'pm2-runtime must not have been started')
     assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling in either run')
-    // Why: run 1 met the backend answering before its stop, run 2 did not.
-    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true', '/health up=false'], report)
+    // Why: run 1 met the backend answering before its stop, run 2 did not -- nothing
+    // listens on the backend port any more (R67 round 1: the backend is its own process,
+    // which run 1's stop removed), so run 2's probe never reaches this server.
+    assert.deepEqual(health.preStopProbes.map((entry) => `${entry.url} up=${entry.backendUp}`), ['/health up=true'], report)
 
     // What the operator reads.
     const block = run2.stdout.slice(run2.stdout.indexOf('UPGRADE NOT APPLIED'))
@@ -4861,7 +5218,7 @@ test('stop gap (#6079): with -RestartService 0 a failure before anything was rep
   const root = mkLongTempDir('ms2-upgrade-gap-')
   const fx = setUpR59Fixture(root, { runtimeAlive: false })
   // Only a witness here: with RestartService=0 step 2 must not probe the backend at all.
-  const health = await startHealthServer({ flagPath: fx.witness.flagPath })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath })
   try {
     const archivePath = buildR59LiveRootAndArchive(fx, health.port)
     const wrapper = writeStubbedUpgradeWrapper(
@@ -4921,6 +5278,98 @@ test('stop gap (#6079): a failure BEFORE the step 2 stop (the gate cannot be rai
   }
 })
 
+// ── 3d'. R67 round 1 (#6412 review findings 1, 2, 4) ────────────────────────────────
+
+test('end-to-end (acid fixture, R67 round 1 port gate): an orphaned backend the step 2 stop does not remove keeps listening on the backend port -- on Windows step 7 refuses with exit 20 before any pm2 command or task start, names its pid and keeps the flag; off Windows the gate does not apply', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r67-')
+  const liveRoot = path.join(root, 'live')
+  const witness = maintenanceWitnessPaths(root, liveRoot)
+  // pm2 holds the app, but the process on the backend port survives the stop (an orphan).
+  const health = await startHealthServer({ flagPath: witness.flagPath, keepOnStop: true })
+  try {
+    const pm2LogPath = path.join(root, 'pm2-calls.log')
+    buildAcidLiveRoot(liveRoot, { pm2LogPath, backendPort: health.port, witness })
+    const { archivePath } = buildAcidArchive(root)
+    const result = await runUpgradeScriptAsync(r67UpgradeArgs(liveRoot, root, archivePath, health.url, ['-Pm2ScheduledTaskName', '', '-PluginLoadTimeoutSec', '2']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    const calls = readLogLines(pm2LogPath).map((line) => line.split(/\s+/)[0])
+    if (IS_WINDOWS) {
+      assert.equal(result.status, 20, report)
+      assert.match(combined, new RegExp(`PM2_PRE_RESTART_PORT_BUSY: something already listens on the backend port \\(127\\.0\\.0\\.1:${health.port}\\) before 'metasheet-backend' is started: pid \\d+ \\(started \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}; `))
+      assert.deepEqual(calls, ['stop', 'stop'], 'the step 2 stop and the failure handler\'s stop -- no list, no restart, no kill')
+      assert.match(combined, /RESTORE REQUIRED/)
+      assert.match(combined, /KEPT: PM2_PRE_RESTART_PORT_BUSY stopped this run/)
+      assert.ok(fs.existsSync(witness.flagPath), 'the maintenance flag stays up')
+      assert.deepEqual(health.requests.filter((entry) => !entry.gateProbe), [], 'no health polling: the old process never gets to answer for the new one')
+    } else {
+      // Documented gap: the port and listener-age gates need Get-NetTCPConnection (Windows).
+      assert.doesNotMatch(combined, /PM2_PRE_RESTART_PORT_BUSY/)
+      assert.deepEqual(calls.slice(0, 2), ['stop', 'restart'], report)
+    }
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R67 round 1 backend already down): no pm2 daemon on the pipe and nothing on the backend port before the run -- on Windows the whole upgrade runs NO pm2 command (the step 2 stop is skipped, no stray daemon) and step 7 starts the MetaSheet-PM2 task; off Windows the pre-R67 R59 path; both pass (RED on the pre-round-1 script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r67-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ pm2Daemon: 'none', oldBackend: false, flagPath: fx.witness.flagPath, backendUp: () => fs.existsSync(fx.runtimeStartedMarker) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(root, fx.taskStub(), { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '3', HealthcheckDelaySec: '1' })
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    const homes = readPm2HomeLog(fx.homeLogPath).map((entry) => entry.command)
+    if (IS_WINDOWS) {
+      assert.deepEqual(homes, [], 'not one pm2 command in the whole run')
+      assert.match(combined, /PM2_STOP_SKIPPED_NO_PIPE/)
+      assert.match(combined, /PM2_PRE_RESTART_TASK_PATH/)
+      assert.match(combined, /Listener-age gate: the process behind http:\/\/127\.0\.0\.1:\d+\/health started at or after T0\./)
+    } else {
+      assert.deepEqual(homes, ['stop', 'restart', 'kill'])
+    }
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), ['start MetaSheet-PM2'])
+    assert.match(result.stdout, /backend started:\s+scheduled-task/)
+    assert.ok(!fs.existsSync(fx.witness.flagPath))
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('end-to-end (acid fixture, R67 round 1 exit code): a backup that fails, followed by a restart gate while the failure handler starts the unapplied upgrade again (the task never leaves Running), exits with that gate\'s code 23 -- not 1 -- and keeps the flag, which the UPGRADE NOT APPLIED block says (RED on the pre-round-1 script)', async () => {
+  const root = mkLongTempDir('ms2-upgrade-r67-')
+  const fx = setUpR59Fixture(root, { runtimeAlive: false })
+  const health = await startHealthServer({ pm2Daemon: fx.pm2Daemon, flagPath: fx.witness.flagPath, backendUp: backendUpUntilStopped(fx) })
+  try {
+    const archivePath = buildR59LiveRootAndArchive(fx, health.port)
+    const wrapper = writeStubbedUpgradeWrapper(
+      root,
+      fx.taskStub({ taskState: 'Running', runningPolls: 100000 }),
+      { ...fx.baseParams, PackageArchive: archivePath, HealthUrl: health.url, HealthcheckAttempts: '2', HealthcheckDelaySec: '1', ScheduledTaskIdleTimeoutSec: '2' },
+      copyItemFailureStubSource(fx.backupRoot),
+    )
+    const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
+    const combined = result.stderr + result.stdout
+    const report = `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`
+    assert.equal(result.status, 23, `the gate that fired names the exit code.\n${report}`)
+    assert.match(combined, /STUB_COPY_FAILED: cannot write/, 'the original error is still printed')
+    assert.match(combined, /Backend: NOT started -- starting it again failed: PM2_SCHEDULED_TASK_STILL_RUNNING: /)
+    assert.match(combined, /=+ UPGRADE NOT APPLIED =+/)
+    assert.match(combined, /KEPT: PM2_SCHEDULED_TASK_STILL_RUNNING stopped this run/)
+    assert.match(combined, /RESTART_GATE_FAILED exit=23: PM2_SCHEDULED_TASK_STILL_RUNNING: /)
+    assert.ok(fs.existsSync(fx.witness.flagPath), 'the flag is kept, and the exit code says why')
+    assert.deepEqual(readLogLines(fx.taskLogPath).filter((line) => line.startsWith('start ')), [], 'a Running task is never started')
+  } finally {
+    health.server.close()
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
 // ── 3e. The success path is unchanged, byte for byte ─────────────────────────────
 //
 // The stop-gap fix moved the step 3 backup inside the failure handler and added the
@@ -4940,8 +5389,9 @@ test('stop gap (#6079): a failure BEFORE the step 2 stop (the gate cannot be rai
 // pm2 uses the machine-wide pipe: success-output-<shape>.txt is the non-Windows
 // output (the pre-R67 restart and R59 fallback), success-output-<shape>.win32.txt the
 // Windows output (Windows PowerShell 5.1 and pwsh 7 alike). On Windows the
-// pm2-restart shape holds pm2's pipe for the run (holdPm2PipeOnWindows); the task
-// shape has no pipe, which is the R59 host after pm2-runtime auto-exited.
+// pm2-restart shape holds pm2's pipe for the run; the task shape holds it until the
+// step 2 stop (startHealthServer pm2Daemon), which is the R59 host whose pm2-runtime
+// auto-exited. R67 round 1 adds the backend-port and listener-age lines.
 
 const SUCCESS_GOLDEN_DIR = path.join(repoRoot, 'scripts/ops/fixtures/multitable-onprem-upgrade-inplace')
 
@@ -4978,6 +5428,7 @@ for (const shape of SUCCESS_SHAPES) {
     // A host whose nginx reads the gate: the gate probe gets 503, so the output
     // carries no text that depends on the console code page.
     const health = await startHealthServer({
+      pm2Daemon: fx.pm2Daemon,
       flagPath: fx.witness.flagPath,
       gateWired: true,
       backendUp: () => shape.runtimeAlive || fs.existsSync(fx.runtimeStartedMarker),
@@ -4994,13 +5445,7 @@ for (const shape of SUCCESS_SHAPES) {
         HealthcheckAttempts: '3',
         HealthcheckDelaySec: '1',
       })
-      const pipe = await holdPm2PipeOnWindows(shape.runtimeAlive)
-      let result
-      try {
-        result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
-      } finally {
-        await pipe.close()
-      }
+      const result = await runPwshFileAsync(wrapper, r59ChildEnv(fx.profileDir, {}, ['PM2_HOME']))
       assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
       const actual = `=== stdout ===\n${normalizeRunOutput(result.stdout, root)}=== stderr ===\n${normalizeRunOutput(result.stderr, root)}`
       const goldenPath = path.join(SUCCESS_GOLDEN_DIR, `success-output-${shape.name}${process.platform === 'win32' ? '.win32' : ''}.txt`)

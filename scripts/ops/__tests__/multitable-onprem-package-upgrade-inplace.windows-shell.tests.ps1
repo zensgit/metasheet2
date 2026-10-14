@@ -82,7 +82,9 @@ $requiredOk = @(
   '^ok \d+ - R67 restart gates:',
   '^ok \d+ - R67 post-restart gate:',
   '^ok \d+ - end-to-end \(acid fixture, R67 pre-restart gate\):',
-  '^ok \d+ - end-to-end \(acid fixture, R67 post-restart gate\):'
+  '^ok \d+ - end-to-end \(acid fixture, R67 post-restart gate\):',
+  '^ok \d+ - end-to-end \(acid fixture, R67 round 1 port gate\):',
+  '^ok \d+ - end-to-end \(acid fixture, R67 round 1 backend already down\):'
 )
 $missing = @()
 foreach ($pattern in $requiredOk) {

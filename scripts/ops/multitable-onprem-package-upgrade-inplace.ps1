@@ -114,6 +114,11 @@
   URL can answer before the plugins load. Step 7 (and the failure handler's
   start of an unapplied upgrade) therefore starts the backend through
   Start-BackendWithRestartGates:
+    a0. PORT (Windows, round 1): nothing may already listen on the backend
+       port -- an orphaned backend would answer every later probe while the
+       new one dies on EADDRINUSE -> PM2_PRE_RESTART_PORT_BUSY (pid, start
+       time and command line printed; nothing stopped). Step 2's own stop is
+       pipe-gated too (no pipe: PM2_STOP_SKIPPED_NO_PIPE, no pm2 call).
     a. PRE-RESTART (Windows): pm2's pipe must exist AND `pm2 list` under the
        resolved PM2_HOME must show the app online or stopped (stopped is what
        the step 2 stop leaves). No pipe -> no pm2 call at all (it would spawn
@@ -136,6 +141,10 @@
        (ecosystem `time: true`, the pm2 daemon's local time) at or after T0
        within -PluginLoadTimeoutSec; otherwise PLUGIN_LOAD_NOT_CONFIRMED. The
        maintenance flag is dropped only after this gate passed.
+    c2. LISTENER AGE (Windows, round 1, both paths): after the backend
+       answers, the process listening on its port must have started at or
+       after T0 -> else PM2_BACKEND_LISTENER_PREDATES_T0; an unreadable age is
+       reported (PM2_LISTENER_AGE_UNCONFIRMED), never failed.
     d. SCHEDULED-TASK PATH: the task is started only once it has left the
        Running state (-ScheduledTaskIdleTimeoutSec, else
        PM2_SCHEDULED_TASK_STILL_RUNNING), and after the backend answers, on
@@ -147,7 +156,9 @@
   A run stopped by any of these gates KEEPS the maintenance flag (judge M1):
   the site stays on the maintenance page until an operator has confirmed the
   backend by hand; the RESTORE REQUIRED / UPGRADE NOT APPLIED blocks say so
-  and print the Remove-Item command.
+  and print the Remove-Item command. After a gate the failure handler stops
+  pm2 but never runs `pm2 kill`, and the printed commands advise removing a
+  stray daemon by pid instead.
 
   EXIT CODES
     0   upgrade completed (or RestartService=0 and everything else passed).
@@ -155,12 +166,13 @@
         swap, F22/hash assertions, migrations, healthchecks, R59 fallback).
     20  PRE-RESTART gate refused (PM2_PRE_RESTART_NO_DAEMON,
         PM2_PRE_RESTART_PIPE_UNKNOWN, PM2_PRE_RESTART_APP_NOT_READY,
-        PM2_PRE_RESTART_SPAWNED_DAEMON).
+        PM2_PRE_RESTART_SPAWNED_DAEMON, PM2_PRE_RESTART_PORT_BUSY).
     21  RESTART RESULT gate failed (PM2_RESTART_RESULT_FAILED).
     22  POST-RESTART gate failed (PLUGIN_LOAD_NOT_CONFIRMED).
-    23  SCHEDULED-TASK gate failed (PM2_SCHEDULED_TASK_STILL_RUNNING,
-        PM2_BACKEND_UNDER_STRAY_DAEMON).
-    20-23 keep the maintenance flag.
+    23  SCHEDULED-TASK / LISTENER gate failed (PM2_SCHEDULED_TASK_STILL_RUNNING,
+        PM2_BACKEND_UNDER_STRAY_DAEMON, PM2_BACKEND_LISTENER_PREDATES_T0).
+    20-23 keep the maintenance flag -- also when the gate fired while the
+    failure handler started an unapplied upgrade again after another error.
 
   NO ROLLBACK AUTOMATION in this MVP. Steps 3-7 (everything after the step 2
   stop: the backup, then the entire mutation window through the health
@@ -645,7 +657,9 @@ function Test-Pm2UsesMachinePipe {
 
 function Stop-Pm2App {
   <#
-    `pm2 stop <name>` under $Pm2Home. Step 2 calls it plainly.
+    `pm2 stop <name>` under $Pm2Home. Step 2 calls it plainly; since R67
+    round 1 its stop is pipe-gated on Windows as well (no pipe: no pm2 call,
+    PM2_STOP_SKIPPED_NO_PIPE), and only -AfterFailure may kill.
 
     -AfterFailure is the mutation-window failure handler's call (R60 review,
     #6079). On Windows it first asks pm2's machine-wide pipe whether any pm2
@@ -676,11 +690,19 @@ function Stop-Pm2App {
     [switch]$KillDaemonAfterStop
   )
 
-  $pipeDecides = $AfterFailure -and (Test-Pm2UsesMachinePipe)
+  # R67 round 1 (#6412 review finding 2): step 2's stop is pipe-gated too. A
+  # pm2 stop with no daemon on the pipe spawned a stray daemon that then HELD
+  # the pipe, so step 7's pre-restart gate saw "pipe, app not listed" and every
+  # re-run of a host whose backend was already down dead-ended at exit 20.
+  $pipeDecides = Test-Pm2UsesMachinePipe
   if ($pipeDecides) {
     $pipePresent = Test-Pm2DaemonPipePresent
     if ($pipePresent -eq $false) {
-      Write-Info "PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\.\pipe\rpc.sock, so '$Name' is not running under pm2 and nothing is stopped. No pm2 command is run: one would start a pm2 daemon inside this upgrade session."
+      if ($AfterFailure) {
+        Write-Info "PM2_STOP_SKIPPED_NO_DAEMON: no pm2 daemon listens on \\.\pipe\rpc.sock, so '$Name' is not running under pm2 and nothing is stopped. No pm2 command is run: one would start a pm2 daemon inside this upgrade session."
+      } else {
+        Write-Info "PM2_STOP_SKIPPED_NO_PIPE: no pm2 daemon listens on \\.\pipe\rpc.sock, so '$Name' is not running under pm2 and nothing is stopped. No pm2 command is run: one would start a stray pm2 daemon that then holds the pipe."
+      }
       return
     }
     if ($null -eq $pipePresent) {
@@ -694,7 +716,7 @@ function Stop-Pm2App {
     Write-Info "pm2 stop reported exit=$($result.ExitCode) for '$Name' (continuing: the app may not have been running yet)"
   }
 
-  if ($pipeDecides -and $KillDaemonAfterStop) {
+  if ($AfterFailure -and $pipeDecides -and $KillDaemonAfterStop) {
     Write-Info 'pm2-runtime host: removing the pm2 daemon (pm2 kill) so none stays attached to this upgrade session, then waiting for its pipe to close.'
     $kill = Invoke-Pm2 -Pm2Command $Pm2Command -Arguments @('kill') -Pm2Home $Pm2Home
     if ($kill.ExitCode -ne 0) {
@@ -1000,6 +1022,8 @@ function Start-BackendWithRestartGates {
     Off Windows pm2's sockets are files, pm2's pipe says nothing, and this is
     exactly Restart-Pm2AppOrScheduledTask (the pre-R67 restart and its R59
     fallback). On Windows (one machine-wide pipe, \\.\pipe\rpc.sock):
+      a0. PORT: nothing may listen on $BackendPort yet (Assert-BackendPortFree,
+         PM2_PRE_RESTART_PORT_BUSY, exit 20) -- before either path.
       a. PRE-RESTART: no pipe -> no pm2 command at all (a pm2 call that finds
          no daemon spawns a stray one that later hosts the backend): the
          $ScheduledTaskName task is started once it has left Running, or,
@@ -1021,12 +1045,18 @@ function Start-BackendWithRestartGates {
     [string]$Pm2Home = '',
     [string]$ScheduledTaskName = '',
     [Parameter(Mandatory = $true)][datetime]$Since,
-    [int]$TaskIdleTimeoutSec = 60
+    [int]$TaskIdleTimeoutSec = 60,
+    # The backend-direct URL's port (Get-UrlPort); 0 = cannot be checked.
+    [int]$BackendPort = 0
   )
 
   if (-not (Test-Pm2UsesMachinePipe)) {
     return (Restart-Pm2AppOrScheduledTask -Pm2Command $Pm2Command -Name $Name -Pm2Home $Pm2Home -ScheduledTaskName $ScheduledTaskName -TaskIdleTimeoutSec $TaskIdleTimeoutSec)
   }
+
+  # a0. PRE-RESTART, both paths: nothing may already listen on the backend
+  # port (#6412 review finding 1). Before any pm2 command or task start.
+  Assert-BackendPortFree -Port $BackendPort -Name $Name
 
   $pipePresent = Test-Pm2DaemonPipePresent
   if ($null -eq $pipePresent) {
@@ -1078,6 +1108,143 @@ function Start-BackendWithRestartGates {
   return 'pm2-restart'
 }
 
+function Get-PortListener {
+  <#
+    Windows: who listens on TCP $Port (Get-NetTCPConnection -State Listen).
+    Returns [pscustomobject]@{ State; Processes; Reason }: State 'free'
+    (nothing listens), 'busy' (Processes lists each distinct owning process:
+    Pid, CreationDate (or $null), CommandLine, ParentPid, ParentCommandLine)
+    or 'unknown' (off Windows, no port, no Get-NetTCPConnection, or a query
+    that failed for another reason than "no such connection"). Read-only:
+    it never stops anything. Never throws.
+  #>
+  param([int]$Port)
+
+  $unknown = { param([string]$Why) [pscustomobject]@{ State = 'unknown'; Processes = @(); Reason = $Why } }
+  if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+    return (& $unknown 'not Windows')
+  }
+  if ($Port -le 0) {
+    return (& $unknown 'no backend port')
+  }
+  if (-not (Get-Command -Name 'Get-NetTCPConnection' -ErrorAction SilentlyContinue)) {
+    return (& $unknown 'Get-NetTCPConnection is not available')
+  }
+  $queryErrors = $null
+  try {
+    $connections = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue -ErrorVariable queryErrors)
+  } catch {
+    return (& $unknown ("Get-NetTCPConnection failed: {0}" -f $_.Exception.Message))
+  }
+  if ($connections.Count -eq 0) {
+    # "No MSFT_NetTCPConnection objects found" is ObjectNotFound: nothing listens.
+    $realErrors = @($queryErrors | Where-Object { $null -ne $_ -and [string]$_.CategoryInfo.Category -ne 'ObjectNotFound' })
+    if ($realErrors.Count -gt 0) {
+      return (& $unknown ("Get-NetTCPConnection failed: {0}" -f $realErrors[0].Exception.Message))
+    }
+    return [pscustomobject]@{ State = 'free'; Processes = @(); Reason = '' }
+  }
+  $processes = @()
+  foreach ($owningPid in @($connections | ForEach-Object { [int]$_.OwningProcess } | Sort-Object -Unique)) {
+    $info = [pscustomobject]@{ Pid = $owningPid; CreationDate = $null; CommandLine = ''; ParentPid = 0; ParentCommandLine = '' }
+    try {
+      $proc = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId={0}' -f $owningPid) -ErrorAction Stop)
+      if ($proc.Count -gt 0) {
+        $info.CreationDate = $proc[0].CreationDate
+        $info.CommandLine = [string]$proc[0].CommandLine
+        $info.ParentPid = [int]$proc[0].ParentProcessId
+        $parent = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId={0}' -f $info.ParentPid) -ErrorAction Stop)
+        if ($parent.Count -gt 0) {
+          $info.ParentCommandLine = [string]$parent[0].CommandLine
+        }
+      }
+    } catch {
+      # The pid is still reported; its age and command line stay unknown.
+    }
+    $processes += $info
+  }
+  return [pscustomobject]@{ State = 'busy'; Processes = $processes; Reason = '' }
+}
+
+function Format-PortListenerProcess {
+  # One values-free description of a listening process: pid, start time,
+  # command line (paths only, cut at 160 characters).
+  param($Process)
+  $created = if ($null -eq $Process.CreationDate) { 'start time unknown' } else { 'started ' + ([datetime]$Process.CreationDate).ToString('yyyy-MM-ddTHH:mm:ss') }
+  $command = [string]$Process.CommandLine
+  if ([string]::IsNullOrWhiteSpace($command)) { $command = 'command line unknown' }
+  if ($command.Length -gt 160) { $command = $command.Substring(0, 160) + '...' }
+  return ('pid {0} ({1}; {2})' -f $Process.Pid, $created, $command)
+}
+
+function Get-UrlPort {
+  # The TCP port of $Url, 0 when it has none or does not parse.
+  param([string]$Url = '')
+  try { return ([uri]$Url).Port } catch { return 0 }
+}
+
+function Assert-BackendPortFree {
+  <#
+    PRE-RESTART (Windows, #6412 review finding 1): nothing may listen on the
+    backend port before the backend is started. An orphaned backend (its pm2
+    daemon removed by pid, or a hand-started node) keeps answering /health
+    while the new process loads its plugins, logs "Plugin loaded" after T0,
+    dies on EADDRINUSE and autorestart-loops -- every later gate would pass on
+    the OLD process. Throws PM2_PRE_RESTART_PORT_BUSY (exit 20, flag kept),
+    naming each listener's pid, start time and command line; nothing is
+    stopped. A port that cannot be checked is reported
+    (PM2_PRE_RESTART_PORT_UNCONFIRMED) and the start goes on: the
+    post-health listener-age gate still applies.
+  #>
+  param([int]$Port, [string]$Name = 'metasheet-backend')
+
+  $listener = Get-PortListener -Port $Port
+  switch ($listener.State) {
+    'free' {
+      Write-Info "Pre-restart gate: nothing listens on the backend port (127.0.0.1:$Port)."
+    }
+    'busy' {
+      $who = (@($listener.Processes | ForEach-Object { Format-PortListenerProcess -Process $_ }) -join '; ')
+      throw (Register-RestartGateFailure -Code 'PM2_PRE_RESTART_PORT_BUSY' -ExitCode 20 -Detail "something already listens on the backend port (127.0.0.1:$Port) before '$Name' is started: $who. A new backend would die on EADDRINUSE while the old process answers every health probe. Nothing was started and nothing was stopped; find out what that process is before removing it (by pid, never pm2 kill).")
+    }
+    default {
+      Write-Info "PM2_PRE_RESTART_PORT_UNCONFIRMED: could not check the backend port (127.0.0.1:$Port): $($listener.Reason). Continuing; the listener-age gate after the health check still applies."
+    }
+  }
+}
+
+function Assert-BackendListenerStartedSince {
+  <#
+    POST-RESTART (Windows, #6412 review finding 1), both start paths: the
+    process listening on the backend port must have started at or after T0
+    -- a listener older than T0 is a backend this run did not start, and its
+    health answer proves nothing about the new one. Throws
+    PM2_BACKEND_LISTENER_PREDATES_T0 (exit 23, flag kept). A listener whose
+    age cannot be read (or a port that cannot be checked) is reported
+    (PM2_LISTENER_AGE_UNCONFIRMED) and the run goes on.
+  #>
+  param([Parameter(Mandatory = $true)][string]$BackendHealthUrl, [Parameter(Mandatory = $true)][datetime]$Since)
+
+  $port = Get-UrlPort -Url $BackendHealthUrl
+  $listener = Get-PortListener -Port $port
+  if ($listener.State -ne 'busy') {
+    $why = if ($listener.State -eq 'free') { 'nothing listens on it by the time it was checked' } else { $listener.Reason }
+    Write-Info "PM2_LISTENER_AGE_UNCONFIRMED: could not tell when the process behind $BackendHealthUrl started ($why)."
+    return
+  }
+  $older = @($listener.Processes | Where-Object { $null -ne $_.CreationDate -and ([datetime]$_.CreationDate) -lt $Since })
+  if ($older.Count -gt 0) {
+    $who = (@($older | ForEach-Object { Format-PortListenerProcess -Process $_ }) -join '; ')
+    throw (Register-RestartGateFailure -Code 'PM2_BACKEND_LISTENER_PREDATES_T0' -ExitCode 23 -Detail ("the backend answers, but the process listening on 127.0.0.1:{0} started before T0 {1}: {2}. That is not the backend this run started. Nothing was stopped; remove it by pid (never pm2 kill) once you know what it is." -f $port, $Since.ToString('yyyy-MM-ddTHH:mm:ss'), $who))
+  }
+  $unaged = @($listener.Processes | Where-Object { $null -eq $_.CreationDate })
+  if ($unaged.Count -gt 0) {
+    Write-Info ("PM2_LISTENER_AGE_UNCONFIRMED: the start time of {0} behind {1} could not be read." -f ((@($unaged | ForEach-Object { 'pid ' + $_.Pid }) -join ', ')), $BackendHealthUrl)
+    return
+  }
+  Write-Info "Listener-age gate: the process behind $BackendHealthUrl started at or after T0."
+}
+
 function Get-BackendHostParent {
   <#
     Windows: who hosts the process listening on $Port, by its parent process:
@@ -1090,27 +1257,22 @@ function Get-BackendHostParent {
   param([int]$Port)
 
   $unknown = [pscustomobject]@{ Kind = 'unknown'; ParentPid = 0 }
-  if (([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) -or ($Port -le 0)) {
+  $listener = Get-PortListener -Port $Port
+  if ($listener.State -ne 'busy' -or @($listener.Processes).Count -eq 0) {
     return $unknown
   }
-  try {
-    $listener = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop)
-    if ($listener.Count -eq 0) { return $unknown }
-    $owner = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId={0}' -f [int]$listener[0].OwningProcess) -ErrorAction Stop)
-    if ($owner.Count -eq 0) { return $unknown }
-    $parent = @(Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId={0}' -f [int]$owner[0].ParentProcessId) -ErrorAction Stop)
-    if ($parent.Count -eq 0) { return $unknown }
-    $parentCommand = [string]$parent[0].CommandLine
-    if ($parentCommand -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$') {
-      return [pscustomobject]@{ Kind = 'stray-daemon'; ParentPid = [int]$parent[0].ProcessId }
-    }
-    if ($parentCommand -match '(?i)pm2-runtime') {
-      return [pscustomobject]@{ Kind = 'pm2-runtime'; ParentPid = [int]$parent[0].ProcessId }
-    }
-    return [pscustomobject]@{ Kind = 'unknown'; ParentPid = [int]$parent[0].ProcessId }
-  } catch {
+  $owner = @($listener.Processes)[0]
+  if ($owner.ParentPid -le 0) {
     return $unknown
   }
+  $parentCommand = [string]$owner.ParentCommandLine
+  if ($parentCommand -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$') {
+    return [pscustomobject]@{ Kind = 'stray-daemon'; ParentPid = [int]$owner.ParentPid }
+  }
+  if ($parentCommand -match '(?i)pm2-runtime') {
+    return [pscustomobject]@{ Kind = 'pm2-runtime'; ParentPid = [int]$owner.ParentPid }
+  }
+  return [pscustomobject]@{ Kind = 'unknown'; ParentPid = [int]$owner.ParentPid }
 }
 
 function Assert-BackendNotUnderStrayDaemon {
@@ -1215,7 +1377,8 @@ function Find-PluginLoadedLineSince {
     daemon's local time, whole seconds) of the last
     `Plugin loaded: <PluginName>` line in $Text stamped at or after $Since
     (truncated to the second); '' when there is none. A line without such a
-    prefix never counts: nothing would show it was written after T0.
+    prefix inherits the last stamp before it (pm2 stamps per chunk); one with
+    no stamped line before it never counts.
   #>
   param(
     [string]$Text = '',
@@ -1225,10 +1388,25 @@ function Find-PluginLoadedLineSince {
 
   $floor = New-Object DateTime ($Since.Year, $Since.Month, $Since.Day, $Since.Hour, $Since.Minute, $Since.Second)
   $pattern = '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?: .*Plugin loaded: ' + [regex]::Escape($PluginName) + '(?![\w.-])'
+  # pm2 (fork mode, `time: true`) stamps each chunk it receives from the
+  # backend, not each line: lines after the first of a chunk carry no prefix.
+  # Such a line inherits the stamp of the last stamped line before it (#6412
+  # review finding 5); one before any stamped line never counts.
+  $stampedLine = '^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?: '
+  $pluginLine = 'Plugin loaded: ' + [regex]::Escape($PluginName) + '(?![\w.-])'
+  $lastStamp = ''
   $found = ''
   foreach ($line in ($Text -split "`r?`n")) {
-    if ($line -notmatch $pattern) { continue }
-    $stampText = $Matches[1]
+    if ($line -match $stampedLine) {
+      $lastStamp = $Matches[1]
+    }
+    if ($line -match $pattern) {
+      $stampText = $Matches[1]
+    } elseif (($line -match $pluginLine) -and ($line -notmatch $stampedLine) -and $lastStamp) {
+      $stampText = $lastStamp
+    } else {
+      continue
+    }
     $stamp = [datetime]::MinValue
     if (-not [datetime]::TryParseExact($stampText, 'yyyy-MM-ddTHH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::None, [ref]$stamp)) {
       continue
@@ -2365,10 +2543,18 @@ function Write-BackendStartCommands {
     if ([string]::IsNullOrEmpty($ScheduledTaskPath)) {
       $ScheduledTaskPath = '\'
     }
-    Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited and that pm2 call'
-    Write-Host '  # started an empty pm2 daemon in THIS session. Kill it first, or the task''s pm2-runtime'
-    Write-Host '  # attaches to it and the backend lives only as long as this session. Then start the task:'
-    Write-Host '  pm2 kill'
+    if ($null -ne $script:RestartGateFailure) {
+      # R67 round 1: after a restart gate, never `pm2 kill` (machine-wide pipe).
+      Write-Host '  # pm2-runtime host: start pm2 commands only while pm2-runtime holds \\.\pipe\rpc.sock. If a stray'
+      Write-Host '  # pm2 daemon holds it (a node process whose command line ends in pm2\lib\Daemon.js), do NOT pm2 kill:'
+      Write-Host '  # Stop-Process -Id <that pid> -- unless the backend runs under it (its parent) -- then start the task'
+      Write-Host '  # (runbook-backend-log-rotation-20261012.md section 3 item 8):'
+    } else {
+      Write-Host '  # pm2-runtime host: if pm2 answers "not found", pm2-runtime has exited and that pm2 call'
+      Write-Host '  # started an empty pm2 daemon in THIS session. Kill it first, or the task''s pm2-runtime'
+      Write-Host '  # attaches to it and the backend lives only as long as this session. Then start the task:'
+      Write-Host '  pm2 kill'
+    }
     Write-Host ("  Start-ScheduledTask -TaskName {0} -TaskPath {1}" -f (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskName), (ConvertTo-PsSingleQuotedLiteral -Value $ScheduledTaskPath))
   }
 }
@@ -2445,7 +2631,7 @@ function Start-BackendAfterUnappliedUpgrade {
     try {
       # R67: the same gated start as step 7 (no pm2 call without a daemon,
       # the restart's own result checked, the task started only once idle).
-      $startedVia = Start-BackendWithRestartGates -Pm2Command $Pm2Command -Name $Name -Pm2Home $Pm2Home -ScheduledTaskName $ScheduledTaskName -Since (Get-Date) -TaskIdleTimeoutSec $TaskIdleTimeoutSec
+      $startedVia = Start-BackendWithRestartGates -Pm2Command $Pm2Command -Name $Name -Pm2Home $Pm2Home -ScheduledTaskName $ScheduledTaskName -Since (Get-Date) -TaskIdleTimeoutSec $TaskIdleTimeoutSec -BackendPort (Get-UrlPort -Url $BackendHealthUrl)
       $backendHealth = Wait-ForHealthOk -HealthUrl $BackendHealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Backend-direct healthcheck'
       if ($backendHealth.Ok) {
         $outcome = 'answered'
@@ -2703,7 +2889,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         # runtime exited after the stop (R59). Throws on anything else, into
         # the handler below -- an R67 gate with its own exit code and the
         # maintenance flag kept. Either way the SAME health polling follows.
-        $backendStartedVia = Start-BackendWithRestartGates -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -ScheduledTaskName $Pm2ScheduledTaskName -Since $restartT0 -TaskIdleTimeoutSec $ScheduledTaskIdleTimeoutSec
+        $backendStartedVia = Start-BackendWithRestartGates -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -ScheduledTaskName $Pm2ScheduledTaskName -Since $restartT0 -TaskIdleTimeoutSec $ScheduledTaskIdleTimeoutSec -BackendPort (Get-UrlPort -Url $resolvedBackendHealthUrl)
       } else {
         Write-Info 'RestartService=0: skipped'
       }
@@ -2723,10 +2909,15 @@ if ($MyInvocation.InvocationName -ne '.') {
         $backendHealth = Wait-ForHealthOk -HealthUrl $resolvedBackendHealthUrl -Attempts $HealthcheckAttempts -DelaySec $HealthcheckDelaySec -Label 'Backend-direct healthcheck'
         if ($backendHealth.Ok) {
           Write-Info "Backend answered directly on attempt $($backendHealth.Attempt) ($resolvedBackendHealthUrl)"
-          # R67 scheduled-task gate: a backend started by the task must not be
-          # hosted by a pm2 Daemon.js (Windows; throws, flag kept).
-          if ($backendStartedVia -eq 'scheduled-task' -and (Test-Pm2UsesMachinePipe)) {
-            Assert-BackendNotUnderStrayDaemon -BackendHealthUrl $resolvedBackendHealthUrl
+          if (Test-Pm2UsesMachinePipe) {
+            # R67 round 1 listener-age gate, both paths: the process answering
+            # must have started at or after T0 (Windows; throws, flag kept).
+            Assert-BackendListenerStartedSince -BackendHealthUrl $resolvedBackendHealthUrl -Since $restartT0
+            # R67 scheduled-task gate: a backend started by the task must not be
+            # hosted by a pm2 Daemon.js (Windows; throws, flag kept).
+            if ($backendStartedVia -eq 'scheduled-task') {
+              Assert-BackendNotUnderStrayDaemon -BackendHealthUrl $resolvedBackendHealthUrl
+            }
           }
           # R67 POST-RESTART gate: the health URL can answer before the
           # plugins load. The maintenance gate drops only after this.
@@ -2814,7 +3005,10 @@ if ($MyInvocation.InvocationName -ne '.') {
         $restoreTaskPath = Get-ScheduledTaskPathOrRoot -Task $restoreTask
       }
       try {
-        Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:($null -ne $restoreTask)
+        # R67 round 1: after a restart gate the stop is enough -- `pm2 kill`
+        # goes through the machine-wide pipe and, after exit 23, would hit the
+        # stray daemon hosting the new backend (runbook section 3 item 8).
+        Stop-Pm2App -Pm2Command $pm2Command -Name $Pm2AppName -Pm2Home $resolvedPm2Home -AfterFailure -KillDaemonAfterStop:(($null -ne $restoreTask) -and ($null -eq $script:RestartGateFailure))
       } catch {
         Write-Err "pm2 stop itself failed while handling the error above: $($_.Exception.Message)"
       }
@@ -2822,12 +3016,14 @@ if ($MyInvocation.InvocationName -ne '.') {
       throw
     }
   } catch {
-    # R67: a run an R67 restart gate stopped exits with that gate's own code
-    # (20-23, see EXIT CODES in the header) instead of 1. Every other error is
-    # rethrown exactly as before (exit 1), and so is an earlier error that a
-    # gate merely followed (the failure handler's start of an unapplied
-    # upgrade): the exit code names the error that ended the run.
-    if (($null -ne $script:RestartGateFailure) -and ($_.Exception.Message -eq $script:RestartGateFailure.Message)) {
+    # R67: a run in which an R67 restart gate fired exits with that gate's own
+    # code (20-23, see EXIT CODES in the header) instead of 1 -- also when the
+    # gate fired inside the failure handler's start of an unapplied upgrade
+    # after another error (#6412 review finding 4): the flag is kept then too,
+    # and exit 1 promises the pre-R67 flag handling. The original error was
+    # already printed by the handler. Every other error is rethrown exactly as
+    # before (exit 1).
+    if ($null -ne $script:RestartGateFailure) {
       $restartGateExit = [int]$script:RestartGateFailure.ExitCode
     } else {
       throw
