@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { PoolClient } from 'pg'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from '../w4c3a-legacy-plan-commit-connection'
+import { W4_TRANSACTION_STATEMENT_TIMEOUT_MS } from '../w4c0-operation-contract'
 import {
   AttendanceLegacyPlanWorkerRepositoryError,
   createAttendanceLegacyPlanWorkerRepositoryV1,
@@ -280,6 +283,7 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
     expect(String(query.mock.calls[1]?.[0])).toMatch(
       /started_at = COALESCE\(started_at, now\(\)\)/,
     )
+    expect(String(query.mock.calls[1]?.[0])).toContain('finished_at = clock_timestamp(), updated_at = now()')
     expect(query.mock.calls[1]?.[1]).toEqual([
       JOB_ID,
       ORG_ID,
@@ -342,5 +346,40 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
       code: 'W4C3A_REPOSITORY_RESPONSE_DIGEST_MISMATCH',
     })
     expect(query).not.toHaveBeenCalled()
+  })
+})
+
+describe('legacy-plan COMMIT connection deadline', () => {
+  it('leaves nonliteral transaction statements on the original client path', async () => {
+    const query = vi.fn().mockResolvedValue({ rows: [] })
+    const connection = createAttendanceLegacyPlanCommitConnectionV1({ query } as unknown as Pick<PoolClient, 'query'>)
+    for (const text of ['COMMIT;', 'commit', 'BEGIN']) await connection.query(text)
+    expect(query.mock.calls).toEqual([['COMMIT;', undefined], ['commit', undefined], ['BEGIN', undefined]])
+  })
+
+  it('overrides only the COMMIT read timer with the existing transaction bound', async () => {
+    const result = { rows: [{ observed: true }] }
+    const query = vi.fn().mockResolvedValue(result)
+    const client = { query } as unknown as Pick<PoolClient, 'query'>
+    const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
+    const values = ['opaque-fixture']
+    expect(await connection.query('SELECT $1', values)).toBe(result)
+    expect(await connection.query('COMMIT', [])).toBe(result)
+    expect(await connection.query('ROLLBACK')).toBe(result)
+    expect(query.mock.calls).toEqual([
+      ['SELECT $1', values],
+      [{ text: 'COMMIT', values: [], query_timeout: W4_TRANSACTION_STATEMENT_TIMEOUT_MS }],
+      ['ROLLBACK', undefined],
+    ])
+    expect(W4_TRANSACTION_STATEMENT_TIMEOUT_MS).toBe(180000)
+  })
+
+  it('does not hide commit errors or replace the acquired connection', async () => {
+    const failure = Object.assign(new Error('synthetic-commit-failure'), { code: '40001' })
+    const query = vi.fn().mockRejectedValue(failure)
+    const connection = createAttendanceLegacyPlanCommitConnectionV1({ query } as unknown as Pick<PoolClient, 'query'>)
+    await expect(connection.query('COMMIT')).rejects.toBe(failure)
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(query).toHaveBeenCalledWith({ text: 'COMMIT', values: undefined, query_timeout: 180000 })
   })
 })
