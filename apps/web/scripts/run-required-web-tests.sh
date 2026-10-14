@@ -1989,6 +1989,7 @@ exec npx vitest run \
   tasks-nav-badge.spec.ts \
   tasks-nav-feature-gate.spec.ts \
   tasks-nav-relogin.spec.ts \
+  tasks-record-dispatch.spec.ts \
   tasks-routes.spec.ts \
   tasks-settings-view.spec.ts \
   tasks-status-filter.spec.ts \
