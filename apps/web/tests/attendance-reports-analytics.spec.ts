@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
+import { attendanceReportDateRangeIssue, isAttendanceReportDateRangeValid } from '../src/views/attendance/attendanceReportDateRange'
 import { apiFetch } from '../src/utils/api'
 
 vi.mock('../src/composables/usePlugins', () => ({
@@ -400,6 +401,74 @@ describe('Attendance reports analytics', () => {
     expect(container?.querySelector('.attendance__status-block')?.textContent).toContain('Code: ACCESS')
   })
 
+  it('blocks record reload, export, and empty ranges with the same date validation', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')!
+    const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')!
+    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters button')!
+    const recordsReload = container!.querySelector<HTMLButtonElement>(
+      '[data-report-card="records"] .attendance__records-actions button',
+    )!
+    const requestReload = container!.querySelector<HTMLButtonElement>(
+      '[data-report-card="request-report"] .attendance__requests-header button',
+    )!
+    const exportCsv = findButtonByText(container!, 'Export CSV')
+    const exportXlsx = container!.querySelector<HTMLButtonElement>('[data-testid="attendance-export-xlsx"]')!
+
+    fromInput.value = '2026-04-20'
+    fromInput.dispatchEvent(new Event('input'))
+    toInput.value = '2026-04-10'
+    toInput.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    vi.mocked(apiFetch).mockClear()
+    recordsReload.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('.attendance__status-block')?.textContent)
+      .toContain('Start date must be on or before end date.')
+
+    exportCsv.click()
+    exportXlsx.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+
+    fromInput.value = ''
+    fromInput.dispatchEvent(new Event('input'))
+    toInput.value = '2026-04-15'
+    toInput.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    expect(fromInput.getAttribute('aria-invalid')).toBe('true')
+    expect(toInput.getAttribute('aria-invalid')).toBe('true')
+    expect(container!.querySelector('[data-report-period-label]')?.textContent).toContain('Range not set')
+
+    vi.mocked(apiFetch).mockClear()
+    headerReload.click()
+    recordsReload.click()
+    requestReload.click()
+    exportCsv.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('.attendance__status-block')?.textContent)
+      .toContain('Both start and end dates are required.')
+
+    fromInput.value = '2026-04-01'
+    fromInput.dispatchEvent(new Event('input'))
+    toInput.value = ''
+    toInput.dispatchEvent(new Event('input'))
+    await flushUi(3)
+
+    vi.mocked(apiFetch).mockClear()
+    recordsReload.click()
+    await flushUi(3)
+    expect(apiFetch).not.toHaveBeenCalled()
+    expect(container!.querySelector('[data-report-period-label]')?.textContent).toContain('Range not set')
+  })
+
 
   it('S5: Export Excel reuses the server report CSV endpoint and is gated like CSV', async () => {
     app = createApp(AttendanceView, { mode: 'reports' })
@@ -428,5 +497,19 @@ describe('Attendance reports analytics', () => {
     userInput!.dispatchEvent(new Event('input'))
     await flushUi(3)
     expect(container!.querySelector<HTMLButtonElement>('[data-testid="attendance-export-xlsx"]')!.disabled).toBe(true)
+  })
+})
+
+describe('attendance report date range', () => {
+  it('requires both ends and rejects an inverted range', () => {
+    expect(attendanceReportDateRangeIssue('', '2026-04-15')).toBe('missing')
+    expect(attendanceReportDateRangeIssue('2026-04-01', '   ')).toBe('missing')
+    expect(attendanceReportDateRangeIssue('  ', '')).toBe('missing')
+    expect(attendanceReportDateRangeIssue('2026-04-20', '2026-04-10')).toBe('inverted')
+    expect(attendanceReportDateRangeIssue('2026-04-15', '2026-04-15')).toBeNull()
+    expect(attendanceReportDateRangeIssue('2026-04-01', '2026-04-15')).toBeNull()
+    expect(isAttendanceReportDateRangeValid('2026-04-01', '')).toBe(false)
+    expect(isAttendanceReportDateRangeValid('2026-04-20', '2026-04-10')).toBe(false)
+    expect(isAttendanceReportDateRangeValid('2026-04-01', '2026-04-15')).toBe(true)
   })
 })

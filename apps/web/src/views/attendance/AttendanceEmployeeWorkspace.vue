@@ -174,13 +174,6 @@
           >
             {{ tr('Updating...', '更新中...') }}
           </small>
-          <p
-            v-if="selfServiceNeedsSetupHint"
-            class="attendance__field-hint attendance__field-hint--strong"
-            data-selfservice-setup-hint
-          >
-            {{ selfServiceSetupFollowupHint }}
-          </p>
         </div>
       </div>
 
@@ -590,8 +583,6 @@ const props = defineProps<{
   workbenchWorkMinutes: number
   workbenchLateEarlyLabel: string
   workbenchHasLateEarly: boolean
-  selfServiceNeedsSetupHint: boolean
-  selfServiceSetupFollowupHint: string
   formatStatus: (value: string) => string
   // Status banner (not part of the history disclosure)
   statusMessage: string

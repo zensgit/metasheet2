@@ -163,8 +163,6 @@
         :workbench-work-minutes="workbenchWorkMinutes"
         :workbench-late-early-label="activeWorkbenchLateEarlyLabel"
         :workbench-has-late-early="activeWorkbenchHasLateEarly"
-        :self-service-needs-setup-hint="selfServiceNeedsSetupHint"
-        :self-service-setup-followup-hint="selfServiceSetupFollowupHint"
         :format-status="formatStatus"
         :status-message="statusMessage"
         :status-kind="statusKind"
@@ -10251,7 +10249,7 @@ import {
   type AttendanceRecordRequestPrefill,
 } from './attendance/attendanceRecordRequestPrefill'
 import { formatCalendarDate } from './attendance/dateOnlyFormat'
-import { isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
+import { attendanceReportDateRangeIssue, isAttendanceReportDateRangeValid } from './attendance/attendanceReportDateRange'
 import AttendanceAdminRail from './attendance/AttendanceAdminRail.vue'
 import AttendanceAdminTaskHome from './attendance/AttendanceAdminTaskHome.vue'
 import { isAttendanceAdminEndpointUnavailable } from './attendance/attendanceAdminEndpointCompatibility'
@@ -13872,9 +13870,7 @@ const attendanceOverviewAttentionItem = computed(() => resolveAttendanceOverview
 ))
 
 const selfServiceQuickActionHint = computed(() => {
-  if (selfServiceNeedsSetupHint.value) {
-    return selfServiceSetupFollowupHint.value
-  }
+  // Setup guidance stays on the canonical attention item (design-lock §4.2 row 6).
   if (activeWorkbenchAttentionCount.value > 0) {
     return tr(
       'Start with missing-punch handling to resolve the current anomaly reminder.',
@@ -23332,12 +23328,13 @@ async function loadRequestReport() {
 }
 
 function validateReportDateRange(): boolean {
-  if (isAttendanceReportDateRangeValid(fromDate.value, toDate.value)) return true
+  const issue = attendanceReportDateRangeIssue(fromDate.value, toDate.value)
+  if (!issue) return true
 
-  setStatus(
-    tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。'),
-    'error',
-  )
+  const message = issue === 'inverted'
+    ? tr('Start date must be on or before end date.', '开始日期不能晚于结束日期。')
+    : tr('Both start and end dates are required.', '开始日期和结束日期都需要填写。')
+  setStatus(message, 'error')
   return false
 }
 
@@ -23519,6 +23516,8 @@ async function reloadRequestReportWithStatus() {
 }
 
 async function reloadRecordsWithStatus() {
+  if (!validateReportDateRange()) return
+
   try {
     await loadRecords()
     setStatus(
@@ -23847,6 +23846,7 @@ async function cancelRequest(id: string, requestType = '') {
 async function changeRecordsPage(delta: number) {
   const next = recordsPage.value + delta
   if (next < 1 || next > recordsTotalPages.value) return
+  if (!validateReportDateRange()) return
   recordsPage.value = next
   try {
     await loadRecords()
@@ -23867,6 +23867,7 @@ async function changeRecordsPage(delta: number) {
 }
 
 async function exportCsv() {
+  if (!validateReportDateRange()) return
   if (reportsExportBlocked.value) {
     setStatus(
       appendStatusContext(
@@ -23952,6 +23953,7 @@ async function exportCsv() {
 // S5: same server report CSV (identical fields/filters/fingerprint) rendered to
 // a real .xlsx client-side — Excel opens it without the ANSI/GBK 乱码 guess.
 async function exportXlsx() {
+  if (!validateReportDateRange()) return
   if (reportsExportBlocked.value) {
     setStatus(
       appendStatusContext(
