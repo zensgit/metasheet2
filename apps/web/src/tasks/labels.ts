@@ -48,6 +48,9 @@ export const TASKS_ZH = {
   reopenSelfNoop: '你没有已完成的部分可以重启',
   // a done "all" mode task: reopen every assignee's part (scope all); `reopen` is one's own part
   reopenAll: '重启全部',
+  // its inline confirmation: it reopens other assignees' finished parts too
+  reopenAllConfirmPrompt: '确认重启全部负责人的部分？已完成的负责人需要重新完成。',
+  reopenAllConfirm: '确认重启全部',
   // a list row of an "all" mode task: the row has no assignee state, so complete / reopen happen
   // on the task detail, which turns off a click that would change nothing
   rowCompleteInDetail: '在任务详情中完成',
@@ -384,6 +387,8 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   completeNoopOwnPartDone: 'Your part is done; waiting for the other assignees',
   reopenSelfNoop: 'You have no completed part to reopen',
   reopenAll: 'Reopen for everyone',
+  reopenAllConfirmPrompt: "Reopen every assignee's part? Assignees who are done will need to complete again.",
+  reopenAllConfirm: 'Confirm reopen for everyone',
   rowCompleteInDetail: 'Complete on the task page',
   rowReopenInDetail: 'Reopen on the task page',
   modeAll: 'All assignees complete',

@@ -1148,6 +1148,14 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     return mountAsViewer(task, viewer)
   }
 
+  /** 重启全部 asks first: opens its confirmation, then confirms. */
+  async function reopenAllConfirmed(el: HTMLElement): Promise<void> {
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).click()
+    await flush()
+  }
+
   it('a creator who is not an assignee can reopen the task for everyone: scope all, then the detail reloads', async () => {
     h_.reopenTask.mockResolvedValue({ kind: 'ok' })
     const el = await mountAsViewer(DONE_ALL, 'u1')
@@ -1157,8 +1165,7 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     expect(all.disabled).toBe(false)
 
     h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ ...DONE_ALL, status: 'open' }) })
-    all.click()
-    await flush()
+    await reopenAllConfirmed(el)
     expect(h_.reopenTask).toHaveBeenCalledTimes(1)
     expect(h_.reopenTask).toHaveBeenCalledWith('t1', 'all')
     expect(h_.getTask).toHaveBeenCalledTimes(2)
@@ -1201,11 +1208,11 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     const pending = deferred<unknown>()
     h_.reopenTask.mockReturnValue(pending.promise)
     const el = await mountAsViewer(DONE_ALL, 'u2')
-    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
-    await flush()
-    expect((shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).disabled).toBe(true)
+    await reopenAllConfirmed(el)
+    expect((shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).disabled).toBe(true)
+    expect((shown(el, 'tasks-detail-reopen-all-confirm-cancel') as HTMLButtonElement).disabled).toBe(true)
     expect((shown(el, 'tasks-detail-reopen-button') as HTMLButtonElement).disabled).toBe(true)
-    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement).click()
     await flush()
     expect(h_.reopenTask).toHaveBeenCalledTimes(1)
     pending.resolve({ kind: 'ok' })
@@ -1215,9 +1222,43 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
   it('a failed reopen for everyone shows the action banner and does not reload', async () => {
     h_.reopenTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountAsViewer(DONE_ALL, 'u1')
-    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
-    await flush()
+    await reopenAllConfirmed(el)
     expect(shown(el, 'tasks-action-error')?.textContent).toBe('您没有权限修改此任务')
     expect(h_.getTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('重启全部 asks first: the click alone sends nothing, and cancelling sends nothing and brings the button back', async () => {
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-prompt')?.textContent).toBe('确认重启全部负责人的部分？已完成的负责人需要重新完成。')
+    const yes = shown(el, 'tasks-detail-reopen-all-confirm-yes') as HTMLButtonElement
+    expect(yes.textContent).toBe('确认重启全部')
+    expect(yes.getAttribute('aria-describedby')).toBe('tasks-detail-reopen-all-prompt')
+    expect(document.activeElement).toBe(yes)
+
+    ;(shown(el, 'tasks-detail-reopen-all-confirm-cancel') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(document.activeElement).toBe(shown(el, 'tasks-detail-reopen-all-button'))
+    expect(h_.getTask).toHaveBeenCalledTimes(1)
+  })
+
+  it('an open confirmation does not outlive its task: another task\'s detail starts from the button', async () => {
+    const el = await mountAsViewer(DONE_ALL, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
+
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ ...DONE_ALL, id: 't2' }) })
+    await router!.push('/tasks/t2')
+    await flush()
+    expect(h_.getTask).toHaveBeenLastCalledWith('t2')
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
   })
 })

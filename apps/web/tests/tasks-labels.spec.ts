@@ -982,6 +982,21 @@ describe('EN locale — TasksView detail page renders no CJK', () => {
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
+  it('the reopen-for-everyone confirmation', async () => {
+    h_.getTask.mockResolvedValue({
+      kind: 'ok',
+      task: taskDetail({ status: 'done', assignees: [{ userId: 'u2', completedAt: '2026-09-20T10:00:00Z' }] }),
+    })
+    const el = await mountViewAt('/tasks/t1')
+    await click(el, 'tasks-detail-reopen-all-button')
+    expect(must(el, 'tasks-detail-reopen-all-prompt').textContent?.trim()).toBe(
+      "Reopen every assignee's part? Assignees who are done will need to complete again.",
+    )
+    expect(must(el, 'tasks-detail-reopen-all-confirm-yes').textContent?.trim()).toBe('Confirm reopen for everyone')
+    expect(must(el, 'tasks-detail-reopen-all-confirm-cancel').textContent?.trim()).toBe('Cancel')
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
   it('FE-8: 422 INACTIVE_ORG_MEMBER next to the assignee form and next to the follower form', async () => {
     h_.addAssignee.mockResolvedValue({ kind: 'validation', code: 'INACTIVE_ORG_MEMBER' })
     h_.addFollower.mockResolvedValue({ kind: 'validation', code: 'INACTIVE_ORG_MEMBER' })

@@ -128,13 +128,34 @@
                 :aria-describedby="detailReopenSelfNoop ? 'tasks-detail-reopen-reason' : undefined"
                 @click="onDetailReopen('self')"
               >{{ t.reopen }}</button>
-              <button
-                v-if="detailOffersReopenAll"
-                type="button"
-                data-testid="tasks-detail-reopen-all-button"
-                :disabled="detailActionPending"
-                @click="onDetailReopen('all')"
-              >{{ t.reopenAll }}</button>
+              <!-- Reopening for everyone reopens other assignees' finished parts too, so it asks
+                   first: an inline two-step confirmation (no window.confirm), as the delete and
+                   the remove-from-list controls do. Cancelling it sends nothing. -->
+              <span v-if="detailOffersReopenAll" ref="reopenAllRef">
+                <button
+                  v-if="!reopenAllConfirmVisible"
+                  type="button"
+                  data-testid="tasks-detail-reopen-all-button"
+                  :disabled="detailActionPending"
+                  @click="openReopenAllConfirm"
+                >{{ t.reopenAll }}</button>
+                <span v-else data-testid="tasks-detail-reopen-all-confirm">
+                  <span id="tasks-detail-reopen-all-prompt" data-testid="tasks-detail-reopen-all-prompt">{{ t.reopenAllConfirmPrompt }}</span>
+                  <button
+                    type="button"
+                    data-testid="tasks-detail-reopen-all-confirm-yes"
+                    aria-describedby="tasks-detail-reopen-all-prompt"
+                    :disabled="detailActionPending"
+                    @click="onDetailReopen('all')"
+                  >{{ t.reopenAllConfirm }}</button>
+                  <button
+                    type="button"
+                    data-testid="tasks-detail-reopen-all-confirm-cancel"
+                    :disabled="detailActionPending"
+                    @click="cancelReopenAllConfirm"
+                  >{{ t.cancel }}</button>
+                </span>
+              </span>
               <p
                 v-if="detailReopenSelfNoop"
                 id="tasks-detail-reopen-reason"
@@ -635,6 +656,7 @@ import {
 } from '../../tasks/tasksApi'
 import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
+import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
 import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
@@ -857,6 +879,24 @@ const detailOffersReopenAll = computed(() => {
   const state = detailResult.value
   return state.kind === 'ok' && offersReopenAll(state.task, completionViewerId.value)
 })
+
+// The open "reopen for everyone" confirmation. Held here, not in the detail block (re-created on
+// every `loadDetail`); closed when the offer goes away, so a later offer starts from the button.
+const reopenAllConfirmVisible = ref(false)
+const reopenAllRef = ref<HTMLElement | null>(null)
+watch(detailOffersReopenAll, (offered) => {
+  if (!offered) reopenAllConfirmVisible.value = false
+})
+
+function openReopenAllConfirm(): void {
+  reopenAllConfirmVisible.value = true
+  void focusAfterSwap(() => reopenAllRef.value, 'tasks-detail-reopen-all-confirm-yes')
+}
+
+function cancelReopenAllConfirm(): void {
+  reopenAllConfirmVisible.value = false
+  void focusAfterSwap(() => reopenAllRef.value, 'tasks-detail-reopen-all-button')
+}
 
 function canEditOwnComment(comment: Comment): boolean {
   if (comment.deleted) return false
@@ -1129,11 +1169,12 @@ async function onDetailComplete(): Promise<void> {
 }
 
 /** `'self'` reopens the viewer's own part (in any mode the server reopens the whole task either
- *  way); `'all'` every assignee's part of a done "all" mode task, offered by `detailOffersReopenAll`. */
+ *  way); `'all'` every assignee's part of a done "all" mode task, offered by `detailOffersReopenAll`
+ *  and sent only from its open confirmation. */
 async function onDetailReopen(scope: ReopenScope): Promise<void> {
   const id = taskId.value
   if (!id || detailActionPending.value) return
-  if (scope === 'self' ? detailReopenSelfNoop.value : !detailOffersReopenAll.value) return
+  if (scope === 'self' ? detailReopenSelfNoop.value : !detailOffersReopenAll.value || !reopenAllConfirmVisible.value) return
   actionErrorKind.value = null
   const token = ++detailActionToken
   detailActionPending.value = true
@@ -1143,7 +1184,10 @@ async function onDetailReopen(scope: ReopenScope): Promise<void> {
       if (result.kind === 'ok') notifyTasksChanged()
       return
     }
-    if (applyActionOutcome(result.kind) === 'ok') await loadDetail(id)
+    if (applyActionOutcome(result.kind) === 'ok') {
+      reopenAllConfirmVisible.value = false
+      await loadDetail(id)
+    }
   } finally {
     if (token === detailActionToken) detailActionPending.value = false
   }
@@ -1925,6 +1969,7 @@ watch(taskId, (id) => {
   commentsTruncated.value = false
   deleteConfirmVisible.value = false
   deleteError.value = null
+  reopenAllConfirmVisible.value = false
   // M4: the editor's draft, phase and errors, the "my lists" read and the lists section's inline
   // error belong to the task that was showing (design §7.3: a route edge returns to idle).
   editorState.value = createDetailEditorState()
