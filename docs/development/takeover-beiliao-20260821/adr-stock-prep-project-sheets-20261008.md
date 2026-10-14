@@ -366,7 +366,7 @@ UNIQUE (tenant_id, project_no);  UNIQUE (sheet_id);  CHECK ((status='archived') 
        3. **上机步骤**见 `runbook-operator-merge-20261012.md`（老机器上执行，owner 动作）：R66 升级 → 只读预检 → 带拆分参数的 dry-run → owner 放行 → 维护窗口里 `--apply --split-extra-codes-to-role approvals_operator` → 视情况 `--delete-empty-old-role` → 角色管理里核对 → 审批模板计数大于 0 时在设计器里改指向。脚本保证的是每个成员的**平台权限码**不变；按角色 id / 显示名匹配人的其它配置（考勤调度权限、日历 / 节假日覆盖规则、钉钉同步的「成员组默认业务角色」）脚本不读，由 owner 按手册第 1 步人工预检、第 5 步核对（修复轮 2）。
   4. **定时试拉换账号**：脚本只调 dry-run 和 apply（`scheduled-pull.mjs:368-374`），用的如果是一线账号，升级后会 403；换成拉取人员账号。走 legacy `integration:read` / `integration:write` 的账号不受影响（`workbench-access.cjs:272,278`）。
   5. **撤销一线在旧表上的授权**，或降为只读（`univer-meta.ts:9797`），免得一线继续往一张没人读的表里填；暂停挂在旧表上的自动化（0924 §1）。
-  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。
+  6. 在 `app.env` 写入开关和 G1 角色清单，重启。`stock-prep_frontline` 进 G1 角色清单必须在第 3 步的搬迁脚本跑完（`--apply` 退出码 0）之后。上机手册（owner 决策清单、只读预检、核对、回退）见 `runbook-stock-prep-project-sheets-switch-on-20261014.md`。
   7. 拉取人员把每个项目建一次表；建表前定时试拉会把它们当 ABSENT 跳过。
   8. 只读核对：GET target 的行数要和表格 All Records 一致。
   9. 通知客户：自动化、提醒、自建视图都是按表配置的，新项目表不会自动带过去；旧表里已填的人工列不会带进新表，新表第一次拉取后人工列是空的。
