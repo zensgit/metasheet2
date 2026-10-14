@@ -6736,7 +6736,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
             >
               <AttendanceImportBatchesSection
@@ -6752,7 +6752,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
             >
               <AttendanceTeamAvailabilitySection :tr="tr" :user-scope="attendanceTeamAvailabilityUserScope" />
@@ -7597,7 +7597,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
             >
               <div class="attendance__admin-section-header">
@@ -34723,6 +34723,7 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__admin-grid),
 .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
 .attendance__form-sheet .attendance__override-filters {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
   gap: var(--ms-space-3) var(--ms-space-4);
@@ -34967,6 +34968,18 @@ defineExpose({
   align-items: center;
   gap: 8px 12px;
   margin-top: 8px;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox {
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox > span {
+  white-space: nowrap;
 }
 
 .attendance__ch-save-row .attendance__field-hint {

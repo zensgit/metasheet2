@@ -1500,7 +1500,7 @@ describe('Attendance admin anchor navigation', () => {
     input!.value = 'zzz-no-such-page-text'
     input!.dispatchEvent(new Event('input'))
     await flushUi()
-    expect(container!.querySelector('[data-admin-home-context="true"] [data-admin-page-search-hidden="true"]')).toBeTruthy()
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
     expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches')
     expect(container!.querySelector('[data-admin-page-search-status]')?.hasAttribute('data-attendance-search-empty')).toBe(true)
     expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()

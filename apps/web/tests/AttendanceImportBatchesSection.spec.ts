@@ -306,7 +306,7 @@ describe('AttendanceImportBatchesSection', () => {
         createBatch({
           id: 'batch-api',
           rowCount: 4,
-          status: 'rolled_back',
+          status: 'completed',
           source: 'api',
           createdBy: 'ops-9',
           meta: {
@@ -382,6 +382,54 @@ describe('AttendanceImportBatchesSection', () => {
       'batch-api',
       expect.stringContaining('Coverage: 4 / 4 (100%)'),
     )
+  })
+
+  it('hides rollback for a batch that is already rolled back', async () => {
+    const rollbackImportBatch = vi.fn()
+    const workflow: ImportBatchesBindings = {
+      importBatchLoading: ref(false),
+      importBatches: ref([
+        createBatch({
+          id: 'batch-done',
+          rowCount: 2,
+          status: 'rolled_back',
+          source: 'csv',
+          createdBy: 'ops-1',
+        }),
+      ]),
+      importBatchImpactLoading: ref(false),
+      importBatchImpactReport: ref(null),
+      importBatchSelectedId: ref('batch-done'),
+      importBatchItems: ref([
+        createItem({
+          id: 'item-done',
+          batchId: 'batch-done',
+        }),
+      ]),
+      importBatchSnapshot: ref(null),
+      loadFullImportBatchImpact: vi.fn(),
+      reloadImportBatches: vi.fn(),
+      loadImportBatchItems: vi.fn(),
+      rollbackImportBatch,
+      exportImportBatchItemsCsv: vi.fn(),
+      toggleImportBatchSnapshot: vi.fn(),
+    }
+
+    app = createApp(AttendanceImportBatchesSection, {
+      tr,
+      workflow,
+      resolveRuleSetName,
+      formatStatus,
+      formatDateTime,
+      formatJson,
+    })
+    app.mount(container!)
+    await flushUi()
+
+    expect(container!.textContent).toContain('rolled_back')
+    expect(container!.querySelector('[data-attendance-import-batch-rollback]')).toBeNull()
+    expect(container!.textContent).not.toContain('Rollback with loaded estimate')
+    expect(rollbackImportBatch).not.toHaveBeenCalled()
   })
 
   it('filters the batch inbox by search, status, engine, and source', async () => {

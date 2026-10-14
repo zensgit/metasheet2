@@ -2,11 +2,6 @@
   <div class="attendance__admin-section" data-attendance-team-availability>
     <div class="attendance__admin-section-header">
       <h4>{{ tr('Team availability', '团队可用性') }}</h4>
-      <div class="attendance__admin-actions">
-        <button class="attendance__btn attendance__btn--primary" :disabled="loading || !canLoad" @click="reload">
-          {{ loading ? tr('Loading...', '加载中...') : tr('Load', '加载') }}
-        </button>
-      </div>
     </div>
 
     <p class="attendance__hint">
@@ -51,6 +46,14 @@
         <span>{{ tr('To', '止') }}</span>
         <AttendanceLocaleDateInput id="attendance-ta-to" v-model="to" />
       </label>
+      <button
+        class="attendance__btn attendance__btn--primary attendance-ta__load"
+        type="button"
+        :disabled="loading || !canLoad"
+        @click="reload"
+      >
+        {{ loading ? tr('Loading...', '加载中...') : tr('Load', '加载') }}
+      </button>
     </div>
 
     <p v-if="errorText" class="attendance__error" data-attendance-team-availability-error>{{ errorText }}</p>
@@ -365,28 +368,68 @@ async function reload(): Promise<void> {
   flex-flow: row nowrap;
   align-items: center;
   gap: 8px;
-  flex: 1 1 0;
   min-width: 0;
   font-size: 12px;
-  color: #555;
+  font-weight: 600;
+  color: var(--ms-text-2, #555);
+}
+.attendance-ta__group {
+  flex: 1 1 16rem;
+}
+.attendance-ta__field:not(.attendance-ta__group) {
+  flex: 0 0 auto;
 }
 .attendance-ta__field > span {
   flex: 0 0 auto;
   white-space: nowrap;
 }
 .attendance-ta__field > input {
-  flex: 1 1 auto;
+  flex: 1 1 12rem;
   min-width: 0;
-  width: 100%;
+  width: auto;
+  max-width: 100%;
   box-sizing: border-box;
+  min-height: var(--ms-control-height, 32px);
   padding: 6px 10px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-bg-card, #fff);
+  color: var(--ms-text-1, inherit);
+  font: inherit;
+  font-weight: 400;
 }
 .attendance-ta__filters :deep(.attendance-locale-date) {
-  flex: 1 1 auto;
-  width: auto;
+  flex: 0 0 auto;
+  width: 11rem;
+  max-width: 11rem;
   min-width: 0;
+}
+.attendance-ta__filters :deep(.attendance-locale-date__input) {
+  width: 8.25rem;
+  max-width: 8.25rem;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 8px;
+  border: 1px solid var(--ms-border, #d0d5dd);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-bg-card, #fff);
+}
+.attendance-ta__load {
+  flex: 0 0 auto;
+  align-self: center;
+  min-height: var(--ms-control-height, 32px);
+  padding: 6px 14px;
+  border: 1px solid var(--ms-color-primary, #2563eb);
+  border-radius: var(--ms-radius-md, 8px);
+  background: var(--ms-color-primary, #2563eb);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+.attendance-ta__load:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .attendance-ta__group { position: relative; }
 .attendance-ta__group-menu {
