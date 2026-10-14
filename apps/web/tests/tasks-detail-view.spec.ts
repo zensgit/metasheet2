@@ -107,6 +107,12 @@ interface TaskDetailFixture {
   assignees: { userId: string; completedAt: string | null }[]
   canComplete: boolean
   canReopen: boolean
+  // Editor fields: present only where a cell needs the detail editor on screen.
+  version?: number
+  description?: string | null
+  startDate?: string | null
+  startTime?: string | null
+  remindAt?: string | null
 }
 
 function taskDetail(over: Partial<TaskDetailFixture> = {}): TaskDetailFixture {
@@ -1219,7 +1225,7 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     await flush()
   })
 
-  it('a failed reopen for everyone shows the action banner and does not reload', async () => {
+  it('a failed reopen for everyone shows the action banner, does not reload and leaves the confirmation open', async () => {
     h_.reopenTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountAsViewer(DONE_ALL, 'u1')
     await reopenAllConfirmed(el)
@@ -1258,6 +1264,34 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     await router!.push('/tasks/t2')
     await flush()
     expect(h_.getTask).toHaveBeenLastCalledWith('t2')
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
+    expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('a reload of the same task closes an open confirmation: an editor save brings the button back and sends no reopen', async () => {
+    const editable = taskDetail({
+      ...DONE_ALL,
+      version: 3,
+      description: null,
+      startDate: null,
+      startTime: null,
+      remindAt: null,
+    })
+    h_.patchTask.mockResolvedValue({ kind: 'ok', id: 't1', version: 4 })
+    const el = await mountAsViewer(editable, 'u1')
+    ;(shown(el, 'tasks-detail-reopen-all-button') as HTMLButtonElement).click()
+    await flush()
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
+
+    const title = shown(el, 'tasks-detail-editor-title') as HTMLInputElement
+    title.value = 'Task One renamed'
+    title.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-detail-editor-submit') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.patchTask).toHaveBeenCalledTimes(1)
+    expect(h_.getTask).toHaveBeenCalledTimes(2)
     expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeNull()
     expect(shown(el, 'tasks-detail-reopen-all-button')).toBeTruthy()
     expect(h_.reopenTask).not.toHaveBeenCalled()
