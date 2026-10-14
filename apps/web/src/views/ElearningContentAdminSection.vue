@@ -137,6 +137,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import { randomUuid } from '../utils/uuid'
 import { assignElearningDirect, ElearningApiError } from '../services/elearning'
 import {
   createElearningContentRequestIdTracker,
@@ -147,6 +148,7 @@ import {
 } from '../services/elearningContent'
 import {
   elearningAssignIncomplete,
+  elearningErrorMessage,
   elearningFailure,
   elearningLabel,
 } from './elearningLabels'
@@ -184,15 +186,12 @@ function newItem(itemType: ElearningContentItemType): ContentDraft {
 }
 
 function newUuid(): string {
-  if (typeof crypto === 'undefined' || typeof crypto.randomUUID !== 'function') {
-    throw new ElearningApiError('request_failed', 0)
-  }
-  return crypto.randomUUID()
+  return randomUuid()
 }
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }

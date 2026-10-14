@@ -1,3 +1,4 @@
+import { copyText } from '../../utils/clipboard'
 import { computed, onScopeDispose, ref, watch, type ComputedRef, type Ref } from 'vue'
 
 export type TranslateFn = (en: string, zh: string) => string
@@ -413,13 +414,9 @@ export function useAttendanceAdminRail({
       notify(tr('No admin section is active yet.', '当前还没有激活的管理区块。'), 'error')
       return
     }
-    try {
-      if (!navigator.clipboard?.writeText) {
-        throw new Error('Clipboard unavailable')
-      }
-      await navigator.clipboard.writeText(link)
+    if (await copyText(link)) {
       notify(tr('Current admin section link copied.', '当前管理区块链接已复制。'))
-    } catch {
+    } else {
       notify(tr('Failed to copy current admin section link.', '复制当前管理区块链接失败。'), 'error')
     }
   }

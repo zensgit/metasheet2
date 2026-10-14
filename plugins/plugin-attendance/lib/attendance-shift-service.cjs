@@ -148,6 +148,7 @@ function createAttendanceShiftService(deps) {
     DEFAULT_SHIFT,
     DEFAULT_ORG_ID,
     normalizeLegacyRotationRulesForShiftName,
+    prepareTimezoneSourceChange,
   } = deps
 
   function segmentValidationError(details) {
@@ -696,6 +697,8 @@ function createAttendanceShiftService(deps) {
 
     const shiftId = randomUUID()
     return db.transaction(async (trx) => {
+      const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
+        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
       const rows = await trx.query(
         `INSERT INTO attendance_shifts
          (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight,
@@ -726,7 +729,9 @@ function createAttendanceShiftService(deps) {
         ],
       )
       await insertSegmentRows(trx, orgId, shiftId, segments)
-      return readShiftWithSegments(trx, orgId, rows[0])
+      const result = await readShiftWithSegments(trx, orgId, rows[0])
+      await verifyTimezone()
+      return result
     })
   }
 
@@ -758,6 +763,8 @@ function createAttendanceShiftService(deps) {
     const mode = hasSegments ? 'segments' : (hasEnvelopeTiming ? 'envelope' : 'metadata')
 
     return db.transaction(async (trx) => {
+      const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
+        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
       const existingRows = await trx.query(
         'SELECT * FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR UPDATE',
         [shiftId, orgId],
@@ -928,7 +935,9 @@ function createAttendanceShiftService(deps) {
         await insertSegmentRows(trx, orgId, shiftId, segments)
       }
 
-      return readShiftWithSegments(trx, orgId, rows[0])
+      const result = await readShiftWithSegments(trx, orgId, rows[0])
+      await verifyTimezone()
+      return result
     })
   }
 
@@ -1041,6 +1050,8 @@ function createAttendanceShiftService(deps) {
    */
   async function deleteShift(db, { orgId, shiftId }) {
     return db.transaction(async (trx) => {
+      const verifyTimezone = typeof prepareTimezoneSourceChange === 'function'
+        ? await prepareTimezoneSourceChange(trx,{orgId}) : async () => {}
       const shiftRows = await trx.query(
         'SELECT id, name FROM attendance_shifts WHERE id = $1 AND org_id = $2 FOR UPDATE',
         [shiftId, orgId],
@@ -1066,6 +1077,7 @@ function createAttendanceShiftService(deps) {
         'DELETE FROM attendance_shifts WHERE id = $1 AND org_id = $2',
         [shiftId, orgId],
       )
+      await verifyTimezone()
       return { id: shiftId }
     })
   }

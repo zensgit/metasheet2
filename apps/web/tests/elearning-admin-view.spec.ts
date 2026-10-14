@@ -54,7 +54,38 @@ vi.mock('../src/services/elearningPractice', async () => {
   }
 })
 
+// Session-org fake: the real composable is covered by useSessionOrg.spec.ts; here only the
+// e-learning page's use of it (visibility, switch, reload-after-switch) is under test.
+const sessionOrgFake = vi.hoisted(() => ({
+  orgs: [] as string[],
+  currentOrgId: null as string | null,
+  load: vi.fn(),
+  switch: vi.fn(),
+}))
+
+vi.mock('../src/composables/useSessionOrg', async () => {
+  const { computed, ref } = await import('vue')
+  return {
+    useSessionOrg: () => {
+      const orgs = ref<string[]>([...sessionOrgFake.orgs])
+      const currentOrgId = ref<string | null>(sessionOrgFake.currentOrgId)
+      return {
+        loading: ref(false),
+        switching: ref(false),
+        errorMessage: ref(''),
+        orgs,
+        currentOrgId,
+        selectedOrgId: computed(() => currentOrgId.value ?? ''),
+        hasMultipleOrgs: computed(() => orgs.value.length > 1),
+        loadSessionOrgs: sessionOrgFake.load,
+        switchSessionOrg: sessionOrgFake.switch,
+      }
+    },
+  }
+})
+
 import { ElearningApiError } from '../src/services/elearning'
+import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import ElearningAdminView from '../src/views/ElearningAdminView.vue'
 
 const REQUEST = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
@@ -688,14 +719,14 @@ describe('ElearningAdminView', () => {
       },
     })
     const root = mountView()
-    await fillMinimum(root)
+    await flushUi()
     expect(root.querySelector('[data-testid="elearning-credit-rule-form"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    const publish = root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement
-    expect(publish.disabled).toBe(true)
-    publish.click()
-    await flushUi(12)
+    // F11: media is off, so the legacy video form is not rendered at all (no greyed-out publish).
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
     expect(h.upload).not.toHaveBeenCalled()
     expect(h.publish).not.toHaveBeenCalled()
     expect(h.assign).not.toHaveBeenCalled()
@@ -717,10 +748,12 @@ describe('ElearningAdminView', () => {
       },
     })
     const disabled = mountView()
-    await fillMinimum(disabled)
+    await flushUi()
     expect(disabled.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('feature_disabled')
-    ;(disabled.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
-    await flushUi(12)
+    // F11: a failed capabilities check renders neither the video form nor the no-video notice.
+    expect(disabled.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(disabled.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(disabled.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
     expect(h.upload).not.toHaveBeenCalled()
     expect(h.publish).not.toHaveBeenCalled()
     expect(h.assign).not.toHaveBeenCalled()
@@ -761,6 +794,17 @@ describe('ElearningAdminView', () => {
     const publishedIds = publishBody.questions[0]?.options.map((option) => option.id) ?? []
     expect(publishedIds).toEqual(['a', 'b', 'o4', 'o5'])
     expect(new Set(publishedIds).size).toBe(4)
+  })
+
+  it('explains ORG_CONTEXT_REQUIRED inside the assessment resource section', async () => {
+    h.listBanks.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const root = mountView()
+    await flushUi()
+    ;(root.querySelector('[data-testid="elearning-assessment-toggle"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.listBanks).toHaveBeenCalled()
+    expect(root.querySelector('[data-testid="elearning-assessment-status"]')?.textContent?.trim())
+      .toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
   })
 
   it('lazily opens the assessment resource section and creates a bank', async () => {
@@ -1220,8 +1264,8 @@ describe('ElearningAdminView', () => {
     expect(root.querySelector('[data-testid="elearning-practice-admin-section"]')).not.toBeNull()
     expect(root.querySelector('[data-testid="elearning-content-admin-section"]')).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled)
-      .toBe(true)
+    expect(root.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
   })
 
   it('keeps content-only and mixed content capabilities independent from legacy V0.1 readiness', async () => {
@@ -1241,7 +1285,8 @@ describe('ElearningAdminView', () => {
     expect(contentOnly.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
     expect(contentOnly.querySelector('[data-testid="elearning-content-target-user"]')).toBeNull()
     expect(contentOnly.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((contentOnly.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(contentOnly.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(contentOnly.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
 
     app?.unmount()
     container?.remove()
@@ -1261,6 +1306,167 @@ describe('ElearningAdminView', () => {
     expect(mixed.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
     expect(mixed.querySelector('[data-testid="elearning-content-target-user"]')).not.toBeNull()
     expect(mixed.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
-    expect((mixed.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).disabled).toBe(true)
+    expect(mixed.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(mixed.querySelector('[data-testid="elearning-admin-video-unavailable"]')).not.toBeNull()
+  })
+
+  it('renders the video-course form only when the capabilities response has media on (F11)', async () => {
+    const on = mountView()
+    await flushUi()
+    expect(on.querySelector('[data-testid="elearning-admin-video-form"]')).not.toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-file"]')).not.toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
+    expect(on.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent?.trim())
+      .toBe('上传一段 MP4、编写客观题后发布并直接指派给一名学员。')
+
+    app?.unmount()
+    container?.remove()
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content: true,
+        assignment: true,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const off = mountView()
+    await flushUi()
+    expect(off.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-file"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-publish"]')).toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
+      .toBe('本部署未开启视频，视频课程不可用；学员端无正式考试入口；可发布文章 / 外链课程。')
+    expect(off.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent).not.toContain('MP4')
+    // The article / external-link course section stays available on a no-video deployment.
+    expect(off.querySelector('[data-testid="elearning-content-admin-section"]')).not.toBeNull()
+    expect(off.querySelector('[data-testid="elearning-admin-status"]')).toBeNull()
+
+    useLocale().setLocale('en')
+    await nextTick()
+    expect(off.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim())
+      .toBe('Video is not enabled on this deployment, so video courses are unavailable and learners have no formal exam entry. You can publish article / external-link courses.')
+  })
+
+  it.each([
+    { content: true, zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口；可发布文章 / 外链课程。' },
+    { content: false, zh: '本部署未开启视频，视频课程不可用；学员端无正式考试入口。' },
+  ])('offers the article / link clause in the no-video notice only when content is on (content=$content)', async ({ content, zh }) => {
+    h.capabilities.mockResolvedValue({
+      enabled: true,
+      capabilities: {
+        content,
+        assignment: false,
+        assessment: true,
+        incentive: false,
+        analytics: false,
+        media: false,
+      },
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')?.textContent?.trim()).toBe(zh)
+    expect(root.querySelector('[data-testid="elearning-admin-subtitle"]')?.textContent?.trim())
+      .toBe('在下方管理本部署已开启的学习资源。')
+    expect(root.querySelector('[data-testid="elearning-content-admin-section"]') !== null).toBe(content)
+  })
+
+  it('renders neither the video form nor the no-video notice before or after a failed capabilities check', async () => {
+    const pending = deferred<never>()
+    h.capabilities.mockReturnValueOnce(pending.promise)
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
+    pending.reject(new ElearningApiError('request_failed', 500))
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('request_failed')
+    expect(root.querySelector('[data-testid="elearning-admin-video-form"]')).toBeNull()
+    expect(root.querySelector('[data-testid="elearning-admin-video-unavailable"]')).toBeNull()
+  })
+})
+
+describe('ElearningAdminView organization context', () => {
+  let app: VueApp<Element> | null = null
+  let container: HTMLDivElement | null = null
+
+  afterEach(() => {
+    app?.unmount()
+    container?.remove()
+    app = null
+    container = null
+    useLocale().setLocale('en')
+    vi.clearAllMocks()
+  })
+
+  it('explains a 403 ORG_CONTEXT_REQUIRED in Chinese and shows no selector without memberships', async () => {
+    useLocale().setLocale('zh-CN')
+    h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    app = createApp(ElearningAdminView)
+    app.mount(container)
+    await flushUi()
+    const status = container.querySelector('[data-testid="elearning-admin-status"]')?.textContent ?? ''
+    expect(status).toBe('当前账号没有唯一的有效组织：没有组织请联系管理员加入组织；属于多个组织请先在上方选择组织。')
+    expect(status).not.toContain('ORG_CONTEXT_REQUIRED')
+    expect(container.querySelector('[data-testid="session-org-switcher"]')).toBeNull()
+  })
+
+  it('disables the organization selector while the admin page is busy', async () => {
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    try {
+      h.capabilities.mockReset().mockReturnValue(new Promise(() => {}))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(ElearningAdminView)
+      app.mount(container)
+      await flushUi()
+      const select = container.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(select.disabled).toBe(true)
+    } finally {
+      sessionOrgFake.orgs = []
+      sessionOrgFake.currentOrgId = null
+    }
+  })
+
+  it('lets a multi-organization admin switch organization and reloads only from the stale banner', async () => {
+    const realReload = elearningSessionOrgPage.reload
+    const reload = vi.fn()
+    elearningSessionOrgPage.reload = reload
+    sessionOrgFake.orgs = ['org-a', 'org-b']
+    sessionOrgFake.currentOrgId = 'org-a'
+    sessionOrgFake.switch.mockReset().mockResolvedValue(true)
+    try {
+      useLocale().setLocale('zh-CN')
+      h.capabilities.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+      container = document.createElement('div')
+      document.body.appendChild(container)
+      app = createApp(ElearningAdminView)
+      app.mount(container)
+      await flushUi()
+      const select = container.querySelector('[data-testid="session-org-switcher"] select') as HTMLSelectElement
+      expect(select).not.toBeNull()
+      expect(select.value).toBe('org-a')
+      select.value = 'org-b'
+      select.dispatchEvent(new Event('change'))
+      await flushUi()
+      expect(sessionOrgFake.switch).toHaveBeenCalledWith('org-b')
+      // The admin form may hold unsaved input: no reload until the banner's button.
+      expect(reload).not.toHaveBeenCalled()
+      const banner = document.querySelector('[data-testid="elearning-session-org-stale"]') as HTMLElement
+      expect(banner?.textContent).toContain('放弃未保存内容并重新加载')
+      expect(container.querySelector('.elearning-admin')?.hasAttribute('inert')).toBe(true)
+      ;(banner.querySelector('[data-testid="elearning-session-org-reload"]') as HTMLButtonElement).click()
+      expect(reload).toHaveBeenCalledTimes(1)
+    } finally {
+      elearningSessionOrgPage.reload = realReload
+      sessionOrgFake.orgs = []
+      sessionOrgFake.currentOrgId = null
+    }
   })
 })

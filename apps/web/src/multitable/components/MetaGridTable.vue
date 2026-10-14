@@ -428,6 +428,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText, readClipboardText } from '../../utils/clipboard'
 import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import type {
   MetaAttachment,
@@ -1677,7 +1678,7 @@ function copyFocusedCell() {
   if (!row || !field) return
   const val = row.data[field.id]
   const text = val == null ? '' : String(val)
-  navigator.clipboard?.writeText(text).catch(() => {})
+  void copyText(text)
 }
 
 async function pasteFocusedCell() {
@@ -1689,7 +1690,7 @@ async function pasteFocusedCell() {
   // text would be rejected by record-write-service's field validation (400).
   if (field.type === 'person' || field.type === 'multiSelect') return
   try {
-    const text = await navigator.clipboard.readText()
+    const text = await readClipboardText()
     let value: unknown = field.type === 'number' && text !== '' ? Number(text) : text
     // 客户反馈 2026-09-24 #4c (S1): pasted date-time text is a BUSINESS wall clock (zone rule: explicit
     // non-UTC field zone, else the business zone), converted here to the UTC instant — never read in the

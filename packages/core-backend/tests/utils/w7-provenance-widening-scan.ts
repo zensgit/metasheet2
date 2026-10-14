@@ -705,13 +705,16 @@ export const W7_PROVENANCE_WIDENING_LEDGER_V1: readonly W7LedgerEntryV1[] = Obje
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'projectionOwner: isAttendanceProjectionOwnerV1(row.projection_owner)', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: 'readonly projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-authoritative-calculation-core.ts', text: '} else if (parent.projectionOwner === \'legacy_untracked\' && parent.visibilityState === \'active\') {', rule: 'legacy_polarity' },
+  // Outcome.kind selects a boundary result arm, not a projection owner. Both w4
+  // and w4_group calculations use this arm and retain their calculation pointer.
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: "await adapters.bindLiveTimezoneContext(pluginTrx, input, { calculationId: outcome.kind === 'w4' ? outcome.shadow.calculationId : null })", rule: 'single_member_selector' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: ': \'legacy_untracked\',', rule: 'widened_predicate_continuation' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: '\'legacy_untracked\', NULL, \'retired\', \'review_placeholder\',', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'kind: \'w4\' as const,', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'projectionOwner: AttendanceProjectionOwnerV1', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'projectionOwner: isAttendanceProjectionOwnerV1(row.projectionOwner)', rule: 'widened_predicate' },
-  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId, rows: insertedRows, perUser }', rule: 'write_side_emitter' },
-  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId: startOutcome.runId, rows: [], perUser: [] }', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId, rows: insertedRows, perUser, ...counts() }', rule: 'write_side_emitter' },
+  { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { kind: \'w4\', runId: startOutcome.runId, rows: [], perUser: [], ...counts() }', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', text: 'return { mode: \'w4\' as const, rows: [] as Array<{ user_id: string }> }', rule: 'write_side_emitter' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '!isAttendanceProjectionOwnerV1(projectionOwner) ||', rule: 'widened_predicate' },
   { file: 'packages/core-backend/src/attendance/w4c3a-canonical-import-kernel.ts', text: '(isAttendanceProjectionOwnerWithCalculationPointerV1(projectionOwner) &&', rule: 'widened_predicate' },

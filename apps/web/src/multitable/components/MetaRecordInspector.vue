@@ -154,8 +154,8 @@
         </button>
         <!-- Copy-link icon: PR-A shipped the button + `copy-link` emit; record inspector v3 PR-B1
              (§1.3 "Copy link") adds the disabled-when-absent gate here (`copyLinkAvailable`, read once
-             at setup — the Clipboard API is a page-lifetime capability, not a live signal) and, in the
-             workbench, the `navigator.clipboard.writeText(window.location.href)` write plus the
+             at setup via `canCopyText()` — a page-lifetime capability, not a live signal) and, in the
+             workbench, the `copyText(window.location.href)` write plus the
              `record.copyLinkDone` / `record.copyLinkFailed` status through MetaToast's existing
              `aria-live="polite"` region. This component still only EMITS — no clipboard access here. -->
         <MtIconButton size="sm" :disabled="!copyLinkAvailable" :aria-label="l('record.copyLink')" :title="l('record.copyLink')" data-testid="record-inspector-copy-link" @click="emit('copy-link')">&#x1F517;</MtIconButton>
@@ -518,6 +518,7 @@
 </template>
 
 <script setup lang="ts">
+import { canCopyText } from '../../utils/clipboard'
 import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, useId, watch } from 'vue'
 import { RouterLink, routerKey } from 'vue-router'
 import type {
@@ -1430,11 +1431,11 @@ const canEditPrimaryTitle = computed(() => {
 // (not in the fields panel) because the control sits in the tabs bar, outside the details tabpanel,
 // and must survive tab switches + record navigation within one open panel; a remount resets it.
 const hideEmpty = ref(false)
-// Copy-link availability: `navigator.clipboard.writeText` is a page-lifetime capability (secure
-// context + browser support), read ONCE at setup; the icon is disabled when it is absent (design
-// §1.3 "item disabled when clipboard API absent"). The write itself lives in the workbench.
-const copyLinkAvailable = typeof navigator !== 'undefined'
-  && typeof navigator.clipboard?.writeText === 'function'
+// Copy-link availability: any copy mechanism (the async Clipboard API, or the execCommand fallback
+// that plain-HTTP intranet deployments rely on — see utils/clipboard.ts) is a page-lifetime
+// capability, read ONCE at setup; the icon is disabled only when neither exists (design §1.3 "item
+// disabled when clipboard API absent"). The write itself lives in the workbench.
+const copyLinkAvailable = canCopyText()
 const primaryFieldRawValue = computed(() => {
   const field = primaryField.value
   return field && props.record ? props.record.data[field.id] : undefined

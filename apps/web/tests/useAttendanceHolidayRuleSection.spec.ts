@@ -263,7 +263,7 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(accordion.getAttribute('aria-expanded')).toBe('true')
     expect(container!.querySelector('.attendance__table')).toBeTruthy()
     expect(container!.querySelector('.attendance__table-cell--holiday-name input')).toBeTruthy()
-    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__override-field input[placeholder="选择或输入考勤组"]')).toBeTruthy()
   })
 
   it('expands and shows effective calendar override controls after adding one rule', async () => {
@@ -324,9 +324,10 @@ describe('AttendanceHolidayRuleSection', () => {
     expect(roleOption).toBeTruthy()
     expect(roleOption?.disabled).toBe(false)
     expect(container!.querySelector('input[placeholder="规则标签"]')).toBeTruthy()
-    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
-    const roleInputs = container!.querySelectorAll('.attendance__override-field input[placeholder="attendance_admin,班组长"]')
-    expect(roleInputs.length).toBeGreaterThanOrEqual(2)
+    expect(container!.querySelector('.attendance__override-field input[placeholder="选择或输入考勤组"]')).toBeTruthy()
+    expect(container!.querySelectorAll('.attendance__override-field input[placeholder="选择或输入角色"]').length).toBeGreaterThanOrEqual(1)
+    expect(container!.querySelectorAll('.attendance__override-field input[placeholder="选择或输入标签"]').length).toBeGreaterThanOrEqual(1)
+    expect(container!.querySelector('[data-attendance-override-advanced]')?.getAttribute('open')).toBeNull()
   })
 
   it('quick-adds a group holiday-length calendar policy row', async () => {
@@ -380,7 +381,7 @@ describe('AttendanceHolidayRuleSection', () => {
     const accordions = container!.querySelectorAll<HTMLButtonElement>('.attendance__accordion')
     expect(accordions[1]?.getAttribute('aria-expanded')).toBe('true')
     expect(container!.textContent).toContain('节假日第 4-5 天改为工作日')
-    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__override-field input[placeholder="选择或输入考勤组"]')).toBeTruthy()
   })
 
   it('quick-adds a longer group holiday length as a concrete rest date range', async () => {
@@ -440,7 +441,7 @@ describe('AttendanceHolidayRuleSection', () => {
     const accordions = container!.querySelectorAll<HTMLButtonElement>('.attendance__accordion')
     expect(accordions[1]?.getAttribute('aria-expanded')).toBe('true')
     expect(container!.textContent).toContain('2026-10-04 至 2026-10-05 改为休息日')
-    expect(container!.querySelector('.attendance__override-field input[placeholder="单休办公,白班"]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__override-field input[placeholder="选择或输入考勤组"]')).toBeTruthy()
   })
 
   it('shows effective calendar override diagnostics for unsaved and shadowed rules', async () => {

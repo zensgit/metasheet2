@@ -4,6 +4,7 @@ import { routerKey } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
 import {
   canRunBatchAnomalyResolution,
   runBatchAnomalyResolution,
@@ -216,7 +217,7 @@ function restoreAttendanceHeroClock(): void {
 describe('Attendance admin regressions', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
-  let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let originalScrollIntoView: PropertyDescriptor | undefined
   let exportReportFieldFingerprint = 'records-unit-test-fingerprint'
   let exportReportFieldCodes = 'work_date,employee_name'
   let exportReportFieldCount = '2'
@@ -935,9 +936,10 @@ describe('Attendance admin regressions', () => {
 
     container = document.createElement('div')
     document.body.appendChild(container)
-    originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
+      writable: true,
       value: vi.fn(),
     })
   })
@@ -948,10 +950,9 @@ describe('Attendance admin regressions', () => {
     restoreAttendanceHeroClock()
     if (container) container.remove()
     if (originalScrollIntoView) {
-      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-        configurable: true,
-        value: originalScrollIntoView,
-      })
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
     }
     app = null
     container = null
@@ -1649,10 +1650,7 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-admin-task-action]')).toBeNull()
   })
 
-  it('W3/4353 wiring: AttendanceAdminCenter re-emits clear-section from the real return-home flow (review P3-1)', async () => {
-    // Mounts the REAL wrapper (not a mock): entering with an explicit section keeps the task home
-    // closed; clicking Management home must propagate clear-section through AdminCenter to its
-    // parent. A regression that drops the template re-emit turns exactly this leg red.
+  it('W3/4353 wiring: the management-home return control is gone and the open section stays put', async () => {
     const onClearSection = vi.fn()
     app = createAttendanceApp(AttendanceAdminCenter, {
       initialSectionId: 'attendance-admin-groups',
@@ -1661,17 +1659,14 @@ describe('Attendance admin regressions', () => {
     app.mount(container!)
     await flushUi(16)
 
-    // Task home lives under v-show: with an explicit section it must be present-but-hidden.
     const homeContext = container!.querySelector('[data-admin-home-context]') as HTMLElement
     expect(homeContext).toBeTruthy()
     expect(homeContext.style.display).toBe('none')
+    expect(container!.querySelector('[data-admin-task-home-return]')).toBeNull()
     const returnHome = [...container!.querySelectorAll('button')].find(b => (b.textContent || '').includes('Management home'))
-    expect(returnHome, 'expected the Management home button').toBeTruthy()
-    returnHome!.click()
-    await flushUi(4)
-
-    expect(onClearSection).toHaveBeenCalledTimes(1)
-    expect((container!.querySelector('[data-admin-home-context]') as HTMLElement).style.display).not.toBe('none')
+    expect(returnHome).toBeUndefined()
+    expect(onClearSection).not.toHaveBeenCalled()
+    expect(homeContext.style.display).toBe('none')
   })
 
   it('admin notification deliveries — reminds selected owed-punch candidates with an authoritative confirm snapshot', async () => {
@@ -1794,7 +1789,10 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-missed-punch-reminder-error]')?.textContent).toContain('candidate stale')
   })
 
-  it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
+  it.each([
+    { type: 'shift_swap', label: 'Shift-swap request', name: 'Shift swap approval' },
+    { type: 'business_trip', label: 'Business trip request', name: 'Business trip approval' },
+  ])('exposes $type as an approval-flow type and saves it through the admin form', async ({ type, label, name: flowName }) => {
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
@@ -1804,7 +1802,16 @@ describe('Attendance admin regressions', () => {
     expect(name).toBeTruthy()
     expect(requestType).toBeTruthy()
     const typeValues = Array.from(requestType!.options).map(option => option.value)
-    expect(typeValues).toContain('shift_swap')
+    expect(typeValues).toContain(type)
+    expect(typeValues).not.toContain('unsupported_request_type')
+    expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe(label)
+    if (type === 'business_trip') {
+      useLocale().setLocale('zh-CN')
+      await flushUi(2)
+      expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe('出差申请')
+      useLocale().setLocale('en')
+      await flushUi(2)
+    }
     // A1 wire-level fix: the dropdown must now expose every backend REQUEST_TYPE,
     // including the two that were missing (outdoor_punch / schedule_dispatch).
     expect(typeValues).toContain('outdoor_punch')
@@ -1814,9 +1821,9 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-testid="attendance-approval-steps-preview"]')).toBeTruthy()
     expect(container!.querySelector('#attendance-approval-steps')).toBeNull()
 
-    name!.value = 'Shift swap approval'
+    name!.value = flowName
     name!.dispatchEvent(new Event('input', { bubbles: true }))
-    requestType!.value = 'shift_swap'
+    requestType!.value = type
     requestType!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
 
@@ -1832,8 +1839,8 @@ describe('Attendance admin regressions', () => {
     )
     expect(postCall).toBeTruthy()
     expect(JSON.parse(String((postCall![1] as RequestInit | undefined)?.body || '{}'))).toEqual({
-      name: 'Shift swap approval',
-      requestType: 'shift_swap',
+      name: flowName,
+      requestType: type,
       steps: [],
       isActive: true,
     })
@@ -1909,7 +1916,7 @@ describe('Attendance admin regressions', () => {
     vi.mocked(apiFetch).mockImplementation(async (input) => {
       const url = String(input)
       if (url.includes('/api/attendance-admin/users/search')) {
-        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA' }])
+        if (url.includes('q=userA')) return userSearchResponse([{ id: 'userA', name: '备料一线测试账号' }])
         if (url.includes('q=userB')) return userSearchResponse([{ id: 'userB' }])
         return userSearchResponse([])
       }
@@ -1954,6 +1961,7 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const shown = section!.querySelector('.attendance__annual-balance')
     expect(shown).toBeTruthy()
+    expect(shown?.textContent || '').toContain('备料一线测试账号')
     expect(shown?.textContent || '').toContain('userA')
 
     // (B) query userB → failure → A's balance MUST disappear (cleared up front; the view renders on v-if).
@@ -2072,7 +2080,9 @@ describe('Attendance admin regressions', () => {
     await flushUi(4)
     const section = container!.querySelector<HTMLElement>('#attendance-admin-annual-leave-policy')
     expect(section).toBeTruthy()
-    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
+    expect(section!.querySelector('[data-attendance-help="annual-policy"]')?.textContent).toContain('Attendance help')
+    expect(section!.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
+    const tzInput = section!.querySelector<HTMLSelectElement>('#attendance-annual-policy-tz')!
     expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
@@ -2087,7 +2097,7 @@ describe('Attendance admin regressions', () => {
     // enabled + empty timezone → blocked client-side (no PUT).
     savedPayload = null
     tzInput.value = ''
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     await flushUi(2)
     saveBtn.click()
     await flushUi(4)
@@ -2096,7 +2106,7 @@ describe('Attendance admin regressions', () => {
     // restore timezone but make the ladder malformed (a closed last band) → blocked client-side, surfacing what the
     // backend would otherwise silently revert to the statutory preset with a 200 "saved".
     tzInput.value = 'Asia/Shanghai'
-    tzInput.dispatchEvent(new Event('input'))
+    tzInput.dispatchEvent(new Event('change'))
     const maxYearsInput = section!.querySelector<HTMLInputElement>('tbody tr td:nth-child(2) input')!
     maxYearsInput.value = '10'
     maxYearsInput.dispatchEvent(new Event('input'))
@@ -4801,10 +4811,12 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
     expect(section).toBeTruthy()
-    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
+    const timezone = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="timezone"]')
     expect(timezone).toBeTruthy()
-    timezone!.value = 'Not/AZone'
-    timezone!.dispatchEvent(new Event('input', { bubbles: true }))
+    const timezoneQuery = section!.querySelector<HTMLInputElement>('[data-attendance-timezone-query]')
+    expect(timezoneQuery).toBeTruthy()
+    timezoneQuery!.value = 'Not/AZone'
+    timezoneQuery!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
     section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
     await flushUi(6)
@@ -9319,8 +9331,10 @@ describe('Attendance admin regressions', () => {
     templateLibraryNav!.click()
     await flushUi(2)
 
-    const viewVersionButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('View'))
+    const templateSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-rule-template-library"]')
+    expect(templateSection).toBeTruthy()
+    const viewVersionButton = Array.from(templateSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'View')
     expect(viewVersionButton).toBeTruthy()
     viewVersionButton!.click()
     await flushUi(2)

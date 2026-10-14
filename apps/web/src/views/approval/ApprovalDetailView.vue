@@ -1146,6 +1146,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { ref, computed, onMounted, onBeforeUnmount, watch, type Ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -3132,11 +3133,11 @@ function buildApprovalSummary(): string | null {
 async function handleCopySummary() {
   const text = buildApprovalSummary()
   if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
+  // copyText falls back to execCommand('copy') when the Clipboard API is unavailable (insecure
+  // context / older browser) or denied, and never throws; `false` = no copy mechanism worked.
+  if (await copyText(text)) {
     ElMessage.success(t.value.summaryCopied)
-  } catch {
-    // Clipboard API unavailable (insecure context / older browser) or permission denied.
+  } else {
     ElMessage.error(t.value.copyFailed)
   }
 }

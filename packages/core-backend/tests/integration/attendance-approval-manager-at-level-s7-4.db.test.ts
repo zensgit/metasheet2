@@ -110,6 +110,8 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
   const createdFlowIds: string[] = []
   const createdInstanceIds: string[] = []
   const createdRequestIds: string[] = []
+  const seededDefaultRuleIds: string[] = []
+  const seededOrgMemberships: Array<[string, string]> = []
 
   let adminToken = ''
   let managerL1Token = ''
@@ -273,6 +275,27 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
     return id
   }
 
+  async function seedDefaultRule(orgId: string): Promise<void> {
+    const defaultRule = await (pool as Pool).query(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'S7-4 timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id as string))
+  }
+
+  async function seedOrgMembership(userId: string, orgId: string): Promise<void> {
+    await (pool as Pool).query(
+      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
+       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
+      [userId, orgId],
+    )
+    seededOrgMemberships.push([userId, orgId])
+  }
+
   async function createRequest(
     orgId: string,
     token: string,
@@ -284,11 +307,8 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
     // file drives one requester across many orgs (org anchoring is a directory-lookup property,
     // never a user_orgs membership property), so grant membership on demand per org used,
     // idempotently (DO UPDATE, not DO NOTHING — never leaves a stale inactive row).
-    await (pool as Pool).query(
-      `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, TRUE)
-       ON CONFLICT (user_id, org_id) DO UPDATE SET is_active = TRUE`,
-      [requester, orgId],
-    )
+    await seedOrgMembership(requester, orgId)
+    await seedDefaultRule(orgId)
     return requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(token),
@@ -430,6 +450,10 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
           await pool.query(`DELETE FROM directory_accounts WHERE integration_id = $1`, [integrationId]).catch(() => undefined)
           await pool.query(`DELETE FROM directory_departments WHERE integration_id = $1`, [integrationId]).catch(() => undefined)
           await pool.query(`DELETE FROM directory_integrations WHERE id = $1`, [integrationId]).catch(() => undefined)
+        }
+        await pool.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
+        for (const [userId, orgId] of seededOrgMemberships) {
+          await pool.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [userId, orgId]).catch(() => undefined)
         }
         await pool.query('DELETE FROM user_permissions WHERE user_id = ANY($1::text[])', [userIds]).catch(() => undefined)
         await pool.query('DELETE FROM users WHERE id = ANY($1::text[])', [userIds]).catch(() => undefined)
@@ -605,6 +629,7 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
     const unlinkedUser = `s7-4-unlinked-user-${runSuffix}`
     await seedUser(unlinkedUser)
     userIds.push(unlinkedUser)
+    await seedOrgMembership(unlinkedUser, orgUnlinked)
     await (pool as Pool).query(
       `INSERT INTO user_permissions (user_id, permission_code)
        VALUES ($1, 'attendance:write'), ($1, 'attendance:admin')
@@ -624,6 +649,7 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
       [orgUnlinked],
     )
 
+    await seedDefaultRule(orgUnlinked)
     const res = await requestJson(`${baseUrl}/api/attendance/requests`, {
       method: 'POST',
       headers: authHeaders(unlinkedToken),
@@ -693,6 +719,7 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
   it('FREEZE: 2-step flow keeps step-2 assignee after directory chain mutation', async () => {
     setFlag(true)
     process.env.RBAC_BYPASS = 'true'
+    await seedOrgMembership(managerL1Home, orgFreeze)
     await seedFlow(
       orgFreeze,
       'time_correction',
@@ -775,6 +802,10 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
     setFlag(true)
     process.env.RBAC_BYPASS = 'false'
     try {
+      await seedOrgMembership(managerL1Home, orgAuthz)
+      await seedOrgMembership(managerL2Home, orgAuthz)
+      await seedOrgMembership(otherApprover, orgAuthz)
+      await seedOrgMembership(adminActor, orgAuthz)
       await seedFlow(orgAuthz, 'time_correction', [{ kind: 'manager_at_level', level: 1 }], `s7-4-authz-${runSuffix}`)
       await seedTwoLevelChain(orgAuthz, requester, managerL1Home, managerL2Home, 'authz')
 
@@ -881,6 +912,7 @@ describeIfDatabase('S7-4 manager_at_level — freeze + assignment + auth (real D
     process.env.RBAC_BYPASS = 'true'
     setFlag(true)
     const orgAdv = `s7-4-adv-${runSuffix}`
+    await seedOrgMembership(managerL1Home, orgAdv)
     await seedTwoLevelChain(orgAdv, requester, managerL1Home, managerL2Home, 'adv')
 
     await seedFlow(

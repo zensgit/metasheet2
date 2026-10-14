@@ -375,7 +375,7 @@ const BUILT_IN_LABELS: Record<string, [string, string]> = {
   'stock-prep_admin': ['备料主管理员', 'Main administrator'],
   'stock-prep_puller': ['数据管理员（拉取人员）', 'Data manager (puller)'],
   'stock-prep_developer': ['开发成员', 'Developer'],
-  'stock-prep_frontline': ['一线填写', 'Floor operator'],
+  'stock-prep_frontline': ['操作人员', 'Operator'],
 }
 
 function builtInLabel(id: string): string {

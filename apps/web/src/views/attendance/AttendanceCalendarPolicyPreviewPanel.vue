@@ -23,11 +23,11 @@
     <div class="attendance__calendar-preview-controls">
       <label class="attendance__field">
         <span>{{ tr('From', '开始日期') }}</span>
-        <input v-model="previewFrom" type="date" data-attendance-calendar-policy-preview-from />
+        <AttendanceLocaleDateInput v-model="previewFrom" data-attendance-calendar-policy-preview-from />
       </label>
       <label class="attendance__field">
         <span>{{ tr('To', '结束日期') }}</span>
-        <input v-model="previewTo" type="date" data-attendance-calendar-policy-preview-to />
+        <AttendanceLocaleDateInput v-model="previewTo" data-attendance-calendar-policy-preview-to />
       </label>
       <label class="attendance__field">
         <span>{{ tr('Scope', '范围') }}</span>
@@ -108,6 +108,7 @@
 </template>
 
 <script setup lang="ts">
+import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref } from 'vue'
 import {
   EffectiveCalendarFetchError,
@@ -153,6 +154,7 @@ const SOURCE_LABELS: Record<CalendarEffectiveSource, [string, string]> = {
   group: ['Group policy', '考勤组规则'],
   role: ['Role policy', '角色规则'],
   user: ['User policy', '用户规则'],
+  stored_record: ['Historical record', '历史记录'],
 }
 
 const MODE_LABELS: Record<PreviewMode, [string, string]> = {
@@ -285,8 +287,8 @@ async function runPreview() {
 
 .attendance__calendar-preview-controls {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px 20px;
+  grid-template-columns: minmax(0, 28rem);
+  gap: 12px;
 }
 
 .attendance__calendar-preview-result {
@@ -331,10 +333,13 @@ async function runPreview() {
 }
 
 .attendance__field--checkbox {
-  grid-column: 1 / -1;
+  justify-self: start;
+  width: fit-content;
+  max-width: 100%;
   flex-direction: row;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  gap: 8px;
   min-height: 40px;
   padding: 8px 12px;
   border: 1px solid var(--ms-border-light);

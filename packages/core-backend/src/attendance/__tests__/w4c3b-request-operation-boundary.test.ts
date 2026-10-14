@@ -126,7 +126,7 @@ describe('W4C-3b request operation boundary', () => {
       routeInput: { requestType: 'leave' },
     })).resolves.toEqual({ kind: 'legacy', response: { id: REQUEST_ID } })
 
-    expect(events).toEqual(['prepare', 'execute'])
+    expect(events).toEqual(['prepareIdentity', 'prepare', 'execute'])
     expect(acceptedWritePostures).toEqual(['legacy_projection_only'])
     expect(client.calls.some(({ sqlText }) => sqlText.includes('FROM users WHERE id = $1'))).toBe(false)
     expect(client.calls.some(({ sqlText }) => sqlText.includes('attendance_result_operations'))).toBe(false)

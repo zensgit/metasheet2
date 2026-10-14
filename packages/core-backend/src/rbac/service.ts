@@ -71,7 +71,49 @@ export async function userHasPermission(userId: string, code: string): Promise<b
   }
 }
 
-export async function listUserPermissions(userId: string): Promise<string[]> {
+/**
+ * A caller-supplied executor for the permission read — the caller's TRANSACTION client. With it,
+ * every statement of the read (codes, the legacy column, the namespace-admission filter) runs on
+ * that one connection, so a caller holding row locks inside a transaction decides on what those
+ * locks protect instead of on a second pool connection.
+ */
+export type RbacPermissionQueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>
+
+/**
+ * The CURRENT codes on `runQuery`, never through the memo in either direction: nothing cached is
+ * returned, and the result is not cached (it may include the caller's own uncommitted writes, which
+ * must not leak to other requests if the transaction rolls back).
+ */
+async function readUserPermissionsOn(userId: string, runQuery: RbacPermissionQueryFn): Promise<string[]> {
+  try {
+    const { rows } = await runQuery(
+      `SELECT DISTINCT permission_code AS code FROM (
+         SELECT up.permission_code FROM user_permissions up WHERE up.user_id = $1
+         UNION ALL
+         SELECT rp.permission_code FROM user_roles ur JOIN role_permissions rp ON rp.role_id = ur.role_id WHERE ur.user_id = $1
+       ) t`,
+      [userId],
+    )
+    const codes = (rows as Array<{ code: string }>).map((r) => r.code)
+    const legacy = await runQuery('SELECT permissions FROM users WHERE id = $1', [userId])
+    const legacyRow = (legacy.rows as Array<{ permissions?: unknown }>)[0]
+    const legacyPerms = Array.isArray(legacyRow?.permissions) ? (legacyRow.permissions as string[]) : []
+    const merged = Array.from(new Set([...codes, ...legacyPerms]))
+    return await filterPermissionCodesByNamespaceAdmission(userId, merged, runQuery)
+  } catch (error) {
+    if (isDatabaseSchemaError(error) && allowDegradation) {
+      if (!rbacDegraded) {
+        logger.warn('RBAC service degraded - permission tables not found')
+        rbacDegraded = true
+      }
+      return []
+    }
+    throw error
+  }
+}
+
+export async function listUserPermissions(userId: string, runQuery?: RbacPermissionQueryFn): Promise<string[]> {
+  if (typeof runQuery === 'function') return readUserPermissionsOn(userId, runQuery)
   const now = Date.now()
   const key = `perms:${userId}`
   const hit = cache.get(key)

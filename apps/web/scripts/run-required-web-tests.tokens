@@ -5,6 +5,7 @@
 # `vitest run` logical line in apps/web/scripts/run-required-web-tests.sh — not only its final `exec` line.
 # See docs/development/required-web-lane-token-manifest-guard-design-20260922.md §1.
 accountIdentityDisplay
+adminPageContentSearch.spec.ts
 amountAutoSum
 approval-amount-in-words
 approval-assignee-source
@@ -150,20 +151,33 @@ attendance-records-route-redirect
 attendance-scheduled-feature-status-wiring
 attendance-scheduled-feature-status.spec.ts
 attendance-selfservice-dashboard
+attendance-server-clock-view.spec.ts
+attendance-server-clock.spec.ts
 attendanceAdminEndpointCompatibility
+attendanceAdminGuide.spec.ts
+attendanceAudienceChipField.spec.ts
+attendanceBusinessTripRequestCard
 attendanceCapabilityUnavailable
+attendanceCurrentTimeContext
+attendanceDayTimeContext
 attendanceEmployeeLeaveRequestCard
 attendanceEmployeeMakeupRequestCard
 attendanceEmployeeQuickActionIcons
 attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
+attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
+attendancePayrollHelp.spec.ts
 attendanceRecordRequestPrefill
 attendanceRequestReviewEntitlement
+attendanceRequestTimezoneIntegration
 AttendanceScheduledFeatureStatus
+attendanceTimezonePolicyPanel
+attendanceTimezoneTarget
 attendanceTodayWorkbench
 attendanceUserPickerEndpoint
+attendanceWallTime
 automation-action-summary
 automation-condition-legacy-person-picker
 automation-condition-typing-editor
@@ -186,6 +200,7 @@ cancelRoundEntryDetailView
 cancelRoundEntrySurfaces
 cancelRoundEntryTodoCenter
 categoryCandidateInput
+clipboard-no-bare-navigator-clipboard
 comment-affordance-color-consistency
 conditional-formatting-dialog-i18n
 data-sources-api-preview
@@ -453,7 +468,9 @@ platform-app-entry-mismatch-inventory
 platform-app-launcher
 platform-app-shell
 public-multitable-form
+recordReportPresentation.spec.ts
 requesterPreviewFields
+roleDelegationView
 roleManagementSave
 routePreviewErrors
 run-required-web-tests-shape
@@ -585,9 +602,11 @@ useAttendanceAdminImportWorkflow.spec.ts
 useAttendanceAdminProvisioning
 useAttendanceAdminRailNavigation
 useAttendanceAdminUsers
+useAttendanceRequestTimezone
 useAutoSumTotal
 usePlmExportActions
 userManagementView
+uuid-no-bare-randomuuid
 view-manager-multitable-contract
 workflowHubView
 xlsx-mapping

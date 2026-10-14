@@ -23,6 +23,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { RefreshRight } from '@element-plus/icons-vue'
 import type { RecoveryArchiveCaptureStatus } from '../api/client'
 import { MtButton, MtIconButton } from '../ui'
+import { randomUuid } from '../../utils/uuid'
 
 const props = defineProps<{
   sheetId: string
@@ -66,7 +67,7 @@ async function run(create: boolean): Promise<void> {
   try {
     if (!requestId.value) {
       if (!create) return
-      const id = crypto.randomUUID()
+      const id = randomUuid()
       // Persist before sending so an interrupted POST can be retried, never silently duplicated.
       sessionStorage.setItem(storageKey(sheet), id)
       requestId.value = id

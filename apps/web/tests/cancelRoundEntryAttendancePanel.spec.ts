@@ -7,7 +7,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createApp, h, nextTick, type App as VueApp } from 'vue'
+import { createApp, h, nextTick, ref, type App as VueApp } from 'vue'
 
 const apiFetchMock = vi.fn()
 vi.mock('../src/utils/api', async (importOriginal) => {
@@ -430,14 +430,14 @@ describe('「请假仍然有效」 only next to a leave that is still approved (
   it('T1 — a cancelled leave whose round was blocked because the leave is no longer approved: the block copy, and no note contradicting it', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
     const root = await mountPanel({ ...LEAVE, status: 'cancelled' })
-    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该申请已不再是已通过状态')
     expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
   })
 
   it('T4 — the block code wins over a parent row that still says approved (stale prop, or the row and the document diverged)', async () => {
     summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: NOT_APPROVED_BLOCK }))]
     const root = await mountPanel()
-    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该请假已不再是已通过状态')
+    expect($(root, 'data-cancel-round-block')!.textContent).toContain('该申请已不再是已通过状态')
     expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
   })
 })
@@ -631,7 +631,129 @@ describe('AttendanceView wiring', () => {
     expect(tagIndex).toBeGreaterThan(recentHeader)
     expect(tagIndex).toBeLessThan(shiftSwapBlock)
     const tag = source.slice(tagIndex, source.indexOf('/>', tagIndex))
-    expect(tag).toContain('v-if="item.request_type === \'leave\'"')
+    expect(tag).toContain('v-if="item.request_type === \'leave\' || item.request_type === \'business_trip\'"')
     expect(tag).toContain(':current-user-id="currentUserId"')
+  })
+})
+
+describe('approved business trip cancellation entry', () => {
+  const trip = { ...LEAVE, request_type: 'business_trip' }
+
+  it.each([
+    ['zh-CN', '只有已通过的申请才能发起撤销'],
+    ['en', 'Only an approved request can be cancelled'],
+  ] as const)('renders document-neutral trip launch errors in %s', async (locale, message) => {
+    useLocale().setLocale(locale)
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    writes = [() => jsonResponse(409, { ok: false, error: {
+      code: 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', message: 'raw server text',
+    } })]
+    const root = await mountPanel(trip)
+    $(root, 'data-cancel-round-launch')!.click()
+    await flushUi()
+    $(root, 'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect($(root, 'data-cancel-round-dialog-error')!.textContent?.trim()).toBe(message)
+    expect($(root, 'data-cancel-round-dialog')).not.toBeNull()
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect(calls()).toEqual([
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
+      ['POST', '/api/attendance/requests/req-1/cancel-round', '{}'],
+      ['GET', '/api/attendance/requests/req-1/cancel-round', null],
+    ])
+  })
+
+  it.each([
+    ['zh-CN', 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', '该申请已不再是已通过状态(例如已被取消),本次撤销未执行', '该申请已无法撤销(业务原因)'],
+    ['en', 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED', 'This request is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out', 'Cancellation blocked'],
+    ['zh-CN', 'FUTURE_CODE_X', '该申请已不可撤销(业务原因)', '该申请已无法撤销(业务原因)'],
+    ['en', 'FUTURE_CODE_X', 'This request can no longer be cancelled (business reason)', 'Cancellation blocked'],
+  ] as const)('renders document-neutral trip block %s/%s with no writes', async (locale, code, message, status) => {
+    useLocale().setLocale(locale)
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true, round: round({
+      outcome: 'blocked', status: 'cancellation_blocked', closedBySystem: true,
+      closeReason: 'business_blocked:' + code, blockCode: code, canWithdraw: false,
+    }) }))]
+    const root = await mountPanel(trip)
+    expect($(root, 'data-cancel-round-status')!.textContent).toBe(status)
+    const block = $(root, 'data-cancel-round-block')!
+    expect(block.querySelector('span')!.textContent).toBe(message)
+    expect(block.querySelector('details code')!.textContent).toBe(code)
+    expect(root.textContent).not.toContain(locale === 'zh-CN' ? '请假' : 'leave')
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect($(root, 'data-cancel-round-launch')).not.toBeNull()
+    expect($(root, 'data-cancel-round-withdraw')).toBeNull()
+    if (code === 'CANCEL_ROUND_DOCUMENT_NOT_APPROVED') expect($(root, 'data-cancel-round-leave-valid')).toBeNull()
+    expect(calls()).toEqual([['GET', '/api/attendance/requests/req-1/cancel-round', null]])
+  })
+  it('allows the owner to explicitly submit the existing cancellation route with trip wording', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    const root = await mountPanel(trip)
+    $(root, 'data-cancel-round-launch')!.click()
+    await flushUi()
+    expect(root.textContent).toContain('申请撤销这条出差')
+    expect(root.textContent).toContain('保留过去记录')
+    $(root, 'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect(calls().filter(call => call[0] === 'POST')).toEqual([
+      ['POST', '/api/attendance/requests/req-1/cancel-round', '{}'],
+    ])
+  })
+  it('does not launch for flag-off or a different owner', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: false }))]
+    expect($(await mountPanel(trip), 'data-cancel-round-launch')).toBeNull()
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true }))]
+    expect($(await mountPanel(trip, 'someone_else'), 'data-cancel-round-launch')).toBeNull()
+    expect(calls().filter(call => call[0] === 'POST')).toEqual([])
+  })
+  it('does not read unknown request types', async () => {
+    await mountPanel({ ...trip, request_type: 'business_trip_unknown' })
+    expect(apiFetchMock).not.toHaveBeenCalled()
+  })
+  it('shows applied trip cancellation without leave balance claims', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({ entryEnabled: true,
+      round: round({ outcome: 'applied', status: 'business_trip_cancelled', canWithdraw: false }),
+    }))]
+    const root = await mountPanel(trip)
+    expect(root.textContent).toContain('出差已取消')
+    expect(root.textContent).not.toContain('请假')
+    expect($(root, 'data-cancel-round-result')).toBeNull()
+    expect($(root, 'data-cancel-round-launch')).toBeNull()
+  })
+})
+
+
+describe('cancel round async scope', () => {
+  it('a late launch after unmount sends no follow-up summary read', async () => {
+    summaries = [() => jsonResponse(200, summaryBody({entryEnabled:true}))]
+    const root = await mountPanel({...LEAVE,request_type:'business_trip'})
+    let finish!: (response: Response) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+    $(root,'data-cancel-round-launch')!.click()
+    await flushUi()
+    $(root,'data-cancel-round-confirm')!.click()
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+    apps.pop()!.unmount()
+    finish(jsonResponse(201,{ok:true}))
+    await flushUi()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('a late summary cannot overwrite the newly selected document', async () => {
+    let finish!: (response: Response) => void
+    apiFetchMock.mockImplementationOnce(() => new Promise<Response>((resolve) => {finish=resolve}))
+    apiFetchMock.mockImplementationOnce(async () => jsonResponse(200,summaryBody({entryEnabled:false})))
+    const request = ref({...LEAVE})
+    const root = document.createElement('div')
+    document.body.appendChild(root)
+    const app = createApp({render:()=>h(AttendanceCancelRoundPanel,{request:request.value,currentUserId:'emp_1'})})
+    app.mount(root);apps.push(app)
+    request.value = {...LEAVE,id:'req-2'}
+    await flushUi()
+    finish(jsonResponse(200,summaryBody({entryEnabled:true})))
+    await flushUi()
+    expect($(root,'data-cancel-round-launch')).toBeNull()
+    expect(apiFetchMock).toHaveBeenCalledTimes(2)
   })
 })

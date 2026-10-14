@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process'
 // Half-day leave helper (display-only) — design-lock
 // docs/development/attendance-halfday-leave-helper-design-lock-20260705.md (PR #3605).
 //
@@ -24,6 +25,7 @@ import { createApp, nextTick, ref, type App } from 'vue'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import { apiFetch } from '../src/utils/api'
 import { useLocale } from '../src/composables/useLocale'
+import { formatAttendanceDateKey } from '../src/views/attendance/attendanceDateTimePresentation'
 import {
   buildLeaveQuickFill,
   computeLeaveMinutesDaysEquivalent,
@@ -31,6 +33,7 @@ import {
 } from '../src/views/attendance/halfDayLeaveHelper'
 import {
   formatLeaveDurationHours,
+  parseDateTimeLocalMs,
   hoursFromLeaveMinutes,
   minutesFromDateTimeRange,
   snapMinutesToHalfHour,
@@ -194,6 +197,26 @@ describe('leaveRequestDurationDisplay (pure)', () => {
     expect(formatLeaveDurationHours('')).toBe('')
   })
 
+  it.each(['America/New_York', 'Asia/Singapore', 'UTC'])(
+    'keeps the same form wall-clock duration for a viewer in %s',
+    timezone => {
+      // A real child process is required: Vitest's stubEnv does not change the
+      // host engine timezone. Execute the actual parser under each native TZ.
+      const script = 'const parse = ' + parseDateTimeLocalMs.toString()
+        + '; console.log(JSON.stringify(['
+        + '(parse("2026-03-08T03:00")-parse("2026-03-08T01:00"))/60000,'
+        + '(parse("2026-11-01T02:00")-parse("2026-11-01T00:00"))/60000]))'
+      const output = execFileSync(process.execPath, ['-e', script], {
+        env: { ...process.env, TZ: timezone }, encoding: 'utf8',
+      })
+      expect(JSON.parse(output)).toEqual([120, 120])
+    },
+  )
+
+  it('rejects impossible calendar dates in the form instead of normalizing them', () => {
+    expect(minutesFromDateTimeRange('2026-02-30T09:00', '2026-03-02T18:00')).toBeNull()
+  })
+
   it('derives duration from start/end and never invents a free-form 8.3 hour value', () => {
     expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T18:00')).toBe(540)
     expect(minutesFromDateTimeRange('2026-08-28T09:00', '2026-08-28T17:30')).toBe(510)
@@ -226,6 +249,13 @@ vi.mock('../src/composables/usePlugins', () => ({
     loading: ref(false),
     error: ref(null),
     fetchPlugins: vi.fn().mockResolvedValue(undefined),
+  }),
+}))
+
+vi.mock('../src/composables/useAuth', () => ({
+  useAuth: () => ({
+    getCurrentUserId: async () => 'user-1',
+    buildAuthHeaders: () => ({ 'x-tenant-id': 'default' }),
   }),
 }))
 
@@ -274,7 +304,7 @@ const LEAVE_TYPE_ITEMS = [
 /** Installs an `/api/attendance/*` mock for employee overview mode with a valid effective shift
  * window (09:00-18:00) and the two leave types above. `runtimeRuleOverride`, when provided,
  * replaces `runtimeRule` wholesale (used by the "missing shift window" test). */
-function installOverviewMock(options?: { runtimeRuleOverride?: Record<string, unknown>; leaveTypeItems?: unknown[] }): void {
+function installOverviewMock(options?: { runtimeRuleOverride?: Record<string, unknown>; targetRuleOverride?: Record<string, unknown>; leaveTypeItems?: unknown[] }): void {
   const runtimeRule = options?.runtimeRuleOverride ?? {
     name: 'Standard',
     timezone: 'Asia/Shanghai',
@@ -296,13 +326,30 @@ function installOverviewMock(options?: { runtimeRuleOverride?: Record<string, un
     if (url.includes('/api/attendance/reports/requests?')) return jsonResponse(200, { ok: true, data: { items: [] } })
     if (url.includes('/api/attendance/holidays?')) return jsonResponse(200, { ok: true, data: { items: [] } })
     if (url.includes('/api/attendance/settings')) return jsonResponse(200, { ok: true, data: {} })
+    if (url.includes('/api/attendance/timezone-context/me?')) {
+      const workDate = new URL(url, 'http://fixture.invalid').searchParams.get('workDate') ?? ''
+      return jsonResponse(200, { ok: true, data: {
+        orgId: 'default', userId: 'user-1', workDate, timezone: 'Asia/Shanghai',
+        contextFingerprint: 'a'.repeat(64), frozen: false, referenceId: null, provenance: null,
+        window: { startAt: workDate + 'T01:00:00.000Z', endAt: workDate + 'T10:00:00.000Z' },
+        rule: options?.targetRuleOverride ?? runtimeRule, isWorkingDay: true,
+      } })
+    }
     if (url.includes('/api/attendance/rules/me')) {
+      const now = new Date()
       return jsonResponse(200, {
         ok: true,
         data: {
           userId: 'user-1',
           orgId: 'default',
-          resolvedForDate: '2026-04-15',
+          resolvedAt: now.toISOString(),
+          attendanceTimeContext: {
+            resolvedForInstant: now.toISOString(), effectiveTimezone: 'Asia/Shanghai',
+            timezoneSource: 'system_default', mode: 'default_only', policyVersion: 0,
+            referenceId: 'default-rule', version: 1,
+            currentLocalDate: formatAttendanceDateKey(now, 'Asia/Shanghai'), nextEffectiveBoundary: null,
+          },
+          resolvedForDate: new URL(url, 'http://fixture.invalid').searchParams.get('asOf') ?? new Date().toISOString().slice(0, 10),
           assignment: { attendanceGroups: [], scheduleGroups: [] },
           runtimeRule,
           punchPolicy: { unscheduledMode: 'allow', outdoorApprovalRequired: false, merge: {} },
@@ -428,6 +475,15 @@ describe('Attendance half-day leave helper — inline request form (component)',
       expect(requestedIn.value).toBe('2026-04-15T13:30')
       expect(requestedOut.value).toBe('2026-04-15T18:00')
       expect(minutes.value).toBe('240')
+    })
+
+    it('uses the target rule window even when the displayed current runtime rule differs', async () => {
+      installOverviewMock({ targetRuleOverride: { workStartTime: '11:00', workEndTime: '20:00' } })
+      const { requestedIn, requestedOut } = await mountAndSelectLeave()
+      container!.querySelector<HTMLButtonElement>('[data-leave-quickfill-kind="full_day"]')!.click()
+      await flushUi()
+      expect(requestedIn.value).toBe('2026-04-15T11:00')
+      expect(requestedOut.value).toBe('2026-04-15T20:00')
     })
 
     it('one-time seed only: editing an input after a quick-fill click is never reverted', async () => {
@@ -679,8 +735,9 @@ describe('Attendance dedicated leave-request card (employee overview)', () => {
       requestType: 'leave',
       leaveTypeId: 'leave-annual',
       minutes: 480,
-      requestedInAt: '2026-04-15T09:00',
-      requestedOutAt: '2026-04-15T18:00',
+      requestedInAt: '2026-04-15T01:00:00.000Z',
+      requestedOutAt: '2026-04-15T10:00:00.000Z',
+      expectedTimezoneContextFingerprint: 'a'.repeat(64),
       reason: '家里有事',
     })
     await vi.waitFor(() => {

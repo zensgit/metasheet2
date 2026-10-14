@@ -128,7 +128,8 @@ test('every staging retirement commandSeed is a unique valid UUID', () => {
       seeds.push({ filename, seed: match[1].toLowerCase() })
     }
   }
-  assert.ok(seeds.length >= 10, 'expected the complete staging retirement seed census')
+  // The timestamp-writing S2-3 smoke is retired and no longer owns a commandSeed.
+  assert.ok(seeds.length >= 9, 'expected the complete active staging retirement seed census')
   assert.equal(
     new Set(seeds.map((entry) => entry.seed)).size,
     seeds.length,

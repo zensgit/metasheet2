@@ -1,3 +1,4 @@
+import { acquireBusinessTripRequestPrefixV1 } from '../attendance/attendance-business-trip-locks'
 import crypto from 'crypto'
 import { pool } from '../db/pg'
 import type {
@@ -11707,6 +11708,9 @@ export class ApprovalProductService {
           parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
           'shared',
         )
+        await acquireBusinessTripRequestPrefixV1(client as unknown as AttendanceW4TransactionClientV1, {
+          orgId: rolloutLock.orgId, requestId: rolloutLock.requestId,
+        })
       } else {
         await client.query('BEGIN')
       }

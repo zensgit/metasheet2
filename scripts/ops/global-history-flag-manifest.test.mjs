@@ -825,4 +825,40 @@ test('stock-prep members page switch (ADR §11.4-11.6 S5b, R-39): boolean, exact
   const host = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/services/stock-preparation-members.ts'), 'utf8')
   assert.match(host, /STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV = 'STOCK_PREP_MEMBERS_PAGE_ENABLED'/)
   assert.match(host, /env\[STOCK_PREP_MEMBERS_PAGE_ENABLED_ENV\] === 'true'/)
+  // Fix round 1 (S5b lock redesign): the switch-on record states what other sessions wait for, exactly,
+  // and keeps the explicit owner-acceptance line — the overclaims it replaced may not come back.
+  assert.doesNotMatch(spec.purpose, /user_roles writes for any other role are unaffected/)
+  assert.doesNotMatch(spec.purpose, /every wait is bounded by a 5 s lock_timeout/)
+  // Final review: "unaffected" overclaimed — such a write can still queue behind a blocked session or on the
+  // pool, and the role-row waiters (same-role port writes, appointments, members' approval / FWB / record-link
+  // sessions) and the pool they can fill are part of what the owner accepts.
+  assert.doesNotMatch(spec.purpose, /authority rows is unaffected/)
+  assert.match(spec.purpose, /a write that touches neither the role being written nor the grantor's own authority rows is not blocked directly by this write's locks \(it can still queue behind a blocked session or on the connection pool\)/)
+  assert.match(spec.purpose, /other writes of this port on X \(each takes its connection first and then waits.*about 20 of them fill the default 20-connection pool/)
+  assert.match(spec.purpose, /any session acting as a member of X that locks all of that user's roles FOR SHARE \(submitting an approval, an approval write-back \(FWB\) automation, writing a record link\)/)
+  assert.match(spec.purpose, /a sheet-permission PUT\) is blocked indirectly/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision that accepts these waits .*on other writes and appointments to the role being written, on approval submissions, FWB automations and record-link writes by its members .*and on the connection pool they can fill/)
+  assert.doesNotMatch(host, /authority rows\s+\*\s+is unaffected/)
+  assert.match(host, /is not blocked directly by this write's locks \(it can still queue behind a blocked session or on[\s*]+the connection pool/)
+  assert.match(host, /an approval[\s*]+write-back \(FWB\) automation/)
+  assert.match(spec.purpose, /revoking ANY of the grantor's own authority \(.*\) waits for the in-flight write with no bound from this port/)
+  assert.match(spec.purpose, /the 5 s lock_timeout bounds only THIS port's own waits/)
+  assert.match(spec.purpose, /uses more pool connections while its locks are held/)
+  assert.match(spec.purpose, /OWNER ACCEPTANCE REQUIRED: turning this switch ON is an owner decision/)
+  assert.doesNotMatch(host, /every other `user_roles` write/)
+  assert.doesNotMatch(host, /no second pool connection (?:is taken )?while (?:the locks|they) are held/)
+  assert.match(host, /WHAT OTHER SESSIONS SEE/)
+  // Fix round 2 (N3 stated exactly): the row locks hold only EXISTING rows, so an insert-only downgrade
+  // of the grantor waits on nothing and a sheet not reached yet may still be granted after it; a G1
+  // call's pool-connection wait is not a lock wait. Both the switch-on record and the header say so,
+  // and the old "cannot be revoked … nothing is granted after it" claims may not come back.
+  assert.match(spec.purpose, /an insert-only downgrade of the grantor \(.*standard PUT.*member group holding a lower level.*\) waits on nothing, and a named sheet the add has not reached yet may still be granted after it/)
+  assert.match(spec.purpose, /A G1 call waiting for a pool connection is not a lock wait and no lock_timeout bounds it: .*pool connect timeout \(10 s by default\) and ends in 500/)
+  assert.match(host, /THE INSERT-ONLY DOWNGRADE IS NOT COVERED/)
+  assert.match(host, /may STILL BE GRANTED AFTER IT/)
+  assert.match(host, /A G1 CALL WAITING FOR A POOL CONNECTION IS[\s*]+NOT A LOCK WAIT/)
+  assert.doesNotMatch(host, /cannot be revoked between the in-lock check and the G1 call/)
+  assert.doesNotMatch(host, /lands \(nothing is granted after it\)/)
+  assert.doesNotMatch(host, /so none of them can be revoked between the decision/)
+  assert.doesNotMatch(host, /no revoke of the grantor's write can land/)
 })

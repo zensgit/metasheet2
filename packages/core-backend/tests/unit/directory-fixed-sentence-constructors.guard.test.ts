@@ -78,8 +78,9 @@
  * NOT COVERED, deliberately (each is a value the guard cannot see into today; the named sites are values-free by
  * inspection):
  *  - classes whose message a route echoes through its own `instanceof` branch and NOT through the classifier: this
- *    guard's family is the classes on the lists only. Today eight — LocalDirectoryValidationError /
- *    LocalDirectoryNotFoundError / LocalDirectoryConflictError (routes/admin-directory-local.ts:74-83),
+ *    guard's family is the classes on the lists only. Today nine — LocalDirectoryMembershipHistoryError (slice C,
+ *    #6079; a fixed sentence, no parameter) / LocalDirectoryValidationError /
+ *    LocalDirectoryNotFoundError / LocalDirectoryConflictError (routes/admin-directory-local.ts:81-96),
  *    OrgTransferValidationError / OrgTransferNotFoundError / OrgTransferConflictError
  *    (routes/admin-directory-org-transfers.ts:98-107), DirectorySyncInProgressError and
  *    DirectorySyncFrozenByTransferError (routes/admin-directory.ts:729-781) — answer `error.message` as it is;

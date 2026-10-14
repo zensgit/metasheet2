@@ -233,6 +233,8 @@ const FENCE_HOLDER_LEDGER: readonly LedgerEntry[] = [
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: <module> :: sql:meta_recovery_archive_expiry_authorize', '33', 'as above.'),
   NONWRITER('multitable/recovery-archive-legal-holds.ts :: <module> :: sql-dml:meta_recovery_archive_legal_holds', '33', 'DML on the legal-hold table fires the guard_row trigger (a SQL acquirer); no meta_records statement.', 2),
   NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: executeLivePunch :: ${W4C0}`, '32', W4C0_REASON),
+  NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: probeOnlinePunchReplay :: ${W4C0}`, '32', `${W4C0_REASON} Online probe reads authorization liveness and operation receipts only; it passes no attendanceCleaningSheetIds.`),
+  NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: executeOnlinePunch :: ${W4C0}`, '32', `${W4C0_REASON} Online common-receipt transaction writes attendance operations, events, records and requests only; it passes no attendanceCleaningSheetIds.`),
   NONWRITER(`attendance/w4c2-live-scheduled-boundary.ts :: executeScheduledRunInternal :: ${W4C0}`, '32', W4C0_REASON, 5),
   NONWRITER(`attendance/w4c2-scheduled-run-ops-worker.ts :: abandonScheduledRunOnceV1 :: ${W4C0}`, '32', W4C0_REASON),
   NONWRITER(`attendance/w4c2-scheduled-run-ops-worker.ts :: sweepAttendanceScheduledRunsOnceV1 :: ${W4C0}`, '32', W4C0_REASON, 2),

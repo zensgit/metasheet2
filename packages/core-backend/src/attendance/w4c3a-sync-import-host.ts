@@ -1,3 +1,4 @@
+import { acquireAttendanceImportTimezonePrefixV1, prepareAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 /**
  * W4C-3a P06 — core-owned modern synchronous import commit host.
  *
@@ -381,6 +382,7 @@ export function createAttendanceSyncImportHostV1(
         return await runAttendanceResultOperationTransactionV1(
           acquired.client,
           async (trx) => {
+            await acquireAttendanceImportTimezonePrefixV1(trx, input.orgId)
             const orgKey = parseCanonicalAttendanceRolloutOrgKeyV1(input.orgId)
             await acquireAttendanceCalculationRolloutLock(trx, orgKey, 'shared')
             const posture = await resolveSegmentCalculationPosture(
@@ -584,6 +586,8 @@ export function createAttendanceSyncImportHostV1(
                 fail('ATTENDANCE_OPERATION_CONFLICT')
               }
             }
+
+            if (input.groupEffects.length > 0) await prepareAttendanceImportTimezoneSourceV1(trx, input.orgId)
 
             // Freeze preconditions (class-11 inside strict/bulk freeze helpers).
             const frozenRecords =

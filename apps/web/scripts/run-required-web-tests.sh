@@ -470,6 +470,16 @@
 # workflow-scoped token; until that lands this always-on lane is the only one running the file.
 # Its sibling tests/multitable/export-sheet-client.test.ts remains unwired here (untouched, out of
 # scope for this change).
+#
+# Role delegation page (2026-10-10, #6310 follow-up): `roleDelegationView` — apps/web/tests/
+# roleDelegationView.spec.ts, RoleDelegationView.vue (the delegated-admin role page; its revoke
+# dropdown now reads the server's revocable `delegableRoles`, its assign dropdown the assignable
+# `roleCatalog`). It ran in NO workflow before: no token in this script, approval-web-guard.yml or
+# multitable-web-guard.yml is a substring of its path, so the file was laptop-only green. Bare
+# basename token, checked BOTH directions: none of the existing tokens is a substring of
+# `tests/roleDelegationView.spec.ts`, it is a substring of none of them (nearest: `myDelegationView`,
+# `roleManagementSave`), and among the vitest-collectable spec/test files under apps/web it matches
+# exactly one, its own (src/views/RoleDelegationView.vue is not collectable and differs in case).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # Explicit organization sessions: a separate small process, retaining existing
@@ -1503,6 +1513,7 @@ npx vitest run attendance-punch-outcome --reporter=dot || exit $?
 # and a substring-collision check in BOTH directions over all 553 manifest tokens found none.
 # The manifest was regenerated with `node scripts/ops/required-web-lane-token-manifest.mjs --write`.
 exec npx vitest run \
+  adminPageContentSearch.spec.ts \
   amountAutoSum \
   approval-amount-in-words \
   approval-assignee-source \
@@ -1601,20 +1612,33 @@ exec npx vitest run \
   attendance-scheduled-feature-status-wiring \
   attendance-scheduled-feature-status.spec.ts \
   attendance-selfservice-dashboard \
+  attendance-server-clock-view.spec.ts \
+  attendance-server-clock.spec.ts \
   attendanceAdminEndpointCompatibility \
+  attendanceAdminGuide.spec.ts \
+  attendanceAudienceChipField.spec.ts \
+  attendanceBusinessTripRequestCard \
   attendanceCapabilityUnavailable \
+  attendanceCurrentTimeContext \
+  attendanceDayTimeContext \
   attendanceEmployeeLeaveRequestCard \
   attendanceEmployeeMakeupRequestCard \
   attendanceEmployeeQuickActionIcons \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
+  attendancePayrollHelp.spec.ts \
   attendanceRecordRequestPrefill \
   attendanceRequestReviewEntitlement \
+  attendanceRequestTimezoneIntegration \
   AttendanceScheduledFeatureStatus \
+  attendanceTimezonePolicyPanel \
+  attendanceTimezoneTarget \
   attendanceTodayWorkbench \
   attendanceUserPickerEndpoint \
+  attendanceWallTime \
   automation-action-summary \
   automation-condition-legacy-person-picker \
   automation-condition-typing-editor \
@@ -1637,6 +1661,7 @@ exec npx vitest run \
   cancelRoundEntrySurfaces \
   cancelRoundEntryTodoCenter \
   categoryCandidateInput \
+  clipboard-no-bare-navigator-clipboard \
   comment-affordance-color-consistency \
   conditional-formatting-dialog-i18n \
   data-sources-api-preview \
@@ -1891,7 +1916,9 @@ exec npx vitest run \
   parallelBranchRunsView \
   personal-view-client \
   public-multitable-form \
+  recordReportPresentation.spec.ts \
   requesterPreviewFields \
+  roleDelegationView \
   roleManagementSave \
   routePreviewErrors \
   run-required-web-tests-shape \
@@ -1981,9 +2008,11 @@ exec npx vitest run \
   useAttendanceAdminConfig \
   useAttendanceAdminProvisioning \
   useAttendanceAdminUsers \
+  useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
   userManagementView \
+  uuid-no-bare-randomuuid \
   view-manager-multitable-contract \
   workflowHubView \
   xlsx-mapping \

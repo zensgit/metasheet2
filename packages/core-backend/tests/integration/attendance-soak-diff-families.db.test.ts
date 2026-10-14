@@ -1,3 +1,4 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * #4556 combined-soak shadow-diff FAMILY pins (real host, real DB) — the mechanical
  * statement of what staging soak-status 31962440160 counted, built while dispositioning it:
@@ -49,7 +50,10 @@ const { buildAttendanceGroupFixedScheduleProducerKey } = requireCjs(
 )
 
 type HttpResponse = { status: number; body?: any; raw: string }
-function requestJson(
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(
   url: string,
   options: { method?: string; headers?: Record<string, string>; body?: string } = {},
 ): Promise<HttpResponse> {
@@ -82,6 +86,7 @@ function requestJson(
 describeDb('#4556 soak shadow-diff families — transient partial-day mismatch + single-daily-pair all-equal (org2 shape)', () => {
   let server: MetaSheetServer | undefined
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let baseUrl = ''
   let priorW4: string | undefined
   let priorW7: string | undefined
@@ -113,6 +118,15 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, org],
     )
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), org, TZ],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   beforeAll(async () => {
@@ -228,6 +242,7 @@ describeDb('#4556 soak shadow-diff families — transient partial-day mismatch +
     }
     await pool?.query(`DELETE FROM attendance_calculation_rollout_state WHERE org_id = $1`, [org]).catch(() => undefined)
     await pool?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [[userA, userB, userC, userD]]).catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorW4 === undefined) delete process.env[W4_ENV]

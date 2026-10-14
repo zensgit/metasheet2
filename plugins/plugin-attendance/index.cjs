@@ -1,4 +1,5 @@
 const crypto = require('crypto')
+const {validateAttendanceRelatedAbsoluteInstantsV1,validateAttendanceLeaveTargetRangeV1} = require('./lib/attendance-timezone-request-instants.cjs')
 const { randomUUID } = crypto
 const fs = require('fs')
 const fsp = require('fs/promises')
@@ -33,6 +34,15 @@ const attendanceGroupFixedScheduleProducerKeyLib = require('./lib/attendance-gro
 const { resolveAttendanceFixedScheduleSelfRouteIdentity } = require('./lib/attendance-fixed-schedule-self-route-identity.cjs')
 const { resolvePunchOrgIdV1, extractRequestedPunchOrgIdV1 } = require('./lib/attendance-punch-org-resolution.cjs')
 const { hasReversedLivePunchOrder } = require('./lib/attendance-live-punch-order.cjs')
+const { CLIENT_TIMESTAMP_CODE, CLIENT_TIMESTAMP_MESSAGE, hasClientPunchTimestamp, getOnlinePunchServerInstant } = require('./lib/attendance-online-punch-clock.cjs')
+const { registerAttendanceTimezonePolicyRoutes } = require('./lib/attendance-timezone-policy-routes.cjs')
+const { registerAttendanceTimezoneTargetRoutes } = require('./lib/attendance-timezone-target-routes.cjs')
+const { createAttendanceTimezoneReadContext, withTimezoneExportColumns } = require('./lib/attendance-timezone-read-context.cjs')
+const { createAttendanceTimezoneRuntime } = require('./lib/attendance-timezone-runtime.cjs')
+const { authorizeAttendanceTimezoneManage } = require('./lib/attendance-timezone-manage-authority.cjs')
+const { createBusinessTripService, getBusinessTripServerInstant } = require('./lib/attendance-business-trip.cjs')
+const { lockAttendanceTimezoneOrg, AttendanceTimezonePolicyError } = require('./lib/attendance-timezone-policy-store.cjs')
+const { createBusinessTripRequestAdapter } = require('./lib/attendance-business-trip-request-adapter.cjs')
 const {
   parseAttendanceOrgResolutionShadowModeV1,
   recordShadowOrgResolutionV1,
@@ -150,6 +160,7 @@ const REQUEST_TYPES = [
   // OPTIONAL dispatch/multisite D1 (#2546 design-lock): approval envelope type only; generic
   // /requests must not create it because dispatch needs a structured target-group/date-range detail.
   'schedule_dispatch',
+  'business_trip',
 ]
 const OUTDOOR_APPROVAL_EVENT_SOURCE = 'outdoor_approval'
 // ② S2-0 (#2325 design-lock): event sources that ONLY a trusted internal writer may set — never accepted
@@ -5206,6 +5217,17 @@ function getAttendanceRecordReportFieldValue(row, fieldCode) {
   }
 
   switch (fieldCode) {
+    case 'timezone':
+      return row?.timezone ?? null
+    case 'timezone_source':
+      return row?.timezone_source ?? 'legacy_record'
+    case 'first_in_at':
+    case 'last_out_at': {
+      const value = row?.[fieldCode]
+      if (value === null || value === undefined) return null
+      const instant = new Date(value)
+      return Number.isFinite(instant.getTime()) ? instant.toISOString() : null
+    }
     case 'work_date':
       return workDate
     case 'employee_name':
@@ -8545,6 +8567,39 @@ function mapShiftRow(row) {
 // (HttpError, resolveShiftTiming, mapShiftRow, ...) are module-scope definitions that
 // must exist before first use; routes only call this at request time.
 let attendanceShiftService = null
+async function prepareAttendanceTimezoneSourceChange(trx,input) {
+  if (!attendanceTimezoneRuntime) {
+    throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+  }
+  async function guard(work) {
+    try { return await work() }
+    catch (error) {
+      if (error instanceof HttpError) throw error
+      if (error instanceof AttendanceTimezonePolicyError) throw new HttpError(error.status,error.code,error.code)
+      throw new HttpError(503,'ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE','ATTENDANCE_TIMEZONE_SOURCE_UNAVAILABLE')
+    }
+  }
+  const verify = await guard(() => attendanceTimezoneRuntime.prepareSourceChange(trx,input))
+  return async () => guard(verify)
+}
+
+async function assertAttendanceTimezoneManage(trx,{orgId,actorId}) {
+  const rows = await trx.query('SELECT u.id FROM users u JOIN user_orgs uo ON uo.user_id=u.id '
+    + 'WHERE u.id=$1 AND uo.org_id=$2 AND u.is_active=true AND uo.is_active=true FOR SHARE OF u,uo',[actorId,orgId])
+  const allowed = rows.length === 1 && await authorizeAttendanceTimezoneManage({
+    orgId,actorId,query:async (sql,values) => ({rows:await trx.query(sql,values)}),
+  })
+  if (!allowed) throw new HttpError(403,'ATTENDANCE_TIMEZONE_FORBIDDEN','ATTENDANCE_TIMEZONE_FORBIDDEN')
+}
+
+async function withAttendanceTimezoneSourceChange(trx,input,work) {
+  const verify = await prepareAttendanceTimezoneSourceChange(trx,input)
+  if (input.actorId) await assertAttendanceTimezoneManage(trx,input)
+  const result = await work()
+  await verify()
+  return result
+}
+
 function getAttendanceShiftService() {
   if (!attendanceShiftService) {
     attendanceShiftService = attendanceShiftServiceLib.createAttendanceShiftService({
@@ -8556,6 +8611,7 @@ function getAttendanceShiftService() {
       DEFAULT_SHIFT,
       DEFAULT_ORG_ID,
       normalizeLegacyRotationRulesForShiftName,
+      prepareTimezoneSourceChange:prepareAttendanceTimezoneSourceChange,
     })
   }
   return attendanceShiftService
@@ -10784,7 +10840,8 @@ function normalizeAttendanceScheduleAssignmentEndDate(value) {
 }
 
 function resolveAttendanceScheduleAssignmentUpdateEndDate(payload, existingEndDate) {
-  if (!Object.prototype.hasOwnProperty.call(payload, 'endDate')) return existingEndDate
+  // Request normalization retains omitted optional keys with an undefined value.
+  if (payload.endDate === undefined) return normalizeAttendanceScheduleAssignmentEndDate(existingEndDate)
   return normalizeAttendanceScheduleAssignmentEndDate(payload.endDate)
 }
 
@@ -11400,6 +11457,7 @@ function respondAttendanceGroupFixedScheduleTransactionAbort(res, error) {
 }
 
 async function applyAttendanceGroupFixedSchedule(db, input) {
+  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId},async () => {
   // FSER-3 (#4709): consume the desired config inside this transaction. Validation of
   // group/shift/date/targets and the config row lock (or first-create insert) happen
   // here, BEFORE any per-user target lock taken by the plan builder below; a failed
@@ -11461,9 +11519,11 @@ async function applyAttendanceGroupFixedSchedule(db, input) {
       applied: true,
     },
   }
+  })
 }
 
 async function rebuildAttendanceGroupFixedSchedule(db, input) {
+  return withAttendanceTimezoneSourceChange(db,{orgId:input.orgId},async () => {
   // FSER-3 (#4709): same config-consumption contract as apply — the config row is
   // locked (or atomically first-created) before any target lock, and the reloaded row
   // is the only authoritative source of the materialized values.
@@ -11533,6 +11593,7 @@ async function rebuildAttendanceGroupFixedSchedule(db, input) {
       rebuilt: true,
     },
   }
+  })
 }
 
 async function clearAttendanceGroupFixedScheduleManagedRows(db, input) {
@@ -12928,7 +12989,7 @@ function computeNextRunTime({ now, timeZone, hour, minute }) {
   return targetUtc
 }
 
-async function performHolidaySync({ db, logger, orgId, settings, payload }) {
+async function performHolidaySync({ db, logger, orgId, settings, payload, actorId }) {
   const syncConfig = resolveHolidaySyncConfig(settings, payload)
   const years = resolveHolidaySyncYears(settings, payload)
   let totalFetched = 0
@@ -12936,6 +12997,7 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
   let totalSkipped = 0
   let totalIgnored = 0
   const results = []
+  const fetched = []
 
   for (const year of years) {
     const { url, days } = await fetchHolidayCnYear({ year, baseUrl: syncConfig.baseUrl })
@@ -12946,23 +13008,18 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
       dayIndexMaxDays: syncConfig.dayIndexMaxDays,
       dayIndexFormat: syncConfig.dayIndexFormat,
     })
-    const syncResult = await upsertHolidayRows(db, {
-      orgId,
-      rows,
-      overwrite: syncConfig.overwrite,
-    })
-    totalApplied += syncResult.applied
-    totalSkipped += syncResult.skipped
-    totalIgnored += syncResult.ignored
-    results.push({
-      year,
-      url,
-      fetched: days.length,
-      applied: syncResult.applied,
-      skipped: syncResult.skipped,
-      ignored: syncResult.ignored,
-    })
+    fetched.push({year,url,days,rows})
   }
+
+  await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId},async () => {
+    for (const {year,url,days,rows} of fetched) {
+      const syncResult = await upsertHolidayRows(trx, {orgId,rows,overwrite:syncConfig.overwrite})
+      totalApplied += syncResult.applied
+      totalSkipped += syncResult.skipped
+      totalIgnored += syncResult.ignored
+      results.push({year,url,fetched:days.length,applied:syncResult.applied,skipped:syncResult.skipped,ignored:syncResult.ignored})
+    }
+  }))
 
   const lastRun = {
     ranAt: new Date().toISOString(),
@@ -12974,13 +13031,7 @@ async function performHolidaySync({ db, logger, orgId, settings, payload }) {
     totalIgnored,
     error: null,
   }
-  await saveSettings(db, {
-    ...settings,
-    holidaySync: {
-      ...(settings.holidaySync || {}),
-      lastRun,
-    },
-  })
+  await updateAttendanceSettings(db, { holidaySync: { lastRun } })
 
   return { syncConfig, years, totalFetched, totalApplied, totalSkipped, totalIgnored, results, lastRun }
 }
@@ -14422,6 +14473,26 @@ let attendanceW4ActiveCurrentPort = null
 let w4RecordOperationBoundary = null
 let w4CleaningRecordOperationBoundary = null
 let attendanceW4SegmentCalculationPortRef = null
+let attendanceTimezoneRuntime = null
+const attendanceTimezoneReadContext = createAttendanceTimezoneReadContext({
+  settingsKey: SETTINGS_KEY,
+  normalizeSettings,
+  runtime: () => attendanceTimezoneRuntime,
+  HttpError,
+  acquireLocks: (trx, input) => {
+    if (typeof attendanceW4SegmentCalculationPortRef?.acquireTimezoneRuntimeLocks !== 'function') {
+      throw new HttpError(503, 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE', 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+    }
+    return attendanceW4SegmentCalculationPortRef.acquireTimezoneRuntimeLocks(trx, input)
+  },
+  validateIanaTimezone: zone => {
+    if (typeof attendanceW4SegmentCalculationPortRef?.validateIanaTimezone !== 'function') {
+      throw new HttpError(503, 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE', 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+    }
+    return attendanceW4SegmentCalculationPortRef.validateIanaTimezone(zone)
+  },
+})
+let attendanceBusinessTripService = null
 
 // #4556 Gate A / Option B cutover: the ONE seam every reference-producing writer consults to
 // learn whether an org's canonical posture admits a multi-segment shift reference. Resolves
@@ -14984,7 +15055,7 @@ async function getAttendanceFormulaRuntimeOptions(db) {
   }
 }
 
-async function saveSettings(db, settings) {
+async function saveSettings(db, settings, { updateCache = true } = {}) {
   const normalized = normalizeSettings(settings)
   await db.query(
     `INSERT INTO system_configs (key, value, is_encrypted, updated_at)
@@ -14992,9 +15063,19 @@ async function saveSettings(db, settings) {
      ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
     [SETTINGS_KEY, JSON.stringify(normalized)]
   )
-  settingsCache = { value: normalized, loadedAt: Date.now() }
+  if (updateCache) settingsCache = { value: normalized, loadedAt: Date.now() }
   return normalized
 }
+
+
+const updateAttendanceSettings = require('./lib/attendance-calendar-settings-writer.cjs').createAttendanceCalendarSettingsWriter({
+  HttpError, settingsKey: SETTINGS_KEY, defaultSettings: DEFAULT_SETTINGS, normalizeSettings, mergeSettings,
+  isValidTimeZoneIdentifier,
+  lockOrg: (trx,orgId) => lockAttendanceTimezoneOrg((sql,values) => trx.query(sql,values),orgId),
+  prepareSourceChange: prepareAttendanceTimezoneSourceChange,
+  saveSettings, assertManage: assertAttendanceTimezoneManage,
+  cacheCommitted: value => { settingsCache = { value, loadedAt: Date.now() } },
+})
 
 function normalizeTemplateLibrary(raw) {
   const templates = Array.isArray(raw?.templates)
@@ -15259,7 +15340,7 @@ async function loadDefaultRule(db, orgId) {
   }
 }
 
-async function loadHoliday(db, orgId, workDate) {
+async function loadHoliday(db, orgId, workDate, strictSources = false) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
@@ -15272,12 +15353,12 @@ async function loadHoliday(db, orgId, workDate) {
     if (!rows.length) return null
     return mapHolidayRow(rows[0])
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return null
+    if (!strictSources && isDatabaseSchemaError(error)) return null
     throw error
   }
 }
 
-async function loadShiftAssignment(db, orgId, userId, workDate) {
+async function loadShiftAssignment(db, orgId, userId, workDate, strictSources = false) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
@@ -15315,12 +15396,12 @@ async function loadShiftAssignment(db, orgId, userId, workDate) {
       shift: mapShiftFromAssignmentRow(row),
     }
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return null
+    if (!strictSources && isDatabaseSchemaError(error)) return null
     throw error
   }
 }
 
-async function loadShiftById(db, orgId, shiftId) {
+async function loadShiftById(db, orgId, shiftId, strictSources = false) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
@@ -15336,7 +15417,7 @@ async function loadShiftById(db, orgId, shiftId) {
     if (!rows.length) return null
     return mapShiftRow(rows[0])
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return null
+    if (!strictSources && isDatabaseSchemaError(error)) return null
     throw error
   }
 }
@@ -15556,7 +15637,7 @@ async function loadApprovalFlow(db, orgId, { requestType, flowId }) {
   }
 }
 
-async function loadRotationAssignment(db, orgId, userId, workDate) {
+async function loadRotationAssignment(db, orgId, userId, workDate, strictSources = false) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   try {
     const rows = await db.query(
@@ -15582,7 +15663,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
     const row = rows[0]
     const rotation = mapRotationRuleFromAssignmentRow(row)
     if (!rotation.shiftSequence.length) return null
-    const offset = diffDays(row.start_date, workDate)
+    const offset = diffDays(normalizeDateOnly(row.start_date), workDate)
     if (offset < 0) return null
     const index = offset % rotation.shiftSequence.length
     const shiftRef = rotation.shiftSequence[index]
@@ -15595,7 +15676,7 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
       shift,
     }
   } catch (error) {
-    if (isDatabaseSchemaError(error)) return null
+    if (!strictSources && isDatabaseSchemaError(error)) return null
     throw error
   }
 }
@@ -15639,10 +15720,15 @@ async function loadRotationAssignment(db, orgId, userId, workDate) {
 async function resolveWorkContext(options) {
   const { db, orgId, userId, workDate, defaultRule, holidayOverride } = options
   const rule = defaultRule ?? await loadDefaultRule(db, orgId)
-  const holiday = holidayOverride ?? await loadHoliday(db, orgId, workDate)
-  const rotationInfo = userId ? await loadRotationAssignment(db, orgId, userId, workDate) : null
-  const assignmentInfo = userId ? await loadShiftAssignment(db, orgId, userId, workDate) : null
-  const profile = rotationInfo?.shift ?? assignmentInfo?.shift ?? rule
+  const holiday = options.holidayPrefetched === true ? holidayOverride
+    : holidayOverride ?? await loadHoliday(db, orgId, workDate, options.strictSources)
+  const rotationInfo = userId && !options.publishedProfile && options.publishedSourcesAbsent !== true
+    ? await loadRotationAssignment(db, orgId, userId, workDate, options.strictSources) : null
+  const assignmentInfo = userId && !options.publishedProfile && options.publishedSourcesAbsent !== true
+    ? await loadShiftAssignment(db, orgId, userId, workDate, options.strictSources) : null
+  const sourceProfile = options.publishedProfile?.rule ?? rotationInfo?.shift ?? assignmentInfo?.shift ?? rule
+  const profile = options.timezoneContext
+    ? { ...sourceProfile, timezone: options.timezoneContext.timezone } : sourceProfile
   const weekday = getWeekdayFromDateKey(workDate)
   let isWorkingDay = profile.workingDays.includes(weekday)
   if (holiday) {
@@ -15650,12 +15736,15 @@ async function resolveWorkContext(options) {
   }
   const context = {
     rule: profile,
-    assignment: assignmentInfo?.assignment ?? null,
-    rotation: rotationInfo?.rotation ?? null,
-    rotationAssignment: rotationInfo?.assignment ?? null,
+    assignment: options.publishedProfile?.source === 'shift'
+      ? {id:options.publishedProfile.assignmentId,orgId,userId,shiftId:profile.id} : assignmentInfo?.assignment ?? null,
+    rotation: options.publishedProfile?.source === 'rotation'
+      ? {id:options.publishedProfile.rotationRuleId} : rotationInfo?.rotation ?? null,
+    rotationAssignment: options.publishedProfile?.source === 'rotation'
+      ? {id:options.publishedProfile.assignmentId,orgId,userId} : rotationInfo?.assignment ?? null,
     holiday,
     isWorkingDay,
-    source: rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule',
+    source: options.publishedProfile?.source ?? (rotationInfo ? 'rotation' : assignmentInfo ? 'shift' : 'rule'),
   }
   assertWorkContextSegmentCalculationAllowed(orgId, context, options.referenceSegments)
   // Step 5: layer calendarPolicy.overrides on top of profile/holiday. D4
@@ -15675,7 +15764,7 @@ async function resolveWorkContext(options) {
   }
   if (calendarOverrides.length > 0 && userId) {
     const scopeContext = options.scopeContext
-      ?? await loadAttendanceScopeContextForUser(db, orgId, userId)
+      ?? await loadAttendanceScopeContextForUser(db, orgId, userId, {strictSources:options.strictSources === true})
     applyCalendarPolicyToWorkContext(context, {
       calendarOverrides,
       scopeContext,
@@ -15714,7 +15803,7 @@ function isPunchWithinShiftWindow(occurredAt, context, workDate, fallbackTimezon
  * Returns ALL published slots for the requested work dates (no LIMIT 1 / row-order winner).
  * Each row is an atomic (workDate, shiftId, segmentIndex=null, absolute window inputs).
  */
-async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId, lockScheduleFacts = false }) {
+async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, workDates, explicitShiftId, lockScheduleFacts = false, strictSources = false }) {
   const targetOrg = orgId || DEFAULT_ORG_ID
   const dates = Array.isArray(workDates)
     ? [...new Set(workDates.map((d) => normalizeDateOnly(d)).filter(Boolean))]
@@ -15771,7 +15860,7 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
       }
     }
   } catch (error) {
-    if (!isDatabaseSchemaError(error)) throw error
+    if (strictSources || !isDatabaseSchemaError(error)) throw error
   }
 
   // Published rotation assignments — resolve the sequence slot per workDate (org-scoped).
@@ -15801,7 +15890,7 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
         const end = row.end_date == null ? null : normalizeDateOnly(row.end_date)
         if (start && start > workDate) continue
         if (end && end < workDate) continue
-        const offset = diffDays(row.start_date, workDate)
+        const offset = diffDays(start, workDate)
         if (offset < 0) continue
         const index = offset % rotation.shiftSequence.length
         const shiftRef = rotation.shiftSequence[index]
@@ -15822,6 +15911,7 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
           segmentIndex: null,
           assignmentId: String(row.assignment_id),
           source: 'rotation',
+          rotationRuleId: String(row.rotation_rule_id),
           timezone: shift.timezone ?? rotation.timezone,
           workStartTime: shift.workStartTime ?? shift.work_start_time,
           workEndTime: shift.workEndTime ?? shift.work_end_time,
@@ -15830,7 +15920,7 @@ async function loadPublishedCandidatesForWorkDateResolver(db, { orgId, userId, w
       }
     }
   } catch (error) {
-    if (!isDatabaseSchemaError(error)) throw error
+    if (strictSources || !isDatabaseSchemaError(error)) throw error
   }
 
   return candidates
@@ -15941,15 +16031,19 @@ function createPluginAttendanceWorkDateResolver(db, options = {}) {
   const explicitActiveCurrentPort = options.activeCurrent ?? null
   const resolver = createAttendanceWorkDateResolver({
     toWorkDate,
-    buildZonedDate,
+    buildZonedDate: options.effectiveTimezone === undefined ? buildZonedDate
+      : (...args) => attendanceTimezoneRuntime.uniqueWallInstant(...args),
     addDaysToDateKey,
     normalizeTimeString,
     resolveOvernightFlag,
     async loadPublishedCandidates(args) {
-      return loadPublishedCandidatesForWorkDateResolver(db, {
+      const candidates = await loadPublishedCandidatesForWorkDateResolver(db, {
         ...args,
         lockScheduleFacts: options.lockScheduleFacts === true,
+        strictSources: options.strictSources === true,
       })
+      return options.effectiveTimezone === undefined ? candidates
+        : candidates.map(candidate => ({ ...candidate, timezone: options.effectiveTimezone }))
     },
     async loadOpenRecords(args) {
       return loadOpenRecordsForWorkDateResolver(db, args, explicitActiveCurrentPort)
@@ -16846,6 +16940,7 @@ async function applyAutoShiftMatchingItems(db, {
   }
 
   return db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
     const applied = []
     const skipped = []
     // #4556 Gate A / Option B: resolve the org's canonical posture ONCE for the whole apply
@@ -16959,7 +17054,8 @@ async function applyAutoShiftMatchingItems(db, {
       })
     }
     return { applied, skipped }
-  })
+              })
+          })
 }
 
 function resolveAutoShiftAutoWriteWindow(now = new Date(), lookaheadDays = DEFAULT_SETTINGS.autoShiftMatching.autoWrite.lookaheadDays) {
@@ -17512,16 +17608,30 @@ async function runAttendanceReportDigestOnce(db, { orgId = DEFAULT_ORG_ID, now =
   return { ran: true, cadences: cadenceSummaries }
 }
 
-async function loadAttendanceScopeContextForUser(db, orgId, userId) {
+async function loadAttendanceScopeContextForUser(db, orgId, userId, options = {}) {
+  const strict = options.strictSources === true
+  const unavailable = () => new HttpError(503,'ATTENDANCE_TIMEZONE_SCOPE_SOURCE_UNAVAILABLE','ATTENDANCE_TIMEZONE_SCOPE_SOURCE_UNAVAILABLE')
+  if (strict && (!orgId || !userId)) throw unavailable()
   if (!userId) return { userId: null, userName: undefined, attendanceGroups: [], roles: [], roleTags: [] }
-  const targetOrg = orgId || DEFAULT_ORG_ID
+  const targetOrg = strict ? orgId : (orgId || DEFAULT_ORG_ID)
+  let authorizedRequestSubject = false
+  if (options.authorizeRequestSubject !== undefined) {
+    if (typeof options.authorizeRequestSubject !== 'function'
+      || await options.authorizeRequestSubject({orgId:targetOrg,userId}) !== true) throw unavailable()
+    authorizedRequestSubject = true
+  }
   let userName
   const roleAccumulator = createAttendanceRoleContextAccumulator()
   try {
-    const rows = await db.query('SELECT name, role FROM users WHERE id = $1', [userId])
+    const rows = strict && !authorizedRequestSubject
+      ? await db.query(`SELECT u.name,u.role FROM users u JOIN user_orgs uo ON uo.user_id=u.id
+          WHERE u.id=$1 AND uo.org_id=$2 AND u.is_active=true AND uo.is_active=true`,[userId,targetOrg])
+      : await db.query('SELECT name, role FROM users WHERE id = $1', [userId])
+    if (strict && rows.length !== 1) throw unavailable()
     if (rows.length && typeof rows[0].name === 'string') userName = rows[0].name
     if (rows.length) appendRoleContextValue(roleAccumulator, rows[0].role)
   } catch (error) {
+    if (strict) throw unavailable()
     if (!isDatabaseSchemaError(error)) throw error
     try {
       const rows = await db.query('SELECT name FROM users WHERE id = $1', [userId])
@@ -17535,7 +17645,7 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
     const rows = await db.query(
       `SELECT g.name, g.code
        FROM attendance_group_members m
-       JOIN attendance_groups g ON g.id = m.group_id
+       JOIN attendance_groups g ON g.id = m.group_id AND g.org_id = m.org_id
        WHERE m.user_id = $1 AND m.org_id = $2`,
       [userId, targetOrg]
     )
@@ -17549,6 +17659,7 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
       }
     }
   } catch (error) {
+    if (strict) throw unavailable()
     if (!isDatabaseSchemaError(error)) throw error
   }
   try {
@@ -17564,6 +17675,7 @@ async function loadAttendanceScopeContextForUser(db, orgId, userId) {
       appendRoleContextValue(roleAccumulator, row.role_name)
     }
   } catch (error) {
+    if (strict) throw unavailable()
     if (!isDatabaseSchemaError(error)) throw error
   }
   const roleContext = finalizeAttendanceRoleContext(roleAccumulator)
@@ -17989,7 +18101,13 @@ async function resolveEffectiveCalendar(db, args) {
   else if (args.groupId) mode = 'groupId'
   else mode = 'orgOnly'
 
-  const settings = await getSettings(db)
+  // Trusted target facts are supplied only by the user calendar read route.
+  // They were resolved under the same transaction's timezone/source locks.
+  const targetDays = mode === 'userId' && args.targetDays instanceof Map ? args.targetDays : null
+  const settings = targetDays ? args.sourceSettings : await getSettings(db)
+  if (targetDays && (!settings || !(args.calendarSourceFacts?.byDate instanceof Map))) {
+    throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+  }
   let calendarPolicyOverrides
   if (Array.isArray(args.calendarPolicyOverrides)) {
     calendarPolicyOverrides = normalizeCalendarPolicyOverrides(args.calendarPolicyOverrides)
@@ -17999,9 +18117,9 @@ async function resolveEffectiveCalendar(db, args) {
       : []
   }
   const multiShiftDay = normalizeMultiShiftDaySetting(settings?.multiShiftDay)
-  const defaultRule = await loadDefaultRule(db, orgId)
+  const defaultRule = targetDays ? null : await loadDefaultRule(db, orgId)
   const dates = enumerateAttendanceCalendarDateRange(from, to)
-  const holidaysByDate = await loadHolidayMapByDates(db, orgId, dates)
+  const holidaysByDate = targetDays ? new Map() : await loadHolidayMapByDates(db, orgId, dates)
 
   // Mode-specific loads
   let scopeContext = {}
@@ -18016,11 +18134,26 @@ async function resolveEffectiveCalendar(db, args) {
   let groupRule = null
 
   if (mode === 'userId') {
-    scopeContext = await loadAttendanceScopeContextForUser(db, orgId, args.userId)
-    shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
-    const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
-    rotationByUser = rotationPrefetch.assignmentsByUser
-    rotationShiftsById = rotationPrefetch.shiftsById
+    if (!targetDays || [...targetDays.values()].some(day => !day.target.frozen)) {
+      scopeContext = await loadAttendanceScopeContextForUser(db, orgId, args.userId, { strictSources: Boolean(targetDays) })
+      if (targetDays) {
+        // Reuse the same transaction's selected sources instead of loading them twice.
+        const prefetched = args.calendarSourceFacts.prefetched
+        if (!(prefetched?.shiftAssignmentsByUser instanceof Map)
+          || !(prefetched.rotationAssignmentsByUser instanceof Map)
+          || !(prefetched.rotationShiftsById instanceof Map)) {
+          throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+        }
+        shiftAssignmentsByUser = prefetched.shiftAssignmentsByUser
+        rotationByUser = prefetched.rotationAssignmentsByUser
+        rotationShiftsById = prefetched.rotationShiftsById
+      } else {
+        shiftAssignmentsByUser = await loadShiftAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+        const rotationPrefetch = await loadRotationAssignmentMapForUsersRange(db, orgId, [args.userId], from, to)
+        rotationByUser = rotationPrefetch.assignmentsByUser
+        rotationShiftsById = rotationPrefetch.shiftsById
+      }
+    }
     overlays = await loadApprovedRequestsForOverlay(db, orgId, args.userId, from, to)
     if (args.includePending === true) {
       pendingOverlays = await loadPendingLeaveRequestsForOverlay(db, orgId, args.userId, from, to)
@@ -18104,6 +18237,19 @@ async function resolveEffectiveCalendar(db, args) {
   }
 
   const items = dates.map((date) => {
+    const targetDay = targetDays?.get(date)
+    if (targetDays && !targetDay) throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+    if (targetDay?.target.frozen) {
+      return { date,
+        base: { isWorkingDay: targetDay.target.isWorkingDay, source: 'stored_record' },
+        effective: { isWorkingDay: targetDay.target.isWorkingDay, source: 'stored_record' },
+        layers: [], overlays: overlaysByDate.get(date) ?? [],
+      }
+    }
+    const sourceContext = targetDays ? args.calendarSourceFacts.byDate.get(date)?.window?.sourceContext : null
+    if (targetDays && (!sourceContext?.rule || typeof sourceContext.isWorkingDay !== 'boolean')) {
+      throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+    }
     const weekday = getWeekdayFromDateKey(date)
     let profileSource = 'rule'
     let profile = groupRule ?? defaultRule
@@ -18125,7 +18271,18 @@ async function resolveEffectiveCalendar(db, args) {
       }
     }
 
-    const holiday = holidaysByDate.get(date) ?? null
+    if (sourceContext) {
+      profile = sourceContext.rule
+      profileSource = sourceContext.source
+      const calendarWindows = args.calendarSourceFacts.byDate.get(date)?.window?.calendarWindows
+      const selectedIds = calendarWindows?.filter(window => window.source === 'shift').map(window => window.assignmentId)
+      if (!Array.isArray(selectedIds) || (profileSource === 'shift'
+        && JSON.stringify(directShiftSlots.map(entry => entry.assignment?.id)) !== JSON.stringify(selectedIds))) {
+        throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+      }
+      if (profileSource !== 'shift') directShiftSlots = []
+    }
+    const holiday = sourceContext ? sourceContext.holiday ?? null : holidaysByDate.get(date) ?? null
     const layers = []
     let base
     if (holiday) {
@@ -18156,7 +18313,7 @@ async function resolveEffectiveCalendar(db, args) {
     }
     let effectivePriority = CALENDAR_BASE_SOURCE_PRIORITY
 
-    const holidayMeta = holiday ? { name: holiday.name ?? null, dayIndex: resolveHolidayMeta(holiday).dayIndex } : null
+    const holidayMeta = holiday ? { name: resolveHolidayMeta(holiday).name ?? null, dayIndex: resolveHolidayMeta(holiday).dayIndex } : null
     const dayContext = {
       date,
       holiday: holidayMeta,
@@ -18188,6 +18345,11 @@ async function resolveEffectiveCalendar(db, args) {
       effectivePriority = policyWinner.priority
     }
 
+    if (targetDay && (effective.isWorkingDay !== targetDay.target.isWorkingDay
+      || effective.isWorkingDay !== sourceContext.isWorkingDay)) {
+      throw new HttpError(409, 'ATTENDANCE_TIMEZONE_CALENDAR_CONTEXT_CONFLICT', 'ATTENDANCE_TIMEZONE_CALENDAR_CONTEXT_CONFLICT')
+    }
+
     const baseOut = {
       isWorkingDay: base.isWorkingDay,
       source: base.source,
@@ -18211,7 +18373,8 @@ async function resolveEffectiveCalendar(db, args) {
       effectiveOut.plannedMinutes = slots.length > 0
         ? sumEffectiveCalendarShiftSlotMinutes(slots)
         : (effective.isWorkingDay ? calculateAttendanceComprehensiveShiftPlannedMinutes(profile) : 0)
-      if (slots.length > 0) effectiveOut.slots = slots
+      if (slots.length > 0) effectiveOut.slots = targetDay
+        ? slots.map(slot => ({ ...slot, timezone: targetDay.target.timezone })) : slots
     }
 
     return {
@@ -22887,6 +23050,12 @@ async function enforcePunchConstraints({ db, userId, orgId, occurredAt, eventTyp
 // derived here, in-transaction, from that projection) — it does not
 // reintroduce the kind of route-smuggled value P1-3 removed.
 async function deriveLegacyLivePunchAttributionV1(trx, { orgId, userId, occurredAt, requestTimezone }) {
+
+  const frame = attendanceTimezoneRuntime?.frameFor(trx)
+  if (frame) {
+    const { fullWinner: _fullWinner, attributionTailMinutes: _tail, approvedOvertimeWindows: _overtime, ...wireResolution } = frame.resolution
+    return { rule: frame.context.rule, punchWorkDateResolution: wireResolution }
+  }
   const calendarWorkDate = toWorkDate(occurredAt, requestTimezone)
   const defaultRule = await loadDefaultRule(trx, orgId)
   const { adapters } = createPluginAttendanceWorkDateResolver(trx)
@@ -23195,6 +23364,8 @@ async function applyLivePunchProjectionLegacyV1(trx, args, mergePolicyPure) {
 // `includeFullWinner` out-params carry the winner's absolute/attribution windows and wall-time
 // provenance for the strict V2 rebuild; without the flag the resolver output is byte-identical.
 async function resolveW4LiveCandidateInTransactionV1(trx, args) {
+  const frame = attendanceTimezoneRuntime?.frameFor(trx)
+  if (frame) return frame.resolution
   // P18/P27: the canonical W4 transaction holds a shared lock on every
   // published assignment candidate it freezes. Schedule publication and
   // terminal schedule writers take the conflicting row lock, so either commit
@@ -23212,7 +23383,11 @@ async function resolveW4LiveCandidateInTransactionV1(trx, args) {
 
 // W4C-2: in-transaction W2 re-resolution (freeze step) — scheduled channel.
 async function resolveW4ScheduledCandidateInTransactionV1(trx, args) {
-  const { adapters } = createPluginAttendanceWorkDateResolver(trx, { lockScheduleFacts: true })
+  const frame = attendanceTimezoneRuntime?.scheduledFrameFor(trx,args)
+  if (frame) return frame.resolution
+  const { adapters } = createPluginAttendanceWorkDateResolver(trx, {
+    lockScheduleFacts: true, ...(args.effectiveTimezone === undefined ? {} : {effectiveTimezone:args.effectiveTimezone,strictSources:true}),
+  })
   return adapters.scheduled.resolveScheduledWorkDate({
     orgId: args.orgId,
     userId: args.userId,
@@ -23281,7 +23456,7 @@ async function buildW4ShadowFrozenContextV1(trx, args) {
       earlyLeaveGraceMinutes,
     }]
   }
-  const rule = await loadDefaultRule(trx, orgId)
+  const rule = args.defaultRule ?? await loadDefaultRule(trx, orgId)
   const severeLateThresholdMinutes = Number.isFinite(Number(rule?.severeLateThresholdMinutes))
     ? Math.max(0, Number(rule.severeLateThresholdMinutes))
     : DEFAULT_RULE.severeLateThresholdMinutes
@@ -23346,7 +23521,8 @@ async function buildW4ShadowFrozenContextV1(trx, args) {
     orgId,
     userId,
     workDate,
-    timezone: typeof shift.timezone === 'string' && shift.timezone ? shift.timezone : timezone,
+    timezone: args.effectiveTimezone ?? attendanceTimezoneRuntime?.frameFor(trx)?.timezone
+      ?? (typeof shift.timezone === 'string' && shift.timezone ? shift.timezone : timezone),
     shiftId,
     isWorkday: isWorkday !== false,
     holidayKind: holidayKind ?? null,
@@ -23416,6 +23592,28 @@ function clearHolidaySyncSchedule() {
 async function runAutoAbsenceForOrgDate(db, options) {
   const { orgId, workDate, logger, emit, skipDedup = false } = options
   const recoveryRunId = typeof options.recoveryRunId === 'string' ? options.recoveryRunId : null
+  if (options.w4Boundary?.resolvesScheduledTimezone === true) {
+    const key = `${orgId}:${workDate}`
+    const initiator = options.initiator === 'admin_run' ? 'admin_run' : 'cron'
+    // Fresh membership and each target's context belong to the owning transaction.
+    // In particular, a completed recovery never reads today's mutable sources.
+    const input = {orgId,workDate,targetUserIds:[],reviewTargets:[],initiator,
+      legacyDedupHit:!skipDedup && key === lastAutoAbsenceKey}
+    const outcome = recoveryRunId === null
+      ? await options.w4Boundary.executeScheduledRun({...input,adminActorId:initiator === 'admin_run' ? (options.adminActorId || null) : null})
+      : await options.w4Boundary.recoverScheduledRun({...input,runId:recoveryRunId})
+    if (outcome.kind === 'suspended') return {skipped:true,reason:'segment_calculation_suspended',total:0}
+    if (outcome.kind === 'legacy_dedup') return {skipped:true,reason:'dedup',total:0}
+    const rows = outcome.rows
+    const reviewRequired = outcome.reviewTargets ?? []
+    if (!skipDedup) lastAutoAbsenceKey = key
+    if (emit && outcome.kind !== 'w4') {
+      emit('attendance.absence.generated',{orgId,workDate,total:rows.length})
+      if (reviewRequired.length) emit('attendance.work_date.review_required',{orgId,workDate,total:reviewRequired.length,reasons:reviewRequired})
+    }
+    if (logger && rows.length) logger.info(`Auto absence generated for ${workDate}`,{orgId,total:rows.length})
+    return {skipped:false,total:rows.length,targetUsers:outcome.targetCount ?? 0,generated:rows.length,reviewRequired}
+  }
   const rule = options.rule ?? await loadDefaultRule(db, orgId)
   let calendarOverrides = Array.isArray(options.calendarOverrides) ? options.calendarOverrides : null
   if (calendarOverrides === null) {
@@ -23935,6 +24133,7 @@ function attendanceRequestTypeLabel(requestType) {
     missed_check_out: '漏打下班卡',
     time_correction: '时间更正',
     leave: '请假',
+    business_trip: '出差',
     overtime: '加班',
     outdoor_punch: '外勤打卡',
     shift_swap: '换班',
@@ -24599,6 +24798,20 @@ async function isAttendanceActorAssignedForNode(client, approvalId, nodeKey, act
 }
 
 module.exports = {
+  previewTimezonePolicyChange(trx,input) {
+    if (!attendanceTimezoneRuntime) {
+      throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+    }
+    return attendanceTimezoneRuntime.previewPolicyChange(trx,input)
+  },
+  // Trusted server port; HTTP authorization and tenant selection belong to the caller.
+  readTargetTimezoneContext(trx,input) {
+    if (!attendanceTimezoneRuntime) {
+      throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+    }
+    return attendanceTimezoneRuntime.readTargetTimezoneContext(trx,input)
+  },
+
   // Top-level so the integration harness's
   // getAttendancePluginForTest().resetAttendanceSettingsCacheForTests?.() (in
   // attendance-plugin.test.ts beforeEach) actually runs — it was previously only
@@ -25229,14 +25442,25 @@ module.exports = {
 	      if (!port || typeof port.buildRequestCreationAttributionSnapshotV1 !== 'function') {
 	        return buildUnsupportedRequestSnapshotMaterial('missing')
 	      }
-	      const defaultRule = await loadDefaultRule(trx, args.orgId)
-	      const workContext = await resolveWorkContext({
+	      const target = args.timezoneTarget
+	      const frozen = target?.frozen ? attendanceTimezoneRuntime.requestTargetFactsFor(trx)?.frame : null
+	      if (frozen) {
+	        return {
+	          attributionSnapshot: frozen.resolution.frozenAttribution
+	            ?? port.buildRequestCreationAttributionSnapshotV1({orgId:args.orgId,userId:args.userId,nowIso:new Date().toISOString(),resolution:frozen.resolution}),
+	          contextSnapshot:frozen.issued?.context ?? null,
+	        }
+	      }
+	      const defaultRule = target?.rule ?? await loadDefaultRule(trx, args.orgId)
+	      const targetFacts = target ? attendanceTimezoneRuntime.requestTargetFactsFor(trx) : null
+	      const workContext = target ? targetFacts?.window?.sourceContext ?? targetFacts?.frame?.context : await resolveWorkContext({
 	        db: trx,
 	        orgId: args.orgId,
 	        userId: args.userId,
 	        workDate: args.workDate,
 	        defaultRule,
 	      })
+	      if (!workContext) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED','ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED')
 	      const timezone =
 	        typeof workContext?.rule?.timezone === 'string' && workContext.rule.timezone
 	          ? workContext.rule.timezone
@@ -25248,12 +25472,14 @@ module.exports = {
 	            occurredAt: args.occurredAt,
 	            timezone,
 	            calendarWorkDate: args.workDate,
+	            ...(target ? {effectiveTimezone:target.timezone} : {}),
 	          })
 	        : await resolveW4ScheduledCandidateInTransactionV1(trx, {
 	            orgId: args.orgId,
 	            userId: args.userId,
 	            timezone,
 	            calendarWorkDate: args.workDate,
+	            ...(target ? {effectiveTimezone:target.timezone} : {}),
 	          })
 	      const attributionSnapshot = port.buildRequestCreationAttributionSnapshotV1({
 	        orgId: args.orgId,
@@ -25263,6 +25489,10 @@ module.exports = {
 	      })
 	      if (!attributionSnapshot || attributionSnapshot.posture !== 'resolved_v2') {
 	        return { attributionSnapshot, contextSnapshot: null }
+	      }
+	      const selectedDefinition = target && attendanceTimezoneRuntime.requestTargetFactsFor(trx)?.window?.calculationDefinition
+	      if (selectedDefinition && attendanceW4SegmentCalculationPort.validateFrozenTimezoneContext(selectedDefinition)) {
+	        return {attributionSnapshot,contextSnapshot:selectedDefinition}
 	      }
 	      // W7-1b P4 (request-creation snapshot) — through the seam + §2.4.
 	      const contextSnapshot = (await issueW4FrozenContextForProducerV1(trx, {
@@ -25276,6 +25506,7 @@ module.exports = {
 	            : timezone,
 	        isWorkday: workContext?.isWorkingDay !== false,
 	        holidayKind: workContext?.holiday?.kind ?? null,
+	        ...(target ? {effectiveTimezone:target.timezone,defaultRule} : {}),
 	      })).context
 	      if (!contextSnapshot) return buildUnsupportedRequestSnapshotMaterial('unresolved')
 	      return { attributionSnapshot, contextSnapshot }
@@ -25499,6 +25730,10 @@ module.exports = {
      * run inside the caller's transaction rather than on a second connection.
      */
     const issueW4FrozenContextViaW7SeamV1 = async (pluginTrx, args) => {
+      const scheduledFrame = args.purpose === 'persist' ? attendanceTimezoneRuntime?.scheduledFrameFor(pluginTrx,args) : null
+      const liveFrame = attendanceTimezoneRuntime?.frameFor(pluginTrx) ?? scheduledFrame
+      if (liveFrame?.issued) return liveFrame.issued
+      const effectiveArgs = liveFrame ? { ...args, timezone: liveFrame.timezone, effectiveTimezone: liveFrame.timezone } : args
       if (!w4IssueFrozenContextV1) {
         // Unreachable while the boundary conjunction above holds; asserted
         // rather than assumed, because a silent legacy fallback here would
@@ -25508,7 +25743,7 @@ module.exports = {
       const coreTrx = {
         query: async (sqlText, params) => ({ rows: await pluginTrx.query(sqlText, params ?? []) }),
       }
-      return w4IssueFrozenContextV1(
+      const issued = await w4IssueFrozenContextV1(
         coreTrx,
         {
           deriveFixedScheduleEffectiveness:
@@ -25516,7 +25751,7 @@ module.exports = {
               .deriveAttendanceGroupFixedScheduleEffectiveness,
           buildFixedScheduleProducerKey: buildAttendanceGroupFixedScheduleProducerKey,
           loadOrgRuleFacts: async (_coreTrx, orgKey) => {
-            const rule = await loadDefaultRule(pluginTrx, orgKey)
+            const rule = effectiveArgs.defaultRule ?? await loadDefaultRule(pluginTrx, orgKey)
             return {
               severeLateThresholdMinutes: Number.isFinite(Number(rule?.severeLateThresholdMinutes))
                 ? Math.max(0, Number(rule.severeLateThresholdMinutes))
@@ -25526,11 +25761,17 @@ module.exports = {
                 : DEFAULT_RULE.absenceLateThresholdMinutes,
             }
           },
-          buildLegacyFrozenContext: (legacyArgs) =>
-            buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs),
+          buildLegacyFrozenContext: (legacyArgs) => {
+            if (effectiveArgs.effectiveTimezone !== undefined) {
+              legacyArgs = {...legacyArgs,effectiveTimezone:effectiveArgs.effectiveTimezone,defaultRule:effectiveArgs.defaultRule}
+            }
+            return buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs)
+          },
         },
-        args,
+        effectiveArgs,
       )
+      return scheduledFrame && issued.arm !== 'blocked'
+        ? attendanceTimezoneRuntime.acceptScheduledIssued(pluginTrx,args,issued) : issued
     }
     __attendanceW7IssuanceSeamRefForTests.issueAttendanceFrozenContextV1 = (pluginTrx, args) =>
       issueW4FrozenContextViaW7SeamV1(pluginTrx, args)
@@ -25629,6 +25870,119 @@ module.exports = {
             attendanceW4SegmentCalculationPort.resolveAttendanceW7GroupArmSelectionV1(coreTrx, orgId)
         : null
 
+    const authorizedRequestTimezoneSubjects = new WeakMap()
+    attendanceTimezoneRuntime = createAttendanceTimezoneRuntime({
+      HttpError,
+      authorizeRequestTarget: async (trx,{orgId,userId}) => {
+        const authorization = authorizedRequestTimezoneSubjects.get(trx)
+        if (!authorization || authorization.orgId !== orgId || authorization.userId !== userId) {
+          throw new HttpError(403,'ATTENDANCE_TIMEZONE_MEMBER_REQUIRED','ATTENDANCE_TIMEZONE_MEMBER_REQUIRED')
+        }
+        return loadAttendanceScopeContextForUser(trx,orgId,userId,{
+          strictSources:true,
+          authorizeRequestSubject:subject => subject.orgId === authorization.orgId && subject.userId === authorization.userId,
+        })
+      },
+      loadPublishedCandidates: loadPublishedCandidatesForWorkDateResolver,
+      resolveLocalWallTime: (...args) => {
+        if (typeof attendanceW4SegmentCalculationPort?.resolveLocalWallTime !== 'function') {
+          throw new HttpError(503, 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE', 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        return attendanceW4SegmentCalculationPort.resolveLocalWallTime(...args)
+      },
+      validateIanaTimezone: zone => attendanceW4SegmentCalculationPort.validateIanaTimezone(zone),
+      addDaysToDateKey, normalizeTimeString, mapRuleRow, mapHolidayRow,
+      resolveRuleContext: async input => {
+        const resolvePosture = attendanceW4SegmentCalculationPort?.resolveTimezoneSegmentReferencePosture
+        if (typeof resolvePosture !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        const posture = await resolvePosture(input.db,input.orgId)
+        return resolveWorkContext({...input,referenceSegments:posture.referenceSegments === true})
+      },
+      prepareRuleContextBatch: async (trx,orgId) => {
+        const resolvePosture = attendanceW4SegmentCalculationPort?.resolveTimezoneSegmentReferencePosture
+        if (typeof resolvePosture !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        // This closure belongs to one read-only batch, never to a transaction
+        // that may subsequently mutate posture or source facts.
+        const posture = await resolvePosture(trx,orgId)
+        return input => {
+          if (input.db !== trx || input.orgId !== orgId) {
+            throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+          }
+          return resolveWorkContext({...input,referenceSegments:posture.referenceSegments === true})
+        }
+      },
+      loadShiftById:(trx,orgId,shiftId) => loadShiftById(trx,orgId,shiftId,true),
+      toWorkDate, resolveOvernightFlag,
+      loadAttributionTail: loadWorkDateAttributionTailMinutes,
+      loadApprovedOvertime: loadApprovedOvertimeWindowsForWorkDateResolver,
+      resolveScheduledCandidate: resolveW4ScheduledCandidateInTransactionV1,
+      acquireRuntimeLocks: (trx, input) => attendanceW4SegmentCalculationPort.acquireTimezoneRuntimeLocks(trx, input),
+      serverNow: getOnlinePunchServerInstant,
+      validateFrozenContext:context => attendanceW4SegmentCalculationPort.validateFrozenTimezoneContext(context),
+      validateFrozenAttribution:attribution => attendanceW4SegmentCalculationPort.validateFrozenTimezoneAttribution(attribution),
+      readCalculationDefinition: async (mirrorTrx,args) => {
+        const issued = await issueW4FrozenContextViaW7SeamV1(mirrorTrx, {
+          ...args,effectiveTimezone:args.timezone,purpose:'mirror',
+        })
+        if (issued?.arm === 'blocked') {
+          throw new HttpError(409,'W4C2_W7_CONTEXT_SOURCE_SUSPENDED','W4C2_W7_CONTEXT_SOURCE_SUSPENDED')
+        }
+        if (!issued?.context) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID','ATTENDANCE_TIMEZONE_CALCULATION_SOURCE_INVALID')
+        return issued.context
+      },
+      selectCalendarCandidates: async (trx,{orgId,userId,workDates,candidates}) => {
+        const settings = await attendanceTimezoneReadContext.readCalendarSettings(trx)
+        const multiShiftDay = normalizeMultiShiftDaySetting(settings.multiShiftDay)
+        const from = workDates[0],to = workDates[workDates.length-1]
+        const shifts = await loadShiftAssignmentMapForUsersRange(trx,orgId,[userId],from,to)
+        const rotations = await loadRotationAssignmentMapForUsersRange(trx,orgId,[userId],from,to)
+        const selected = []
+        for (const workDate of workDates) {
+          const rotation = resolveRotationInfoFromPrefetch(rotations.assignmentsByUser.get(userId),workDate,rotations.shiftsById)
+          const slots = rotation?.shift ? [{source:'rotation',assignment:rotation.assignment}]
+            : resolveShiftAssignmentsFromPrefetch(shifts.get(userId),workDate,{multiShiftDay})
+                .map(entry => ({source:'shift',assignment:entry.assignment}))
+          for (const slot of slots) {
+            const matches = candidates.filter(candidate => candidate.workDate === workDate
+              && candidate.source === slot.source && candidate.assignmentId === slot.assignment.id)
+            if (matches.length !== 1) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID','ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+            selected.push(matches[0])
+          }
+        }
+        return {candidates:selected,multiShiftDay,prefetched:{
+          shiftAssignmentsByUser:shifts,
+          rotationAssignmentsByUser:rotations.assignmentsByUser,
+          rotationShiftsById:rotations.shiftsById,
+        }}
+      },
+      loadCalendarOverrides: async trx => {
+        const rows = await trx.query('SELECT value FROM system_configs WHERE key=$1',[SETTINGS_KEY])
+        if (rows.length > 1) throw new HttpError(503,'ATTENDANCE_SETTINGS_SOURCE_INVALID','ATTENDANCE_SETTINGS_SOURCE_INVALID')
+        const stored = rows.length === 0 ? {} : rows[0].value
+        const raw = typeof stored === 'string' ? JSON.parse(stored) : stored
+        if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+          throw new HttpError(503,'ATTENDANCE_SETTINGS_SOURCE_INVALID','ATTENDANCE_SETTINGS_SOURCE_INVALID')
+        }
+        return normalizeSettings(raw).calendarPolicy.overrides
+      },
+      lockOrgPolicy: (trx, orgId) => lockAttendanceTimezoneOrg(pluginQueryAdapter(trx), orgId),
+      prepareTripSourceChange: async (trx, input) => {
+        if (!attendanceBusinessTripService) {
+          throw new HttpError(503, 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE', 'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        return attendanceBusinessTripService.prepareSourceChange(trx, {
+          ...input, acquireLocks: (client, args) => attendanceW4SegmentCalculationPort.acquireTimezoneRuntimeLocks(client, args),
+        })
+      },
+      readApprovedTrips: require('./lib/attendance-business-trip.cjs').readApprovedTrips,
+    })
+
+    attendanceW4SegmentCalculationPort?.registerTimezoneSourceGuard?.(prepareAttendanceTimezoneSourceChange)
+
     const w4LiveScheduledBoundary =
       attendanceW4SegmentCalculationPort
       && typeof attendanceW4SegmentCalculationPort.createLiveScheduledBoundary === 'function'
@@ -25637,6 +25991,35 @@ module.exports = {
       && w4IssueFrozenContextV1
         ? attendanceW4SegmentCalculationPort.createLiveScheduledBoundary({
             legacyAdapters: {
+
+              acquireScheduledTimezoneLocks: (trx, input) => attendanceTimezoneRuntime.acquireScheduledLocks(trx,input),
+              resolveScheduledMembers: (trx, input) => attendanceTimezoneRuntime.resolveScheduledMembers(trx,input),
+              prepareScheduledTimezoneContext: (trx, input) => attendanceTimezoneRuntime.prepareScheduledContext(trx,input),
+              bindScheduledTimezoneContext: (trx, proof) => attendanceTimezoneRuntime.bindRelatedRecordContext(trx,proof),
+              prepareLiveTimezoneContext: async (trx, input, lockMode) => {
+                const frame = await attendanceTimezoneRuntime.prepareLivePunch(trx, { ...input, runtimeLockMode: lockMode })
+                if (frame.resolution.kind === 'resolved' && !frame.issued) {
+                  frame.issued = await issueW4FrozenContextViaW7SeamV1(trx, {
+                    orgId: input.orgId, userId: input.userId, workDate: frame.workDate,
+                    shiftId: frame.resolution.shiftId, timezone: frame.timezone,
+                    isWorkday: frame.context.isWorkingDay,
+                    holidayKind: frame.context.holiday?.isWorkingDay === false ? 'holiday' : null, purpose: 'persist',
+                  })
+                }
+                if (input.outerSourceDefinitionFingerprint !== null && frame.issued) {
+                  const fingerprint = w4ComputeOuterSourceDefinitionFingerprint({
+                    orgId: input.orgId, userId: input.userId, source: 'live_resolution',
+                    nowIso: new Date().toISOString(), resolution: frame.resolution, context: frame.issued.context,
+                  })
+                  if (fingerprint !== input.outerSourceDefinitionFingerprint) {
+                    throw new HttpError(409, 'ATTENDANCE_TIMEZONE_CONTEXT_CHANGED', 'ATTENDANCE_TIMEZONE_CONTEXT_CHANGED')
+                  }
+                }
+              },
+              assertLiveTimezoneTarget: (trx, input) => attendanceTimezoneRuntime.assertLiveTarget(trx, input),
+              bindLiveTimezoneContext: (trx, input, proof) => attendanceTimezoneRuntime.bindLiveContext(trx, input, proof),
+              executeOnlineOutdoorInTransaction: (client, input) =>
+                w4RequestOperationBoundary.executeInExternalTransaction({ ...input, client }),
               applyLivePunchLegacy: (trx, args) => applyLivePunchProjectionLegacyV1(trx, args, w4MergePolicyPure),
               // Gate D2 (#4556/#4844): the split event-INSERT seam the AUTHORITATIVE live-punch
               // branch uses. Injected ALONGSIDE `applyLivePunchLegacy` (never as a flag on it) so
@@ -25669,6 +26052,7 @@ module.exports = {
     // (closed codes only; the raw caller value is never echoed). Returns true when handled.
     const W4_ERROR_NAMES = new Set([
       'AttendanceW4OperationError',
+      'OnlinePunchConnectionUncertainError',
       'AttendanceW4RegistryError',
       'AttendanceW4CommandError',
       'AttendanceW4AuthorizationError',
@@ -25693,6 +26077,7 @@ module.exports = {
       // core was built to satisfy.
       'AttendanceW4AuthoritativeCalculationError',
     ])
+    W4_ERROR_NAMES.add('AttendanceBusinessTripError')
     const respondIfW4BoundaryError = (res, error) => {
       if (!error || typeof error !== 'object' || !W4_ERROR_NAMES.has(error.name)) return false
       const code = typeof error.code === 'string' && error.code ? error.code : 'W4_OPERATION_FAILED'
@@ -26933,8 +27318,6 @@ module.exports = {
       // response-loss retry with the same key and congruent payload replays the stored
       // response. Absent (every pre-W4 client) => the legacy null-ID command contract.
       operationId: z.string().uuid().optional(),
-      occurredAt: z.string().optional(),
-      occurred_at: z.string().optional(),
       timezone: z.string().optional(),
       source: z.string().optional(),
       location: z.record(z.unknown()).optional(),
@@ -30214,6 +30597,10 @@ module.exports = {
       'POST',
       '/api/attendance/punch',
       withPermission('attendance:write', async (req, res) => {
+        if (hasClientPunchTimestamp(req.body)) {
+          res.status(400).json({ ok: false, error: { code: CLIENT_TIMESTAMP_CODE, message: CLIENT_TIMESTAMP_MESSAGE } })
+          return
+        }
         const parsed = punchSchema.safeParse(req.body)
         if (!parsed.success) {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
@@ -30264,14 +30651,40 @@ module.exports = {
             logger,
           ).catch(() => {})
         }
-        const rawOccurredAt = parsed.data.occurredAt ?? parsed.data.occurred_at
-        const occurredAt = rawOccurredAt ? parseDateInput(rawOccurredAt) : new Date()
-        if (rawOccurredAt && !occurredAt) {
-          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'occurredAt must be a valid date-time' } })
-          return
+        const rawOccurredAt = null
+        const occurredAt = getOnlinePunchServerInstant()
+        const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
+        // Snapshot the complete client frame before any derived branch defaults or async preparation.
+        const onlineInput = operationId === null ? null : {
+          orgId, userId, tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? userId, operationId,
+          client: JSON.parse(JSON.stringify({ eventType: parsed.data.eventType,
+            timezone: parsed.data.timezone ?? null, source: parsed.data.source ?? null,
+            location: parsed.data.location ?? null, meta: parsed.data.meta ?? null,
+            photoFileId: typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() || null : null,
+            requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
+          })),
+        }
+        async function refusePreparedPunch(status, body) {
+          if (onlineInput) {
+            const refusal = new HttpError(status, body.error.code, body.error.message)
+            try {
+              const replay = await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'refusal', error: refusal })
+              res.status(replay.receipt.status).json(replay.receipt.body)
+              return
+            } catch (error) { if (error !== refusal) throw error }
+          }
+          res.status(status).json(body)
         }
 
         try {
+          if (onlineInput) {
+            if (!w4LiveScheduledBoundary || typeof w4LiveScheduledBoundary.probeOnlinePunchReplay !== 'function') {
+              res.status(503).json({ ok: false, error: { code: 'W4_WRITE_BOUNDARY_UNAVAILABLE', message: 'Canonical attendance write boundary unavailable' } })
+              return
+            }
+            const replay = await w4LiveScheduledBoundary.probeOnlinePunchReplay(onlineInput)
+            if (replay) { res.status(replay.status).json(replay.body); return }
+          }
           const settings = await getSettings(db)
           const { outsideGeofence } = await enforcePunchConstraints({
             db,
@@ -30283,66 +30696,30 @@ module.exports = {
             req,
           })
 
-          const baseRule = await loadDefaultRule(db, orgId)
-          const baseTimezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, baseRule.timezone)
-          let workDate = toWorkDate(occurredAt, baseTimezone)
-          let context = await resolveWorkContext({
-            db,
-            orgId,
-            userId,
-            workDate,
-            defaultRule: baseRule,
-          })
-          let timezone = resolveExplicitTimeZoneOrThrow(parsed.data.timezone, context.rule.timezone)
-          if (timezone !== baseTimezone) {
-            const recalculated = toWorkDate(occurredAt, timezone)
-            if (recalculated !== workDate) {
-              workDate = recalculated
-              context = await resolveWorkContext({
-                db,
-                orgId,
-                userId,
-                workDate,
-                defaultRule: baseRule,
+          const timezonePreparation = await db.transaction(async (prepareTrx) => {
+            const frame = await attendanceTimezoneRuntime.prepareLivePunch(prepareTrx, {
+              orgId, userId, eventType: parsed.data.eventType, occurredAtResolved: occurredAt.toISOString(),
+              clientTimezone: parsed.data.timezone ?? null,
+            })
+            let issued = frame.issued ?? null
+            if (frame.resolution.kind === 'resolved' && !issued) {
+              issued = await issueW4FrozenContextViaW7SeamV1(prepareTrx, {
+                orgId, userId, workDate: frame.workDate, shiftId: frame.resolution.shiftId,
+                timezone: frame.timezone, isWorkday: frame.context.isWorkingDay,
+                holidayKind: frame.context.holiday?.isWorkingDay === false ? 'holiday' : null, purpose: 'mirror',
               })
             }
-          }
-
-          // W4C-2 remediation P1 (#4612 gate2 finding, exact-head `ad5541027`):
-          // snapshot the PRE-resolution timezone — the exact value fed into the
-          // resolvePunchWorkDateByShiftWindow call directly below — BEFORE
-          // `timezone` is reassigned to the POST-resolution value a few lines
-          // down. The canonical write boundary's in-transaction legacy
-          // re-derivation must reproduce THIS call, not the reassigned one; see
-          // AttendanceLivePunchBoundaryInputV1.requestTimezone's doc comment.
-          const requestTimezone = timezone
-
-          const punchWorkDate = await resolvePunchWorkDateByShiftWindow({
-            db,
-            orgId,
-            userId,
-            occurredAt,
-            workDate,
-            context,
-            defaultRule: baseRule,
-            timezone,
+            return { frame, issued }
           })
-          // Actionable ambiguity: never silently pick calendar date or row order (R5 / OD-4556-8).
-          if (punchWorkDate.resolution?.kind === 'ambiguous') {
-            res.status(422).json({
-              ok: false,
-              error: {
-                code: 'WORK_DATE_ATTRIBUTION_AMBIGUOUS',
-                message: 'Multiple shift windows match this punch; refuse silent work-date choice',
-                reasonCode: punchWorkDate.resolution.reasonCode,
-                candidates: punchWorkDate.resolution.candidates,
-              },
-            })
-            return
+          const preparedTimezoneFrame = timezonePreparation.frame
+          let workDate = preparedTimezoneFrame.workDate
+          let context = preparedTimezoneFrame.context
+          let timezone = preparedTimezoneFrame.timezone
+          const requestTimezone = timezone
+          const punchWorkDate = {
+            workDate, context, timezone, resolution: preparedTimezoneFrame.resolution,
+            shiftId: preparedTimezoneFrame.resolution.kind === 'resolved' ? preparedTimezoneFrame.resolution.shiftId : null,
           }
-          workDate = punchWorkDate.workDate
-          context = punchWorkDate.context
-          timezone = punchWorkDate.timezone
           // W4C-2 remediation P1-3: punchWorkDate.resolution is no longer
           // threaded into the canonical boundary as a route-prepared value —
           // applyLivePunchProjectionLegacyV1 re-derives its own resolution
@@ -30467,35 +30844,13 @@ module.exports = {
               || w7MirrorSelectsGroupArm
             )
           ) {
-            outerResolution = await resolveW4LiveCandidateInTransactionV1(db, {
-              orgId,
-              userId,
-              occurredAt: occurredAt.toISOString(),
-              timezone: requestTimezone,
-            })
+            outerResolution = preparedTimezoneFrame.resolution
             if (outerResolution && outerResolution.kind === 'resolved') {
-              const outerBuildArgs = {
-                orgId,
-                userId,
-                workDate: outerResolution.workDate,
-                shiftId: outerResolution.shiftId,
-                timezone:
-                  outerResolution.fullWinner && typeof outerResolution.fullWinner.timezone === 'string'
-                    ? outerResolution.fullWinner.timezone
-                    : requestTimezone,
-                isWorkday: context.isWorkingDay,
-                holidayKind: null,
-              }
               // The seam call is wrapped in the mirror's own short READ
               // transaction so the composite advisory locks have a real scope
               // and are released at COMMIT. Read-only by construction: no DML,
               // no `FOR UPDATE`, and it returns before the boundary opens.
-              const issued = await db.transaction(async (mirrorTrx) =>
-                issueW4FrozenContextViaW7SeamV1(mirrorTrx, {
-                  ...outerBuildArgs,
-                  purpose: 'mirror',
-                }),
-              )
+              const issued = timezonePreparation.issued
               outerContext = issued.context
               outerSourceDefinitionFingerprint = w4ComputeOuterSourceDefinitionFingerprint({
                 orgId,
@@ -30516,7 +30871,7 @@ module.exports = {
             punchPolicySettings?.punchPolicy?.unscheduled?.mode === 'block'
             && !(await isUserScheduledForDate(db, orgId, userId, workDate))
           ) {
-            res.status(422).json({
+            await refusePreparedPunch(422, {
               ok: false,
               error: {
                 code: 'PUNCH_UNSCHEDULED_BLOCKED',
@@ -30549,7 +30904,7 @@ module.exports = {
             const rawPhotoFileId = typeof parsed.data.photoFileId === 'string' ? parsed.data.photoFileId.trim() : ''
             try {
               const operationId = typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null
-              const outcome = await w4RequestOperationBoundary.execute({
+              const requestInput = {
                 kind: 'request_create',
                 operationId,
                 correlationId: requestCorrelationId(req, operationId, 'outdoor-create'),
@@ -30576,11 +30931,15 @@ module.exports = {
                   },
                   requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
                 },
-              })
+              }
+              const outcome = onlineInput
+                ? await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'outdoor', input: requestInput })
+                : await w4RequestOperationBoundary.execute(requestInput)
               if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
                 emitEvent('attendance.outdoorPunch.requested', { orgId, userId, workDate, eventType })
               }
-              res.status(202).json(outcome.response)
+              if (onlineInput) res.status(outcome.receipt.status).json(outcome.receipt.body)
+              else res.status(202).json(outcome.response)
               return
             } catch (error) {
               if (error instanceof HttpError) {
@@ -30631,7 +30990,7 @@ module.exports = {
               w7MirrorEffectiveState: w7MirrorArmSelection ? w7MirrorArmSelection.effectiveState : null,
             })
           }
-          const boundaryOutcome = await w4LiveScheduledBoundary.executeLivePunch({
+          const liveInput = {
             orgId,
             userId,
             operationId: typeof parsed.data.operationId === 'string' ? parsed.data.operationId : null,
@@ -30664,9 +31023,14 @@ module.exports = {
             // `AttendanceLivePunchBoundaryInputV1.outerSourceDefinitionFingerprint`'s
             // own doc comment for the full contract.
             outerSourceDefinitionFingerprint,
+            timezoneContextFingerprint: preparedTimezoneFrame.fingerprint,
+            clientTimezone: parsed.data.timezone ?? null,
             isWorkday: context.isWorkingDay,
             holidayKind: null,
-          })
+          }
+          const boundaryOutcome = onlineInput
+            ? await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'normal', input: liveInput })
+            : await w4LiveScheduledBoundary.executeLivePunch(liveInput)
           if (boundaryOutcome.kind === 'legacy' || boundaryOutcome.kind === 'legacy_compat') {
             // Lock §12.3 legacy-posture leg: the same synchronous best-effort emit as before.
             // Shadow results deliver durably through the outbox row instead; a replay emits
@@ -30680,8 +31044,17 @@ module.exports = {
               timezone,
             })
           }
-          res.json({ ok: true, data: boundaryOutcome.response })
+          if (onlineInput) res.status(boundaryOutcome.receipt.status).json(boundaryOutcome.receipt.body)
+          else res.json({ ok: true, data: boundaryOutcome.response })
         } catch (error) {
+          // Mutable preparation failures must not mask a concurrently completed same-key receipt.
+          if (onlineInput && error instanceof HttpError) {
+            try {
+              const replay = await w4LiveScheduledBoundary.executeOnlinePunch(onlineInput, { kind: 'refusal', error })
+              res.status(replay.receipt.status).json(replay.receipt.body)
+              return
+            } catch (fencedError) { error = fencedError }
+          }
           if (respondIfW4BoundaryError(res, error)) {
             return
           }
@@ -30859,11 +31232,10 @@ module.exports = {
             [targetUserId, orgId, from, to, pageSize, offset]
           )
 
-          const workContextPrefetch = await buildWorkContextPrefetch(db, {
-            orgId,
-            userIds: [targetUserId],
-            workDates: rows.map((row) => row.work_date),
-          })
+          const storedContexts = await db.transaction(trx => attendanceTimezoneReadContext.readStoredContexts(trx, {
+            orgId, userId: targetUserId, actorId: requesterId,
+            records: rows.map(row => ({ ...row, work_date: normalizeDateOnly(row.work_date) })),
+          }))
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
           const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
@@ -30871,22 +31243,18 @@ module.exports = {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const meta = normalizeMetadata(row.meta)
             const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} }
-            const resolvedContext = resolveWorkContextFromPrefetch({
-              orgId,
-              userId: targetUserId,
-              workDate,
-              defaultRule: workContextPrefetch.defaultRule,
-              prefetched: workContextPrefetch.prefetched,
-            })
+            const storedContext = storedContexts.get(workDate)
             const record = {
               ...row,
               work_date: workDate,
-              workday_context: buildWorkdayContextSummary({
-                workDate,
-                storedIsWorkday: row.is_workday,
-                storedTimezone: row.timezone,
-                resolvedContext,
-              }),
+              attendanceTimeContext: storedContext,
+              timezone_source: storedContext.timezoneSource,
+              workday_context: {
+                storedIsWorkday: typeof row.is_workday === 'boolean' ? row.is_workday : null,
+                resolvedIsWorkday: null, matchesStored: null, source: storedContext.timezoneSource,
+                sourceName: null, timezone: storedContext.effectiveTimezone,
+                weekday: getWeekdayFromDateKey(workDate), workingDays: null, holiday: null,
+              },
               meta: {
                 ...meta,
                 leave_minutes: approved.leaveMinutes,
@@ -30920,6 +31288,10 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -31486,11 +31858,10 @@ module.exports = {
 	            return port.resolveOrgSegmentCalculationPosture(trx, orgId)
 	          })
 
-	          const workContextPrefetch = await buildWorkContextPrefetch(db, {
-	            orgId,
-	            userIds: [targetUserId],
-	            workDates: rows.map((row) => row.work_date),
-	          })
+	          const storedContexts = await db.transaction(trx => attendanceTimezoneReadContext.readStoredContexts(trx, {
+	            orgId, userId: targetUserId, actorId: requesterId,
+	            records: rows.map(row => ({ ...row, work_date: normalizeDateOnly(row.work_date) })),
+	          }))
 
 	          const requestRows = await db.query(
 	            `SELECT id, work_date, request_type, status
@@ -31530,13 +31901,7 @@ module.exports = {
 	            const suggestedRequestType = suggestRequestType(row)
 	            const owedPunch = classifyOwedPunchRecord(row)
 	            const state = requestSummary.hasPending ? 'pending' : 'open'
-	            const resolvedContext = resolveWorkContextFromPrefetch({
-	              orgId,
-	              userId: targetUserId,
-	              workDate,
-	              defaultRule: workContextPrefetch.defaultRule,
-	              prefetched: workContextPrefetch.prefetched,
-	            })
+	            const storedContext = storedContexts.get(workDate)
 
 	            const expectedCalculation = resolveW4c3cExpectedCalculation(
 	              row,
@@ -31560,12 +31925,12 @@ module.exports = {
 	              owedPunch: owedPunch.owedPunch,
 	              missingSide: owedPunch.missingSide,
 	              owedPunchReason: owedPunch.owedPunchReason,
-	              workdayContext: buildWorkdayContextSummary({
-	                workDate,
-	                storedIsWorkday: row.is_workday,
-	                storedTimezone: row.timezone,
-	                resolvedContext,
-	              }),
+	              workdayContext: {
+	                storedIsWorkday: typeof row.is_workday === 'boolean' ? row.is_workday : null,
+	                resolvedIsWorkday: null, matchesStored: null, source: storedContext.timezoneSource,
+	                sourceName: null, timezone: storedContext.effectiveTimezone,
+	                weekday: getWeekdayFromDateKey(workDate), workingDays: null, holiday: null,
+	              },
 	              state,
 	              request: requestSummary.pending ?? requestSummary.latest,
 	              suggestedRequestType,
@@ -32124,6 +32489,7 @@ module.exports = {
       expectedSnapshotVersion: z.coerce.number().int().min(1).optional(),
       expected_snapshot_version: z.coerce.number().int().min(1).optional(),
       expectedSnapshotFingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+      expectedTimezoneContextFingerprint:z.string().regex(/^[0-9a-f]{64}$/).optional(),
       expected_snapshot_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional(),
       orgId: z.string().optional(),
       org_id: z.string().optional(),
@@ -33181,6 +33547,7 @@ module.exports = {
       // generic requests API must NOT mint one — otherwise a client could bypass all outdoor policy and
       // (on approve) fabricate a real punch event. It is a valid DB request_type (for the punch route +
       // approval flows), just not user-creatable here.
+      if (requestType === 'business_trip') throw new HttpError(422, 'ATTENDANCE_TRIP_DEDICATED_ROUTE_ONLY', 'ATTENDANCE_TRIP_DEDICATED_ROUTE_ONLY')
       if (requestType === 'outdoor_punch') {
         throw new HttpError(
           422,
@@ -33431,7 +33798,9 @@ module.exports = {
               'Cannot freeze overtime attribution without a subject userId',
             )
           }
-          const { adapters } = createPluginAttendanceWorkDateResolver(client)
+          const timezoneTarget = freshRequestTimezoneTargets.get(client)
+          const { adapters } = createPluginAttendanceWorkDateResolver(client,timezoneTarget
+            ? {effectiveTimezone:timezoneTarget.timezone,strictSources:true} : {})
           const freeze = await adapters.overtime.freezeRequestCreationAnchor({
             orgId,
             userId: createUserId,
@@ -33756,6 +34125,20 @@ module.exports = {
       return requestCreateIdentityFromRoute('shift_swap', route, { subjectUserId, actorPosture })
     }
 
+    const authoritativeGenericRequestRoutes = new WeakMap()
+    function genericRequestRoute(trx,rawInput) {
+      const stored = authoritativeGenericRequestRoutes.get(trx)
+      return stored?.rawInput === rawInput ? stored.route : requestBoundaryRouteInputSchema.parse(rawInput)
+    }
+    async function deriveGenericRequestRoute(trx,rawInput) {
+      const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      const orgId = await deriveAttendanceApprovalOrgStampV1(trx,{
+        subjectUserId:route.actorId,requestNamedOrgId:route.requestNamedOrgId,
+      })
+      const authoritativeRoute = {...route,orgId}
+      authoritativeGenericRequestRoutes.set(trx,{rawInput,route:authoritativeRoute})
+      return authoritativeRoute
+    }
     async function prepareRequestCreateIdentity(trx, rawInput, operation) {
       const variant = operation?.routeVariant
       if (variant === 'generic') {
@@ -33763,7 +34146,11 @@ module.exports = {
         if (!route.orgId || route.requestId !== null) {
           throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
         }
-        return requestCreateIdentityFromRoute(variant, route)
+        // Null-ID has no stored registry scope; derive before posture/locks.
+        // Stable-ID replay must retain its original identity and scope.
+        const authoritativeRoute = operation.operationId === null
+          ? await deriveGenericRequestRoute(trx,rawInput) : route
+        return requestCreateIdentityFromRoute(variant, authoritativeRoute)
       }
       if (variant === 'outdoor') {
         return requestCreateIdentityFromRoute(variant, outdoorCreateRouteInputSchema.parse(rawInput))
@@ -33781,8 +34168,100 @@ module.exports = {
       throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID', 'W4C3B_REQUEST_ROUTE_VARIANT_INVALID')
     }
 
-    async function prepareGenericRequestCreate(trx, rawInput) {
+    const freshRequestTimezoneTargets = new WeakMap()
+    const freshRequestTimezoneSnapshotMaterials = new WeakMap()
+    async function prepareFreshRequestTimezoneTarget(trx,identity,rawInput) {
       const route = requestBoundaryRouteInputSchema.parse(rawInput)
+      const body = route.requestBody
+      let date = firstDefinedValue(body.workDate,body.work_date,body.date)
+      let requestType = firstDefinedValue(body.requestType,body.request_type,body.type)
+      let orgId, userId
+      if (route.requestId) {
+        const rows = await trx.query('SELECT * FROM attendance_requests WHERE id=$1 AND org_id=$2',
+          [route.requestId,identity.orgId])
+        if (rows.length !== 1) throw new HttpError(404,'NOT_FOUND','NOT_FOUND')
+        const existingRequest = rows[0]
+        await ensureAttendanceRequestAccess(existingRequest,route.actorId,'edit request')
+        if (existingRequest.status !== 'pending') throw new HttpError(400,'INVALID_STATUS','Only pending requests can be edited')
+        // D9/D10: validate today's writer selector without moving the old target.
+        await deriveAttendanceApprovalOrgStampV1(trx,{
+          subjectUserId:existingRequest.user_id,requestNamedOrgId:route.requestNamedOrgId,
+        })
+        orgId = existingRequest.org_id
+        userId = existingRequest.user_id
+        date = date ?? existingRequest.work_date
+        requestType = requestType ?? existingRequest.request_type
+      } else {
+        const authoritativeRoute = await deriveGenericRequestRoute(trx,rawInput)
+        orgId = authoritativeRoute.orgId
+        userId = authoritativeRoute.actorId
+      }
+      if (orgId !== identity.orgId || userId !== identity.subjectUserId) {
+        throw new HttpError(409,'W4C3B_REQUEST_IDENTITY_CHANGED','W4C3B_REQUEST_IDENTITY_CHANGED')
+      }
+      if (!['leave','overtime','missed_check_in','missed_check_out','time_correction'].includes(requestType)) return
+      validateAttendanceRelatedAbsoluteInstantsV1(body,HttpError)
+      const workDate = normalizeDateOnlyValue(date)
+      if (!workDate) throw new HttpError(400,'ATTENDANCE_TIMEZONE_TARGET_INVALID','ATTENDANCE_TIMEZONE_TARGET_INVALID')
+      authorizedRequestTimezoneSubjects.set(trx,{orgId,userId})
+      let target
+      try {
+        target = await attendanceTimezoneRuntime.readRequestTimezoneContext(trx,{orgId,userId,workDate})
+      } finally {
+        authorizedRequestTimezoneSubjects.delete(trx)
+      }
+      if (body.expectedTimezoneContextFingerprint !== undefined
+        && body.expectedTimezoneContextFingerprint !== target.contextFingerprint) {
+        throw new HttpError(409,'ATTENDANCE_TIMEZONE_CONTEXT_CHANGED','ATTENDANCE_TIMEZONE_CONTEXT_CHANGED')
+      }
+      freshRequestTimezoneTargets.set(trx,target)
+      freshRequestTimezoneSnapshotMaterials.set(trx,await resolveRequestCreationSnapshotMaterial(trx,{
+        orgId,userId,workDate,timezoneTarget:target,
+      }))
+    }
+
+    async function prepareFrozenRequestTimezoneTarget(trx,identity,rawInput) {
+      const requestId = rawInput?.requestId
+      if (!requestId) return
+      const rows = await trx.query('SELECT user_id,work_date::text,request_type,metadata,requested_in_at,requested_out_at FROM attendance_requests WHERE id=$1 AND org_id=$2',
+        [requestId,identity.orgId])
+      if (rows.length !== 1) throw new HttpError(404,'NOT_FOUND','NOT_FOUND')
+      const row = rows[0]
+      if (!['leave','overtime','missed_check_in','missed_check_out','time_correction'].includes(row.request_type)) return
+      await attendanceW4SegmentCalculationPort.acquireTimezoneRuntimeLocks(trx,{
+        orgId:identity.orgId,userId:String(row.user_id),mode:'shared',
+      })
+      const target = normalizeMetadata(row.metadata).timezoneContextV1
+      if (target === undefined) return
+      let timezone
+      try { timezone = attendanceW4SegmentCalculationPort.validateIanaTimezone(target.timezone) }
+      catch (_) { throw new HttpError(409,'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID','ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID') }
+      if (!target || target.orgId !== identity.orgId || target.userId !== String(row.user_id)
+        || target.workDate !== row.work_date || typeof target.contextFingerprint !== 'string'
+        || !/^[0-9a-f]{64}$/.test(target.contextFingerprint)
+        || target.timezone !== timezone || target.rule?.timezone !== timezone
+        || typeof target.isWorkingDay !== 'boolean'
+        || !Number.isFinite(Date.parse(target.window?.startAt))
+        || !Number.isFinite(Date.parse(target.window?.endAt))
+        || Date.parse(target.window.startAt) >= Date.parse(target.window.endAt)) {
+        throw new HttpError(409,'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID','ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID')
+      }
+      if (rawInput.action === 'approve') {
+        validateAttendanceLeaveTargetRangeV1({
+          requestType:row.request_type,requestedInAt:row.requested_in_at,requestedOutAt:row.requested_out_at,
+        },target,HttpError,toWorkDate)
+        const current = await attendanceTimezoneRuntime.prepareRelatedRecordContext(trx,{
+          orgId:identity.orgId,userId:String(row.user_id),workDate:row.work_date,
+          expectedContextFingerprint:target.contextFingerprint,
+        })
+        // Stored request metadata is an OCC token, never authority to create an
+        // old context after a legal future source change.
+        freshRequestTimezoneTargets.set(trx,current)
+      } else freshRequestTimezoneTargets.set(trx,target)
+    }
+
+    async function prepareGenericRequestCreate(trx, rawInput) {
+      const route = genericRequestRoute(trx,rawInput)
       if (!route.orgId || route.requestId !== null) {
         throw new HttpError(400, 'W4C3B_REQUEST_ROUTE_INPUT_INVALID', 'W4C3B_REQUEST_ROUTE_INPUT_INVALID')
       }
@@ -33791,6 +34270,9 @@ module.exports = {
         route.requestBody,
         { org_id: route.orgId, user_id: route.actorId },
       )
+      const timezoneTarget = freshRequestTimezoneTargets.get(trx)
+      validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
+      if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
       let makeupPunchPolicy = null
       if (MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType)) {
         const settings = await getSettings(trx)
@@ -33839,6 +34321,8 @@ module.exports = {
       const {
         route, draft, makeupPunchPolicy, requestId, approvalId, approvalPayload, approvalAssignments,
       } = prepared.state
+      const timezoneTarget = freshRequestTimezoneTargets.get(trx)
+      if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
       await acquireAttendanceRequestLock(trx, route.orgId, route.actorId, draft.workDate, draft.requestType)
       const duplicateRequest = await findDuplicateAttendanceRequest(trx, {
         orgId: route.orgId,
@@ -33860,11 +34344,9 @@ module.exports = {
         })
         draft.metadata.makeupPunchPolicySnapshot = buildMakeupPunchPolicySnapshot(makeupPunchPolicy, enforcement)
       }
-      // G-L11-8 (D-11(ii)): the twin attendance_requests.org_id row carries the SAME stamped
-      // org the writer just derived — never route.orgId directly — so the same-transaction
-      // equality gate holds by construction. Every OTHER route.orgId use in this function
-      // (the lock above, findDuplicateAttendanceRequest, lifecycle events below) is
-      // deliberately left unrewritten (spec §3 disclosure (a)) — prod-inert under u1a=1.
+      // G-L11-8 (D-11(ii)): keep both rows bound to the same writer-derived org.
+      // The route was derived before boundary posture/locks and target preparation;
+      // the writer rechecks that authority in this transaction before stamping.
       const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
@@ -33894,11 +34376,11 @@ module.exports = {
         subjectUserId: route.actorId,
         actorUserId: route.actorId,
         payloadFields: buildRequestSnapshotPayloadFieldsFromDraft(draft, draft.metadata),
-        resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-          orgId: route.orgId,
-          userId: route.actorId,
-          workDate: draft.workDate,
-        }),
+        resolveSnapshots: () => {
+          const material = freshRequestTimezoneSnapshotMaterials.get(trx)
+          if (!material) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED','ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED')
+          return material
+        },
       })
       const response = {
         ok: true,
@@ -34778,12 +35260,80 @@ module.exports = {
       }
     }
 
+    const businessTripRouteSchema = z.object({
+      actorId: z.string().min(1), tokenSubjectUserId: z.string().min(1), requesterName: z.string().min(1), orgId: z.string().min(1),
+      input: z.object({ userId: z.string().min(1), destinationTimezone: z.string().min(1), startAt: z.string(), endAt: z.string(),
+        reason: z.string().nullable(), approvalFlowId: z.string().uuid().nullable() }).strict(),
+    }).strict()
+    attendanceBusinessTripService = createBusinessTripService({ HttpError,
+      readFrozenWindows: async (trx,input) => {
+        if (!attendanceTimezoneRuntime?.readFrozenTimezoneWindows) throw new HttpError(503, 'ATTENDANCE_TRIP_FROZEN_READER_UNAVAILABLE', 'ATTENDANCE_TRIP_FROZEN_READER_UNAVAILABLE')
+        return attendanceTimezoneRuntime.readFrozenTimezoneWindows(trx,input)
+      },
+      readWindows: async (trx, input) => {
+      if (!attendanceTimezoneRuntime?.readPublishedTimezoneWindows) throw new HttpError(503, 'ATTENDANCE_TRIP_BOUNDARY_READER_UNAVAILABLE', 'ATTENDANCE_TRIP_BOUNDARY_READER_UNAVAILABLE')
+      // Employee/trip transitions are instant-based. Group membership is resolved
+      // separately for every candidate workDate by the shared published reader.
+      const boundaries = await trx.query(`SELECT effective_from AS boundary FROM attendance_employee_timezone_overrides
+        WHERE org_id=$1 AND user_id=$2 AND effective_from > $3 AND effective_from < $4
+        UNION SELECT effective_to FROM attendance_employee_timezone_overrides
+        WHERE org_id=$1 AND user_id=$2 AND effective_to > $3 AND effective_to < $4
+        UNION SELECT start_at FROM attendance_business_trip_arrangements
+        WHERE org_id=$1 AND user_id=$2 AND start_at > $3 AND start_at < $4
+        UNION SELECT effective_end_at FROM attendance_business_trip_arrangements
+        WHERE org_id=$1 AND user_id=$2 AND effective_end_at > $3 AND effective_end_at < $4`,
+      [input.orgId,input.userId,input.from,input.to])
+      const points = [...new Set([input.from.getTime(),input.to.getTime(),...boundaries.map(row => new Date(row.boundary).getTime())])].sort((a,b) => a-b)
+      const result = (await attendanceTimezoneRuntime.readPublishedTimezoneWindows(trx,{...input,fullPeriod:true}))
+        .map(window => ({...window,contextSide:'destination'}))
+      const edgeDates = new Set([input.from,input.to].flatMap(at =>
+        [-3,-2,-1,0,1].map(offset => addDaysToDateKey(at.toISOString().slice(0,10),offset))))
+      const outsideDates = [...new Set(result.filter(window =>
+        input.from <= window.startAt && window.endAt <= input.to && edgeDates.has(window.workDate))
+        .map(window => window.workDate))]
+      // The instant just before entry and the instant at the half-open exit
+      // select the actual base context, including an adjacent approved trip.
+      for (const at of [new Date(input.from.getTime()-1),input.to]) {
+        result.push(...(await attendanceTimezoneRuntime.readPublishedTimezoneWindows(trx,{
+          orgId:input.orgId,userId:input.userId,from:at,to:new Date(at.getTime()+1),
+          targetWorkDates:outsideDates,
+          excludeTripRequestId:input.excludeTripRequestId,
+          ...(input.policyProjection === undefined ? {} : {policyProjection:input.policyProjection}),
+        })).map(window => ({...window,contextSide:'outside'})))
+      }
+      for (let i=0;i<points.length-1;i++) {
+        result.push(...await attendanceTimezoneRuntime.readPublishedTimezoneWindows(trx, {
+          orgId:input.orgId,userId:input.userId,from:new Date(points[i]),to:new Date(points[i+1]),
+          excludeTripRequestId:input.excludeTripRequestId,
+          ...(input.policyProjection === undefined ? {} : {policyProjection:input.policyProjection}),
+        }))
+      }
+      return result
+    } })
+    const businessTripService = attendanceBusinessTripService
+    const businessTripCreateAdapter = createBusinessTripRequestAdapter({
+      service: businessTripService, routeSchema: businessTripRouteSchema,
+      loadFlow: loadActiveApprovalFlowForRequestType,
+      freezeRelations: args => resolveAttendanceOrgRelationsFreeze({ ...args, context }),
+      buildApproval: buildAttendanceApprovalInstancePayload, buildAssignments: buildAttendanceApprovalAssignments,
+      upsertApproval: upsertAttendanceApprovalInstance, replaceAssignments: replaceAttendanceApprovalAssignments,
+      appendSnapshot: appendRequestCalculationSnapshotOnCreate, snapshotFields: buildRequestSnapshotPayloadFieldsFromDraft,
+      snapshotMaterial: resolveRequestCreationSnapshotMaterial, snapshotToken: buildRequestSnapshotToken,
+      mapRequest: mapAttendanceRequestRow, assertDynamic: steps => assertDynamicFlowStepsRuntimeAvailable(steps,context),
+      isAdmin: hasAttendanceAdminAccess,
+    })
+
     const requestCreateAdapter = {
       async prepareIdentity(trx, rawInput, operation) {
+        if (operation.routeVariant === 'business_trip') return businessTripCreateAdapter.prepareIdentity(trx,rawInput)
         return prepareRequestCreateIdentity(trx, rawInput, operation)
+      },
+      prepareFreshTimezoneContext:async (trx,identity,rawInput,operation) => {
+        if (operation.routeVariant === 'generic') await prepareFreshRequestTimezoneTarget(trx,identity,rawInput)
       },
       prepare: async function prepareRequestCreate(trx, rawInput, operation) {
         const variant = operation?.routeVariant
+        if (variant === 'business_trip') return businessTripCreateAdapter.prepare(trx,rawInput)
         if (variant === 'generic') return prepareGenericRequestCreate(trx, rawInput)
         if (variant === 'outdoor') return prepareOutdoorRequestCreate(trx, rawInput)
         if (variant === 'schedule_dispatch') return prepareScheduleDispatchRequestCreate(trx, rawInput)
@@ -34792,6 +35342,7 @@ module.exports = {
       },
       async execute(trx, prepared, operation) {
         const variant = prepared?.state?.routeVariant ?? operation?.routeVariant
+        if (variant === 'business_trip') return businessTripCreateAdapter.execute(trx,prepared)
         if (variant === 'generic') return executeGenericRequestCreate(trx, prepared)
         if (variant === 'outdoor') return executeOutdoorRequestCreate(trx, prepared)
         if (variant === 'schedule_dispatch') return executeScheduleDispatchRequestCreate(trx, prepared)
@@ -34882,6 +35433,7 @@ module.exports = {
       async prepareIdentity(trx, rawInput, operation) {
         return prepareRequestPendingEditIdentity(trx, rawInput, operation)
       },
+      prepareFreshTimezoneContext:prepareFreshRequestTimezoneTarget,
       prepare: async function prepareRequestPendingEdit(trx, rawInput, operation) {
         const route = requestBoundaryRouteInputSchema.parse(rawInput)
         if (!route.requestId) {
@@ -34896,10 +35448,15 @@ module.exports = {
         if (requestRows.length === 0) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
         const existingRequest = requestRows[0]
         await ensureAttendanceRequestAccess(existingRequest, route.actorId, 'edit request')
+        if (existingRequest.request_type === 'business_trip') attendanceBusinessTripService.fail('EDIT_UNSUPPORTED')
         if (existingRequest.status !== 'pending') {
           throw new HttpError(400, 'INVALID_STATUS', 'Only pending requests can be edited')
         }
         const draft = await resolveAttendanceRequestDraft(trx, route.requestBody, existingRequest)
+        const timezoneTarget = freshRequestTimezoneTargets.get(trx)
+        validateAttendanceLeaveTargetRangeV1(draft,timezoneTarget,HttpError,toWorkDate)
+        if (timezoneTarget) draft.metadata.timezoneContextV1 = timezoneTarget
+
         const makeupTypeInvolved =
           MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(draft.requestType) ||
           MAKEUP_PUNCH_ALLOWED_REQUEST_TYPES.includes(existingRequest.request_type)
@@ -35005,11 +35562,11 @@ module.exports = {
           expectedSnapshotVersion,
           expectedSnapshotFingerprint,
           payload: buildRequestSnapshotPayloadFromDraft(draft, draft.metadata),
-          resolveSnapshots: () => resolveRequestCreationSnapshotMaterial(trx, {
-            orgId: existingRequest.org_id ?? DEFAULT_ORG_ID,
-            userId: existingRequest.user_id,
-            workDate: draft.workDate,
-          }),
+          resolveSnapshots: () => {
+          const material = freshRequestTimezoneSnapshotMaterials.get(trx)
+          if (!material) throw new HttpError(503,'ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED','ATTENDANCE_TIMEZONE_CONTEXT_UNPREPARED')
+          return material
+        },
         })
         await upsertAttendanceApprovalInstance(trx, approvalPayload)
         await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
@@ -35245,6 +35802,7 @@ module.exports = {
     }
 
     const requestCancelAdapter = {
+      prepareFreshTimezoneContext:prepareFrozenRequestTimezoneTarget,
       async prepareIdentity(trx, rawInput, operation) {
         return prepareRequestCancelIdentity(trx, rawInput, operation)
       },
@@ -35363,7 +35921,9 @@ module.exports = {
           },
         )
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
-        if (requestRow.status !== 'pending' && !approvedLeave) {
+        const approvedTrip = requestRow.status === 'approved' && requestRow.request_type === 'business_trip'
+        if (approvedTrip && operation.cancelRoundAuthorized !== true) businessTripService.fail('CANCEL_ROUND_REQUIRED',409)
+        if (requestRow.status !== 'pending' && !approvedLeave && !approvedTrip) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
         let cancellationCalculation = null
@@ -35450,7 +36010,7 @@ module.exports = {
           )
         }
 
-        const resolvedAt = new Date()
+        const resolvedAt = requestRow.request_type === 'business_trip' ? getBusinessTripServerInstant() : new Date()
         const updatedRows = await trx.query(
           `UPDATE attendance_requests
               SET status = 'cancelled', resolved_by = $2, resolved_at = $3, updated_at = now()
@@ -35465,6 +36025,7 @@ module.exports = {
           await closeScheduleDispatchRequest(trx, requestOrgId, route.requestId)
         }
 
+        if (approvedTrip) await businessTripService.cancel(trx,requestRow,resolvedAt)
         let reversal = null
         if (approvedLeave) {
           reversal = await reverseLeaveBalanceDeduction(trx, {
@@ -35868,6 +36429,7 @@ module.exports = {
     }
 
     const requestDecisionAdapter = {
+      prepareFreshTimezoneContext:prepareFrozenRequestTimezoneTarget,
       async prepareIdentity(trx, rawInput, operation) {
         return prepareRequestDecisionIdentity(trx, rawInput, operation)
       },
@@ -36837,6 +37399,42 @@ module.exports = {
         adapters: { manual_edit: cleaningAdapter, recompute: recomputeAdapter, ops_retirement: opsRetirementAdapter },
       }) : null
 
+    const respondBusinessTripError = (res,error) => {
+      if (respondIfW4BoundaryError(res,error)) return
+      const known = error instanceof HttpError
+      res.status(known ? error.status : 503).json({ ok:false,error:{ code:known ? error.code : 'ATTENDANCE_TRIP_SOURCE_UNAVAILABLE' } })
+    }
+    context.api.http.addRoute('POST','/api/attendance/business-trip-requests',withPermission('attendance:write',async (req,res) => {
+      const actor = resolveAttendanceGroupRouteActorContext(req,res)
+      if (!actor) return
+      try {
+        const input = businessTripService.parse(req.body,actor.userId)
+        if (input.userId !== actor.userId && !await hasAttendanceAdminAccess(actor.userId)) businessTripService.fail('FORBIDDEN',403)
+        if (!w4RequestOperationBoundary) businessTripService.fail('WRITE_BOUNDARY_UNAVAILABLE',503)
+        const operationId = req.body.operationId || null
+        const outcome = await w4RequestOperationBoundary.execute({ kind:'request_create',operationId,
+          correlationId:requestCorrelationId(req,operationId,'business-trip-create'),routeVariant:'business_trip',
+          routeInput:{ actorId:actor.userId,tokenSubjectUserId:getAuthenticatedTokenSubjectUserId(req),requesterName:getUserLabel(req,actor.userId),orgId:actor.orgId,input } })
+        if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') emitEvent('attendance.requested',{
+          orgId:actor.orgId,userId:input.userId,requestType:'business_trip',requestId:outcome.response?.data?.request?.id,
+        })
+        res.status(201).json(outcome.response)
+      } catch (error) { respondBusinessTripError(res,error) }
+    }))
+    context.api.http.addRoute('GET','/api/attendance/business-trip-requests/:id',withPermission('attendance:read',async (req,res) => {
+      const actor = resolveAttendanceGroupRouteActorContext(req,res)
+      if (!actor) return
+      try {
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) businessTripService.fail('INVALID_REFERENCE')
+        const rows = await db.query("SELECT * FROM attendance_requests WHERE id=$1 AND org_id=$2 AND request_type='business_trip'",[requestId,actor.orgId])
+        if (rows.length !== 1) businessTripService.fail('NOT_FOUND',404)
+        if (rows[0].user_id !== actor.userId && !await canAccessOtherUsers(actor.userId)) businessTripService.fail('FORBIDDEN',403)
+        const detail = await businessTripService.detail(db,actor.orgId,requestId)
+        res.json({ok:true,data:{request:mapAttendanceRequestRow(rows[0]),businessTrip:businessTripService.map(detail)}})
+      } catch (error) { respondBusinessTripError(res,error) }
+    }))
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/requests',
@@ -36887,7 +37485,7 @@ module.exports = {
           if (outcome.kind === 'legacy' || outcome.kind === 'legacy_compat') {
             const request = outcome.response?.data?.request
             emitEvent('attendance.requested', {
-              orgId,
+              orgId: request.org_id,
               userId,
               workDate: request?.workDate,
               requestType: request?.requestType,
@@ -36968,7 +37566,11 @@ module.exports = {
 	        const { from, to } = dateRange
 
         try {
-          const params = [targetUserId, orgId, from, to]
+          const params = [targetUserId, orgId, from, to, getAuthenticatedOrgId(req), getAuthenticatedUserId(req)]
+          const tripScopeFilter = `AND (request_type <> 'business_trip' OR (org_id = $5 AND EXISTS (
+            SELECT 1 FROM users u JOIN user_orgs uo ON uo.user_id = u.id
+            WHERE u.id = $6 AND u.is_active = true AND uo.is_active = true
+              AND uo.org_id = attendance_requests.org_id)))`
           let statusFilter = ''
           if (parsed.data.status) {
             params.push(parsed.data.status)
@@ -36978,7 +37580,7 @@ module.exports = {
           const countRows = await db.query(
             `SELECT COUNT(*)::int AS total
              FROM attendance_requests
-             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4 ${statusFilter}`,
+             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4 ${tripScopeFilter} ${statusFilter}`,
             params
           )
           const total = Number(countRows[0]?.total ?? 0)
@@ -36986,7 +37588,7 @@ module.exports = {
           params.push(pageSize, offset)
           const rows = await db.query(
             `SELECT * FROM attendance_requests
-             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4 ${statusFilter}
+             WHERE user_id = $1 AND org_id = $2 AND work_date BETWEEN $3 AND $4 ${tripScopeFilter} ${statusFilter}
              ORDER BY created_at DESC
              LIMIT $${params.length - 1} OFFSET $${params.length}`,
             params
@@ -37026,7 +37628,10 @@ module.exports = {
         }
 
         try {
-          const orgId = getOrgId(req)
+          const tripScope = await resolveBusinessTripActionScope(req, res, requestId)
+          if (!tripScope) return
+          const orgId = tripScope.orgId ?? getOrgId(req)
+          if (tripScope.orgId) await attendanceBusinessTripService.member(db, orgId, getAuthenticatedUserId(req))
           const rows = await db.query(
             'SELECT * FROM attendance_requests WHERE id = $1 AND org_id = $2',
             [requestId, orgId]
@@ -37127,12 +37732,12 @@ module.exports = {
         res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
       }
 
-      // LEAVE ONLY + an approval instance to key on, over a request row already read org-scoped. The
+      // Leave or business trip + an approval instance, over an org-scoped request row. The
       // ONE document gate: the single-row loader below (every per-request cancel-round route) and the
       // C2 list's batch read both pass their rows through it.
       const toCancelRoundRequest = (row) => {
         if (!row || !row.approval_instance_id) return null
-        if (row.request_type !== 'leave') return null
+        if (row.request_type !== 'leave' && row.request_type !== 'business_trip') return null
         return {
           requestId: String(row.id),
           userId: row.user_id,
@@ -37214,7 +37819,9 @@ module.exports = {
             return
           }
           try {
-            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+            if (!tripScope) return
+            const request = await loadCancelRoundRequestForViewer(requestId, tripScope.orgId || getOrgId(req), viewerId)
             if (!request) {
               respondCancelRoundRequestNotFound(res)
               return
@@ -37265,7 +37872,9 @@ module.exports = {
             ? parsed.data.reason.trim()
             : null
           try {
-            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+            if (!tripScope) return
+            const request = await loadCancelRoundRequestForViewer(requestId, tripScope.orgId || getOrgId(req), viewerId)
             if (!request) {
               respondCancelRoundRequestNotFound(res)
               return
@@ -37380,7 +37989,9 @@ module.exports = {
             return
           }
           try {
-            const request = await loadCancelRoundRequestRow(requestId, getOrgId(req))
+            const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+            if (!tripScope) return
+            const request = await loadCancelRoundRequestRow(requestId, tripScope.orgId || getOrgId(req))
             if (!request) {
               respondCancelRoundRequestNotFound(res)
               return
@@ -37446,7 +38057,9 @@ module.exports = {
             return
           }
           try {
-            const request = await loadCancelRoundRequestForViewer(requestId, getOrgId(req), viewerId)
+            const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+            if (!tripScope) return
+            const request = await loadCancelRoundRequestForViewer(requestId, tripScope.orgId || getOrgId(req), viewerId)
             if (!request) {
               respondCancelRoundRequestNotFound(res)
               return
@@ -38284,6 +38897,8 @@ module.exports = {
 	        }
 	        const orgId = getOrgId(req)
 	        try {
+	          const tripScope = await resolveBusinessTripActionScope(req, res, requestId)
+	          if (!tripScope) return
 	          const operationId = resolveRequestOperationId(parsed.data)
 	          const outcome = await w4RequestOperationBoundary.execute({
 	            kind: 'request_pending_edit',
@@ -38294,7 +38909,7 @@ module.exports = {
 	              actorId: requesterId,
 	              tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
 	              requesterName: getUserLabel(req, requesterId),
-	              orgId: null,
+	              orgId: tripScope.orgId ?? null,
 	              requestId,
 	              requestBody: parsed.data,
 	              requestNamedOrgId: extractRequestedPunchOrgIdV1(req),
@@ -38455,7 +39070,7 @@ module.exports = {
             ? (isFinalApproval ? 'approved' : 'pending')
             : 'rejected'
           const newVersion = Number(approval.version ?? 0) + 1
-          const resolvedAt = new Date()
+          const resolvedAt = requestRow.request_type === 'business_trip' ? getBusinessTripServerInstant() : new Date()
           let finalOvertimeAnchor = null
           let lockedRequestSnapshot = null
 
@@ -38721,6 +39336,11 @@ module.exports = {
 	            }
 	          }
 
+          if (requestType === 'business_trip') {
+            if (action === 'approve' && isFinalApproval) await businessTripService.publish(trx,requestRow,requesterId,resolvedAt)
+            return { requestId, status: isFinalApproval ? newStatus : 'pending', record: null, orgId, userId: requestRow.user_id,
+              approvalStep: { index:isFinalApproval ? currentStepIndex : currentStepIndex+1,total:flowSteps.length } }
+          }
           let record = null
           if (action === 'approve' && isFinalApproval) {
             // ④ C2/O5 (#2230/#2453 design-lock): overtime approval → comp-time (调休)
@@ -38915,18 +39535,18 @@ module.exports = {
                 }
               }
             }
-            const baseRule = await loadDefaultRule(trx, orgId)
-            const context = await resolveWorkContext({
-              db: trx,
-              orgId,
-              userId: requestRow.user_id,
-              workDate: requestRow.work_date,
-              defaultRule: baseRule,
-              // #4899 residual R4: the ONE wired consumer of the re-sourced calculation door.
-              // Same boundary-resolved value the finalization guards above consumed — resolved
-              // under the rollout SHARED lock before this transaction's first row lock.
-              referenceSegments: decisionReferenceSegments,
-            })
+            const frozenTarget = freshRequestTimezoneTargets.get(trx)
+            const baseRule = frozenTarget?.rule ?? await loadDefaultRule(trx, orgId)
+            const context = frozenTarget
+              ? {rule:frozenTarget.rule,isWorkingDay:frozenTarget.isWorkingDay,holiday:null}
+              : await resolveWorkContext({
+                  db: trx,
+                  orgId,
+                  userId: requestRow.user_id,
+                  workDate: requestRow.work_date,
+                  defaultRule: baseRule,
+                  referenceSegments: decisionReferenceSegments,
+                })
             const timezone = context.rule.timezone
             if (requestType === 'missed_check_in' || requestType === 'missed_check_out' || requestType === 'time_correction') {
               const approvedMinutes = await loadApprovedMinutes(trx, orgId, requestRow.user_id, requestRow.work_date)
@@ -38943,7 +39563,8 @@ module.exports = {
                 ?? existingCorrectionMeta?.workDateAttributionV1
                 ?? null
               const frozenAttribution = parseFrozenWorkDateAttribution(rawFrozenAttribution)
-              const { adapters: correctionAdapters } = createPluginAttendanceWorkDateResolver(trx)
+              const { adapters: correctionAdapters } = createPluginAttendanceWorkDateResolver(trx,frozenTarget
+                ? {effectiveTimezone:frozenTarget.timezone,strictSources:true} : {})
               const correctionResolution = await correctionAdapters.correction.resolveCorrectionWorkDate({
                 orgId,
                 userId: requestRow.user_id,
@@ -39150,6 +39771,10 @@ module.exports = {
             }
           }
 
+          if (record && freshRequestTimezoneTargets.has(trx)
+            && ['leave','overtime','missed_check_in','missed_check_out','time_correction'].includes(requestType)) {
+            await attendanceTimezoneRuntime.bindRelatedRecordContext(trx)
+          }
           return {
             requestId,
             status: isFinalApproval ? newStatus : 'pending',
@@ -39161,6 +39786,18 @@ module.exports = {
               total: flowSteps.length,
             },
           }
+    }
+
+    async function resolveBusinessTripActionScope(req,res,requestId) {
+      const rows = await db.query("SELECT org_id FROM attendance_requests WHERE id=$1 AND request_type='business_trip'",[requestId])
+      if (!rows.length) return { orgId:null }
+      const actor = resolveAttendanceGroupRouteActorContext(req,res)
+      if (!actor) return null
+      if (rows.length !== 1 || rows[0].org_id !== actor.orgId) {
+        res.status(404).json({ok:false,error:{code:'NOT_FOUND'}})
+        return null
+      }
+      return {orgId:actor.orgId}
     }
 
     async function resolveRequest(req, res, action) {
@@ -39208,6 +39845,8 @@ module.exports = {
       }
       let operationId = null
       try {
+        const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+        if (!tripScope) return
         operationId = resolveRequestOperationId(parsed.data)
         const outcome = await w4RequestOperationBoundary.execute({
           kind: 'request_decision',
@@ -39218,7 +39857,7 @@ module.exports = {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
             actorName: getUserLabel(req, requesterId),
-            orgId: null,
+            orgId: tripScope.orgId,
             requestId,
             action,
             requestBody: parsed.data,
@@ -39294,6 +39933,8 @@ module.exports = {
       }
 
       try {
+        const tripScope = await resolveBusinessTripActionScope(req,res,requestId)
+        if (!tripScope) return
         const operationId = resolveRequestOperationId(parsed.data)
         const outcome = await w4RequestOperationBoundary.execute({
           kind: 'request_cancel',
@@ -39304,7 +39945,7 @@ module.exports = {
             actorId: requesterId,
             tokenSubjectUserId: getAuthenticatedTokenSubjectUserId(req) ?? requesterId,
             actorName: getUserLabel(req, requesterId),
-            orgId: null,
+            orgId: tripScope.orgId,
             requestId,
             requestBody: parsed.data,
             ipAddress: req.ip ?? null,
@@ -40292,6 +40933,7 @@ module.exports = {
           // check and the write. Multi-segment sequence members fail closed with a
           // typed 422 and zero writes while segment calculation is OFF.
           const rows = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
               shiftRefs: payload.shiftSequence,
@@ -40312,12 +40954,18 @@ module.exports = {
                 payload.isActive,
               ]
             )
+                      })
           })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.created', { orgId, rotationRuleId: rule.id })
           res.status(201).json({ ok: true, data: rule })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40386,6 +41034,7 @@ module.exports = {
           // shift lock protocol; multi-segment sequence members fail closed with a
           // typed 422 and zero writes while segment calculation is OFF.
           const rows = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await getAttendanceShiftService().assertShiftSequenceReferenceAllowed(trx, {
               orgId,
               shiftRefs: payload.shiftSequence,
@@ -40410,12 +41059,18 @@ module.exports = {
                 payload.isActive,
               ]
             )
+                      })
           })
 
           const rule = mapRotationRuleRow(rows[0])
           emitEvent('attendance.rotationRule.updated', { orgId, rotationRuleId: rule.id })
           res.json({ ok: true, data: rule })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40476,10 +41131,10 @@ module.exports = {
         }
 
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             'DELETE FROM attendance_rotation_rules WHERE id = $1 AND org_id = $2 RETURNING id',
             [ruleId, orgId]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Rotation rule not found' } })
             return
@@ -40487,6 +41142,11 @@ module.exports = {
           emitEvent('attendance.rotationRule.deleted', { orgId, rotationRuleId: ruleId })
           res.json({ ok: true, data: { id: ruleId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40641,6 +41301,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -40678,6 +41339,7 @@ module.exports = {
               ]
             )
             return { row: rows[0] }
+                      })
           })
 
           if (result.conflict) {
@@ -40689,6 +41351,11 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40785,6 +41452,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -40832,6 +41500,7 @@ module.exports = {
               return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
             }
             return { row: rows[0] }
+                      })
           })
 
           if (result.lockedPublishStatus) {
@@ -40851,6 +41520,11 @@ module.exports = {
           const rotation = mapRotationRuleRow(ruleRows[0])
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -40905,10 +41579,10 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             'DELETE FROM attendance_rotation_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
             [assignmentId, orgId, 'draft']
-          )
+          )))
           if (!rows.length) {
             const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_rotation_assignments', assignmentId, orgId)
             if (publishStatus) {
@@ -40920,6 +41594,11 @@ module.exports = {
           }
           res.json({ ok: true, data: { id: assignmentId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -40978,6 +41657,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -41021,6 +41701,7 @@ module.exports = {
               toDate: payload.endDate,
             })
             return { row: rows[0] }
+                      })
           })
 
           if (result.conflict) {
@@ -41033,6 +41714,11 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.created', { orgId, rotationAssignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -41130,6 +41816,7 @@ module.exports = {
           }
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: rotation assignments reference shifts indirectly through
             // the rule's shift_sequence — every sequenced shift must pass the
@@ -41185,6 +41872,7 @@ module.exports = {
               toDate: payload.endDate,
             })
             return { row: rows[0] }
+                      })
           })
 
           if (result.lockedPublishStatus) {
@@ -41205,6 +41893,11 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.updated', { orgId, rotationAssignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, rotation } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -41260,14 +41953,14 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             `DELETE FROM attendance_rotation_assignments
              WHERE id = $1 AND org_id = $2
                AND COALESCE(publish_status, 'published') = 'published'
                AND locked_at IS NULL
              RETURNING id`,
             [assignmentId, orgId]
-          )
+          )))
           if (!rows.length) {
             const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_rotation_assignments', assignmentId, orgId)
             if (publishStatus) {
@@ -41280,6 +41973,11 @@ module.exports = {
           emitEvent('attendance.rotationAssignment.deleted', { orgId, rotationAssignmentId: assignmentId })
           res.json({ ok: true, data: { id: assignmentId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -41370,9 +42068,13 @@ module.exports = {
           return
         }
 
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         try {
           const rule = await db.transaction(async (trx) => {
+            const verifyTripChange = await prepareAttendanceTimezoneSourceChange(trx,{orgId,userIds:null})
+            await assertAttendanceTimezoneManage(trx,{orgId,actorId:actorAccess.userId})
             await trx.query('UPDATE attendance_rules SET is_default = false WHERE is_default = true AND org_id = $1', [orgId])
 
             const rows = await trx.query(
@@ -41396,6 +42098,7 @@ module.exports = {
               ]
             )
 
+            await verifyTripChange()
             return rows[0]
           })
 
@@ -41406,6 +42109,10 @@ module.exports = {
           })
           res.json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code}})
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -45869,14 +46576,19 @@ module.exports = {
         const description = parsed.data.description?.trim() || null
 
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,mutation:{kind:'empty_group_create'}},async () => trx.query(
             `INSERT INTO attendance_groups (org_id, name, code, timezone, rule_set_id, description, attendance_type, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())
              RETURNING *`,
             [orgId, name, code, timezone, ruleSetId, description, attendanceType]
-          )
+          )))
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
             return
@@ -45966,7 +46678,7 @@ module.exports = {
         const description = parsed.data.description?.trim() || null
 
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             `UPDATE attendance_groups
              SET name = $3,
                  code = $4,
@@ -45977,13 +46689,18 @@ module.exports = {
              WHERE id = $1 AND org_id = $2
              RETURNING *`,
             [groupId, orgId, name, code, timezone, ruleSetId, description]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
           }
           res.json({ ok: true, data: mapAttendanceGroupRow(rows[0]) })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Group name or code already exists' } })
             return
@@ -46011,16 +46728,21 @@ module.exports = {
           return
         }
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             'DELETE FROM attendance_groups WHERE id = $1 AND org_id = $2 RETURNING id',
             [groupId, orgId]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found' } })
             return
           }
           res.json({ ok: true, data: { id: groupId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46111,6 +46833,7 @@ module.exports = {
         try {
           const created = []
           await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             for (const userId of new Set(userIds)) {
               const rows = await trx.query(
                 `INSERT INTO attendance_group_members (org_id, group_id, user_id, created_at, updated_at)
@@ -46121,6 +46844,7 @@ module.exports = {
               )
               if (rows.length) created.push(mapAttendanceGroupMemberRow(rows[0]))
             }
+                      })
           })
           emitEvent('attendance.group.members.changed', {
             orgId,
@@ -46132,6 +46856,11 @@ module.exports = {
           })
           res.json({ ok: true, data: { items: created } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46154,10 +46883,10 @@ module.exports = {
         }
         const userId = req.params.userId
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             'DELETE FROM attendance_group_members WHERE org_id = $1 AND group_id = $2 AND user_id = $3 RETURNING id',
             [orgId, groupId, userId]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Member not found' } })
             return
@@ -46172,6 +46901,11 @@ module.exports = {
           })
           res.json({ ok: true, data: { id: rows[0].id } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -48530,6 +49264,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes when a multi-segment shift is
             // referenced while authoritative segment calculation is OFF for the org.
@@ -48582,6 +49317,7 @@ module.exports = {
               ]
             )
             return { row: rows[0] }
+                      })
           })
 
           if (result.temporaryError) {
@@ -48597,6 +49333,11 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -48719,6 +49460,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -48768,6 +49510,7 @@ module.exports = {
               return publishStatus ? { lockedPublishStatus: publishStatus } : { missing: true }
             }
             return { row: rows[0] }
+                      })
           })
 
           if (result.lockedPublishStatus) {
@@ -48787,6 +49530,11 @@ module.exports = {
           const shift = mapShiftRow(shiftRows[0])
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
@@ -48842,10 +49590,10 @@ module.exports = {
           })
           if (!access) return
 
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             'DELETE FROM attendance_shift_assignments WHERE id = $1 AND org_id = $2 AND publish_status = $3 RETURNING id',
             [assignmentId, orgId, 'draft']
-          )
+          )))
           if (!rows.length) {
             const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_shift_assignments', assignmentId, orgId)
             if (publishStatus) {
@@ -48857,6 +49605,11 @@ module.exports = {
           }
           res.json({ ok: true, data: { id: assignmentId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -48933,6 +49686,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -48977,6 +49731,7 @@ module.exports = {
               toDate: payload.endDate,
             })
             return { row: rows[0] }
+                      })
           })
 
           if (result.conflict) {
@@ -48989,6 +49744,11 @@ module.exports = {
           emitEvent('attendance.assignment.created', { orgId, assignmentId: assignment.id })
           res.status(201).json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -49113,6 +49873,7 @@ module.exports = {
           payload.slotIndex = slotResolution.slotIndex
 
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLock(trx, orgId, payload.userId)
             // W3 erratum: typed 422 + zero writes for multi-segment references while OFF.
             await getAttendanceShiftService().assertShiftReferenceAllowed(trx, {
@@ -49170,6 +49931,7 @@ module.exports = {
               toDate: payload.endDate,
             })
             return { row: rows[0] }
+                      })
           })
 
           if (result.lockedPublishStatus) {
@@ -49190,6 +49952,11 @@ module.exports = {
           emitEvent('attendance.assignment.updated', { orgId, assignmentId: assignment.id })
           res.json({ ok: true, data: { assignment, shift } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (respondAttendanceShiftServiceError(res, error)) return
           if (respondShiftComplianceCapExceeded(res, error)) return
           if (isDatabaseSchemaError(error)) {
@@ -49251,6 +50018,7 @@ module.exports = {
 
           if (isPublishedTemporaryAssignment) {
             const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
               await acquireAttendanceScheduleAssignmentLock(trx, orgId, existing.user_id)
               const rows = await trx.query(
                 `UPDATE attendance_shift_assignments
@@ -49265,7 +50033,8 @@ module.exports = {
                 [assignmentId, orgId]
               )
               return rows[0] ? { row: rows[0] } : { missing: true }
-            })
+                        })
+          })
             if (result.missing) {
               res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Assignment not found' } })
               return
@@ -49276,14 +50045,14 @@ module.exports = {
             return
           }
 
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId},async () => trx.query(
             `DELETE FROM attendance_shift_assignments
              WHERE id = $1 AND org_id = $2
                AND COALESCE(publish_status, 'published') = 'published'
                AND locked_at IS NULL
              RETURNING id`,
             [assignmentId, orgId]
-          )
+          )))
           if (!rows.length) {
             const publishStatus = await loadAttendanceScheduleAssignmentPublishStatus(db, 'attendance_shift_assignments', assignmentId, orgId)
             if (publishStatus) {
@@ -49296,6 +50065,11 @@ module.exports = {
           emitEvent('attendance.assignment.deleted', { orgId, assignmentId })
           res.json({ ok: true, data: { id: assignmentId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -49486,6 +50260,7 @@ module.exports = {
 
           const initialSnapshots = new Map(initialRows.map(row => [`${row.kind}:${row.id}`, attendanceSchedulePublishSnapshot(row)]))
           const result = await db.transaction(async (trx) => {
+            return withAttendanceTimezoneSourceChange(trx,{orgId},async () => {
             await acquireAttendanceScheduleAssignmentLocks(
               trx,
               orgId,
@@ -49657,6 +50432,7 @@ module.exports = {
             }
             if (preflightOnly) throw new AttendanceSchedulePublishPreflightComplete(data)
             return data
+                      })
           })
 
           emitEvent('attendance.schedulePublication.published', {
@@ -49668,6 +50444,11 @@ module.exports = {
           })
           res.json({ ok: true, data: result })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
+
           if (error instanceof AttendanceSchedulePublishPreflightComplete) {
             res.json({ ok: true, data: error.result })
             return
@@ -49904,7 +50685,27 @@ module.exports = {
         }
 
         try {
-          const result = await resolveEffectiveCalendar(db, {
+          const result = await db.transaction(async trx => {
+            await attendanceTimezoneReadContext.assertMembers(trx, { orgId, actorId: requesterId, userId: userIdRaw || requesterId })
+            const contexts = userIdRaw ? await attendanceTimezoneReadContext.readCalendarContexts(trx, {
+              orgId, userId: userIdRaw, actorId: requesterId,
+              workDates: enumerateAttendanceCalendarDateRange(from, to),
+            }) : null
+            const hasFreshDates = contexts && [...contexts.values()].some(day => !day.target.frozen)
+            const sourceSettings = hasFreshDates ? await attendanceTimezoneReadContext.readCalendarSettings(trx)
+              : contexts ? normalizeSettings({}) : null
+            const sourceFacts = hasFreshDates ? attendanceTimezoneRuntime.readCalendarSourceFactsFor(trx)
+              : { calendarOverrides: [], byDate: new Map() }
+            if (contexts && (!sourceFacts || (hasFreshDates
+              && (JSON.stringify(sourceFacts.calendarOverrides) !== JSON.stringify(sourceSettings.calendarPolicy.overrides)
+                || JSON.stringify(sourceFacts.multiShiftDay) !== JSON.stringify(normalizeMultiShiftDaySetting(sourceSettings.multiShiftDay)))))) {
+              throw new HttpError(503, 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID', 'ATTENDANCE_TIMEZONE_CALENDAR_SOURCE_INVALID')
+            }
+            const calendar = await resolveEffectiveCalendar(trx, {
+            targetDays: contexts,
+            sourceSettings,
+            calendarSourceFacts: sourceFacts,
+            calendarPolicyOverrides: contexts ? sourceFacts.calendarOverrides : undefined,
             orgId,
             from,
             to,
@@ -49914,8 +50715,22 @@ module.exports = {
             includePending: includePending === true ? true : undefined,
             logger,
           })
+            if (!userIdRaw) return calendar
+            const zones = new Set([...contexts.values()].map(item => item.target.timezone))
+            return { ...calendar, timezone: zones.size === 1 ? [...zones][0] : null,
+              timezoneMode: zones.size === 1 ? 'single' : 'per_day',
+              items: calendar.items.map(item => {
+                const day = contexts.get(item.date)
+                return { ...item, attendanceTimeContext: day.attendanceTimeContext }
+              }),
+            }
+          })
           res.json({ ok: true, data: result })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code } })
+            return
+          }
           const message = error instanceof Error ? error.message : String(error)
           if (message === 'NOT_FOUND:group') {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Group not found.' } })
@@ -50213,6 +51028,10 @@ module.exports = {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
           }
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.code } })
+            return
+          }
           logger.error('Manual auto-absence run failed', error)
           res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run auto absence' } })
         }
@@ -50291,7 +51110,9 @@ module.exports = {
           res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: parsed.error.message } })
           return
         }
-        const orgId = getOrgId(req)
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
+        const orgId = actorAccess.orgId
         const settings = await getSettings(db)
         const years = resolveHolidaySyncYears(settings, parsed.data)
 
@@ -50300,6 +51121,7 @@ module.exports = {
             db,
             logger,
             orgId,
+            actorId:actorAccess.userId,
             settings,
             payload: parsed.data,
           })
@@ -50324,6 +51146,10 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
           const lastRun = {
             ranAt: new Date().toISOString(),
             success: false,
@@ -50335,13 +51161,7 @@ module.exports = {
             error: error instanceof Error ? error.message : 'Holiday sync failed',
           }
           try {
-            await saveSettings(db, {
-              ...settings,
-              holidaySync: {
-                ...(settings.holidaySync || {}),
-                lastRun,
-              },
-            })
+            await updateAttendanceSettings(db, { holidaySync: { lastRun } })
           } catch (persistError) {
             logger.warn('Failed to persist holiday sync status', persistError)
           }
@@ -50367,7 +51187,7 @@ module.exports = {
 
         try {
           const payload = resolveHolidayWritePayload(parsed.data)
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => trx.query(
             `INSERT INTO attendance_holidays
              (id, org_id, holiday_date, name, is_working_day, origin)
              VALUES ($1, $2, $3, $4, $5, 'manual')
@@ -50379,7 +51199,7 @@ module.exports = {
               payload.name,
               payload.isWorkingDay,
             ]
-          )
+          )))
           const holiday = mapHolidayRow(rows[0])
           emitEvent('attendance.holiday.created', { orgId, holidayId: holiday.id })
           res.status(201).json({ ok: true, data: holiday })
@@ -50422,19 +51242,19 @@ module.exports = {
         }
 
         try {
-          const existingRows = await db.query(
-            'SELECT id, org_id, holiday_date, name, is_working_day, origin FROM attendance_holidays WHERE id = $1 AND org_id = $2',
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => {
+          const existingRows = await trx.query(
+            'SELECT id, org_id, holiday_date, name, is_working_day, origin FROM attendance_holidays WHERE id = $1 AND org_id = $2 FOR UPDATE',
             [holidayId, orgId]
           )
           if (!existingRows.length) {
-            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
-            return
+            throw new HttpError(404,'NOT_FOUND','Holiday not found')
           }
 
           const existing = existingRows[0]
           const payload = resolveHolidayWritePayload(parsed.data, existing)
 
-          const rows = await db.query(
+          return trx.query(
             `UPDATE attendance_holidays
              SET holiday_date = $3,
                  name = $4,
@@ -50445,6 +51265,7 @@ module.exports = {
             [holidayId, orgId, payload.date, payload.name, payload.isWorkingDay]
           )
 
+          }))
           const holiday = mapHolidayRow(rows[0])
           emitEvent('attendance.holiday.updated', { orgId, holidayId: holiday.id })
           res.json({ ok: true, data: holiday })
@@ -50481,10 +51302,10 @@ module.exports = {
         }
 
         try {
-          const rows = await db.query(
+          const rows = await db.transaction(trx => withAttendanceTimezoneSourceChange(trx,{orgId,userIds:null,actorId:actorAccess.userId},async () => trx.query(
             'DELETE FROM attendance_holidays WHERE id = $1 AND org_id = $2 RETURNING id',
             [holidayId, orgId]
-          )
+          )))
           if (!rows.length) {
             res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Holiday not found' } })
             return
@@ -50492,6 +51313,10 @@ module.exports = {
           emitEvent('attendance.holiday.deleted', { orgId, holidayId })
           res.json({ ok: true, data: { id: holidayId } })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -51014,6 +51839,42 @@ module.exports = {
       })
     )
 
+    registerAttendanceTimezoneTargetRoutes({
+      addRoute:(...args) => context.api.http.addRoute(...args),
+      withPermission,
+      resolveActor:resolveAttendanceGroupRouteActorContext,
+      db,
+      authorizeManage:authorizeAttendanceTimezoneManage,
+      HttpError,
+      readTargetTimezoneContext:(trx,input) => {
+        if (typeof attendanceTimezoneRuntime?.readTargetTimezoneContext !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        return attendanceTimezoneRuntime.readTargetTimezoneContext(trx,input)
+      },
+    })
+
+    registerAttendanceTimezonePolicyRoutes({
+      addRoute: (...args) => context.api.http.addRoute(...args),
+      withPermission,
+      resolveActor: resolveAttendanceGroupRouteActorContext,
+      db,
+      HttpError,
+      previewTimezonePolicyChange:(trx,input) => {
+        if (typeof attendanceTimezoneRuntime?.previewPolicyChange !== 'function') {
+          throw new HttpError(503,'ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE','ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE')
+        }
+        return attendanceTimezoneRuntime.previewPolicyChange(trx,input)
+      },
+      authorizeManage: authorizeAttendanceTimezoneManage,
+      prepareTimezoneSourceChange: input => {
+        if (typeof attendanceTimezoneRuntime?.prepareTimezoneSourceChange !== 'function') {
+          throw new AttendanceTimezonePolicyError('ATTENDANCE_TIMEZONE_WRITE_GUARD_UNAVAILABLE',503)
+        }
+        return attendanceTimezoneRuntime.prepareTimezoneSourceChange(input)
+      },
+    })
+
     context.api.http.addRoute(
       'GET',
       '/api/attendance/settings',
@@ -51235,7 +52096,26 @@ module.exports = {
 
         const orgId = getAttendanceRulesMeOrgId(req)
         try {
-          const data = await loadAttendanceRulesMeSummary(db, { orgId, userId, workDate: resolvedForDate })
+          const occurredAt = getOnlinePunchServerInstant()
+          const data = await db.transaction(async trx => {
+            const attendanceTimeContext = await attendanceTimezoneReadContext.readCurrentTimezoneContext(trx, {
+              orgId, userId, occurredAt,
+            })
+            const summary = await loadAttendanceRulesMeSummary(trx, { orgId, userId, workDate: resolvedForDate })
+            const target = await attendanceTimezoneRuntime.readTargetTimezoneContext(trx, { orgId, userId, workDate: resolvedForDate })
+            const targetFacts = attendanceTimezoneRuntime.requestTargetFactsFor(trx)
+            const source = targetFacts?.frame?.context?.source ?? targetFacts?.window?.source ?? null
+            return { ...summary, resolvedAt: occurredAt.toISOString(), attendanceTimeContext,
+              warnings: [
+                ...summary.warnings.filter(warning => warning.code !== 'DEFAULT_RULE_FALLBACK'),
+                ...(source === 'rule' ? [{ code: 'DEFAULT_RULE_FALLBACK', severity: 'info' }] : []),
+              ],
+              runtimeRule: { ...mapAttendanceRulesMeRuntimeRule({
+                source, rule: { ...target.rule, timezone: target.timezone },
+                isWorkingDay: target.isWorkingDay,
+              }), source },
+            }
+          })
           res.json({ ok: true, data })
         } catch (error) {
           if (error instanceof HttpError) {
@@ -51384,25 +52264,10 @@ module.exports = {
           return
         }
 
+        const actorAccess = resolveAttendanceGroupRouteActorContext(req, res)
+        if (!actorAccess) return
         try {
-          const current = await getSettings(db)
-          const merged = mergeSettings(current, parsed.data)
-          // 年假/法定假 L0 config-integrity guard (#2622 timezone lock): enabling the engine requires a
-          // resolvable timezone — carryover/expiry boundaries are calendar-year-end in org time, so an
-          // unset timezone would silently fall back to UTC (forbidden). L0 requires an EXPLICIT timezone;
-          // inherited-timezone resolution (attendance default rule / org) is an L2/L4 extension. A disabled
-          // policy persists freely.
-          if (merged.annualLeavePolicy?.enabled === true && !merged.annualLeavePolicy?.timezone) {
-            res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_REQUIRED', message: 'annualLeavePolicy.timezone is required when annualLeavePolicy.enabled is true' } })
-            return
-          }
-          // L4a: an enabled policy's timezone drives the year-end expiry boundary — it MUST be a real IANA zone,
-          // else zonedTimeToUtc silently falls back to UTC and stamps the wrong expiry. Reject typos at the gate.
-          if (merged.annualLeavePolicy?.enabled === true && !isValidTimeZoneIdentifier(merged.annualLeavePolicy.timezone)) {
-            res.status(422).json({ ok: false, error: { code: 'ANNUAL_LEAVE_TIMEZONE_INVALID', message: 'annualLeavePolicy.timezone must be a valid IANA timezone identifier' } })
-            return
-          }
-          const saved = await saveSettings(db, merged)
+          const saved = await updateAttendanceSettings(db, parsed.data, {orgId:actorAccess.orgId,actorId:actorAccess.userId})
           scheduleAutoAbsence({ db, logger, emit: emitEvent, w4Boundary: w4LiveScheduledBoundary })
           scheduleHolidaySync({ db, logger, emit: emitEvent })
           emitEvent('attendance.settings.updated', {
@@ -51410,6 +52275,10 @@ module.exports = {
           })
           res.json({ ok: true, data: saved })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ok:false,error:{code:error.code,message:error.message}})
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -51449,13 +52318,10 @@ module.exports = {
           return
         }
 
-        const requesterId = getUserId(req)
-        if (!requesterId) {
-          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
-          return
-        }
-
-        const orgId = getOrgId(req)
+        const identity = resolveAttendanceRecordReadIdentity(req, res)
+        if (!identity) return
+        const requesterId = identity.actorId
+        const orgId = identity.orgId
         const targetUserId = parsed.data.userId ?? requesterId
         const dateRange = resolveAttendanceDateRange(parsed.data.from, parsed.data.to)
         if (!dateRange.ok) {
@@ -51494,15 +52360,21 @@ module.exports = {
             [targetUserId, orgId, from, to, limit]
           )
 
+          const storedContexts = await db.transaction(trx => attendanceTimezoneReadContext.readStoredContexts(trx, {
+            orgId, userId: targetUserId, actorId: requesterId,
+            records: rows.map(row => ({ ...row, work_date: normalizeDateOnly(row.work_date) })),
+          }))
           const approvedMap = await loadApprovedMinutesRange(db, orgId, targetUserId, from, to)
           const formulaOptions = await getAttendanceFormulaRuntimeOptions(db)
           const reportFields = await loadAttendanceRecordReportFields(context, orgId, logger, formulaOptions)
+          reportFields.fields = withTimezoneExportColumns(reportFields.fields)
           const exportRows = rows.map((row) => {
             const workDate = normalizeDateOnly(row.work_date) ?? String(row.work_date ?? '').slice(0, 10)
             const approved = approvedMap.get(workDate) ?? { leaveMinutes: 0, overtimeMinutes: 0, reportSubtypeMinutes: {} }
             return {
               ...row,
               work_date: workDate,
+              timezone_source: storedContexts.get(workDate).timezoneSource,
               meta: {
                 ...normalizeMetadata(row.meta),
                 leave_minutes: approved.leaveMinutes,
@@ -51563,6 +52435,10 @@ module.exports = {
           setAttendanceReportFieldConfigHeaders(res, reportFieldConfig)
           res.status(200).send(withCsvBom(csv))
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -51704,6 +52580,7 @@ module.exports = {
   },
 
 	  async deactivate() {
+    attendanceW4SegmentCalculationPortRef?.registerTimezoneSourceGuard?.(null)
 	    clearAutoAbsenceSchedule()
 	    clearHolidaySyncSchedule()
 	    if (importUploadCleanupInterval) clearInterval(importUploadCleanupInterval)

@@ -1,3 +1,4 @@
+import { copyText, readClipboardText } from '../../utils/clipboard'
 import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue'
 import type { MetaField, MetaRecord } from '../types'
 import {
@@ -151,10 +152,8 @@ export function useGridRangeSelection(options: Options) {
     const epoch = generation
     busy.value = true
     try {
-      await navigator.clipboard.writeText(text)
-      if (epoch === generation && before === signature.value) status.value = 'COPIED'
-    } catch {
-      if (epoch === generation && before === signature.value) status.value = 'CLIPBOARD'
+      const ok = await copyText(text)
+      if (epoch === generation && before === signature.value) status.value = ok ? 'COPIED' : 'CLIPBOARD'
     } finally { busy.value = false }
   }
   async function paste() {
@@ -166,7 +165,7 @@ export function useGridRangeSelection(options: Options) {
     const context = options.contextKey()
     busy.value = true
     try {
-      const text = await navigator.clipboard.readText()
+      const text = await readClipboardText()
       if (epoch !== generation || before !== signature.value || !enabled.value || options.editing()) {
         status.value = 'STALE'
         return

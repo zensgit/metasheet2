@@ -1,4 +1,5 @@
 import type { WorkflowHubRouteState } from './workflowHubQueryState'
+import { randomUuid } from '../utils/uuid'
 
 const WORKFLOW_HUB_SAVED_VIEWS_KEY = 'metasheet_workflow_hub_saved_views'
 const WORKFLOW_HUB_SAVED_VIEWS_LIMIT = 8
@@ -64,11 +65,7 @@ function normalizeViewName(name: string) {
 }
 
 function generateSavedViewId() {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return `workflow-view-${crypto.randomUUID()}`
-  }
-
-  return `workflow-view-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  return `workflow-view-${randomUuid()}`
 }
 
 export function saveWorkflowHubSavedView(

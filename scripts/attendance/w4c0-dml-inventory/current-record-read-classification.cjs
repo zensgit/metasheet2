@@ -10,6 +10,22 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // Exact internal frozen-context and source-change preconditions; no public record listing.
+  // Scheduled generation checks physical parent existence before current-policy resolution.
+  // Match generateAbsenceRecords' base-table NOT EXISTS, including retired/review placeholders;
+  // the authoritative parent resolver separately enforces retirement before any write or skip.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'prepareScheduledContext', 1, 'scheduled_existing_parent_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDates', 1, 'batch_frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'readTargetTimezoneContexts', 1, 'batch_original_freeze_migration_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readLegacyFrozenV2', 1, 'original_frozen_v2_continuation_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs', 'readStoredContexts', 1, 'stored_timezone_identity_active_parent_join'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readEligibleOpen', 1, 'frozen_checkout_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readForWorkDate', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'assertTarget', 1, 'frozen_binding_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'bindFirst', 1, 'frozen_binding_write_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-frozen-windows.cjs', 'readFrozenTimezoneWindows', 1, 'frozen_source_change_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-runtime.cjs', 'target', 1, 'frozen_target_precondition'),
+  entry('plugins/plugin-attendance/lib/attendance-business-trip.cjs', 'dateKey', 1, 'trip_work_date_conflict_precondition'),
   // ACP seed is an authority precondition, revalidated under the canonical lock, never a public list.
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'readAttendanceCleaningSourceSeed', 1, 'canonical_authority_seed'),
   entry('packages/core-backend/src/attendance/attendance-multitable-cleaning-authority.ts', 'loadCanonicalRow', 1, 'write_lock'),
@@ -23,7 +39,7 @@ const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
   // to the punching actor as the acknowledgement of their own write; it is not an ordinary
   // listing/report surface (all of which stay on the view — see the §7.5 reader trace in the
   // boundary's own placeholder docblock).
-  entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'executeLivePunch', 1, 'write_response_echo'),
+  entry('packages/core-backend/src/attendance/w4c2-live-scheduled-boundary.ts', 'executeLivePunchInTransaction', 1, 'write_response_echo'),
   // #4556 W4C-2 Gate D1 (#4844): the INERT authoritative-result-write CORE locks the exact base
   // parent row FOR UPDATE before moving its pointer/visibility — it MUST read the base table (not
   // the current view) to serialize the pointer move and to read the true projection_owner /

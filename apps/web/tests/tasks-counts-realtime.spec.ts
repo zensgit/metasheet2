@@ -143,7 +143,7 @@ import TasksTodoBadge from '../src/tasks/TasksTodoBadge.vue'
 import TasksSettingsView from '../src/views/tasks/TasksSettingsView.vue'
 import { notifyTasksChanged } from '../src/tasks/tasksBadgeBus'
 import { TASKS_SIGNAL_WINDOW_MS } from '../src/tasks/useTasksBadge'
-import { TASKS_COUNTS_UPDATED_EVENT } from '../src/tasks/useTasksCountsRealtime'
+import { TASKS_COUNTS_UPDATED_EVENT, useTasksCountsRealtime } from '../src/tasks/useTasksCountsRealtime'
 
 const EVENT = 'tasks:counts-updated'
 const WINDOW = TASKS_SIGNAL_WINDOW_MS
@@ -764,6 +764,74 @@ describe('D. the client listens and never speaks; the event name has one spellin
     expect(composable).toContain("export const TASKS_COUNTS_UPDATED_EVENT = 'tasks:counts-updated'")
     expect(composable.split('.on(TASKS_COUNTS_UPDATED_EVENT,').length - 1).toBe(1)
     expect(TASKS_COUNTS_UPDATED_EVENT).toBe(EVENT)
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// D2. socket construction failures
+// ---------------------------------------------------------------------------------------------
+
+describe('D2. socket construction failures', () => {
+  it('retries after a synchronous io failure instead of reusing a rejected attempt', async () => {
+    h_.shouldAutoConnectRealtime.mockReturnValue(false)
+    h_.io.mockImplementationOnce(() => {
+      throw new Error('socket construction failed')
+    })
+    let reconnect!: ReturnType<typeof useTasksCountsRealtime>['reconnect']
+    let disconnect!: () => void
+    const el = attach()
+    app = createApp({
+      setup() {
+        const realtime = useTasksCountsRealtime({ onCountsUpdated: vi.fn() })
+        reconnect = realtime.reconnect
+        disconnect = realtime.disconnect
+        return () => null
+      },
+    })
+    app.mount(el)
+
+    await expect(reconnect()).rejects.toThrow('socket construction failed')
+    const opened = await reconnect()
+    expect(opened).toBe(lastSocket())
+    expect(h_.io).toHaveBeenCalledTimes(2)
+    expect(await reconnect()).toBe(opened)
+    expect(h_.io).toHaveBeenCalledTimes(2)
+    disconnect()
+    expect(opened?.disconnect).toHaveBeenCalledTimes(1)
+    const reconnected = await reconnect()
+    expect(reconnected).toBe(lastSocket())
+    expect(reconnected).not.toBe(opened)
+    expect(h_.io).toHaveBeenCalledTimes(3)
+
+    app.unmount()
+    app = null
+  })
+
+  it('consumes an automatic mount failure and the 60 s poll still recovers the badge', async () => {
+    vi.useFakeTimers()
+    h_.io.mockImplementationOnce(() => {
+      throw new Error('socket construction failed')
+    })
+    h_.pendingCountReply.mockReturnValueOnce(jsonResponse(500, { error: { code: 'INTERNAL' } }))
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      mountBadge()
+      await vi.advanceTimersByTimeAsync(0)
+      await flush()
+      expect(triple(badgeEl())).toBe('unavailable||')
+      expect(h_.io).toHaveBeenCalledTimes(1)
+
+      h_.server.count = 3
+      await vi.advanceTimersByTimeAsync(60_000)
+      await flush()
+      expect(reads()).toBe(2)
+      expect(triple(badgeEl())).toBe('ready|on|3')
+      expect(unhandled).toEqual([])
+    } finally {
+      process.removeListener('unhandledRejection', onUnhandled)
+    }
   })
 })
 

@@ -288,7 +288,7 @@ describe('ApprovalDetailView — P-2 on a cancel-round instance', () => {
     mockActiveApproval.value = cancelRoundInstance({ status: 'rejected', cancelRoundCloseReason: 'business_blocked:SOME_CODE' })
     await mountView()
     expect(headerTag().dataset).toMatchObject({ domain: 'cancelRound', status: 'cancellation_blocked' })
-    expect(headerTag().textContent).toBe('该请假已无法撤销(业务原因)')
+    expect(headerTag().textContent).toBe('该申请已无法撤销(业务原因)')
   })
 
   it('header tag: an approver rejection (detail DTO without a close reason) renders V3', async () => {
@@ -425,7 +425,7 @@ describe('ApprovalDetailView — cancel-round approver path (attendance route)',
     await flushUi()
     q(container!, 'approval-action-dialog-confirm')!.click()
     await flushUi()
-    expect(dialogErrors().join('|')).toContain('无法定位这条撤销申请对应的请假')
+    expect(dialogErrors().join('|')).toContain('无法定位这条撤销申请对应的原申请')
     expect(executeActionSpy).not.toHaveBeenCalled()
     expect(attendanceCalls()).toHaveLength(0)
   })

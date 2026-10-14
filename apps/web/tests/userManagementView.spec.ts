@@ -2184,6 +2184,537 @@ describe('UserManagementView', () => {
     expect(container?.textContent).toContain('Delta')
   })
 
+  describe('slice B: read-only 所属组织 in the member-admission block (owner ruling on #6079)', () => {
+    const NONE_NOTICE = '未归属任何组织：该账号无法使用云课堂等按组织隔离的应用；请用目录管理或新建账号时的「所属组织」补齐'
+    const MULTIPLE_NOTICE = '属于多个组织：登录后需在页面顶部选择组织'
+
+    // `organizations: undefined` leaves the field out of the payload entirely (an older backend).
+    function installOrganizations(organizations: unknown, overrides: { accountEnabled?: boolean } = {}): void {
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const response = await base(input, init)
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (!/^\/api\/admin\/users\/[^/]+\/member-admission$/.test(pathname)) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data, ...overrides }
+        if (organizations !== undefined) data.organizations = organizations
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    function orgBlock(): HTMLElement | null {
+      return container!.querySelector('[data-testid="member-admission-organizations"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+    }
+
+    it('one active organization: shows that org as a chip under 所属组织 and no warning', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }], hasTenantContext: true })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgBlock()!.closest('.user-admin__section')?.querySelector('h3')?.textContent?.trim()).toBe('成员准入')
+      expect(orgBlock()!.textContent).toContain('所属组织')
+      expect(orgChips()).toEqual(['org-alpha'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(true)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('no active organization: no chips and the 未归属任何组织 sentence', async () => {
+      installOrganizations({ active: [], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual([])
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')!.textContent!.trim()).toBe(NONE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')).toBeNull()
+    })
+
+    it('two active organizations: both chips and the 属于多个组织 sentence', async () => {
+      installOrganizations({ active: [{ orgId: 'org-alpha' }, { orgId: 'org-bravo' }], hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => orgBlock() !== null)
+
+      expect(orgChips()).toEqual(['org-alpha', 'org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-org-chip"]')!.classList.contains('user-admin__chip--success')).toBe(false)
+      expect(container!.querySelector('[data-testid="member-admission-org-multiple"]')!.textContent!.trim()).toBe(MULTIPLE_NOTICE)
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+    })
+
+    it('older backend without the field: renders nothing for organizations, the rest of the block still renders', async () => {
+      installOrganizations(undefined)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(orgChips()).toEqual([])
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+      expect(container!.textContent).not.toContain(MULTIPLE_NOTICE)
+    })
+
+    it('a malformed field (no active list) is treated like an absent one, not as "no organization"', async () => {
+      installOrganizations({ hasTenantContext: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    it('organizations: null from the server (its read failed, "unknown") renders nothing, not 「未归属任何组织」', async () => {
+      installOrganizations(null)
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+
+    for (const [label, organizations] of [
+      ['an item without a string orgId', { active: [{ orgId: 42 }], hasTenantContext: false }],
+      ['an item with a whitespace-only orgId', { active: [{ orgId: '   ' }], hasTenantContext: false }],
+      ['a good item next to a bad one', { active: [{ orgId: 'org-alpha' }, {}], hasTenantContext: false }],
+      ['a non-boolean hasTenantContext', { active: [{ orgId: 'org-alpha' }], hasTenantContext: 'yes' }],
+    ] as const) {
+      it(`a malformed payload (${label}) renders nothing instead of a wrong claim`, async () => {
+        installOrganizations(organizations)
+        await mountPage()
+        await waitForCondition(() => container!.textContent?.includes('平台账号已启用') ?? false)
+
+        expect(orgBlock()).toBeNull()
+        expect(orgChips()).toEqual([])
+        expect(container!.textContent).not.toContain(NONE_NOTICE)
+      })
+    }
+
+    it('disabled account: renders nothing for organizations (the login predicate reads it as none, which is not the remedy)', async () => {
+      installOrganizations({ active: [], hasTenantContext: false }, { accountEnabled: false })
+      await mountPage()
+      await waitForCondition(() => container!.textContent?.includes('平台账号未启用') ?? false)
+
+      expect(orgBlock()).toBeNull()
+      expect(container!.textContent).not.toContain(NONE_NOTICE)
+    })
+  })
+
+  describe('slice C: 加入默认组织 for a zero-org user (owner 2026-10-13)', () => {
+    const JOIN_PATH = '/api/admin/directory/local/accounts'
+    const ADMISSION_PATH = '/api/admin/users/user-1/member-admission'
+    // What a server might put in an error body; it must never reach the page.
+    const SERVER_TEXT = 'MKSLICEC a local directory account already exists for this user in this org'
+    const GENERIC_FAILURE = '加入默认组织失败，请稍后重试'
+    const CONFLICT_MESSAGE = '该账号已有本地目录账号或已停用，不能再加入默认组织；请到目录管理查看'
+    const HISTORY_MESSAGE = '该账号在默认组织已有归属记录或离职记录，不能从本页加入；活跃归属无需处理，停用归属或离职记录请按目录管理 / 离职证据流程处理。'
+    const USER_GONE_MESSAGE = '该账号已不存在，请刷新列表'
+    const ZERO_ORG_CLEAR = { active: [], hasTenantContext: false, hasAnyRow: false, deprovisionApplied: false }
+
+    type JoinResponder = () => ReturnType<typeof createJsonResponse> | Promise<ReturnType<typeof createJsonResponse>>
+    let joinCalls: Array<{ method: string | undefined; body: unknown }> = []
+
+    // Before any successful POST the member-admission read answers `organizations` (left out when undefined, an
+    // older backend); after one it answers the `default` membership the route creates.
+    function installJoin(
+      organizations: unknown,
+      options: {
+        accountEnabled?: boolean
+        respond?: JoinResponder
+        // Per-user `organizations` overriding the shared one.
+        organizationsFor?: Record<string, unknown>
+        // Overrides the `userId` the admission payload claims (a malformed / mismatched answer).
+        admissionUserId?: string
+        // Lets a test hold (or fail) a given user's n-th admission read.
+        holdAdmission?: (userId: string, callIndex: number) => Promise<void> | undefined
+      } = {},
+    ): void {
+      joinCalls = []
+      const joinedUserIds = new Set<string>()
+      const admissionCalls = new Map<string, number>()
+      const respond: JoinResponder = options.respond
+        ?? (() => createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const pathname = new URL(String(input), 'http://localhost').pathname
+        if (pathname === JOIN_PATH) {
+          callLog.push(String(input))
+          const body = init?.body ? JSON.parse(String(init.body)) as { localUserId?: string } : undefined
+          joinCalls.push({ method: init?.method, body })
+          const response = await respond()
+          if (response.ok && body?.localUserId) joinedUserIds.add(body.localUserId)
+          return response
+        }
+        const isAdmission = pathname.startsWith('/api/admin/users/') && pathname.endsWith('/member-admission')
+        const admissionUser = isAdmission ? decodeURIComponent(pathname.split('/')[4]) : ''
+        if (isAdmission) {
+          const callIndex = admissionCalls.get(admissionUser) ?? 0
+          admissionCalls.set(admissionUser, callIndex + 1)
+          const hold = options.holdAdmission?.(admissionUser, callIndex)
+          if (hold) await hold
+        }
+        const response = await base(input, init)
+        if (!isAdmission) return response
+        const payload = await response.json() as { ok: boolean; data: Record<string, unknown> }
+        const data: Record<string, unknown> = { ...payload.data }
+        if (options.accountEnabled !== undefined) data.accountEnabled = options.accountEnabled
+        if (options.admissionUserId !== undefined) data.userId = options.admissionUserId
+        const ownOrganizations = options.organizationsFor && admissionUser in options.organizationsFor
+          ? options.organizationsFor[admissionUser]
+          : organizations
+        if (joinedUserIds.has(admissionUser)) {
+          data.organizations = { active: [{ orgId: 'default' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false }
+        } else if (ownOrganizations !== undefined) {
+          data.organizations = ownOrganizations
+        }
+        return createJsonResponse({ ...payload, data })
+      })
+    }
+
+    function deferred(): { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void } {
+      let resolve!: () => void
+      let reject!: (error: Error) => void
+      const promise = new Promise<void>((res, rej) => {
+        resolve = res
+        reject = rej
+      })
+      return { promise, resolve, reject }
+    }
+
+    async function openUser(name: string, userId: string): Promise<void> {
+      const row = findUserRow(container!, name)
+      const detailButton = Array.from(row.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes(name))
+      detailButton!.click()
+      await waitForCondition(() => callLog.includes(`/api/admin/users/${userId}/member-admission`))
+      await flushUi(12)
+    }
+
+    async function mountPage(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => callLog.some((url) => url.endsWith('/member-admission')))
+      await flushUi(8)
+      await waitForCondition(() => container!.textContent?.includes('平台账号') ?? false)
+    }
+
+    function joinButton(): HTMLButtonElement | null {
+      return container!.querySelector('[data-testid="join-default-org-button"]')
+    }
+
+    function confirmPanel(): HTMLElement | null {
+      return container!.querySelector('[data-testid="join-default-org-confirm"]')
+    }
+
+    function orgChips(): string[] {
+      return Array.from(container!.querySelectorAll('[data-testid="member-admission-org-chip"]'))
+        .map((chip) => chip.textContent?.trim() ?? '')
+    }
+
+    function admissionLoads(): number {
+      return callLog.filter((url) => url.includes(ADMISSION_PATH)).length
+    }
+
+    function errorStatus(): string {
+      return container!.querySelector('.user-admin__status--error')?.textContent?.trim() ?? ''
+    }
+
+    async function confirmJoin(): Promise<void> {
+      joinButton()!.click()
+      await flushUi()
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-submit"]')!.click()
+      await waitForCondition(() => joinCalls.length === 1)
+      await flushUi(12)
+    }
+
+    for (const [label, organizations, accountEnabled] of [
+      ['an older backend without organizations', undefined, true],
+      ['organizations without the two slice-C booleans', { active: [], hasTenantContext: false }, true],
+      ['hasAnyRow missing', { active: [], hasTenantContext: false, deprovisionApplied: false }, true],
+      ['deprovisionApplied missing', { active: [], hasTenantContext: false, hasAnyRow: false }, true],
+      ['hasAnyRow as a non-boolean', { ...ZERO_ORG_CLEAR, hasAnyRow: 'false' }, true],
+      ['hasAnyRow: null (its read failed)', { ...ZERO_ORG_CLEAR, hasAnyRow: null }, true],
+      ['deprovisionApplied: null (its read failed)', { ...ZERO_ORG_CLEAR, deprovisionApplied: null }, true],
+      ['both slice-C booleans null', { ...ZERO_ORG_CLEAR, hasAnyRow: null, deprovisionApplied: null }, true],
+      ['one active organization', { ...ZERO_ORG_CLEAR, active: [{ orgId: 'org-alpha' }] }, true],
+      ['a prior membership row (hasAnyRow)', { ...ZERO_ORG_CLEAR, hasAnyRow: true }, true],
+      ['an applied deprovision', { ...ZERO_ORG_CLEAR, deprovisionApplied: true }, true],
+      ['a disabled account', ZERO_ORG_CLEAR, false],
+    ] as const) {
+      it(`hides 加入默认组织 for ${label}`, async () => {
+        installJoin(organizations, { accountEnabled })
+        await mountPage()
+
+        expect(joinButton()).toBeNull()
+        expect(container!.textContent).not.toContain('加入默认组织')
+      })
+    }
+
+    it('shows 加入默认组织 only when all conditions are positively clear, and asks before writing', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      expect(joinButton()!.textContent!.trim()).toBe('加入默认组织')
+      expect(confirmPanel()).toBeNull()
+
+      joinButton()!.click()
+      await flushUi()
+      const panel = confirmPanel()
+      expect(panel).not.toBeNull()
+      expect(panel!.getAttribute('role')).toBe('dialog')
+      const items = Array.from(panel!.querySelectorAll('li')).map((item) => item.textContent?.trim())
+      expect(items).toEqual([
+        '会为该账号创建一条本地目录账号与链接（目录管理里可见）；',
+        '加入组织后该用户进入考勤全员名册（自动缺勤 / 年假累计 / 考勤报表 / 汇总会计入）；',
+        '用户需重新登录或刷新后，云课堂等按组织隔离的应用才可用。',
+      ])
+      expect(panel!.querySelector('[data-testid="join-default-org-confirm-undo"]')!.textContent!.trim())
+        .toBe('此操作不能在本页撤销；撤销需运维调用目录接口归档该本地目录账号（界面暂无），归档后也不能再经本按钮加入。')
+      expect(joinCalls).toEqual([])
+
+      container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-cancel"]')!.click()
+      await flushUi()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    it('on confirm posts the user id, reloads the admission and shows the default chip', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      const loadsBefore = admissionLoads()
+
+      await confirmJoin()
+
+      expect(joinCalls).toEqual([{ method: 'POST', body: { localUserId: 'user-1' } }])
+      await waitForCondition(() => orgChips().length > 0)
+      expect(admissionLoads()).toBeGreaterThan(loadsBefore)
+      expect(orgChips()).toEqual(['default'])
+      expect(joinButton()).toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(container!.textContent).toContain('已加入默认组织')
+      expect(errorStatus()).toBe('')
+    })
+
+    it('disables the button while the request is in flight', async () => {
+      let release: (() => void) | null = null
+      installJoin(ZERO_ORG_CLEAR, {
+        respond: () => new Promise((resolve) => {
+          release = () => resolve(createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+        }),
+      })
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+
+      await confirmJoin()
+
+      expect(joinButton()!.disabled).toBe(true)
+      expect(joinButton()!.textContent!.trim()).toBe('加入中...')
+      release!()
+      await waitForCondition(() => orgChips().length > 0)
+      expect(joinButton()).toBeNull()
+    })
+
+    it('a confirm panel opened for one user is not shown for another user', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      joinButton()!.click()
+      await flushUi()
+      expect(confirmPanel()).not.toBeNull()
+
+      const bravoRow = findUserRow(container!, 'Bravo')
+      const bravoDetailButton = Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))
+      bravoDetailButton!.click()
+      await waitForCondition(() => callLog.includes('/api/admin/users/user-2/member-admission'))
+      await flushUi(12)
+
+      expect(joinButton()).not.toBeNull()
+      expect(confirmPanel()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    async function mountWithHeldFirstAdmission(): Promise<void> {
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await flushUi(20)
+      await waitForCondition(() => container!.querySelector('.user-admin__user') !== null)
+    }
+
+    it("refuter scenario: user-1's slow admission landing while user-2 is shown neither replaces user-2's panel nor offers a join", async () => {
+      const heldAlpha = deferred()
+      installJoin(ZERO_ORG_CLEAR, {
+        organizationsFor: { 'user-2': { active: [{ orgId: 'org-bravo' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false } },
+        holdAdmission: (userId, callIndex) => (userId === 'user-1' && callIndex === 0 ? heldAlpha.promise : undefined),
+      })
+      await mountWithHeldFirstAdmission()
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => orgChips().length > 0)
+      expect(orgChips()).toEqual(['org-bravo'])
+
+      heldAlpha.resolve()
+      await waitForCondition(() => callLog.includes(ADMISSION_PATH))
+      await flushUi(12)
+
+      expect(orgChips()).toEqual(['org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-org-none"]')).toBeNull()
+      expect(joinButton()).toBeNull()
+      expect(joinCalls).toEqual([])
+    })
+
+    it("user-1's slow admission failing while user-2 is shown does not wipe user-2's panel", async () => {
+      const heldAlpha = deferred()
+      installJoin(ZERO_ORG_CLEAR, {
+        organizationsFor: { 'user-2': { active: [{ orgId: 'org-bravo' }], hasTenantContext: true, hasAnyRow: true, deprovisionApplied: false } },
+        holdAdmission: (userId, callIndex) => (userId === 'user-1' && callIndex === 0 ? heldAlpha.promise : undefined),
+      })
+      await mountWithHeldFirstAdmission()
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => orgChips().length > 0)
+
+      heldAlpha.reject(new Error('MKSLICEC late failure'))
+      await flushUi(20)
+
+      expect(orgChips()).toEqual(['org-bravo'])
+      expect(container!.querySelector('[data-testid="member-admission-load-failure"]')).toBeNull()
+    })
+
+    it('an admission whose userId is not the selected user never offers a join', async () => {
+      installJoin(ZERO_ORG_CLEAR, { admissionUserId: 'user-other' })
+      await mountPage()
+      await waitForCondition(() => container!.querySelector('[data-testid="member-admission-org-none"]') !== null)
+
+      expect(joinButton()).toBeNull()
+    })
+
+    it('a confirm clicked after the selection moved (before the page re-rendered) posts nothing and says so', async () => {
+      installJoin(ZERO_ORG_CLEAR)
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      joinButton()!.click()
+      await flushUi()
+      const submit = container!.querySelector<HTMLButtonElement>('[data-testid="join-default-org-confirm-submit"]')!
+
+      const bravoRow = findUserRow(container!, 'Bravo')
+      Array.from(bravoRow.querySelectorAll('button')).find((candidate) => candidate.textContent?.includes('Bravo'))!.click()
+      submit.click()
+      await waitForCondition(() => callLog.includes('/api/admin/users/user-2/member-admission'))
+      await flushUi(12)
+
+      expect(joinCalls).toEqual([])
+      expect(errorStatus()).toBe(GENERIC_FAILURE)
+    })
+
+    it("a join in flight for user-1 does not mark user-2's button, and its success is not announced under user-2", async () => {
+      let release: (() => void) | null = null
+      installJoin(ZERO_ORG_CLEAR, {
+        respond: () => new Promise((resolve) => {
+          release = () => resolve(createJsonResponse({ ok: true, data: { account: { id: 'acct-1', localUserId: 'user-1' } } }))
+        }),
+      })
+      await mountPage()
+      await waitForCondition(() => joinButton() !== null)
+      await confirmJoin()
+      expect(joinButton()!.disabled).toBe(true)
+
+      await openUser('Bravo', 'user-2')
+      await waitForCondition(() => joinButton() !== null)
+      expect(joinButton()!.disabled).toBe(false)
+      expect(joinButton()!.textContent!.trim()).toBe('加入默认组织')
+      const alphaLoadsBefore = admissionLoads()
+
+      release!()
+      await flushUi(20)
+
+      expect(container!.textContent).not.toContain('已加入默认组织')
+      expect(admissionLoads()).toBe(alphaLoadsBefore)
+      expect(joinButton()).not.toBeNull()
+      expect(joinButton()!.disabled).toBe(false)
+    })
+
+    for (const [label, respond, expected] of [
+      [
+        '404 DIRECTORY_LOCAL_NOT_FOUND (the user was deleted meanwhile)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_NOT_FOUND', message: SERVER_TEXT } }, 404),
+        USER_GONE_MESSAGE,
+      ],
+      [
+        'the not-found code on a non-404 status',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_NOT_FOUND', message: SERVER_TEXT } }, 400),
+        GENERIC_FAILURE,
+      ],
+      [
+        '404 with another code',
+        () => createJsonResponse({ ok: false, error: { code: 'NOT_FOUND', message: SERVER_TEXT } }, 404),
+        GENERIC_FAILURE,
+      ],
+      [
+        '409 DIRECTORY_LOCAL_CONFLICT (existing account / inactive user)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 409),
+        CONFLICT_MESSAGE,
+      ],
+      [
+        '409 DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY (prior membership or deprovision)',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_ORG_MEMBERSHIP_HISTORY', message: SERVER_TEXT } }, 409),
+        HISTORY_MESSAGE,
+      ],
+      [
+        '409 with an unknown code',
+        () => createJsonResponse({ ok: false, error: { code: 'SOMETHING_ELSE', message: SERVER_TEXT } }, 409),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a known conflict code on a non-409 status',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_CONFLICT', message: SERVER_TEXT } }, 400),
+        GENERIC_FAILURE,
+      ],
+      [
+        '500',
+        () => createJsonResponse({ ok: false, error: { code: 'DIRECTORY_LOCAL_INTERNAL_ERROR', message: SERVER_TEXT } }, 500),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a 2xx without the created account',
+        () => createJsonResponse({ ok: true, data: { message: SERVER_TEXT } }),
+        GENERIC_FAILURE,
+      ],
+      [
+        'a network failure',
+        () => Promise.reject(new Error(SERVER_TEXT)),
+        GENERIC_FAILURE,
+      ],
+    ] as const) {
+      it(`maps ${label} to this page's sentence, never the server text, and does not reload`, async () => {
+        installJoin(ZERO_ORG_CLEAR, { respond })
+        await mountPage()
+        await waitForCondition(() => joinButton() !== null)
+        const loadsBefore = admissionLoads()
+
+        await confirmJoin()
+
+        expect(errorStatus()).toBe(expected)
+        expect(container!.textContent).not.toContain('MKSLICEC')
+        expect(container!.textContent).not.toContain('已加入默认组织')
+        expect(admissionLoads()).toBe(loadsBefore)
+        expect(joinButton()).not.toBeNull()
+      })
+    }
+  })
+
   describe('#6163: a failed DingTalk-access or member-admission load is shown inside its block', () => {
     // What the server might put in a 500 body: the text of an underlying error. It must never reach the page.
     const SERVER_TEXT = 'MK6163 Unsupported state or unable to authenticate data at probe.invalid'

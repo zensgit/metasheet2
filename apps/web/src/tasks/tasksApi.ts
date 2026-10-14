@@ -148,8 +148,10 @@ export interface CreateTaskInput {
    *  that want "no assignees" must pass `[]` explicitly; they are not the same request body. */
   assignees?: string[]
   completionMode?: CompletionMode
-  /** M4 (PR-3a S4) — the date keys `POST /api/tasks` accepts. Each is sent only when given; the
-   *  create form does not set them in this slice (design §12-Q3, `[fe-09]`). */
+  /** M4 (PR-3a S4) — the date keys `POST /api/tasks` accepts. Each is sent only when given. The
+   *  create form sets `dueDate`, `dueTime` and `timeZone` when the viewer picks a due date
+   *  (`buildCreateDue` in `tasksDraft.ts`) and never sets `remindAt`, so the server sets the
+   *  default reminder. */
   dueDate?: string | null
   dueTime?: string | null
   startDate?: string | null

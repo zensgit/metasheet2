@@ -103,6 +103,7 @@ import {
   type PlmBomMultitableResult,
 } from '../../services/integration/workbench'
 import PlmBomReviewTable from './PlmBomReviewTable.vue'
+import { randomUuid } from '../../utils/uuid'
 
 // ecoIntentEnabled: the ECO Phase 3 CTA pre-gate, computed by the WORKBENCH view from the
 // capabilities advisory (features.bom_eco_revision supported+entitled+actions includes
@@ -224,9 +225,7 @@ async function load(): Promise<void> {
 }
 
 function makeIdempotencyKey(): string {
-  const cryptoApi = globalThis.crypto as { randomUUID?: () => string } | undefined
-  if (typeof cryptoApi?.randomUUID === 'function') return cryptoApi.randomUUID()
-  return `bom-write-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return randomUuid()
 }
 
 function writebackMessage(status: number, reason?: string): string {

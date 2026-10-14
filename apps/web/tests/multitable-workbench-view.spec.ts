@@ -4448,7 +4448,7 @@ describe('MultitableWorkbench view wiring', () => {
 
   // Record inspector v3 (2026-09-05, PR-B1 §1.3 "Copy link"): the inspector only emits `copy-link`;
   // the workbench writes `window.location.href` — which carries `#recordId=<id>` while the panel is
-  // open (hash lifecycle above) — via `navigator.clipboard.writeText`, and reports the outcome through
+  // open (hash lifecycle above) — via `copyText` (Clipboard API, execCommand fallback on plain HTTP), and reports the outcome through
   // MetaToast (the `aria-live="polite"` / `role="status"` region, stubbed here as `showSuccessSpy` /
   // `showErrorSpy`) with the reserved `record.copyLinkDone` / `record.copyLinkFailed` keys. The
   // inspector-side "button disabled when the Clipboard API is absent" gate is pinned in
@@ -4500,6 +4500,34 @@ describe('MultitableWorkbench view wiring', () => {
         expect(showErrorSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkFailed', false))
         expect(showSuccessSpy).not.toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
       } finally {
+        restore()
+      }
+    })
+
+    it('plain-HTTP (no Clipboard API) copies through the execCommand fallback and reports record.copyLinkDone', async () => {
+      const restore = stubClipboard(undefined)
+      const original = Object.getOwnPropertyDescriptor(document, 'execCommand')
+      const copied: string[] = []
+      const execCommand = vi.fn((command: string) => {
+        copied.push(`${command}:${document.querySelector('textarea')?.value ?? ''}`)
+        return true
+      })
+      Object.defineProperty(document, 'execCommand', { configurable: true, writable: true, value: execCommand })
+      try {
+        mountWorkbench()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-expand-record="rec_1"]')!.click()
+        await flushUi()
+        container!.querySelector<HTMLButtonElement>('[data-copy-link="true"]')!.click()
+        await flushUi()
+        expect(execCommand).toHaveBeenCalledTimes(1)
+        expect(copied).toEqual([`copy:${window.location.href}`])
+        expect(copied[0]).toContain('#recordId=rec_1')
+        expect(showSuccessSpy).toHaveBeenCalledWith(recordLabel('record.copyLinkDone', false), undefined)
+        expect(showErrorSpy).not.toHaveBeenCalled()
+      } finally {
+        if (original) Object.defineProperty(document, 'execCommand', original)
+        else Reflect.deleteProperty(document, 'execCommand')
         restore()
       }
     })

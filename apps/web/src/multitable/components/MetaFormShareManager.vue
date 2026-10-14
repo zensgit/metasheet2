@@ -220,7 +220,7 @@
                   data-form-share-copy="true"
                   @click="onCopyLink"
                 >
-                  {{ copied ? f('link.copied') : f('link.copy') }}
+                  {{ copied ? f('link.copied') : copyFailed ? f('link.copyFailed') : f('link.copy') }}
                 </MtButton>
               </div>
             </div>
@@ -273,6 +273,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import { computed, ref, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
 import { MtButton, MtIconButton } from '../ui'
@@ -306,6 +307,7 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 const busy = ref(false)
 const copied = ref(false)
+const copyFailed = ref(false)
 const candidateQuery = ref('')
 const candidates = ref<MetaSheetPermissionCandidate[]>([])
 const candidatesLoading = ref(false)
@@ -526,9 +528,16 @@ async function onRegenerate() {
 
 function onCopyLink() {
   if (!publicLink.value) return
-  void navigator.clipboard.writeText(publicLink.value)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 2000)
+  // The public link is never logged; on failure the button says so and the link stays in the
+  // read-only input beside it for a manual copy.
+  void copyText(publicLink.value).then((ok) => {
+    copied.value = ok
+    copyFailed.value = !ok
+    setTimeout(() => {
+      copied.value = false
+      copyFailed.value = false
+    }, 2000)
+  })
 }
 
 function onPreview() {

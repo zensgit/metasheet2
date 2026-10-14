@@ -88,6 +88,38 @@
 //         healed by number (b); a later success in the same run clears an earlier failure (c); a failure the handler
 //         did not log itself still gets the wrapper's generic line (d).
 //
+// S3 FOLLOW-UPS 2 (the follow-up PR's final-judge notes, register R-37):
+//   O-30  (item 1) a 503 REFRESH_INCOMPLETE keeps the SHORTER PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS (15 s) from
+//         when the run ended: a click inside it is 200 fresh:false + incomplete:true with no refresh IO; BUSY (O-25)
+//         still leaves no cooldown.
+//   O-31  (item 4) the INCOMPLETE warn (O-31) and the per-event warn (O-31b) name the last failure that still stands,
+//         never an earlier one the same run healed.
+//   O-24b (item 5) the runner's MAIN form (`runFailClosedMain`): a drained hang inside main exits 1, a main that only
+//         sets process.exitCode exits 1 and is never "all assertions passed", a live hang is bounded, a pass exits 0.
+//   O-24c (item 5) adoption guard: every stock-prep suite with `async function main()` / a `tests` array runs on the
+//         fail-closed runner under its own file name; no bare main() call or hand-rolled async loop is left (the suites
+//         of the parallel S5b members work are skipped while they are not on the runner — fix round 2: a pinned list).
+//
+// S3 FOLLOW-UPS 2, FIX ROUND 1:
+//   O-24 / O-24b / O-24d (R5) the runner's OWN self-tests run at TOP LEVEL, before the runner — never on it: with its exit
+//         path broken (the `process.exit(1)` lost, the failure branch gone) every suite on it could print FAIL and end 0,
+//         this one included; run outside it, the self-tests throw uncaught and this suite exits 1 on its own. O-24d: with
+//         `process.exit` stubbed out, a failed run still ends 1 and never prints a pass line.
+//   O-24c the adoption guard also flags ANY stock-prep suite (outside the S5b prefix) with async code that is neither on
+//         the runner nor a node:test file — not only the exact `async function main()` / `const tests = []` spellings.
+//   O-29a the INCOMPLETE warn names the project-less failure's code when it is the only failure that stands.
+//   O-31c a failure that still stands is named over a LATER one the same run healed; O-31d of two failures that both
+//         stand, the later one is named.
+//   O-32  a click while this process's refresh of the tenant is still RUNNING answers 409 BUSY (nothing done, the running
+//         refresh's stamp kept) — never 200 fresh:false ("current") ahead of a run that may end 503 INCOMPLETE.
+//
+// S3 FOLLOW-UPS 2, FIX ROUND 2:
+//   O-24c a suite ON the runner is still scanned: the runner statement must be the last top-level statement, and no
+//         other top-level statement may run async code or call an async function the suite declares (G10: an async
+//         IIFE after the runner line hung drained and exited 0). The S5b exemption is the pinned file list, not a prefix.
+//   O-33  the INCOMPLETE cooldown is keyed by the verified tenant: a second user of the tenant is cooled with no IO; a
+//         user of another tenant is not cooled, sees no `incomplete`, and does not clear this tenant's stamp.
+//
 // Synthetic values only.
 
 const assert = require('node:assert/strict')
@@ -156,6 +188,8 @@ const realDateNow = Date.now
 let clockOffsetMs = 0
 Date.now = () => realDateNow() + clockOffsetMs
 const passCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS + 1000 }
+/** Follow-ups 2 (item 1): the SHORTER cooldown a 503 REFRESH_INCOMPLETE leaves behind, on the same clock. */
+const passIncompleteCooldown = () => { clockOffsetMs += overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS + 1000 }
 /** Fix round 1: the per-event writer's per-project retry backoff is on the same in-process `Date.now()`. */
 const passRetryBackoff = () => { clockOffsetMs += overview.__internals.OVERVIEW_EVENT_RETRY_BACKOFF_MS + 1000 }
 
@@ -296,6 +330,12 @@ function registryRow(h, projectNo = PROJECT) {
 
 const tests = []
 const test = (name, fn) => tests.push([name, fn])
+// S3 follow-ups 2, fix round 1 (R5): the fail-closed runner's OWN self-tests. They must not run ON the runner they test
+// (a runner whose failure exit is broken would report them as passed and end 0): each is synchronous (spawnSync probes)
+// and runs at TOP LEVEL right before `runFailClosedSuite(…)` below — a failure is an uncaught throw, exit 1, whatever the
+// runner does.
+const runnerSelfTests = []
+const runnerSelfTest = (name, fn) => runnerSelfTests.push([name, fn])
 
 // ── O-01 ───────────────────────────────────────────────────────────────────────────────────────────
 test('O-01 the template: pinned aggregate columns only, no select/detail, key projectNo, two status views, host kind literal, own-base partner', () => {
@@ -1511,7 +1551,7 @@ test('O-23 (F4) an event that lands after the writer drained but before it stopp
 
 // ── O-24 ───────────────────────────────────────────────────────────────────────────────────────────
 // S3 follow-up A: this suite (and any that adopts support/fail-closed-suite-runner.cjs) cannot exit 0 past a hang.
-test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with nothing alive exits 1 (sentinel); a hang that keeps the loop alive times out, the run continues, and exits 1', () => {
+runnerSelfTest('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with nothing alive exits 1 (sentinel); a hang that keeps the loop alive times out, the run continues, and exits 1', () => {
   const { spawnSync } = require('node:child_process')
   const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
   const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedSuite } = require(${JSON.stringify(runnerPath)});\n${body}`], { encoding: 'utf8', timeout: 20000 })
@@ -1540,6 +1580,326 @@ test('O-24 (follow-up A) the suite runner fails closed: FAIL then a hang with no
   const passing = probe(`runFailClosedSuite('probe-ok', [['passes', async () => {}]])`)
   assert.equal(passing.status, 0, passing.stderr)
   assert.match(passing.stdout, /probe-ok: all assertions passed/)
+})
+
+// S3 follow-ups 2 (item 5): the runner's MAIN adoption form and its reported-exit-code rule.
+runnerSelfTest('O-24b (follow-ups 2, item 5) runFailClosedMain: a main that hangs with nothing alive exits 1 (sentinel); a main that reports failure through process.exitCode exits 1 and is never "all assertions passed"; a passing main exits 0', () => {
+  const { spawnSync } = require('node:child_process')
+  const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
+  const runner = require(runnerPath)
+  assert.equal(runner.WHOLE_SUITE_TIMEOUT_MS, 5 * 60 * 1000, 'the whole-suite bound stated in the PR body')
+  const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedMain } = require(${JSON.stringify(runnerPath)});\n${body}`], { encoding: 'utf8', timeout: 20000 })
+  // (1) The S3 review's hang, inside a main(): nothing keeps the loop alive.
+  const drained = probe(`runFailClosedMain('probe-main-drain', async function main() { console.log('before the hang'); await new Promise(() => {}) })`)
+  assert.equal(drained.status, 1, `a drained hang inside main must exit 1 (status ${drained.status}, signal ${drained.signal}); stderr: ${drained.stderr}`)
+  assert.match(drained.stderr, /probe-main-drain FAILED: the event loop drained before every test settled/)
+  assert.ok(!drained.stdout.includes('all assertions passed'))
+  // (2) A main that counts its own failures and only sets process.exitCode (seven stock-prep suites do).
+  const reported = probe(`runFailClosedMain('probe-main-exitcode', async function main() { console.error('1 guard(s) FAILED'); process.exitCode = 1 })`)
+  assert.equal(reported.status, 1, `a main that set process.exitCode must exit 1 (status ${reported.status}); stderr: ${reported.stderr}`)
+  assert.match(reported.stderr, /probe-main-exitcode FAILED \(process\.exitCode 1 was set by the suite\)/)
+  assert.ok(!reported.stdout.includes('all assertions passed'), 'never "all assertions passed" over a reported failure')
+  // (3) A main that throws: FAIL + exit 1.
+  const thrown = probe(`runFailClosedMain('probe-main-throw', async function main() { throw new Error('synthetic failure') })`)
+  assert.equal(thrown.status, 1)
+  assert.match(thrown.stderr, /FAIL: main/)
+  assert.match(thrown.stderr, /probe-main-throw FAILED \(1\)/)
+  // (4) A live hang inside main is bounded by the (overridable) whole-suite timeout.
+  const alive = probe(`runFailClosedMain('probe-main-alive', () => new Promise(() => { setInterval(() => {}, 50) }), { testTimeoutMs: 300 })`)
+  assert.equal(alive.status, 1, `a live hang inside main must time out and exit 1 (status ${alive.status}, signal ${alive.signal})`)
+  assert.match(alive.stderr, /timed out after 300 ms/)
+  // (5) Control: a passing main exits 0 and says so; an exitCode of 0 is not a failure.
+  const passing = probe(`runFailClosedMain('probe-main-ok', async function main() { process.exitCode = 0 })`)
+  assert.equal(passing.status, 0, passing.stderr)
+  assert.match(passing.stdout, / {2}main OK/)
+  assert.match(passing.stdout, /probe-main-ok: all assertions passed/)
+  // (6) `passLine` — the line a converted suite's old tail printed — is kept on a pass (right before the runner's own
+  // line) and never printed over a failure.
+  const kept = probe(`runFailClosedMain('probe-main-passline', async function main() {}, { passLine: 'probe-main-passline.test.cjs OK' })`)
+  assert.equal(kept.status, 0, kept.stderr)
+  assert.match(kept.stdout, /probe-main-passline\.test\.cjs OK\nprobe-main-passline: all assertions passed/)
+  const keptOnFail = probe(`runFailClosedMain('probe-main-passline-fail', async function main() { throw new Error('synthetic failure') }, { passLine: 'probe-main-passline-fail.test.cjs OK' })`)
+  assert.equal(keptOnFail.status, 1)
+  assert.ok(!keptOnFail.stdout.includes('probe-main-passline-fail.test.cjs OK'), 'no pass line over a failure')
+  assert.throws(() => runner.runFailClosedSuite('x', [], { passLine: '' }), TypeError)
+})
+
+// S3 follow-ups 2, fix round 1 (R5): a failed run ends 1 even where `process.exit` does not end the process.
+runnerSelfTest('O-24d (follow-ups 2, fix round 1) with process.exit stubbed out, a failed run still ends with exit code 1 and prints neither its pass line nor "all assertions passed"; a passing run under the same stub ends 0', () => {
+  const { spawnSync } = require('node:child_process')
+  const runnerPath = path.join(__dirname, 'support', 'fail-closed-suite-runner.cjs')
+  const probe = (body) => spawnSync(process.execPath, ['-e', `const { runFailClosedSuite, runFailClosedMain } = require(${JSON.stringify(runnerPath)});\nprocess.exit = () => {};\n${body}`], { encoding: 'utf8', timeout: 20000 })
+  const failed = probe(`runFailClosedSuite('probe-stub-fail', [['fails', () => { throw new Error('synthetic failure') }], ['passes', () => {}]], { passLine: 'probe-stub-fail.test.cjs OK' })`)
+  assert.equal(failed.status, 1, `a counted failure must end 1 without process.exit (status ${failed.status}); stderr: ${failed.stderr}`)
+  assert.match(failed.stderr, /probe-stub-fail FAILED \(1\)/)
+  assert.ok(!/was set by the suite/.test(failed.stderr), 'a counted failure ends there — it never falls through to the reported-exit-code branch')
+  assert.ok(!failed.stdout.includes('all assertions passed'), 'never "all assertions passed" over a failure')
+  assert.ok(!failed.stdout.includes('probe-stub-fail.test.cjs OK'), 'never the pass line over a failure')
+  const reported = probe(`runFailClosedMain('probe-stub-exitcode', async function main() { process.exitCode = 1 }, { passLine: 'probe-stub-exitcode.test.cjs OK' })`)
+  assert.equal(reported.status, 1, `a reported failure must end 1 without process.exit (status ${reported.status})`)
+  assert.ok(!reported.stdout.includes('all assertions passed'), 'never "all assertions passed" over a reported failure')
+  assert.ok(!reported.stdout.includes('probe-stub-exitcode.test.cjs OK'))
+  const passing = probe(`runFailClosedSuite('probe-stub-ok', [['passes', () => {}]])`)
+  assert.equal(passing.status, 0, passing.stderr)
+  assert.match(passing.stdout, /probe-stub-ok: all assertions passed/)
+})
+
+/**
+ * O-24c (fix round 1): a stock-prep suite with ASYNC code that is neither on the fail-closed runner (its tail is the
+ * exact runFailClosedMain / runFailClosedSuite statement under its own file name) nor a node:test file — whatever its
+ * spelling (`async function run()`, `const main = async () =>`, `async function main ()`, a renamed loop variable, an
+ * async check a sync main() never awaits), a drained hang in it ends the process 0. Returns the problem line, or null.
+ */
+const ASYNC_CODE_RE = /\basync\b|\bawait\b|\.then\(|\bPromise\b/
+/**
+ * The CODE of a CommonJS suite: comments, string / template text and regex literals blanked (a `${…}` inside a
+ * template stays code). Source-text guards name `async NAME(req, res)` in strings and regexes all the time; only what
+ * would run counts. A `/` starts a regex literal after an operator, an opening bracket, a comma / colon / semicolon,
+ * `return` / `typeof` / `case`, or at the start — otherwise it is a division (the usual tokenizer rule).
+ */
+function suiteCodeOnly(src) {
+  let i = 0
+  const scan = (untilBrace) => {
+    let out = ''
+    let depth = 0
+    // The last few characters of the code so far, trailing whitespace skipped ('' at the start).
+    const lastSignificant = () => {
+      let j = out.length - 1
+      while (j >= 0 && /\s/.test(out[j])) j -= 1
+      return out.slice(Math.max(0, j - 9), j + 1)
+    }
+    while (i < src.length) {
+      const c = src[i]
+      const next = src[i + 1]
+      if (untilBrace && c === '}' && depth === 0) { i += 1; return out }
+      if (c === '{') depth += 1
+      if (c === '}') depth -= 1
+      if (c === '/' && next === '/') { while (i < src.length && src[i] !== '\n') i += 1; continue }
+      if (c === '/' && next === '*') { const end = src.indexOf('*/', i + 2); i = end < 0 ? src.length : end + 2; out += ' '; continue }
+      if (c === '\'' || c === '"') {
+        i += 1
+        while (i < src.length && src[i] !== c && src[i] !== '\n') i += src[i] === '\\' ? 2 : 1
+        i += 1
+        out += '""'
+        continue
+      }
+      if (c === '`') {
+        i += 1
+        out += '`'
+        while (i < src.length && src[i] !== '`') {
+          if (src[i] === '\\') { i += 2; continue }
+          if (src[i] === '$' && src[i + 1] === '{') { i += 2; out += '${' + scan(true) + '}'; continue }
+          i += 1
+        }
+        i += 1
+        out += '`'
+        continue
+      }
+      if (c === '/') {
+        const before = lastSignificant()
+        const prev = before.slice(-1)
+        if (before === '' || '(,=:[!&|?{};+-*%<>~^'.includes(prev) || /\b(?:return|typeof|case)$/.test(before)) {
+          i += 1
+          let inClass = false
+          while (i < src.length && src[i] !== '\n') {
+            if (src[i] === '\\') { i += 2; continue }
+            if (src[i] === '[') inClass = true
+            else if (src[i] === ']') inClass = false
+            else if (src[i] === '/' && !inClass) break
+            i += 1
+          }
+          i += 1
+          while (i < src.length && /[a-z]/.test(src[i])) i += 1
+          out += '/r/'
+          continue
+        }
+      }
+      out += c
+      i += 1
+    }
+    return out
+  }
+  return scan(false)
+}
+const escapeSuiteRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// The one option a converted tail may pass: the pass line its old tail printed (a single-quoted literal).
+const SUITE_PASS_LINE_OPTION = "(?:, \\{ passLine: '[^'\\n]+' \\})?"
+/**
+ * Follow-ups 2, fix round 2 (G10): the TOP-LEVEL code of a suite — `suiteCodeOnly` with the contents of every `{…}`
+ * block blanked (function bodies, object literals), one statement per line in practice. What is left is what the
+ * module runs when it loads, plus its declarations.
+ */
+function suiteTopLevelLines(text) {
+  const code = suiteCodeOnly(text)
+  let out = ''
+  let depth = 0
+  for (const c of code) {
+    if (c === '{') { if (depth === 0) out += c; depth += 1; continue }
+    if (c === '}') { depth -= 1; if (depth === 0) out += c; continue }
+    if (depth === 0) out += c
+  }
+  return out.split('\n').map((line) => line.trim()).filter(Boolean)
+}
+// The top-level shapes that only DECLARE async code (nothing runs at load): an `async function NAME(…) {}` and a
+// `const NAME = async (…) => {}`; a sync arrow declaration `const NAME = (…) => …` (its body runs only when called;
+// a parenthesised head, so `(() => …)()` is not one); and a `test('…', async () => {})` registration.
+const TOP_LEVEL_ASYNC_DECLARATION_RES = [
+  /^async function (\w+)\([^\n]*\) \{\}$/,
+  /^(?:const|let|var) (\w+) = async (?:\([^()\n]*\)|\w+) => \{\}$/,
+]
+const TOP_LEVEL_SYNC_ARROW_DECLARATION_RE = /^(?:const|let|var) \w+ = (?:\([^()\n]*\)|\w+) => /
+const TOP_LEVEL_TEST_REGISTRATION_RE = /^test\("", async (?:\([^()\n]*\)|\w+) => \{\}\)$/
+// The runner statement as it reads in the top-level code (strings blanked to "", the passLine option's block to {}).
+const TOP_LEVEL_RUNNER_RE = /^(?:require\(""\)\.)?runFailClosed(?:Main\("", main|Suite\("", tests)(?:, \{\})?\);?$/
+/**
+ * Fix round 2 (G10): a suite ON the runner is not cleared as a whole by its runner line — the runner's exit sentinel
+ * stops looking once the runner completed, so async code the module starts OUTSIDE the runner (an async IIFE before
+ * or after the runner line, a `.then(` statement, a top-level call of an async function) can still hang drained and
+ * exit 0. The runner statement must be the LAST top-level statement, and every other top-level line holding async
+ * code must be a declaration or a test registration; no top-level line may call an async function the suite
+ * declares. (Residual, by construction of a source scan: a top-level call of a SYNC function whose body starts async
+ * work is not seen — none of the suites does that.)
+ */
+function runnerSuiteTopLevelProblems(file, text) {
+  const lines = suiteTopLevelLines(text)
+  const problems = []
+  if (!TOP_LEVEL_RUNNER_RE.test(lines[lines.length - 1] || '')) {
+    problems.push(`${file}: the fail-closed runner statement is not the last top-level statement (code after it runs outside the runner)`)
+  }
+  const asyncNames = new Set()
+  for (const line of lines) {
+    for (const re of TOP_LEVEL_ASYNC_DECLARATION_RES) {
+      const match = re.exec(line)
+      if (match) asyncNames.add(match[1])
+    }
+  }
+  lines.forEach((line, index) => {
+    if (index === lines.length - 1 && TOP_LEVEL_RUNNER_RE.test(line)) return
+    if (TOP_LEVEL_ASYNC_DECLARATION_RES.some((re) => re.test(line))) return
+    if (TOP_LEVEL_SYNC_ARROW_DECLARATION_RE.test(line)) return
+    if (TOP_LEVEL_TEST_REGISTRATION_RE.test(line)) return
+    if (ASYNC_CODE_RE.test(line)) {
+      problems.push(`${file}: top-level statement ${index + 1} runs async code outside the fail-closed runner (a drained hang after the runner completed would exit 0)`)
+      return
+    }
+    for (const name of asyncNames) {
+      if (new RegExp(`(?:^|[^.\\w])${escapeSuiteRe(name)}\\(`).test(line)) {
+        problems.push(`${file}: top-level statement ${index + 1} calls the async ${name}() outside the fail-closed runner`)
+        return
+      }
+    }
+  })
+  return problems
+}
+function unrunAsyncSuiteProblems(file, text) {
+  const onRunner = new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosed(?:Main\\('${escapeSuiteRe(file)}', main|Suite\\('${escapeSuiteRe(file)}', tests)${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)
+  if (onRunner) return runnerSuiteTopLevelProblems(file, text)
+  if (/require\('node:test'\)/.test(text)) return []
+  if (!ASYNC_CODE_RE.test(suiteCodeOnly(text))) return []
+  return [`${file}: async code outside the fail-closed runner and node:test (a drained hang would exit 0)`]
+}
+
+/**
+ * O-24c's per-suite verdict (fix round 1: ONE function, so the checks the loop applies to the real suites are the very
+ * checks the synthetic cases below exercise). `viaMain` / `viaTests`: the suite is on the runner in the exact form.
+ */
+function suiteRunnerVerdict(file, text) {
+  const problems = []
+  let viaMain = false
+  let viaTests = false
+  const hasAsyncMain = /^async function main\(\) \{$/m.test(text)
+  const hasTestsArray = /^const tests = \[\]$/m.test(text)
+  // Fix round 1: ANY async code off the runner, whatever its spelling (the exact forms below are the common case).
+  problems.push(...unrunAsyncSuiteProblems(file, text))
+  // A SYNCHRONOUS `function main()` cannot await anything, so it cannot hang on a promise: only the async one counts.
+  if (hasAsyncMain && /^main\(/m.test(text)) problems.push(`${file}: a bare top-level call of the async main() (exits 0 past a hang)`)
+  if (/^;?\(async \(\) => \{$/m.test(text) && /for \(const \[name, fn\] of tests\)/.test(text)) problems.push(`${file}: a hand-rolled async test loop (exits 0 past a hang)`)
+  if (hasAsyncMain) {
+    // A top-level STATEMENT (anchored to its own line), never a mention in a comment.
+    if (new RegExp(`^require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.runFailClosedMain\\('${escapeSuiteRe(file)}', main${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaMain = true
+    else problems.push(`${file}: async main() is not run by runFailClosedMain('${file}', main)`)
+  }
+  if (hasTestsArray) {
+    if (new RegExp(`^(?:require\\('\\./support/fail-closed-suite-runner\\.cjs'\\)\\.)?runFailClosedSuite\\('${escapeSuiteRe(file)}', tests${SUITE_PASS_LINE_OPTION}\\)$`, 'm').test(text)) viaTests = true
+    else problems.push(`${file}: its tests array is not run by runFailClosedSuite('${file}', tests)`)
+  }
+  return { problems, viaMain, viaTests }
+}
+
+// S3 follow-ups 2 (item 5): every stock-prep suite with a hand-rolled ASYNC runner is on the fail-closed runner.
+test('O-24c (follow-ups 2, item 5) adoption guard: every stock-prep suite with `async function main()` ends in runFailClosedMain(<its file>, main), every `tests` array suite in runFailClosedSuite(<its file>, tests); no bare main() / async-IIFE loop is left', () => {
+  const dir = __dirname
+  const files = fs.readdirSync(dir).filter((name) => /^stock-preparation-.*\.test\.cjs$/.test(name)).sort()
+  // Left to its owners ON PURPOSE: the suite of the S5b members work, which another line of work is rewriting right
+  // now. Fix round 2: the exemption is the PINNED file list, never an open prefix — a pinned file that is NOT on the
+  // runner is skipped (that line adopts it when it lands); a pinned file that IS on the runner is held to the same
+  // exact form as every other suite; any OTHER `stock-preparation-members*` suite (added, split or renamed) is checked
+  // like every suite. Nothing outside this list is exempt.
+  const PENDING_ADOPTION_FILES = Object.freeze(['stock-preparation-members-routes.test.cjs'])
+  const isPendingAdoption = (file, text) => PENDING_ADOPTION_FILES.includes(file) && !text.includes('fail-closed-suite-runner')
+  const pendingSkipped = []
+  const viaMain = []
+  const viaTests = []
+  const problems = []
+  for (const file of files) {
+    const text = fs.readFileSync(path.join(dir, file), 'utf8').replace(/\r\n/g, '\n')
+    if (isPendingAdoption(file, text)) {
+      pendingSkipped.push(file)
+      continue
+    }
+    const verdict = suiteRunnerVerdict(file, text)
+    problems.push(...verdict.problems)
+    if (verdict.viaMain) viaMain.push(file)
+    if (verdict.viaTests) viaTests.push(file)
+  }
+  assert.deepEqual(problems, [], problems.join('\n'))
+  // Fix round 1: the general check is not vacuous — every spelling the review found passing the exact-form checks is
+  // flagged; a sync suite, a node:test suite and a suite on the runner are not.
+  const F = 'stock-preparation-synthetic.test.cjs'
+  const flags = (text) => suiteRunnerVerdict(F, text).problems.length > 0
+  for (const [label, text] of [
+    ['async function run', 'async function run() { await new Promise(() => {}) }\nrun().catch(() => process.exit(1))\n'],
+    ['async arrow main', 'const main = async () => { await new Promise(() => {}) }\nmain().catch(() => process.exit(1))\n'],
+    ['spaced async main', 'async function main () { await new Promise(() => {}) }\nmain()\n'],
+    ['renamed loop variable', 'const tests = [];\n(async () => { for (const [label, fn] of tests) await fn() })()\n'],
+    ['unawaited async check', 'function main() { checkAsync() }\nfunction checkAsync() { return new Promise(() => {}).then(() => {}) }\nmain()\n'],
+  ]) assert.ok(flags(text), `O-24c must flag: ${label}`)
+  assert.equal(flags("const assert = require('node:assert/strict')\nassert.equal(1, 1)\n"), false, 'a sync suite')
+  // A sync SOURCE-TEXT guard naming async code only in comments, strings, templates and regexes is still sync…
+  assert.equal(flags("// every await is checked\nconst a = '    async x(req, res) {'\nconst b = `${a} await y`\nconst re = /\\n {4}async ([a-z]+)\\(/g\nassert.match(a, /async/)\nconst n = 4 / 2 / 1\n"), false, 'async named only in comments / strings / regexes')
+  // …while async CODE next to such text is not hidden by it (a template's `${…}` is code).
+  assert.ok(flags("const re = /async/\nconst t = `${await load()}`\n"), 'await inside a template expression is code')
+  assert.ok(flags("const a = 'x' // async\nconst p = 6 / 2; load().then(() => {})\n"), 'a .then( after a division and a comment is code')
+  assert.equal(flags("const test = require('node:test')\ntest('x', async () => {})\n"), false, 'a node:test suite')
+  assert.equal(flags(`async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('${F}', main)\n`), false, 'on the runner')
+  assert.ok(flags("async function main() {}\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedMain('another.test.cjs', main)\n"), 'on the runner under ANOTHER file name is not this suite on the runner')
+  // Fix round 2 (G10): a suite ON the runner is still scanned — async code it starts outside the runner is flagged
+  // (an async IIFE after or before the runner line, a top-level `.then(`, a top-level call of an async helper, code
+  // after the runner line); declarations, `test('…', async () => {})` registrations and a sync arrow returning a
+  // promise are not.
+  const RUNNER_TAIL = `require('./support/fail-closed-suite-runner.cjs').runFailClosedMain('${F}', main)\n`
+  for (const [label, text] of [
+    ['async IIFE after the runner line', `async function main() {}\n${RUNNER_TAIL};(async () => { await new Promise(() => {}); console.log('never') })()\n`],
+    ['async IIFE before the runner line', `async function main() {}\n;(async () => { await new Promise(() => {}) })()\n${RUNNER_TAIL}`],
+    ['a top-level .then( statement', `async function main() {}\nload().then(() => {})\n${RUNNER_TAIL}`],
+    ['a top-level call of an async helper', `async function main() {}\nasync function warm() { await new Promise(() => {}) }\nwarm()\n${RUNNER_TAIL}`],
+    ['a top-level call of an async arrow helper', `const warm = async () => { await new Promise(() => {}) }\nasync function main() {}\nconst p = warm()\n${RUNNER_TAIL}`],
+    ['a sync statement after the runner line', `async function main() {}\n${RUNNER_TAIL}console.log('after')\n`],
+  ]) assert.ok(flags(text), `O-24c must flag, on the runner: ${label}`)
+  assert.equal(flags(`const tests = []\nconst test = (name, fn) => tests.push([name, fn])\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms))\nasync function call(routes, req = {}) { return routes.x(req) }\ntest('a', async () => { await call({}) })\ntest('b', () => {})\nrequire('./support/fail-closed-suite-runner.cjs').runFailClosedSuite('${F}', tests, { passLine: 'ok' })\n`), false, 'a runner suite of declarations and registrations')
+  // Fix round 2: only the PINNED files are ever skipped — today the one members suite this PR leaves untouched; a new
+  // or renamed members suite off the runner is checked like every suite (and flagged), and a pinned one that adopts
+  // the runner is no longer skipped.
+  const BARE_MAIN = 'async function main() { await new Promise(() => {}) }\nmain().catch(() => process.exit(1))\n'
+  assert.deepEqual(PENDING_ADOPTION_FILES, ['stock-preparation-members-routes.test.cjs'])
+  assert.equal(isPendingAdoption('stock-preparation-members-routes.test.cjs', BARE_MAIN), true)
+  assert.equal(isPendingAdoption('stock-preparation-members-roster.test.cjs', BARE_MAIN), false, 'a new members suite is not exempt')
+  assert.equal(isPendingAdoption('stock-preparation-members-routes.test.cjs', `async function main() {}\n${RUNNER_TAIL}`), false, 'a pinned suite on the runner is checked')
+  assert.ok(pendingSkipped.length <= PENDING_ADOPTION_FILES.length, pendingSkipped.join(', '))
+  // Not vacuous: the 65 main() suites and the 6 tests-array suites (5 converted here + this one) this PR stands on.
+  assert.ok(viaMain.length >= 65, `runFailClosedMain adopters: ${viaMain.length}`)
+  assert.ok(viaTests.length >= 6, `runFailClosedSuite adopters: ${viaTests.length}`)
+  assert.ok(viaTests.includes('stock-preparation-project-overview.test.cjs'))
 })
 
 // ── O-25 ───────────────────────────────────────────────────────────────────────────────────────────
@@ -1577,7 +1937,7 @@ test('O-25 (follow-up B) another process holds the overview lock: the refresh ro
 
 // ── O-26 ───────────────────────────────────────────────────────────────────────────────────────────
 // S3 follow-up C: a refresh never reports `fresh: true` over a project it could not write.
-test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRESH_INCOMPLETE (counts only), audited `incomplete`, cooldown cleared, the project stays DIRTY and the next writer heals it', async () => {
+test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRESH_INCOMPLETE (counts only), audited `incomplete`, the project stays DIRTY and the next writer heals it', async () => {
   const logger = capturingLogger()
   const h = mount({ logger })
   try {
@@ -1621,7 +1981,9 @@ test('O-26 (follow-up C) a project write that fails in the full pass: 503 REFRES
     assert.equal((await patchFields(h, FLOOR, { note: NOTE })).statusCode, 200)
     assert.deepEqual(overviewRows(h).map((row) => logical(row, 'projectNo')).sort(), [PROJECT, PROJECT_B])
     assert.equal(state.dirty.size, 0)
-    // The cooldown was cleared by the incomplete answer: the next click refreshes (no clock step) and is fresh.
+    // Follow-ups 2 (item 1): the incomplete answer left the SHORTER cooldown (O-30), long past by now (the retry-backoff
+    // step above is longer): the next click refreshes and is fresh.
+    assert.ok(overview.__internals.OVERVIEW_EVENT_RETRY_BACKOFF_MS > overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS)
     const again = await refresh(h, FLOOR)
     assert.equal(again.statusCode, 200, JSON.stringify(again.body))
     assert.equal(again.body.data.fresh, true)
@@ -1839,8 +2201,9 @@ test('O-28 (fix round 1) failed projects are retried BOUNDED by per-event writer
     assert.equal(ownNote(), `${NOTE}-c1`, 'the event\'s own project is updated within the backoff')
     assert.equal(state.dirty.has(PROJECT), false)
 
-    // (d) THE REFRESH IS THE FULL PASS: host back, NO clock step — still inside the backoff of the last retries (and
-    // no cooldown: the 503 above cleared it) — and every retry mark is drained.
+    // (d) THE REFRESH IS THE FULL PASS: host back, NO clock step — still inside the backoff of the last retries (the
+    // 503 above left only the shorter INCOMPLETE cooldown, long past after (b)'s clock steps) — and every retry mark is
+    // drained.
     hostDown = false
     const ok = await refresh(h, FLOOR)
     assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
@@ -1854,7 +2217,8 @@ test('O-28 (fix round 1) failed projects are retried BOUNDED by per-event writer
 // S3 follow-ups, fix round 1 (item 2): the failure bookkeeping paths only the verifier's probes covered.
 test('O-29a (fix round 1) a project-less overview row whose delete fails is COUNTED: 503 REFRESH_INCOMPLETE, nothing to re-mark, the next refresh removes it', async () => {
   // (a) A project-less overview row whose delete fails: counted → 503 INCOMPLETE; nothing to re-mark.
-  const h = mount()
+  const logger = capturingLogger()
+  const h = mount({ logger })
   try {
     h.seedRegistryRow(PROJECT)
     assert.equal((await ensure(h, PULLER)).statusCode, 200)
@@ -1870,7 +2234,12 @@ test('O-29a (fix round 1) a project-less overview row whose delete fails is COUN
     assert.equal(res.body.error.details.failedProjectCount, 1)
     const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
     assert.equal(state.dirty.size, 0, 'no project number → nothing to re-mark')
+    // Follow-ups 2, fix round 1 (M9): the project-less failure is the only one that stands — ITS code is the one logged.
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_OVERVIEW_DOWN', failedProjectCount: 1 }], 'the warn names the project-less failure that stands')
     h.overviewPort.deleteRecord = realDelete
+    // Follow-ups 2 (item 1): the 503 left the shorter INCOMPLETE cooldown; the next refresh after it removes the row.
+    passIncompleteCooldown()
     const ok = await refresh(h, FLOOR)
     assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
     assert.equal(ok.body.data.rowsRemovedOrphan, 1, 'the next refresh removes it')
@@ -2015,6 +2384,370 @@ test('O-29d (fix round 1, log-noise control) a refresh that fails otherwise stil
     assert.deepEqual(logger.warnings.filter((w) => /route failed/.test(w.message)).map((w) => w.meta), [{ code: 'UNLISTED' }])
   } finally { h.restore() }
 })
+
+// ── O-30 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2 (item 1): a refresh that RAN and answered 503 REFRESH_INCOMPLETE keeps a (shorter) cooldown.
+test('O-30 (follow-ups 2, item 1) a 503 REFRESH_INCOMPLETE keeps the SHORTER cooldown from when the run ENDED: a click inside it is 200 fresh:false + incomplete:true with no refresh IO; past it the rebuild runs again; a success then stamps the 60 s cooldown without `incomplete`', async () => {
+  const INCOMPLETE_MS = overview.PROJECT_OVERVIEW_REFRESH_INCOMPLETE_COOLDOWN_MS
+  assert.equal(INCOMPLETE_MS, 15 * 1000, 'the constant stated in the PR body')
+  assert.ok(INCOMPLETE_MS < overview.PROJECT_OVERVIEW_REFRESH_COOLDOWN_MS, 'shorter than the success cooldown')
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let hostDown = true
+    let failedAttempts = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (hostDown && input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        failedAttempts += 1
+        // The first rebuild is SLOW: 20 s pass on the in-process clock before it fails — longer than the INCOMPLETE
+        // cooldown, so a cooldown measured from the START would already be over when the 503 is answered.
+        if (failedAttempts === 1) clockOffsetMs += 20 * 1000
+        throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const first = await refresh(h, FLOOR)
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    const attemptsAfterFirst = failedAttempts
+    assert.ok(attemptsAfterFirst >= 1)
+
+    // RIGHT AFTER the 503: the cooldown holds — 200 fresh:false, flagged incomplete, NO registry / host / records / audit work.
+    const audits = h.auditAppends.length
+    const dbCalls = h.db.calls.length
+    const hostCalls = h.provisioning.calls.length
+    const recordCalls = h.records.calls.length
+    const cooled = await refresh(h, FLOOR)
+    assert.equal(cooled.statusCode, 200, `a click right after an INCOMPLETE refresh is cooled, not a second full rebuild: ${JSON.stringify(cooled.body)}`)
+    assert.deepEqual(Object.keys(cooled.body.data).sort(), ['cooldownSeconds', 'fresh', 'incomplete', 'retryAfterSeconds'])
+    assert.equal(cooled.body.data.fresh, false)
+    assert.equal(cooled.body.data.incomplete, true, 'the page must never call this overview current')
+    assert.equal(cooled.body.data.cooldownSeconds, 15)
+    assert.ok(cooled.body.data.retryAfterSeconds >= 1 && cooled.body.data.retryAfterSeconds <= 15, String(cooled.body.data.retryAfterSeconds))
+    assert.deepEqual([h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length], [audits, dbCalls, hostCalls, recordCalls], 'inside the INCOMPLETE cooldown: no registry, host, records or audit work')
+    assert.equal(failedAttempts, attemptsAfterFirst, 'no project write was attempted again')
+
+    // Still inside it 10 s later (from the END of the run).
+    clockOffsetMs += 10 * 1000
+    const still = await refresh(h, FLOOR)
+    assert.equal(still.statusCode, 200)
+    assert.equal(still.body.data.fresh, false)
+    assert.equal(failedAttempts, attemptsAfterFirst)
+
+    // Past it (but far inside the 60 s success cooldown): the full rebuild runs again — and, still failing, is 503 again.
+    passIncompleteCooldown()
+    const again = await refresh(h, FLOOR)
+    assert.equal(again.statusCode, 503, JSON.stringify(again.body))
+    assert.ok(failedAttempts > attemptsAfterFirst, 'the rebuild ran again once the shorter cooldown was over')
+
+    // Host back: past the INCOMPLETE cooldown the refresh is fresh, and a click right after it is the 60 s success
+    // cooldown — WITHOUT the incomplete flag (the success replaced the incomplete stamp).
+    hostDown = false
+    passIncompleteCooldown()
+    const ok = await refresh(h, FLOOR)
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.fresh, true)
+    const cooledOk = await refresh(h, FLOOR)
+    assert.deepEqual(Object.keys(cooledOk.body.data).sort(), ['cooldownSeconds', 'fresh', 'retryAfterSeconds'])
+    assert.equal(cooledOk.body.data.cooldownSeconds, 60)
+  } finally { h.restore() }
+})
+
+// ── O-31 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2 (item 4): the logged cause is a failure that still STANDS when the run stops.
+test('O-31 (follow-ups 2, item 4) the INCOMPLETE warn names the code of the last failure that still stands — not an earlier failure the same run healed', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let projectCreates = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      const no = input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')]
+      if (no === PROJECT) {
+        projectCreates += 1
+        if (projectCreates === 1) {
+          // The FIRST failure of the run — healed below by the drain of an event deferred into this refresh.
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      if (no === PROJECT_B) throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 1, 'only the project that still fails is counted')
+    assert.equal(projectCreates, 2, 'the healed project failed once in the full pass and was written by the drain')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING', failedProjectCount: 1 }], 'the warn names the failure that stands, never the healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
+  } finally { h.restore() }
+})
+
+test('O-31b (follow-ups 2, item 4) the PER-EVENT path: the logged code is the last failure that still stands — an earlier failure of the same writer run that a deferred event healed is not named', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    assert.equal((await refresh(h, FLOOR)).statusCode, 200, 'both rows exist; the events below PATCH them')
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realPatch = h.overviewPort.patchRecord
+    const rowProject = (recordId) => logical(overviewRows(h).find((row) => row.id === recordId), 'projectNo')
+    let projectPatches = 0
+    h.overviewPort.patchRecord = async (input = {}) => {
+      const no = rowProject(input.recordId)
+      if (no === PROJECT) {
+        projectPatches += 1
+        if (projectPatches === 1) {
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      if (no === PROJECT_B) throw Object.assign(new Error('patch failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realPatch(input)
+    }
+    // The writer: an event on PROJECT whose own patch is held, then fails.
+    const writing = patchFields(h, FLOOR, { note: `${NOTE}-1` })
+    await entered
+    // Two events deferred into that running writer: PROJECT again (its re-projection will succeed) and PROJECT_B (fails).
+    assert.equal((await patchFields(h, FLOOR, { note: `${NOTE}-2` })).statusCode, 200)
+    assert.equal((await patchFields(h, FLOOR, { note: NOTE }, PROJECT_B)).statusCode, 200)
+    releaseGate()
+    assert.equal((await writing).statusCode, 200, 'the event stands')
+    assert.equal(projectPatches, 2, 'PROJECT failed once, then the drain wrote it')
+    assert.equal(logical(overviewRows(h).find((row) => logical(row, 'projectNo') === PROJECT), 'note'), `${NOTE}-2`, 'healed in the same run')
+    const warns = logger.warnings.filter((w) => /overview row could not be updated/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING' }], 'the writer logs the failure that stands, never the healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [PROJECT_B])
+  } finally { h.restore() }
+})
+
+// S3 follow-ups 2, fix round 1 (M8): the failure that STANDS is named even when a LATER failure of the same run was
+// healed — O-31/O-31b only had the healed failure first, where "the first failure" picks the right one too.
+test('O-31c (follow-ups 2, fix round 1) a failure that still stands is named over a LATER failure the same run healed: an unregistered project\'s row whose delete fails, then a project whose write fails and an event deferred into the refresh heals', async () => {
+  const GONE = 'PRJ-S3-GONE'
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    // The full pass deletes orphans BEFORE it writes projects: GONE's failed delete is the run's FIRST failure.
+    h.rows.push({ id: 'rec_gone', sheetId: overviewSheetId(h), version: 1, data: { [phys(OVERVIEW_OBJECT, 'projectNo')]: GONE } })
+    const realDelete = h.overviewPort.deleteRecord
+    h.overviewPort.deleteRecord = async (input = {}) => {
+      if (input.recordId === 'rec_gone') throw Object.assign(new Error('delete failed'), { code: 'SYNTHETIC_STILL_FAILING' })
+      return realDelete(input)
+    }
+    let signalEntered
+    const entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    const gate = new Promise((resolve) => { releaseGate = resolve })
+    const realCreate = h.overviewPort.createRecord
+    let projectCreates = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT) {
+        projectCreates += 1
+        if (projectCreates === 1) {
+          // The run's LATER failure — healed below by the drain of an event deferred into this refresh.
+          signalEntered()
+          await gate
+          throw Object.assign(new Error('create failed'), { code: 'SYNTHETIC_HEALED_LATER' })
+        }
+      }
+      return realCreate(input)
+    }
+    const refreshing = refresh(h, FLOOR)
+    await entered
+    assert.equal((await archive(h, PULLER, PROJECT)).statusCode, 200, 'deferred into the running refresh')
+    releaseGate()
+    const res = await refreshing
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 1, 'only the orphan delete still stands')
+    assert.equal(projectCreates, 2, 'the project failed once in the full pass and was written by the drain')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_STILL_FAILING', failedProjectCount: 1 }], 'the warn names the failure that stands, never the later healed one')
+    const state = overview.__internals.overviewWriterState(h.projectTargetStore, TENANT)
+    assert.deepEqual([...state.dirty.keys()], [GONE])
+  } finally { h.restore() }
+})
+
+// S3 follow-ups 2, fix round 1 (M7): of failures that ALL stand, the logged one is the most recent.
+test('O-31d (follow-ups 2, fix round 1) two failures that both stand: the warn names the LATER one', async () => {
+  const logger = capturingLogger()
+  const h = mount({ logger })
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    const failedOrder = []
+    h.overviewPort.createRecord = async (input = {}) => {
+      const no = input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')]
+      if (no === PROJECT || no === PROJECT_B) {
+        failedOrder.push(no)
+        throw Object.assign(new Error('create failed'), { code: `SYNTHETIC_FAILED_${failedOrder.length}` })
+      }
+      return realCreate(input)
+    }
+    const res = await refresh(h, FLOOR)
+    assert.equal(res.statusCode, 503, JSON.stringify(res.body))
+    assert.equal(res.body.error.details.failedProjectCount, 2)
+    assert.equal(failedOrder.length, 2, 'each project failed exactly once')
+    const warns = logger.warnings.filter((w) => /refresh could not write every project/.test(w.message))
+    assert.deepEqual(warns.map((w) => w.meta), [{ code: 'SYNTHETIC_FAILED_2', failedProjectCount: 2 }], 'the later of the two standing failures is named')
+  } finally { h.restore() }
+})
+
+// ── O-32 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2, fix round 1: a click while this process's refresh is still RUNNING is never told "current".
+test('O-32 (follow-ups 2, fix round 1) a click while this process\'s refresh of the tenant is still RUNNING answers 409 BUSY with no refresh IO — never 200 fresh:false ("current") ahead of a run that ends 503 INCOMPLETE; after that run a click is the INCOMPLETE cooldown; a run that ends fresh leaves the 60 s cooldown', async () => {
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let hostDown = true
+    let signalEntered
+    let entered = new Promise((resolve) => { signalEntered = resolve })
+    let releaseGate
+    let gate = new Promise((resolve) => { releaseGate = resolve })
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        // Held IN the run, so the clicks below land while it is still going.
+        signalEntered()
+        await gate
+        if (hostDown) throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const running = refresh(h, FLOOR)
+    await entered
+    const counts = () => [h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length]
+    const before = counts()
+    for (let click = 0; click < 2; click += 1) {
+      const during = await refresh(h, FLOOR)
+      assert.equal(during.statusCode, 409, `a click during the running refresh is BUSY, never "current": ${JSON.stringify(during.body)}`)
+      assert.equal(during.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_BUSY')
+    }
+    assert.deepEqual(counts(), before, 'the BUSY clicks did no registry, host, records or audit work')
+    releaseGate()
+    const first = await running
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    // After the 503 the INCOMPLETE cooldown answers — flagged, never "current".
+    const cooled = await refresh(h, FLOOR)
+    assert.equal(cooled.statusCode, 200, JSON.stringify(cooled.body))
+    assert.equal(cooled.body.data.fresh, false)
+    assert.equal(cooled.body.data.incomplete, true)
+
+    // Control: a run that ends FRESH — BUSY while it runs, then the 60 s cooldown WITHOUT `incomplete`.
+    hostDown = false
+    entered = new Promise((resolve) => { signalEntered = resolve })
+    gate = new Promise((resolve) => { releaseGate = resolve })
+    passIncompleteCooldown()
+    // PROJECT_B's row does not exist yet (its create failed), so this run creates it — held at the gate again.
+    const second = refresh(h, FLOOR)
+    await entered
+    const during = await refresh(h, FLOOR)
+    assert.equal(during.statusCode, 409, JSON.stringify(during.body))
+    releaseGate()
+    const ok = await second
+    assert.equal(ok.statusCode, 200, JSON.stringify(ok.body))
+    assert.equal(ok.body.data.fresh, true)
+    const cooledOk = await refresh(h, FLOOR)
+    assert.equal(cooledOk.statusCode, 200, `the run is over: a click is the success cooldown, not BUSY: ${JSON.stringify(cooledOk.body)}`)
+    assert.deepEqual(Object.keys(cooledOk.body.data).sort(), ['cooldownSeconds', 'fresh', 'retryAfterSeconds'])
+    assert.equal(cooledOk.body.data.cooldownSeconds, 60)
+    // Past the cooldown a refresh runs again (nothing is left marked running).
+    passCooldown()
+    const again = await refresh(h, FLOOR)
+    assert.equal(again.statusCode, 200, JSON.stringify(again.body))
+    assert.equal(again.body.data.fresh, true)
+  } finally { h.restore() }
+})
+
+// ── O-33 ───────────────────────────────────────────────────────────────────────────────────────────
+// S3 follow-ups 2, fix round 2: the cooldown is keyed by the VERIFIED TENANT — shared by every user of the tenant
+// (never per user), never by another tenant.
+test('O-33 (follow-ups 2, fix round 2) the INCOMPLETE cooldown is per TENANT: a second user of the same tenant is cooled with no refresh IO; a user of another tenant is not cooled, sees no `incomplete` bit, and does not clear this tenant\'s cooldown', async () => {
+  const OTHER_TENANT_OPERATOR = Object.freeze({ id: 'u_s3_other_floor', tenantId: `${TENANT}-other`, permissions: [STOCK_PREP_READ, STOCK_PREP_OPERATE] })
+  const h = mount()
+  try {
+    h.seedRegistryRow(PROJECT)
+    h.seedRegistryRow(PROJECT_B)
+    assert.equal((await ensure(h, PULLER)).statusCode, 200)
+    const realCreate = h.overviewPort.createRecord
+    let failedAttempts = 0
+    h.overviewPort.createRecord = async (input = {}) => {
+      if (input.data && input.data[phys(OVERVIEW_OBJECT, 'projectNo')] === PROJECT_B) {
+        failedAttempts += 1
+        throw Object.assign(new Error('overview write failed'), { code: 'SYNTHETIC_OVERVIEW_DOWN' })
+      }
+      return realCreate(input)
+    }
+    const first = await refresh(h, FLOOR)
+    assert.equal(first.statusCode, 503, JSON.stringify(first.body))
+    assert.equal(first.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_REFRESH_INCOMPLETE')
+    const attempts = failedAttempts
+    const counts = () => [h.auditAppends.length, h.db.calls.length, h.provisioning.calls.length, h.records.calls.length]
+
+    // ANOTHER USER of the SAME tenant: cooled — never a second full rebuild just because the user differs.
+    const before = counts()
+    const sameTenant = await refresh(h, PULLER)
+    assert.equal(sameTenant.statusCode, 200, `the cooldown is the tenant's, not the user's: ${JSON.stringify(sameTenant.body)}`)
+    assert.equal(sameTenant.body.data.fresh, false)
+    assert.equal(sameTenant.body.data.incomplete, true)
+    assert.deepEqual(counts(), before, 'the same-tenant click did no registry, host, records or audit work')
+    assert.equal(failedAttempts, attempts)
+
+    // A user of ANOTHER tenant: not cooled by this tenant's run — its own refresh runs (its overview does not exist:
+    // 409 ABSENT), never this tenant's `fresh: false` / `incomplete` answer.
+    const otherTenant = await refresh(h, OTHER_TENANT_OPERATOR)
+    assert.equal(otherTenant.statusCode, 409, `another tenant is never cooled by this tenant's run: ${JSON.stringify(otherTenant.body)}`)
+    assert.equal(otherTenant.body.error.code, 'STOCK_PREPARATION_PROJECT_OVERVIEW_ABSENT')
+    assert.equal(JSON.stringify(otherTenant.body).includes('incomplete'), false)
+
+    // …and that tenant's failure (which clears ITS stamp) leaves this tenant's cooldown standing.
+    const after = counts()
+    const stillCooled = await refresh(h, FLOOR)
+    assert.equal(stillCooled.statusCode, 200, JSON.stringify(stillCooled.body))
+    assert.equal(stillCooled.body.data.incomplete, true)
+    assert.deepEqual(counts(), after)
+    assert.equal(failedAttempts, attempts)
+  } finally { h.restore() }
+})
+
+// S3 follow-ups 2, fix round 1 (R5): the runner's own self-tests, OUTSIDE it — synchronous, at top level, before it. A
+// failure here is an uncaught throw: this suite exits 1 even when the runner's own failure exit is broken.
+for (const [name, fn] of runnerSelfTests) {
+  const result = fn()
+  assert.ok(!(result && typeof result.then === 'function'), `${name}: a runner self-test must be synchronous (it runs outside the runner)`)
+  console.log(`  ${name} OK`)
+}
 
 // S3 follow-up A: the fail-closed runner (support/fail-closed-suite-runner.cjs) — exit sentinel + per-test timeout.
 runFailClosedSuite('stock-preparation-project-overview.test.cjs', tests)

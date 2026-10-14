@@ -515,6 +515,33 @@ describe('elearning V0.1 OpenAPI paths', () => {
     expect(JSON.stringify(schemas.ElearningAnalyticsExportResult)).not.toMatch(
       /storageKey|fileSha|fileSize|querySnapshot|snapshot|orgId|actorId|answer|trace|grade/,
     )
+
+    const availability = doc.paths?.['/api/elearning/admin/analytics/export-availability']?.get
+    expect(availability?.security).toEqual([{ bearerAuth: [] }])
+    expect(availability?.responses?.['200']?.content?.['application/json']?.schema)
+      .toEqual({ $ref: '#/components/schemas/ElearningAnalyticsExportAvailability' })
+    expect(schemas.ElearningAnalyticsExportAvailability).toEqual({
+      oneOf: [
+        { $ref: '#/components/schemas/ElearningAnalyticsExportAvailable' },
+        { $ref: '#/components/schemas/ElearningAnalyticsExportUnavailable' },
+      ],
+    })
+    expect(schemas.ElearningAnalyticsExportAvailable).toEqual({
+      type: 'object',
+      additionalProperties: false,
+      required: ['available'],
+      properties: { available: { type: 'boolean', enum: [true] } },
+    })
+    expect(schemas.ElearningAnalyticsExportUnavailable).toEqual({
+      type: 'object',
+      additionalProperties: false,
+      required: ['available', 'reason'],
+      properties: {
+        available: { type: 'boolean', enum: [false] },
+        reason: { type: 'string', enum: ['storage_unavailable'] },
+      },
+    })
+    expect(create?.description).toContain('ANALYTICS_EXPORT_STORAGE_UNAVAILABLE')
   })
 
   it('documents playback Range 200/206/416 without a JSON success body', () => {

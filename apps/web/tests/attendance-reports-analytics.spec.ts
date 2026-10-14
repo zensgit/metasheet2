@@ -296,7 +296,7 @@ describe('Attendance reports analytics', () => {
 
     const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')
     const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')
-    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters button')
+    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters > button.attendance__btn')
     const cardReload = container!.querySelector<HTMLButtonElement>(
       '[data-report-card="request-report"] .attendance__requests-header button',
     )
@@ -335,7 +335,7 @@ describe('Attendance reports analytics', () => {
 
     const fromInput = container!.querySelector<HTMLInputElement>('#attendance-from-date')!
     const toInput = container!.querySelector<HTMLInputElement>('#attendance-to-date')!
-    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters button')!
+    const headerReload = container!.querySelector<HTMLButtonElement>('.attendance__filters > button.attendance__btn')!
     const cardReload = container!.querySelector<HTMLButtonElement>(
       '[data-report-card="request-report"] .attendance__requests-header button',
     )!

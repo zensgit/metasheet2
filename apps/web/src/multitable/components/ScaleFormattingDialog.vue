@@ -279,6 +279,7 @@ import type {
   MetaField,
 } from '../types'
 import { CONDITIONAL_FORMATTING_SCALE_RULE_LIMIT } from '../types'
+import { randomUuid } from '../../utils/uuid'
 import { HEX_COLOR_RE, extractScaleRulesFromConfig, lerpHexColor } from '../utils/conditional-formatting'
 import { SCALE_ICON_GLYPHS, type ScaleIconGlyph } from '../utils/scale-icons'
 import { formattingPickColor, managerLabel } from '../utils/meta-manager-labels'
@@ -366,9 +367,7 @@ function fieldOptionsFor(rule: ScaleDraft): Array<{ id: string; name: string; di
 }
 
 function newId(): string {
-  return typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? `scr_${crypto.randomUUID()}`
-    : `scr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  return `scr_${randomUuid()}`
 }
 
 function fromRule(rule: ConditionalFormattingScaleRule): ScaleDraft {

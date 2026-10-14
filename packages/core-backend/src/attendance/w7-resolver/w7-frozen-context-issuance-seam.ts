@@ -264,6 +264,8 @@ export async function resolveAttendanceW7GroupArmSelectionV1(
 export type AttendanceW7IssuancePurposeV1 = 'persist' | 'mirror'
 
 export interface AttendanceW7IssuanceInputV1 {
+  /** Trusted live authority, outside the closed frozen context. */
+  effectiveTimezone?: string
   orgId: string
   userId: string
   workDate: string
@@ -438,6 +440,7 @@ export async function issueAttendanceFrozenContextV1(
       shiftId: input.shiftId,
     })
     const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, deps, {
+      effectiveTimezone: input.effectiveTimezone,
       orgId: input.orgId,
       userId: input.userId,
       workDate: input.workDate,
@@ -477,6 +480,7 @@ export async function issueAttendanceFrozenContextV1(
 
   // Step 4 — group facts, fail-closed, NEVER a legacy fallback.
   const resolution = await resolveW7GroupEffectiveFactsInTransactionV1(trx, deps, {
+      effectiveTimezone: input.effectiveTimezone,
     orgId: input.orgId,
     userId: input.userId,
     workDate: input.workDate,

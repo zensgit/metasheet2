@@ -1,3 +1,8 @@
+// Current layer split: the original 16 guards below drive the real legacy
+// canonical boundary over PostgreSQL. Their historical route-shape rationale
+// remains below. Strict effective-timezone HTTP behavior is tested separately
+// by registerCanonicalTimezoneHttpContracts; no HTTP adapter is removed.
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
 /**
  * W4C-2 (#4556 lock §8.2 steps 4/5/7, §5.2/§5.3) — #4612 gate3 P2-1
  * remediation: canonical/shadow live-punch freeze-step anchor correctness
@@ -129,7 +134,6 @@
  * Shared-DB discipline: fixture ids are file-namespaced random UUIDs.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { createRequire } from 'module'
 import type { MetaSheetServer } from '../../src/index'
 import * as path from 'path'
 import net from 'net'
@@ -139,6 +143,8 @@ import { Pool } from 'pg'
 import {
   assertLegacyPunchResponseGoldenShapeResolvedV1,
 } from '../utils/attendance-w4c2-golden-response'
+import { createLegacyLivePunchBoundaryDriver, type LegacyLivePunchCommand } from '../utils/attendance-legacy-live-punch-boundary-driver'
+import { registerCanonicalTimezoneHttpContracts } from '../utils/attendance-canonical-http-contract-cases'
 import { __computeAttendanceOuterAttributionValueForTestsV1 } from '../../src/attendance/w4c2-live-scheduled-boundary'
 import {
   canonicalAttendanceJsonV1,
@@ -154,7 +160,10 @@ const describeDb = dbUrl ? describe : describe.skip
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -181,26 +190,30 @@ function requestJson(url: string, options: { method?: string; headers?: Record<s
   })
 }
 
-const requireCjs = createRequire(import.meta.url)
-function loadPlugin(): {
-  __setAttendanceW4LivePunchPreBoundarySeamForTests?: (seam: ((ctx: unknown) => Promise<void>) | null) => void
-} {
-  return requireCjs('../../../../plugins/plugin-attendance/index.cjs')
-}
-
-describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor (real DB, route-level + race)', () => {
+describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor (real DB, HTTP contract + legacy boundary guards)', () => {
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
   let priorAllowlistEnv: string | undefined
 
-  const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
   async function mintToken(userId: string, perms = 'attendance:write'): Promise<string> {
     const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
-  const punch = (token: string, body: Record<string, unknown>) =>
-    requestJson(`${baseUrl}/api/attendance/punch`, { method: 'POST', headers: authHeaders(token), body: JSON.stringify(body) })
+  let legacyDriver: ReturnType<typeof createLegacyLivePunchBoundaryDriver>
+  type Prepared = Awaited<ReturnType<typeof legacyDriver.prepare>>
+  let legacyPreBoundarySeam: ((ctx: Prepared) => Promise<void>) | null = null
+  const setLegacyPreBoundarySeam = (seam: typeof legacyPreBoundarySeam) => { legacyPreBoundarySeam = seam }
+  const httpCleanupUsers: string[] = []
+  async function legacyPunch(userId: string, body: Omit<LegacyLivePunchCommand, 'userId'>) {
+    const prepared = await legacyDriver.prepare({ ...body, userId })
+    if (legacyPreBoundarySeam) await legacyPreBoundarySeam(prepared)
+    const result = await legacyDriver.execute(prepared)
+    // Preserve the original JSON wire-shape assertions over the real adapter result.
+    return { ...result, response: JSON.parse(JSON.stringify(result.response)) }
+  }
+  type LegacyPunchResponse = Awaited<ReturnType<typeof legacyPunch>>
 
   async function insertActiveUser(userId: string, orgId: string): Promise<void> {
     await pool.query(
@@ -213,6 +226,16 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    if (orgId === 'default') return
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
   async function insertLegacyRolloutRow(orgId: string): Promise<void> {
     await pool.query(
@@ -489,6 +512,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    legacyDriver = createLegacyLivePunchBoundaryDriver(pool)
 
     // Group A fixtures.
     await insertLegacyRolloutRow(refOrg)
@@ -607,7 +631,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   }, 120000)
 
   afterAll(async () => {
-    for (const userId of [refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser, gncUser, o53iPosUser, o53iNegUser]) {
+    for (const userId of [...httpCleanupUsers, refDriftUser, shadowDriftUser, shadowPlainUser, raceUser, raceEvidenceUser, tzRaceUser, sidUser, osidUser, eDay1User, eDay2User, fProbeUser, gncUser, o53iPosUser, o53iNegUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -615,25 +639,30 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     }
     if (priorAllowlistEnv === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
     else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlistEnv
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [seededDefaultRuleIds]).catch(() => undefined)
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
   }, 60000)
 
-  it('L1 + L4: canonical shadow freeze-step attribution byte-matches the legacy reference resolution (drift), and a non-drift punch resolves identically (positive control)', async () => {
+  registerCanonicalTimezoneHttpContracts({
+    pool: () => pool, baseUrl: () => baseUrl, requestJson, mintToken,
+    seedUser: insertActiveUser, cleanupUsers: httpCleanupUsers,
+  })
+
+  it('legacy boundary / L1 + L4: canonical shadow freeze-step attribution byte-matches the legacy reference resolution (drift), and a non-drift punch resolves identically (positive control)', async () => {
     // Reference: legacy posture, SAME shift/day/instant, client tz drifts
     // from the shift's own tz — already mutation-proven (P1 remediation) to
     // reproduce the route's own PRE-resolution W2 call.
-    const refToken = await mintToken(refDriftUser)
-    const ref = await punch(refToken, {
+    const ref = await legacyPunch(refDriftUser, {
       eventType: 'check_in', occurredAt: '2026-07-19T22:00:00.000Z', timezone: 'Asia/Tokyo', orgId: refOrg,
     })
-    expect(ref.status, ref.raw).toBe(200)
-    assertLegacyPunchResponseGoldenShapeResolvedV1(ref.body.data, {
+    expect(ref.kind).toBe('legacy')
+    assertLegacyPunchResponseGoldenShapeResolvedV1(ref.response, {
       userId: refDriftUser,
       status: 'partial',
       workMinutes: 0,
       lateMinutes: 0,
-      firstInAt: ref.body.data.event.occurred_at,
+      firstInAt: ref.response.event.occurred_at,
       lastOutAt: null,
       calendarWorkDate: '2026-07-20',
       reasonCode: 'SINGLE_MATCHING_CANDIDATE',
@@ -641,14 +670,13 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       resolvedWorkDate: '2026-07-19',
       matchingCount: 1,
     })
-    const refWinner = ref.body.data.workDateResolution.evidenceSnapshot.winner
+    const refWinner = ref.response.workDateResolution.evidenceSnapshot.winner
 
     // L1: shadow posture, drift user, IDENTICAL shift/day/instant shape.
-    const driftToken = await mintToken(shadowDriftUser)
-    const drift = await punch(driftToken, {
+    const drift = await legacyPunch(shadowDriftUser, {
       eventType: 'check_in', occurredAt: '2026-07-19T22:00:00.000Z', timezone: 'Asia/Tokyo', orgId: shadowOrgA, operationId: randomUUID(),
     })
-    expect(drift.status, drift.raw).toBe(200)
+    expect(drift.kind).toBe('w4')
     const driftCalcs = await calculationRowsForUser(shadowDriftUser)
     expect(driftCalcs.length).toBe(1)
     expect(driftCalcs[0].attribution_snapshot.posture).toBe('resolved_v2')
@@ -734,11 +762,10 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
 
     // L4 positive control: client tz == shift tz (no drift) resolves
     // identically to the drift leg — L1 is not fail-closed by construction.
-    const plainToken = await mintToken(shadowPlainUser)
-    const plain = await punch(plainToken, {
+    const plain = await legacyPunch(shadowPlainUser, {
       eventType: 'check_in', occurredAt: '2026-07-19T22:00:00.000Z', timezone: 'UTC', orgId: shadowOrgA, operationId: randomUUID(),
     })
-    expect(plain.status, plain.raw).toBe(200)
+    expect(plain.kind).toBe('w4')
     const plainCalcs = await calculationRowsForUser(shadowPlainUser)
     expect(plainCalcs.length).toBe(1)
     expect(plainCalcs[0].attribution_snapshot.posture).toBe('resolved_v2')
@@ -747,14 +774,10 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(plainCalcs[0].outcome).toBe('completed')
   })
 
-  it('L5 + L7: a genuine DB-state race between the route read and the canonical transaction hits the step-7 candidate-identity gate (review_required/context_mismatch, zero segments, legacy projection intact); evidence is anchored to the re-resolved day', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / L5 + L7: a genuine DB-state race between the route read and the canonical transaction hits the step-7 candidate-identity gate (review_required/context_mismatch, zero segments, legacy projection intact); evidence is anchored to the re-resolved day', async () => {
+    const setSeam = setLegacyPreBoundarySeam
 
-    async function runRace(userId: string): Promise<HttpResponse> {
+    async function runRace(userId: string): Promise<LegacyPunchResponse> {
       let signalReached: () => void
       const reached = new Promise<void>((resolve) => { signalReached = resolve })
       let release: () => void
@@ -764,8 +787,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
         await released
       })
       try {
-        const token = await mintToken(userId)
-        const punchPromise = punch(token, {
+        const punchPromise = legacyPunch(userId, {
           eventType: 'check_in', occurredAt: RACE_OCCURRED_AT, timezone: 'UTC', orgId: raceOrg, operationId: randomUUID(),
         })
         await reached
@@ -793,8 +815,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
 
     // L5.
     const res = await runRace(raceUser)
-    expect(res.status, res.raw).toBe(200)
-    expect(res.body?.ok).toBe(true)
+    expect(res.kind).toBe('w4')
+    expect(res.response).toEqual(expect.objectContaining({ event: expect.any(Object), record: expect.any(Object) }))
     // Legacy projection intact: event/record written at the route's OWN
     // (pre-race) work date, unaffected by the canonical-side downgrade.
     const rows = await recordRow(raceUser)
@@ -817,7 +839,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     // CORRECT anchor day RACE_DAY_PREV — the OLD `input.workDate` anchor
     // would only ever see the just-written RACE_DAY event).
     const evRes = await runRace(raceEvidenceUser)
-    expect(evRes.status, evRes.raw).toBe(200)
+    expect(evRes.kind).toBe('w4')
     const evCalcs = await calculationRowsForUser(raceEvidenceUser)
     expect(evCalcs.length).toBe(1)
     expect(evCalcs[0].outcome).toBe('review_required')
@@ -872,12 +894,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // in-place shift-definition edit under a stable shiftId is exactly the
   // race class the lock's "source-definition fingerprint" clause exists to
   // catch, and it was previously silent.
-  it('L6 (re-scoped twice): identity is UNCHANGED by this race, but the winning shift\'s OWN definition changes underneath it — the fingerprint-only conjunct now catches what the identity conjunct alone cannot', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / L6 (re-scoped twice): identity is UNCHANGED by this race, but the winning shift\'s OWN definition changes underneath it — the fingerprint-only conjunct now catches what the identity conjunct alone cannot', async () => {
+    const setSeam = setLegacyPreBoundarySeam
 
     let signalReached: () => void
     const reached = new Promise<void>((resolve) => { signalReached = resolve })
@@ -887,10 +905,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(tzRaceUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(tzRaceUser, {
         eventType: 'check_in', occurredAt: TZ_RACE_OCCURRED_AT, timezone: 'UTC', orgId: tzRaceOrg, operationId: randomUUID(),
       })
       await reached
@@ -906,7 +923,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       setSeam(null)
     }
 
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(tzRaceUser)
     expect(calcs.length).toBe(1)
     // Identity (workDate/shiftId) is UNCHANGED by this race — kept from
@@ -937,12 +954,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // `review_required` could be an artifact of fixture assembly order (e.g.
   // an env/allowlist mismatch, a stale rollout row) rather than the
   // constructed shift-definition race.
-  it('L6 positive control: with connection B disarmed (no timezone swap), the SAME punch shape completes normally', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / L6 positive control: with connection B disarmed (no timezone swap), the SAME punch shape completes normally', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     const controlUser = randomUUID()
     await insertActiveUser(controlUser, tzRaceOrg)
     // Uses `tzRaceControlShift` — its OWN, never-raced shift row — NOT
@@ -960,10 +973,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(controlUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(controlUser, {
         eventType: 'check_in', occurredAt: TZ_RACE_OCCURRED_AT, timezone: 'UTC', orgId: tzRaceOrg, operationId: randomUUID(),
       })
       await reached
@@ -978,7 +990,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
     }
 
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(controlUser)
     expect(calcs.length).toBe(1)
     expect(calcs[0].outcome).toBe('completed')
@@ -1006,12 +1018,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // neuter both) for the corrected, empirically re-verified numbers; the
   // single-conjunct claim above is retained as a historical record of what
   // was true in that earlier round, not a claim about current behavior.
-  it('Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group D: a shiftId-ONLY race (workDate held fixed, only the winning shift swaps) hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
+    const setSeam = setLegacyPreBoundarySeam
 
     let signalReached: () => void
     const reached = new Promise<void>((resolve) => { signalReached = resolve })
@@ -1021,10 +1029,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(sidUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(sidUser, {
         eventType: 'check_in', occurredAt: SID_OCCURRED_AT, timezone: 'UTC', orgId: sidOrg, operationId: randomUUID(),
       })
       await reached
@@ -1050,8 +1057,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       setSeam(null)
     }
 
-    expect(res.status, res.raw).toBe(200)
-    expect(res.body?.ok).toBe(true)
+    expect(res.kind).toBe('w4')
+    expect(res.response).toEqual(expect.objectContaining({ event: expect.any(Object), record: expect.any(Object) }))
     // Legacy projection intact: still keyed at SID_DAY (the day never
     // changed in this race), unaffected by the canonical-side downgrade.
     const rows = await recordRow(sidUser)
@@ -1078,12 +1085,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // and the seam pause kept, the SAME punch must complete normally —
   // otherwise Group D's `review_required` would be an artifact of fixture
   // assembly order, not the constructed race.
-  it('Group D positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group D positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     const controlUser = randomUUID()
     await insertActiveUser(controlUser, sidOrg)
     await insertAssignment(randomUUID(), sidOrg, controlUser, sidShiftX, SID_DAY)
@@ -1096,10 +1099,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(controlUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(controlUser, {
         eventType: 'check_in', occurredAt: SID_OCCURRED_AT, timezone: 'UTC', orgId: sidOrg, operationId: randomUUID(),
       })
       await reached
@@ -1114,7 +1116,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
     }
 
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(controlUser)
     expect(calcs.length).toBe(1)
     expect(calcs[0].outcome).toBe('completed')
@@ -1129,12 +1131,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // at OSID_DAY across the race (the overnight candidate's own `workDate`
   // is the night it starts, not the calendar day the punch instant falls
   // on), only `shiftId` swaps.
-  it('Group D-overnight: a shiftId-ONLY race between two OVERNIGHT shifts sharing the same start_date hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group D-overnight: a shiftId-ONLY race between two OVERNIGHT shifts sharing the same start_date hits the widened step-7 identity+fingerprint gate (BOTH conjuncts fire — this is NOT an identity-only-discriminating leg, see Group G for the leg that is)', async () => {
+    const setSeam = setLegacyPreBoundarySeam
 
     let signalReached: () => void
     const reached = new Promise<void>((resolve) => { signalReached = resolve })
@@ -1144,10 +1142,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(osidUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(osidUser, {
         eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
       })
       await reached
@@ -1173,8 +1170,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       setSeam(null)
     }
 
-    expect(res.status, res.raw).toBe(200)
-    expect(res.body?.ok).toBe(true)
+    expect(res.kind).toBe('w4')
+    expect(res.response).toEqual(expect.objectContaining({ event: expect.any(Object), record: expect.any(Object) }))
 
     const calcs = await calculationRowsForUser(osidUser)
     expect(calcs.length).toBe(1)
@@ -1192,12 +1189,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
 
   // Race-genuineness control for Group D-overnight (same discipline as
   // Group D's own positive control, `feedback_toctou_needs_constructed_race`).
-  it('Group D-overnight positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group D-overnight positive control: with connection B disarmed (no shift swap), the SAME punch shape completes normally', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     const controlUser = randomUUID()
     await insertActiveUser(controlUser, osidOrg)
     await insertAssignment(randomUUID(), osidOrg, controlUser, osidShiftX, OSID_DAY)
@@ -1210,10 +1203,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(controlUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(controlUser, {
         eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
       })
       await reached
@@ -1228,7 +1220,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
     }
 
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(controlUser)
     expect(calcs.length).toBe(1)
     expect(calcs[0].outcome).toBe('completed')
@@ -1262,12 +1254,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // the leg-map comment atop this file and `w4c2-live-scheduled-
   // boundary.ts`'s STRUCTURAL NOTE) — not a production-reachable state (the
   // canonical shift service only ever writes dense 0..2 segment rows).
-  it('Group G: a shiftId-ONLY race where BOTH candidate shifts have a null frozen context hits the step-7 gate on the identity conjunct ALONE (fingerprint conjunct is structurally silent, null === null)', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group G: a shiftId-ONLY race where BOTH candidate shifts have a null frozen context hits the step-7 gate on the identity conjunct ALONE (fingerprint conjunct is structurally silent, null === null)', async () => {
+    const setSeam = setLegacyPreBoundarySeam
 
     let signalReached: () => void
     const reached = new Promise<void>((resolve) => { signalReached = resolve })
@@ -1277,10 +1265,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(gncUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(gncUser, {
         eventType: 'check_in', occurredAt: GNC_OCCURRED_AT, timezone: 'UTC', orgId: gncOrg, operationId: randomUUID(),
       })
       await reached
@@ -1306,8 +1293,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       setSeam(null)
     }
 
-    expect(res.status, res.raw).toBe(200)
-    expect(res.body?.ok).toBe(true)
+    expect(res.kind).toBe('w4')
+    expect(res.response).toEqual(expect.objectContaining({ event: expect.any(Object), record: expect.any(Object) }))
     // Legacy projection intact: still keyed at GNC_DAY (the day never
     // changed in this race), unaffected by the canonical-side downgrade.
     const rows = await recordRow(gncUser)
@@ -1357,12 +1344,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // connection B can produce the raced leg's `context_mismatch` +
   // gncShiftY combination; this control proves that combination is not an
   // artifact of fixture assembly order.
-  it('Group G positive control: with connection B disarmed (no shift swap), the reason code falls through to the null-context calculator (missing_frozen_context, NOT context_mismatch) and shiftId never leaves gncShiftX', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group G positive control: with connection B disarmed (no shift swap), the reason code falls through to the null-context calculator (missing_frozen_context, NOT context_mismatch) and shiftId never leaves gncShiftX', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     const controlUser = randomUUID()
     await insertActiveUser(controlUser, gncOrg)
     await insertAssignment(randomUUID(), gncOrg, controlUser, gncShiftX, GNC_DAY)
@@ -1375,10 +1358,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(controlUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(controlUser, {
         eventType: 'check_in', occurredAt: GNC_OCCURRED_AT, timezone: 'UTC', orgId: gncOrg, operationId: randomUUID(),
       })
       await reached
@@ -1393,7 +1375,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       await pool?.query('DELETE FROM users WHERE id = $1', [controlUser]).catch(() => undefined)
     }
 
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(controlUser)
     expect(calcs.length).toBe(1)
     expect(calcs[0].outcome).toBe('review_required')
@@ -1414,12 +1396,11 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // "asserted invariant, never independently reached" failure mode this
   // repo has hit before (see the PR body's earlier ⑥ self-report). Each
   // block's mutation behavior is independently observable.
-  it('Group E / eDay1: correct resolution isolates L2 (mutation table in PR body: L2 fires, L3 silent on this fixture)', async () => {
-    const token1 = await mintToken(eDay1User)
-    const res1 = await punch(token1, {
+  it('legacy boundary / Group E / eDay1: correct resolution isolates L2 (mutation table in PR body: L2 fires, L3 silent on this fixture)', async () => {
+    const res1 = await legacyPunch(eDay1User, {
       eventType: 'check_in', occurredAt: EDAY1_OCCURRED_AT, timezone: 'Etc/GMT+7', orgId: eDay1Org, operationId: randomUUID(),
     })
-    expect(res1.status, res1.raw).toBe(200)
+    expect(res1.kind).toBe('w4')
     const calcs1 = await calculationRowsForUser(eDay1User)
     expect(calcs1.length).toBe(1)
     expect(calcs1[0].outcome).toBe('completed')
@@ -1427,12 +1408,11 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs1[0].attribution_snapshot.value.reasonCode).toBe('CURRENT_DAY_CONTAINING_SHIFT')
   })
 
-  it('Group E / eDay2: correct resolution isolates L3 (mutation table in PR body: L2 silent, L3 fires on this fixture)', async () => {
-    const token2 = await mintToken(eDay2User)
-    const res2 = await punch(token2, {
+  it('legacy boundary / Group E / eDay2: correct resolution isolates L3 (mutation table in PR body: L2 silent, L3 fires on this fixture)', async () => {
+    const res2 = await legacyPunch(eDay2User, {
       eventType: 'check_in', occurredAt: EDAY2_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: eDay2Org, operationId: randomUUID(),
     })
-    expect(res2.status, res2.raw).toBe(200)
+    expect(res2.kind).toBe('w4')
     const calcs2 = await calculationRowsForUser(eDay2User)
     expect(calcs2.length).toBe(1)
     expect(calcs2[0].outcome).toBe('completed')
@@ -1467,26 +1447,21 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // outer-fingerprint computation itself makes) and diff it key-by-key
   // against the persisted `attribution_snapshot.value` (the inner, freeze
   // step's own result).
-  it('Group F (O-5 probe): outer-vs-inner attribution.value full-field diff on the eDay2 self-observation shape — drift set is EXACTLY {resolvedAt, reasonCode}, asserted per-field, not argued', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group F (O-5 probe): outer-vs-inner attribution.value full-field diff on the eDay2 self-observation shape — drift set is EXACTLY {resolvedAt, reasonCode}, asserted per-field, not argued', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     let captured: { outerResolution: unknown; outerContext: unknown } | null = null
     setSeam(async (ctx: { outerResolution: unknown; outerContext: unknown }) => {
       captured = { outerResolution: ctx.outerResolution, outerContext: ctx.outerContext }
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(fProbeUser)
-      res = await punch(token, {
+      res = await legacyPunch(fProbeUser, {
         eventType: 'check_in', occurredAt: FPROBE_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: fProbeOrg, operationId: randomUUID(),
       })
     } finally {
       setSeam(null)
     }
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     expect(captured).not.toBeNull()
     const { outerResolution, outerContext } = captured as { outerResolution: unknown; outerContext: unknown }
     expect(outerResolution && (outerResolution as { kind: string }).kind).toBe('resolved')
@@ -1615,12 +1590,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // different window/instant shape), or whether a wider set needs to be
   // reported (per the task's own hard constraint: a third drifting field is
   // an escalation, not a silent set-widening).
-  it('Group F2 (O-5 probe, second geometry): outer-vs-inner attribution.value full-field diff on the D-overnight self-observation shape', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / Group F2 (O-5 probe, second geometry): outer-vs-inner attribution.value full-field diff on the D-overnight self-observation shape', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     const f2User = randomUUID()
     await insertActiveUser(f2User, osidOrg)
     await insertAssignment(randomUUID(), osidOrg, f2User, osidShiftX, OSID_DAY)
@@ -1629,10 +1600,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     setSeam(async (ctx: { outerResolution: unknown; outerContext: unknown }) => {
       captured = { outerResolution: ctx.outerResolution, outerContext: ctx.outerContext }
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(f2User)
-      res = await punch(token, {
+      res = await legacyPunch(f2User, {
         eventType: 'check_in', occurredAt: OSID_OCCURRED_AT, timezone: 'UTC', orgId: osidOrg, operationId: randomUUID(),
       })
     } finally {
@@ -1642,7 +1612,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [f2User]).catch(() => undefined)
       await pool?.query('DELETE FROM users WHERE id = $1', [f2User]).catch(() => undefined)
     }
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     expect(captured).not.toBeNull()
     const { outerResolution, outerContext } = captured as { outerResolution: unknown; outerContext: unknown }
     expect(outerResolution && (outerResolution as { kind: string }).kind).toBe('resolved')
@@ -1699,12 +1669,11 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
   // positive leg red / negative leg green; mutation B: fingerprint conjunct
   // neutered, negative leg red / positive leg green).
   // ---------------------------------------------------------------------
-  it('OD-W4C-53(i) POSITIVE control: the zero-concurrency same-operation reasonCode-flip fixture (eDay2 geometry) PASSES step 7 equality under the narrow domain — completed, no context_mismatch', async () => {
-    const token = await mintToken(o53iPosUser)
-    const res = await punch(token, {
+  it('legacy boundary / OD-W4C-53(i) POSITIVE control: the zero-concurrency same-operation reasonCode-flip fixture (eDay2 geometry) PASSES step 7 equality under the narrow domain — completed, no context_mismatch', async () => {
+    const res = await legacyPunch(o53iPosUser, {
       eventType: 'check_in', occurredAt: EDAY2_OCCURRED_AT, timezone: 'Asia/Tokyo', orgId: o53iPosOrg, operationId: randomUUID(),
     })
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(o53iPosUser)
     expect(calcs.length).toBe(1)
     // The false-positive PRECONDITION actually occurred on this fixture: the inner
@@ -1718,12 +1687,8 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     expect(calcs[0].expected_segment_count).toBeGreaterThan(0)
   })
 
-  it('OD-W4C-53(i) NEGATIVE control: drift in a field the narrow domain does NOT exclude (shift timezone) still FAILS step 7 equality — review_required/context_mismatch, zero segments, identity unchanged', async () => {
-    const plugin = loadPlugin()
-    const setSeam = plugin.__setAttendanceW4LivePunchPreBoundarySeamForTests
-    if (typeof setSeam !== 'function') {
-      throw new Error('W4C2_TEST_SEAM_MISSING: __setAttendanceW4LivePunchPreBoundarySeamForTests')
-    }
+  it('legacy boundary / OD-W4C-53(i) NEGATIVE control: drift in a field the narrow domain does NOT exclude (shift timezone) still FAILS step 7 equality — review_required/context_mismatch, zero segments, identity unchanged', async () => {
+    const setSeam = setLegacyPreBoundarySeam
     let signalReached: () => void
     const reached = new Promise<void>((resolve) => { signalReached = resolve })
     let release: () => void
@@ -1732,10 +1697,9 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
       signalReached()
       await released
     })
-    let res: HttpResponse
+    let res: LegacyPunchResponse
     try {
-      const token = await mintToken(o53iNegUser)
-      const punchPromise = punch(token, {
+      const punchPromise = legacyPunch(o53iNegUser, {
         eventType: 'check_in', occurredAt: O53I_NEG_OCCURRED_AT, timezone: 'UTC', orgId: o53iNegOrg, operationId: randomUUID(),
       })
       await reached
@@ -1748,7 +1712,7 @@ describeDb('W4C-2 #4612 gate3 P2-1 remediation — canonical freeze-step anchor 
     } finally {
       setSeam(null)
     }
-    expect(res.status, res.raw).toBe(200)
+    expect(res.kind).toBe('w4')
     const calcs = await calculationRowsForUser(o53iNegUser)
     expect(calcs.length).toBe(1)
     // Identity conjunct silent by construction — the narrow-domain fingerprint conjunct is

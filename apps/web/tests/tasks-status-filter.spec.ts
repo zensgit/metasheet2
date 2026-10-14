@@ -291,8 +291,9 @@ describe('G2-core status switch — switching', () => {
     expect(el.textContent).not.toContain('Stale Done')
   })
 
+  // An "any" mode row: an "all" mode row has no inline complete and links to the task detail.
   it('g2core|fe|reload after complete keeps the status', async () => {
-    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1' })] })
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', completion_mode: 'any' })] })
     h.completeTask.mockResolvedValue({ kind: 'ok' })
     const el = await mountReady()
     statusButton(el, 'all').click()
@@ -384,6 +385,8 @@ describe('G2-core status switch — remembered per browser', () => {
 // The status analogues of the view switch's page-token cells (tasks-list-view.spec.ts, "late action
 // result after switching list view"): `switchStatus` moves the page on like `switchView`, so a row
 // action or create started under the previous status must not act on the new status's rows.
+// The row complete / reopen cells use "any" mode rows: an "all" mode row has no inline buttons and
+// links to the task detail instead.
 describe('G2-core status switch — late action result after switching status (list-page-token guard)', () => {
   function submitCreate(el: HTMLElement): void {
     const titleInput = shown(el, 'tasks-create-title') as HTMLInputElement
@@ -393,7 +396,7 @@ describe('G2-core status switch — late action result after switching status (l
 
   it('g2core|fe|token|a pending error from complete settling after a status switch shows no banner and does not reload', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
     const pendingComplete = deferred<{ kind: 'error'; status: number }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -415,7 +418,7 @@ describe('G2-core status switch — late action result after switching status (l
 
   it('g2core|fe|token|a pending org_missing from complete settling after a status switch shows no guidance block', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Done Item', status: 'done' })] })
     const pendingComplete = deferred<{ kind: 'org_missing' }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -433,7 +436,7 @@ describe('G2-core status switch — late action result after switching status (l
 
   it('g2core|fe|token|a pending ok from reopen settling after a status switch notifies the badge bus without a needless reload', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'All Item', status: 'open' })] })
     const pendingReopen = deferred<{ kind: 'ok' }>()
     h.reopenTask.mockReturnValue(pendingReopen.promise)
@@ -506,5 +509,156 @@ describe('G2-core status switch — the empty line', () => {
     statusButton(el, 'all').click()
     await flush()
     expect(shown(el, 'tasks-list-empty')?.textContent?.trim()).toBe('暂无任务')
+  })
+})
+
+// The status filter together with #6390 (merged from main): an "all" mode row offers its complete
+// / reopen on the task detail instead of inline, and the create form carries an optional due date.
+// The fake backend below filters by `status` as the server does (`tasks.status`), so each cell
+// sees the rows the real list read would return under the switch.
+describe('G2-core status switch — with the all-mode row link and the create due date', () => {
+  type Row = ReturnType<typeof taskItem>
+  let rows: Row[] = []
+
+  function serveRows(): void {
+    h.listTasks.mockImplementation(async (_view: string, _page: unknown, status?: 'open' | 'done' | 'all') => {
+      const items = rows.filter((row) => status === undefined || status === 'all' || row.status === status)
+      return { kind: 'ok', items, total: items.length }
+    })
+  }
+
+  /** title -> the row's own action: the detail link's text, or the inline button. */
+  function rowActions(el: HTMLElement): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const link of Array.from(el.querySelectorAll('[data-testid="tasks-list-item-link"]'))) {
+      const row = link.parentElement as HTMLElement
+      const detail = row.querySelector('[data-testid="tasks-row-detail-action"]')
+      out[link.textContent?.trim() ?? ''] = detail
+        ? `detail:${detail.textContent?.trim()}`
+        : row.querySelector('[data-testid="tasks-complete-button"]')
+          ? 'complete'
+          : row.querySelector('[data-testid="tasks-reopen-button"]')
+            ? 'reopen'
+            : 'none'
+    }
+    return out
+  }
+
+  function onBoard(el: HTMLElement): boolean {
+    return el.querySelector('[data-testid="tasks-group"]') !== null
+  }
+
+  async function setControl(el: HTMLElement, testid: string, value: string): Promise<void> {
+    const input = shown(el, testid) as HTMLInputElement
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flush()
+  }
+
+  beforeEach(() => {
+    rows = [
+      taskItem({ id: 'a1', title: 'All Open', status: 'open', completion_mode: 'all' }),
+      taskItem({ id: 'a2', title: 'All Done', status: 'done', completion_mode: 'all' }),
+      taskItem({ id: 'y1', title: 'Any Open', status: 'open', completion_mode: 'any' }),
+      taskItem({ id: 'y2', title: 'Any Done', status: 'done', completion_mode: 'any' }),
+    ]
+    serveRows()
+  })
+
+  const EXPECTED = {
+    open: { 'All Open': 'detail:在任务详情中完成', 'Any Open': 'complete' },
+    done: { 'All Done': 'detail:在任务详情中重启', 'Any Done': 'reopen' },
+    all: {
+      'All Open': 'detail:在任务详情中完成',
+      'All Done': 'detail:在任务详情中重启',
+      'Any Open': 'complete',
+      'Any Done': 'reopen',
+    },
+  } as const
+
+  it('g2core|fe|6390|on the assigned view board, every status shows all-mode rows as a detail link and any-mode rows with their inline action', async () => {
+    // The board mounts with the rows and then reads the groups and the placements: two more flushes.
+    const el = await mountReady()
+    await flush(8)
+    expect(onBoard(el)).toBe(true)
+    expect(rowActions(el)).toEqual(EXPECTED.open)
+    for (const status of ['done', 'all', 'open'] as const) {
+      statusButton(el, status).click()
+      await flush(12)
+      expect(onBoard(el)).toBe(true)
+      expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, status)
+      expect(rowActions(el)).toEqual(EXPECTED[status])
+    }
+    expect(h.completeTask).not.toHaveBeenCalled()
+    expect(h.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('g2core|fe|6390|on a flat list view, every status shows all-mode rows as a detail link and any-mode rows with their inline action', async () => {
+    const el = await mountReady()
+    ;(shown(el, 'tasks-view-switch-created') as HTMLButtonElement).click()
+    await flush()
+    expect(onBoard(el)).toBe(false)
+    expect(rowActions(el)).toEqual(EXPECTED.open)
+    for (const status of ['done', 'all', 'open'] as const) {
+      statusButton(el, status).click()
+      await flush()
+      expect(onBoard(el)).toBe(false)
+      expect(h.listTasks).toHaveBeenLastCalledWith('created', undefined, status)
+      expect(rowActions(el)).toEqual(EXPECTED[status])
+    }
+    expect(h.completeTask).not.toHaveBeenCalled()
+    expect(h.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('g2core|fe|6390|an inline complete under 未完成 reloads under 未完成, and the completed row leaves the list', async () => {
+    h.completeTask.mockImplementation(async (id: string) => {
+      rows = rows.map((row) => (row.id === id ? { ...row, status: 'done' as const } : row))
+      return { kind: 'ok', done: true }
+    })
+    const el = await mountReady()
+    ;(Array.from(el.querySelectorAll('[data-testid="tasks-complete-button"]'))[0] as HTMLButtonElement).click()
+    await flush()
+    expect(h.completeTask).toHaveBeenCalledWith('y1')
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'open')
+    expect(rowActions(el)).toEqual({ 'All Open': 'detail:在任务详情中完成' })
+  })
+
+  // Pinned as it is today: a create while 已完成 is on is sent with its due date, the form is
+  // cleared, and the reload stays under 已完成, so the new (open) task is not in the list until the
+  // switch moves to 未完成 or 全部.
+  it('g2core|fe|6390|a create with a due date while 已完成 is on: sent with the due keys, form cleared, reload stays under 已完成', async () => {
+    h.createTask.mockImplementation(async (body: { title: string; completionMode: 'all' | 'any' }) => {
+      rows = [...rows, taskItem({ id: 'n1', title: body.title, status: 'open', completion_mode: body.completionMode })]
+      return { kind: 'ok', id: 'n1' }
+    })
+    const el = await mountReady()
+    statusButton(el, 'done').click()
+    await flush()
+
+    await setControl(el, 'tasks-create-title', 'Fresh Task')
+    await setControl(el, 'tasks-create-due-date', '2031-03-04')
+    await setControl(el, 'tasks-create-due-time', '09:30')
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+
+    expect(h.createTask).toHaveBeenCalledTimes(1)
+    expect(h.createTask.mock.calls[0][0]).toEqual({
+      title: 'Fresh Task',
+      completionMode: 'all',
+      dueDate: '2031-03-04',
+      dueTime: '09:30',
+      timeZone: 'UTC',
+    })
+    expect(h.notifyTasksChanged).toHaveBeenCalledTimes(1)
+    expect(h.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+    expect(pressed(el)).toEqual(['done'])
+    expect((shown(el, 'tasks-create-title') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-date') as HTMLInputElement).value).toBe('')
+    expect((shown(el, 'tasks-create-due-time') as HTMLInputElement).value).toBe('')
+    expect(rowActions(el)).toEqual(EXPECTED.done)
+
+    statusButton(el, 'open').click()
+    await flush()
+    expect(rowActions(el)).toEqual({ ...EXPECTED.open, 'Fresh Task': 'detail:在任务详情中完成' })
   })
 })

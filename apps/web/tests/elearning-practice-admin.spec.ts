@@ -130,6 +130,14 @@ describe('ElearningPracticeAdminSection', () => {
     expect(h.create.mock.calls[2]?.[0].requestId).toBe(REQUEST_B)
   })
 
+  it('explains ORG_CONTEXT_REQUIRED on load instead of printing the raw code', async () => {
+    h.list.mockReset().mockRejectedValue(new ElearningApiError('ORG_CONTEXT_REQUIRED', 403))
+    const view = await mount()
+    const text = view.querySelector('[data-testid="elearning-practice-admin-status"]')?.textContent ?? ''
+    expect(text).toContain('does not have exactly one active organization')
+    expect(text).not.toContain('ORG_CONTEXT_REQUIRED')
+  })
+
   it('fails locally for invalid paper identity without calling the API', async () => {
     const view = await mount()
     input(view, 'elearning-practice-paper-id', 'not-a-uuid')

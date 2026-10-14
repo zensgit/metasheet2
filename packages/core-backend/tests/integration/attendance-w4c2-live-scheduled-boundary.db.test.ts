@@ -1,3 +1,5 @@
+import { requestOnlinePunchFixture } from '../utils/attendance-online-punch-fixture'
+import { createLegacyLivePunchBoundaryDriver } from '../utils/attendance-legacy-live-punch-boundary-driver'
 /**
  * W4C-2 (#4556 lock §12.3) — canonical live/scheduled write-boundary WIRING gates
  * (route-level, real DB, real MetaSheetServer + plugin activate).
@@ -20,6 +22,11 @@
  *     exactly one absent row) — mutating either absence initiator to bypass the canonical
  *     writer fails the suspended leg on its own.
  *
+ * The historical P1 client-timezone drift leg explicitly drives the legacy boundary
+ * through real activated adapters and PostgreSQL. Its original Tokyo geometry and
+ * frozen evidence pin remain there; a separate HTTP leg proves strict UTC authority
+ * rejects Tokyo without seven-table writes and accepts UTC for the same subject.
+ *
  * Suspension fixtures walk the guarded rollout state machine's legal edges
  * (legacy->shadow->eligible->authoritative->suspended); a persisted `suspended` state is
  * honored REGARDLESS of the env allowlist (w4c0-identity posture doctrine), so no env
@@ -36,6 +43,7 @@ import net from 'net'
 import http from 'http'
 import { randomUUID } from 'crypto'
 import { Pool } from 'pg'
+import { acquireAttendanceTimezoneRuntimeLocksV1, buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../../src/attendance/attendance-timezone-runtime-locks'
 import {
   snapshotAttendanceSettingsRow,
   restoreAttendanceSettingsRow,
@@ -65,7 +73,10 @@ const describeDb = dbUrl ? describe : describe.skip
 
 type HttpResponse = { status: number; body?: any; raw: string }
 
-function requestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
+const requestJson = (...args: Parameters<typeof rawRequestJson>): ReturnType<typeof rawRequestJson> =>
+  requestOnlinePunchFixture(args[0], args[1] ?? {}, rawRequestJson)
+
+function rawRequestJson(url: string, options: { method?: string; headers?: Record<string, string>; body?: string } = {}): Promise<HttpResponse> {
   return new Promise((resolve, reject) => {
     const target = new URL(url)
     const req = http.request(
@@ -96,11 +107,15 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
   let server: MetaSheetServer | undefined
   let baseUrl = ''
   let pool: Pool
+  const seededDefaultRuleIds: string[] = []
+
+  const settingsAdminUserId = randomUUID()
+  const settingsAdminOrg = randomUUID()
 
   const authHeaders = (token: string) => ({ Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' })
 
-  async function mintToken(userId: string, perms: string): Promise<string> {
-    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}`)
+  async function mintToken(userId: string, perms: string, tenantId?: string): Promise<string> {
+    const res = await requestJson(`${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(userId)}&roles=admin&perms=${encodeURIComponent(perms)}${tenantId ? `&tenantId=${encodeURIComponent(tenantId)}` : ''}`)
     return (res.body as { token?: string } | undefined)?.token ?? ''
   }
   const punch = (token: string, body: Record<string, unknown>) =>
@@ -130,6 +145,10 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
   const resolvedFixtureAssignmentB = randomUUID()
   const plainResolvedUser = randomUUID()
   const driftResolvedUser = randomUUID()
+  const httpContractOrg = randomUUID()
+  const httpContractUser = randomUUID()
+  const httpContractShift = randomUUID()
+  const httpContractAssignment = randomUUID()
 
   async function insertActiveUser(userId: string, orgId: string): Promise<void> {
     await pool.query(
@@ -142,6 +161,15 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
       `INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, true) ON CONFLICT DO NOTHING`,
       [userId, orgId],
     )
+    const defaultRule = await pool.query<{ id: string }>(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, $2, 'owned timezone fixture', $3, 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = $2 AND is_default = true)
+       RETURNING id`,
+      [randomUUID(), orgId, 'UTC'],
+    )
+    seededDefaultRuleIds.push(...defaultRule.rows.map(row => row.id))
   }
 
   /** Walk the guarded state machine's legal edges to a persisted `suspended` state. */
@@ -219,9 +247,15 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     if (!address || typeof address === 'string') throw new Error('server did not expose a TCP address')
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
+    await insertActiveUser(legacyLiveUser, 'default')
+    await insertActiveUser(settingsAdminUserId, settingsAdminOrg)
+    await pool.query(
+      `INSERT INTO user_roles (user_id, role_id) VALUES ($1, 'admin') ON CONFLICT DO NOTHING`,
+      [settingsAdminUserId],
+    )
     settingsRowSnapshot = await snapshotAttendanceSettingsRow(pool)
     // Throttle off for the replay leg (see module note); exact-restored in afterAll.
-    const adminToken = await mintToken(randomUUID(), 'attendance:read,attendance:write,attendance:admin')
+    const adminToken = await mintToken(settingsAdminUserId, 'attendance:read,attendance:write,attendance:admin', settingsAdminOrg)
     const putRes = await requestJson(`${baseUrl}/api/attendance/settings`, {
       method: 'PUT',
       headers: authHeaders(adminToken),
@@ -261,7 +295,9 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
       await restoreAttendanceSettingsRow(pool, settingsRowSnapshot).catch(() => undefined)
       resetAttendanceSettingsCacheAfterRestore()
     }
-    for (const userId of [legacyLiveUser, compatUser, suspendedLiveUser, controlLiveUser, scheduledLegacyUser, scheduledSuspendedUser, plainResolvedUser, driftResolvedUser]) {
+    await pool?.query('DELETE FROM attendance_shift_assignments WHERE id = $1', [httpContractAssignment]).catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_shifts WHERE id = $1', [httpContractShift]).catch(() => undefined)
+    for (const userId of [legacyLiveUser, compatUser, suspendedLiveUser, controlLiveUser, scheduledLegacyUser, scheduledSuspendedUser, plainResolvedUser, driftResolvedUser, httpContractUser]) {
       await pool?.query('DELETE FROM attendance_events WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM attendance_records WHERE user_id = $1', [userId]).catch(() => undefined)
       await pool?.query('DELETE FROM user_orgs WHERE user_id = $1', [userId]).catch(() => undefined)
@@ -269,6 +305,17 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     }
     // Rollout-state and operation rows are append-only/immutable by design (trigger-denied
     // DELETE); they are keyed by this file's throwaway UUIDs and cannot collide.
+    await pool?.query('DELETE FROM user_roles WHERE user_id = $1 AND role_id = $2', [settingsAdminUserId, 'admin']).catch(() => undefined)
+    await pool?.query('DELETE FROM user_orgs WHERE user_id = $1 AND org_id = $2', [settingsAdminUserId, settingsAdminOrg]).catch(() => undefined)
+    await pool?.query('DELETE FROM users WHERE id = $1', [settingsAdminUserId]).catch(() => undefined)
+    // Retain the existing unique owned default with any retained source history.
+    // Repeated suites reuse it through insertActiveUser's NOT EXISTS seed.
+    await pool?.query(`DELETE FROM attendance_rules r WHERE r.id=ANY($1::uuid[])
+      AND NOT EXISTS (SELECT 1 FROM attendance_shift_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+      AND NOT EXISTS (SELECT 1 FROM attendance_rotation_assignments a WHERE a.org_id=r.org_id AND a.is_active=true)
+      AND NOT EXISTS (SELECT 1 FROM attendance_timezone_context_companions c WHERE c.org_id=r.org_id)
+      AND NOT EXISTS (SELECT 1 FROM attendance_business_trip_arrangements b WHERE b.org_id=r.org_id AND b.effective_end_at>now())`,
+    [seededDefaultRuleIds])
     await pool?.end().catch(() => undefined)
     if (server) await server.stop()
   }, 60000)
@@ -302,6 +349,157 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect((await liveOperationRows('default')).length).toBe(opsBefore)
     expect(await calculationCountForUser(legacyLiveUser)).toBe(0)
     expect(await outboxCount('default')).toBe(outboxBefore)
+  })
+
+  it.each([
+    { label: 'default/null-id', orgId: 'default', stableId: false },
+    { label: 'custom/null-id', orgId: randomUUID(), stableId: false },
+    { label: 'default/stable-id', orgId: 'default', stableId: true },
+    { label: 'custom/stable-id', orgId: randomUUID(), stableId: true },
+  ] as const)('legacy text user keeps the real org and companion freeze ($label)', async ({ orgId, stableId }) => {
+    const userId = `w4c2-legacy-text-${randomUUID()}`
+    await insertActiveUser(userId, orgId)
+    const token = await mintToken(userId, 'attendance:write', orgId)
+    expect(token).not.toBe('')
+    const opsBefore = await liveOperationRows(orgId)
+    const outboxBefore = await outboxCount(orgId)
+    const firstId = stableId ? randomUUID() : null
+    const lastId = stableId ? randomUUID() : null
+    const firstBody = { orgId, eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z', ...(firstId ? { operationId: firstId } : {}) }
+    try {
+      const first = await punch(token, firstBody)
+      expect(first.status, first.raw).toBe(200)
+      expect(first.body.data).toMatchObject({ event: { org_id: orgId }, record: { org_id: orgId } })
+      assertLegacyPunchResponseGoldenShapeV1(first.body.data, {
+        userId, status: 'partial', workMinutes: 0, lateMinutes: 0,
+        firstInAt: first.body.data.event.occurred_at, lastOutAt: null,
+        workDateResolutionKind: 'unresolved', workDateResolutionReasonCode: 'UNSCHEDULED_NO_SHIFT',
+      })
+      const frozen = (await pool.query(
+        'SELECT * FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2', [orgId, userId],
+      )).rows
+      expect(frozen).toHaveLength(1)
+      expect(frozen[0]).toMatchObject({ org_id: orgId, user_id: userId, timezone: 'UTC' })
+      if (stableId) {
+        const sealed = await liveOperationRows(orgId)
+        expect(sealed.filter(row => row.operation_id === firstId)).toHaveLength(1)
+        expect(sealed.find(row => row.operation_id === firstId)).toMatchObject({
+          state: 'completed', accepted_write_posture: 'legacy_projection_only', resolved_calculation_id: null,
+        })
+        const replay = await punch(token, firstBody)
+        expect({ status: replay.status, body: replay.body }).toEqual({ status: first.status, body: first.body })
+        const conflict = await punch(token, { ...firstBody, meta: { note: 'different fixture frame' } })
+        expect(conflict.status, conflict.raw).toBe(409)
+        expect(conflict.body?.error?.code).toBe('ATTENDANCE_OPERATION_CONFLICT')
+        expect(await liveOperationRows(orgId)).toEqual(sealed)
+        expect(await eventCount(userId)).toBe(1)
+        expect(await recordCount(userId)).toBe(1)
+        expect((await pool.query(
+          'SELECT * FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2', [orgId, userId],
+        )).rows).toEqual(frozen)
+      }
+      const last = await punch(token, { orgId, eventType: 'check_out', occurredAt: '2026-07-20T02:00:00.000Z', ...(lastId ? { operationId: lastId } : {}) })
+      expect(last.status, last.raw).toBe(200)
+      expect(await eventCount(userId)).toBe(2)
+      expect(await recordCount(userId)).toBe(1)
+      expect((await pool.query(
+        'SELECT * FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2', [orgId, userId],
+      )).rows).toEqual(frozen)
+      expect((await pool.query(
+        'SELECT DISTINCT org_id FROM attendance_records WHERE user_id=$1', [userId],
+      )).rows).toEqual([{ org_id: orgId }])
+      const operations = await liveOperationRows(orgId)
+      const owned = operations.filter(row => row.operation_id === firstId || row.operation_id === lastId)
+      expect(owned).toHaveLength(stableId ? 2 : 0)
+      for (const row of owned) expect(row).toMatchObject({
+        state: 'completed', accepted_write_posture: 'legacy_projection_only', actor_id: userId, resolved_calculation_id: null,
+      })
+      expect(operations.filter(row => !owned.includes(row))).toEqual(opsBefore)
+      expect(await calculationCountForUser(userId)).toBe(0)
+      expect(await outboxCount(orgId)).toBe(outboxBefore)
+      await pool.query('UPDATE user_orgs SET is_active=false WHERE user_id=$1 AND org_id=$2', [userId, orgId])
+      const denied = await punch(token, { orgId, eventType: 'check_in', occurredAt: '2026-07-21T01:00:00.000Z' })
+      expect(denied.status, denied.raw).toBe(403)
+      expect(denied.body).toEqual({ ok: false, error: { code: 'ATTENDANCE_PUNCH_ORG_NOT_PERMITTED' } })
+      expect(await eventCount(userId)).toBe(2)
+      expect(await recordCount(userId)).toBe(1)
+      expect(await liveOperationRows(orgId)).toEqual(operations)
+      expect(await calculationCountForUser(userId)).toBe(0)
+      expect(await outboxCount(orgId)).toBe(outboxBefore)
+      expect((await pool.query(
+        'SELECT * FROM attendance_timezone_context_companions WHERE org_id=$1 AND user_id=$2', [orgId, userId],
+      )).rows).toEqual(frozen)
+    } finally {
+      // retainHistoryInIsolatedDatabase: companion and its record/events/operations
+      // are immutable paired evidence; only these owned identities are removable.
+      await pool.query('DELETE FROM user_orgs WHERE user_id=$1 AND org_id=$2', [userId, orgId])
+      await pool.query('DELETE FROM users WHERE id=$1', [userId])
+    }
+  })
+
+  it('W4 shadow text user still fails the strict target domain before business writes', async () => {
+    const orgId = randomUUID()
+    const userId = `w4c2-shadow-text-${randomUUID()}`
+    const priorAllowlist = process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+    await insertActiveUser(userId, orgId)
+    await insertLegacyRolloutRow(orgId)
+    await pool.query(`UPDATE attendance_calculation_rollout_state
+      SET state='shadow', prior_state='legacy', version=2 WHERE org_id=$1`, [orgId])
+    const snapshot = async () => {
+      const result: Record<string, unknown[]> = {}
+      for (const table of ['attendance_events', 'attendance_records', 'attendance_record_calculations',
+        'attendance_record_segments', 'attendance_result_operations', 'attendance_result_event_outbox',
+        'attendance_requests', 'attendance_timezone_context_companions']) {
+        result[table] = (await pool.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE org_id=$1 ORDER BY to_jsonb(t)::text`, [orgId])).rows
+      }
+      return result
+    }
+    try {
+      process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = orgId
+      const token = await mintToken(userId, 'attendance:write', orgId)
+      expect(token).not.toBe('')
+      const before = await snapshot()
+      expect(Object.values(before).every(rows => rows.length === 0)).toBe(true)
+      const result = await punch(token, { orgId, eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z', operationId: randomUUID() })
+      // Preserve the existing strict identity error mapping; this patch does not widen W4 users.
+      expect(result.status, result.raw).toBe(500)
+      expect(result.body).toEqual({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to punch attendance' } })
+      expect(await snapshot()).toEqual(before)
+    } finally {
+      if (priorAllowlist === undefined) delete process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED
+      else process.env.ATTENDANCE_SHIFT_SEGMENT_CALCULATION_ENABLED = priorAllowlist
+      await pool.query('DELETE FROM user_orgs WHERE user_id=$1 AND org_id=$2', [userId, orgId])
+      await pool.query('DELETE FROM users WHERE id=$1', [userId])
+    }
+  })
+
+  it('suspended org rejects a text-user null-ID command before any business writes', async () => {
+    const orgId = randomUUID()
+    const userId = `w4c2-suspended-text-${randomUUID()}`
+    await insertActiveUser(userId, orgId)
+    await walkRolloutToSuspended(orgId)
+    const token = await mintToken(userId, 'attendance:write', orgId)
+    expect(token).not.toBe('')
+    const snapshot = async () => {
+      const result: Record<string, unknown[]> = {}
+      for (const table of ['attendance_events', 'attendance_records', 'attendance_record_calculations',
+        'attendance_record_segments', 'attendance_result_operations', 'attendance_result_event_outbox',
+        'attendance_requests', 'attendance_timezone_context_companions']) {
+        result[table] = (await pool.query(`SELECT to_jsonb(t) AS row FROM ${table} t WHERE org_id=$1 ORDER BY to_jsonb(t)::text`, [orgId])).rows
+      }
+      return result
+    }
+    try {
+      const before = await snapshot()
+      expect(Object.values(before).every(rows => rows.length === 0)).toBe(true)
+      const result = await punch(token, { orgId, eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z' })
+      expect(result.status, result.raw).toBe(503)
+      expect(result.body).toEqual({ ok: false, error: { code: 'SEGMENT_CALCULATION_SUSPENDED', message: 'SEGMENT_CALCULATION_SUSPENDED' } })
+      expect(await snapshot()).toEqual(before)
+    } finally {
+      await pool.query('DELETE FROM user_orgs WHERE user_id=$1 AND org_id=$2', [userId, orgId])
+      await pool.query('DELETE FROM users WHERE id=$1', [userId])
+    }
   })
 
   it('P1-3 remediation declare-item: in-transaction legacy attribution re-derivation rejects an ambiguous shift match with a CLOSED 409 (not an unmapped 500)', async () => {
@@ -463,7 +661,7 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
 
   it('P1 remediation (#4612 gate2 finding, exact-head `ad5541027`): zero-concurrency client-tz != winning-shift-tz drift no longer byte-flips the legacy response or the frozen DB evidence', async () => {
     // Same published shift as the leg above (UTC 20:00-23:00, 2026-07-19),
-    // but the client explicitly sends `timezone: 'Asia/Tokyo'`. The route's
+    // but the legacy command explicitly carries `timezone: 'Asia/Tokyo'`. The historical route's
     // PRE-resolution timezone is 'Asia/Tokyo' (client input wins the route's
     // own resolvePunchWorkDateByShiftWindow call: `calendarWorkDate` =
     // toWorkDate(2026-07-19T22:00:00Z, 'Asia/Tokyo') = '2026-07-20'); the
@@ -476,7 +674,8 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     // route's own '2026-07-20' — a DIFFERENT resolver call, DIFFERENT
     // reasonCode (CURRENT_DAY_CONTAINING_SHIFT instead of
     // SINGLE_MATCHING_CANDIDATE), permanently frozen into DB evidence. This
-    // leg pins the CORRECT (route-equivalent) values.
+    // leg pins the CORRECT legacy boundary values; HTTP now rejects this drift
+    // before the boundary, as the separate HTTP contract test proves.
     //
     // #4612 gate3 P2-2 remediation: same rationale as the leg above — a
     // check_out closes the day so `rule: resolvedShift` (shift, late_grace=0)
@@ -486,36 +685,109 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     // of the client's tz-drift input — `nextTimezone` always persists the
     // WINNING SHIFT's own rule timezone ('UTC'), so the same check-in/out
     // instants produce the same late/work/status numbers here.
-    const token = await mintToken(driftResolvedUser, 'attendance:write')
-    const checkin = await punch(token, {
+    const driver = createLegacyLivePunchBoundaryDriver(pool)
+    const checkin = await driver.execute(await driver.prepare({
+      userId: driftResolvedUser,
       eventType: 'check_in',
       occurredAt: '2026-07-19T20:06:00.000Z',
       timezone: 'Asia/Tokyo',
       orgId: resolvedFixtureOrg,
-    })
-    expect(checkin.status).toBe(200)
-    expect(checkin.body?.ok).toBe(true)
-    const res = await punch(token, {
+    }))
+    expect(checkin.kind).toBe('legacy')
+    const checkinData = JSON.parse(JSON.stringify(checkin.response))
+    const res = await driver.execute(await driver.prepare({
+      userId: driftResolvedUser,
       eventType: 'check_out',
       occurredAt: '2026-07-19T23:00:00.000Z',
       timezone: 'Asia/Tokyo',
       orgId: resolvedFixtureOrg,
-    })
-    expect(res.status).toBe(200)
-    expect(res.body?.ok).toBe(true)
-    assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
+    }))
+    expect(res.kind).toBe('legacy')
+    const data = JSON.parse(JSON.stringify(res.response))
+    assertLegacyPunchResponseGoldenShapeResolvedV1(data, {
       userId: driftResolvedUser,
       status: 'late',
       workMinutes: 170,
       lateMinutes: 6,
-      firstInAt: checkin.body.data.event.occurred_at,
-      lastOutAt: res.body.data.event.occurred_at,
+      firstInAt: checkinData.event.occurred_at,
+      lastOutAt: data.event.occurred_at,
       calendarWorkDate: '2026-07-20',
       reasonCode: 'SINGLE_MATCHING_CANDIDATE',
       shiftId: resolvedFixtureShift,
       resolvedWorkDate: '2026-07-19',
       matchingCount: 1,
     })
+    const persisted = await pool.query('SELECT meta FROM attendance_records WHERE user_id = $1 AND org_id = $2', [driftResolvedUser, resolvedFixtureOrg])
+    expect(persisted.rows).toHaveLength(1)
+    expect(persisted.rows[0].meta.workDateAttributionV1).toEqual(data.record.meta.workDateAttributionV1)
+    expect(await eventCount(driftResolvedUser)).toBe(2)
+    expect(await recordCount(driftResolvedUser)).toBe(1)
+  })
+
+  it('HTTP timezone authority: Tokyo conflicts with default UTC with seven-table zero writes; same-subject UTC succeeds', async () => {
+    await insertActiveUser(httpContractUser, httpContractOrg)
+    await insertLegacyRolloutRow(httpContractOrg)
+    await pool.query(
+      `INSERT INTO attendance_shifts
+         (id, org_id, name, timezone, work_start_time, work_end_time, is_overnight, working_days, late_grace_minutes, early_grace_minutes)
+       VALUES ($1, $2, 'W4C2-HTTP-UTC', 'UTC', '20:00', '23:00', false, '[0,1,2,3,4,5,6]'::jsonb, 0, 0)`,
+      [httpContractShift, httpContractOrg],
+    )
+    await pool.query(
+      `INSERT INTO attendance_shift_assignments
+         (id, org_id, user_id, shift_id, start_date, end_date, is_active, publish_status, slot_index)
+       VALUES ($1, $2, $3, $4, '2026-07-19', '2026-07-19', true, 'published', 1)`,
+      [httpContractAssignment, httpContractOrg, httpContractUser, httpContractShift],
+    )
+    const counts = async () => (await pool.query(`SELECT
+      (SELECT count(*)::int FROM attendance_events WHERE org_id=$1) AS events,
+      (SELECT count(*)::int FROM attendance_records WHERE org_id=$1) AS records,
+      (SELECT count(*)::int FROM attendance_result_operations WHERE org_id=$1) AS operations,
+      (SELECT count(*)::int FROM attendance_record_calculations WHERE org_id=$1) AS calculations,
+      (SELECT count(*)::int FROM attendance_record_segments s JOIN attendance_record_calculations c ON c.id=s.calculation_id WHERE c.org_id=$1) AS segments,
+      (SELECT count(*)::int FROM attendance_result_event_outbox WHERE org_id=$1) AS outbox,
+      (SELECT count(*)::int FROM attendance_timezone_context_companions WHERE org_id=$1) AS companions`, [httpContractOrg])).rows[0]
+    const zero = { events: 0, records: 0, operations: 0, calculations: 0, segments: 0, outbox: 0, companions: 0 }
+    const token = await mintToken(httpContractUser, 'attendance:write', httpContractOrg)
+    const body = {
+      eventType: 'check_in', occurredAt: '2026-07-19T20:06:00.000Z',
+      timezone: 'Asia/Tokyo', orgId: httpContractOrg, operationId: randomUUID(),
+    }
+    expect(await counts()).toEqual(zero)
+    const conflict = await punch(token, body)
+    expect(conflict.status, conflict.raw).toBe(409)
+    expect(conflict.body).toEqual({
+      ok: false,
+      error: { code: 'ATTENDANCE_TIMEZONE_CLIENT_ZONE_CONFLICT', message: 'ATTENDANCE_TIMEZONE_CLIENT_ZONE_CONFLICT' },
+    })
+    expect(await counts()).toEqual(zero)
+
+    const checkin = await punch(token, { ...body, timezone: 'UTC' })
+    expect(checkin.status, checkin.raw).toBe(200)
+    expect(checkin.body?.ok).toBe(true)
+    const res = await punch(token, {
+      ...body, eventType: 'check_out', occurredAt: '2026-07-19T23:00:00.000Z',
+      timezone: 'UTC', operationId: randomUUID(),
+    })
+    expect(res.status, res.raw).toBe(200)
+    expect(res.body?.ok).toBe(true)
+    assertLegacyPunchResponseGoldenShapeResolvedV1(res.body.data, {
+      userId: httpContractUser,
+      status: 'late',
+      workMinutes: 170,
+      lateMinutes: 6,
+      firstInAt: checkin.body.data.event.occurred_at,
+      lastOutAt: res.body.data.event.occurred_at,
+      calendarWorkDate: '2026-07-19',
+      reasonCode: 'CURRENT_DAY_CONTAINING_SHIFT',
+      shiftId: httpContractShift,
+      resolvedWorkDate: '2026-07-19',
+      matchingCount: 1,
+    })
+    expect(await eventCount(httpContractUser)).toBe(2)
+    expect(await recordCount(httpContractUser)).toBe(1)
+    expect(await calculationCountForUser(httpContractUser)).toBe(0)
+    expect(await outboxCount(httpContractOrg)).toBe(0)
   })
 
   it('stable-ID legacy_compat: claim+seal, congruent replay returns stored response with zero new DML, incongruent same key is 409', async () => {
@@ -549,8 +821,11 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(replay.body).toEqual(first.body)
     expect(await eventCount(compatUser)).toBe(1)
 
-    // Same key, different business time: closed 409 conflict, still zero new DML.
-    const conflict = await punch(token, { ...body, occurredAt: '2026-07-20T03:00:00.000Z' })
+    // Advancing only the server clock replays the first sealed receipt exactly.
+    const laterReplay = await punch(token, { ...body, occurredAt: '2026-07-21T03:00:00.000Z' })
+    expect(laterReplay).toEqual(first)
+    // A real client business-frame change still conflicts with zero new DML.
+    const conflict = await punch(token, { ...body, meta: { note: 'changed client business frame' } })
     expect(conflict.status).toBe(409)
     expect(conflict.body?.error?.code).toBe('ATTENDANCE_OPERATION_CONFLICT')
     expect(await eventCount(compatUser)).toBe(1)
@@ -595,6 +870,77 @@ describeDb('W4C-2 canonical live/scheduled boundary wiring (real DB, route-level
     expect(probe!.getState()).toEqual({ gated: false })
     await expect(probe!.runOnce()).rejects.toThrow('W4_OUTBOX_DRAIN_NOT_GATED')
   })
+
+  it('legacy live write waits on the real org runtime lock before companion creation', async () => {
+    const orgId = randomUUID()
+    const readerUser = randomUUID()
+    const writerUser = `w4c2-lock-text-${randomUUID()}`
+    await insertActiveUser(readerUser, orgId)
+    await insertActiveUser(writerUser, orgId)
+    const token = await mintToken(writerUser, 'attendance:write', orgId)
+    expect(token).not.toBe('')
+    const holder = await pool.connect()
+    let transactionOpen = false
+    let pending: Promise<{ response?: HttpResponse; error?: unknown }> | undefined
+    let settled = false
+    try {
+      await holder.query('BEGIN')
+      transactionOpen = true
+      // Different subjects exclude per-user locks; the HTTP route's shared pre-read can pass.
+      await acquireAttendanceTimezoneRuntimeLocksV1(holder, { orgId, userId: readerUser, mode: 'shared' })
+      pending = punch(token, { orgId, eventType: 'check_in', occurredAt: '2026-07-20T01:00:00.000Z' })
+        .then(response => { settled = true; return { response } }, error => { settled = true; return { error } })
+      type Waiter = { mode: string; granted: boolean; blocked_by_holder: boolean }
+      let waiters: Waiter[] = []
+      const deadline = Date.now() + 10_000
+      do {
+        const observed = await holder.query<Waiter>(`SELECT waiting.mode, waiting.granted,
+          held.pid=ANY(pg_blocking_pids(waiting.pid)) AS blocked_by_holder
+          FROM pg_locks held JOIN pg_locks waiting
+            ON waiting.locktype=held.locktype AND waiting.database=held.database
+            AND waiting.classid=held.classid AND waiting.objid=held.objid AND waiting.objsubid=held.objsubid
+          WHERE held.locktype='advisory' AND held.pid=pg_backend_pid()
+            AND held.mode='ShareLock' AND held.granted
+            AND held.classid=((hashtextextended($1,0) >> 32) & 4294967295)::oid
+            AND held.objid=(hashtextextended($1,0) & 4294967295)::oid AND held.objsubid=1
+            AND waiting.pid<>held.pid AND NOT waiting.granted`,
+        [buildAttendanceTimezoneRuntimeOrgLockKeyV1(orgId)])
+        waiters = observed.rows
+        if (waiters.length || settled) break
+        await new Promise(resolve => setTimeout(resolve, 25))
+      } while (Date.now() < deadline)
+      expect(waiters, 'LEGACY_RUNTIME_EXCLUSIVE_WAIT_REQUIRED').toEqual([
+        { mode: 'ExclusiveLock', granted: false, blocked_by_holder: true },
+      ])
+      expect(settled).toBe(false)
+      const before = await holder.query(`SELECT
+        (SELECT count(*)::int FROM attendance_events WHERE org_id=$1) AS events,
+        (SELECT count(*)::int FROM attendance_records WHERE org_id=$1) AS records,
+        (SELECT count(*)::int FROM attendance_timezone_context_companions WHERE org_id=$1) AS companions`, [orgId])
+      expect(before.rows).toEqual([{ events: 0, records: 0, companions: 0 }])
+      await holder.query('COMMIT')
+      transactionOpen = false
+      const outcome = await pending
+      if (outcome.error) throw outcome.error
+      expect(outcome.response?.status, outcome.response?.raw).toBe(200)
+      expect(await eventCount(writerUser)).toBe(1)
+      expect(await recordCount(writerUser)).toBe(1)
+      expect(await liveOperationRows(orgId)).toEqual([])
+      expect(await calculationCountForUser(writerUser)).toBe(0)
+      expect(await outboxCount(orgId)).toBe(0)
+      const paired = await holder.query(`SELECT c.org_id,c.user_id,c.timezone,r.org_id AS record_org_id
+        FROM attendance_timezone_context_companions c JOIN attendance_records r ON r.id=c.record_id AND r.org_id=c.org_id
+        WHERE c.org_id=$1 AND c.user_id=$2`, [orgId, writerUser])
+      expect(paired.rows).toEqual([{ org_id: orgId, user_id: writerUser, timezone: 'UTC', record_org_id: orgId }])
+    } finally {
+      try { if (transactionOpen) await holder.query('ROLLBACK') } finally { holder.release() }
+      // Drain the real request after releasing the blocker, including mutation/failure paths.
+      if (pending) await pending
+      // Keep the immutable record/events/companion evidence and its owned default in this isolated DB.
+      await pool.query('DELETE FROM user_orgs WHERE org_id=$1 AND user_id=ANY($2::text[])', [orgId, [readerUser, writerUser]])
+      await pool.query('DELETE FROM users WHERE id=ANY($1::text[])', [[readerUser, writerUser]])
+    }
+  }, 30000)
 
   it('suspended rollout org: administrator absence run reports the closed suspended outcome and inserts NO absent row (positive control: legacy-state org generates)', async () => {
     // POSITIVE CONTROL: same fixture shape over a legacy-state rollout org generates one row.
