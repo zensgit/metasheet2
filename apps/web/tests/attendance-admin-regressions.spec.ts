@@ -7596,6 +7596,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -7615,11 +7616,47 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('.attendance__form-actions [data-attendance-comprehensive-hours-preview-run]')).toBeTruthy()
     expect(section!.querySelector('.attendance__admin-grid [data-attendance-comprehensive-hours-save-block-mode]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-save-block-mode]')?.textContent).toContain('Save-time strong control')
-    expect(section!.querySelector('#attendance-comprehensive-hours-user-id')).toBeTruthy()
+    const nameInput = section!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-user-id')
+    expect(nameInput).toBeTruthy()
+    expect(nameInput?.getAttribute('placeholder')).toContain('Type a name')
+    expect(nameInput?.closest('.attendance__field')?.textContent).toContain('Employee name')
+    expect(nameInput?.closest('.attendance__user-picker')?.classList.contains('attendance__user-picker--typeahead')).toBe(true)
     expect(section!.textContent).not.toContain('User ID')
 
-    selectUserPicker(section!, '#attendance-comprehensive-hours-user-id', 'user-1')
+    const previousFetch = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'user-1',
+              name: '张三',
+              email: 'zhang@example.com',
+              role: 'user',
+              is_active: true,
+              is_admin: false,
+              last_login_at: null,
+              created_at: '',
+            }],
+          },
+        })
+      }
+      if (previousFetch) return previousFetch(input, init)
+      return emptyAttendanceResponse()
+    })
+    nameInput!.value = '张三'
+    nameInput!.dispatchEvent(new Event('input'))
+    nameInput!.closest('.attendance__field')!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')!.click()
+    await flushUi(4)
+    const nameSelect = nameInput!.closest('.attendance__field')!.querySelector<HTMLSelectElement>('select')
+    expect(nameSelect).toBeTruthy()
+    nameSelect!.value = 'user-1'
+    nameSelect!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
+    expect(nameInput!.value).toContain('张三')
+    expect(nameInput!.value).not.toContain('user-1')
 
     const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
     expect(runButton).toBeTruthy()

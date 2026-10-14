@@ -8534,13 +8534,14 @@
                   v-model="comprehensiveHoursPreviewForm.userId"
                   :tr="tr"
                   typeahead
-                  :label="tr('Employee', '员工')"
+                  :label="tr('Employee name', '员工姓名')"
                   name="comprehensiveHoursUserId"
                   input-id="attendance-comprehensive-hours-user-id"
                   endpoint="/api/attendance-admin/users/search"
                   :org-id="orgId"
                   :global-scope="attendanceAdminGlobalUserScope"
-                  :search-placeholder="tr('Name or email', '姓名或邮箱')"
+                  :search-placeholder="tr('Type a name', '输入姓名')"
+                  :help-text="tr('Type a name. Matches appear as you type.', '输入姓名，输入时自动匹配。')"
                   @update:display-name="comprehensiveHoursPreviewUserLabel = $event"
                 />
                 <label
@@ -8777,11 +8778,8 @@
                   <tbody>
                     <tr v-for="row in comprehensiveHoursPreviewRows" :key="row.userId">
                       <td>
-                        <strong>{{ comprehensiveHoursRowPrimaryLabel(row.userId) }}</strong>
-                        <span
-                          v-if="comprehensiveHoursRowPrimaryLabel(row.userId) !== row.userId"
-                          class="attendance__id-clip"
-                        >{{ row.userId }}</span>
+                        <strong>{{ comprehensiveHoursRowPrimaryLabel(row.userId) || tr('Employee', '员工') }}</strong>
+                        <span class="attendance__id-clip">{{ row.userId }}</span>
                         <div v-if="row.days !== undefined" class="attendance__field-hint">
                           {{ tr(`${row.workingDays ?? 0}/${row.days ?? 0} working days`, `${row.workingDays ?? 0}/${row.days ?? 0} 个工作日`) }}
                         </div>
@@ -17472,6 +17470,7 @@ const comprehensiveHoursPreviewForm = reactive({
   enforcement: 'warn' as AttendanceComprehensiveHoursEnforcement,
 })
 const comprehensiveHoursPreviewUserLabel = ref('')
+const comprehensiveHoursPreviewNames = ref<Record<string, string>>({})
 
 function comprehensiveHoursUserIds(): string[] {
   if (comprehensiveHoursPreviewForm.userMode === 'multiple') {
@@ -17560,10 +17559,41 @@ const comprehensiveHoursPreviewVisibleAggregateItems = computed(() =>
 )
 
 function comprehensiveHoursRowPrimaryLabel(userId: string): string {
-  const label = comprehensiveHoursPreviewUserLabel.value.trim()
+  const picked = comprehensiveHoursPreviewUserLabel.value.trim()
   const selectedId = comprehensiveHoursPreviewForm.userId.trim()
-  if (label && selectedId && userId === selectedId && label !== selectedId) return label
-  return userId
+  if (picked && selectedId && userId === selectedId && picked !== userId) return picked
+  const resolved = comprehensiveHoursPreviewNames.value[userId]?.trim() || ''
+  if (resolved && resolved !== userId) return resolved
+  return ''
+}
+
+async function resolveComprehensiveHoursPreviewNames(userIds: string[]): Promise<void> {
+  const ids = Array.from(new Set(userIds.map(id => id.trim()).filter(Boolean)))
+  const scope = attendanceTeamAvailabilityUserScope.value
+  if (!scope || ids.length === 0) return
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: ids, ...scope }),
+    })
+    if (!response.ok) return
+    const payload = await response.json().catch(() => null)
+    if (!payload?.ok) return
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const next: Record<string, string> = { ...comprehensiveHoursPreviewNames.value }
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = String((raw as { id?: string }).id || '').trim()
+      if (!id) continue
+      const name = (raw as { name?: unknown }).name == null ? '' : String((raw as { name?: unknown }).name).trim()
+      const email = String((raw as { email?: unknown }).email || '').trim()
+      const label = name || (email && email !== id ? email : '')
+      if (label) next[id] = label
+    }
+    comprehensiveHoursPreviewNames.value = next
+  } catch {
+    // A failed lookup leaves the preview in place. The raw id stays out of the name cell.
+  }
 }
 
 function toDateKey(date: Date): string {
@@ -27780,6 +27810,9 @@ async function previewComprehensiveHours() {
     }
     adminForbidden.value = false
     comprehensiveHoursPreview.value = data.data ?? null
+    void resolveComprehensiveHoursPreviewNames(
+      (data.data?.rows ?? []).map((row: { userId?: string }) => String(row.userId || '')),
+    )
     comprehensiveHoursPreviewStatus.value = {
       kind: data.data?.degraded ? 'warn' : 'info',
       message: data.data?.degraded
@@ -34920,6 +34953,21 @@ defineExpose({
   border-color: var(--ms-color-primary);
   background: var(--ms-color-primary);
   color: var(--ms-bg-card);
+}
+
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead select),
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead .attendance__user-picker-controls button) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  white-space: nowrap;
 }
 
 .attendance__form-sheet .attendance__btn--danger,

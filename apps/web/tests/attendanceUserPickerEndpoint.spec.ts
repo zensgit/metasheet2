@@ -32,6 +32,7 @@ const EXPECTED_MOUNTED_PICKER_IDS = [
   'attendance-group-manager-user-picker',
   'attendance-annual-balance-user',
   'attendance-annual-bulk-adjust-user-picker',
+  'attendance-comprehensive-hours-user-id',
   'attendance-rotation-user',
   'attendance-assignment-user-id',
   'attendance-bulk-apply-user-picker',
@@ -425,7 +426,7 @@ describe('attendance user pickers — the endpoint is stated at every usage', ()
   it('finds every picker usage in the source tree', () => {
     // Domain floor pinned to the current count: adding a picker is a deliberate act, and this
     // number changing is the signal that the leg below has a new case to cover.
-    expect(usages.length).toBe(13)
+    expect(usages.length).toBe(14)
   })
 
   it('every usage passes the attendance-scoped user-search endpoint', () => {
