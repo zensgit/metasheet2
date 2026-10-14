@@ -1,4 +1,10 @@
 const crypto = require('crypto')
+const {
+  isCanonicalImportUserId,
+  importUserIdentifierLookupKey,
+  adoptCanonicalImportUserId,
+  loadAttendanceImportUserIdentifierIndex,
+} = require('./lib/attendance-import-user-identity.cjs')
 const {validateAttendanceRelatedAbsoluteInstantsV1,validateAttendanceLeaveTargetRangeV1} = require('./lib/attendance-timezone-request-instants.cjs')
 const { randomUUID } = crypto
 const fs = require('fs')
@@ -8202,167 +8208,6 @@ function collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceField
     values.push({ field: key, value: normalized })
   }
   return values
-}
-
-// W4 commit accepts only a canonical 8-4-4-4-12 user id. Preview used to treat any
-// non-empty UserId cell (including an email) as already resolved, then commit threw
-// W4C0_USER_ID_INVALID and the route answered HTTP 500. Both paths now share this check.
-const CANONICAL_IMPORT_USER_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
-
-function isCanonicalImportUserId(value) {
-  return typeof value === 'string' && value.length === 36 && CANONICAL_IMPORT_USER_ID_RE.test(value)
-}
-
-function importUserIdentifierLookupKey(value) {
-  const trimmed = String(value ?? '').trim()
-  if (!trimmed) return ''
-  try {
-    return trimmed.normalize('NFKC').toLowerCase()
-  } catch (_error) {
-    return trimmed.toLowerCase()
-  }
-}
-
-function importUserMobileMatchKeys(value) {
-  const compact = String(value ?? '').replace(/[\s\-()]/g, '')
-  if (!/^\+?\d{7,15}$/.test(compact)) return []
-  const keys = new Set([compact])
-  if (compact.startsWith('+')) keys.add(compact.slice(1))
-  if (compact.startsWith('+86') && compact.length > 3) keys.add(compact.slice(3))
-  if (/^1\d{10}$/.test(compact)) keys.add(`+86${compact}`)
-  return Array.from(keys)
-}
-
-function classifyImportUserIdentifier(raw, users) {
-  const trimmed = String(raw ?? '').trim()
-  const key = importUserIdentifierLookupKey(trimmed)
-  const list = Array.isArray(users) ? users : []
-  const exact = list.filter((user) => user && String(user.id) === trimmed)
-  if (exact.length > 1) return { ambiguous: true }
-  if (exact.length === 1) {
-    const id = String(exact[0].id)
-    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
-  }
-  const emailMatches = list.filter((user) => (
-    typeof user?.email === 'string' && importUserIdentifierLookupKey(user.email) === key
-  ))
-  if (emailMatches.length > 1) return { ambiguous: true }
-  if (emailMatches.length === 1) {
-    const id = String(emailMatches[0].id)
-    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
-  }
-  const usernameMatches = list.filter((user) => (
-    typeof user?.username === 'string' && user.username.trim() && importUserIdentifierLookupKey(user.username) === key
-  ))
-  if (usernameMatches.length > 1) return { ambiguous: true }
-  if (usernameMatches.length === 1) {
-    const id = String(usernameMatches[0].id)
-    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
-  }
-  const wantedMobile = new Set(importUserMobileMatchKeys(trimmed))
-  if (wantedMobile.size > 0) {
-    const mobileMatches = list.filter((user) => {
-      const keys = importUserMobileMatchKeys(user?.mobile)
-      return keys.some((mobileKey) => wantedMobile.has(mobileKey))
-    })
-    if (mobileMatches.length > 1) return { ambiguous: true }
-    if (mobileMatches.length === 1) {
-      const id = String(mobileMatches[0].id)
-      return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
-    }
-  }
-  return { missing: true }
-}
-
-function adoptCanonicalImportUserId(rawUserId, index) {
-  if (!rawUserId) return { userId: null, warning: null }
-  const raw = String(rawUserId).trim()
-  if (!raw) return { userId: null, warning: null }
-  if (isCanonicalImportUserId(raw)) return { userId: raw.toLowerCase(), warning: null }
-  const entry = index instanceof Map ? index.get(importUserIdentifierLookupKey(raw)) : null
-  if (entry?.userId && isCanonicalImportUserId(entry.userId)) {
-    return { userId: entry.userId.toLowerCase(), warning: null }
-  }
-  if (entry?.ambiguous) {
-    return {
-      userId: null,
-      warning: `Unresolved user identifier (${raw}); more than one user in this organization matches`,
-    }
-  }
-  if (entry?.nonCanonical) {
-    return {
-      userId: null,
-      warning: `Unresolved user identifier (${raw}); the matched account id is not a canonical user id`,
-    }
-  }
-  return {
-    userId: null,
-    warning: `Unresolved user identifier (${raw}); use a user id, or an email, username, or mobile that matches one user in this organization`,
-  }
-}
-
-async function queryAttendanceImportIdentifierUsers(db, orgId, unique, lowerKeys, mobileKeys) {
-  try {
-    return await db.query(
-      `SELECT u.id::text AS id, u.email, u.username, u.mobile
-         FROM users u
-         JOIN user_orgs uo ON uo.user_id = u.id
-        WHERE uo.org_id = $1
-          AND COALESCE(uo.is_active, true) = true
-          AND COALESCE(u.is_active, true) = true
-          AND (
-            u.id = ANY($2::text[])
-            OR lower(COALESCE(u.email, '')) = ANY($3::text[])
-            OR lower(COALESCE(u.username, '')) = ANY($3::text[])
-            OR regexp_replace(COALESCE(u.mobile, ''), '[\\s\\-()]+', '', 'g') = ANY($4::text[])
-          )`,
-      [orgId, unique, lowerKeys, mobileKeys]
-    )
-  } catch (error) {
-    if (!isDatabaseSchemaError(error)) throw error
-  }
-  // Older schemas may lack username/mobile/is_active. Email + id still resolve.
-  try {
-    return await db.query(
-      `SELECT u.id::text AS id, u.email, NULL::text AS username, NULL::text AS mobile
-         FROM users u
-         JOIN user_orgs uo ON uo.user_id = u.id
-        WHERE uo.org_id = $1
-          AND (
-            u.id = ANY($2::text[])
-            OR lower(COALESCE(u.email, '')) = ANY($3::text[])
-          )`,
-      [orgId, unique, lowerKeys]
-    )
-  } catch (error) {
-    if (!isDatabaseSchemaError(error)) throw error
-    return []
-  }
-}
-
-async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers) {
-  const index = new Map()
-  const unique = []
-  const seen = new Set()
-  for (const raw of Array.isArray(rawIdentifiers) ? rawIdentifiers : []) {
-    const trimmed = String(raw ?? '').trim()
-    if (!trimmed || isCanonicalImportUserId(trimmed)) continue
-    const key = importUserIdentifierLookupKey(trimmed)
-    if (!key || seen.has(key)) continue
-    seen.add(key)
-    unique.push(trimmed)
-  }
-  if (!unique.length || !db || typeof db.query !== 'function') return index
-
-  const lowerKeys = unique.map((value) => importUserIdentifierLookupKey(value))
-  const mobileKeys = Array.from(new Set(unique.flatMap((value) => importUserMobileMatchKeys(value))))
-  const rows = await queryAttendanceImportIdentifierUsers(db, orgId, unique, lowerKeys, mobileKeys)
-  const users = Array.isArray(rows) ? rows : []
-
-  for (const raw of unique) {
-    index.set(importUserIdentifierLookupKey(raw), classifyImportUserIdentifier(raw, users))
-  }
-  return index
 }
 
 async function loadImportUserIdentifierIndexForIterator(db, orgId, iterateRows, options) {
@@ -27025,18 +26870,19 @@ module.exports = {
       }
     }
 
-    function resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId) {
+    function resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId, userIdentifierIndex) {
       const targets = new Map()
       for (const row of Array.isArray(rows) ? rows : []) {
-        const userId = resolveRowUserId({
-          row,
+        const { userId } = resolveImportRowUserReference(row, {
           fallbackUserId,
+          userIdentifierIndex,
           userMap: payload?.userMap,
           userMapKeyField: payload?.userMapKeyField,
           userMapSourceFields: payload?.userMapSourceFields,
         })
         const workDate = normalizeDateOnly(row?.workDate) ?? row?.workDate
-        if (!userId || !workDate) continue
+        if (!userId) return []
+        if (!workDate) continue
         targets.set(`${userId}:${workDate}`, { userId, workDate })
       }
       return Array.from(targets.values())
@@ -27045,13 +26891,25 @@ module.exports = {
     async function assertAttendanceImportRowsAllowed(req, res, { orgId, rows, payload, fallbackUserId, actorAccess, operation }) {
       const access = actorAccess ?? await resolveAttendanceImportActor(req, res)
       if (!access) return null
-      if (access.fullImport) return access
 
       try {
+        const userIdentifierIndex = await loadAttendanceImportUserIdentifierIndex(
+          db,
+          orgId,
+          (Array.isArray(rows) ? rows : []).map(row => resolveRowUserId({
+            row,
+            fallbackUserId,
+            userMap: payload?.userMap,
+            userMapKeyField: payload?.userMapKeyField,
+            userMapSourceFields: payload?.userMapSourceFields,
+          })),
+        )
+        const resolvedAccess = { ...access, userIdentifierIndex }
+        if (access.fullImport) return resolvedAccess
         const actorContext = await loadAttendanceScopeContextForUser(db, orgId, access.userId)
         const scopes = (await loadActiveAttendanceSchedulerScopesForActor(orgId, actorContext))
           .filter(scope => normalizeStringArray(scope.actions).includes('import'))
-        const targets = resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId)
+        const targets = resolveAttendanceImportScopeTargets(rows, payload, fallbackUserId, userIdentifierIndex)
         let allowed = targets.length > 0
         for (const target of targets) {
           const facts = await resolveAttendanceUserSchedulerScopeFacts(db, orgId, target.userId, { workDate: target.workDate })
@@ -27067,7 +26925,7 @@ module.exports = {
           respondAttendanceSchedulerScopeForbidden(res)
           return null
         }
-        return access
+        return resolvedAccess
       } catch (error) {
         if (isDatabaseSchemaError(error)) {
           res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
@@ -28233,7 +28091,6 @@ module.exports = {
 	    const resolveImportRows = async ({ payload, orgId, fallbackUserId }) => {
 	      let csvWarnings = []
 	      let csvFileId = null
-		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      const resolvedCsvFileId = resolveImportUploadFileId(payload)
 		      if (resolvedCsvFileId) {
 		        csvFileId = resolvedCsvFileId
@@ -28243,6 +28100,7 @@ module.exports = {
 		        csvWarnings = result.warnings
 		        return { rows: result.rows, csvWarnings, csvFileId }
 		      }
+		      if (Array.isArray(payload.rows)) return { rows: payload.rows, csvWarnings, csvFileId }
 		      if (typeof payload.csvText === 'string' && payload.csvText.length > 0) {
 		        const result = buildRowsFromCsv({ csvText: payload.csvText, csvOptions: payload.csvOptions })
 		        ensureCsvRowsWithinLimit(result)
@@ -28662,15 +28520,15 @@ module.exports = {
 		    }
 
 		    const estimateImportPayloadRowCount = async ({ payload, orgId }) => {
-		      if (Array.isArray(payload?.rows)) return payload.rows.length
-		      if (Array.isArray(payload?.entries)) return payload.entries.length
 		      const csvFileId = resolveImportUploadFileId(payload)
 		      if (csvFileId) {
 		        const meta = await loadImportUploadMetaOrThrow({ orgId, fileId: csvFileId })
 		        const hint = Number(meta?.rowCount ?? 0)
 		        return Number.isFinite(hint) && hint > 0 ? hint : 0
 		      }
-		      if (typeof payload?.csvText === 'string') return estimateCsvRowCount(payload.csvText)
+		      if (Array.isArray(payload?.rows)) return payload.rows.length
+		      if (typeof payload?.csvText === 'string' && payload.csvText.length > 0) return estimateCsvRowCount(payload.csvText)
+		      if (Array.isArray(payload?.entries)) return payload.entries.length
 		      return 0
 		    }
 
@@ -29281,7 +29139,7 @@ module.exports = {
 	    // Shared background commit implementation. Intentionally mirrors the sync commit logic but:
 	    // - uses a stable batchId (job.batch_id)
 	    // - does NOT consume commit tokens (token is consumed when the job is enqueued)
-			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false }) => {
+			    const commitAttendanceImportPayload = async ({ payload, orgId, requesterId, batchId, idempotencyKey, onProgress, prepareOnly = false, integrationId = null, transactionClient = null, deferUploadCleanup = false, resolvedUserIdentifierIndex }) => {
 		      const cleanIdempotency = typeof idempotencyKey === 'string' ? idempotencyKey.trim() : ''
 		      const trustedIntegrationId = normalizeUuidString(integrationId)
 		      const commitStartedAtMs = Date.now()
@@ -29340,7 +29198,7 @@ module.exports = {
 	        userMapKeyField: payload.userMapKeyField,
 	        userMapSourceFields: payload.userMapSourceFields,
 	      }
-	      const userIdentifierIndex = await loadImportUserIdentifierIndexForIterator(
+	      const userIdentifierIndex = resolvedUserIdentifierIndex ?? await loadImportUserIdentifierIndexForIterator(
 	        db,
 	        orgId,
 	        (onRow) => rowSource.iterateRows(onRow),
@@ -43422,11 +43280,7 @@ module.exports = {
             userMapKeyField: parsed.data.userMapKeyField,
             userMapSourceFields: parsed.data.userMapSourceFields,
           }
-          const previewUserIndex = await loadAttendanceImportUserIdentifierIndex(
-            db,
-            orgId,
-            rows.map((row) => resolveRowUserId({ row, ...previewUserOptions })),
-          )
+          const previewUserIndex = scopedAccess.userIdentifierIndex
           for (const row of rows) {
             const shouldRender = previewLimit == null || preview.length < previewLimit
             const workDate = row.workDate
@@ -44009,6 +43863,7 @@ module.exports = {
 	            batchId,
 	            idempotencyKey,
 	            prepareOnly: true,
+	            resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
 	          })
 	          // Pass the prepared plan through unchanged. Do not re-fingerprint
 	          // attribution/policy leaves here — core freeze authority is separate.
@@ -44667,6 +44522,7 @@ module.exports = {
 	          // The legacy route never exposed or honored idempotency semantics.
 	          idempotencyKey: null,
 	          prepareOnly: true,
+	          resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
 	        })
 	        const commitResult = await syncImportPort.commitSyncImportPlan({
 	          ...preparedPlan,
@@ -45160,6 +45016,7 @@ module.exports = {
                   batchId: newBatchId,
                   idempotencyKey: null,
                   prepareOnly: true,
+                  resolvedUserIdentifierIndex: scopedAccess.userIdentifierIndex,
                   integrationId,
                 })
                 const commitResult = await syncImportPort.commitSyncImportPlan({

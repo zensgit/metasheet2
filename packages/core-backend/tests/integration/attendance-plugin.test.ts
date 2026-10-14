@@ -15689,7 +15689,7 @@ attendanceIntegrationDescribe(
     const subjectId = randomUUID()
     await ensureActiveImportIdentitiesForTest(subjectId)
     const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(subjectId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(subjectId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     expect(token).toBeTruthy()
@@ -15803,7 +15803,7 @@ attendanceIntegrationDescribe(
     const unknownItem = (unknownPreviewRes.body as { data?: { items?: Array<{ status?: string; warnings?: string[] }> } } | undefined)?.data?.items?.[0]
     expect(unknownItem?.status).toBe('invalid')
     expect(unknownItem?.warnings?.join('\n')).toContain('Unresolved user identifier')
-    expect(unknownItem?.warnings?.join('\n')).toContain('nobody-not-a-member@metasheet.test')
+    expect(unknownItem?.warnings?.join('\n')).not.toContain('nobody-not-a-member@metasheet.test')
 
     const prepareUnknownCommit = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
       method: 'POST',
@@ -15836,7 +15836,7 @@ attendanceIntegrationDescribe(
         headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         body: '{}',
       })
-      expect(rollbackRes.status).toBe(200)
+      expect(rollbackRes.status, (rollbackRes.body as { error?: { code?: string } })?.error?.code).toBe(200)
     }
   })
 
@@ -17717,8 +17717,8 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const orgId = 'default'
     const actorId = `attendance-h1-scope-actor-${runSuffix}`
-    const targetId = `attendance-h1-scope-target-${runSuffix}`
-    const outsideTargetId = `attendance-h1-scope-outside-${runSuffix}`
+    const targetId = randomUUID()
+    const outsideTargetId = randomUUID()
     const requestIds: string[] = []
     const approvalIds: string[] = []
     const scopeIds: string[] = []
@@ -17767,6 +17767,8 @@ attendanceIntegrationDescribe(
 
     try {
       await seedNeutralAttendanceSubjectForTest(actorId, orgId)
+      await seedNeutralAttendanceSubjectForTest(targetId, orgId)
+      await seedNeutralAttendanceSubjectForTest(outsideTargetId, orgId)
       process.env.RBAC_BYPASS = 'false'
       await pool.query(
         `INSERT INTO permissions (code, name, description)
@@ -17841,6 +17843,32 @@ attendanceIntegrationDescribe(
       expect((approveOutsideScope.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
       const outsideStatus = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [outsideRequestId])).rows[0]?.status
       expect(outsideStatus).toBe('pending')
+
+      // #6404: the real scoped route must authorize the resolved employee, not a raw email.
+      const importRows = (identifier: string) => [{
+        userId: identifier,
+        workDate: '2026-03-23',
+        fields: { Date: '2026-03-23', ClockIn: '09:00', ClockOut: '18:00' },
+      }]
+      for (const identifier of [targetId, `${targetId}@example.test`]) {
+        const preview = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ orgId, timezone: 'Asia/Shanghai', rows: importRows(identifier) }),
+        })
+        expect(preview.status).toBe(200)
+        const items = (preview.body as { data?: { items?: Array<{ userId?: string; status?: string }> } })?.data?.items
+        expect(items).toHaveLength(1)
+        expect(items?.[0]?.userId).toBe(targetId)
+        expect(items?.[0]?.status).not.toBe('invalid')
+      }
+      const outsidePreview = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ orgId, timezone: 'Asia/Shanghai', rows: importRows(`${outsideTargetId}@example.test`) }),
+      })
+      expect(outsidePreview.status).toBe(403)
+      expect((outsidePreview.body as { error?: { code?: string } })?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+      const previewWrites = await pool.query('SELECT count(*)::int AS count FROM attendance_records WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]])
+      expect(previewWrites.rows).toEqual([{ count: 0 }])
 
       const prepareImport = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
         method: 'POST',
