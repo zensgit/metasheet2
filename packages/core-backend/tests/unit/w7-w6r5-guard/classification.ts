@@ -123,6 +123,7 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-group-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-item-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-preconditions.ts',
+  'packages/core-backend/src/attendance/w4c3a-legacy-plan-commit-connection.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-processor.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-record-effects.ts',
   'packages/core-backend/src/attendance/w4c3a-legacy-plan-reservation-host.ts',

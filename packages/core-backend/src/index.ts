@@ -208,6 +208,7 @@ import {
 } from './attendance/w4c2-scheduled-run-ops-worker'
 import { createAttendanceLegacyPlanProcessorV1 } from './attendance/w4c3a-legacy-plan-processor'
 import { createAttendanceLegacyPlanReservationHostV1 } from './attendance/w4c3a-legacy-plan-reservation-host'
+import { createAttendanceLegacyPlanCommitConnectionV1 } from './attendance/w4c3a-legacy-plan-commit-connection'
 import { createAttendanceSyncImportHostV1 } from './attendance/w4c3a-sync-import-host'
 import {
   buildAttendanceImportAttributionFreezeV1,
@@ -3322,7 +3323,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
                     },
                   })
                   return processor.processLegacyImportPlanV1(jobId)
@@ -3334,7 +3335,7 @@ export class MetaSheetServer {
                         .get()
                         .getInternalPool()
                         .connect()
-                      return { client, release: () => client.release() }
+                      return { client: createAttendanceLegacyPlanCommitConnectionV1(client), release: () => client.release() }
                     },
                   })
                   return host.reserveLegacyImportPlanV1(input)
