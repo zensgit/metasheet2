@@ -22,6 +22,7 @@ import {
 } from '../../src/attendance/w4c3a-legacy-execution-plan'
 import { createAttendanceLegacyPlanWorkerRepositoryV1 } from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
 import { createAttendanceLegacyPlanCommitConnectionV1 } from '../../src/attendance/w4c3a-legacy-plan-commit-connection'
+import { runAttendanceResultOperationTransactionV1 } from '../../src/attendance/w4c0-operation-registry'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -647,6 +648,42 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
         // connection in this control. All objects belong to its temp schema.
         await client.end()
       }
+    }
+  })
+
+  it('preserves the transaction bound through deferred COMMIT with pool-shaped startup timers', async () => {
+    const url = new URL(dbUrl as string)
+    url.pathname = `/${scratchName}`
+    const client = new Client({
+      connectionString: url.toString(), query_timeout: 40, statement_timeout: 40,
+    })
+    await client.connect()
+    try {
+      const setup = (text: string) => client.query({ text, query_timeout: 1000 })
+      // Fixture DDL is outside the measured transaction and its short timers.
+      await setup("SET statement_timeout = '1s'")
+      await setup('CREATE TEMP TABLE pool_delayed_commit (n integer)')
+      await setup(`CREATE FUNCTION pg_temp.pool_delay_commit()
+        RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(0.1); RETURN NEW; END $$`)
+      await setup(`CREATE CONSTRAINT TRIGGER pool_delayed_validation
+        AFTER INSERT ON pool_delayed_commit DEFERRABLE INITIALLY DEFERRED
+        FOR EACH ROW EXECUTE FUNCTION pg_temp.pool_delay_commit()`)
+      await setup("SET statement_timeout = '40ms'")
+      const connection = createAttendanceLegacyPlanCommitConnectionV1(client)
+      await runAttendanceResultOperationTransactionV1(connection, async (transaction) => {
+        expect(transaction).toBe(connection)
+        expect((await transaction.query(
+          "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+        )).rows).toEqual([{ setting: '180000' }])
+        await transaction.query('INSERT INTO pool_delayed_commit VALUES (1)')
+      })
+      expect((await client.query('SELECT n FROM pool_delayed_commit')).rows).toEqual([{ n: 1 }])
+      expect((await client.query(
+        "SELECT setting FROM pg_settings WHERE name = 'statement_timeout'",
+      )).rows).toEqual([{ setting: '40' }])
+    } finally {
+      await client.end()
     }
   })
 
