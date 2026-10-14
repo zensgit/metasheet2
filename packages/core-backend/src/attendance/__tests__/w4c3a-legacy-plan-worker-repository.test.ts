@@ -258,6 +258,7 @@ describe('createAttendanceLegacyPlanWorkerRepositoryV1', () => {
     expect(String(query.mock.calls[1]?.[0])).toMatch(
       /started_at = COALESCE\(started_at, now\(\)\)/,
     )
+    expect(String(query.mock.calls[1]?.[0])).toContain('finished_at = clock_timestamp(), updated_at = now()')
     expect(query.mock.calls[1]?.[1]).toEqual([
       JOB_ID,
       ORG_ID,

@@ -256,7 +256,7 @@ const MARK_COMPLETED_SQL = `
   SET status = 'completed', progress = $3, error = NULL,
       w4_execution_reason_code = NULL,
       started_at = COALESCE(started_at, now()),
-      finished_at = now(), updated_at = now()
+      finished_at = clock_timestamp(), updated_at = now()
   WHERE id = $1::uuid AND org_id = $2 AND w4_contract_version = 1
     AND status = 'queued' AND w4_execution_reason_code IS NULL
   RETURNING id

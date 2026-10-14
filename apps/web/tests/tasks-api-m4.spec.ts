@@ -547,6 +547,25 @@ describe('listTasks — page and total', () => {
     expect(lastCall()[0]).toBe('/api/tasks?view=created&limit=100&offset=0')
   })
 
+  it('G2-core: a status is sent after the view and before the page; without one the string is unchanged', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], total: 0 }))
+    await listTasks('assigned', undefined, 'open')
+    expect(lastCall()[0]).toBe('/api/tasks?view=assigned&status=open')
+    await listTasks('following', undefined, 'done')
+    expect(lastCall()[0]).toBe('/api/tasks?view=following&status=done')
+    await listTasks('any_role', undefined, 'all')
+    expect(lastCall()[0]).toBe('/api/tasks?view=any_role&status=all')
+    await listTasks('created', { offset: 100 }, 'done')
+    expect(lastCall()[0]).toBe(`/api/tasks?view=created&status=done&limit=${TASK_PAGE_LIMIT}&offset=100`)
+    await listTasks('delegated', undefined, undefined)
+    expect(lastCall()[0]).toBe('/api/tasks?view=delegated')
+  })
+
+  it('G2-core: an unknown status answered as predicate_error reads as predicate_error, not as an empty list', async () => {
+    h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [], degraded: true, reason: 'predicate_error' }))
+    await expect(listTasks('assigned', undefined, 'open')).resolves.toEqual({ kind: 'predicate_error' })
+  })
+
   it('carries total when the body has it, and omits the key when the body does not', async () => {
     h.apiFetch.mockResolvedValue(jsonResponse(200, { items: [itemBody], total: 5 }))
     await expect(listTasks('assigned')).resolves.toStrictEqual({ kind: 'ok', items: [itemBody], total: 5 })

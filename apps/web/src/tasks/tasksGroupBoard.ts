@@ -11,10 +11,15 @@
 //   - a placement whose group is not on the board is shown in the default group's placed rows;
 //     a placement whose task is not among the rows is not shown.
 //
-// Moves count in the target group's visible set as the board shows it, with the moved task taken
-// out; the PUT names the default group with `null` in both scopes. A move that leaves the task in
-// the same group at the same index is no move. Moves are offered only while the board's index space
-// is the server's (`consistent`): every placement names a shown row and a known group.
+// Moves count in the target group's visible set as the server numbers it, with the moved task
+// taken out; the PUT names the default group with `null` in both scopes. A move that leaves the
+// task in the same group at the same index is no move. Moves are offered only while the board's
+// index space is the server's (`consistent`): every placement names a known group, and every
+// placement names a shown row — except, when the host has filtered the rows by status
+// (`rowsFiltered`), a placement whose task is not a row is kept in its group's order as a hidden
+// entry (`hidden`). The placements read is the server's whole visible set, numbered densely, so the
+// order with the hidden entries in it is still the server's index space (G2-core design §4.1): it
+// is counted, never rendered, and a step passes over it to the next shown row.
 
 import type { TaskGroup, TaskListItem, TaskPlacement } from './tasksApi'
 
@@ -31,7 +36,10 @@ export interface BoardModel {
   ordered: Record<string, string[]>
   /** The default group's rows without a placement, in the rows' own order. */
   tail: string[]
-  /** Every placement names a shown row and a known group. */
+  /** Ids in `ordered` that are not rows: placements kept in the index space because the rows were
+   *  filtered by status. Always empty when the rows are not filtered. */
+  hidden: string[]
+  /** Every placement names a known group, and a shown row or (rows filtered) a hidden entry. */
   consistent: boolean
 }
 
@@ -73,11 +81,13 @@ function comparePlacements(a: TaskPlacement, b: TaskPlacement): number {
 
 /** The board for these reads, or `null` when the groups cannot hold one: not exactly one default
  *  group, or a group other than the default without an id, with an empty id or with an id another
- *  group has. */
+ *  group has. `rowsFiltered`: the rows are the host's status-filtered subset of the placements'
+ *  visible set, so a placement whose task is not a row is a hidden entry, not an inconsistency. */
 export function buildBoardModel(
   groups: readonly TaskGroup[],
   placements: readonly TaskPlacement[],
   items: readonly TaskListItem[],
+  options: { rowsFiltered?: boolean } = {},
 ): BoardModel | null {
   const sorted = [...groups].sort(compareGroups)
   if (sorted.filter((group) => group.isDefault).length !== 1) return null
@@ -94,14 +104,17 @@ export function buildBoardModel(
   const rowIds = new Set(items.map((item) => item.id))
   const byKey = new Map<string, TaskPlacement[]>(sorted.map((group) => [groupKey(group), []]))
   const placed = new Set<string>()
+  const hidden: string[] = []
   let consistent = true
   for (const placement of placements) {
-    if (!rowIds.has(placement.taskId)) {
+    const isRow = rowIds.has(placement.taskId)
+    if (!isRow && !options.rowsFiltered) {
       consistent = false
       continue
     }
     if (placed.has(placement.taskId)) continue
     placed.add(placement.taskId)
+    if (!isRow) hidden.push(placement.taskId)
     const key = keyById.get(placement.groupId)
     if (key === undefined) consistent = false
     ;(byKey.get(key ?? DEFAULT_GROUP_KEY) as TaskPlacement[]).push(placement)
@@ -110,7 +123,13 @@ export function buildBoardModel(
   const ordered: Record<string, string[]> = {}
   for (const [key, list] of byKey) ordered[key] = [...list].sort(comparePlacements).map((placement) => placement.taskId)
   const tail = items.filter((item) => !placed.has(item.id)).map((item) => item.id)
-  return { groups: sorted, ordered, tail, consistent }
+  return { groups: sorted, ordered, tail, hidden, consistent }
+}
+
+/** Group `key`'s ids as the board shows them: its order without the hidden entries. */
+export function shownIds(model: BoardModel, key: string): string[] {
+  const order = model.ordered[key] ?? []
+  return model.hidden.length === 0 ? order : order.filter((id) => !model.hidden.includes(id))
 }
 
 export function locateTask(model: BoardModel, taskId: string): TaskLocation | null {
@@ -134,11 +153,17 @@ export function planMove(model: BoardModel, taskId: string, key: string, positio
   return { taskId, key, groupId: key === DEFAULT_GROUP_KEY ? null : key, position }
 }
 
-/** One place up (`-1`) or down (`1`) inside the task's own group; the tail has no such step. */
+/** One place up (`-1`) or down (`1`) inside the task's own group, past the next shown row: hidden
+ *  entries in between are passed over. Up lands before that row and down after it; in the order
+ *  without the task both are that row's index in the full order. The tail has no such step. */
 export function planStep(model: BoardModel, taskId: string, step: -1 | 1): PlannedMove | null {
   const from = locateTask(model, taskId)
   if (from === null || from.index < 0) return null
-  return planMove(model, taskId, from.key, from.index + step)
+  const order = model.ordered[from.key]
+  let index = from.index + step
+  while (index >= 0 && index < order.length && model.hidden.includes(order[index])) index += step
+  if (index < 0 || index >= order.length) return null
+  return planMove(model, taskId, from.key, index)
 }
 
 /** A tail row joins the default group's order at its end. */
@@ -177,6 +202,7 @@ export function applyMove(model: BoardModel, move: PlannedMove): BoardModel {
     groups: model.groups,
     ordered,
     tail: model.tail.filter((id) => id !== move.taskId),
+    hidden: model.hidden,
     consistent: model.consistent,
   }
 }
