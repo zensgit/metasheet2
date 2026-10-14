@@ -29064,6 +29064,26 @@ module.exports = {
 		            throw new Error('ATTENDANCE_IMPORT_LEGACY_ROLLOUT_WITNESS_INVALID')
 		          }
 			          const uploadFileId = resolveImportUploadFileId(payload)
+			          // Resolve aliases before the serializable commit takes the org
+			          // timezone lock. The lookup used to run inside that transaction
+			          // and stall every later import and punch on the same org.
+			          const commitUserResolveOptions = {
+			            fallbackUserId: payload.userId ?? requesterId,
+			            userMap: payload.userMap,
+			            userMapKeyField: payload.userMapKeyField,
+			            userMapSourceFields: payload.userMapSourceFields,
+			          }
+			          const commitRowSource = await resolveAsyncImportRowSource({
+			            payload,
+			            orgId,
+			            fallbackUserId: payload.userId ?? requesterId,
+			          })
+			          const resolvedUserIdentifierIndex = await loadImportUserIdentifierIndexForIterator(
+			            db,
+			            orgId,
+			            (onRow) => commitRowSource.iterateRows(onRow),
+			            commitUserResolveOptions,
+			          )
 			          await runAttendanceLegacyNullVersionCommitAtomically({
 		            db,
 		            jobId: rowId,
@@ -29078,6 +29098,7 @@ module.exports = {
 			              idempotencyKey,
 			              transactionClient: trx,
 			              deferUploadCleanup: true,
+			              resolvedUserIdentifierIndex,
 			            }),
 		            buildTerminal: (commitResult) => {
 		              const { skippedCount, skippedRows } = extractImportJobSkippedSummary(

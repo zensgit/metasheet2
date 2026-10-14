@@ -124,19 +124,44 @@ describe('attendance import row user resolution', () => {
     expect(resolved.warning).not.toContain(email)
   })
 
+  it('keeps authorization filters on the column lookup without scanning every non-ASCII user', async () => {
+    const userId = '22222222-2222-4222-8222-222222222222'
+    const email = 'Fallback.User@Example.TEST'
+    const db = {
+      query: vi.fn(async (sql: string, params: unknown[]) => {
+        expect(sql).toContain('u.username')
+        expect(sql).toContain('u.mobile')
+        expect(sql).not.toContain('octet_length(')
+        expect(sql).toContain('uo.org_id = $1')
+        expect(sql).toContain('uo.is_active = true')
+        expect(sql).toContain('u.is_active = true')
+        expect(params[0]).toBe('default')
+        return [{ id: userId, email: email.toLowerCase(), username: 'fallback-login', mobile: '13800000000' }]
+      }),
+    }
+    const index = await helpers.loadAttendanceImportUserIdentifierIndex(db, 'default', [email, 'fallback-login', '13800000000'])
+    expect(helpers.adoptCanonicalImportUserId(email, index)).toEqual({ userId, warning: null })
+    expect(helpers.adoptCanonicalImportUserId('fallback-login', index).userId).toBe(userId)
+    expect(helpers.adoptCanonicalImportUserId('13800000000', index).userId).toBe(userId)
+    expect(db.query).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['username', 'mobile', 'both'])('keeps authorization filters when optional %s aliases are absent', async (missing) => {
     const userId = '22222222-2222-4222-8222-222222222222'
     const email = 'Fallback.User@Example.TEST'
     const db = {
       query: vi.fn(async (sql: string, params: unknown[]) => {
-        expect(sql).toContain("to_jsonb(u)->>'username'")
-        expect(sql).toContain("to_jsonb(u)->>'mobile'")
-        expect(sql).not.toContain('u.username')
-        expect(sql).not.toContain('u.mobile')
         expect(sql).toContain('uo.org_id = $1')
         expect(sql).toContain('uo.is_active = true')
         expect(sql).toContain('u.is_active = true')
+        expect(sql).not.toContain('octet_length(')
         expect(params[0]).toBe('default')
+        if (sql.includes('u.username') || sql.includes('u.mobile')) {
+          const missingColumn = missing === 'mobile' ? 'mobile' : 'username'
+          throw Object.assign(new Error(`column "${missingColumn}" of relation "users" does not exist`), { code: '42703' })
+        }
+        expect(sql).toContain("to_jsonb(u)->>'username'")
+        expect(sql).toContain("to_jsonb(u)->>'mobile'")
         return [{ id: userId, email: email.toLowerCase(), username: missing === 'mobile' ? 'fallback-login' : null, mobile: missing === 'username' ? '13800000000' : null }]
       }),
     }
@@ -144,7 +169,7 @@ describe('attendance import row user resolution', () => {
     expect(helpers.adoptCanonicalImportUserId(email, index)).toEqual({ userId, warning: null })
     expect(helpers.adoptCanonicalImportUserId('fallback-login', index).userId).toBe(missing === 'mobile' ? userId : null)
     expect(helpers.adoptCanonicalImportUserId('13800000000', index).userId).toBe(missing === 'username' ? userId : null)
-    expect(db.query).toHaveBeenCalledTimes(1)
+    expect(db.query).toHaveBeenCalledTimes(2)
   })
 
   it.each(['u.is_active', 'uo.is_active', 'user_orgs'])('fails closed when required %s schema is absent', async (column) => {
@@ -172,11 +197,13 @@ describe('attendance import row user resolution', () => {
   it.each(['ｓｈａｒｅｄ＠ｅｘａｍｐｌｅ．ｔｅｓｔ', 'shared@example.test\t\r\n', 'Δ@example.test'])('rejects a normalized historical cross-field owner collision (%s)', async (username) => {
     const identifier = username.startsWith('Δ') ? 'δ@example.test' : 'shared@example.test'
     const db = { query: async (sql: string, params: unknown[]) => {
-      expect(sql).toContain('octet_length(')
+      expect(sql).toContain('normalize(')
       expect(sql).toContain('COLLATE "C"')
+      expect(sql).not.toContain('octet_length(')
       expect(params[4]).toEqual(expect.stringContaining('\t'))
       expect(params[4]).toEqual(expect.stringContaining('\r'))
       expect(params[4]).toEqual(expect.stringContaining('\n'))
+      if (username.startsWith('Δ')) expect(String(params[5])).toContain('Δ')
       return [
         { id: '11111111-1111-4111-8111-111111111111', email: identifier, username: null, mobile: null },
         { id: '22222222-2222-4222-8222-222222222222', email: null, username, mobile: null },
