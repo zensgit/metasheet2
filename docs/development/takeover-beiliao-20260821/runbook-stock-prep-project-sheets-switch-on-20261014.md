@@ -253,11 +253,18 @@ Get-Content -LiteralPath $envFile -Tail 3
 
 前两个键各恰为 1（D4 全否时第二个为 0），第三个 D10 = 是时为 1、否则 0；末尾几行就是刚追加的内容（`true` 和角色 id 都不是秘密）。
 
-### 2.4 重启：走计划任务，不要只用 `pm2 restart`
+### 2.4 重启：加键走「导入 `app.env` + `pm2 restart --update-env`」，删键走计划任务
 
-演示机后端由计划任务 `MetaSheet-PM2` → pm2-runtime 托管（`handoff-r59-two-machine-20260924.md:22`）。改了 `app.env` 之后按 `stock-prep-root-selection-config.md:30` 的顺序重启：在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里停应用 → 确认 pm2 命名管道上已没有守护进程（还在就先 `pm2 kill` 再查）→ `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'` → 查 health。先 kill 再起任务的原因见 `handoff-r59-two-machine-20260924.md:39`，起来后核对后端挂在 pm2-runtime 下见同文 `:52`。旧机开云课堂 7 个开关时用的就是这条路（`r66-deploy-record-20261013.md:15`「云课堂 7 个开关在」）。
+演示机后端由计划任务 `MetaSheet-PM2` → pm2-runtime 托管，`PM2_HOME` 是 pm2-runtime 的运行目录 `.pm2-runtime`（`handoff-r59-two-machine-20260924.md:22`；本手册引用的 `runbook-operator-merge-20261012.md` §0.6 讲的是怎么执行与落日志，不含 pm2 home，别在那里找）。
 
-**不要**只跑 `pm2 restart metasheet-backend --update-env`：它把**执行命令的会话**的环境合并进去，不重读 `app.env`（`222-rehearsal-full-run-20260904.md:200`），而且不会撤掉已从 `app.env` 删掉的键（`design-large-bom-worker-20260906.md:350`）。
+**加键（本手册开关：§2.2 追加的键）**：10-12 云课堂开关与 10-14 G1 开关都是这样重启的——先把 `app.env` 导入**当前进程**的环境，再在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里跑 `pm2 restart metasheet-backend --update-env`。`--update-env` 合并的是执行命令的会话的环境（不重读 `app.env`，`222-rehearsal-full-run-20260904.md:200`），所以「先导入」这一步不能省。每一步带门：
+
+1. 重启前：pm2 命名管道 `\\.\pipe\rpc.sock` 存在，且 `pm2 list` 里 `metasheet-backend` 是 `online`；不满足就停，不要在管道上没有守护进程时硬跑 `restart`（会另起一个空守护进程，`handoff-r59-two-machine-20260924.md:39`）。
+2. 跑 `pm2 restart … --update-env`，**检查退出码**，非 0 就停。
+3. 记下重启时刻 T0；T0 之后后端日志里必须出现 `Plugin loaded: plugin-integration-core`，否则按没起来处理。
+4. 失败时**维护标志保持开着**，不要自行放行；报开发机。
+
+**删键**：`--update-env` 不会撤掉已从 `app.env` 删掉的键（`design-large-bom-worker-20260906.md:350`），进程环境里旧值还在。所以 §5 回退（字节级还原会让追加的键消失）必须走计划任务：在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里停应用 → 等 `MetaSheet-PM2` 任务离开 `Running` 状态（`Get-ScheduledTask … | Select-Object State`）→ 确认 pm2 命名管道上已没有守护进程（任务停掉后还在的是多余的 `node …\pm2\lib\Daemon.js` 进程：**不要 `pm2 kill`**——Windows 上管道名是整机共用的，`pm2 kill` 会打到占着管道的任何守护进程；用 `Get-CimInstance Win32_Process` 按 CommandLine 过滤出它，再按 pid `Stop-Process -Id`，做法见 `runbook-backend-log-rotation-20261012.md` §3.8；为什么会冒出这样的多余进程见 `handoff-r59-two-machine-20260924.md:39`）→ `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'` → 确认进程已重新拉起（后端进程的父进程是 pm2-runtime，不是 `Daemon.js`，`handoff-r59-two-machine-20260924.md:52`）→ 查 health。
 
 **是否真的生效，以 §3.1 的接口状态为准**，不以 `app.env` 内容为准；也**不要**为了看环境去跑 `pm2 env`——pm2-runtime 不在守护模式下时，会话里的 pm2 命令会另起一个空守护进程（`handoff-r59-two-machine-20260924.md:50`）。
 
@@ -419,7 +426,7 @@ SELECT count(*) AS old_sheet_registered FROM integration_stock_prep_project_targ
      ```
 
      角色清单那一行可以留着：开关关时建表路由 404，清单不会被读。D10 = 是时成员页开关同样改成 `false`。
-2. 按 §2.4 重启（同样走计划任务；不要只用 `pm2 restart --update-env`，它撤不掉删掉的键）。
+2. 按 §2.4 的「删键」路径重启（走计划任务，不用 `pm2 restart --update-env`：字节级还原会让追加的键从 `app.env` 消失，`--update-env` 撤不掉进程里已有的旧值；就地改 `false` 的做法键还在，为统一也走计划任务）。
 3. 跑 §3.1 的探针：`list` 回 404 `STOCK_PREPARATION_PROJECT_SHEETS_DISABLED`，`preflight` 里没有 `projectSheets`。
 4. 回退之后**留下的东西**（只增不删，什么都不删）：登记行、A / B 的项目表及其数据、总览表、已授出的表级授权、审计行。G1 只增不删，所以有授权的人仍能在多维表网格里打开、编辑这些项目表。重新打开开关即恢复原样（ADR §8）。
 5. 回退之后的行为：查找回落到部署 env 的目标，也就是旧表。拉 A 会再写进旧表（旧表不再只是参照）；拉 B 等其它项目会被一表一项目守卫 409 `TARGET_SHEET_FOREIGN_PROJECT`（旧表里有 A 的有效行）——即「关开关 = 停用拉取」（ADR §8；`global-history-flag-manifest.mjs:681`）。首页「打开备料多维表」按钮回来、指向旧表。§2.0 换过的试拉脚本不用换回（开关关时它的行为与旧拷贝一致）。
