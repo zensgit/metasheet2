@@ -490,7 +490,9 @@
                  the group reads are out or failed, the board's root keeping `tasks-list` ([fe-16]).
                  The row content below is the same markup as the plain list's rows further down
                  (tasks-groups.spec.ts pins the two equal); the row actions stay this view's
-                 ([fe-33]). -->
+                 ([fe-33]). A row of an "all" mode task offers its complete / reopen on the task
+                 detail instead: a list row carries no assignee state, and in that mode a click
+                 can succeed and change nothing (the detail turns such a click off and says why). -->
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
@@ -505,8 +507,13 @@
                 >{{ task.title }}</router-link>
                 <span class="tasks-view__item-status">{{ task.status === 'done' ? t.statusDone : t.statusOpen }}</span>
                 <span v-if="task.due_at" class="tasks-view__item-due" data-testid="tasks-list-item-due">{{ formatViewerInstant(task.due_at, undefined, viewerLocale) }}</span>
+                <router-link
+                  v-if="task.completion_mode === 'all'"
+                  :to="`/tasks/${encodeURIComponent(task.id)}`"
+                  data-testid="tasks-row-detail-action"
+                >{{ task.status === 'open' ? t.rowCompleteInDetail : t.rowReopenInDetail }}</router-link>
                 <button
-                  v-if="task.status === 'open'"
+                  v-else-if="task.status === 'open'"
                   type="button"
                   data-testid="tasks-complete-button"
                   @click="onComplete(task.id)"
@@ -528,8 +535,13 @@
                 >{{ task.title }}</router-link>
                 <span class="tasks-view__item-status">{{ task.status === 'done' ? t.statusDone : t.statusOpen }}</span>
                 <span v-if="task.due_at" class="tasks-view__item-due" data-testid="tasks-list-item-due">{{ formatViewerInstant(task.due_at, undefined, viewerLocale) }}</span>
+                <router-link
+                  v-if="task.completion_mode === 'all'"
+                  :to="`/tasks/${encodeURIComponent(task.id)}`"
+                  data-testid="tasks-row-detail-action"
+                >{{ task.status === 'open' ? t.rowCompleteInDetail : t.rowReopenInDetail }}</router-link>
                 <button
-                  v-if="task.status === 'open'"
+                  v-else-if="task.status === 'open'"
                   type="button"
                   data-testid="tasks-complete-button"
                   @click="onComplete(task.id)"

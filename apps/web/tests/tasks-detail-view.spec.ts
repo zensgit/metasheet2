@@ -848,6 +848,78 @@ describe('TasksView list — row links to /tasks/:id (real router)', () => {
   })
 })
 
+// A list row carries the task's completion mode but not the viewer's own assignee state, so on an
+// "all" mode row an inline complete / reopen could succeed and change nothing. Such a row links to
+// the task detail instead (where the buttons are gated); an "any" mode row keeps its buttons. The
+// assigned view renders its rows on the grouping board, the other views as the flat list.
+describe('TasksView list — an "all" mode row offers complete / reopen on the task detail', () => {
+  const ROWS = [
+    { id: 't1', title: 'All Open', status: 'open', completion_mode: 'all', created_by: 'u1', due_at: null },
+    { id: 't2', title: 'All Done', status: 'done', completion_mode: 'all', created_by: 'u1', due_at: null },
+    { id: 't3', title: 'Any Open', status: 'open', completion_mode: 'any', created_by: 'u1', due_at: null },
+    { id: 't4', title: 'Any Done', status: 'done', completion_mode: 'any', created_by: 'u1', due_at: null },
+  ]
+
+  /** Per row, in order: the row's complete / reopen control as [test id, text, href]. */
+  function rowActions(el: HTMLElement): Array<[string, string, string | null]> {
+    return Array.from(el.querySelectorAll('[data-testid="tasks-list-item"]')).map((row) => {
+      const action = row.querySelector<HTMLElement>(
+        '[data-testid="tasks-row-detail-action"], [data-testid="tasks-complete-button"], [data-testid="tasks-reopen-button"]',
+      ) as HTMLElement
+      return [action.getAttribute('data-testid') ?? '', action.textContent?.trim() ?? '', action.getAttribute('href')]
+    })
+  }
+
+  const EXPECTED: Array<[string, string, string | null]> = [
+    ['tasks-row-detail-action', '在任务详情中完成', '/tasks/t1'],
+    ['tasks-row-detail-action', '在任务详情中重启', '/tasks/t2'],
+    ['tasks-complete-button', '完成', null],
+    ['tasks-reopen-button', '重启', null],
+  ]
+
+  it('on the assigned view\'s board and on the flat list of another view alike', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    const el = await mountAt('/tasks')
+    expect(el.querySelector('[data-testid="tasks-list"][data-scope]')).toBeTruthy()
+    expect(rowActions(el)).toEqual(EXPECTED)
+
+    ;(shown(el, 'tasks-view-switch-following') as HTMLButtonElement).click()
+    await flush()
+    expect(el.querySelector('[data-testid="tasks-list"]')?.tagName).toBe('UL')
+    expect(rowActions(el)).toEqual(EXPECTED)
+  })
+
+  it('following the row action opens that task\'s detail and sends nothing', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    h_.getTask.mockResolvedValue({ kind: 'ok', task: taskDetail({ id: 't1', title: 'All Open' }) })
+    const el = await mountAt('/tasks')
+    const link = shown(el, 'tasks-row-detail-action') as HTMLAnchorElement
+    expect(link.tagName).toBe('A')
+
+    // `router.push` on the link's own target, as the row-link cells above do (see there).
+    await router!.push(link.getAttribute('href') as string)
+    await flush()
+    expect(h_.getTask).toHaveBeenCalledWith('t1')
+    expect(shown(el, 'tasks-detail')).toBeTruthy()
+    expect(h_.completeTask).not.toHaveBeenCalled()
+    expect(h_.reopenTask).not.toHaveBeenCalled()
+  })
+
+  it('the inline buttons of an "any" mode row still complete and reopen in place', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: ROWS })
+    h_.completeTask.mockResolvedValue({ kind: 'ok', done: true })
+    h_.reopenTask.mockResolvedValue({ kind: 'ok' })
+    const el = await mountAt('/tasks')
+    ;(shown(el, 'tasks-complete-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.completeTask).toHaveBeenCalledWith('t3')
+    ;(shown(el, 'tasks-reopen-button') as HTMLButtonElement).click()
+    await flush()
+    expect(h_.reopenTask).toHaveBeenCalledWith('t4', 'self')
+    expect(h_.getTask).not.toHaveBeenCalled()
+  })
+})
+
 // In "all assignees complete" mode the server answers 200 to a complete or a reopen (scope self)
 // that changes nothing: a complete stamps only the caller's own assignee row, a self reopen clears
 // only it. The detail page turns such a button off and says why, once the viewer's id is known;

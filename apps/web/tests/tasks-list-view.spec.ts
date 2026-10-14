@@ -263,6 +263,8 @@ describe('TasksView view switcher', () => {
   })
 })
 
+// The row complete / reopen cells below use "any" mode rows: an "all" mode row has no inline
+// buttons and links to the task detail instead (tasks-detail-view.spec.ts covers that).
 describe('TasksView create / complete / reopen mutations', () => {
   it('submitting the create form calls createTask (no assignees key) then refreshes the list', async () => {
     h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
@@ -342,7 +344,7 @@ describe('TasksView create / complete / reopen mutations', () => {
 
   it('clicking complete calls completeTask for that row id and refreshes the list', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [] })
     h.completeTask.mockResolvedValue({ kind: 'ok', done: true })
     const el = await mountReady()
@@ -359,7 +361,7 @@ describe('TasksView create / complete / reopen mutations', () => {
 
   it('clicking reopen sends scope self and refreshes the list', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [] })
     h.reopenTask.mockResolvedValue({ kind: 'ok' })
     const el = await mountReady()
@@ -378,7 +380,7 @@ describe('TasksView create / complete / reopen mutations', () => {
   // `createTask` already covers above) must show the SAME org-guidance block, not a silently
   // dropped click or the generic action-error message.
   it('completing a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
-    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
     h.completeTask.mockResolvedValue({ kind: 'org_missing' })
     const el = await mountReady()
 
@@ -395,7 +397,7 @@ describe('TasksView create / complete / reopen mutations', () => {
   })
 
   it('reopening a task that reports org_missing shows the org-missing guidance (not the generic action error)', async () => {
-    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+    h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
     h.reopenTask.mockResolvedValue({ kind: 'org_missing' })
     const el = await mountReady()
 
@@ -419,7 +421,7 @@ describe('TasksView create / complete / reopen mutations', () => {
       ['not_found', { kind: 'not_found' }, '操作失败，请稍后重试'],
       ['error', { kind: 'error', status: 500 }, '操作失败，请稍后重试'],
     ] as const)('complete -> %s shows the action error and keeps the list', async (_label, result, expectedText) => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       h.completeTask.mockResolvedValue(result)
       const el = await mountReady()
 
@@ -443,7 +445,7 @@ describe('TasksView create / complete / reopen mutations', () => {
       ['not_found', { kind: 'not_found' }, '操作失败，请稍后重试'],
       ['error', { kind: 'error', status: 500 }, '操作失败，请稍后重试'],
     ] as const)('reopen -> %s shows the action error and keeps the list', async (_label, result, expectedText) => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       h.reopenTask.mockResolvedValue(result)
       const el = await mountReady()
 
@@ -460,7 +462,7 @@ describe('TasksView create / complete / reopen mutations', () => {
     })
 
     it('a fresh action clears a stale error from the PREVIOUS action', async () => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       h.completeTask
         .mockResolvedValueOnce({ kind: 'forbidden' })
         .mockResolvedValueOnce({ kind: 'ok', done: true })
@@ -480,7 +482,7 @@ describe('TasksView create / complete / reopen mutations', () => {
     // reset (~:263) — the complete-only test above cannot exercise this: it never calls
     // `reopenTask` at all, so it would stay green even if reopen's own reset were deleted.
     it('a fresh reopen clears a stale action error from a PREVIOUS reopen', async () => {
-      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      h.listTasks.mockResolvedValue({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       h.reopenTask
         .mockResolvedValueOnce({ kind: 'forbidden' })
         .mockResolvedValueOnce({ kind: 'ok' })
@@ -508,7 +510,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
   it('a pending complete resolving ok AFTER a reopen set org_missing clears the guidance block', async () => {
     h.listTasks.mockResolvedValue({
       kind: 'ok',
-      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+      items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' }), taskItem({ id: 't2', status: 'done', completion_mode: 'any' })],
     })
     const completeDeferred = deferred<{ kind: 'ok'; done: boolean }>()
     h.completeTask.mockReturnValue(completeDeferred.promise)
@@ -537,7 +539,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
   it('a pending reopen resolving ok AFTER a complete set org_missing clears the guidance block', async () => {
     h.listTasks.mockResolvedValue({
       kind: 'ok',
-      items: [taskItem({ id: 't1', status: 'open' }), taskItem({ id: 't2', status: 'done' })],
+      items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' }), taskItem({ id: 't2', status: 'done', completion_mode: 'any' })],
     })
     const reopenDeferred = deferred<{ kind: 'ok' }>()
     h.reopenTask.mockReturnValue(reopenDeferred.promise)
@@ -573,7 +575,7 @@ describe('TasksView resets a stale orgMissingFromAction when a later action succ
 describe('TasksView list — late action result after switching list view (M2 list-page-token guard)', () => {
   it('a PENDING error from complete that settles AFTER switching list view shows no banner, and does not reload the new view', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingComplete = deferred<{ kind: 'error'; status: number }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -602,7 +604,7 @@ describe('TasksView list — late action result after switching list view (M2 li
 
   it('a PENDING org_missing from complete that settles AFTER switching list view shows no guidance banner', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't1', status: 'open', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingComplete = deferred<{ kind: 'org_missing' }>()
     h.completeTask.mockReturnValue(pendingComplete.promise)
@@ -627,7 +629,7 @@ describe('TasksView list — late action result after switching list view (M2 li
 
   it('a PENDING ok from reopen that settles AFTER switching list view still notifies the badge bus but does not issue a needless extra reload', async () => {
     h.listTasks
-      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done' })] })
+      .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't2', status: 'done', completion_mode: 'any' })] })
       .mockResolvedValueOnce({ kind: 'ok', items: [taskItem({ id: 't9', title: 'Following Item', status: 'open' })] })
     const pendingReopen = deferred<{ kind: 'ok' }>()
     h.reopenTask.mockReturnValue(pendingReopen.promise)

@@ -48,6 +48,10 @@ export const TASKS_ZH = {
   reopenSelfNoop: '你没有已完成的部分可以重启',
   // a done "all" mode task: reopen every assignee's part (scope all); `reopen` is one's own part
   reopenAll: '重启全部',
+  // a list row of an "all" mode task: the row has no assignee state, so complete / reopen happen
+  // on the task detail, which turns off a click that would change nothing
+  rowCompleteInDetail: '在任务详情中完成',
+  rowReopenInDetail: '在任务详情中重启',
   modeAll: '全部负责人完成',
   modeAny: '任一负责人完成',
   // the create form's optional due date: with a date, the server sets the default reminder
@@ -380,6 +384,8 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   completeNoopOwnPartDone: 'Your part is done; waiting for the other assignees',
   reopenSelfNoop: 'You have no completed part to reopen',
   reopenAll: 'Reopen for everyone',
+  rowCompleteInDetail: 'Complete on the task page',
+  rowReopenInDetail: 'Reopen on the task page',
   modeAll: 'All assignees complete',
   modeAny: 'Any assignee completes',
   createDueDateLabel: 'Due date (optional)',

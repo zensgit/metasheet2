@@ -228,7 +228,7 @@ function renderedTextAndAttributes(root: HTMLElement): string {
 // Fixtures — ASCII-only so a CJK hit in the sweep can only come from the view's own copy.
 // ---------------------------------------------------------------------------------------------
 
-function listItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; due_at: string | null }> = {}) {
+function listItem(over: Partial<{ id: string; title: string; status: 'open' | 'done'; completion_mode: 'all' | 'any'; due_at: string | null }> = {}) {
   return {
     id: 't1',
     title: 'Task One',
@@ -757,7 +757,19 @@ describe('EN locale — TasksView list page renders no CJK', () => {
     expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
   })
 
+  it('an "all" mode row: complete and reopen on the task page', async () => {
+    h_.listTasks.mockResolvedValue({
+      kind: 'ok',
+      items: [listItem({ id: 't1' }), listItem({ id: 't2', status: 'done' })],
+    })
+    const el = await mountViewAt('/tasks')
+    const actions = Array.from(el.querySelectorAll('[data-testid="tasks-row-detail-action"]')).map((link) => link.textContent?.trim())
+    expect(actions).toEqual(['Complete on the task page', 'Reopen on the task page'])
+    expect(renderedTextAndAttributes(el)).not.toMatch(CJK)
+  })
+
   it('action banner — forbidden and the generic failure', async () => {
+    h_.listTasks.mockResolvedValue({ kind: 'ok', items: [listItem({ completion_mode: 'any' })] })
     h_.completeTask.mockResolvedValue({ kind: 'forbidden' })
     const el = await mountViewAt('/tasks')
 
