@@ -2218,6 +2218,8 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-shift-segments-writer-matrix.db.test.ts',
   'tests/integration/attendance-shift-swap.test.ts',
   'tests/integration/attendance-soak-diff-families.db.test.ts',
+  'tests/integration/attendance-timezone-default-recovery.db.test.ts',
+  'tests/integration/attendance-timezone-legacy-repair.db.test.ts',
   'tests/integration/attendance-timezone-policy-preview.db.test.ts',
   'tests/integration/attendance-timezone-policy-routes.db.test.ts',
   'tests/integration/attendance-timezone-policy-store.db.test.ts',

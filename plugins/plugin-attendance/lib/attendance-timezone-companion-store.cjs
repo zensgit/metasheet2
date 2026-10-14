@@ -31,6 +31,17 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
     if (rows.length > 1) fail('ATTENDANCE_TIMEZONE_OPEN_CONTEXT_AMBIGUOUS')
     return rows.length === 0 ? null : restore(rows[0])
   }
+  async function readEligibleLegacyRepair(trx, { orgId, userId, occurredAt, eventType }) {
+    const rows = await trx.query(`SELECT c.* FROM attendance_timezone_context_companions c
+      JOIN attendance_records r ON r.id=c.record_id AND r.org_id=c.org_id
+      WHERE c.org_id=$1 AND c.user_id=$2 AND r.visibility_state='active'
+        AND c.frame_snapshot->'identity'->>'source'='legacy_repair'
+        AND r.last_out_at IS NULL AND c.attribution_start_at <= $3
+        AND $3 <= CASE WHEN $4='check_in' THEN c.absolute_end_at ELSE c.attribution_end_at END`,
+    [orgId,userId,occurredAt,eventType])
+    if (rows.length > 1) fail('ATTENDANCE_TIMEZONE_OPEN_CONTEXT_AMBIGUOUS')
+    return rows.length === 0 ? null : restore(rows[0])
+  }
   async function readLegacyFrozenV2(trx,{orgId,userId,workDate = null,occurredAt = null,workDates}) {
     const rows = await trx.query(`SELECT r.id,r.org_id,r.user_id,r.work_date::text,r.timezone,r.current_calculation_id,
       calc.context_snapshot,calc.attribution_snapshot,calc.source_definition_fingerprint
@@ -166,7 +177,7 @@ function createAttendanceTimezoneCompanionStore({ HttpError, validateFrozenConte
       frame.attributionWindow.startAt,frame.attributionWindow.endAt,frame.fingerprint,
       canonicalContextFingerprint(originalFreeze),calculations[0]?.id ?? null,JSON.stringify(frame),JSON.stringify(originalFreeze)])
   }
-  return { readLegacyFrozenV2, readEligibleOpen, readForWorkDate, readForWorkDates, assertTarget, bindFirst }
+  return { readLegacyFrozenV2, readEligibleLegacyRepair, readEligibleOpen, readForWorkDate, readForWorkDates, assertTarget, bindFirst }
 }
 
 module.exports = { createAttendanceTimezoneCompanionStore }

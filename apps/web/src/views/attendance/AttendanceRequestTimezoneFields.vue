@@ -1,7 +1,7 @@
 <template>
   <section class="request-timezone" aria-live="polite" data-request-timezone>
     <p v-if="loading">{{ tr('Loading target shift timezone…', '正在读取目标班次时区…') }}</p>
-    <p v-else-if="failed">{{ tr('Target timezone could not be confirmed. Refresh before submitting.', '无法确认目标班次时区，请刷新后再提交。') }}</p>
+    <p v-else-if="failed">{{ attendanceTimezoneErrorMessage(errorCode, tr) ?? tr('Target timezone could not be confirmed. Refresh before submitting.', '无法确认目标班次时区，请刷新后再提交。') }}</p>
     <p v-else-if="target">{{ tr('Target shift timezone', '目标班次时区') }}: {{ target.timezone }} · {{ target.workDate }}</p>
     <p v-else>{{ tr('Select a valid work date to confirm its timezone.', '请选择有效工作日期以确认考勤时区。') }}</p>
     <button type="button" :disabled="loading" @click="$emit('refresh')">{{ tr('Refresh timezone', '刷新时区') }}</button>
@@ -21,6 +21,7 @@
 </template>
 
 <script setup lang="ts">
+import { attendanceTimezoneErrorMessage } from './attendanceTimezoneError'
 import type { AttendanceTimezoneTarget } from './attendanceTimezoneTarget'
 import type { AttendanceWallTimeResult } from './attendanceWallTime'
 
@@ -29,6 +30,7 @@ defineProps<{
   target: AttendanceTimezoneTarget | null
   loading: boolean
   failed: boolean
+  errorCode?: unknown
   selected: { inAt: string; outAt: string }
   resolved: { inAt: AttendanceWallTimeResult; outAt: AttendanceWallTimeResult }
 }>()
