@@ -15,7 +15,12 @@ import {
   type AttendanceW4TransactionClientV1,
 } from '../../src/attendance/w4c0-identity'
 import type { AttendanceLegacyPlanWorkerJobV1, VerifiedAttendanceLegacyPlanV1 } from '../../src/attendance/w4c3a-legacy-plan-worker'
-import { LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1 } from '../../src/attendance/w4c3a-legacy-execution-plan'
+import {
+  computeLegacyImportAsyncJobSummaryDigestV1,
+  LEGACY_IMPORT_MISSING_RECORD_PRECONDITION_FINGERPRINT_V1,
+  type LegacyImportAsyncJobSummaryV1,
+} from '../../src/attendance/w4c3a-legacy-execution-plan'
+import { createAttendanceLegacyPlanWorkerRepositoryV1 } from '../../src/attendance/w4c3a-legacy-plan-worker-repository'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -525,6 +530,89 @@ describeIfDatabase('W4C-3a canonical import kernel (real PostgreSQL)', () => {
     if (closeError) throw closeError
     if (dropError) throw dropError
   }, 60000)
+
+  it.each([false, true])('V1 terminal timing includes transaction work and preserves an existing start (%s)', async (existingStart) => {
+    const client = await pool.connect()
+    const input = fixture('shadow')
+    const response: LegacyImportAsyncJobSummaryV1 = {
+      __jobType: 'commit',
+      idempotencyKey: null,
+      __importEngine: 'standard',
+      recordUpsertStrategy: 'unnest',
+      itemsInsertStrategy: 'unnest',
+      summary: {
+        processedRows: 1,
+        failedRows: 0,
+        elapsedMs: 0,
+        chunkConfig: { size: 100 },
+      },
+    }
+    try {
+      await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+      // Isolate the repository's real SQL time semantics from plan-admission
+      // constraints. These transaction-local tables never replace public data.
+      await client.query(`CREATE TEMP TABLE attendance_import_jobs
+        (LIKE public.attendance_import_jobs INCLUDING DEFAULTS) ON COMMIT DROP`)
+      await client.query(`CREATE TEMP TABLE attendance_import_legacy_terminal_responses (
+        job_id uuid PRIMARY KEY, org_id text NOT NULL, response_variant text NOT NULL,
+        response_digest text NOT NULL, response jsonb NOT NULL
+      ) ON COMMIT DROP`)
+      await client.query(
+        `INSERT INTO attendance_import_jobs
+          (id, org_id, batch_id, created_by, status, w4_contract_version, w4_accepted_write_posture, started_at)
+         VALUES ($1::uuid, $2, $3::uuid, $4, 'queued', 1, 'legacy_projection_only',
+           CASE WHEN $5::boolean THEN now() - interval '5 seconds' ELSE NULL END)`,
+        [input.job.jobId, input.orgId, input.batchId, input.job.createdBy, existingStart],
+      )
+      await client.query('SELECT pg_sleep(0.1)')
+      await createAttendanceLegacyPlanWorkerRepositoryV1(trx(client))
+        .storeCompletedResponseAndTerminalize(
+          {
+            ...input.job,
+            status: 'queued',
+            acceptedWritePosture: 'legacy_projection_only',
+            entrypoint: 'import_batch',
+            batchCommandId: input.batchId,
+            executionReasonCode: null,
+          },
+          {
+            ...input.plan,
+            manifest: {
+              ...input.plan.manifest,
+              artifactCleanup: { kind: 'none' },
+            },
+          },
+          response,
+          computeLegacyImportAsyncJobSummaryDigestV1(response),
+        )
+      const result = await client.query(
+        `SELECT status, started_at IS NOT NULL AS has_start, finished_at IS NOT NULL AS has_finish,
+                started_at = CASE WHEN $2::boolean THEN now() - interval '5 seconds' ELSE now() END AS start_preserved,
+                updated_at = now() AS update_preserved,
+                EXTRACT(EPOCH FROM (finished_at - started_at))::double precision * 1000 AS elapsed_ms,
+                EXTRACT(EPOCH FROM (finished_at - now()))::double precision * 1000 AS transaction_work_ms
+           FROM attendance_import_jobs WHERE id = $1::uuid`,
+        [input.job.jobId, existingStart],
+      )
+      expect(result.rows).toHaveLength(1)
+      expect(result.rows[0]).toMatchObject({
+        status: 'completed', has_start: true, has_finish: true,
+        start_preserved: true, update_preserved: true,
+      })
+      // Reverting only the production finish expression to now() makes this
+      // zero despite pg_sleep; a fake summary elapsedMs cannot satisfy it.
+      expect(result.rows[0].transaction_work_ms).toBeGreaterThanOrEqual(100)
+      expect(result.rows[0].elapsed_ms).toBeGreaterThanOrEqual(existingStart ? 5100 : 100)
+      const stored = await client.query(
+        'SELECT response FROM attendance_import_legacy_terminal_responses WHERE job_id = $1::uuid',
+        [input.job.jobId],
+      )
+      expect(stored.rows).toEqual([{ response }])
+    } finally {
+      await client.query('ROLLBACK')
+      client.release()
+    }
+  })
 
   async function execute(input: ReturnType<typeof fixture>): Promise<void> {
     const client = await pool.connect()
