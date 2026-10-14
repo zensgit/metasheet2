@@ -159,11 +159,60 @@ $spawnStub = {
 }
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
 $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2' } ([scriptblock]::Create($spawnStub.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) [void]`$calls.Add(`$Since); 4242 }"))
-Check 'reloadLogs printed "Spawning PM2 daemon" (exit 0, live file exists) -> exit 4, warning names the stray pid, never pm2 kill' ($r.Code -eq 4 -and $r.Out -match 'spawned a stray pm2 daemon; stray daemon pid 4242\. Do NOT run pm2 kill' -and $r.Out -notmatch 'live log\(s\) reopened' -and $r.Calls.Count -eq 1)
+Check 'reloadLogs printed "Spawning PM2 daemon" (exit 0, live file exists) -> exit 4, warning names the stray pid, never pm2 kill' ($r.Code -eq 4 -and $r.Out -match 'spawned a stray pm2 daemon; stray daemon pid 4242\. Do NOT run pm2 kill' -and $r.Out -notmatch 'live log\(s\) reopened' -and $r.Calls.Count -eq 2 -and $r.Calls[1] -eq [datetime]::MinValue)
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
 $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2' } ([scriptblock]::Create($spawnStub.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) @() }"))
 Check 'stray daemon pid not found -> the warning says so' ($r.Code -eq 4 -and $r.Out -match 'its pid was not found')
 
+
+Write-Host '== exit 4 names every Daemon.js process (also ones that predate the call); never kills'
+$noSpawnFail = 'function Test-Pm2PipePresent { $true }; function Stub-Pm2 { [void]$calls.Add(''x''); $global:LASTEXITCODE = 1; ''connect EPERM'' }'
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2'; ReopenTimeoutSec = 1 } ([scriptblock]::Create($noSpawnFail + "`nfunction Find-StrayPm2Daemon { param(`$Since) [void]`$calls.Add(`$Since); 777, 888 }"))
+Check 'exit 4 without "Spawning PM2 daemon": a pre-existing Daemon.js pid is named, scanned without a time filter' ($r.Code -eq 4 -and $r.Out -match 'present now: pid 777, 888' -and $r.Out -notmatch 'spawned a stray pm2 daemon' -and $r.Calls.Count -eq 2 -and $r.Calls[1] -eq [datetime]::MinValue)
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = 'Stub-Pm2'; ReopenTimeoutSec = 1 } ([scriptblock]::Create($noSpawnFail + "`nfunction Find-StrayPm2Daemon { param(`$Since) @() }"))
+Check 'exit 4 with no Daemon.js process: the log says none' ($r.Code -eq 4 -and $r.Out -match 'present now: none')
+
+Write-Host '== external pm2 program: bounded call (-Pm2TimeoutSec), output via files'
+$stubDir = Join-Path $WorkRoot ('logrot-test-stub-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
+$okStub = Join-Path $stubDir 'pm2-ok'
+$slowStub = Join-Path $stubDir 'pm2-slow'
+$pidFile = Join-Path $stubDir 'slow.pid'
+$marker = 1200 + (Get-Random -Maximum 700)
+if ($isWin) {
+  $okStub += '.cmd'; $slowStub += '.cmd'
+  [System.IO.File]::WriteAllText($okStub, "@echo off`r`ntype nul > `"%LOGROT_LIVE%`"`r`necho All logs reloaded`r`nexit /b 0`r`n")
+  [System.IO.File]::WriteAllText($slowStub, "@echo off`r`nping -n $marker 127.0.0.1 >nul`r`nexit /b 0`r`n")
+} else {
+  [System.IO.File]::WriteAllText($okStub, "#!/bin/sh`n: > `"`$LOGROT_LIVE`"`necho All logs reloaded`nexit 0`n")
+  [System.IO.File]::WriteAllText($slowStub, "#!/bin/sh`necho `$`$ > '$pidFile'`nexec sleep $marker`n")
+  $null = & chmod +x $okStub $slowStub
+}
+$stubCanRun = $true
+if (-not $isWin -and -not (Test-Path '/bin/sh')) { $stubCanRun = $false }
+if (-not $stubCanRun) { Write-Host '  SKIP  external-program timeout cases (no /bin/sh)' }
+else {
+  $okOver = { function Test-Pm2PipePresent { $true } }
+  $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+  $env:LOGROT_LIVE = Join-Path $lab.Logs 'metasheet-backend.out-0.log'
+  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = $okStub; Pm2TimeoutSec = 30 } $okOver
+  Check 'external stub (normal case): exit 0, output read from the redirect files, live file back, archive kept' ($r.Code -eq 0 -and $r.Out -match 'pm2 reloadLogs exit=0: All logs reloaded' -and $r.Out -match 'live log\(s\) reopened' -and @(Get-ChildItem -LiteralPath $lab.Archive -Filter 'metasheet-backend.out-0.*.log').Count -eq 1)
+  $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+  $before = Get-Sha (Join-Path $lab.Logs 'metasheet-backend.out-0.log')
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = $slowStub; Pm2TimeoutSec = 1; ReopenTimeoutSec = 1 } ([scriptblock]::Create($okOver.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) @() }"))
+  $sw.Stop()
+  Check 'pm2 call longer than -Pm2TimeoutSec 1 -> exit 4, "pm2 call timed out after 1 s", archive moved back with its bytes' ($r.Code -eq 4 -and $r.Out -match 'pm2 call timed out after 1 s' -and $r.Out -match 'ROLLED BACK' -and (Get-Sha (Join-Path $lab.Logs 'metasheet-backend.out-0.log')) -eq $before -and @(Get-ChildItem -LiteralPath $lab.Archive -Filter 'metasheet-backend.*').Count -eq 0 -and $sw.Elapsed.TotalSeconds -lt ($marker / 2))
+  Start-Sleep -Milliseconds 500
+  $alive = $true
+  if ($isWin) { $alive = (@(Get-CimInstance Win32_Process | Where-Object { [string]$_.CommandLine -match ('ping(\.exe)?"? -n ' + $marker + ' ') }).Count -gt 0) }
+  elseif (Test-Path $pidFile) { $alive = ($null -ne (Get-Process -Id ([int]([System.IO.File]::ReadAllText($pidFile).Trim())) -ErrorAction SilentlyContinue)) }
+  Check 'the timed-out stub process was killed' (-not $alive)
+  Remove-Item Env:LOGROT_LIVE -ErrorAction SilentlyContinue
+}
+Remove-Item -LiteralPath $stubDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host '== archive name collision, -Keep 0'
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
 New-Item -ItemType Directory -Force -Path $lab.Archive | Out-Null

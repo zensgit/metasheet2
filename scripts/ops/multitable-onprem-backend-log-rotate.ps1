@@ -26,7 +26,10 @@
   -ReopenTimeoutSec (each renamed file is either moved back, or kept when its live file came back
   late -- the log says which); 5 a file operation failed (read the rotate log);
   1 unexpected PowerShell error (e.g. Register-ScheduledTask in a non-elevated session).
-  The pm2 call itself has no timeout (see the runbook).
+  The pm2 call is bounded by -Pm2TimeoutSec (default 60): on timeout only the pm2 CLI process this script
+  started is killed (never a daemon), the run counts as a failed reload (rollback, exit 4) and prints
+  "pm2 call timed out after N s". On any exit 4 the pid(s) of every node ...\pm2\lib\Daemon.js process
+  present are printed (also ones that existed before the call); they are never stopped by this script.
 #>
 param(
   [string]$InstallRoot = '',
@@ -37,6 +40,7 @@ param(
   [ValidateSet('Rename', 'CopyTruncate')][string]$Mode = 'Rename',
   [string]$Pm2Command = '',
   [int]$ReopenTimeoutSec = 10,
+  [int]$Pm2TimeoutSec = 60,
   [switch]$DryRun,
   [switch]$Apply,
   [switch]$Register,
@@ -61,26 +65,93 @@ function Test-Pm2PipePresent([string]$Pm2HomeDir) {
   try { return (@([System.IO.Directory]::GetFiles('\\.\pipe\', 'rpc.sock')).Count -gt 0) } catch { return $false }
 }
 
-function Invoke-Pm2ReloadLogs([string]$Command, [string]$Pm2HomeDir) {
-  $previous = $env:PM2_HOME
-  $ErrorActionPreference = 'Continue'
-  try {
-    $env:PM2_HOME = $Pm2HomeDir
-    $raw = & $Command 'reloadLogs' 2>&1
-    $code = $LASTEXITCODE
-  } catch { $raw = @($_.Exception.Message); $code = 1 } finally { $env:PM2_HOME = $previous }
-  $text = (@($raw) | ForEach-Object { [string]$_ }) -join ' | '
-  return [pscustomobject]@{ Ok = (($code -eq 0) -and ($text -notmatch 'Spawning PM2 daemon')); Code = $code; Text = $text }
-}
-
 function Find-StrayPm2Daemon([datetime]$Since) {
   # pm2-runtime never runs pm2\lib\Daemon.js; a node process running it was spawned by a pm2 CLI call.
+  # -Since [datetime]::MinValue lists every such process, including ones that existed before the call.
   if (-not (Test-IsWindowsHost)) { return @() }
   try {
     return @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object {
         [string]$_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' -and $_.CreationDate -ge $Since
       } | ForEach-Object { [int]$_.ProcessId })
   } catch { return @() }
+}
+
+function Stop-Pm2CliProcess($Proc) {
+  # Kills ONLY the pm2 CLI process this script started (plus its non-daemon children, e.g. the node
+  # behind a pm2.cmd shim). A pm2\lib\Daemon.js process is never touched, even when it is a child.
+  try {
+    if (Test-IsWindowsHost) {
+      $all = @(Get-CimInstance Win32_Process)
+      $queue = New-Object System.Collections.ArrayList
+      [void]$queue.Add([int]$Proc.Id)
+      $victims = @()
+      for ($i = 0; $i -lt $queue.Count; $i++) {
+        foreach ($c in @($all | Where-Object { [int]$_.ParentProcessId -eq [int]$queue[$i] -and [int]$_.ProcessId -ne [int]$Proc.Id })) {
+          if ([string]$c.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$') { continue }
+          if ($queue.Contains([int]$c.ProcessId)) { continue }
+          [void]$queue.Add([int]$c.ProcessId); $victims += [int]$c.ProcessId
+        }
+      }
+      foreach ($v in @($victims | Sort-Object -Descending)) { try { Stop-Process -Id $v -Force -ErrorAction Stop } catch { } }
+    }
+  } catch { }
+  try { if (-not $Proc.HasExited) { $Proc.Kill() } } catch { }
+}
+
+function Invoke-Pm2ReloadLogs([string]$Command, [string]$Pm2HomeDir, [int]$TimeoutSec = 60) {
+  $previous = $env:PM2_HOME
+  $ErrorActionPreference = 'Continue'
+  $isApp = $false
+  $resolved = $null
+  try { $resolved = Get-Command -Name $Command -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { }
+  if ($null -ne $resolved) { $isApp = $true }
+  if (-not $isApp) {
+    # Not an external program (a PowerShell function/alias, e.g. a test stub): in-process call, no timeout possible.
+    try {
+      $env:PM2_HOME = $Pm2HomeDir
+      $raw = & $Command 'reloadLogs' 2>&1
+      $code = $LASTEXITCODE
+    } catch { $raw = @($_.Exception.Message); $code = 1 } finally { $env:PM2_HOME = $previous }
+    $text = (@($raw) | ForEach-Object { [string]$_ }) -join ' | '
+    return [pscustomobject]@{ Ok = (($code -eq 0) -and ($text -notmatch 'Spawning PM2 daemon')); Code = $code; Text = $text; TimedOut = $false }
+  }
+  # External program: own process with output redirected to FILES (a daemon spawned by pm2 would inherit
+  # a pipe and keep a pipe reader hanging forever; it only inherits the file handles), bounded wait.
+  $outFile = [System.IO.Path]::GetTempFileName()
+  $errFile = [System.IO.Path]::GetTempFileName()
+  $proc = $null
+  $timedOut = $false
+  $code = 1
+  $startError = ''
+  try {
+    $env:PM2_HOME = $Pm2HomeDir
+    $file = [string]$resolved.Source
+    $argList = 'reloadLogs'
+    if ($file -match '(?i)\.(cmd|bat)$') {
+      $argList = '/d /c ""' + $file + '" reloadLogs"'
+      $file = 'cmd.exe'
+    }
+    $sp = @{ FilePath = $file; ArgumentList = $argList; PassThru = $true; RedirectStandardOutput = $outFile; RedirectStandardError = $errFile }
+    if (Test-IsWindowsHost) { $sp['NoNewWindow'] = $true }
+    try {
+      $proc = Start-Process @sp
+      $null = $proc.Handle
+      if (-not $proc.WaitForExit([int]([math]::Max(1, $TimeoutSec) * 1000))) {
+        $timedOut = $true
+        Stop-Pm2CliProcess $proc
+        try { [void]$proc.WaitForExit(5000) } catch { }
+      } else { $proc.WaitForExit(); $code = [int]$proc.ExitCode }
+    } catch { $startError = $_.Exception.Message; $code = 1 }
+  } finally { $env:PM2_HOME = $previous }
+  $parts = @()
+  foreach ($f in @($outFile, $errFile)) {
+    try { foreach ($l in @([System.IO.File]::ReadAllLines($f))) { if ($l.Trim()) { $parts += $l.Trim() } } } catch { }
+    try { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } catch { }
+  }
+  if ($startError) { $parts += ('could not start pm2: ' + $startError) }
+  if ($timedOut) { $parts += ('pm2 call timed out after ' + $TimeoutSec + ' s'); $code = -1 }
+  $text = ($parts) -join ' | '
+  return [pscustomobject]@{ Ok = ((-not $timedOut) -and ($code -eq 0) -and ($text -notmatch 'Spawning PM2 daemon')); Code = $code; Text = $text; TimedOut = $timedOut }
 }
 
 function Get-RotateStamp { return (Get-Date -Format 'yyyyMMdd-HHmmss') }
@@ -222,7 +293,7 @@ function Invoke-Main {
   $code = 0
   if ($renamed.Count -gt 0) {
     $callStart = (Get-Date).AddSeconds(-2)
-    $reload = Invoke-Pm2ReloadLogs $cmd $pm2HomeDir
+    $reload = Invoke-Pm2ReloadLogs $cmd $pm2HomeDir $Pm2TimeoutSec
     Write-Step ("pm2 reloadLogs exit={0}: {1}" -f $reload.Code, $reload.Text)
     if ($reload.Text -match 'Spawning PM2 daemon') {
       $stray = @(Find-StrayPm2Daemon $callStart)
@@ -245,6 +316,10 @@ function Invoke-Main {
         } catch { Write-Step ("FAILED: rollback of {0}: {1}" -f $r.Archive, $_.Exception.Message); $code = 5 }
       }
       Write-Step 'pm2 did not reopen the live log(s); check -Pm2Home, that this runs as the pm2-runtime account, and that the MetaSheet-PM2 task is running'
+      # Exit 4 for ANY reason: name every pm2\lib\Daemon.js process, also ones that existed before the call. Never killed here.
+      $anyDaemon = @(Find-StrayPm2Daemon ([datetime]::MinValue))
+      if ($anyDaemon.Count -gt 0) { Write-Step ("pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: pid " + ($anyDaemon -join ', ') + ". pm2-runtime never runs Daemon.js, so each is a stray (it may predate this call). This script does not stop it; runbook section 3 item 8.") }
+      else { Write-Step 'pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: none' }
     } else { Write-Step 'live log(s) reopened by pm2' }
   }
   if ($failed) { $code = 5 }
