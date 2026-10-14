@@ -2877,4 +2877,294 @@ describe('UserManagementView', () => {
       expect(topBanner()).toBeNull()
     })
   })
+
+  describe('admin reset-password inline rule', () => {
+    const RULE_COPY = '至少 8 位。留空则自动生成临时密码。'
+    const SHORT_COPY = '临时密码不足 8 位，未重置。'
+    const SERVER_SHORT_ENGLISH = 'Password must be at least 8 characters long'
+
+    type ResetOutcome = 'ok' | 'short' | 'other-400' | 'failed'
+    const resets: Array<{ userId: string; passwordLength: number | null }> = []
+    const revokes: string[] = []
+    let resetOutcome: ResetOutcome = 'ok'
+    let resetGate: Promise<void> | null = null
+
+    function marks(length: number): string {
+      return 'x'.repeat(length)
+    }
+
+    function installResetApi(): void {
+      const base = createApiImplementation(callLog)
+      apiFetchMock.mockImplementation(async (input: unknown, init?: RequestInit) => {
+        const rawUrl = String(input)
+        const method = (init?.method || 'GET').toUpperCase()
+        const pathname = new URL(rawUrl, 'http://localhost').pathname
+        if (method === 'POST' && pathname.endsWith('/reset-password')) {
+          const match = pathname.match(/\/users\/([^/]+)\/reset-password$/)
+          const rawBody = typeof init?.body === 'string' ? init.body : ''
+          let passwordLength: number | null = null
+          if (rawBody) {
+            const parsed = JSON.parse(rawBody) as { password?: unknown }
+            if (typeof parsed.password === 'string') passwordLength = parsed.password.length
+          }
+          resets.push({
+            userId: match ? decodeURIComponent(match[1]) : '',
+            passwordLength,
+          })
+          if (resetGate) await resetGate
+          if (resetOutcome === 'short') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'PASSWORD_TOO_SHORT', message: SERVER_SHORT_ENGLISH },
+            }, 400)
+          }
+          if (resetOutcome === 'other-400') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'USER_ID_REQUIRED', message: 'userId is required' },
+            }, 400)
+          }
+          if (resetOutcome === 'failed') {
+            return createJsonResponse({
+              ok: false,
+              error: { code: 'PASSWORD_RESET_FAILED', message: 'Failed to reset password' },
+            }, 500)
+          }
+          return createJsonResponse({
+            ok: true,
+            data: { userId: match ? decodeURIComponent(match[1]) : '', temporaryPassword: 'issued' },
+          })
+        }
+        if (method === 'POST' && pathname.endsWith('/revoke-sessions')) {
+          const match = pathname.match(/\/users\/([^/]+)\/revoke-sessions$/)
+          revokes.push(match ? decodeURIComponent(match[1]) : '')
+          return createJsonResponse({ ok: true, data: {} })
+        }
+        return base(input, init)
+      })
+    }
+
+    function ruleEl(): HTMLElement | null {
+      const node = container?.querySelector('[data-testid="admin-temporary-password-rule"]')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function errorEl(): HTMLElement | null {
+      const node = container?.querySelector('[data-testid="admin-temporary-password-error"]')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function passwordInput(): HTMLInputElement {
+      const node = container!.querySelector('[data-testid="admin-temporary-password"]')
+      if (!(node instanceof HTMLInputElement)) throw new Error('temporary password input missing')
+      return node
+    }
+
+    function pageBanner(): HTMLElement | null {
+      const node = container!.querySelector('.user-admin > p.user-admin__status')
+      return node instanceof HTMLElement ? node : null
+    }
+
+    function sessionHint(): HTMLElement | null {
+      const node = Array.from(container!.querySelectorAll('p.user-admin__hint')).find((candidate) => candidate.textContent?.includes('现有会话失效'))
+      return node instanceof HTMLElement ? node : null
+    }
+
+    async function typeManual(value: string): Promise<void> {
+      const input = passwordInput()
+      input.value = value
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+      await flushUi()
+    }
+
+    async function clickReset(): Promise<void> {
+      findButtonByText(container!, '重置密码').click()
+      await flushUi()
+    }
+
+    async function openNamedUser(name: string): Promise<void> {
+      const button = findUserRow(container!, name).querySelector('button.user-admin__user-body')
+      if (!(button instanceof HTMLButtonElement)) throw new Error(`User button missing: ${name}`)
+      button.click()
+      await waitForCondition(() => container!.querySelector('[data-testid="selected-user-heading"]')?.textContent?.includes(name) ?? false)
+    }
+
+    async function mountAdmin(): Promise<void> {
+      resets.length = 0
+      revokes.length = 0
+      resetOutcome = 'ok'
+      resetGate = null
+      installResetApi()
+      app = createApp(UserManagementView)
+      registerRouterLink(app)
+      app.mount(container!)
+      await waitForCondition(() => ruleEl() !== null)
+    }
+
+    it('shows the length rule beside the input and blocks a trimmed short value before POST', async () => {
+      await mountAdmin()
+      const input = passwordInput()
+      const rule = ruleEl()
+      expect(rule?.textContent?.trim()).toBe(RULE_COPY)
+      expect(rule?.textContent).not.toMatch(/大写|小写|弱口令/)
+      expect(input.compareDocumentPosition(rule!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+      expect(sessionHint()?.textContent).toContain('现有会话失效')
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Alpha')
+
+      await typeManual(marks(1))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(errorEl()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('true')
+      expect(findButtonByText(container!, '重置密码').disabled).toBe(false)
+      expect(findButtonByText(container!, '停用账号').disabled).toBe(false)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(errorEl()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+
+      await typeManual(`  ${marks(7)}  `)
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+    })
+
+    it('posts a trimmed 8-character value that has no other character classes', async () => {
+      await mountAdmin()
+      await typeManual(`  ${marks(8)}  `)
+      await clickReset()
+      await waitForCondition(() => resets.length === 1 && pageBanner()?.textContent?.includes('密码已重置') === true)
+      expect(resets).toEqual([{ userId: 'user-1', passwordLength: 8 }])
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().value).toBe('')
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(false)
+      const issued = container!.querySelector('[data-testid="admin-reset-temporary-password"]')
+      expect(issued?.textContent?.trim().startsWith('临时密码：')).toBe(true)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+    })
+
+    it('posts a blank or whitespace value with the password field omitted', async () => {
+      await mountAdmin()
+      await clickReset()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets[0]).toEqual({ userId: 'user-1', passwordLength: null })
+
+      await typeManual('   ')
+      await clickReset()
+      await waitForCondition(() => resets.length === 2)
+      expect(resets[1]).toEqual({ userId: 'user-1', passwordLength: null })
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(pageBanner()?.textContent).toContain('密码已重置')
+    })
+
+    it('maps server PASSWORD_TOO_SHORT to the inline sentence and leaves other reset failures on the page error', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      await typeManual(marks(8))
+      await clickReset()
+      await waitForCondition(() => errorEl() !== null)
+      expect(resets).toEqual([{ userId: 'user-1', passwordLength: 8 }])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+      expect(errorEl()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().value).toHaveLength(8)
+
+      resetOutcome = 'other-400'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('userId is required') === true)
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(pageBanner()?.textContent).not.toContain(SHORT_COPY)
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+
+      resetOutcome = 'failed'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('Failed to reset password') === true)
+      expect(resets).toHaveLength(3)
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(true)
+      expect(pageBanner()?.textContent).not.toContain('密码已重置')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+    })
+
+    it('clears the inline error on success and keeps the rule', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      await typeManual(marks(8))
+      await clickReset()
+      await waitForCondition(() => errorEl()?.textContent?.includes(SHORT_COPY) === true)
+
+      resetOutcome = 'ok'
+      await clickReset()
+      await waitForCondition(() => pageBanner()?.textContent?.includes('密码已重置') === true)
+      expect(errorEl()).toBeNull()
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(pageBanner()?.classList.contains('user-admin__status--error')).toBe(false)
+    })
+
+    it('does not carry a short-password error onto the next account', async () => {
+      await mountAdmin()
+      await typeManual(marks(7))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+
+      await openNamedUser('Bravo')
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(errorEl()).toBeNull()
+      expect(passwordInput().value).toBe('')
+      expect(passwordInput().getAttribute('aria-invalid')).toBe('false')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+
+      await clickReset()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets).toEqual([{ userId: 'user-2', passwordLength: null }])
+      expect(pageBanner()?.textContent).toContain('密码已重置')
+    })
+
+    it('does not paint a late short-password response onto the account selected afterward', async () => {
+      await mountAdmin()
+      resetOutcome = 'short'
+      let releaseReset = (): void => {}
+      resetGate = new Promise<void>((resolve) => {
+        releaseReset = resolve
+      })
+      await typeManual(marks(8))
+      findButtonByText(container!, '重置密码').click()
+      await waitForCondition(() => resets.length === 1)
+      expect(resets[0]).toEqual({ userId: 'user-1', passwordLength: 8 })
+
+      await openNamedUser('Bravo')
+      releaseReset()
+      await flushUi(8)
+      expect(container!.querySelector('[data-testid="selected-user-heading"]')?.textContent).toContain('Bravo')
+      expect(errorEl()).toBeNull()
+      expect(pageBanner()?.textContent || '').not.toContain(SERVER_SHORT_ENGLISH)
+      expect(pageBanner()?.textContent || '').not.toContain(SHORT_COPY)
+      expect(pageBanner()?.textContent || '').not.toContain('密码已重置')
+      expect(resets).toHaveLength(1)
+    })
+
+    it('still logs the current account out after a short password was refused', async () => {
+      await mountAdmin()
+      await typeManual(marks(4))
+      await clickReset()
+      expect(resets).toEqual([])
+      expect(errorEl()?.textContent?.trim()).toBe(SHORT_COPY)
+
+      findButtonByText(container!, '全部下线').click()
+      await waitForCondition(() => revokes.length === 1 && pageBanner()?.textContent?.includes('该用户现有会话已失效') === true)
+      expect(revokes).toEqual(['user-1'])
+      expect(resets).toEqual([])
+      expect(pageBanner()?.textContent).not.toContain('密码已重置')
+      expect(ruleEl()?.textContent?.trim()).toBe(RULE_COPY)
+      expect(sessionHint()?.textContent).toContain('现有会话失效')
+    })
+  })
 })
