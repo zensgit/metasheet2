@@ -98,6 +98,19 @@ describe('attendance import row user resolution', () => {
     expect(helpers.resolveRequiredFieldValue({ fields: row.fields }, '下班1打卡时间')).toBe('2026-03-23 18:00')
   })
 
+  it('leaves opaque legacy user ids untouched and does not query the directory', async () => {
+    let queries = 0
+    const db = {
+      async query() {
+        queries += 1
+        return []
+      },
+    }
+    const index = await helpers.loadAttendanceImportUserIdentifierIndex(db, 'default', ['worker-1'])
+    expect(queries).toBe(0)
+    expect(helpers.adoptCanonicalImportUserId('worker-1', index)).toEqual({ userId: 'worker-1', warning: null })
+  })
+
   it('flags an unknown email instead of treating it as a resolved user id', async () => {
     const email = 'nobody@metasheet.test'
     const db = {

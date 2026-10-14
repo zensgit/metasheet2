@@ -8233,6 +8233,17 @@ function importUserMobileMatchKeys(value) {
   return Array.from(keys)
 }
 
+// Only email and mobile are directory identifiers. Opaque legacy ids such as
+// "worker-1" stay as-is: scheduler scope and the legacy import path accept them,
+// and looking them up would turn a missing users query into HTTP 500.
+function isImportEmailIdentifier(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value ?? '').trim())
+}
+
+function isDirectoryResolvableImportUserIdentifier(value) {
+  return isImportEmailIdentifier(value) || importUserMobileMatchKeys(value).length > 0
+}
+
 function classifyImportUserIdentifier(raw, users) {
   const trimmed = String(raw ?? '').trim()
   const key = importUserIdentifierLookupKey(trimmed)
@@ -8279,6 +8290,7 @@ function adoptCanonicalImportUserId(rawUserId, index) {
   const raw = String(rawUserId).trim()
   if (!raw) return { userId: null, warning: null }
   if (isCanonicalImportUserId(raw)) return { userId: raw.toLowerCase(), warning: null }
+  if (!isDirectoryResolvableImportUserIdentifier(raw)) return { userId: raw, warning: null }
   const entry = index instanceof Map ? index.get(importUserIdentifierLookupKey(raw)) : null
   if (entry?.userId && isCanonicalImportUserId(entry.userId)) {
     return { userId: entry.userId.toLowerCase(), warning: null }
@@ -8346,7 +8358,7 @@ async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers
   const seen = new Set()
   for (const raw of Array.isArray(rawIdentifiers) ? rawIdentifiers : []) {
     const trimmed = String(raw ?? '').trim()
-    if (!trimmed || isCanonicalImportUserId(trimmed)) continue
+    if (!trimmed || isCanonicalImportUserId(trimmed) || !isDirectoryResolvableImportUserIdentifier(trimmed)) continue
     const key = importUserIdentifierLookupKey(trimmed)
     if (!key || seen.has(key)) continue
     seen.add(key)
