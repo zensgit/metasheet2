@@ -176,6 +176,12 @@ describe('Attendance admin anchor navigation', () => {
 
     const homeContext = container!.querySelector<HTMLElement>('[data-admin-home-context="true"]')
     const sectionWorkspace = container!.querySelector<HTMLElement>('[data-admin-section-workspace="true"]')
+    const homeHeader = container!.querySelector<HTMLElement>('.attendance__admin-header')
+    expect(homeHeader?.textContent).toContain('Admin Console')
+    expect(homeHeader?.querySelector('[data-admin-page-search="true"]')).toBeTruthy()
+    expect(homeHeader?.querySelector('[data-admin-reload="true"]')).toBeTruthy()
+    expect(homeHeader?.querySelector('[data-attendance-admin-guide]')).toBeTruthy()
+    expect(homeContext?.querySelector('[data-attendance-admin-guide]')).toBeNull()
     const taskHome = container!.querySelector<HTMLElement>('[data-admin-task-home="true"]')
     expect(homeContext?.style.display).not.toBe('none')
     expect(sectionWorkspace?.style.display).toBe('none')
@@ -939,6 +945,10 @@ describe('Attendance admin anchor navigation', () => {
     expect(currentSectionBar?.querySelector('[data-admin-prev-section]')).toBeNull()
     expect(currentSectionBar?.querySelector('[data-admin-next-section]')).toBeNull()
     expect(currentSectionBar?.querySelector('[data-admin-task-home-return]')).toBeNull()
+    expect(currentSectionBar?.querySelector('[data-admin-page-search="true"]')).toBeTruthy()
+    expect(currentSectionBar?.querySelector('[data-admin-reload="true"]')).toBeTruthy()
+    expect(currentSectionBar?.querySelector('[data-attendance-admin-guide]')).toBeTruthy()
+    expect(container!.querySelector('.attendance__admin-header')).toBeNull()
     expect(container!.querySelector('[data-admin-reload="true"]')?.previousElementSibling?.getAttribute('data-admin-page-search')).toBe('true')
   })
 

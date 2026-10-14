@@ -1573,54 +1573,57 @@
 
       <section class="attendance__grid" v-if="showAdmin">
         <div ref="adminConsoleRef" class="attendance__card attendance__card--admin">
-          <div class="attendance__admin-header">
+          <div v-if="adminTaskHomeOpen" class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <div class="attendance__admin-actions">
-              <div class="attendance__admin-page-search" data-admin-page-search="true">
-                <button
-                  v-if="!adminPageSearchOpen"
-                  class="attendance__btn"
-                  type="button"
-                  data-admin-page-search-toggle="true"
-                  @click="openAdminPageSearch"
-                >
-                  {{ tr('Search this page', '搜索本页') }}
-                </button>
-                <div v-else class="attendance__admin-page-search-field" role="search">
-                  <input
-                    ref="adminPageSearchInputRef"
-                    v-model="adminPageSearchQuery"
-                    class="attendance__admin-page-search-input"
-                    type="search"
-                    data-admin-page-search-input="true"
-                    :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
-                    :aria-label="tr('Search this page', '搜索本页')"
-                    @keydown.esc.prevent="closeAdminPageSearch"
-                  />
+            <div class="attendance__admin-header-tools">
+              <div class="attendance__admin-actions">
+                <div class="attendance__admin-page-search" data-admin-page-search="true">
                   <button
-                    class="attendance__btn attendance__btn--inline"
+                    v-if="!adminPageSearchOpen"
+                    class="attendance__btn"
                     type="button"
-                    data-admin-page-search-clear="true"
-                    @click="clearAdminPageSearchQuery"
+                    data-admin-page-search-toggle="true"
+                    @click="openAdminPageSearch"
                   >
-                    {{ tr('Clear', '清除') }}
+                    {{ tr('Search this page', '搜索本页') }}
                   </button>
-                  <span
-                    v-if="adminPageSearchQuery.trim()"
-                    class="attendance__admin-page-search-status"
-                    data-admin-page-search-status
-                  >
-                    {{
-                      adminPageSearchMatched === 0
-                        ? tr('No matches on this page.', '当前页面没有匹配内容。')
-                        : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
-                    }}
-                  </span>
+                  <div v-else class="attendance__admin-page-search-field" role="search">
+                    <input
+                      ref="adminPageSearchInputRef"
+                      v-model="adminPageSearchQuery"
+                      class="attendance__admin-page-search-input"
+                      type="search"
+                      data-admin-page-search-input="true"
+                      :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
+                      :aria-label="tr('Search this page', '搜索本页')"
+                      @keydown.esc.prevent="closeAdminPageSearch"
+                    />
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      data-admin-page-search-clear="true"
+                      @click="clearAdminPageSearchQuery"
+                    >
+                      {{ tr('Clear', '清除') }}
+                    </button>
+                    <span
+                      v-if="adminPageSearchQuery.trim()"
+                      class="attendance__admin-page-search-status"
+                      data-admin-page-search-status
+                    >
+                      {{
+                        adminPageSearchMatched === 0
+                          ? tr('No matches on this page.', '当前页面没有匹配内容。')
+                          : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
+                      }}
+                    </span>
+                  </div>
                 </div>
+                <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                  {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                </button>
               </div>
-              <button class="attendance__btn" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-                {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
-              </button>
+              <AttendanceAdminGuide :tr="tr" @select-section="selectAdminSection" />
             </div>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -1679,7 +1682,6 @@
                   </button>
                 </div>
               </div>
-              <AttendanceAdminGuide :tr="tr" @select-section="selectAdminSection" />
               <AttendanceAdminTaskHome
                 :tr="tr"
                 :groups="adminTaskHomeGroups"
@@ -1713,11 +1715,60 @@
               data-admin-current-section="true"
             >
               <strong class="attendance__admin-current-section-title">{{ activeAdminSectionContextLabel }}</strong>
-              <AttendanceAdminGuide
-                :tr="tr"
-                :active-section-id="adminActiveSectionId"
-                @select-section="selectAdminSection"
-              />
+              <div v-if="!adminTaskHomeOpen" class="attendance__admin-current-section-tools">
+                <div class="attendance__admin-actions">
+                  <div class="attendance__admin-page-search" data-admin-page-search="true">
+                    <button
+                      v-if="!adminPageSearchOpen"
+                      class="attendance__btn"
+                      type="button"
+                      data-admin-page-search-toggle="true"
+                      @click="openAdminPageSearch"
+                    >
+                      {{ tr('Search this page', '搜索本页') }}
+                    </button>
+                    <div v-else class="attendance__admin-page-search-field" role="search">
+                      <input
+                        ref="adminPageSearchInputRef"
+                        v-model="adminPageSearchQuery"
+                        class="attendance__admin-page-search-input"
+                        type="search"
+                        data-admin-page-search-input="true"
+                        :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
+                        :aria-label="tr('Search this page', '搜索本页')"
+                        @keydown.esc.prevent="closeAdminPageSearch"
+                      />
+                      <button
+                        class="attendance__btn attendance__btn--inline"
+                        type="button"
+                        data-admin-page-search-clear="true"
+                        @click="clearAdminPageSearchQuery"
+                      >
+                        {{ tr('Clear', '清除') }}
+                      </button>
+                      <span
+                        v-if="adminPageSearchQuery.trim()"
+                        class="attendance__admin-page-search-status"
+                        data-admin-page-search-status
+                      >
+                        {{
+                          adminPageSearchMatched === 0
+                            ? tr('No matches on this page.', '当前页面没有匹配内容。')
+                            : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
+                        }}
+                      </span>
+                    </div>
+                  </div>
+                  <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                    {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                  </button>
+                </div>
+                <AttendanceAdminGuide
+                  :tr="tr"
+                  :active-section-id="adminActiveSectionId"
+                  @select-section="selectAdminSection"
+                />
+              </div>
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
@@ -32370,6 +32421,28 @@ defineExpose({
   margin-bottom: var(--ms-space-4);
 }
 
+.attendance__admin-header-tools,
+.attendance__admin-current-section-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.attendance__admin-header-tools .attendance__admin-actions,
+.attendance__admin-current-section-tools .attendance__admin-actions {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.attendance__admin-header-tools :deep(.admin-guide),
+.attendance__admin-current-section-tools :deep(.admin-guide) {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
 .attendance__admin-header h3,
 .attendance__admin-section-header h4 {
   margin: 0;
@@ -32498,8 +32571,9 @@ defineExpose({
   z-index: 6;
   display: flex;
   align-items: center;
+  gap: 12px;
   margin-bottom: var(--ms-space-4);
-  padding: var(--ms-space-3) var(--ms-space-4);
+  padding: var(--ms-space-2) var(--ms-space-4);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
@@ -32507,6 +32581,10 @@ defineExpose({
 }
 
 .attendance__admin-current-section-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--ms-text-1);
   font-size: var(--ms-font-size-section-title);
   font-weight: var(--ms-font-weight-title);
@@ -33626,6 +33704,17 @@ defineExpose({
 
   .attendance__admin-current-section {
     top: 8px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .attendance__admin-header,
+  .attendance__admin-header-tools,
+  .attendance__admin-current-section-tools,
+  .attendance__admin-header-tools .attendance__admin-actions,
+  .attendance__admin-current-section-tools .attendance__admin-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
   }
 
   .attendance__missed-reminder-toolbar {
