@@ -240,6 +240,18 @@ describe('ElearningContentAdminSection', () => {
     expect(h.assign).toHaveBeenCalledWith(expect.objectContaining({ targetUserId: 'pasted-user' }))
   })
 
+  it('F13: a person whose mailbox the server withheld (email null) is shown by name only', async () => {
+    h.searchAssignees.mockResolvedValueOnce([{ id: PICKED_ID, name: '钉钉用户', email: null }])
+    const root = mountView()
+    pickerSearch(root, '钉钉')
+    await flushUi()
+    const option = root.querySelector('[data-testid="elearning-content-assignee-option-0"]') as HTMLButtonElement
+    expect(option.textContent?.trim()).toBe('钉钉用户')
+    expect(option.querySelector('small')).toBeNull()
+    expect(option.textContent).not.toContain('@')
+    expect(option.textContent).not.toContain(PICKED_ID)
+  })
+
   it('F13: clear empties the assignee, and 403 / empty / failed searches say so without blocking paste', async () => {
     h.searchAssignees.mockResolvedValueOnce([{ id: PICKED_ID, name: '张三', email: null }])
     const root = mountView()

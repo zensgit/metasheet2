@@ -286,15 +286,49 @@ describe('elearning assignee search (F13 picker)', () => {
     })
     expect(queries).toHaveLength(1)
     const [{ sql, params }] = queries
-    expect(params).toEqual([ORG, '50%_off\\', '%50\\%\\_off\\\\%', 7])
+    expect(params).toEqual([
+      ORG,
+      '50%_off\\',
+      '%50\\%\\_off\\\\%',
+      7,
+      ['%@placeholder.local', '%@migration-revert.local', '%@trusted-token.local'],
+    ])
     const compact = sql.replace(/\s+/g, ' ')
     expect(compact).toContain('JOIN user_orgs membership ON membership.user_id = platform_user.id AND membership.org_id = $1 AND membership.is_active = TRUE')
     expect(compact).toContain('WHERE platform_user.is_active = TRUE')
-    expect(compact).toContain("COALESCE(platform_user.name, '') ILIKE $3")
-    expect(compact).toContain("COALESCE(platform_user.email, '') ILIKE $3")
+    expect(compact).toContain("COALESCE(platform_user.name, '') ILIKE $3 ESCAPE '\\'")
+    // Placeholder mailboxes are neither matched nor projected.
+    expect(compact).toContain("( COALESCE(platform_user.email, '') ILIKE $3 ESCAPE '\\' AND NOT lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[]) )")
+    expect(compact).toContain("CASE WHEN lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[]) THEN NULL ELSE platform_user.email END AS email")
     expect(compact).toContain('LIMIT $4')
-    expect(compact).toMatch(/^\/\* elearning-assignee-directory:search \*\/ SELECT platform_user\.id, platform_user\.name, platform_user\.email FROM users platform_user /)
+    expect(compact).toMatch(/^\/\* elearning-assignee-directory:search \*\/ SELECT platform_user\.id, platform_user\.name, CASE WHEN /)
+    expect(compact).toContain(' END AS email FROM users platform_user ')
     expect(compact).not.toMatch(/is_admin|mobile|department|last_login|password|role/i)
+  })
+
+  it('never returns a placeholder mailbox and clamps the limit even when called directly', async () => {
+    const { db, queries } = captureDb([
+      { id: 'dt-1', name: '钉钉用户', email: 'dingtalk_union123@placeholder.local' },
+      { id: 'dt-2', name: null, email: 'DingTalk_Open9@PLACEHOLDER.LOCAL ' },
+      { id: 'mig-1', name: 'Migrated', email: 'mig-1@migration-revert.local' },
+      { id: 'tok-1', name: 'Token', email: 'tok-1@trusted-token.local' },
+      { id: 'real-1', name: 'Real', email: 'real@placeholder.local.example.test' },
+    ])
+    const result = await searchElearningAssignees(db, { orgId: ORG, query: 'a', limit: 500 })
+    expect(result.items).toEqual([
+      { id: 'dt-1', name: '钉钉用户', email: null },
+      { id: 'dt-2', name: null, email: null },
+      { id: 'mig-1', name: 'Migrated', email: null },
+      { id: 'tok-1', name: 'Token', email: null },
+      { id: 'real-1', name: 'Real', email: 'real@placeholder.local.example.test' },
+    ])
+    expect(JSON.stringify(result)).not.toMatch(/placeholder\.local"|migration-revert|trusted-token|union123|Open9/i)
+    expect(queries[0]?.params[3]).toBe(50)
+    for (const [limit, expected] of [[0, 1], [-3, 1], [7.9, 7], [Number.NaN, 20]] as const) {
+      const run = captureDb([])
+      await searchElearningAssignees(run.db, { orgId: ORG, query: '', limit })
+      expect(run.queries[0]?.params[3]).toBe(expected)
+    }
   })
 })
 

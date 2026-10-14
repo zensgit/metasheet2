@@ -1200,6 +1200,9 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     await seed(`${NS}-assignee-inactive-user`, orgA, { name: `Alice ${tag} gone`, email: null, userActive: false })
     await seed(`${NS}-assignee-inactive-member`, orgA, { name: `Alice ${tag} left`, email: null, memberActive: false })
     await seed(`${NS}-assignee-other-org`, orgB, { name: `Alice ${tag} elsewhere`, email: `alice.other.${tag}@assignee.test` })
+    // DingTalk JIT accounts store a synthetic `dingtalk_<unionId>@placeholder.local` mailbox.
+    const dingtalk = `${NS}-assignee-dingtalk`
+    await seed(dingtalk, orgA, { name: `Ding ${tag}`, email: `dingtalk_union${tag}@placeholder.local` })
 
     const byName = await searchElearningAssignees(db, { orgId: orgA, query: `alice ${tag}`, limit: 20 })
     expect(byName.items).toEqual([
@@ -1216,7 +1219,16 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     expect(wildcardOnly.items.map((item) => item.id)).toEqual([percent])
     // Whole-org listing (empty query) stays inside orgA's active members and honours the limit.
     const listing = await searchElearningAssignees(db, { orgId: orgA, query: '', limit: 20 })
-    expect(listing.items.map((item) => item.id).sort()).toEqual([alice, bob, percent].sort())
+    expect(listing.items.map((item) => item.id).sort()).toEqual([alice, bob, dingtalk, percent].sort())
+    // The placeholder mailbox is never returned and never matched; the person stays findable by name.
+    expect(listing.items.find((item) => item.id === dingtalk)).toEqual({ id: dingtalk, name: `Ding ${tag}`, email: null })
+    expect(JSON.stringify(listing)).not.toContain('placeholder.local')
+    const byPlaceholder = await searchElearningAssignees(db, { orgId: orgA, query: `dingtalk_union${tag}`, limit: 20 })
+    expect(byPlaceholder.items).toEqual([])
+    const byPlaceholderDomain = await searchElearningAssignees(db, { orgId: orgA, query: 'placeholder.local', limit: 20 })
+    expect(byPlaceholderDomain.items).toEqual([])
+    const dingByName = await searchElearningAssignees(db, { orgId: orgA, query: `ding ${tag}`, limit: 20 })
+    expect(dingByName.items).toEqual([{ id: dingtalk, name: `Ding ${tag}`, email: null }])
     const limited = await searchElearningAssignees(db, { orgId: orgA, query: '', limit: 1 })
     expect(limited.items).toHaveLength(1)
     const otherOrg = await searchElearningAssignees(db, { orgId: orgB, query: `alice ${tag}`, limit: 20 })

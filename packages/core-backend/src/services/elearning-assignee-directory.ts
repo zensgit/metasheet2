@@ -53,9 +53,42 @@ function optionalText(value: unknown): string | null {
   return typeof value === 'string' && value.trim() !== '' ? value : null
 }
 
+/**
+ * Synthetic addresses the platform stores on `users.email` that are not a person's mailbox:
+ * DingTalk JIT accounts get `dingtalk_<unionId|openId>@placeholder.local`
+ * (auth/dingtalk-oauth.ts), the no-email migration's down() backfills `<id>@migration-revert.local`,
+ * and trusted-token principals are named `<id>@trusted-token.local` (auth/AuthService.ts). They
+ * embed external or internal identifiers, so they are neither matched nor returned.
+ */
+export const ELEARNING_ASSIGNEE_PLACEHOLDER_EMAIL_DOMAINS = [
+  'placeholder.local',
+  'migration-revert.local',
+  'trusted-token.local',
+] as const
+
+const PLACEHOLDER_EMAIL_LIKE_PATTERNS = ELEARNING_ASSIGNEE_PLACEHOLDER_EMAIL_DOMAINS.map(
+  (domain) => `%@${domain}`,
+)
+
+export function isElearningAssigneePlaceholderEmail(email: string): boolean {
+  const normalized = email.trim().toLowerCase()
+  return ELEARNING_ASSIGNEE_PLACEHOLDER_EMAIL_DOMAINS.some((domain) => normalized.endsWith(`@${domain}`))
+}
+
+function visibleEmail(value: unknown): string | null {
+  const email = optionalText(value)
+  return email && !isElearningAssigneePlaceholderEmail(email) ? email : null
+}
+
 /** Escapes the LIKE metacharacters so a typed `%` or `_` matches literally. */
 export function escapeElearningAssigneeLikeTerm(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`)
+}
+
+/** Defence in depth: the route already rejects out-of-range limits. */
+export function clampElearningAssigneeLimit(value: number): number {
+  if (!Number.isFinite(value)) return ELEARNING_ASSIGNEE_SEARCH_DEFAULT_LIMIT
+  return Math.min(ELEARNING_ASSIGNEE_SEARCH_MAX_LIMIT, Math.max(1, Math.trunc(value)))
 }
 
 export async function searchElearningAssignees(
@@ -64,10 +97,13 @@ export async function searchElearningAssignees(
 ): Promise<ElearningAssigneeSearchResult> {
   const term = input.query.trim()
   const pattern = `%${escapeElearningAssigneeLikeTerm(term)}%`
+  const limit = clampElearningAssigneeLimit(input.limit)
   const rows = await db.transaction(async (tx) => {
     const result = await tx.query(
       `/* elearning-assignee-directory:search */
-       SELECT platform_user.id, platform_user.name, platform_user.email
+       SELECT platform_user.id, platform_user.name,
+              CASE WHEN lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[])
+                   THEN NULL ELSE platform_user.email END AS email
        FROM users platform_user
        JOIN user_orgs membership
          ON membership.user_id = platform_user.id
@@ -76,13 +112,16 @@ export async function searchElearningAssignees(
        WHERE platform_user.is_active = TRUE
          AND (
            $2::text = ''
-           OR COALESCE(platform_user.name, '') ILIKE $3
-           OR COALESCE(platform_user.email, '') ILIKE $3
+           OR COALESCE(platform_user.name, '') ILIKE $3 ESCAPE '\\'
+           OR (
+             COALESCE(platform_user.email, '') ILIKE $3 ESCAPE '\\'
+             AND NOT lower(COALESCE(platform_user.email, '')) LIKE ANY($5::text[])
+           )
          )
        ORDER BY COALESCE(NULLIF(platform_user.name, ''), platform_user.email, platform_user.id) ASC,
                 platform_user.id ASC
        LIMIT $4`,
-      [input.orgId, term, pattern, input.limit],
+      [input.orgId, term, pattern, limit, PLACEHOLDER_EMAIL_LIKE_PATTERNS],
     )
     return result.rows
   })
@@ -90,7 +129,7 @@ export async function searchElearningAssignees(
   for (const row of rows) {
     const id = optionalText(row.id)
     if (!id) continue
-    items.push({ id, name: optionalText(row.name), email: optionalText(row.email) })
+    items.push({ id, name: optionalText(row.name), email: visibleEmail(row.email) })
   }
   return { items }
 }
