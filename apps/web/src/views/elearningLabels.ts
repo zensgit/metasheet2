@@ -8,8 +8,11 @@
 // helpers below for strings with scores / ids / error codes.
 //
 // NOT translated (user/data values): course titles, question prompts,
-// already-entered choice option texts, deadlines, ids, URLs, learner
-// answers, and backend error codes. Error codes and HTTP statuses are
+// already-entered choice option texts, ids, URLs, learner answers, and
+// backend error codes. Timestamps (deadlines, issue/submit/expiry times) are
+// not translated either, but are rendered through `formatElearningDate`
+// below (viewer's local timezone; `YYYY-MM-DD HH:mm` in zh) instead of as
+// raw ISO strings. Error codes and HTTP statuses are
 // interpolated raw. True/false option drafts are UI-owned defaults (not
 // user data) and are localized when the question type is switched to
 // true_false.
@@ -108,6 +111,15 @@ export type ElearningLabelKey =
   | 'contentAdmin.publish'
   | 'contentAdmin.publishing'
   | 'contentAdmin.publishSuccess'
+  | 'assigneePicker.searchPlaceholder'
+  | 'assigneePicker.searching'
+  | 'assigneePicker.noMatch'
+  | 'assigneePicker.forbidden'
+  | 'assigneePicker.failed'
+  | 'assigneePicker.clear'
+  | 'assigneePicker.pasteToggle'
+  | 'assigneePicker.pasteLabel'
+  | 'assigneePicker.unnamed'
   // --- Objective practice chrome ---
   | 'practiceAdmin.title'
   | 'practiceAdmin.subtitle'
@@ -360,7 +372,7 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'admin.falseOption': { en: 'False', zh: '错误' },
   'admin.passScore': { en: 'Passing score', zh: '及格分' },
   'admin.maxAttempts': { en: 'Maximum attempts', zh: '最大尝试次数' },
-  'admin.targetUser': { en: 'Assignee (user ID)', zh: '指派对象（用户 ID）' },
+  'admin.targetUser': { en: 'Assignee', zh: '指派对象' },
   'admin.deadline': { en: 'Deadline (optional)', zh: '截止日期（可选）' },
   'admin.publishing': { en: 'Publishing...', zh: '正在发布…' },
   'admin.publish': { en: 'Publish and assign', zh: '发布并指派' },
@@ -391,12 +403,28 @@ const ELEARNING_LABELS: Record<ElearningLabelKey, { en: string; zh: string }> = 
   'contentAdmin.moveUp': { en: 'Move up', zh: '上移' },
   'contentAdmin.moveDown': { en: 'Move down', zh: '下移' },
   'contentAdmin.optionalAssignee': {
-    en: 'Assignee (optional user ID)',
-    zh: '指派对象（可选用户 ID）',
+    en: 'Assignee (optional)',
+    zh: '指派对象（可选）',
   },
   'contentAdmin.publish': { en: 'Publish content course', zh: '发布内容课程' },
   'contentAdmin.publishing': { en: 'Publishing content course...', zh: '正在发布内容课程…' },
   'contentAdmin.publishSuccess': { en: 'Content course published.', zh: '内容课程已发布。' },
+
+  'assigneePicker.searchPlaceholder': { en: 'Search by name or email', zh: '按姓名或邮箱搜索' },
+  'assigneePicker.searching': { en: 'Searching...', zh: '正在搜索…' },
+  'assigneePicker.noMatch': { en: 'No matching people.', zh: '没有匹配的人员。' },
+  'assigneePicker.forbidden': {
+    en: 'You cannot search people here. Paste a user ID instead.',
+    zh: '你没有搜索人员的权限，可改为粘贴用户 ID。',
+  },
+  'assigneePicker.failed': {
+    en: 'People search is unavailable. Try again, or paste a user ID instead.',
+    zh: '暂时无法搜索人员，请重试，或改为粘贴用户 ID。',
+  },
+  'assigneePicker.clear': { en: 'Clear', zh: '清除' },
+  'assigneePicker.pasteToggle': { en: 'Paste a user ID instead', zh: '改为粘贴用户 ID' },
+  'assigneePicker.pasteLabel': { en: 'User ID', zh: '用户 ID' },
+  'assigneePicker.unnamed': { en: 'Unnamed user', zh: '未命名用户' },
 
   'practiceAdmin.title': { en: 'Objective practice', zh: '客观题练习' },
   'practiceAdmin.subtitle': {
@@ -936,6 +964,39 @@ export function elearningAssignIncomplete(errorText: string, isZh: boolean): str
   return isZh
     ? `课程已发布，指派未完成。${errorText} 可重试指派，无需重新发布。`
     : `The course was published, but assignment did not complete. ${errorText} You can retry assignment without publishing again.`
+}
+
+/**
+ * The one timestamp formatter for the e-learning views (F13): renders an ISO instant in the
+ * viewer's local timezone — `YYYY-MM-DD HH:mm` in zh, the `en` medium date + short time
+ * otherwise. null / undefined / blank -> '' (callers supply their own "none" label); a value
+ * that does not parse is returned unchanged rather than hidden.
+ */
+export function formatElearningDate(value: string | null | undefined, isZh: boolean): string {
+  if (value === null || value === undefined) return ''
+  const raw = String(value)
+  if (raw.trim() === '') return ''
+  const ms = Date.parse(raw)
+  if (!Number.isFinite(ms)) return raw
+  const date = new Date(ms)
+  if (!isZh) {
+    return new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(date)
+  }
+  const pad = (part: number): string => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} `
+    + `${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+/** Picker label for one search hit: the name, else the email, else a generic label — never the id. */
+export function elearningAssigneeDisplayName(
+  candidate: { name: string | null; email: string | null },
+  isZh: boolean,
+): string {
+  return candidate.name ?? candidate.email ?? elearningLabel('assigneePicker.unnamed', isZh)
+}
+
+export function elearningAssigneeSelected(displayName: string, isZh: boolean): string {
+  return isZh ? `已选择：${displayName}` : `Selected: ${displayName}`
 }
 
 export function elearningSelectedFile(fileName: string, isZh: boolean): string {

@@ -211,17 +211,15 @@
             :disabled="busy || published !== null"
           >
         </label>
-        <label class="elearning-field">
-          <span>{{ elearningLabel('admin.targetUser', isZh) }}</span>
-          <input
-            v-model="targetUserId"
-            data-testid="elearning-admin-target"
-            type="text"
-            required
-            :disabled="busy || published !== null"
-            autocomplete="off"
-          >
-        </label>
+        <ElearningAssigneePicker
+          v-model="targetUserId"
+          class="elearning-field"
+          :label="elearningLabel('admin.targetUser', isZh)"
+          :is-zh="isZh"
+          test-id-prefix="elearning-admin-assignee"
+          paste-test-id="elearning-admin-target"
+          :disabled="busy || published !== null"
+        />
         <label class="elearning-field">
           <span>{{ elearningLabel('admin.deadline', isZh) }}</span>
           <input
@@ -329,6 +327,7 @@ import ElearningAssessmentAdminSection from './ElearningAssessmentAdminSection.v
 import ElearningAnalyticsAdminSection from './ElearningAnalyticsAdminSection.vue'
 import ElearningAnalyticsPeriodSection from './ElearningAnalyticsPeriodSection.vue'
 import ElearningContentAdminSection from './ElearningContentAdminSection.vue'
+import ElearningAssigneePicker from './ElearningAssigneePicker.vue'
 import ElearningPortalAdminSection from './ElearningPortalAdminSection.vue'
 import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
