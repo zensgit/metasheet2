@@ -460,8 +460,11 @@ async function ownedWorker(scratch: string, ttlSeconds: number, migrationCount: 
   finally {
     token = ''; password = ''
     try {
-      try { await preview?.close() } catch (error) { retainFailure(error) }
+      // Keep the proxy alive for the host-owned WebSocket close handshake.
+      // Closing it first strands upstream sockets until their 30s close timeout,
+      // exceeding the host's unchanged 10s producer barrier.
       try { await host.stop('YIDA_SYNTHETIC_TRIAL_LOCAL_STOP') } catch (error) { retainFailure(error) }
+      try { await preview?.close() } catch (error) { retainFailure(error) }
       try {
         assert(pool.getInternalPool().ended && host.getAddress() === null)
         assert.equal(verifyBuildReceipt(scratch, 'core').receiptSha256, core.receiptSha256)

@@ -271,7 +271,7 @@ export default class Collector {
 
 export function validateTaskReceipt(receipt) {
   assert.deepEqual(receipt.files, [...TEST_FILES].sort())
-  assert.deepEqual(receipt.counts, { files: 5, tests: 70, passed: 70, failed: 0, skipped: 0,
+  assert.deepEqual(receipt.counts, { files: 5, tests: 71, passed: 71, failed: 0, skipped: 0,
     sentinels: 5, retries: 0, repeats: 0, unhandled: 0, missingRetryFields: 0 })
   assert.deepEqual(receipt.policy, { pool: 'forks', config: CONFIG, retry: 0, repeat: 0,
     watch: false, filtered: false, setupFiles: 0, globalSetup: 0 })
@@ -394,7 +394,7 @@ async function worker(owner, ownerPath, ownerSha) {
     for (const file of [tasks, json]) assert(plain(file, false, 0o600).size < 4 * 1024 * 1024)
     validateTaskReceipt(JSON.parse(fs.readFileSync(tasks, 'utf8')))
     const report = JSON.parse(fs.readFileSync(json, 'utf8'))
-    assert.equal(report.success, true); assert.equal(report.numTotalTests, 70); assert.equal(report.numPassedTests, 70)
+    assert.equal(report.success, true); assert.equal(report.numTotalTests, 71); assert.equal(report.numPassedTests, 71)
     for (const key of ['numFailedTests', 'numPendingTests', 'numTodoTests']) assert.equal(report[key], 0)
     assert.deepEqual(native.assertBrowserNetworkIsolation(), isolation)
     verifyHashes(owner)
@@ -411,7 +411,7 @@ async function worker(owner, ownerPath, ownerSha) {
     // available; only the original owned-PG module removes its own PG subtree.
     const receiptRaw = JSON.stringify({ protocol: owner.protocol,
       ownerSha, sourceSha: hash(JSON.stringify(owner.hashes)), passed, cleanup,
-      tests: passed ? 70 : 0, sentinels: passed ? 5 : 0, business: passed ? 65 : 0,
+      tests: passed ? 71 : 0, sentinels: passed ? 5 : 0, business: passed ? 66 : 0,
       isolatedNetwork: isolation.isolatedNetwork, unixIpcIsolated: false,
       sameProcessHostileCodeIsolated: false, filesystemIsolated: false, failureStage, result })
     privateWrite(path.join(evidence, 'receipt.json'), receiptRaw)
@@ -468,13 +468,13 @@ export function reportOuterResult(owner, ownerSha, terminal, evidence, write = c
     const receipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'))
     assert.equal(receipt.ownerSha, ownerSha); assert.equal(receipt.sourceSha, hash(JSON.stringify(owner.hashes)))
     assert.equal(receipt.cleanup, 'stopped-owned-pg-removed')
-    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 70)
+    assert.equal(receipt.passed, true); assert.equal(receipt.tests, 71)
     passed = terminal.passed
   } catch { /* Original refusal remains; diagnostics carry only fixed fields. */ }
   if (!passed) write('YIDA_BROWSER_CI_CHILD_FAILED ' + JSON.stringify(
     childFailureDiagnostic(terminal, evidence, ownerSha, hash(JSON.stringify(owner.hashes)), postHashesVerified)))
-  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 70 : 0,
-    business: passed ? 65 : 0, sentinels: passed ? 5 : 0 }))
+  write('YIDA_BROWSER_CI_RESULT ' + JSON.stringify({ passed, tests: passed ? 71 : 0,
+    business: passed ? 66 : 0, sentinels: passed ? 5 : 0 }))
   if (!passed) process.exitCode = 1
   return passed
 }

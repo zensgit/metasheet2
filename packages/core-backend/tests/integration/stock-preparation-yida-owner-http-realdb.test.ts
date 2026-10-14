@@ -15,8 +15,19 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
   let f: YidaOwnerHttpRealdbFixture
   const noMaterialRead = () => expect(f.sql.some(sql => /integration_yida_(credential_materials|draft_operations|draft_rows)/u.test(sql))).toBe(false)
   const noFetch = () => expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([0, 0])
-  const bodyData = (result: Awaited<ReturnType<YidaOwnerHttpRealdbFixture['http']>>, status: number) => {
-    expect(result.status).toBe(status)
+  const fixedCount = (value: unknown) => Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) <= 1000000 ? value : 'UNCLASSIFIED'
+  const submissionProof = (row: Data, tokenCount: unknown, formCount: unknown) => JSON.stringify({
+    admissions: fixedCount(row.admissions), ledgers: fixedCount(row.ledgers), audits: fixedCount(row.audits),
+    ledgerState: row.ledger_state === null ? 'NONE'
+      : ['prepared', 'dispatching', 'acknowledged', 'outcome_unknown', 'not_sent'].includes(row.ledger_state as string)
+        ? row.ledger_state : 'UNCLASSIFIED',
+    tokenRequests: fixedCount(tokenCount), formRequests: fixedCount(formCount),
+  })
+  const bodyData = (result: Awaited<ReturnType<YidaOwnerHttpRealdbFixture['http']>>, status: number, stage = 'response') => {
+    // Fixed stage + allowlisted code only: never attach body, material or IDs.
+    const code = (result.body.error as Data | undefined)?.code
+    const fixed = typeof code === 'string' && /^YIDA_[A-Z_]+$/u.test(code) ? code : 'UNCLASSIFIED'
+    expect(result.status, `${stage}:${fixed}`).toBe(status)
     expect(result.headers['cache-control']).toBe('no-store')
     expect(result.headers['x-content-type-options']).toBe('nosniff')
     expect(result.body.ok).toBe(true)
@@ -32,23 +43,59 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     if (code !== 'UNAUTHORIZED') expect(result.body.error).toEqual({ code })
   }
   async function prepare(input = draftInput()) {
-    return bodyData(await f.http('POST', '/drafts', input), 201) as unknown as Draft
+    return bodyData(await f.http('POST', '/drafts', input), 201, 'draft') as unknown as Draft
   }
   async function preview(draft: Draft, ordinal = 0) {
-    return bodyData(await f.http('POST', '/preview', { operationId: draft.operationId, rowKey: draft.rows[ordinal].rowKey }), 200)
+    return bodyData(await f.http('POST', '/preview', { operationId: draft.operationId, rowKey: draft.rows[ordinal].rowKey }), 200, 'preview')
   }
   async function approve(draft: Draft, ordinal = 0, extras: Data = {}) {
     return bodyData(await f.http('POST', '/approvals', { operationId: draft.operationId, rowKey: draft.rows[ordinal].rowKey,
-      confirmationId: randomUUID(), acknowledgeOnce: true, ...extras }), 201)
+      confirmationId: randomUUID(), acknowledgeOnce: true, ...extras }), 201, 'approve')
   }
   async function confirmed(input = draftInput(), ordinal = 0) {
     f.setEnablement('true')
     const draft = await prepare(input), view = await preview(draft, ordinal), grant = await approve(draft, ordinal)
     return { draft, view, grant, request: { grantId: grant.grantId, submissionId: randomUUID() } }
   }
+  async function submitPositive(request: Data) {
+    const response = await f.http('POST', '/submissions', request)
+    let proof = ''
+    if (response.status !== 200) {
+      // Read only fixed counts/status from the dedicated synthetic database,
+      // immediately before the next fixture reset can erase failure evidence.
+      try {
+        const result = await f.sqlAdmin(`SELECT
+          (SELECT count(*)::integer FROM integration_yida_send_admissions) AS admissions,
+          (SELECT count(*)::integer FROM integration_yida_delivery_ledger) AS ledgers,
+          (SELECT count(*)::integer FROM integration_yida_delivery_audit) AS audits,
+          (SELECT status FROM integration_yida_delivery_ledger ORDER BY status LIMIT 1) AS ledger_state`)
+        proof = submissionProof(result.rows[0] ?? {}, f.tokenPayloads.length, f.formPayloads.length)
+      } catch { proof = 'PROOF_UNAVAILABLE' }
+    }
+    return bodyData(response, 200, proof ? `submit:${proof}` : 'submit')
+  }
   beforeAll(async () => { f = await createYidaOwnerHttpRealdbFixture() }, 30000)
   beforeEach(async () => { await f.reset() }, 30000)
   afterAll(async () => { await f?.cleanup() }, 30000)
+
+  it('failed positive-response assertions identify the stage without exposing response values', () => {
+    for (const code of ['YIDA_OWNER_RUNTIME_UNAVAILABLE', 'synthetic-private-response']) {
+      const response = { status: 503, headers: {}, body: { ok: false, error: { code }, material: 'synthetic-private-material' } }
+      const expected = code.startsWith('YIDA_') ? code : 'UNCLASSIFIED'
+      expect(() => bodyData(response, 200, 'preview')).toThrow(`preview:${expected}`)
+      try { bodyData(response, 200, 'preview') } catch (error) {
+        expect(String(error)).not.toContain('synthetic-private-response')
+        expect(String(error)).not.toContain('synthetic-private-material')
+      }
+    }
+    const proof = submissionProof({ admissions: 1, ledgers: 1, audits: 1, ledger_state: 'prepared',
+      credential: 'synthetic-private-material' }, 1, 0)
+    expect(JSON.parse(proof)).toEqual({ admissions: 1, ledgers: 1, audits: 1, ledgerState: 'prepared', tokenRequests: 1, formRequests: 0 })
+    expect(proof).not.toContain('synthetic-private-material')
+    expect(submissionProof({ admissions: 'synthetic-private-count', ledgers: -1, audits: Infinity,
+      ledger_state: 'synthetic-private-state' }, NaN, {})).not.toContain('synthetic-private')
+    expect(JSON.parse(submissionProof({ ledger_state: null }, 0, 0)).ledgerState).toBe('NONE')
+  })
 
   it.each(['original', 'equal_integer', 'equal_decimal_exact'])('one real preview/confirm/admission/token/form/ACK and history without IO: %s', async mode => {
     f.setEnablement('true')
@@ -72,7 +119,7 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
       row_key: draft.rows[ordinal].rowKey, owner_id: principals.owner, tenant_id: tenant,
       workspace_id: null, credential_generation: 1, max_attempts: 1 })
     const request = { grantId: grant.grantId, submissionId: randomUUID() }
-    const sent = bodyData(await f.http('POST', '/submissions', request), 200)
+    const sent = await submitPositive(request)
     expect(sent).toMatchObject({ status: 'acknowledged', reused: false, externalWriteAttempted: true,
       businessVerified: false, durable: true, approval: { remainingAttempts: 0, status: 'admitted' },
       delivery: { status: 'acknowledged', durable: true } })
@@ -89,8 +136,8 @@ databaseSuite('SA05 owner HTTP — actual JWT, native authority and private Post
     expect((await f.rows('integration_yida_delivery_audit')).map(row => row.event).sort()).toEqual(['acknowledgement', 'claim', 'prepare'])
     const before = await f.proof()
     f.sql.length = 0
-    const replay = bodyData(await f.http('POST', '/submissions', request), 200)
-    const history = bodyData(await f.http('GET', '/approvals/' + grant.grantId), 200)
+    const replay = bodyData(await f.http('POST', '/submissions', request), 200, 'replay')
+    const history = bodyData(await f.http('GET', '/approvals/' + grant.grantId), 200, 'history')
     expect(replay).toMatchObject({ status: 'acknowledged', reused: true, externalWriteAttempted: false })
     expect(history).toMatchObject({ delivery: sent.delivery, approval: sent.approval })
     expect([f.tokenPayloads.length, f.formPayloads.length]).toEqual([1, 1])

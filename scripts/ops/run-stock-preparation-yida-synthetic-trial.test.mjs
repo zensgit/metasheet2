@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { HELP, assertSyntheticTrialPlatform, cleanSyntheticTrialEnvironment, parseSyntheticTrialArguments, runSyntheticTrial } from './run-stock-preparation-yida-synthetic-trial.mjs'
 
 const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
@@ -15,8 +16,9 @@ const publicSource = readFileSync(new URL('./run-stock-preparation-yida-syntheti
 const typedSource = readFileSync(path.join(repository, 'packages/core-backend/scripts/run-stock-preparation-yida-synthetic-trial.mts'), 'utf8')
 const valid = ['--pg-bin=/usr/lib/postgresql/16/bin', '--ttl-seconds=300']
 
-// Only selected actual pure function declarations are compiled as data. Neither
-// typed entry nor tsx is imported, and no FS write, signal, child, PG or host runs.
+// Selected declarations are compiled as data, never the typed entry or tsx.
+// The cleanup regression below additionally runs real loopback HTTP/WS/Vite
+// fixtures in an owned tmp directory; no PG, app startup or external IO runs.
 function actualFunction(source, name) {
   const parsed = ts.createSourceFile('actual.ts', source, ts.ScriptTarget.ES2022, true)
   const declaration = parsed.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === name)
@@ -36,6 +38,80 @@ function assertRemovalRed(fn, args) {
   // rejection assertion itself must go red (ERR_ASSERTION), in memory only.
   assert.throws(() => assert.throws(() => fn(...args)), { code: 'ERR_ASSERTION' })
 }
+
+function actualWorkerHostCleanup(source = typedSource) {
+  const parsed = ts.createSourceFile('actual.ts', actualFunction(source, 'ownedWorker'), ts.ScriptTarget.ES2022, true)
+  const worker = parsed.statements.find(ts.isFunctionDeclaration)
+  const lifetime = worker.body.statements.filter(ts.isTryStatement)
+  assert.equal(lifetime.length, 1)
+  const cleanup = lifetime[0].finallyBlock.statements.filter(ts.isTryStatement)
+  assert.equal(cleanup.length, 1)
+  const stops = cleanup[0].tryBlock.statements.slice(0, 2)
+  assert(stops.every(ts.isTryStatement))
+  const body = stops.map(node => node.getText(parsed)).join('\n')
+  assert.equal((body.match(/host\.stop\(/gu) ?? []).length, 1)
+  assert.equal((body.match(/preview\?\.close\(/gu) ?? []).length, 1)
+  return compilePure('async function stopHosts(host, preview, retainFailure) {\n' + body + '\n}', 'stopHosts', {})
+}
+
+test('actual worker drains host before proxy and still closes proxy after a host failure', async () => {
+  const cleanup = actualWorkerHostCleanup()
+  for (const rejectHost of [false, true]) {
+    const order = [], failures = []
+    const sentinel = new Error('synthetic host stop failure')
+    await cleanup({ stop: async reason => {
+      assert.equal(reason, 'YIDA_SYNTHETIC_TRIAL_LOCAL_STOP'); order.push('host')
+      if (rejectHost) throw sentinel
+    } }, { close: async () => { order.push('proxy') } }, error => failures.push(error))
+    assert.deepEqual(order, ['host', 'proxy'])
+    assert.deepEqual(failures, rejectHost ? [sentinel] : [])
+  }
+  const sentinel = new Error('synthetic proxy close failure'), failures = []
+  await cleanup({ stop: async () => {} }, { close: async () => { throw sentinel } }, error => failures.push(error))
+  assert.deepEqual(failures, [sentinel])
+  await cleanup({ stop: async () => {} }, undefined, () => assert.fail('no preview is valid before startup'))
+})
+
+test('actual worker cleanup preserves a live proxy for the real WebSocket close handshake', { timeout: 60000 }, async () => {
+  const requireWeb = createRequire(path.join(repository, 'apps/web/package.json'))
+  const { preview } = await import(pathToFileURL(path.join(path.dirname(requireWeb.resolve('vite/package.json')), 'dist/node/index.js')))
+  const { Server: SocketServer } = requireCore('socket.io')
+  const { io } = requireWeb('socket.io-client')
+  const tempRoot = path.join(repository, 'tmp')
+  mkdirSync(tempRoot, { recursive: true })
+  const scratch = mkdtempSync(path.join(tempRoot, 'yida-proxy-drain-'))
+  assert.equal(path.dirname(scratch), tempRoot)
+  mkdirSync(path.join(scratch, 'empty-env')); mkdirSync(path.join(scratch, 'dist'))
+  const http = createServer((_request, response) => response.end('synthetic'))
+  const sockets = new SocketServer(http)
+  let proxy, client, cleanupComplete = false
+  try {
+    await new Promise(resolve => http.listen(0, '127.0.0.1', resolve))
+    proxy = await preview({ root: scratch, configFile: false, envFile: false, envDir: path.join(scratch, 'empty-env'), logLevel: 'silent',
+      build: { outDir: path.join(scratch, 'dist') },
+      preview: { host: '127.0.0.1', port: 0, strictPort: true, open: false, cors: false,
+        proxy: { '/socket.io': { target: 'http://127.0.0.1:' + http.address().port, changeOrigin: false, ws: true } } } })
+    client = io('http://127.0.0.1:' + proxy.httpServer.address().port, { transports: ['websocket'], reconnection: false })
+    await new Promise((resolve, reject) => { client.once('connect', resolve); client.once('connect_error', reject) })
+    assert.equal(sockets.engine.clientsCount, 1)
+    assert.equal(client.connected, true)
+    const failures = [], started = performance.now()
+    await actualWorkerHostCleanup()({ stop: () => new Promise((resolve, reject) => {
+      void sockets.close(error => error ? reject(error) : resolve()).catch(reject)
+    }) }, proxy, error => failures.push(error))
+    cleanupComplete = !http.listening && !proxy.httpServer.listening
+    assert.deepEqual(failures, [])
+    assert.equal(cleanupComplete, true)
+    // No shortened WS timeout, early client disconnect, mocks or timer override.
+    // The pre-fix order waits for ws's 30s close timeout and fails this assertion.
+    assert(performance.now() - started < 10000, 'live proxy must complete the close handshake within the unchanged host barrier')
+  } finally {
+    client?.disconnect()
+    if (http.listening) await sockets.close()
+    if (proxy?.httpServer.listening) await proxy.close()
+    if (cleanupComplete) rmSync(scratch, { recursive: true })
+  }
+})
 
 test('actual public parser and help accept only the documented local inputs', async () => {
   assert.deepEqual(parseSyntheticTrialArguments(valid), { help: false, pgBin: '/usr/lib/postgresql/16/bin', ttlSeconds: 300 })
