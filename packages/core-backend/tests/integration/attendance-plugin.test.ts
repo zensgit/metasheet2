@@ -14419,6 +14419,19 @@ attendanceIntegrationDescribe(
       body: '{}',
     })
     expect(rollbackRes.status).toBe(200)
+
+    // Global calendar writes enumerate active members of every org. Retire only
+    // this fixture's newly inserted memberships after the completed rollback;
+    // retain immutable records and companions for the normal history contract.
+    const ownedMembers = seededNeutralMemberships
+      .filter(membership => membership.orgId === orgId)
+      .map(membership => membership.userId)
+    expect(ownedMembers).toHaveLength(distinctUsers)
+    const retired = await settingsRowPool!.query(
+      'UPDATE user_orgs SET is_active = false WHERE org_id = $1 AND user_id = ANY($2::text[]) AND is_active = true',
+      [orgId, ownedMembers],
+    )
+    expect(retired.rowCount).toBe(distinctUsers)
   }, 180000)
 
   it('keeps large entries payload for commit-async jobs when csv payload is absent', async () => {
