@@ -75,7 +75,14 @@ $cancelled = Get-TapCount -Lines $lines -Name 'cancelled'
 $requiredOk = @(
   '^ok \d+ - shell under test:',
   '^ok \d+ - Test-Pm2DaemonPipePresent / Wait-Pm2DaemonPipeClosed:',
-  '^ok \d+ - end-to-end \(acid fixture, R59 replay\):'
+  '^ok \d+ - end-to-end \(acid fixture, R59 replay\):',
+  # R67 restart false-success gates: the pre-restart and restart-result gates exist
+  # only on Windows (pm2's machine-wide pipe), so their end-to-end checks mean
+  # something only on this lane.
+  '^ok \d+ - R67 restart gates:',
+  '^ok \d+ - R67 post-restart gate:',
+  '^ok \d+ - end-to-end \(acid fixture, R67 pre-restart gate\):',
+  '^ok \d+ - end-to-end \(acid fixture, R67 post-restart gate\):'
 )
 $missing = @()
 foreach ($pattern in $requiredOk) {
