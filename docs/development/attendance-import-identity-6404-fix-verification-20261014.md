@@ -8,7 +8,7 @@
 
 新真实 SQL spec 接入 required Node 20 考勤主矩阵、unit exclude、考勤本地脚本和 EXACT CI corpus；原有测试链保持并集。没有新增数据库迁移或 flag。
 
-## Mac mini 合成隔离证据
+## Mac mini 合成隔离证据（迭代记录，最终协调以末节及最终 CI 为准）
 
 | 检查 | 结果 |
 |---|---|
@@ -24,7 +24,7 @@
 | 独立复审 | sol 6.1 high 实现；Astra ultra 实际 JS/stub 29/29 PASS，无范围内未解决源码阻断；其探针不替代真实 PG/HTTP |
 | 最终 CI | 推送后重跑 13 项必需检查，以当前 PR 和最终交付 MD 为准 |
 
-生产模块 SHA-256：`23ba81dc1759c879696aedfd18ba6abcf796bd0e3b395ae61dee688b9b312dbb`；index SHA-256：`f6958ca663605da39ed8c68df05804b50ce932d3a75308ed71e85a38b30eef3c`。
+手机号补丁阶段模块 SHA-256：`23ba81dc1759c879696aedfd18ba6abcf796bd0e3b395ae61dee688b9b312dbb`；index SHA-256：`f6958ca663605da39ed8c68df05804b50ce932d3a75308ed71e85a38b30eef3c`。
 
 ## 失败迭代与边界
 
@@ -73,3 +73,5 @@
 未采用其旧 null-version 队列预事务 alias Map 缓存：此分支不作用于本次 V1 大 payload，不作为超时根因证据；移动读取时机扩大等待锁期间的撤权窗口。index 保持前一修复相同哈希，#6051 依赖不变。性能结论仅限实际合成演练，不把直接列查询视作并发授权绑定。
 
 旧同步版本的完整 128 文件 Mac 演练 v11 已在 HTTP 167 PASS 后出现独立 CLI 工具用例失败；新远端协调使该版本不再是最终候选，因此中止并停止 PG，不计主矩阵全绿。最终协调版重新迁移/重放和定向完整 HTTP/SQL；最终 head 的 CI 负责验证完整主矩阵及独立多时区矩阵。
+
+最终协调模块 SHA-256：`3dd6015bd8e20f55816eeb0cf1b15eed28da59f6c6bf3604339cf1fe8b6fbe65`；index：`f6958ca663605da39ed8c68df05804b50ce932d3a75308ed71e85a38b30eef3c`。独立源码复审 PASS；最终协调后的 28 项 SQL、完整 HTTP 与 13 项必需 CI 尚待最终验证，不沿用此前 24 项或中间候选的通过结果。Mac mini 连接中断期间不声称最后运行完成或集群已停止；恢复连接后检查 receipt 和停止状态，再补验最终源。
