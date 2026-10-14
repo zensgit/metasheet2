@@ -58,8 +58,12 @@
             </button>
           </div>
         </section>
-        <p v-if="visibleAdminSectionNavGroups.length === 0" class="attendance__admin-nav-empty">
-          {{ tr('No sections match the current filter.', '当前筛选没有匹配区块。') }}
+        <p
+          v-if="adminSectionFilter.trim() && visibleAdminSectionNavGroups.length === 0"
+          class="attendance__admin-nav-empty"
+          data-attendance-search-empty
+        >
+          {{ tr('No matches', '搜索不到') }}
         </p>
       </nav>
     </template>

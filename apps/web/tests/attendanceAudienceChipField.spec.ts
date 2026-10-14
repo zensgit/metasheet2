@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import AttendanceAudienceChipField from '../src/views/attendance/AttendanceAudienceChipField.vue'
 import AttendanceHolidayIndexHelp from '../src/views/attendance/AttendanceHolidayIndexHelp.vue'
@@ -40,8 +40,56 @@ describe('attendance audience chip field', () => {
     await flush()
     expect(value).toBe('单休办公,白班')
 
+    draft!.value = ''
+    draft!.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    draft!.value = '没有这个'
+    draft!.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+
     app.unmount()
     container.remove()
+  })
+
+  it('waits for a live search before showing 搜索不到', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    let resolveSearch: (hits: string[]) => void = () => {}
+    const app = createApp(AttendanceAudienceChipField, {
+      modelValue: '',
+      options: [],
+      tr,
+      search: () => new Promise<string[]>((resolve) => { resolveSearch = resolve }),
+    })
+    try {
+      app.mount(container)
+      await flush()
+      const draft = container.querySelector<HTMLInputElement>('input[type="text"]')!
+      draft.focus()
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      draft.value = '张'
+      draft.dispatchEvent(new Event('input'))
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(250)
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      resolveSearch([])
+      for (let i = 0; i < 4; i += 1) await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+    } finally {
+      app.unmount()
+      container.remove()
+      vi.useRealTimers()
+    }
   })
 })
 

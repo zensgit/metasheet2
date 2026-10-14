@@ -236,7 +236,9 @@ onBeforeUnmount(() => {
           </button>
         </li>
       </template>
-      <li v-if="visibleOptions.length === 0" class="attendance-tz__empty">{{ isZh ? '没有匹配的时区' : 'No matching timezones' }}</li>
+      <li v-if="query.trim() && visibleOptions.length === 0" class="attendance-tz__empty" data-attendance-search-empty>
+        {{ props.tr ? props.tr('No matches', '搜索不到') : (isZh ? '搜索不到' : 'No matches') }}
+      </li>
     </ul>
   </span>
 </template>

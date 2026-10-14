@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createApp, nextTick } from 'vue'
+import { useLocale } from '../src/composables/useLocale'
 import AttendanceTimezoneSelect from '../src/views/attendance/AttendanceTimezoneSelect.vue'
 import { formatTimezoneLabel } from '../src/utils/timezones'
 import {
@@ -115,6 +116,32 @@ describe('AttendanceTimezoneSelect', () => {
     expect(updates).toContain('Asia/Shanghai')
     expect(input.value).toBe('UTC+08:00 · 北京')
     expect(container.querySelector('[data-attendance-timezone-menu]')).toBeNull()
+
+    app.unmount()
+    container.remove()
+  })
+
+  it('shows No matches only when a typed query filters every timezone', async () => {
+    useLocale().setLocale('en')
+    const { container, app } = await mount()
+    const input = container.querySelector<HTMLInputElement>('#policy-timezone')!
+
+    input.dispatchEvent(new Event('focus'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container.querySelectorAll('[data-attendance-timezone-option]').length).toBeGreaterThan(0)
+
+    input.value = 'zzz-no-such-zone'
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('No matches')
+    expect(container.querySelector('[data-attendance-timezone-option]')).toBeNull()
+
+    input.value = ''
+    input.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container.querySelectorAll('[data-attendance-timezone-option]').length).toBeGreaterThan(0)
 
     app.unmount()
     container.remove()

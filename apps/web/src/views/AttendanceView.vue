@@ -1626,7 +1626,7 @@
                         @keydown="onAdminPageSearchKeydown"
                       />
                       <ul
-                        v-if="adminPageSearchScope === 'workbench' && adminWorkbenchSearchHits.length > 0"
+                        v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
                         class="attendance__admin-page-search-results"
                         data-admin-page-search-results
                         role="listbox"
@@ -1642,6 +1642,9 @@
                             {{ item.contextLabel }}
                           </button>
                         </li>
+                        <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                          {{ tr('No matches', '搜索不到') }}
+                        </li>
                       </ul>
                     </div>
                     <button
@@ -1656,6 +1659,7 @@
                       v-if="adminPageSearchStatusText"
                       class="attendance__admin-page-search-status"
                       data-admin-page-search-status
+                      :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
                     >
                       {{ adminPageSearchStatusText }}
                     </span>
@@ -1810,7 +1814,7 @@
                           @keydown="onAdminPageSearchKeydown"
                         />
                         <ul
-                          v-if="adminPageSearchScope === 'workbench' && adminWorkbenchSearchHits.length > 0"
+                          v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
                           class="attendance__admin-page-search-results"
                           data-admin-page-search-results
                           role="listbox"
@@ -1826,6 +1830,9 @@
                               {{ item.contextLabel }}
                             </button>
                           </li>
+                          <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                            {{ tr('No matches', '搜索不到') }}
+                          </li>
                         </ul>
                       </div>
                       <button
@@ -1840,6 +1847,7 @@
                         v-if="adminPageSearchStatusText"
                         class="attendance__admin-page-search-status"
                         data-admin-page-search-status
+                        :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
                       >
                         {{ adminPageSearchStatusText }}
                       </span>
@@ -7614,11 +7622,18 @@
                       data-annual-ops-adjust-person
                       @input="onAnnualAdjustPersonInput"
                     />
-                    <ul v-if="annualAdjustPersonHits.length > 0" class="attendance__typeahead-menu">
+                    <ul
+                      v-if="annualAdjustPersonHits.length > 0 || annualAdjustPersonSearchEmpty"
+                      class="attendance__typeahead-menu"
+                      data-annual-ops-adjust-person-menu
+                    >
                       <li v-for="person in annualAdjustPersonHits" :key="person.id">
                         <button type="button" @click="chooseAnnualAdjustPerson(person)">
                           {{ annualAdjustPersonLabel(person) }}
                         </button>
+                      </li>
+                      <li v-if="annualAdjustPersonSearchEmpty" class="attendance__typeahead-empty" data-attendance-search-empty>
+                        {{ tr('No matches', '搜索不到') }}
                       </li>
                     </ul>
                   </label>
@@ -15663,6 +15678,11 @@ const adminWorkbenchSearchMatches = computed(() => {
   )
 })
 const adminWorkbenchSearchHits = computed(() => adminWorkbenchSearchMatches.value.slice(0, ADMIN_WORKBENCH_SEARCH_LIMIT))
+const adminPageSearchEmpty = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return false
+  if (adminPageSearchScope.value === 'workbench') return adminWorkbenchSearchMatches.value.length === 0
+  return adminPageSearchMatched.value === 0
+})
 const adminPageSearchPlaceholder = computed(() => (
   adminPageSearchScope.value === 'workbench'
     ? tr('Search workbench sections', '搜索工作台区块')
@@ -15678,11 +15698,11 @@ const adminPageSearchStatusText = computed(() => {
   if (adminPageSearchScope.value === 'workbench') {
     const count = adminWorkbenchSearchMatches.value.length
     return count === 0
-      ? tr('No matching workbench sections.', '没有匹配的工作台入口。')
+      ? tr('No matches', '搜索不到')
       : `${tr('Workbench matches', '工作台匹配')}: ${count}`
   }
   return adminPageSearchMatched.value === 0
-    ? tr('No matches on this page.', '当前页面没有匹配内容。')
+    ? tr('No matches', '搜索不到')
     : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched.value}`
 })
 
@@ -26624,6 +26644,15 @@ interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alre
 const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
 const annualAdjustPersonText = ref('')
 const annualAdjustPersonHits = ref<AnnualAdjustPersonHit[]>([])
+const annualAdjustPersonSearchPending = ref(false)
+const annualAdjustPersonSearchSettled = ref(false)
+let annualAdjustPersonSearchSeq = 0
+const annualAdjustPersonSearchEmpty = computed(() => (
+  annualAdjustPersonText.value.trim().length > 0
+  && annualAdjustPersonHits.value.length === 0
+  && annualAdjustPersonSearchSettled.value
+  && !annualAdjustPersonSearchPending.value
+))
 const annualAdjustReasonPresets = computed(() => [
   tr('Grant', '补发'),
   tr('Reversal', '冲正'),
@@ -26647,29 +26676,39 @@ function onAnnualAdjustPersonInput(event: Event): void {
   annualAdjustPersonText.value = value
   annualAdjustForm.userId = value.trim()
   annualAdjustPersonHits.value = []
-  if ((event as InputEvent).isTrusted) void searchAnnualAdjustPeople(value)
+  annualAdjustPersonSearchSettled.value = false
+  void searchAnnualAdjustPeople(value)
 }
 
 function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
   annualAdjustForm.userId = person.id
   annualAdjustPersonText.value = person.name?.trim() || person.email.trim() || person.id
   annualAdjustPersonHits.value = []
+  annualAdjustPersonSearchPending.value = false
+  annualAdjustPersonSearchSettled.value = false
 }
 
 async function searchAnnualAdjustPeople(query: string): Promise<void> {
   const q = query.trim()
+  const seq = ++annualAdjustPersonSearchSeq
   if (!q) {
     annualAdjustPersonHits.value = []
+    annualAdjustPersonSearchPending.value = false
+    annualAdjustPersonSearchSettled.value = false
     return
   }
+  annualAdjustPersonSearchPending.value = true
+  annualAdjustPersonSearchSettled.value = false
   try {
     const params = new URLSearchParams({ q, ...attendanceAdminUserScopePayload() })
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (seq !== annualAdjustPersonSearchSeq) return
     if (!response.ok) {
       annualAdjustPersonHits.value = []
       return
     }
     const data = await response.json()
+    if (seq !== annualAdjustPersonSearchSeq) return
     const items = data?.data?.items
     annualAdjustPersonHits.value = Array.isArray(items)
       ? items.slice(0, 8).map((item: { id?: string; email?: string | null; name?: string | null }) => ({
@@ -26679,7 +26718,13 @@ async function searchAnnualAdjustPeople(query: string): Promise<void> {
       })).filter((item: AnnualAdjustPersonHit) => item.id)
       : []
   } catch {
+    if (seq !== annualAdjustPersonSearchSeq) return
     annualAdjustPersonHits.value = []
+  } finally {
+    if (seq === annualAdjustPersonSearchSeq) {
+      annualAdjustPersonSearchPending.value = false
+      annualAdjustPersonSearchSettled.value = Boolean(q)
+    }
   }
 }
 
@@ -32749,6 +32794,12 @@ defineExpose({
   color: var(--ms-color-primary);
 }
 
+.attendance__admin-page-search-empty {
+  padding: 6px 8px;
+  color: var(--ms-text-3);
+  font-size: 12px;
+}
+
 .attendance__admin-page-search-status {
   max-width: 148px;
   overflow: hidden;
@@ -33645,6 +33696,12 @@ defineExpose({
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+
+.attendance__typeahead-empty {
+  padding: 4px 8px;
+  color: #667085;
+  font-size: 12px;
 }
 
 .attendance__group-role-badge {

@@ -25,6 +25,7 @@ const emit = defineEmits<{
 const draft = ref('')
 const menuOpen = ref(false)
 const searchHits = ref<string[]>([])
+const searchPending = ref(false)
 let searchTimer = 0
 let searchSeq = 0
 
@@ -51,6 +52,13 @@ const suggestions = computed(() => {
     return true
   }).slice(0, 8)
 })
+
+const showSearchEmpty = computed(() => (
+  menuOpen.value
+  && draft.value.trim().length > 0
+  && suggestions.value.length === 0
+  && !searchPending.value
+))
 
 function write(next: string[]): void {
   emit('update:modelValue', next.join(','))
@@ -79,13 +87,18 @@ function removeValue(value: string): void {
 
 function onDraftInput(): void {
   menuOpen.value = true
-  if (!props.search) return
+  if (!props.search) {
+    searchPending.value = false
+    return
+  }
   const query = draft.value.trim()
   window.clearTimeout(searchTimer)
   if (query.length < 1) {
     searchHits.value = []
+    searchPending.value = false
     return
   }
+  searchPending.value = true
   const seq = ++searchSeq
   searchTimer = window.setTimeout(() => {
     void props.search?.(query).then((hits) => {
@@ -93,6 +106,8 @@ function onDraftInput(): void {
       searchHits.value = Array.isArray(hits) ? hits : []
     }).catch(() => {
       if (seq === searchSeq) searchHits.value = []
+    }).finally(() => {
+      if (seq === searchSeq) searchPending.value = false
     })
   }, 250)
 }
@@ -128,9 +143,12 @@ function onBlur(): void {
         @input="onDraftInput"
         @keydown.enter.prevent="addValue(draft)"
       />
-      <ul v-if="menuOpen && suggestions.length" class="audience-chip-field__menu">
+      <ul v-if="menuOpen && (suggestions.length || showSearchEmpty)" class="audience-chip-field__menu">
         <li v-for="option in suggestions" :key="option">
           <button type="button" @mousedown.prevent="addValue(option)">{{ option }}</button>
+        </li>
+        <li v-if="showSearchEmpty" class="audience-chip-field__empty" data-attendance-search-empty>
+          {{ tr('No matches', '搜索不到') }}
         </li>
       </ul>
     </div>
@@ -230,5 +248,11 @@ function onBlur(): void {
 
 .audience-chip-field__menu button:hover {
   background: var(--el-color-primary-light-9, #eff6ff);
+}
+
+.audience-chip-field__empty {
+  padding: 6px 8px;
+  color: var(--ms-text-3, #667085);
+  font-size: 12px;
 }
 </style>

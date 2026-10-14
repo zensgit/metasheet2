@@ -114,6 +114,19 @@ describe('AttendanceAdminRail', () => {
     expect(handlers['onUpdate:sectionFilter']).toHaveBeenCalledWith('补卡')
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-settings"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(container!.querySelector('[data-admin-page-search]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+  })
+
+  it('shows the empty hint only after a section query matches nothing', async () => {
+    mountRail({ adminSectionFilter: '', visibleAdminSectionNavGroups: [] })
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    app!.unmount()
+    mountRail({ adminSectionFilter: 'zzz', visibleAdminSectionNavGroups: [] })
+    await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-anchor]')).toBeNull()
   })
 
   it('emits interaction events for compact toggle, grouped sections, and item selection', async () => {

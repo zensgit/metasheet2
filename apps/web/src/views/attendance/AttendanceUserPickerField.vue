@@ -32,12 +32,19 @@
           {{ loading ? tr('Loading...', '加载中...') : tr('Search users', '搜索用户') }}
         </button>
       </div>
-      <ul v-if="typeahead && menuUsers.length > 0" class="attendance__user-picker-menu" data-attendance-user-picker-menu>
+      <ul
+        v-if="typeahead && (menuUsers.length > 0 || showTypeaheadEmpty)"
+        class="attendance__user-picker-menu"
+        data-attendance-user-picker-menu
+      >
         <li v-for="user in menuUsers" :key="user.id">
           <button type="button" :disabled="disabled" @mousedown.prevent @click="selectUser(user.id)">
             <span>{{ pickerLabel(user) }}</span>
             <span v-if="!personLabel(user)" class="attendance__user-picker-id">{{ user.id }}</span>
           </button>
+        </li>
+        <li v-if="showTypeaheadEmpty" class="attendance__user-picker-empty" data-attendance-search-empty>
+          {{ tr('No matches', '搜索不到') }}
         </li>
       </ul>
       <small v-if="typeahead && modelValue && !selectedVisibleLabel && !typeaheadEditing" class="attendance__field-hint">
@@ -143,7 +150,16 @@ const menuUsers = computed(() => {
 const inputId = computed(() => props.inputId || `${props.name || 'attendance-user-picker'}-${props.label.replace(/\s+/g, '-').toLowerCase()}`)
 const searchPlaceholderText = computed(() => props.searchPlaceholder || props.tr('Search by email, name, or user ID', '按邮箱、姓名或用户 ID 搜索'))
 const typeaheadEditing = ref(false)
+const typeaheadSearchSettled = ref(false)
 let typeaheadBlurTimer: ReturnType<typeof setTimeout> | undefined
+let typeaheadSeq = 0
+
+const showTypeaheadEmpty = computed(() => (
+  props.typeahead
+  && searchQuery.value.trim().length > 0
+  && menuUsers.value.length === 0
+  && typeaheadSearchSettled.value
+))
 
 const selectedVisibleLabel = computed(() => personLabel(users.value.find((item) => item.id === props.modelValue.trim()) ?? null))
 const typeaheadInputValue = computed(() => (typeaheadEditing.value ? searchQuery.value : selectedVisibleLabel.value))
@@ -169,19 +185,41 @@ function pickerLabel(user: AttendanceAdminUserSearchItem): string {
 
 let typeaheadTimer: ReturnType<typeof setTimeout> | undefined
 
+function markTypeaheadSettled(seq: number, query: string): void {
+  if (seq === typeaheadSeq && searchQuery.value.trim() === query) {
+    typeaheadSearchSettled.value = true
+  }
+}
+
 function scheduleTypeahead(): void {
   if (!props.typeahead) return
   if (typeaheadTimer) clearTimeout(typeaheadTimer)
+  const query = searchQuery.value.trim()
+  if (!query) {
+    typeaheadSeq += 1
+    typeaheadTimer = undefined
+    typeaheadSearchSettled.value = false
+    return
+  }
+  typeaheadSearchSettled.value = false
+  const seq = ++typeaheadSeq
   typeaheadTimer = setTimeout(() => {
     typeaheadTimer = undefined
-    void loadUsers()
+    void loadUsers().finally(() => markTypeaheadSettled(seq, query))
   }, 250)
 }
 
 function searchNow(): void {
   if (typeaheadTimer) clearTimeout(typeaheadTimer)
   typeaheadTimer = undefined
-  void loadUsers()
+  const query = searchQuery.value.trim()
+  if (!props.typeahead || !query) {
+    void loadUsers()
+    return
+  }
+  typeaheadSearchSettled.value = false
+  const seq = ++typeaheadSeq
+  void loadUsers().finally(() => markTypeaheadSettled(seq, query))
 }
 
 function onSearchEnter(): void {
@@ -311,6 +349,12 @@ onBeforeUnmount(() => {
   margin-left: 6px;
   color: #98a2b3;
   font-size: 11px;
+}
+
+.attendance__user-picker-empty {
+  padding: 4px 8px;
+  color: #667085;
+  font-size: 12px;
 }
 
 .attendance__field-hint {

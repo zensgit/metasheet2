@@ -248,6 +248,35 @@ describe('AttendanceTeamAvailabilitySection — RENDER (the owner-enumerated §3
     container.remove()
   })
 
+  it('shows 搜索不到 only after a group query matches nothing', async () => {
+    let resolveGroups: (response: Response) => void = () => {}
+    apiFetchMock.mockImplementation((url: string) => {
+      if (String(url).includes('/api/attendance/groups')) {
+        return new Promise<Response>((resolve) => { resolveGroups = resolve })
+      }
+      return Promise.resolve(jsonResponse(200, { ok: true, data: { items: [] } }))
+    })
+    const { container, app } = mountSection()
+    const input = container.querySelector('#attendance-ta-group') as HTMLInputElement
+    input.value = '没有这个组'
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    resolveGroups(jsonResponse(200, { ok: true, data: { items: [{ id: 'g1', name: '白班组' }] } }))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+
+    input.value = ''
+    input.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+    expect(container.querySelector('[data-attendance-team-availability-group-menu]')?.textContent).toContain('白班组')
+
+    app.unmount()
+    container.remove()
+  })
+
   it('shows the resolved 姓名 and clips the raw user id', async () => {
     const userId = '11111111-1111-4111-8111-111111111111'
     const { container, app, fillForm, clickLoad } = mountSection({ userScope: { orgId: 'org-1' } })

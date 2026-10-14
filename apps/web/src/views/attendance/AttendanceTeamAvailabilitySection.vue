@@ -30,9 +30,16 @@
           @focus="menuOpen = true"
           @keydown.enter.prevent="reload"
         />
-        <ul v-if="menuOpen && groupMatches.length > 0" class="attendance-ta__group-menu" data-attendance-team-availability-group-menu>
+        <ul
+          v-if="menuOpen && (groupMatches.length > 0 || groupSearchEmpty)"
+          class="attendance-ta__group-menu"
+          data-attendance-team-availability-group-menu
+        >
           <li v-for="group in groupMatches" :key="group.id">
             <button type="button" @click="chooseGroup(group)">{{ group.name }}</button>
+          </li>
+          <li v-if="groupSearchEmpty" class="attendance-ta__group-empty" data-attendance-search-empty>
+            {{ tr('No matches', '搜索不到') }}
           </li>
         </ul>
       </label>
@@ -154,6 +161,8 @@ const groupId = ref('')
 const groupDraft = ref('')
 const menuOpen = ref(false)
 const groups = ref<AttendanceGroupChoice[]>([])
+const groupsLoaded = ref(false)
+let groupsRequest: Promise<void> | null = null
 const from = ref('')
 const to = ref('')
 
@@ -171,22 +180,39 @@ const groupMatches = computed(() => {
   if (!query) return source.slice(0, 8)
   return source.filter(group => group.name.toLowerCase().includes(query)).slice(0, 8)
 })
+const groupSearchEmpty = computed(() => (
+  menuOpen.value
+  && groupDraft.value.trim().length > 0
+  && groupMatches.value.length === 0
+  && groupsLoaded.value
+))
 
 async function loadGroupChoices(): Promise<void> {
-  if (groups.value.length > 0) return
-  try {
-    const response = await guardedFetch('/api/attendance/groups?pageSize=200')
-    const payload = await response.json()
-    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
-    groups.value = items
-      .map((item: { id?: string; name?: string }) => ({
-        id: String(item?.id || '').trim(),
-        name: String(item?.name || '').trim(),
-      }))
-      .filter((item: AttendanceGroupChoice) => item.id && item.name)
-  } catch {
-    groups.value = []
+  if (groups.value.length > 0) {
+    groupsLoaded.value = true
+    return
   }
+  if (!groupsRequest) {
+    groupsRequest = (async () => {
+      try {
+        const response = await guardedFetch('/api/attendance/groups?pageSize=200')
+        const payload = await response.json()
+        const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+        groups.value = items
+          .map((item: { id?: string; name?: string }) => ({
+            id: String(item?.id || '').trim(),
+            name: String(item?.name || '').trim(),
+          }))
+          .filter((item: AttendanceGroupChoice) => item.id && item.name)
+      } catch {
+        groups.value = []
+      } finally {
+        groupsLoaded.value = true
+        groupsRequest = null
+      }
+    })()
+  }
+  await groupsRequest
 }
 
 function applyKnownGroup(text: string): boolean {
@@ -384,6 +410,11 @@ async function reload(): Promise<void> {
   background: transparent;
   text-align: left;
   cursor: pointer;
+}
+.attendance-ta__group-empty {
+  padding: 6px 8px;
+  color: #667085;
+  font-size: 12px;
 }
 .attendance-ta__matrix-wrap { overflow-x: auto; }
 .attendance-ta__member { font-size: 13px; white-space: nowrap; }

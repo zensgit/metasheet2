@@ -1458,9 +1458,16 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor-group="workspace"] .attendance__admin-nav-group-header')?.getAttribute('aria-expanded')).toBe('true')
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeNull()
 
+    search!.value = 'zzz-no-such-section'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-anchor]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')?.textContent).toContain('No matches')
+
     search!.value = ''
     search!.dispatchEvent(new Event('input'))
     await flushUi()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
     expect(container!.querySelectorAll('[data-admin-anchor="attendance-admin-shifts"]').length).toBe(1)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
@@ -1494,7 +1501,8 @@ describe('Attendance admin anchor navigation', () => {
     input!.dispatchEvent(new Event('input'))
     await flushUi()
     expect(container!.querySelector('[data-admin-home-context="true"] [data-admin-page-search-hidden="true"]')).toBeTruthy()
-    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches on this page.')
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-page-search-status]')?.hasAttribute('data-attendance-search-empty')).toBe(true)
     expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
 
     workbenchScope!.click()
@@ -1502,8 +1510,14 @@ describe('Attendance admin anchor navigation', () => {
     expect(workbenchScope?.getAttribute('aria-pressed')).toBe('true')
     expect(pageScope?.getAttribute('aria-pressed')).toBe('false')
     expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-results] [data-attendance-search-empty]')?.textContent).toContain('No matches')
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches')
+
+    container!.querySelector<HTMLButtonElement>('[data-admin-page-search-clear]')!.click()
+    await flushUi()
     expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
-    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matching workbench sections.')
+    expect(container!.querySelector('[data-admin-page-search-status]')).toBeNull()
+    expect(container!.querySelector('[data-attendance-search-empty]')).toBeNull()
 
     input!.value = '排班执行'
     input!.dispatchEvent(new Event('input'))

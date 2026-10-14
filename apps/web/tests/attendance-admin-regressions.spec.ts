@@ -2229,6 +2229,14 @@ describe('Attendance admin regressions', () => {
     const section = await openOpsSection()
     const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
     const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[0].value = '没有此人'
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(6)
+    expect(card.querySelector('[data-annual-ops-adjust-person-menu] [data-attendance-search-empty]')?.textContent).toContain('No matches')
+    inputs[0].value = ''
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(card.querySelector('[data-attendance-search-empty]')).toBeNull()
     inputs[0].value = 'u1'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '240'; inputs[1].dispatchEvent(new Event('input'))
     inputs[2].value = 'comp grant'; inputs[2].dispatchEvent(new Event('input'))
