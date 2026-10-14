@@ -44,17 +44,6 @@
             @change="switchSessionOrg"
           />
         </div>
-        <div v-if="showReports" class="attendance__chip-list attendance__chip-list--header">
-          <span class="attendance__status-chip">
-            {{ tr('Records', '记录') }} {{ recordsTotal }}
-          </span>
-          <span class="attendance__status-chip">
-            {{ tr('Requests', '申请') }} {{ requestReportTotal }}
-          </span>
-          <span class="attendance__status-chip">
-            {{ tr('Minutes', '分钟') }} {{ requestReportMinutesTotal }}
-          </span>
-        </div>
       </header>
 
       <!-- Reports mode keeps its existing filter-row position/behavior
@@ -83,32 +72,57 @@
             :aria-invalid="reportDateRangeInvalid ? 'true' : 'false'"
           />
         </label>
-        <label class="attendance__field" for="attendance-org-id">
-          <span>{{ tr('Org ID', '组织 ID') }}</span>
-          <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
-        </label>
-        <!-- A6 (A-class batch 2, 2026-08-22): considered swapping for AttendanceUserPickerField
-             (as done at the annual-leave-balance site) but did NOT — this filter renders on the
-             Reports tab, which `AttendanceExperienceView.vue` never gates by role ("'overview'/
-             'reports' are never gated"), while the picker's `useAttendanceAdminUsers` composable
-             defaults to `/api/admin/users` (`ensurePlatformAdmin`-gated) and fires on mount. Every
-             non-platform-admin visiting Reports would get a background 403 the moment the tab
-             loads. The other 8 existing picker usages are all admin-tab-only, so this reachability
-             gap is new here, not a pre-existing pattern. Left as the original text input; the
-             empty/"current user" semantics are unchanged. -->
-        <label class="attendance__field" for="attendance-user-id">
-          <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
-          <input
-            id="attendance-user-id"
-            name="targetUserId"
-            v-model="targetUserId"
-            type="text"
-            :placeholder="tr('Current user', '当前用户')"
-          />
-        </label>
+        <div class="attendance__filter-pills attendance__filter-pills--range" data-report-filter-group="range-preset">
+          <button
+            v-for="preset in reportRangePresetOptions"
+            :key="preset.id"
+            class="attendance__filter-pill"
+            :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
+            type="button"
+            :data-report-filter-value="preset.id"
+            @click="applyReportRangePreset(preset.id)"
+          >
+            {{ preset.label }}
+          </button>
+        </div>
+        <small class="attendance__field-hint" data-report-period-label>{{ reportRangeLabel }}</small>
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
+        <details class="attendance__filters-more">
+          <summary>{{ tr('More filters', '更多筛选') }}</summary>
+          <label class="attendance__field" for="attendance-org-id">
+            <span>{{ tr('Org ID', '组织 ID') }}</span>
+            <input id="attendance-org-id" name="orgId" v-model="orgId" type="text" :placeholder="tr('default', '默认')" />
+          </label>
+          <!-- A6 (A-class batch 2, 2026-08-22): considered swapping for AttendanceUserPickerField
+               (as done at the annual-leave-balance site) but did NOT — this filter renders on the
+               Reports tab, which `AttendanceExperienceView.vue` never gates by role ("'overview'/
+               'reports' are never gated"), while the picker's `useAttendanceAdminUsers` composable
+               defaults to `/api/admin/users` (`ensurePlatformAdmin`-gated) and fires on mount. Every
+               non-platform-admin visiting Reports would get a background 403 the moment the tab
+               loads. The other 8 existing picker usages are all admin-tab-only, so this reachability
+               gap is new here, not a pre-existing pattern. Left as the original text input; the
+               empty/"current user" semantics are unchanged. -->
+          <label class="attendance__field" for="attendance-user-id">
+            <span>{{ tr('User ID (optional)', '用户 ID（可选）') }}</span>
+            <input
+              id="attendance-user-id"
+              name="targetUserId"
+              v-model="targetUserId"
+              type="text"
+              :placeholder="tr('Current user', '当前用户')"
+            />
+          </label>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
+                '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
+              )
+            }}
+          </p>
+        </details>
         <div v-if="statusMessage" class="attendance__status-block">
           <span class="attendance__status" :class="{ 'attendance__status--error': statusKind === 'error' }">
             {{ statusMessage }}
@@ -339,37 +353,7 @@
         collapsed-by-default details — not an equal-weight sibling of the
         calendar. Quick actions and approval-center deep links open it.
       -->
-      <section v-if="showReports" class="attendance__card attendance__card--report-toolbar">
-        <div class="attendance__requests-header">
-          <h3>{{ tr('Report Period', '报表区间') }}</h3>
-          <small class="attendance__field-hint" data-report-period-label>
-            {{ reportRangeLabel }}
-          </small>
-        </div>
-        <div class="attendance__filter-pills attendance__filter-pills--range" data-report-filter-group="range-preset">
-          <button
-            v-for="preset in reportRangePresetOptions"
-            :key="preset.id"
-            class="attendance__filter-pill"
-            :class="{ 'attendance__filter-pill--active': activeReportRangePreset === preset.id }"
-            type="button"
-            :data-report-filter-value="preset.id"
-            @click="applyReportRangePreset(preset.id)"
-          >
-            {{ preset.label }}
-          </button>
-        </div>
-        <p class="attendance__field-hint attendance__field-hint--strong">
-          {{
-            tr(
-              'Exports follow the active date range, org/user filters, and the server-side dataset. Local pills only refine what is visible on this page.',
-              '导出遵循当前日期区间、组织/用户筛选和服务端数据集；本地筛选只影响当前页面可见内容。',
-            )
-          }}
-        </p>
-      </section>
-
-      <section v-if="showReports" class="attendance__grid attendance__grid--reports-insights">
+      <section v-if="showReports" class="attendance__reports-brief">
         <div class="attendance__card" data-reports-insight="snapshot">
           <div class="attendance__requests-header">
             <h3>{{ tr('Report Snapshot', '报表快照') }}</h3>
@@ -382,10 +366,7 @@
               {{ tr('Clear filters', '清除筛选') }}
             </button>
           </div>
-          <small class="attendance__field-hint">
-            {{ tr('Snapshot combines filtered request totals with the current records page.', '快照结合了筛选后的申请汇总与当前记录页。') }}
-          </small>
-          <p class="attendance__field-hint attendance__field-hint--strong">
+          <p class="attendance__field-hint attendance__reports-quiet">
             {{ reportRangeLabel }}
           </p>
           <div
@@ -433,9 +414,6 @@
         <div class="attendance__card" data-reports-insight="trend">
           <div class="attendance__requests-header">
             <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Range totals from the attendance summary API.', '来自汇总接口的区间总量。') }}
-            </small>
           </div>
           <div class="attendance__summary attendance__summary--reports">
             <div v-for="item in reportTrendItems" :key="item.key" class="attendance__summary-item">
@@ -448,9 +426,6 @@
         <div class="attendance__card" data-reports-insight="metrics">
           <div class="attendance__requests-header">
             <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Range-level attendance totals for quick manager review.', '用于经理快速查看的区间级考勤总量。') }}
-            </small>
           </div>
           <div class="attendance__summary attendance__summary--reports">
             <div v-for="item in reportMetricItems" :key="item.key" class="attendance__summary-item">
@@ -463,9 +438,6 @@
         <div class="attendance__card" data-reports-insight="request-status">
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Filter the request report table locally.', '本地筛选申请报表表格。') }}
-            </small>
           </div>
           <div class="attendance__filter-pills" data-report-filter-group="request-status">
             <button
@@ -494,9 +466,6 @@
         <div class="attendance__card" data-reports-insight="request-type">
           <div class="attendance__requests-header">
             <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Use this to focus on leave, overtime, or corrections.', '用它聚焦请假、加班或补卡类型。') }}
-            </small>
           </div>
           <div class="attendance__filter-pills" data-report-filter-group="request-type">
             <button
@@ -525,9 +494,6 @@
         <div class="attendance__card" data-reports-insight="record-status">
           <div class="attendance__requests-header">
             <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
-            <small class="attendance__field-hint">
-              {{ tr('Current page only, so filters stay lightweight.', '仅针对当前页，保持筛选轻量。') }}
-            </small>
           </div>
           <div class="attendance__filter-pills" data-report-filter-group="record-status">
             <button
@@ -553,20 +519,16 @@
           </div>
         </div>
 
-        <div class="attendance__card" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
-          <div class="attendance__requests-header">
-            <div>
-              <h3>{{ tr('Caliber guide', '口径说明') }}</h3>
-              <small class="attendance__field-hint">
-                {{
-                  tr(
-                    'Plain-language definitions for the headline attendance numbers above.',
-                    '对上方考勤关键数字做一句话口径说明。',
-                  )
-                }}
-              </small>
-            </div>
-          </div>
+        <details class="attendance__reports-caliber" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
+          <summary>{{ tr('Caliber guide', '口径说明') }}</summary>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                'Plain-language definitions for the headline attendance numbers above.',
+                '对上方考勤关键数字做一句话口径说明。',
+              )
+            }}
+          </p>
           <ul class="attendance__status-guide">
             <li
               v-for="item in attendanceCaliberGuideItems"
@@ -576,12 +538,11 @@
             >
               <div class="attendance__status-guide-header">
                 <strong>{{ item.label }}</strong>
-                <span class="attendance__field-hint">{{ item.code }}</span>
               </div>
               <p>{{ item.description }}</p>
             </li>
           </ul>
-        </div>
+        </details>
       </section>
 
       <section
@@ -1261,7 +1222,7 @@
               {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
             </button>
           </div>
-          <small class="attendance__field-hint">{{ requestReportTimezoneContextHint }}</small>
+          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
           <p class="attendance__field-hint attendance__field-hint--strong">
             {{
               tr(
@@ -1403,7 +1364,7 @@
         <div class="attendance__records-header">
           <div class="attendance__records-heading">
             <h3>{{ tr('Records', '记录') }}</h3>
-            <p class="attendance__records-summary">
+            <p class="attendance__records-summary attendance__reports-quiet">
               {{ recordsTimezoneContextHint }}
               ·
               {{
@@ -1416,17 +1377,30 @@
           </div>
           <div class="attendance__records-actions">
             <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
-            <label class="attendance__records-header-mode" for="attendance-record-export-header">
-              <span>{{ tr('CSV header', 'CSV 表头') }}</span>
-              <select
-                id="attendance-record-export-header"
-                name="recordExportHeader"
-                v-model="exportCsvHeaderMode"
-              >
-                <option value="label">{{ tr('Field names', '字段名称') }}</option>
-                <option value="code">{{ tr('Field codes', '字段编码') }}</option>
-              </select>
-            </label>
+            <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
+              <summary>{{ tr('Columns', '显示字段') }}</summary>
+              <div class="attendance__records-column-actions">
+                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
+                  {{ tr('Show all', '全部显示') }}
+                </button>
+                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
+                  {{ tr('Restore default', '恢复默认') }}
+                </button>
+              </div>
+              <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
+                <strong>{{ group.label }}</strong>
+                <label v-for="column in group.columns" :key="column.code">
+                  <input
+                    type="checkbox"
+                    :data-record-column-code="column.code"
+                    :checked="visibleRecordReportCodeSet.has(column.code)"
+                    :disabled="recordReportColumnPinned(column.code)"
+                    @change="onToggleRecordReportColumn(column.code, $event)"
+                  />
+                  {{ column.label }}
+                </label>
+              </div>
+            </details>
             <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
               {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
             </button>
@@ -1436,11 +1410,21 @@
           </div>
         </div>
         <details
-          v-if="recordReportConfigDetails.length > 0 || lastRecordCsvExportDetails.length > 0"
           class="attendance__report-tech"
           data-record-report-tech
         >
           <summary>{{ tr('Technical details', '技术信息') }}</summary>
+          <label class="attendance__records-header-mode" for="attendance-record-export-header">
+            <span>{{ tr('CSV header', 'CSV 表头') }}</span>
+            <select
+              id="attendance-record-export-header"
+              name="recordExportHeader"
+              v-model="exportCsvHeaderMode"
+            >
+              <option value="label">{{ tr('Field names', '字段名称') }}</option>
+              <option value="code">{{ tr('Field codes', '字段编码') }}</option>
+            </select>
+          </label>
         <div
           v-if="recordReportConfigDetails.length > 0"
           class="attendance__report-config"
@@ -1483,7 +1467,7 @@
             <thead>
               <tr>
                 <th
-                  v-for="column in recordReportColumns"
+                  v-for="column in visibleRecordReportColumns"
                   :key="column.code"
                   :class="recordReportColumnClass(column)"
                   :title="column.description || undefined"
@@ -1497,7 +1481,7 @@
               <template v-for="record in filteredRecords" :key="record.id">
                 <tr>
                   <td
-                    v-for="column in recordReportColumns"
+                    v-for="column in visibleRecordReportColumns"
                     :key="`${record.id}-${column.code}`"
                     :class="recordReportColumnClass(column)"
                     :title="recordReportCellTitle(record, column)"
@@ -2362,11 +2346,10 @@
                 </label>
                 <label class="attendance__field" for="attendance-report-digest-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <input
+                  <AttendanceTimezoneSelect
                     id="attendance-report-digest-timezone"
-                    v-model.trim="reportDigestPolicyForm.timezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
+                    v-model="reportDigestPolicyForm.timezone"
+                    :options="timezoneOptions"
                     data-report-digest="timezone"
                   />
                 </label>
@@ -2507,11 +2490,10 @@
                 </label>
                 <label class="attendance__field" for="attendance-makeup-punch-timezone">
                   <span>{{ tr('Policy timezone', '规则时区') }}</span>
-                  <input
+                  <AttendanceTimezoneSelect
                     id="attendance-makeup-punch-timezone"
-                    v-model.trim="makeupPunchPolicyForm.timezone"
-                    type="text"
-                    placeholder="Asia/Shanghai"
+                    v-model="makeupPunchPolicyForm.timezone"
+                    :options="timezoneOptions"
                     data-makeup-punch="timezone"
                   />
                 </label>
@@ -4051,15 +4033,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
                   <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-holiday-sync-auto-tz"
                     name="holidaySyncAutoTimezone"
                     v-model="settingsForm.holidaySyncAutoTimezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`holiday-sync-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ holidaySyncAutoTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
@@ -4148,15 +4127,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-rule-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-rule-timezone"
                     name="ruleTimezone"
                     v-model="ruleForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`rule-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ ruleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-rule-start">
@@ -4320,11 +4296,11 @@
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-timezone">
                       <span>{{ tr('Timezone', '时区') }}</span>
-                      <select id="attendance-rule-builder-timezone" v-model="ruleBuilderTimezone">
-                        <option v-for="option in timezoneOptions" :key="`rule-builder-${option.value}`" :value="option.value">
-                          {{ option.label }}
-                        </option>
-                      </select>
+                      <AttendanceTimezoneSelect
+                        id="attendance-rule-builder-timezone"
+                        v-model="ruleBuilderTimezone"
+                        :options="timezoneOptions"
+                      />
                     </label>
                     <label class="attendance__field" for="attendance-rule-builder-start">
                       <span>{{ tr('Work start time', '上班时间') }}</span>
@@ -5093,15 +5069,12 @@
                            mistyped timezone that they were about to corrupt historical calculations. -->
                       <label class="attendance__field" for="attendance-group-timezone">
                         <span>{{ tr('Timezone', '时区') }}</span>
-                        <select
+                        <AttendanceTimezoneSelect
                           id="attendance-group-timezone"
                           v-model="attendanceGroupForm.timezone"
+                          :options="timezoneOptions"
                           data-attendance-group-timezone
-                        >
-                          <option v-for="option in timezoneOptions" :key="`group-${option.value}`" :value="option.value">
-                            {{ option.label }}
-                          </option>
-                        </select>
+                        />
                         <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ attendanceGroupTimezoneLabel }}</small>
                         <small v-if="attendanceGroupEditingId" class="attendance__field-hint" data-attendance-group-timezone-change-warning>
                           {{ tr('This is stored as group policy. Shift and punch calculations use each shift\'s own timezone (or the default rule\'s), not this value — changing it here does not retime existing shifts.', '此项仅作为考勤组策略保存。打卡与工时计算使用各班次（或默认规则）自身的时区，不使用此值——在此修改不会重新计算已有排班的工时。') }}
@@ -6333,15 +6306,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-group-timezone">
                   <span>{{ tr('Group timezone (optional)', '分组时区（可选）') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-import-group-timezone"
                     v-model="importGroupTimezone"
-                  >
-                    <option value="">{{ tr('Use import timezone', '使用导入时区') }}</option>
-                    <option v-for="option in timezoneOptions" :key="`import-group-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                    :empty-label="tr('Use import timezone', '使用导入时区')"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current effective timezone', '当前生效时区') }}: {{ importGroupTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-import-user">
@@ -6356,15 +6326,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-import-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-import-timezone"
                     name="importTimezone"
                     v-model="importForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`import-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ importTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-import-payload">
@@ -6668,15 +6635,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-payroll-template-timezone"
                     name="payrollTemplateTimezone"
                     v-model="payrollTemplateForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`payroll-template-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ payrollTemplateTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field" for="attendance-payroll-template-start">
@@ -7400,18 +7364,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-annual-policy-tz">
                   <span>{{ tr('Timezone (IANA)', '时区 (IANA)') }}</span>
-                  <select id="attendance-annual-policy-tz" v-model="annualPolicyForm.timezone">
-                    <option value="">{{ tr('Select timezone', '选择时区') }}</option>
-                    <option
-                      v-if="annualPolicyForm.timezone && !timezoneOptions.some((option) => option.value === annualPolicyForm.timezone)"
-                      :value="annualPolicyForm.timezone"
-                    >
-                      {{ annualPolicyForm.timezone }}
-                    </option>
-                    <option v-for="option in timezoneOptions" :key="`annual-policy-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                  <AttendanceTimezoneSelect
+                    id="attendance-annual-policy-tz"
+                    v-model="annualPolicyForm.timezone"
+                    :options="timezoneOptions"
+                    :empty-label="tr('Select timezone', '选择时区')"
+                  />
                   <small class="attendance__field-hint">
                     {{
                       tr(
@@ -8711,15 +8669,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-rotation-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-rotation-timezone"
                     name="rotationTimezone"
                     v-model="rotationRuleForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`rotation-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ rotationRuleTimezoneLabel }}</small>
                 </label>
                 <label class="attendance__field attendance__field--full" for="attendance-rotation-sequence">
@@ -8938,10 +8893,11 @@
                 <AttendanceUserPickerField
                   v-model="rotationAssignmentForm.userId"
                   :tr="tr"
+                  typeahead
                   :label="tr('User', '用户')"
                   name="rotationUserId"
-                  :help-text="tr('Search by email, name, or user ID, then pick a user for this rotation.', '按邮箱、姓名或用户 ID 搜索，然后为该轮班选择用户。')"
-                  :search-placeholder="tr('Search users for rotation assignment', '搜索轮班分配用户')"
+                  :help-text="tr('Type a name or email. Matches appear as you type.', '输入姓名或邮箱，输入时自动匹配。')"
+                  :search-placeholder="tr('Name or email', '姓名或邮箱')"
                   input-id="attendance-rotation-user"
                   endpoint="/api/attendance-admin/users/search"
                   :org-id="orgId"
@@ -9145,15 +9101,12 @@
                 </label>
                 <label class="attendance__field" for="attendance-shift-timezone">
                   <span>{{ tr('Timezone', '时区') }}</span>
-                  <select
+                  <AttendanceTimezoneSelect
                     id="attendance-shift-timezone"
                     name="shiftTimezone"
                     v-model="shiftForm.timezone"
-                  >
-                    <option v-for="option in timezoneOptions" :key="`shift-${option.value}`" :value="option.value">
-                      {{ option.label }}
-                    </option>
-                  </select>
+                    :options="timezoneOptions"
+                  />
                   <small class="attendance__field-hint">{{ tr('Current', '当前') }}: {{ shiftTimezoneLabel }}</small>
                 </label>
                 <AttendanceShiftSegmentsEditor
@@ -10546,6 +10499,17 @@ import { useSessionOrg } from '../composables/useSessionOrg'
 import AttendanceSessionOrgSwitcher from './attendance/AttendanceSessionOrgSwitcher.vue'
 import AttendanceLocaleTimeInput from './attendance/AttendanceLocaleTimeInput.vue'
 import AttendanceLocaleDateInput from './attendance/AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './attendance/AttendanceTimezoneSelect.vue'
+import {
+  RECORD_REPORT_PINNED_COLUMN_CODES,
+  loadRecordReportColumnPrefs,
+  resetRecordReportColumns,
+  resolveVisibleRecordReportCodes,
+  saveRecordReportColumnPrefs,
+  showAllRecordReportColumns,
+  toggleRecordReportColumn,
+  type RecordReportColumnPrefs,
+} from './attendance/recordReportColumnVisibility'
 import AttendanceWeekdayChipField from './attendance/AttendanceWeekdayChipField.vue'
 import AttendanceHolidayIndexHelp from './attendance/AttendanceHolidayIndexHelp.vue'
 import AttendanceAnnualPolicyHelp from './attendance/AttendanceAnnualPolicyHelp.vue'
@@ -13198,6 +13162,70 @@ const recordReportColumns = computed(() => {
     })
 })
 
+const recordReportColumnPrefs = ref<RecordReportColumnPrefs>(
+  loadRecordReportColumnPrefs(typeof localStorage === 'undefined' ? null : localStorage),
+)
+
+watch(recordReportColumnPrefs, (prefs) => {
+  saveRecordReportColumnPrefs(typeof localStorage === 'undefined' ? null : localStorage, prefs)
+}, { deep: true })
+
+const visibleRecordReportCodeSet = computed(() => new Set(
+  resolveVisibleRecordReportCodes(
+    recordReportColumns.value.map(column => column.code),
+    recordReportColumnPrefs.value,
+  ),
+))
+
+const visibleRecordReportColumns = computed(() =>
+  recordReportColumns.value.filter(column => visibleRecordReportCodeSet.value.has(column.code)),
+)
+
+function recordReportCategoryLabel(category: string): string {
+  switch (category) {
+    case 'fixed': return tr('Fixed fields', '固定字段')
+    case 'basic': return tr('People', '人员')
+    case 'attendance': return tr('Attendance', '出勤')
+    case 'anomaly': return tr('Exceptions', '异常')
+    case 'leave': return tr('Leave', '请假')
+    case 'overtime': return tr('Overtime', '加班')
+    default: return tr('Other', '其他')
+  }
+}
+
+const recordReportColumnGroups = computed(() => {
+  const order = ['fixed', 'basic', 'attendance', 'anomaly', 'leave', 'overtime']
+  const groups = new Map<string, typeof recordReportColumns.value>()
+  for (const column of recordReportColumns.value) {
+    const id = column.category || 'other'
+    const list = groups.get(id) ?? []
+    list.push(column)
+    groups.set(id, list)
+  }
+  const ids = [
+    ...order.filter(id => groups.has(id)),
+    ...Array.from(groups.keys()).filter(id => !order.includes(id)),
+  ]
+  return ids.map(id => ({
+    id,
+    label: recordReportCategoryLabel(id),
+    columns: groups.get(id) ?? [],
+  }))
+})
+
+function recordReportColumnPinned(code: string): boolean {
+  return (RECORD_REPORT_PINNED_COLUMN_CODES as readonly string[]).includes(code)
+}
+
+function onToggleRecordReportColumn(code: string, event: Event): void {
+  recordReportColumnPrefs.value = toggleRecordReportColumn(
+    recordReportColumns.value.map(column => column.code),
+    recordReportColumnPrefs.value,
+    code,
+    (event.target as HTMLInputElement).checked,
+  )
+}
+
 const recordReportConfigDetails = computed<AttendanceRecordReportConfigDetail[]>(() => {
   const config = recordReportFieldConfig.value
   if (!config && recordReportFields.value.length === 0) return []
@@ -13458,7 +13486,7 @@ const lastRecordCsvExportDetails = computed<AttendanceRecordReportConfigDetail[]
   return rows
 })
 
-const recordsTableColumnCount = computed(() => Math.max(1, recordReportColumns.value.length) + 1)
+const recordsTableColumnCount = computed(() => Math.max(1, visibleRecordReportColumns.value.length) + 1)
 
 const filteredRecords = computed(() =>
   records.value.filter((record) => {
@@ -31371,6 +31399,65 @@ defineExpose({
 .attendance__summary-item strong {
   color: var(--ms-text-1);
   font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__reports-brief {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.attendance__reports-brief > .attendance__card {
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  background: transparent;
+}
+
+.attendance__reports-quiet {
+  color: var(--ms-text-3, #667085);
+  font-size: 12px;
+}
+
+.attendance__reports-caliber {
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+}
+
+.attendance__reports-caliber summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.attendance__filters-more {
+  flex: 1 1 100%;
+}
+
+.attendance__filters-more[open] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+}
+
+.attendance__records-columns {
+  min-width: 16rem;
+}
+
+.attendance__records-column-actions,
+.attendance__records-column-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.attendance__records-column-group strong {
+  min-width: 4.5rem;
+  font-size: 12px;
 }
 
 .attendance__grid--reports-insights {
