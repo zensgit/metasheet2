@@ -1804,6 +1804,8 @@ describe('/tasks — a refresh whose row read reports no org', () => {
 describe('/tasks — the row actions stay the page\'s', () => {
   it('complete on a board row: the page\'s complete, then the list and its groups are read again', async () => {
     seedGrouped()
+    // An "any" mode row: an "all" mode row offers its complete on the task detail instead.
+    assigned = assigned.map((item) => (item.id === 't2' ? { ...item, completion_mode: 'any' } : item))
     const el = await mountAt('/tasks')
     await clickIn(el, 't2', 'tasks-complete-button')
     expect(writes()).toEqual(['POST /api/tasks/t2/complete'])
@@ -1811,6 +1813,22 @@ describe('/tasks — the row actions stay the page\'s', () => {
     expect(reads(ASSIGNED)).toBe(2)
     expect(reads(USER_GROUPS)).toBe(2)
     expect(layout(el)).toEqual(GROUPED_LAYOUT)
+  })
+
+  it('an "all" mode board row has no complete or reopen of its own: it links to the task detail, and nothing is written', async () => {
+    seedGrouped()
+    assigned = assigned.map((item) => (item.id === 't3' ? { ...item, status: 'done' } : item))
+    const el = await mountAt('/tasks')
+    const toComplete = inRow(el, 't2', 'tasks-row-detail-action')
+    expect(toComplete.tagName).toBe('A')
+    expect(toComplete.getAttribute('href')).toBe('/tasks/t2')
+    expect(toComplete.textContent).toBe('在任务详情中完成')
+    const toReopen = inRow(el, 't3', 'tasks-row-detail-action')
+    expect(toReopen.getAttribute('href')).toBe('/tasks/t3')
+    expect(toReopen.textContent).toBe('在任务详情中重启')
+    expect(shownAll(el, 'tasks-complete-button')).toEqual([])
+    expect(shownAll(el, 'tasks-reopen-button')).toEqual([])
+    expect(writes()).toEqual([])
   })
 })
 

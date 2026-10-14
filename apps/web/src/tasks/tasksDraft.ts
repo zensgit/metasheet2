@@ -1,7 +1,8 @@
 /**
  * Task-feature-line M4 frontend — draft state and client-side pre-checks for the detail editor
- * (`PATCH /api/tasks/:id`), the settings page and the list / group name inputs. PURE: no I/O, no
- * clock, no `Intl` beyond the time-zone name check.
+ * (`PATCH /api/tasks/:id`), the settings page, the list / group name inputs and the create form's
+ * due date. PURE: no I/O, no clock, no `Intl` beyond the time-zone name check and the one read of
+ * the browser's zone (`usableViewerTimeZone`).
  *
  * Design: docs/development/task-m4-frontend-design-20261007.md §3.3, §4.3, §7.1–§7.3.
  * Backend rules mirrored: PR-3a `src/tasks/task-edit.ts` (`planTaskDates`, `planTaskPatch`,
@@ -16,8 +17,8 @@
  * (`buildTaskPatch`) and the request body both use this form only. For the four date / time keys
  * an empty string, the value a cleared control reports, reads as `null`.
  */
-import type { TaskBadgeScope, TaskDetail, TaskPatch, TaskRemindMode, TaskSettings, TaskSettingsPatch } from './tasksApi'
-import { TASK_BADGE_SCOPES, TASK_REMIND_MODES } from './tasksApi'
+import type { CreateTaskInput, TaskBadgeScope, TaskDetail, TaskPatch, TaskRemindMode, TaskSettings, TaskSettingsPatch } from './tasksApi'
+import { TASK_BADGE_SCOPES, TASK_REMIND_MODES, resolveViewerTimeZone } from './tasksApi'
 
 // ASSUMPTION(task-m4-fe): [own-08] (PR-3a) — the description bound, in code points.
 export const TASK_DESCRIPTION_MAX_CODEPOINTS = 20000
@@ -307,6 +308,46 @@ export function buildTaskPatch(current: TaskDraftSource, draft: TaskDraft): Task
   if (draft.remindTouched && draft.remindAt !== base.remindAt) patch.remindAt = draft.remindAt
 
   return Object.keys(patch).length === 0 ? null : patch
+}
+
+// ---- the create form's due date -------------------------------------------------------------
+
+/** The browser's zone when it is a usable IANA name, `''` otherwise. The detail editor fills it in
+ *  for a task's first date, and the create form sends it with a due date, so a task gets the same
+ *  zone whichever of the two sets its date. */
+export function usableViewerTimeZone(): string {
+  const zone = resolveViewerTimeZone()
+  return isValidTimeZoneName(zone) ? zone : ''
+}
+
+export type CreateDueKeys = Pick<CreateTaskInput, 'dueDate' | 'dueTime' | 'timeZone'>
+export type CreateDueCode = 'ZONE_UNAVAILABLE' | TaskDatesCode
+export type CreateDueResult = { ok: true; keys: CreateDueKeys } | { ok: false; code: CreateDueCode }
+
+const CLOCK_WITH_SECONDS_RE = /^\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?$/
+
+/**
+ * The due keys of a `POST /api/tasks` body, from the create form's date and time controls (their
+ * raw values, `''` when empty) and `zone` (`usableViewerTimeZone()`).
+ *
+ * No date ⇒ no keys at all, so the body stays `{ title, completionMode }`; a time without a date is
+ * dropped (the time control is off until a date is set). With a date: the date, the time in the
+ * minutes form when one is set, and `zone`; an empty `zone` is `ZONE_UNAVAILABLE` (a date needs a
+ * zone and the form has no zone control), and the `checkTaskDates` rules apply.
+ *
+ * The keys never include `remindAt`: on create its absence is what lets the server set the default
+ * reminder from the creator's own setting (30 minutes before a timed due, 18:00 on an all-day due).
+ */
+export function buildCreateDue(dueDate: string, dueTime: string, zone: string): CreateDueResult {
+  if (dueDate === '') return { ok: true, keys: {} }
+  if (zone === '') return { ok: false, code: 'ZONE_UNAVAILABLE' }
+  const time = dueTime === '' ? null : CLOCK_WITH_SECONDS_RE.test(dueTime) ? dueTime.slice(0, 5) : dueTime
+  const check = checkTaskDates({ dueDate, dueTime: time, startDate: null, startTime: null, timeZone: zone })
+  if (!check.ok) return { ok: false, code: check.code }
+  const keys: CreateDueKeys = { dueDate }
+  if (time !== null) keys.dueTime = time
+  keys.timeZone = zone
+  return { ok: true, keys }
 }
 
 // ---- settings (mirror of task-settings.ts) --------------------------------------------------

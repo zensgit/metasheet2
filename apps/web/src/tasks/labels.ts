@@ -42,8 +42,26 @@ export const TASKS_ZH = {
   statusDone: '已完成',
   complete: '完成',
   reopen: '重启',
+  // the detail page's complete / reopen buttons when the click would change nothing ("all" mode)
+  completeNoopNotAssignee: '你不是此任务的负责人：「全部负责人完成」模式下由各负责人完成自己的部分',
+  completeNoopOwnPartDone: '你已完成自己的部分，正在等待其他负责人完成',
+  reopenSelfNoop: '你没有已完成的部分可以重启',
+  // a done "all" mode task: reopen every assignee's part (scope all); `reopen` is one's own part
+  reopenAll: '重启全部',
+  // its inline confirmation: it reopens other assignees' finished parts too
+  reopenAllConfirmPrompt: '确认重启全部负责人的部分？已完成的负责人需要重新完成。',
+  reopenAllConfirm: '确认重启全部',
+  // a list row of an "all" mode task: the row has no assignee state, so complete / reopen happen
+  // on the task detail, which turns off a click that would change nothing
+  rowCompleteInDetail: '在任务详情中完成',
+  rowReopenInDetail: '在任务详情中重启',
   modeAll: '全部负责人完成',
   modeAny: '任一负责人完成',
+  // the create form's optional due date: with a date, the server sets the default reminder
+  createDueDateLabel: '截止日期（可选）',
+  createDueTimeLabel: '截止时间（可选）',
+  createDueRemindNote: '将按任务设置中的「新任务的缺省提醒」生成提醒',
+  createDueZoneUnavailable: '无法读取浏览器时区：请先不填截止日期创建，再到任务详情中设置',
 
   // context states and the org-guidance block (shared by every task page)
   orgMissing: '请先选择一个组织后再查看任务',
@@ -365,8 +383,20 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   statusDone: 'Completed',
   complete: 'Complete',
   reopen: 'Reopen',
+  completeNoopNotAssignee: 'You are not an assignee: in "All assignees complete" mode each assignee completes their own part',
+  completeNoopOwnPartDone: 'Your part is done; waiting for the other assignees',
+  reopenSelfNoop: 'You have no completed part to reopen',
+  reopenAll: 'Reopen for everyone',
+  reopenAllConfirmPrompt: "Reopen every assignee's part? Assignees who are done will need to complete again.",
+  reopenAllConfirm: 'Confirm reopen for everyone',
+  rowCompleteInDetail: 'Complete on the task page',
+  rowReopenInDetail: 'Reopen on the task page',
   modeAll: 'All assignees complete',
   modeAny: 'Any assignee completes',
+  createDueDateLabel: 'Due date (optional)',
+  createDueTimeLabel: 'Due time (optional)',
+  createDueRemindNote: 'A reminder is set from "Default reminder for new tasks" in the task settings',
+  createDueZoneUnavailable: 'The browser time zone could not be read: create the task without a due date, then set it on the task page',
 
   orgMissing: 'Select an organization to view tasks',
   contextUnavailable: 'Tasks are not enabled, or this service does not support them',

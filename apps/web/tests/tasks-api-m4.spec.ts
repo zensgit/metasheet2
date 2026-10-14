@@ -74,6 +74,7 @@ import {
   type TaskSettings,
 } from '../src/tasks/tasksApi'
 import {
+  buildCreateDue,
   buildSettingsPatch,
   buildTaskPatch,
   checkGroupName,
@@ -2023,6 +2024,49 @@ describe('buildTaskPatch', () => {
       remindAt: null,
       remindTouched: true,
     }))).toStrictEqual({ title: 'New', description: 'd', dueTime: '12:30', timeZone: 'Asia/Tokyo', remindAt: null })
+  })
+})
+
+// The create form's due keys: none without a date; with one, the date, the minutes-form time when
+// set and the zone; never `remindAt` (its absence on create is what lets the server set the
+// default reminder).
+describe('buildCreateDue', () => {
+  it('no date: no keys, whatever the time and the zone', () => {
+    expect(buildCreateDue('', '', '')).toStrictEqual({ ok: true, keys: {} })
+    expect(buildCreateDue('', '09:30', 'UTC')).toStrictEqual({ ok: true, keys: {} })
+  })
+
+  it('a date alone: the date and the zone', () => {
+    expect(buildCreateDue('2031-03-04', '', 'Asia/Shanghai')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', timeZone: 'Asia/Shanghai' },
+    })
+  })
+
+  it('a date and a time: the time in the minutes form', () => {
+    expect(buildCreateDue('2031-03-04', '09:30', 'UTC')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'UTC' },
+    })
+    expect(buildCreateDue('2031-03-04', '09:30:00', 'UTC')).toStrictEqual({
+      ok: true,
+      keys: { dueDate: '2031-03-04', dueTime: '09:30', timeZone: 'UTC' },
+    })
+  })
+
+  it('a date with no usable zone is ZONE_UNAVAILABLE', () => {
+    expect(buildCreateDue('2031-03-04', '', '')).toStrictEqual({ ok: false, code: 'ZONE_UNAVAILABLE' })
+  })
+
+  it('the checkTaskDates rules: a date that is not a real day, a time out of range, a zone that is not a name', () => {
+    expect(buildCreateDue('2031-02-30', '', 'UTC')).toStrictEqual({ ok: false, code: 'INVALID_DATE' })
+    expect(buildCreateDue('2031-03-04', '24:00', 'UTC')).toStrictEqual({ ok: false, code: 'INVALID_DATE' })
+    expect(buildCreateDue('2031-03-04', '', '+08:00')).toStrictEqual({ ok: false, code: 'INVALID_TIME_ZONE' })
+  })
+
+  it('never produces a remindAt key', () => {
+    const result = buildCreateDue('2031-03-04', '09:30', 'UTC')
+    expect(result.ok && 'remindAt' in result.keys).toBe(false)
   })
 })
 
