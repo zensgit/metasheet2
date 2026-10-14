@@ -94,7 +94,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
       },
       {
         path: ['Makeup punch policy → Policy timezone', '补卡策略 → 规则时区'],
-        detail: ['The cycle is a calendar month; v1 does not offer another cycle. Type a city, an IANA id, or an offset such as +8. The saved value is an IANA id. An unknown zone is refused before save.', '周期只有自然月，v1 没有第二种。可输入城市、IANA 标识，或 +8 这类偏移。保存的是 IANA 标识。无法识别的时区会在保存前被拦住。'],
+        detail: ['The cycle is a calendar month; v1 does not offer another cycle. In the timezone field, type a city, an IANA id, or an offset such as +8, then pick a suggestion. The chosen zone stays in that same field. The saved value is an IANA id. An unknown zone is refused before save.', '周期只有自然月，v1 没有第二种。在时区框里输入城市、IANA 标识，或 +8 这类偏移，再点选一条建议。选中的时区就显示在这一个框里。保存的是 IANA 标识。无法识别的时区会在保存前被拦住。'],
       },
     ],
     callout: [

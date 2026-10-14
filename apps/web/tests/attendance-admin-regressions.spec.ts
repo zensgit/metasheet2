@@ -4628,7 +4628,9 @@ describe('Attendance admin regressions', () => {
 
     // Hydrated by loadSettings() on the first screen; no "reload section" action is required.
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(channel!.value).toBe('email_smtp')
     expect(dailySendAt!.value).toBe('18:45')
     expect(weeklyWeekday!.value).toBe('5')
@@ -4728,7 +4730,9 @@ describe('Attendance admin regressions', () => {
     expect(Boolean(enabled && timezone && cycleType && cycleStartDay && quotaMax && countPending && countApproved && quotaPrincipal && windowUnit && windowDays && missingCheckIn && earlyLeave && normal && requestTypesReadonly && missedCheckIn && missedCheckOut && timeCorrection && requireReason && requireAttachment)).toBe(true)
 
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(cycleType!.textContent).toContain('Calendar month')
     expect(cycleStartDay!.value).toBe('15')
     expect(quotaMax!.value).toBe('5')
@@ -4811,12 +4815,11 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
     expect(section).toBeTruthy()
-    const timezone = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="timezone"]')
+    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
     expect(timezone).toBeTruthy()
-    const timezoneQuery = section!.querySelector<HTMLInputElement>('[data-attendance-timezone-query]')
-    expect(timezoneQuery).toBeTruthy()
-    timezoneQuery!.value = 'Not/AZone'
-    timezoneQuery!.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
+    timezone!.value = 'Not/AZone'
+    timezone!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
     section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
     await flushUi(6)
