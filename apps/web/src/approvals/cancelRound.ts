@@ -58,6 +58,7 @@ export function isCancelRoundWorkflow(value: { workflowKey?: string | null } | n
 export const CANCEL_ROUND_STATUS_KEYS = [
   'cancellation_pending_approval', // V1
   'leave_cancelled', // V2
+  'business_trip_cancelled', // Trip arrangement cancelled; no leave reversal is implied
   'cancellation_rejected', // V3
   'cancellation_withdrawn', // V4
   'cancellation_window_closed', // V5
@@ -329,14 +330,14 @@ const WITHDRAW_CLOSED = {
 
 export const CANCEL_ROUND_ERROR_COPY: Readonly<Record<string, CancelRoundErrorCopyEntry>> = Object.freeze({
   // ① creation-time (P-8 ①)
-  CANCEL_ROUND_DOCUMENT_NOT_APPROVED: { cls: 'creation', zh: '只有已通过的请假才能发起撤销', en: 'Only an approved leave can be cancelled' },
-  CANCEL_ROUND_REQUESTER_ONLY: { cls: 'creation', zh: '只有请假本人可以发起撤销', en: 'Only the person who requested this leave can cancel it' },
-  CANCEL_ROUND_SUITE_FORBIDDEN: { cls: 'creation', zh: '该类型的请假不支持撤销', en: 'This type of leave cannot be cancelled' },
-  CANCEL_ROUND_ALREADY_PENDING: { cls: 'creation', zh: '这条请假已有一个撤销申请在审批中', en: 'This leave already has a cancellation pending approval' },
+  CANCEL_ROUND_DOCUMENT_NOT_APPROVED: { cls: 'creation', zh: '只有已通过的申请才能发起撤销', en: 'Only an approved request can be cancelled' },
+  CANCEL_ROUND_REQUESTER_ONLY: { cls: 'creation', zh: '只有申请人可以发起撤销', en: 'Only the requester can cancel this request' },
+  CANCEL_ROUND_SUITE_FORBIDDEN: { cls: 'creation', zh: '该类型的申请不支持撤销', en: 'This type of request cannot be cancelled' },
+  CANCEL_ROUND_ALREADY_PENDING: { cls: 'creation', zh: '这条申请已有一个撤销申请在审批中', en: 'This request already has a cancellation pending approval' },
   CANCEL_ROUND_NO_ELIGIBLE_APPROVER: { cls: 'creation', ...CANCEL_ROUND_SEAT_CLASS_COPY },
   CANCEL_ROUND_SEAT_INELIGIBLE: { cls: 'creation', ...CANCEL_ROUND_SEAT_CLASS_COPY },
-  CANCEL_ROUND_SUITE_UNKNOWN: { cls: 'creation', zh: '该请假的撤销规则配置有误,请联系管理员', en: 'The cancellation rules for this leave are misconfigured — please contact an administrator' },
-  CANCEL_ROUND_WINDOW_OUT_OF_RANGE: { cls: 'creation', zh: '该请假的撤销规则配置有误,请联系管理员', en: 'The cancellation rules for this leave are misconfigured — please contact an administrator' },
+  CANCEL_ROUND_SUITE_UNKNOWN: { cls: 'creation', zh: '该申请的撤销规则配置有误,请联系管理员', en: 'The cancellation rules for this request are misconfigured — please contact an administrator' },
+  CANCEL_ROUND_WINDOW_OUT_OF_RANGE: { cls: 'creation', zh: '该申请的撤销规则配置有误,请联系管理员', en: 'The cancellation rules for this request are misconfigured — please contact an administrator' },
   CANCEL_ROUND_OUTLET_FORBIDDEN: { cls: 'creation', zh: '撤销申请不支持该操作,请联系管理员', en: 'This action is not available for a cancellation — please contact an administrator' },
   CANCEL_ROUND_CREATE_FAILED: { cls: 'creation', zh: '撤销申请未能创建,请稍后重试', en: 'The cancellation could not be created — please try again later' },
   // ③ retryable, non-terminal (P-8 ③): the round stays pending.
@@ -355,10 +356,11 @@ export const CANCEL_ROUND_ERROR_COPY: Readonly<Record<string, CancelRoundErrorCo
   // Withdraw refusals (engine revoke gate codes, unchanged).
   APPROVAL_REVOKE_WINDOW_CLOSED: { cls: 'withdraw', ...WITHDRAW_CLOSED },
   INVALID_STATUS_TRANSITION: { cls: 'withdraw', ...WITHDRAW_CLOSED },
-  APPROVAL_REVOKE_FORBIDDEN: { cls: 'withdraw', zh: '只有请假本人可以撤回撤销申请', en: 'Only the person who requested this leave can withdraw the cancellation' },
+  APPROVAL_REVOKE_FORBIDDEN: { cls: 'withdraw', zh: '只有申请人可以撤回撤销申请', en: 'Only the requester can withdraw the cancellation' },
   APPROVAL_REVOKE_DISABLED: { cls: 'withdraw', zh: '该撤销申请不允许撤回', en: 'This cancellation cannot be withdrawn' },
   // Entry-level plugin codes that can reach the dialogs.
-  NOT_FOUND: { cls: 'other', zh: '找不到这条请假或撤销申请,请刷新后重试', en: 'This leave or cancellation was not found — please refresh and try again' },
+  CANCEL_ROUND_REQUIRED: { cls: 'other', zh: '已通过的出差需通过撤销申请取消', en: 'An approved business trip must be cancelled through a cancellation request' },
+  NOT_FOUND: { cls: 'other', zh: '找不到这条申请或撤销申请,请刷新后重试', en: 'This request or cancellation was not found — please refresh and try again' },
   FORBIDDEN: { cls: 'other', zh: '没有权限执行此操作', en: 'You do not have permission to do this' },
 })
 
@@ -407,28 +409,28 @@ export function describeCancelRoundError(error: unknown, isZh: boolean, fallback
 // technical detail.
 
 export const CANCEL_ROUND_BLOCK_CATEGORY_COPY = {
-  zh: '该请假已不可撤销(业务原因)',
-  en: 'This leave can no longer be cancelled (business reason)',
+  zh: '该申请已不可撤销(业务原因)',
+  en: 'This request can no longer be cancelled (business reason)',
 } as const
 
 export const CANCEL_ROUND_BLOCK_CODE_COPY: Readonly<Record<string, { zh: string; en: string }>> = Object.freeze({
   ATTENDANCE_CANCELLATION_REVIEW_REQUIRED: {
-    zh: '该请假关联的考勤结果需要复核,已无法撤销',
-    en: 'The attendance result for this leave needs review, so it can no longer be cancelled',
+    zh: '该申请关联的考勤结果需要复核,已无法撤销',
+    en: 'The attendance result for this request needs review, so it can no longer be cancelled',
   },
   CANCEL_ROUND_SUITE_UNKNOWN: {
-    zh: '该请假的撤销规则配置有误,已无法撤销',
-    en: 'The cancellation rules for this leave are misconfigured, so it can no longer be cancelled',
+    zh: '该申请的撤销规则配置有误,已无法撤销',
+    en: 'The cancellation rules for this request are misconfigured, so it can no longer be cancelled',
   },
   CANCEL_ROUND_WINDOW_OUT_OF_RANGE: {
-    zh: '该请假的撤销规则配置有误,已无法撤销',
-    en: 'The cancellation rules for this leave are misconfigured, so it can no longer be cancelled',
+    zh: '该申请的撤销规则配置有误,已无法撤销',
+    en: 'The cancellation rules for this request are misconfigured, so it can no longer be cancelled',
   },
   // The server keys this code on the original leave's status, not on what changed it, so the copy
   // gives the direct cancel as an example rather than as the cause.
   CANCEL_ROUND_DOCUMENT_NOT_APPROVED: {
-    zh: '该请假已不再是已通过状态(例如已被取消),本次撤销未执行',
-    en: 'This leave is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
+    zh: '该申请已不再是已通过状态(例如已被取消),本次撤销未执行',
+    en: 'This request is no longer approved (for example, it has already been cancelled), so this cancellation was not carried out',
   },
 })
 
@@ -654,8 +656,9 @@ export function normalizePendingCancelRoundList(payload: unknown): PendingCancel
 }
 
 /** `GET /api/attendance/cancel-rounds/pending` (attendance:approve). Throws on any non-2xx or malformed body. */
-export async function fetchPendingCancelRounds(): Promise<PendingCancelRoundList> {
-  const response = await apiFetch(CANCEL_ROUND_PENDING_LIST_PATH)
+export async function fetchPendingCancelRounds(orgId?: string): Promise<PendingCancelRoundList> {
+  const query = orgId ? '?' + new URLSearchParams({ orgId }).toString() : ''
+  const response = await apiFetch(CANCEL_ROUND_PENDING_LIST_PATH + query)
   const payload = await readCancelRoundResponse(response)
   return normalizePendingCancelRoundList(payload)
 }
@@ -684,8 +687,8 @@ export function canDecideCancelRoundWith(
 // generic `/api/approvals/:id/actions` route.
 
 export const CANCEL_ROUND_LEAVE_UNRESOLVED_COPY = {
-  zh: '无法定位这条撤销申请对应的请假,请到考勤页面办理或联系管理员',
-  en: 'The leave behind this cancellation could not be located — please act on it from Attendance or contact an administrator',
+  zh: '无法定位这条撤销申请对应的原申请,请到考勤页面办理或联系管理员',
+  en: 'The original request behind this cancellation could not be located — please act on it from Attendance or contact an administrator',
 } as const
 
 /**

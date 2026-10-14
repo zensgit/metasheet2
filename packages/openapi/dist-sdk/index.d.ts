@@ -1018,6 +1018,205 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/effective-calendar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read effective attendance calendar dates
+         * @description Provide from and to and exactly one selector: userId, groupId, or orgOnly=true. The inclusive range is limited to 366 days. Cross-user and group selectors require the existing attendance administration permissions. User dates carry individual timezone contexts; a mixed-zone result has timezone=null and timezoneMode=per_day. Stored historical dates are not reinterpreted through current policy or trips.
+         */
+        get: {
+            parameters: {
+                query: {
+                    from: string;
+                    to: string;
+                    userId?: string;
+                    groupId?: string;
+                    orgOnly?: boolean;
+                    includePending?: boolean;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Calendar with individual timezone identity in user mode */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                /** @enum {string} */
+                                mode: "userId" | "groupId" | "orgOnly";
+                                /** Format: date */
+                                from: string;
+                                /** Format: date */
+                                to: string;
+                                timezone: string | null;
+                                /**
+                                 * @description Present in userId mode.
+                                 * @enum {string}
+                                 */
+                                timezoneMode?: "single" | "per_day";
+                                items: components["schemas"]["AttendanceEffectiveCalendarDay"][];
+                            };
+                        };
+                    };
+                };
+                /** @description Invalid selectors or date range */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Attendance permission or active organization membership required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting target or stored timezone context */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Missing or invalid timezone configuration */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Authoritative calendar context unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/rules/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the authenticated employee's attendance rules and current timezone
+         * @description The employee and organization come from the authenticated session. asOf selects schedule rules; attendanceTimeContext is resolved independently for one captured server instant, which also supplies resolvedAt. A missing or conflicting timezone source fails explicitly.
+         */
+        get: {
+            parameters: {
+                query?: {
+                    asOf?: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Schedule rules plus current server-instant timezone */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                userId: string;
+                                orgId: string;
+                                /** Format: date-time */
+                                resolvedAt: string;
+                                /** Format: date */
+                                resolvedForDate: string;
+                                attendanceTimeContext: components["schemas"]["AttendanceCurrentTimeContext"];
+                                assignment?: Record<string, never>;
+                                runtimeRule?: Record<string, never>;
+                                configuredGroupRule?: Record<string, never> | null;
+                                punchPolicy?: Record<string, never> | null;
+                                warnings?: Record<string, never>[];
+                            };
+                        };
+                    };
+                };
+                /** @description Authentication required */
+                401: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Active organization membership and attendance read permission required */
+                403: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Current timezone context is ambiguous */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid date or missing timezone configuration */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone authority unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attendance/punch": {
         parameters: {
             query?: never;
@@ -1407,7 +1606,14 @@ export interface paths {
             };
         };
         put?: never;
-        /** Create attendance adjustment request */
+        /**
+         * Create attendance adjustment request
+         * @description Supplied timestamps on a fresh request must identify an absolute instant with Z or an explicit UTC offset.
+         *     Local times without an offset, DST gaps, and unresolved DST folds are rejected.
+         *     The server resolves and freezes the target shift context; a client fingerprint is an optional
+         *     optimistic concurrency check, never an authority to select a timezone.
+         *     Existing sealed idempotent requests replay before fresh-input validation.
+         */
         post: {
             parameters: {
                 query?: never;
@@ -1478,6 +1684,8 @@ export interface paths {
                          * @description Compatibility alias for requestedOutAt.
                          */
                         clockOut?: string;
+                        /** @description Optional target-context fingerprint from the target-timezone-context endpoint. A changed context returns 409. */
+                        expectedTimezoneContextFingerprint?: string;
                         reason?: string;
                         /** @description Required for leave requests unless leaveTypeCode is provided. */
                         leaveTypeId?: string;
@@ -3217,6 +3425,607 @@ export interface paths {
                 403: components["responses"]["Forbidden"];
             };
         };
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-context/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview the authenticated employee target shift timezone
+         * @description Requires attendance:read and active organization membership. Accepts only workDate; user, organization, group, and timezone query overrides are rejected. Reads frozen context first, otherwise resolves the actual target context in the same transaction. Does not create attendance or configuration records. Submission must recheck context identity.
+         */
+        get: {
+            parameters: {
+                query: {
+                    workDate: string;
+                };
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Actual target context preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezoneTargetResponse"];
+                    };
+                };
+                /** @description Invalid date or extra query fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting contexts or incomplete historical freeze */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid timezone */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted runtime unavailable or unbound result */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-context/employees/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Preview an administrator selected employee target shift timezone
+         * @description Requires attendance:admin plus actual transaction-bound management authorization and active actor and target memberships in the authenticated organization. Accepts only workDate query and the path subject. Uses the same trusted target resolution as the employee self preview.
+         */
+        get: {
+            parameters: {
+                query: {
+                    workDate: string;
+                };
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Actual target context preview */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezoneTargetResponse"];
+                    };
+                };
+                /** @description Invalid date or extra query fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Conflicting contexts or incomplete historical freeze */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Invalid timezone */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted runtime unavailable or unbound result */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview attendance timezone policy impact without saving
+         * @description Requires attendance:admin and actual transaction-bound management authority. Runs in a read-only transaction and compares the supplied policy revision with the current row. Counts active organization members, changes to their prospective current context, and conflicts with started or frozen shifts and remaining approved trips. Does not reserve a change or guarantee all future calendar dates; saving revalidates authority and source contexts. Invalid default sources and stale revisions return errors without partial counts.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceTimezonePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description Actual version-bound save-admission impact counts */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezonePolicyImpactResponse"];
+                    };
+                };
+                /** @description Unknown fields */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale policy revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default source or timezone is invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted preview unavailable or counts do not bind to the proposal */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read organization attendance timezone policy
+         * @description Requires attendance:admin and active membership in the authenticated organization. An absent policy is OFF with version 0. The organization must have one valid default attendance rule; no global fallback is used. This read does not enable the feature or select a target shift.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: components["schemas"]["AttendanceTimezonePolicyRead"];
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Ambiguous persisted timezone configuration */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required timezone configuration is missing or invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone configuration store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        /**
+         * Set the organization attendance timezone policy
+         * @description Requires attendance:admin and transaction-bound management authorization. Organization and actor come from the authenticated session; client selectors are rejected. Enabling validates the unique organization default in the same transaction. Disabling does not require a valid default, but still preserves already started shifts and approved trip boundaries. All source writes and audit share the guarded transaction.
+         */
+        put: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceTimezonePolicyWrite"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceTimezonePolicyWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/employees/{userId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read current effective employee attendance timezone override
+         * @description Requires attendance:admin and active administrator and target employee memberships in the authenticated organization. Uses the server instant and a half-open effective interval. Null means inheritance, not a selected shift timezone.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @enum {boolean} */
+                            ok: true;
+                            data: {
+                                override: components["schemas"]["AttendanceEmployeeTimezoneOverrideRead"];
+                            };
+                        };
+                    };
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Ambiguous persisted timezone configuration */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required timezone configuration is missing or invalid */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Timezone configuration store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        /**
+         * Create an employee attendance timezone interval
+         * @description Requires attendance:admin and active same-organization administrator and target employee membership. The half-open UTC interval cannot overlap another override. Source guards preserve started and frozen shift contexts and remaining approved trip boundaries. An override does not enable multiple timezones.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideCreate"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/timezone-policy/employees/{userId}/{referenceId}/close": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Shorten an employee attendance timezone interval
+         * @description Requires attendance:admin and transaction-bound management authorization. Only the named employee override in the authenticated organization may be shortened at its expected revision; history is retained. Started shifts and approved trips remain guarded.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    userId: string;
+                    referenceId: string;
+                };
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideClose"];
+                };
+            };
+            responses: {
+                /** @description Saved at the returned revision */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceEmployeeTimezoneOverrideWriteResponse"];
+                    };
+                };
+                /** @description Unknown fields or malformed strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector mismatch or unavailable override */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Stale revision */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Required default */
+                422: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Trusted management authorizer */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -7060,6 +7869,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/attendance/business-trip-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a business trip approval request
+         * @description Requires attendance:write. Only this dedicated route creates a business_trip request. Pending requests do not change attendance timezone or create attendance entitlements. Only final approval may publish a destination arrangement, subject to whole-shift boundaries and one context per work date. Multiple timezones remain disabled unless separately configured.
+         */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": components["schemas"]["AttendanceBusinessTripCreate"];
+                };
+            };
+            responses: {
+                /** @description Created or replayed with the original operation identity */
+                201: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceBusinessTripResponse"];
+                    };
+                };
+                /** @description Invalid strict input */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Organization selector differs from the authenticated organization */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Operation identity or approval configuration conflict */
+                409: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Canonical write boundary unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attendance/business-trip-requests/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a business trip request and its effective arrangement
+         * @description Requires attendance:read and same-organization ownership or attendance access to other employees. A cancelled request may retain an arrangement through an already started shift boundary; effectiveEndAt determines eligibility.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path: {
+                    id: string;
+                };
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description OK */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": components["schemas"]["AttendanceBusinessTripResponse"];
+                    };
+                };
+                /** @description Invalid request reference */
+                400: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                401: components["responses"]["Unauthorized"];
+                403: components["responses"]["Forbidden"];
+                /** @description Unknown or cross-organization business trip request */
+                404: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+                /** @description Business trip store unavailable */
+                503: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content?: never;
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/audit-logs": {
         parameters: {
             query?: never;
@@ -9872,6 +10818,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/elearning/admin/analytics/export-availability": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Report whether this deployment can store analytics exports
+         * @description Same authentication, organization, RBAC, and exact feature gates as the export routes.
+         *     Lets the admin UI disable export creation up front instead of offering a button whose
+         *     task can only fail. Values-free: no storage provider, location, or configuration is
+         *     returned, only availability and a closed reason.
+         */
+        get: operations["getElearningAnalyticsExportAvailability"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/elearning/admin/analytics/exports": {
         parameters: {
             query?: never;
@@ -9889,7 +10858,9 @@ export interface paths {
          *     command contains requestId, departmentId, periodStart, and periodEnd. An exact replay
          *     returns the original closed nine-field result; a different payload for the same
          *     requestId returns a values-free conflict. The export never contains individual answers,
-         *     traces, grades, or unsuppressed small-group values.
+         *     traces, grades, or unsuppressed small-group values. When this deployment has no export
+         *     storage the request is rejected with 409 `ANALYTICS_EXPORT_STORAGE_UNAVAILABLE` before
+         *     any export task is created.
          */
         post: operations["createElearningAnalyticsExport"];
         delete?: never;
@@ -17497,6 +18468,191 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        AttendanceTimezoneTarget: {
+            orgId: string;
+            userId: string;
+            /** Format: date */
+            workDate: string;
+            /** @description Actual IANA timezone of the selected target shift. */
+            timezone: string;
+            /** @description Target context identity to compare again on fresh submission. Preview does not reserve the target. */
+            contextFingerprint: string;
+            frozen: boolean;
+            referenceId: string | null;
+            /** @description Existing source identity. Null only for a complete historical freeze that predates timezone provenance; no source revision is invented. */
+            provenance: {
+                timezone: string;
+                /** @enum {string} */
+                source: "system_default" | "trip" | "employee_override" | "calculation_group";
+                /** @enum {string} */
+                mode: "default_only" | "multi_timezone";
+                referenceId: string;
+                version: number;
+                policyVersion: number;
+                /** @description Actual effective membership identity retained by the selected context. */
+                calculationGroupMembership: Record<string, never> | null;
+            } | null;
+            window: {
+                /** Format: date-time */
+                startAt: string;
+                /** Format: date-time */
+                endAt: string;
+            };
+            /** @description Target calculation rule snapshot returned by the trusted runtime, not client-selected rule input. */
+            rule: Record<string, never>;
+            isWorkingDay: boolean;
+        };
+        AttendanceTimezoneTargetResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: components["schemas"]["AttendanceTimezoneTarget"];
+        };
+        AttendanceTimezonePolicyImpact: {
+            currentVersion: number;
+            proposedEnabled: boolean;
+            evaluatedUsers: number;
+            affectedUsers: number;
+            conflictingUsers: number;
+            conflictCounts: {
+                startedContext: number;
+                tripContext: number;
+                invalidTargetContext: number;
+            };
+        };
+        AttendanceTimezonePolicyImpactResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: components["schemas"]["AttendanceTimezonePolicyImpact"];
+        };
+        AttendanceTimezonePolicyWrite: {
+            enabled: boolean;
+            /** @description Current policy revision. Zero only for an absent disabled policy. */
+            expectedVersion: number;
+        };
+        AttendanceEmployeeTimezoneOverrideCreate: {
+            /** @description Valid IANA attendance timezone; no device fallback. */
+            timezone: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant with seconds, optional millisecond precision, and Z or UTC offset.
+             */
+            effectiveFrom: string;
+            /**
+             * Format: date-time
+             * @description Exclusive end instant after effectiveFrom, or null for an open interval.
+             */
+            effectiveTo: string | null;
+            expectedPolicyVersion: number;
+        };
+        AttendanceEmployeeTimezoneOverrideClose: {
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 exclusive end with seconds and Z or UTC offset. May shorten, never extend, an existing interval.
+             */
+            endAt: string;
+            expectedVersion: number;
+        };
+        AttendanceTimezonePolicyWriteResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                enabled: boolean;
+                version: number;
+            };
+        };
+        AttendanceEmployeeTimezoneOverrideWriteResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                orgId: string;
+                userId: string;
+                referenceId: string;
+                timezone: string;
+                version: number;
+                /** Format: date-time */
+                effectiveFrom: string;
+                /** Format: date-time */
+                effectiveTo: string | null;
+            };
+        };
+        AttendanceBusinessTripCreate: {
+            /** @description Defaults to the authenticated employee. Another employee requires attendance administrator access and active same-organization membership. */
+            userId?: string;
+            /** @description Valid IANA destination timezone. No browser timezone fallback. */
+            destinationTimezone: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant with seconds and Z or UTC offset. Zone-free local values are rejected.
+             */
+            startAt: string;
+            /**
+             * Format: date-time
+             * @description Explicit RFC3339 instant after startAt.
+             */
+            endAt: string;
+            reason?: string;
+            /** Format: uuid */
+            approvalFlowId?: string;
+            /**
+             * Format: uuid
+             * @description Reuse the same identity and payload after an uncertain submission.
+             */
+            operationId?: string;
+        };
+        AttendanceBusinessTripDetail: {
+            /** Format: uuid */
+            requestId: string;
+            orgId: string;
+            userId: string;
+            destinationTimezone: string;
+            /** Format: date-time */
+            startAt: string;
+            /** Format: date-time */
+            endAt: string;
+            arrangement: {
+                /** Format: date-time */
+                effectiveEndAt: string;
+                version: number;
+                /** Format: date-time */
+                publishedAt: string;
+                /** Format: date-time */
+                cancelledAt: string | null;
+            } | null;
+        };
+        AttendanceBusinessTripResponse: {
+            /** @enum {boolean} */
+            ok: true;
+            data: {
+                request: components["schemas"]["AttendanceRequest"];
+                businessTrip: components["schemas"]["AttendanceBusinessTripDetail"];
+                /** @description Existing versioned attendance request snapshot, when issued by the canonical boundary. */
+                requestSnapshot?: Record<string, never>;
+            };
+        };
+        AttendanceTimezonePolicyRead: {
+            enabled: boolean;
+            /** @description Zero only for an absent disabled policy; persisted revisions start at one. */
+            version: number;
+            systemDefault: {
+                orgId: string;
+                referenceId: string;
+                /** @description Valid IANA timezone identifier */
+                timezone: string;
+                version: number;
+            };
+        };
+        AttendanceEmployeeTimezoneOverrideRead: {
+            orgId: string;
+            userId: string;
+            referenceId: string;
+            /** @description Valid IANA timezone identifier */
+            timezone: string;
+            version: number;
+            /** Format: date-time */
+            effectiveFrom: string;
+            /** Format: date-time */
+            effectiveTo: string | null;
+        } | null;
         StandardResponse: {
             ok?: boolean;
             data?: unknown;
@@ -17741,7 +18897,67 @@ export interface components {
             created_at?: string;
         };
         AttendancePunchEvent: components["schemas"]["AttendanceEvent"];
+        /** @description Current server-instant attendance timezone, independent of the requested asOf schedule date. */
+        AttendanceCurrentTimeContext: {
+            /** Format: date-time */
+            resolvedForInstant: string;
+            effectiveTimezone: string;
+            /** @enum {string} */
+            timezoneSource: "system_default" | "trip" | "employee_override" | "calculation_group";
+            /** @enum {string} */
+            mode: "default_only" | "multi_timezone";
+            policyVersion: number;
+            referenceId: string;
+            version: number;
+            /** Format: date */
+            currentLocalDate: string;
+            /**
+             * Format: date-time
+             * @description Earliest future governed source boundary. Refresh the current context at this instant; default-only mode has no optional-source boundary.
+             */
+            nextEffectiveBoundary: string | null;
+        };
+        AttendanceEffectiveCalendarDay: {
+            /** Format: date */
+            date: string;
+            base: {
+                isWorkingDay: boolean;
+                /** @enum {string} */
+                source: "rule" | "shift" | "rotation" | "national" | "manual" | "org" | "group" | "role" | "user" | "stored_record";
+                holidayId?: string;
+                dayIndex?: number;
+                name?: string | null;
+            };
+            effective: {
+                isWorkingDay: boolean;
+                /** @enum {string} */
+                source: "rule" | "shift" | "rotation" | "national" | "manual" | "org" | "group" | "role" | "user" | "stored_record";
+                label?: string;
+                policyId?: string;
+                plannedMinutes?: number;
+                slots?: Record<string, never>[];
+            };
+            layers: Record<string, never>[];
+            overlays: Record<string, never>[];
+            /** @description Present in userId mode. Future dates use their target context; persisted dates use stored identity, including legacy null provenance. */
+            attendanceTimeContext?: components["schemas"]["AttendanceStoredTimeContext"];
+        };
+        AttendanceStoredTimeContext: {
+            /** Format: date */
+            targetWorkDate: string;
+            effectiveTimezone: string;
+            /** @enum {string} */
+            timezoneSource: "system_default" | "trip" | "employee_override" | "calculation_group" | "legacy_record";
+            /** @enum {string|null} */
+            mode: "default_only" | "multi_timezone" | null;
+            policyVersion: number | null;
+            contextFingerprint: string | null;
+            frozen: boolean;
+        };
         AttendanceRecord: {
+            attendanceTimeContext?: components["schemas"]["AttendanceStoredTimeContext"];
+            /** @enum {string} */
+            timezone_source?: "system_default" | "trip" | "employee_override" | "calculation_group" | "legacy_record";
             id?: string;
             user_id?: string;
             org_id?: string;
@@ -17850,7 +19066,7 @@ export interface components {
             /** Format: date */
             work_date?: string;
             /** @enum {string} */
-            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap" | "schedule_dispatch";
+            request_type?: "missed_check_in" | "missed_check_out" | "time_correction" | "leave" | "overtime" | "outdoor_punch" | "shift_swap" | "schedule_dispatch" | "business_trip";
             /** Format: date-time */
             requested_in_at?: string | null;
             /** Format: date-time */
@@ -21308,6 +22524,17 @@ export interface components {
         };
         /** @enum {string} */
         ElearningAnalyticsExportStatus: "pending" | "running" | "succeeded" | "failed" | "expired";
+        ElearningAnalyticsExportAvailable: {
+            /** @enum {boolean} */
+            available: true;
+        };
+        ElearningAnalyticsExportUnavailable: {
+            /** @enum {boolean} */
+            available: false;
+            /** @enum {string} */
+            reason: "storage_unavailable";
+        };
+        ElearningAnalyticsExportAvailability: components["schemas"]["ElearningAnalyticsExportAvailable"] | components["schemas"]["ElearningAnalyticsExportUnavailable"];
         ElearningAnalyticsExportResult: {
             exportId: components["schemas"]["ElearningUuid"];
             departmentId: components["schemas"]["ElearningUuid"];
@@ -24933,6 +26160,29 @@ export interface operations {
             500: components["responses"]["ElearningError"];
             /** @description unavailable */
             503: components["responses"]["ElearningError"];
+        };
+    };
+    getElearningAnalyticsExportAvailability: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current export storage availability. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ElearningAnalyticsExportAvailability"];
+                };
+            };
+            400: components["responses"]["ElearningError"];
+            401: components["responses"]["ElearningAuthError"];
+            403: components["responses"]["ElearningError"];
         };
     };
     createElearningAnalyticsExport: {

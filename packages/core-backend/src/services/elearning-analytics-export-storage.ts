@@ -42,12 +42,25 @@ export function deriveElearningAnalyticsExportStorageKey(input: {
   return `${ELEARNING_ANALYTICS_EXPORT_STORAGE_PREFIX}${orgDigest}/${input.exportId}.csv`
 }
 
+const unavailableStorages = new WeakSet<ElearningAnalyticsExportStorage>()
+
 function unavailableStorage(): ElearningAnalyticsExportStorage {
-  return {
+  const storage: ElearningAnalyticsExportStorage = {
     put: async () => unavailable(),
     get: async () => unavailable(),
     delete: async () => unavailable(),
   }
+  unavailableStorages.add(storage)
+  return storage
+}
+
+/**
+ * Phase A deliberately has no external object-store adapter, so a production
+ * process has no export storage at all. This is the single predicate shared by
+ * the storage factory and the availability read below.
+ */
+function hasNoExportStorageAdapter(env: NodeJS.ProcessEnv): boolean {
+  return env.NODE_ENV === 'production'
 }
 
 let processStorage: ElearningAnalyticsExportStorage | null = null
@@ -60,7 +73,7 @@ export function getElearningAnalyticsExportStorage(
   env: NodeJS.ProcessEnv = process.env,
 ): ElearningAnalyticsExportStorage {
   if (processStorage) return processStorage
-  if (env.NODE_ENV === 'production') {
+  if (hasNoExportStorageAdapter(env)) {
     processStorage = unavailableStorage()
     return processStorage
   }
@@ -91,6 +104,19 @@ export function getElearningAnalyticsExportStorage(
     },
   }
   return processStorage
+}
+
+/**
+ * Whether getElearningAnalyticsExportStorage() would hand out a working store.
+ * Side-effect free: it never creates the process singleton. Once the singleton
+ * exists it is authoritative, so this cannot disagree with what the export
+ * worker will actually use.
+ */
+export function isElearningAnalyticsExportStorageAvailable(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (processStorage) return !unavailableStorages.has(processStorage)
+  return !hasNoExportStorageAdapter(env)
 }
 
 /** Test seam: production code never swaps the process singleton. */

@@ -951,7 +951,7 @@ import {
   STALE_OPTION_KEY,
   parseConditionListText,
   parseConditionNumber,
-  visibilityOperatorsFor,
+  visibilityOperatorsForField,
   visibilityRuleValueIssues,
   type ConditionValueField,
 } from '../conditionValueTyping'
@@ -985,6 +985,8 @@ const props = withDefaults(
       label: string
       type?: FormFieldType
       options?: readonly FormOption[]
+      /** A multi-person picker (its submitted value is a list); follow-up (b) narrows its operators. */
+      listValued?: boolean
     }[]
     readOnly?: boolean
     /**
@@ -1031,7 +1033,12 @@ function visibilityDependencyFor(dependsOnFieldId: string): ConditionValueField 
   const id = dependsOnFieldId.trim()
   if (!id) return null
   const option = props.visibilityOptions.find((candidate) => candidate.id === id)
-  return option?.type ? { type: option.type, options: option.options ?? [] } : null
+  if (!option?.type) return null
+  // Keep `listValued` (a multi-person picker): its operators are narrowed and its stored eq/neq
+  // rules marked (follow-up (b)), exactly like the legacy editor and the branch editor.
+  return option.listValued
+    ? { type: option.type, options: option.options ?? [], listValued: true }
+    : { type: option.type, options: option.options ?? [] }
 }
 
 const visibilityDependency = computed(() =>
@@ -1049,7 +1056,7 @@ const visibilityOperatorChoices = computed(() => {
   const label = (operator: FieldVisibilityDraft['operator']) =>
     operator === 'in' ? inLabel : VISIBILITY_OPERATOR_LABELS[operator]
   const choices: { value: FieldVisibilityDraft['operator']; label: string; disabled: boolean }[] =
-    visibilityOperatorsFor(visibilityKind.value).map((operator) => ({
+    visibilityOperatorsForField(visibilityDependency.value).map((operator) => ({
       value: operator,
       label: label(operator),
       disabled: false,

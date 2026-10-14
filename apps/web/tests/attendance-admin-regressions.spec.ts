@@ -4,6 +4,7 @@ import { routerKey } from 'vue-router'
 import AttendanceView from '../src/views/AttendanceView.vue'
 import AttendanceAdminCenter from '../src/views/attendance/AttendanceAdminCenter.vue'
 import { apiFetch } from '../src/utils/api'
+import { useLocale } from '../src/composables/useLocale'
 import {
   canRunBatchAnomalyResolution,
   runBatchAnomalyResolution,
@@ -216,7 +217,7 @@ function restoreAttendanceHeroClock(): void {
 describe('Attendance admin regressions', () => {
   let app: App<Element> | null = null
   let container: HTMLDivElement | null = null
-  let originalScrollIntoView: typeof HTMLElement.prototype.scrollIntoView | undefined
+  let originalScrollIntoView: PropertyDescriptor | undefined
   let exportReportFieldFingerprint = 'records-unit-test-fingerprint'
   let exportReportFieldCodes = 'work_date,employee_name'
   let exportReportFieldCount = '2'
@@ -935,9 +936,10 @@ describe('Attendance admin regressions', () => {
 
     container = document.createElement('div')
     document.body.appendChild(container)
-    originalScrollIntoView = HTMLElement.prototype.scrollIntoView
+    originalScrollIntoView = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollIntoView')
     Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
       configurable: true,
+      writable: true,
       value: vi.fn(),
     })
   })
@@ -948,10 +950,9 @@ describe('Attendance admin regressions', () => {
     restoreAttendanceHeroClock()
     if (container) container.remove()
     if (originalScrollIntoView) {
-      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-        configurable: true,
-        value: originalScrollIntoView,
-      })
+      Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
+    } else {
+      Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
     }
     app = null
     container = null
@@ -1788,7 +1789,10 @@ describe('Attendance admin regressions', () => {
     expect(section!.querySelector('[data-missed-punch-reminder-error]')?.textContent).toContain('candidate stale')
   })
 
-  it('exposes shift_swap as an approval-flow type and saves it through the admin form', async () => {
+  it.each([
+    { type: 'shift_swap', label: 'Shift-swap request', name: 'Shift swap approval' },
+    { type: 'business_trip', label: 'Business trip request', name: 'Business trip approval' },
+  ])('exposes $type as an approval-flow type and saves it through the admin form', async ({ type, label, name: flowName }) => {
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi(16)
@@ -1798,7 +1802,16 @@ describe('Attendance admin regressions', () => {
     expect(name).toBeTruthy()
     expect(requestType).toBeTruthy()
     const typeValues = Array.from(requestType!.options).map(option => option.value)
-    expect(typeValues).toContain('shift_swap')
+    expect(typeValues).toContain(type)
+    expect(typeValues).not.toContain('unsupported_request_type')
+    expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe(label)
+    if (type === 'business_trip') {
+      useLocale().setLocale('zh-CN')
+      await flushUi(2)
+      expect(Array.from(requestType!.options).find(option => option.value === type)?.textContent).toBe('出差申请')
+      useLocale().setLocale('en')
+      await flushUi(2)
+    }
     // A1 wire-level fix: the dropdown must now expose every backend REQUEST_TYPE,
     // including the two that were missing (outdoor_punch / schedule_dispatch).
     expect(typeValues).toContain('outdoor_punch')
@@ -1808,9 +1821,9 @@ describe('Attendance admin regressions', () => {
     expect(container!.querySelector('[data-testid="attendance-approval-steps-preview"]')).toBeTruthy()
     expect(container!.querySelector('#attendance-approval-steps')).toBeNull()
 
-    name!.value = 'Shift swap approval'
+    name!.value = flowName
     name!.dispatchEvent(new Event('input', { bubbles: true }))
-    requestType!.value = 'shift_swap'
+    requestType!.value = type
     requestType!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
 
@@ -1826,8 +1839,8 @@ describe('Attendance admin regressions', () => {
     )
     expect(postCall).toBeTruthy()
     expect(JSON.parse(String((postCall![1] as RequestInit | undefined)?.body || '{}'))).toEqual({
-      name: 'Shift swap approval',
-      requestType: 'shift_swap',
+      name: flowName,
+      requestType: type,
       steps: [],
       isActive: true,
     })
@@ -9316,8 +9329,10 @@ describe('Attendance admin regressions', () => {
     templateLibraryNav!.click()
     await flushUi(2)
 
-    const viewVersionButton = Array.from(container!.querySelectorAll<HTMLButtonElement>('button'))
-      .find(button => button.textContent?.includes('View'))
+    const templateSection = container!.querySelector<HTMLElement>('[data-admin-section="attendance-admin-rule-template-library"]')
+    expect(templateSection).toBeTruthy()
+    const viewVersionButton = Array.from(templateSection!.querySelectorAll<HTMLButtonElement>('button'))
+      .find(button => button.textContent?.trim() === 'View')
     expect(viewVersionButton).toBeTruthy()
     viewVersionButton!.click()
     await flushUi(2)

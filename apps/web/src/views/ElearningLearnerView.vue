@@ -1,9 +1,36 @@
 <template>
-  <section class="elearning-learner" aria-labelledby="elearning-learner-title">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="elearning-learner"
+    aria-labelledby="elearning-learner-title"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <header class="elearning-learner__header">
       <h1 id="elearning-learner-title">{{ elearningLabel('learner.title', isZh) }}</h1>
-      <p>{{ elearningLabel('learner.subtitle', isZh) }}</p>
+      <p data-testid="elearning-learner-subtitle">
+        {{ mediaEnabled === false
+          ? elearningLearnerNoMediaSubtitle(contentEnabled, practiceEnabled, isZh)
+          : elearningLabel('learner.subtitle', isZh) }}
+      </p>
     </header>
+
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="busy"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
 
     <ElearningPortalHero v-if="contentEnabled" />
 
@@ -28,7 +55,7 @@
       role="status"
       aria-live="polite"
     >
-      {{ status }}
+      {{ explainOrgContext(status) }}
     </p>
 
     <p v-if="ready && loading && courses.length === 0" class="elearning-muted">{{ elearningLabel('learner.loading', isZh) }}</p>
@@ -232,6 +259,9 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import { randomUuid } from '../utils/uuid'
 import {
   ELEARNING_WATCH_HEARTBEAT_INTERVAL_MS,
@@ -270,17 +300,36 @@ import ElearningPracticeLearnerSection from './ElearningPracticeLearnerSection.v
 import ElearningWatchChallengePrompt from './ElearningWatchChallengePrompt.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
+  elearningErrorMessage,
   elearningExamAnswerProgress,
   elearningExamCountdown,
   elearningExamScore,
   elearningFailure,
   elearningLabel,
   elearningLatestAttempt,
+  elearningLearnerNoMediaSubtitle,
   elearningLearnerVideoProgressLabel,
   elearningQuestionPoints,
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
+  changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
 
 const courses = ref<ElearningLearnerCourse[]>([])
 const loading = ref(false)
@@ -291,6 +340,9 @@ const contentEnabled = ref(false)
 const enrollmentEnabled = ref(false)
 const incentiveEnabled = ref(false)
 const practiceEnabled = ref(false)
+// F11: null until GET /api/elearning/capabilities answers, then the deployment's MEDIA
+// capability under the master flag. Only a known-off answer swaps the subtitle.
+const mediaEnabled = ref<boolean | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error'>('info')
 const activeCourseVersionId = ref<string | null>(null)
@@ -371,7 +423,7 @@ let challengeResumeAttempt: ChallengeResumeAttempt | null = null
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }
@@ -797,6 +849,7 @@ async function ensureV01Ready(): Promise<void> {
   ) {
     throw new ElearningApiError('feature_disabled', 404)
   }
+  mediaEnabled.value = capabilities.enabled === true && capabilities.capabilities.media === true
   ready.value = assessmentReady.value || contentEnabled.value
 }
 

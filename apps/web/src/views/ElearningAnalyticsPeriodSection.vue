@@ -42,8 +42,11 @@
     <section class="analytics-period__export" aria-labelledby="elearning-analytics-export-title">
       <h3 id="elearning-analytics-export-title">{{ text('CSV export', 'CSV 导出') }}</h3>
       <p>{{ text('Create a suppressed department aggregate export for this date range.', '为当前日期区间创建已执行隐私抑制的部门汇总导出。') }}</p>
+      <p v-if="exportStorageUnavailable" class="analytics-period__status analytics-period__status--error" data-testid="elearning-analytics-export-unavailable" role="status">
+        {{ elearningLabel('error.analyticsExportStorageUnavailable', isZh) }}
+      </p>
       <div class="analytics-period__actions">
-        <button data-testid="elearning-analytics-export-create" type="button" :disabled="exportBusy" @click="void createExport()">
+        <button data-testid="elearning-analytics-export-create" type="button" :disabled="exportBusy || exportStorageUnavailable" @click="void createExport()">
           {{ exportBusy ? text('Working...', '处理中…') : text('Create export', '创建导出') }}
         </button>
         <button data-testid="elearning-analytics-export-refresh" type="button" :disabled="exportBusy || !exportResult" @click="void refreshExport()">
@@ -67,14 +70,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { randomUuid } from '../utils/uuid'
 import { ElearningApiError } from '../services/elearning'
 import {
+  elearningLabel,
+  isElearningAnalyticsExportStorageUnavailable,
+} from './elearningLabels'
+import {
   createElearningAnalyticsExport,
   downloadElearningAnalyticsExport,
   getElearningAnalyticsExport,
+  getElearningAnalyticsExportAvailability,
   getElearningDepartmentStatsPeriod,
   type ElearningAnalyticsExport,
   type ElearningDepartmentStatsDailyMetrics,
@@ -91,6 +99,9 @@ const result = ref<ElearningDepartmentStatsPeriod | null>(null)
 const exportBusy = ref(false)
 const exportError = ref('')
 const exportResult = ref<ElearningAnalyticsExport | null>(null)
+// Only a definite "unavailable" answer disables creation. If the availability
+// read itself fails, the button stays usable and the server pre-check answers.
+const exportStorageUnavailable = ref(false)
 let pendingExportIdentity: { fingerprint: string; requestId: string } | null = null
 
 function text(en: string, zh: string): string {
@@ -184,8 +195,17 @@ async function load(): Promise<void> {
   }
 }
 
+async function loadExportAvailability(): Promise<void> {
+  try {
+    const availability = await getElearningAnalyticsExportAvailability()
+    if (!availability.available) exportStorageUnavailable.value = true
+  } catch {
+    // Unknown availability: leave the button as is; the server pre-check still answers.
+  }
+}
+
 async function createExport(): Promise<void> {
-  if (exportBusy.value) return
+  if (exportBusy.value || exportStorageUnavailable.value) return
   exportBusy.value = true
   exportError.value = ''
   const input = exportInput()
@@ -196,6 +216,11 @@ async function createExport(): Promise<void> {
     })
     pendingExportIdentity = null
   } catch (value) {
+    if (value instanceof ElearningApiError && isElearningAnalyticsExportStorageUnavailable(value.code, value.status)) {
+      // The server refused before creating a task; show the standing notice instead.
+      exportStorageUnavailable.value = true
+      return
+    }
     exportError.value = exportErrorText(value)
   } finally {
     exportBusy.value = false
@@ -233,6 +258,10 @@ async function downloadExport(): Promise<void> {
     exportBusy.value = false
   }
 }
+
+onMounted(() => {
+  void loadExportAvailability()
+})
 </script>
 
 <style scoped>

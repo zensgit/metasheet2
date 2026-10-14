@@ -343,6 +343,20 @@ describe('e-learning content client', () => {
     })
   })
 
+  it('passes the org-context gate code through and keeps other uppercase codes closed', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'ORG_CONTEXT_REQUIRED' }))
+    await expect(openElearningContentItem(ARTICLE_ITEM, REQUEST)).rejects.toMatchObject({
+      name: 'ElearningApiError',
+      code: 'ORG_CONTEXT_REQUIRED',
+      status: 403,
+    })
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(403, { error: 'SOME_OTHER_CODE' }))
+    await expect(openElearningContentItem(ARTICLE_ITEM, REQUEST)).rejects.toMatchObject({
+      code: 'request_failed',
+      status: 403,
+    })
+  })
+
   it('reuses ids for same logical retries and rotates on content, URL, or order changes', () => {
     const generated = [
       '10101010-1010-4010-8010-101010101010',

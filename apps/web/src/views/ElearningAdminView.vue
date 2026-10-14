@@ -1,11 +1,51 @@
 <template>
-  <section class="elearning-admin" aria-labelledby="elearning-admin-title">
+  <ElearningSessionOrgStaleBanner
+    v-if="sessionOrgStale"
+    :is-zh="isZh"
+    @reload="reloadSessionOrgPage"
+  />
+  <section
+    class="elearning-admin"
+    aria-labelledby="elearning-admin-title"
+    :inert="sessionOrgStale || undefined"
+    :aria-hidden="sessionOrgStale || undefined"
+  >
     <header class="elearning-admin__header">
       <h1 id="elearning-admin-title">{{ elearningLabel('admin.title', isZh) }}</h1>
-      <p>{{ elearningLabel('admin.subtitle', isZh) }}</p>
+      <p data-testid="elearning-admin-subtitle">
+        {{ elearningLabel(mediaEnabled === false ? 'admin.subtitleNoMedia' : 'admin.subtitle', isZh) }}
+      </p>
     </header>
 
-    <form class="elearning-admin__form" @submit.prevent="void submitPublishAndAssign()">
+    <SessionOrgSwitcher
+      v-if="sessionOrgVisible"
+      :tr="sessionOrgText"
+      :orgs="sessionOrgIds"
+      :model-value="sessionOrgSelectedId"
+      :loading="sessionOrgLoading"
+      :switching="sessionOrgSwitching"
+      :disabled="busy"
+      :error-message="sessionOrgError"
+      :has-usable-claim="Boolean(sessionOrgCurrentId)"
+      @change="changeSessionOrg"
+    />
+
+    <!-- F11: the legacy video-course form only renders once the capabilities response says
+         this deployment has video (MEDIA); a no-video deployment gets a notice instead. -->
+    <p
+      v-if="mediaEnabled === false"
+      class="elearning-admin__notice"
+      data-testid="elearning-admin-video-unavailable"
+      role="note"
+    >
+      {{ elearningAdminVideoUnavailable(contentEnabled, isZh) }}
+    </p>
+    <form
+      v-else-if="mediaEnabled === true"
+      class="elearning-admin__form"
+      data-testid="elearning-admin-video-form"
+      @submit.prevent="void submitPublishAndAssign()"
+    >
       <label class="elearning-field">
         <span>{{ elearningLabel('admin.videoFile', isZh) }}</span>
         <input
@@ -233,7 +273,7 @@
       role="status"
       aria-live="polite"
     >
-      {{ status }}
+      {{ explainOrgContext(status) }}
     </p>
 
     <ElearningContentAdminSection
@@ -269,6 +309,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
+import SessionOrgSwitcher from '../components/SessionOrgSwitcher.vue'
+import { useElearningSessionOrg } from '../composables/useElearningSessionOrg'
+import ElearningSessionOrgStaleBanner from './ElearningSessionOrgStaleBanner.vue'
 import { randomUuid } from '../utils/uuid'
 import {
   assignElearningDirect,
@@ -291,8 +334,10 @@ import ElearningCreditAdminSection from './ElearningCreditAdminSection.vue'
 import ElearningPracticeAdminSection from './ElearningPracticeAdminSection.vue'
 import { isElearningPracticeReady } from '../services/elearningPractice'
 import {
+  elearningAdminVideoUnavailable,
   elearningAssignIncomplete,
   elearningCorrectOptionAria,
+  elearningErrorMessage,
   elearningFailure,
   elearningLabel,
   elearningOptionAria,
@@ -301,6 +346,23 @@ import {
 } from './elearningLabels'
 
 const { isZh } = useLocale()
+const {
+  visible: sessionOrgVisible,
+  orgs: sessionOrgIds,
+  selectedOrgId: sessionOrgSelectedId,
+  currentOrgId: sessionOrgCurrentId,
+  loading: sessionOrgLoading,
+  switching: sessionOrgSwitching,
+  errorMessage: sessionOrgError,
+  stale: sessionOrgStale,
+  changeSessionOrg,
+  reloadPage: reloadSessionOrgPage,
+  explainOrgContext,
+} = useElearningSessionOrg()
+
+function sessionOrgText(en: string, zh: string): string {
+  return isZh.value ? zh : en
+}
 
 type OperationStage = 'uploading' | 'publishing' | 'assigning'
 
@@ -337,6 +399,9 @@ const analyticsEnabled = ref(false)
 const contentEnabled = ref(false)
 const assignmentEnabled = ref(false)
 const practiceEnabled = ref(false)
+// F11: null until GET /api/elearning/capabilities answers (and again after it fails), then the
+// deployment's MEDIA capability under the master flag.
+const mediaEnabled = ref<boolean | null>(null)
 const status = ref('')
 const statusTone = ref<'info' | 'error' | 'partial'>('info')
 const operationStage = ref<OperationStage | null>(null)
@@ -379,7 +444,7 @@ function newQuestion(): QuestionDraft {
 
 function formatError(error: unknown): string {
   if (error instanceof ElearningApiError) {
-    return elearningFailure(error.code, error.status, isZh.value)
+    return elearningErrorMessage(error.code, error.status, isZh.value)
   }
   return elearningFailure('request_failed', 0, isZh.value)
 }
@@ -535,6 +600,7 @@ async function ensureV01Ready(): Promise<void> {
     && capabilities.capabilities.analytics === true
   practiceEnabled.value = isElearningPracticeReady(capabilities)
   ready.value = isElearningV01Ready(capabilities)
+  mediaEnabled.value = capabilities.enabled === true && capabilities.capabilities.media === true
   if (
     !ready.value
     && !contentEnabled.value
@@ -628,6 +694,7 @@ onMounted(() => {
   void ensureV01Ready()
     .catch((error) => {
       ready.value = false
+      mediaEnabled.value = null
       statusTone.value = 'error'
       status.value = formatError(error)
     })
@@ -756,6 +823,14 @@ onMounted(() => {
   border-radius: 8px;
   background: #eef7ff;
   color: #123154;
+}
+
+.elearning-admin__notice {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fff7e6;
+  color: #8a5a00;
 }
 
 .elearning-status {

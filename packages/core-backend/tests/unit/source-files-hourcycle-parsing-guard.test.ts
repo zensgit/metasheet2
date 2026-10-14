@@ -177,6 +177,18 @@ interface KnownSite {
 
 // prettier-ignore
 const KNOWN_SITES: KnownSite[] = [
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value }).format(new Date(0))",
+    kind: 'display',
+  },
+  {
+    // IANA validity probe only; formatted date is discarded, no hour is consumed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-policy.cjs',
+    lineText: "new Intl.DateTimeFormat('en-US', { timeZone: value.trim() }).format(new Date(0))",
+    kind: 'display',
+  },
   // ---------------------------------------------------------------------------------
   // PARSING sites — output reaches formatToParts() with numeric consumption, or a
   // format() string is split/Number-parsed. Every entry MUST carry explicit
@@ -237,6 +249,48 @@ const KNOWN_SITES: KnownSite[] = [
   // discarded, or a date-only (no `hour`) formatter, or (one exception) an audited
   // display-only interpolation. Every non-exception entry MUST NOT carry `hour:`.
   // ---------------------------------------------------------------------------------
+  {
+    // prepare() derives the request workDate from year/month/day parts only.
+    // No hour is requested or consumed; retain the display-class no-hour guard.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs',
+    lineText: "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: route.input.destinationTimezone,",
+    kind: 'display',
+  },
+  {
+    // assertWholeShifts() dateKey() builds the stored-record lookup date bounds
+    // from year/month/day only. This is date parsing, never hour parsing.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    lineText: "const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone:row.destination_timezone,",
+    kind: 'display',
+  },
+  {
+    // normalizeCreate() IANA validity probe; the formatted output is discarded.
+    // No hour option or downstream numeric consumption.
+    file: 'plugins/plugin-attendance/lib/attendance-business-trip.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date(0)) } catch (_) { fail('INVALID_ZONE') }",
+    kind: 'display',
+  },
+  {
+    // localDate() reads only ISO year/month/day parts to build a date key.
+    // calendar/numberingSystem are explicit; no hour part is requested.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-read-context.cjs',
+    lineText: "const parts = new Intl.DateTimeFormat('en-CA', {",
+    kind: 'display',
+  },
+  {
+    // Target DTO IANA validity probe. Constructor-only; no formatter escapes
+    // and no output is formatted or parsed.
+    file: 'plugins/plugin-attendance/lib/attendance-timezone-target-routes.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US', { timeZone: target.timezone }) } catch {",
+    kind: 'display',
+  },
+  {
+    // Transition-date input IANA validity probe; format(from) is discarded.
+    // Actual date bounds use UTC ISO dates, not this formatter's output.
+    file: 'plugins/plugin-attendance/lib/attendance-trip-context-transition-dates.cjs',
+    lineText: "try { new Intl.DateTimeFormat('en-US',{timeZone:timezone}).format(from) } catch (_) { fail() }",
+    kind: 'display',
+  },
   {
     // tasks/task-dates.ts `getFormatter()` cache key — resolvedOptions().timeZone only
     // canonicalizes the zone name; the formatter is never formatted or parsed.
@@ -694,7 +748,9 @@ describe('repo guard: h24-midnight hourCycle/hour12 parsing hazard (issue #4922)
     // 28 = 25 + the three task-dates.ts sites (one parsing formatter with hourCycle 'h23', two
     // resolvedOptions-only canonicalizations).
     // 29 = 28 + the hour-free history-reconcile local-day key.
-    expect(KNOWN_SITES.length).toBe(29)
+    // 31 = 29 + two hour-free attendance timezone validity probes.
+    // 37 = 31 + three hour-free multi-timezone date keys and three validity probes.
+    expect(KNOWN_SITES.length).toBe(37)
   })
 
   it('KNOWN_SITES covers exactly the real Intl.DateTimeFormat sites in the domain (set equality via coverageDiff — a new site reds this until classified)', () => {

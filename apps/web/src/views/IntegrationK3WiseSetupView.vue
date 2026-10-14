@@ -941,6 +941,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../utils/clipboard'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import {
@@ -1410,21 +1411,19 @@ function formatDeployGateStatus(status: string): string {
 
 async function copyGateDraft(): Promise<void> {
   if (!gateDraftText.value) return
-  try {
-    await navigator.clipboard.writeText(gateDraftText.value)
+  // copyText never throws (no Error.message can reach the DOM) and falls back to execCommand('copy')
+  // on plain-HTTP deployments; the fixed failure copy stays.
+  if (await copyText(gateDraftText.value)) {
     setStatus('GATE JSON 已复制', 'success')
-  } catch {
-    // Browser clipboard errors are client-generated, but the same fixed-copy invariant keeps
-    // "Error.message never reaches the DOM" absolute across the whole view.
+  } else {
     setStatus('复制失败，请手动选择文本复制。', 'error')
   }
 }
 
 async function copyGateCommand(label: string, command: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(command)
+  if (await copyText(command)) {
     setStatus(`${label} 命令已复制`, 'success')
-  } catch {
+  } else {
     setStatus('复制失败，请手动选择文本复制。', 'error')
   }
 }

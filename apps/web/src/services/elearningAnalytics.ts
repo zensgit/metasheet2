@@ -125,6 +125,10 @@ export interface ElearningAnalyticsExport {
   duplicate: boolean
 }
 
+export type ElearningAnalyticsExportAvailability =
+  | { available: true }
+  | { available: false; reason: 'storage_unavailable' }
+
 export interface ElearningAnalyticsExportDownload {
   blob: Blob
   filename: string
@@ -334,7 +338,7 @@ async function readJson(response: Response): Promise<unknown> {
 function readErrorCode(payload: unknown): string {
   if (!isPlainObject(payload) || typeof payload.error !== 'string') return 'request_failed'
   const code = payload.error.trim()
-  if (code === 'ORG_CONTEXT_REQUIRED') return code
+  if (code === 'ORG_CONTEXT_REQUIRED' || code === 'ANALYTICS_EXPORT_STORAGE_UNAVAILABLE') return code
   return /^[a-z][a-z0-9_]{0,62}$/.test(code) ? code : 'request_failed'
 }
 
@@ -390,6 +394,25 @@ export async function getElearningDepartmentStatsPeriod(
   }
   if (response.status !== 200) fail(readErrorCode(payload), response.status)
   return parsePeriodStats(payload, response.status)
+}
+
+export async function getElearningAnalyticsExportAvailability(): Promise<ElearningAnalyticsExportAvailability> {
+  let response: Response
+  try {
+    response = await apiFetch('/api/elearning/admin/analytics/export-availability', { method: 'GET' })
+  } catch {
+    fail('network_error', 0)
+  }
+  const payload = await readJson(response)
+  if (response.status !== 200) fail(readErrorCode(payload), response.status)
+  if (!isPlainObject(payload)) failShape(response.status)
+  if (exactKeys(payload, ['available']) && payload.available === true) return { available: true }
+  if (
+    exactKeys(payload, ['available', 'reason'])
+    && payload.available === false
+    && payload.reason === 'storage_unavailable'
+  ) return { available: false, reason: 'storage_unavailable' }
+  failShape(response.status)
 }
 
 export async function createElearningAnalyticsExport(input: {

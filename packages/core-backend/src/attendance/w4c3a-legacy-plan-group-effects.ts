@@ -10,9 +10,12 @@
  * Never rereads rules/settings/profile/source or recomputes existence branches.
  * ensure_member still rechecks user_orgs ∩ users.is_active in this same
  * transaction immediately before INSERT. A frozen plan is not a license to
- * write a member who was deactivated after enqueue.
+ * write a member who was deactivated after enqueue. The trusted timezone
+ * verifier checks source invariants after effects; its proof is prepared by
+ * the host.
  */
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
+import { requireAttendanceImportTimezoneSourceV1 } from './attendance-business-trip-locks'
 import type { VerifiedAttendanceLegacyPlanV1 } from './w4c3a-legacy-plan-worker'
 
 export class AttendanceLegacyGroupEffectError extends Error {
@@ -121,6 +124,8 @@ export async function applyAttendanceLegacyGroupEffectsV1(
     return Object.freeze({ groupCreated: 0, groupMembersAdded: 0 })
   }
 
+  const verifyTimezoneSource = await requireAttendanceImportTimezoneSourceV1(trx, plan.manifest.orgId)
+
   let groupCreated = 0
   let groupMembersAdded = 0
   const ensureGroupCount = plan.groupEffects.filter(
@@ -188,6 +193,8 @@ export async function applyAttendanceLegacyGroupEffectsV1(
     // Conflict-ignore returns zero rows when the membership already exists.
     groupMembersAdded += result.rows.length
   }
+
+  await verifyTimezoneSource()
 
   if (groupCreated > ensureGroupCount || groupMembersAdded > ensureMemberCount) {
     fail('W4C3A_GROUP_EFFECT_COUNT_INVALID')

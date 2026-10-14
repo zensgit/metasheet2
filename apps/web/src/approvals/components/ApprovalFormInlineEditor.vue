@@ -706,7 +706,7 @@ import {
   isCurrentOptionValue,
   isOptionKind,
   STALE_OPTION_KEY,
-  visibilityOperatorsFor,
+  visibilityOperatorsForField,
   visibilityRuleValueIssues,
   type ConditionValueField,
   type ConditionValueKind,
@@ -810,7 +810,7 @@ function visibilityDependencyOptions(field: FieldAuthoringDraft): FormOption[] {
   return [...(visibilityDependency(field)?.options ?? [])]
 }
 function visibilityOperatorChoices(field: FieldAuthoringDraft) {
-  const choices = visibilityOperatorsFor(visibilityKindOf(field)).map((operator) => ({
+  const choices = visibilityOperatorsForField(visibilityDependency(field)).map((operator) => ({
     value: operator,
     label: LEGACY_VISIBILITY_OPERATOR_LABELS[operator],
     disabled: false,

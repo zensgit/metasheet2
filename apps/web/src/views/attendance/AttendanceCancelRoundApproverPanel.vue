@@ -107,7 +107,7 @@
             <StatusTag domain="cancelRound" status="cancellation_pending_approval" size="sm" data-cancel-round-pending-status />
           </div>
           <div class="attendance-cancel-round-approver__meta">
-            <span data-cancel-round-pending-period>{{ tr('Leave period', '请假时间') }}: {{ formatStamp(item.startAt) }} – {{ formatStamp(item.endAt) }}</span>
+            <span data-cancel-round-pending-period>{{ tr('Request period', '单据时间') }}: {{ formatStamp(item.startAt) }} – {{ formatStamp(item.endAt) }}</span>
             <span data-cancel-round-pending-launched>{{ tr('Cancellation requested', '撤销发起于') }}: {{ formatStamp(item.launchedAt) }}</span>
           </div>
 
@@ -170,8 +170,10 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref, useId, watch } from 'vue'
+import { nextTick, onMounted, onScopeDispose, ref, useId, watch } from 'vue'
 import StatusTag from '../../components/status/StatusTag.vue'
+import { createAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
+import { onAuthPrincipalChange } from '../../composables/authPrincipal'
 import { useLocale } from '../../composables/useLocale'
 import {
   CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED,
@@ -183,6 +185,7 @@ import {
 
 const props = withDefaults(defineProps<{
   canDecide: boolean
+  orgId?: string
   /** The attendance page's deep-link request id (`?requestId=`): the matching row is marked. */
   focusRequestId?: string
   formatDateTime?: (value: string | null | undefined) => string
@@ -223,22 +226,42 @@ const shown = ref(false)
 let generation = 0
 let landedFor = ''
 
+const session = createAttendanceSessionGuard(props.orgId ?? '')
+let disposed = false
+let epoch = 0
+const current = (mine = epoch): boolean => !disposed && mine === epoch && props.canDecide && session.isCurrent()
+function reset(): void {
+  epoch += 1
+  generation += 1
+  items.value = []
+  total.value = 0
+  shown.value = false
+  loadState.value = 'idle'
+  confirming.value = null
+  busy.value = false
+  notice.value = null
+  landedFor = ''
+}
+const unsubscribe = onAuthPrincipalChange(() => { session.invalidate(); reset() })
+onScopeDispose(() => { disposed = true; reset(); unsubscribe() })
+
 async function load(): Promise<void> {
-  if (!props.canDecide) return
+  if (!current()) return
+  const scope = epoch
   generation += 1
   const mine = generation
   // A re-read after a decision keeps the current list on screen until the answer lands.
   if (loadState.value !== 'ready') loadState.value = 'loading'
   try {
-    const list = await fetchPendingCancelRounds()
-    if (mine !== generation) return
+    const list = await fetchPendingCancelRounds(props.orgId)
+    if (!current(scope) || mine !== generation) return
     items.value = list.items
     total.value = list.total
     loadState.value = 'ready'
     if (list.items.length > 0) shown.value = true
     void landOnFocusedRow()
   } catch {
-    if (mine !== generation) return
+    if (!current(scope) || mine !== generation) return
     items.value = []
     total.value = 0
     loadState.value = 'error'
@@ -285,7 +308,7 @@ function formatStamp(value: string | null): string {
 }
 
 function startConfirm(item: PendingCancelRoundItem, action: 'approve' | 'reject'): void {
-  if (busy.value) return
+  if (!current() || busy.value) return
   comment.value = ''
   confirming.value = { roundId: item.roundId, action }
 }
@@ -296,26 +319,29 @@ function cancelConfirm(): void {
 }
 
 async function submit(item: PendingCancelRoundItem): Promise<void> {
-  const current = confirming.value
-  if (busy.value || !current || current.roundId !== item.roundId) return
+  const decision = confirming.value
+  if (!session.isCurrent() || disposed || !props.canDecide || busy.value || !decision || decision.roundId !== item.roundId) return
+  const scope = epoch
   busy.value = true
   notice.value = null
   try {
     await decideListedCancelRound(
       item.requestId,
       item.roundId,
-      current.action,
-      current.action === 'reject' ? comment.value : null,
+      decision.action,
+      decision.action === 'reject' ? comment.value : null,
       isZh.value,
     )
+    if (!current(scope)) return
     notice.value = {
       kind: 'success',
-      message: current.action === 'approve'
+      message: decision.action === 'approve'
         ? tr('Your approval was submitted.', '已提交通过意见')
         : tr('Your rejection was submitted.', '已提交驳回意见'),
       presentationKey: null,
     }
   } catch (error) {
+    if (!current(scope)) return
     const described = describeCancelRoundError(error, isZh.value, tr('The action could not be completed.', '操作未能完成'))
     notice.value = {
       kind: described.code === CANCEL_ROUND_CLIENT_ACTED_ROUND_UNCONFIRMED ? 'unconfirmed' : 'error',
@@ -323,14 +349,13 @@ async function submit(item: PendingCancelRoundItem): Promise<void> {
       presentationKey: described.presentationKey,
     }
   } finally {
-    confirming.value = null
-    busy.value = false
+    if (current(scope)) { confirming.value = null; busy.value = false }
   }
-  await load()
+  if (current(scope)) await load()
 }
 
 onMounted(() => { void load() })
-watch(() => props.canDecide, () => { void load() })
+watch(() => [props.canDecide, props.orgId] as const, () => { reset(); void load() }, { flush: 'sync' })
 watch(() => props.focusRequestId, () => { void landOnFocusedRow() })
 </script>
 

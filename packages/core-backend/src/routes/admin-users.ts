@@ -14,6 +14,7 @@ import { revokeUserSessions } from '../auth/session-revocation'
 import { auditLog } from '../audit/audit'
 import { authenticate } from '../middleware/auth'
 import { query, transaction } from '../db/pg'
+import { buildAttendanceTimezoneRuntimeOrgLockKeyV1 } from '../attendance/attendance-timezone-runtime-locks'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { hasLegacyAdminClaim } from '../rbac/platform-admin'
 import {
@@ -64,6 +65,7 @@ import {
   type AccessGraphTransactionClient,
 } from '../directory/access-graph-mutex'
 import { isDatabaseSchemaError } from '../utils/database-errors'
+import { readOrgMembershipHistory } from '../directory/org-membership-history'
 import {
   classifyRecoveryConflict,
   RECOVERY_CONFLICT_HTTP_CODE,
@@ -2053,6 +2055,114 @@ async function fetchDirectoryMemberships(userId: string) {
   }))
 }
 
+// Read-only view of the user's active organization rows (user_orgs), for the admin detail panel.
+// The predicate MUST stay identical to the session tenant claim in AuthService
+// (src/auth/AuthService.ts resolveSessionTenantId, no-requested-org branch, and
+// listActiveMembershipOrgIds): `uo.is_active = true AND u.is_active = true`, and a login gets a
+// tenant claim only when EXACTLY ONE such row exists. If that predicate changes there, change it
+// here too, otherwise this panel would tell an admin a user has a tenant context that login does
+// not give them (or the reverse). Never writes. Org ids are returned as stored: there is no
+// org-name table (directory_integrations.name names an integration, not an organization).
+type ActiveOrganizations = {
+  active: Array<{ orgId: string }>
+  hasTenantContext: boolean
+}
+
+async function fetchActiveOrganizations(userId: string): Promise<ActiveOrganizations> {
+  const result = await query<{ org_id: unknown }>(
+    `SELECT uo.org_id
+     FROM user_orgs uo
+     JOIN users u ON u.id = uo.user_id
+     WHERE uo.user_id = $1
+       AND uo.is_active = true
+       AND u.is_active = true
+     ORDER BY uo.org_id ASC`,
+    [userId],
+  )
+  // `hasTenantContext` is decided on the RAW rows, exactly like login: login counts every matching
+  // row (two rows = no claim, even if one id is blank) and then drops a blank id as "no tenant"
+  // (AuthService login only sets tenantId when the resolved id is truthy). The `active` list below
+  // omits blank ids for display only; it must not feed the count.
+  const rawOrgIds = result.rows.map((row) => row.org_id)
+  const hasTenantContext = rawOrgIds.length === 1
+    && typeof rawOrgIds[0] === 'string'
+    && rawOrgIds[0].length > 0
+  const active = rawOrgIds
+    .filter((orgId): orgId is string => typeof orgId === 'string' && orgId.length > 0)
+    .map((orgId) => ({ orgId }))
+  return { active, hasTenantContext }
+}
+
+// Fail-soft wrapper: login swallows a failure of the same read (AuthService resolveSessionTenantId
+// catch -> no tenant), so a failure here must not 500 the whole member-admission answer (plugin
+// toggles included). `null` means "unknown"; the panel renders nothing for it. The log line is
+// values-free like ADMIN_USERS_FAILURE_EVENT: only the error's class name and a validated
+// correlation id, never the error text.
+async function fetchActiveOrganizationsOrUnknown(userId: string): Promise<ActiveOrganizations | null> {
+  try {
+    return await fetchActiveOrganizations(userId)
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organizations-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
+}
+
+// Slice C (#6079): the `organizations` payload also says whether the local-account guard of
+// `POST /api/admin/directory/local/accounts` would refuse this user — `hasAnyRow` (any user_orgs row
+// for the user, any org, active or deactivated) and `deprovisionApplied` (an applied deprovision
+// event or effect for the user), read by the SAME statement the guard runs
+// (directory/org-membership-history.ts). Read-only and advisory: the guard stays the enforcement
+// point. `active` / `hasTenantContext` above are unchanged; when the active read fails the whole
+// `organizations` stays `null` as before and the history read is not attempted. When only the
+// history read fails, `hasAnyRow` / `deprovisionApplied` are `null` ("unknown") and the line below is
+// logged, values-free like the one above.
+type MemberAdmissionOrganizations = ActiveOrganizations & {
+  hasAnyRow: boolean | null
+  deprovisionApplied: boolean | null
+}
+
+async function fetchOrgMembershipHistoryOrUnknown(
+  userId: string,
+): Promise<{ hasAnyRow: boolean; deprovisionApplied: boolean } | null> {
+  try {
+    const history = await readOrgMembershipHistory(
+      { query: (statement, params) => query(statement, params) },
+      { userId, orgId: null },
+    )
+    return { hasAnyRow: history.hasAnyRow, deprovisionApplied: history.deprovisionApplied }
+  } catch (error) {
+    try {
+      const correlationId = getCorrelationId()
+      logger.warn(
+        `admin-users.organization-history-read-failed errorClass=${describeCaughtClass(error)}`
+        + (isValidCorrelationId(correlationId) ? ` correlationId=${correlationId}` : ''),
+      )
+    } catch {
+      // Logging must never turn the degraded answer into a failure.
+    }
+    return null
+  }
+}
+
+async function fetchMemberAdmissionOrganizations(userId: string): Promise<MemberAdmissionOrganizations | null> {
+  const organizations = await fetchActiveOrganizationsOrUnknown(userId)
+  if (!organizations) return null
+  const history = await fetchOrgMembershipHistoryOrUnknown(userId)
+  return {
+    ...organizations,
+    hasAnyRow: history ? history.hasAnyRow : null,
+    deprovisionApplied: history ? history.deprovisionApplied : null,
+  }
+}
+
 async function fetchMemberAdmissionSnapshot(userId: string) {
   const [profile, roles, directoryMemberships, dingtalkAccess, memberGroups, namespaceAdmissions] = await Promise.all([
     fetchUserProfile(userId),
@@ -2063,6 +2173,9 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     listUserNamespaceAdmissionSnapshots(userId),
   ])
   if (!profile) return null
+  // Read after the profile check (not inside the Promise.all above) so an unknown user stays a
+  // plain 404 and the order of the existing reads is unchanged.
+  const organizations = await fetchMemberAdmissionOrganizations(userId)
 
   return {
     userId,
@@ -2074,6 +2187,7 @@ async function fetchMemberAdmissionSnapshot(userId: string) {
     directoryMemberships,
     dingtalk: dingtalkAccess,
     namespaceAdmissions,
+    organizations,
   }
 }
 
@@ -4053,6 +4167,13 @@ export function adminUsersRouter(): Router {
       // (not a second/competing one — every write below moved from `query()` to `client.query()`
       // inside this one call).
       await transaction(async (client) => {
+        if (attendanceOrgId && attendanceOnboarding && (cleanAttendanceGroupId || cleanDefaultShiftId)) {
+          // Only a new subject is admitted here. Serialize its source writes
+          // before shift/user/role locks; no existing subject is reassigned.
+          await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+            buildAttendanceTimezoneRuntimeOrgLockKeyV1(attendanceOrgId),
+          ])
+        }
         if (attendanceOnboarding && cleanDefaultShiftId && defaultShiftStartDate) {
           // W3 safety erratum: this core route is a reference producer outside the
           // attendance plugin. Lock the same parent row that canonical shift delete

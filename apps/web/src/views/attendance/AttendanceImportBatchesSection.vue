@@ -527,6 +527,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '../../utils/clipboard'
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
 import { computed, ref, type Ref } from 'vue'
 import {
@@ -1257,20 +1258,14 @@ function selectImportBatchRow(item: AttendanceImportItem) {
 async function copySelectedImportBatchSnapshot() {
   if (!selectedImportBatchSnapshot.value) return
   const payload = JSON.stringify(selectedImportBatchSnapshot.value, null, 2)
-  try {
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(payload)
-      snapshotActionMessage.value = tr('Snapshot JSON copied.', '快照 JSON 已复制。')
-      return
-    }
-    throw new Error('clipboard-unavailable')
-  } catch {
+  if (await copyText(payload)) {
+    snapshotActionMessage.value = tr('Snapshot JSON copied.', '快照 JSON 已复制。')
+  } else {
     snapshotActionMessage.value = tr('Clipboard is unavailable in this browser. Open the raw snapshot and copy it manually.', '当前浏览器无法直接写入剪贴板，请展开原始快照后手动复制。')
-  } finally {
-    globalThis.setTimeout(() => {
-      snapshotActionMessage.value = ''
-    }, 3000)
   }
+  globalThis.setTimeout(() => {
+    snapshotActionMessage.value = ''
+  }, 3000)
 }
 </script>
 

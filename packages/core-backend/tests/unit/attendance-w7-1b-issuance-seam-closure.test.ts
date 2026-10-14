@@ -110,7 +110,7 @@ const stripComments = (source: string): string =>
 const LEGACY_BUILDER_ADJUDICATED_V1 = Object.freeze([
   Object.freeze({ needle: 'async function buildW4ShadowFrozenContextV1(trx, args) {', reason: 'the function DEFINITION itself' }),
   Object.freeze({ needle: '    buildW4ShadowFrozenContextV1,\n', reason: 'test-export surfaces (D2 adapters + the golden harness) — exposure, not a producer call' }),
-  Object.freeze({ needle: '            buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs),', reason: "the SEAM's own pre-bound legacy thunk — this IS the seam's legacy arm" }),
+  Object.freeze({ needle: '            return buildW4ShadowFrozenContextV1(pluginTrx, legacyArgs)', reason: "the SEAM's own pre-bound legacy thunk — this IS the seam's legacy arm" }),
   Object.freeze({ needle: '              buildShadowFrozenContext: (trx, args) => buildW4ShadowFrozenContextV1(trx, args),', reason: 'the injected legacy adapter the seam calls through' }),
 ])
 

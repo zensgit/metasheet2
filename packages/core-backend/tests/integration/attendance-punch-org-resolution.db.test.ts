@@ -101,6 +101,7 @@ describeDb('POST /api/attendance/punch — membership-derived org check', () => 
   const userF = randomUUID() // case f: member of a mixed-case org id
 
   const allUserIds = [userA1, userA2, userA3, userA4, userD1, userD2, userE1, userE2, userF]
+  const defaultRuleIds = [randomUUID(), randomUUID(), randomUUID(), randomUUID()]
 
   const mintToken = async (userId: string): Promise<string> => {
     const res = await requestJson(
@@ -197,6 +198,23 @@ describeDb('POST /api/attendance/punch — membership-derived org check', () => 
     baseUrl = `http://127.0.0.1:${address.port}`
     pool = new Pool({ connectionString: dbUrl })
 
+    for (const [index, orgId] of [orgA, orgB, orgMixed].entries()) {
+      await pool.query(
+        `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+         VALUES ($1, $2, 'org resolution timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true)`,
+        [defaultRuleIds[index], orgId],
+      )
+    }
+    // Unscoped positive controls resolve to the shared default organization.
+    // Supply its required timezone only when absent; cleanup removes only our row.
+    await pool.query(
+      `INSERT INTO attendance_rules
+       (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       SELECT $1, 'default', 'org resolution default timezone fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true
+       WHERE NOT EXISTS (SELECT 1 FROM attendance_rules WHERE org_id = 'default' AND is_default = true)`,
+      [defaultRuleIds[3]],
+    )
     for (const userId of allUserIds) {
       await insertUser(userId)
     }
@@ -218,6 +236,7 @@ describeDb('POST /api/attendance/punch — membership-derived org check', () => 
     }
     await pool?.query(`DELETE FROM user_orgs WHERE user_id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
     await pool?.query(`DELETE FROM users WHERE id = ANY($1::text[])`, [allUserIds]).catch(() => undefined)
+    await pool?.query('DELETE FROM attendance_rules WHERE id = ANY($1::uuid[])', [defaultRuleIds]).catch(() => undefined)
     await pool?.end()
     await server?.stop?.()
     if (priorRbacBypass === undefined) delete process.env.RBAC_BYPASS

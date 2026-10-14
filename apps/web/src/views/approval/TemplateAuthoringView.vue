@@ -1626,6 +1626,7 @@ import { describeTemplateAuthoringError } from '../../approvals/templateAuthorin
 import { createRoutePreviewController } from '../../approvals/routePreviewController'
 import { routePreviewAssigneeSummary } from '../../approvals/routePreviewSummary'
 import { describeRoutePreviewError } from '../../approvals/routePreviewErrors'
+import { useLocale } from '../../composables/useLocale'
 import { computeRequesterPreviewFields } from '../../approvals/requesterPreviewFields'
 import {
   APPROVAL_CIVIL_DATE_VALUE_FORMAT,
@@ -4714,6 +4715,10 @@ const tryRunDisabledReason = computed<string>(() => {
   return ''
 })
 
+// The view itself is not locale-switched yet (its other copy is Chinese only); the try-run hint
+// below follows the app locale like the R-43 (B) condition copy does.
+const { isZh: tryRunIsZh } = useLocale()
+
 const routePreviewController = createRoutePreviewController(
   async (req: { sampleFormData: Record<string, unknown>; sampleRequesterId?: string }) => {
     try {
@@ -4723,7 +4728,16 @@ const routePreviewController = createRoutePreviewController(
       // message here instead of surfacing as a generic failure flash — the controller only ever
       // reads `.message` off a caught error, so the code → message translation must happen
       // before it does (describeRoutePreviewError is unit-tested independently).
-      throw new Error(describeRoutePreviewError(error))
+      // R-43 follow-up (a): a whole-form validation failure on an empty required sample field gets
+      // a localized hint naming the fields (display names only, looked up in the FULL field list —
+      // the server only reports visible ones, so every id resolves here).
+      throw new Error(describeRoutePreviewError(error, undefined, {
+        isZh: tryRunIsZh.value,
+        fieldLabel: (id) => {
+          const field = templateFormFields.value.find((candidate) => candidate.id === id)
+          return field ? fieldDisplayLabel(field) : null
+        },
+      }))
     }
   },
   (patch) => {

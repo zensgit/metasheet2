@@ -318,7 +318,7 @@ describe('ApprovalCenterView — cancel-round approver path', () => {
     await flushUi()
     ;(document.querySelector('[data-el-popconfirm-confirm$="cr_9」？"]') as HTMLButtonElement).click()
     await flushUi()
-    expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('无法定位这条撤销申请对应的请假'))
+    expect(elErrorSpy).toHaveBeenLastCalledWith(expect.stringContaining('无法定位这条撤销申请对应的原申请'))
     expect(dispatchActionSpy).not.toHaveBeenCalled()
     expect(attendanceCalls()).toHaveLength(1)
   })

@@ -695,6 +695,24 @@ const CURATED_DEBT_ENTRIES = [
       site.relPath ===
       'packages/core-backend/src/db/migrations/zzzz20260918110000_add_attendance_requests_approval_workflow_key.ts',
   },
+
+  {
+    id: 'X09',
+    title: 'Multi-timezone D3 typed business-trip creation, final publication and canonical cancellation.',
+    owningSlice: 'attendance-multitimezone-D3',
+    sharedHook: false,
+    canonicalizedBy: 'attendance-multitimezone-D3',
+    // Exact authority sites only: request_create installs the immutable typed source;
+    // final request_decision publishes; the approved cancel-round adapter truncates.
+    // Table buckets and canonical multiplicity remain independently enforced.
+    claims: (site) => [
+      'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_requests::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip-request-adapter.cjs::execute::attendance_business_trip_requests::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip.cjs::publish::attendance_business_trip_arrangements::insert',
+      'plugins/plugin-attendance/lib/attendance-business-trip.cjs::cancel::attendance_business_trip_arrangements::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
+
 ]
 
 // Non-attendance generic-shared-function allowlist (§8.4: "Shared tables such as

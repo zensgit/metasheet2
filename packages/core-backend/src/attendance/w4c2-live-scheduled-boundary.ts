@@ -105,6 +105,7 @@ import {
   acquireAttendanceCalculationRolloutLock,
   acquireAttendanceCalculationTargetLocks,
   createVerifiedAttendanceCalculationTargetIdentityV1,
+  createVerifiedAttendanceOrgIdentityV1,
   parseCanonicalAttendanceOrgKeyV1,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   parseCanonicalAttendanceWorkDateV1,
@@ -144,6 +145,7 @@ import {
   ATTENDANCE_DAILY_STATUSES_V1,
   ATTENDANCE_W4_SEGMENT_ENGINE_VERSION_V1,
   calculateAttendanceSegmentsV1,
+  isSupportedFrozenAttributionSnapshotV1,
   type AttendanceCalculatedSegmentV1,
   type AttendanceDailyStatusV1,
   type AttendanceSegmentCalculationResultV1,
@@ -312,6 +314,8 @@ export interface AttendanceW4ResolvedCandidateV1 {
   readonly workDate?: string
   readonly shiftId?: string
   readonly reasonCode?: string
+  /** Server-read immutable historical freeze; never accepted from HTTP input. */
+  readonly frozenAttribution?: AttendanceAttributionSnapshotV1
   readonly fullWinner?: {
     readonly workDate: string
     readonly shiftId: string
@@ -375,6 +379,16 @@ export interface AttendanceLivePunchLegacyArgsV1 {
 }
 
 export interface AttendanceW4LiveScheduledLegacyAdaptersV1 {
+  acquireScheduledTimezoneLocks?(trx: AttendancePluginShapedTrxV1, input: { orgId: string; userId?: string }): Promise<void>
+  resolveScheduledMembers?(trx: AttendancePluginShapedTrxV1, input: { orgId: string; workDate: string }): Promise<readonly AttendanceScheduledRunMemberInputV1[]>
+  prepareScheduledTimezoneContext?(trx: AttendancePluginShapedTrxV1, input: { orgId: string; userId: string; workDate: string }): Promise<{ timezone: string; isWorkday: boolean; holidayKind?: string | null; existing: boolean }>
+  bindScheduledTimezoneContext?(trx: AttendancePluginShapedTrxV1, proof: { calculationId: string | null }): Promise<void>
+
+  /** Trusted activation adapters: fresh reads after replay, before source DML/parent locks. */
+  prepareLiveTimezoneContext?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1, lockMode: 'shared' | 'exclusive'): Promise<void>
+  assertLiveTimezoneTarget?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1): Promise<void>
+  bindLiveTimezoneContext?(trx: AttendancePluginShapedTrxV1, input: AttendanceLivePunchBoundaryInputV1, proof: { calculationId: string | null }): Promise<void>
+
   /** Captured once by activation; ordinary HTTP cannot provide an adapter. */
   executeOnlineOutdoorInTransaction?(trx: AttendanceW4TransactionClientV1, input: AttendanceRequestOperationBoundaryInputV1): Promise<AttendanceRequestOperationExternalTransactionResultV1>
 
@@ -612,6 +626,9 @@ export interface AttendanceLivePunchBoundaryInputV1 {
    * that the one theoretical carve-out (a >3-segment winning shift making
    * BOTH sides' frozen context null) is unreachable via a real DB fixture.
    */
+  /** Server-only independent outer authority comparison; never operation/client identity. */
+  readonly timezoneContextFingerprint?: string
+  readonly clientTimezone?: string | null
   readonly outerSourceDefinitionFingerprint: string | null
   readonly isWorkday: boolean
   readonly holidayKind: string | null
@@ -630,7 +647,7 @@ export type AttendanceLivePunchBoundaryResultV1 =
 export interface AttendanceScheduledRunBoundaryInputV1 {
   readonly orgId: string
   readonly workDate: string
-  readonly timezone: string
+  readonly timezone?: string
   readonly targetUserIds: readonly string[]
   readonly initiator: AttendanceScheduledRunInitiatorV1
   /**
@@ -681,7 +698,10 @@ export type AttendanceScheduledRunRecoveryBoundaryInputV1 = Omit<
   readonly runId: string
 }
 
-export type AttendanceScheduledRunBoundaryResultV1 =
+export type AttendanceScheduledRunBoundaryResultV1 = {
+  readonly targetCount?: number
+  readonly reviewTargets?: readonly { userId: string; reasonCode: string }[]
+} & (
   | { readonly kind: 'legacy'; readonly rows: Array<{ user_id: string }> }
   | { readonly kind: 'legacy_dedup' }
   | { readonly kind: 'suspended' }
@@ -703,12 +723,15 @@ export type AttendanceScheduledRunBoundaryResultV1 =
       }>
     }
 
+)
+
 export type OnlinePunchInputV1 = Parameters<typeof buildOnlinePunchRequestV1>[0]
 export type OnlinePunchPreparedV1 =
   | { readonly kind: 'normal'; readonly input: AttendanceLivePunchBoundaryInputV1 }
   | { readonly kind: 'outdoor'; readonly input: AttendanceRequestOperationBoundaryInputV1 }
   | { readonly kind: 'refusal'; readonly error: unknown }
 export interface AttendanceW4LiveScheduledBoundaryV1 {
+  readonly resolvesScheduledTimezone?: boolean
   probeOnlinePunchReplay(input: OnlinePunchInputV1): Promise<OnlinePunchReceiptV1 | null>
   executeOnlinePunch(input: OnlinePunchInputV1, prepared: OnlinePunchPreparedV1): Promise<{ kind: string; receipt: OnlinePunchReceiptV1 }>
 
@@ -1642,6 +1665,15 @@ function attributionFromResolution(
     nowIso: string
   },
 ): AttendanceAttributionSnapshotV1 {
+  if (resolution.frozenAttribution !== undefined) {
+    const frozen = resolution.frozenAttribution
+    if (!isSupportedFrozenAttributionSnapshotV1(frozen) || frozen.posture !== 'resolved_v2'
+      || frozen.value.orgId !== args.orgId || frozen.value.userId !== args.userId
+      || frozen.value.workDate !== resolution.workDate || frozen.value.shiftId !== resolution.shiftId) {
+      boundaryFail('ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_INVALID',409)
+    }
+    return frozen
+  }
   if (resolution.kind === 'ambiguous') {
     return unsupportedAttribution('ambiguous', null)
   }
@@ -1850,6 +1882,25 @@ function buildLegacyPunchArgs(input: AttendanceLivePunchBoundaryInputV1): Attend
 // Factory.
 // ---------------------------------------------------------------------------
 
+async function prepareAttendanceLiveTimezoneContextV1(
+  trx: AttendanceW4TransactionClientV1,
+  pluginTrx: AttendancePluginShapedTrxV1,
+  adapters: AttendanceW4LiveScheduledLegacyAdaptersV1,
+  input: AttendanceLivePunchBoundaryInputV1,
+  org: VerifiedAttendanceOrgIdentityV1 | null,
+): Promise<void> {
+  if (!adapters.prepareLiveTimezoneContext) return
+  if (!adapters.assertLiveTimezoneTarget || !adapters.bindLiveTimezoneContext) {
+    boundaryFail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
+  }
+  // Legacy commands admit historical text users without minting W4 target identities.
+  // The exclusive runtime prefix serializes their parent/companion writes instead.
+  const legacy = org === null || org.acceptedWritePosture === 'legacy_projection_only'
+  await adapters.prepareLiveTimezoneContext(pluginTrx,input,legacy ? 'exclusive' : 'shared')
+  if (org !== null && !legacy) await lockShadowParentRecord(trx,org,input.userId,input.workDate)
+  await adapters.assertLiveTimezoneTarget(pluginTrx,input)
+}
+
 export function createAttendanceLiveScheduledBoundaryV1(
   deps: AttendanceW4LiveScheduledBoundaryDepsV1,
 ): AttendanceW4LiveScheduledBoundaryV1 {
@@ -1874,6 +1925,12 @@ export function createAttendanceLiveScheduledBoundaryV1(
     typeof adapters.issueFrozenContext !== 'function'
   ) {
     boundaryFail('W4C2_LEGACY_ADAPTERS_INVALID', 500)
+  }
+  const scheduledTimezoneAdapters = [adapters.acquireScheduledTimezoneLocks, adapters.resolveScheduledMembers,
+    adapters.prepareScheduledTimezoneContext, adapters.bindScheduledTimezoneContext]
+  if (scheduledTimezoneAdapters.some(adapter => adapter !== undefined)
+    && scheduledTimezoneAdapters.some(adapter => typeof adapter !== 'function')) {
+    boundaryFail('ATTENDANCE_TIMEZONE_RUNTIME_UNAVAILABLE',503)
   }
   if (typeof deps.acquireConnection !== 'function') {
     boundaryFail('W4C2_CONNECTION_PROVIDER_INVALID', 500)
@@ -2005,7 +2062,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
   async function executeLivePunch(input: AttendanceLivePunchBoundaryInputV1): Promise<AttendanceLivePunchBoundaryResultV1> {
     return withConnection(client => runAttendanceResultOperationTransactionV1(client,
-      trx => executeLivePunchInTransaction(trx, input)))
+      trx => executeLivePunchWithTimezoneContextV1(trx, input)))
   }
 
   function onlineAuthorization(request: OnlinePunchRequestV1) {
@@ -2035,7 +2092,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         if (prepared.kind === 'normal') {
           if (prepared.input.orgId !== request.orgId || prepared.input.userId !== request.userId
             || prepared.input.operationId !== request.operationId || prepared.input.occurredAtRaw !== null) boundaryFail('W4C2_ONLINE_INPUT_INVALID')
-          const outcome = await executeLivePunchInTransaction(trx, prepared.input, { request, preflight, authorization })
+          const outcome = await executeLivePunchWithTimezoneContextV1(trx, prepared.input, { request, preflight, authorization })
           return { kind: outcome.kind, receipt: makeOnlinePunchReceiptV1(200, { ok: true, data: wireJson(outcome.response) }) }
         }
         if (prepared.input.kind !== 'request_create' || prepared.input.routeVariant !== 'outdoor'
@@ -2049,9 +2106,22 @@ export function createAttendanceLiveScheduledBoundaryV1(
       })))
   }
 
+  async function executeLivePunchWithTimezoneContextV1(
+    trx: AttendanceW4TransactionClientV1, input: AttendanceLivePunchBoundaryInputV1,
+    online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
+  ): Promise<AttendanceLivePunchBoundaryResultV1> {
+    const pluginTrx = pluginShapedTrx(trx)
+    const outcome = await executeLivePunchInTransaction(trx, input, online, pluginTrx)
+    if (outcome.kind !== 'replay' && adapters.bindLiveTimezoneContext) {
+      await adapters.bindLiveTimezoneContext(pluginTrx, input, { calculationId: outcome.kind === 'w4' ? outcome.shadow.calculationId : null })
+    }
+    return outcome
+  }
+
   async function executeLivePunchInTransaction(
     trx: AttendanceW4TransactionClientV1, input: AttendanceLivePunchBoundaryInputV1,
     online?: { request: OnlinePunchRequestV1; preflight: Awaited<ReturnType<typeof attendanceResultOperationPreflightV1>>; authorization: ReturnType<typeof createAuthorizedAttendanceWriteContextV1> },
+    pluginTrx: AttendancePluginShapedTrxV1 = pluginShapedTrx(trx),
   ): Promise<AttendanceLivePunchBoundaryResultV1> {
     // Org-key pre-classification. The rollout domain is canonical UUIDs plus the
     // exact 'default' sentinel; a legacy org key OUTSIDE that lexical domain can
@@ -2067,7 +2137,6 @@ export function createAttendanceLiveScheduledBoundaryV1(
       rolloutKey = null
     }
 
-    const pluginTrx = pluginShapedTrx(trx)
     const legacyPunchArgs = buildLegacyPunchArgs(input)
 
     if (rolloutKey === null) {
@@ -2075,6 +2144,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         // A stable-ID command requires a canonical org key (values-free).
         boundaryFail('W4C2_ORG_KEY_OUTSIDE_W4_DOMAIN')
       }
+      await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,null)
       const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
       return { kind: 'legacy' as const, response: result }
     }
@@ -2092,6 +2162,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
         // Null-ID legacy command: same closed adapter, no operation row, no
         // outbox, no calculation, NO strict envelope/witness surface; the
         // route keeps its existing synchronous best-effort emit.
+        await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,createVerifiedAttendanceOrgIdentityV1({ orgKey: rolloutKey, posture }))
         const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
         return { kind: 'legacy' as const, response: result }
       }
@@ -2150,12 +2221,14 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (preflight.kind === 'legacy_no_operation') {
       // Posture raced to legacy between the probe and the registry re-read:
       // the null-ID legacy contract applies (no operation row).
+      await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,createVerifiedAttendanceOrgIdentityV1({ orgKey: rolloutKey, posture }))
       const result = await adapters.applyLivePunchLegacy(pluginTrx, legacyPunchArgs)
       return { kind: 'legacy' as const, response: result }
     }
 
     // preflight.kind === 'claimed'
     const org = preflight.org
+    await prepareAttendanceLiveTimezoneContextV1(trx,pluginTrx,adapters,input,org)
     const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
     const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
 
@@ -3117,7 +3190,42 @@ export function createAttendanceLiveScheduledBoundaryV1(
       }
     }
     const workDate = parseCanonicalAttendanceWorkDateV1(input.workDate) as string
-    const targetUserIds = [...input.targetUserIds].map(String)
+    let targetUserIds = [...input.targetUserIds].map(String)
+    let reviewTargets = input.reviewTargets
+    const resolveMembership: AttendanceScheduledRunMembershipResolverV1 = async (trx) => {
+      const members = adapters.resolveScheduledMembers
+        ? await adapters.resolveScheduledMembers(pluginShapedTrx(trx), { orgId: input.orgId, workDate })
+        : [...targetUserIds.map(userId => ({userId,targetKind:'generate' as const,reviewReasonCode:null})),
+          ...reviewTargets.map(rt => ({userId:rt.userId,targetKind:'review' as const,reviewReasonCode:rt.reasonCode}))]
+      targetUserIds = members.filter(member => member.targetKind === 'generate').map(member => member.userId)
+      reviewTargets = members.filter(member => member.targetKind === 'review')
+        .map(member => ({userId:member.userId,reasonCode:member.reviewReasonCode!}))
+      return members
+    }
+    const counts = () => adapters.resolveScheduledMembers ? {targetCount:targetUserIds.length,reviewTargets} : {}
+    const prepareTarget = async (pluginTrx: AttendancePluginShapedTrxV1, userId: string) => {
+      if (adapters.prepareScheduledTimezoneContext) return adapters.prepareScheduledTimezoneContext(pluginTrx, {orgId:input.orgId,userId,workDate})
+      if (typeof input.timezone !== 'string' || !input.timezone) boundaryFail('W4C2_SCHEDULED_TIMEZONE_REQUIRED')
+      return {timezone:input.timezone,isWorkday:input.isWorkday !== false,holidayKind:input.holidayKind ?? null,existing:false}
+    }
+    const applyLegacyBatch = async (trx: AttendanceW4TransactionClientV1) => {
+      if (adapters.resolveScheduledMembers) await resolveMembership(trx, input.orgId, workDate)
+      const pluginTrx = pluginShapedTrx(trx)
+      if (!adapters.prepareScheduledTimezoneContext) {
+        if (!targetUserIds.length) return []
+        const facts = await prepareTarget(pluginTrx,targetUserIds[0])
+        return adapters.applyScheduledAbsenceLegacy(pluginTrx,{orgId:input.orgId,workDate,timezone:facts.timezone,userIds:targetUserIds})
+      }
+      const rows: Array<{user_id:string}> = []
+      for (const userId of targetUserIds) {
+        const facts = await prepareTarget(pluginTrx,userId)
+        if (!facts.isWorkday && !facts.existing) continue
+        const inserted = await adapters.applyScheduledAbsenceLegacy(pluginTrx,{orgId:input.orgId,workDate,timezone:facts.timezone,userIds:[userId]})
+        if (inserted.length) await adapters.bindScheduledTimezoneContext?.(pluginTrx,{calculationId:null})
+        rows.push(...inserted)
+      }
+      return rows
+    }
     // Org-key pre-classification (same doctrine as executeLivePunch): a legacy
     // org key outside the canonical lexical domain cannot carry a rollout row,
     // so it is structurally `legacy_projection_only` — same closed adapter, no
@@ -3134,6 +3242,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
     // suspension preflight and posture resolution precede the first source DML.
     const probe = await withConnection((client) =>
       runAttendanceResultOperationTransactionV1(client, async (trx) => {
+        await adapters.acquireScheduledTimezoneLocks?.(pluginShapedTrx(trx), {orgId:orgKey})
         if (rolloutKey === null) {
           if (recoveryRunId !== null) {
             boundaryFail('W4C2_SCHEDULED_RUN_RECOVERY_ORG_INVALID')
@@ -3141,15 +3250,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
           if (input.legacyDedupHit === true) {
             return { mode: 'legacy_dedup' as const, rows: [] as Array<{ user_id: string }> }
           }
-          if (targetUserIds.length === 0) {
+          if (!adapters.resolveScheduledMembers && targetUserIds.length === 0) {
             return { mode: 'legacy' as const, rows: [] as Array<{ user_id: string }> }
           }
-          const rows = await adapters.applyScheduledAbsenceLegacy(pluginShapedTrx(trx), {
-            orgId: orgKey,
-            workDate,
-            timezone: input.timezone,
-            userIds: targetUserIds,
-          })
+          const rows = await applyLegacyBatch(trx)
           return { mode: 'legacy' as const, rows: rows as Array<{ user_id: string }> }
         }
         await acquireAttendanceCalculationRolloutLock(trx, rolloutKey, 'shared')
@@ -3164,15 +3268,10 @@ export function createAttendanceLiveScheduledBoundaryV1(
           if (input.legacyDedupHit === true) {
             return { mode: 'legacy_dedup' as const, rows: [] as Array<{ user_id: string }> }
           }
-          if (targetUserIds.length === 0) {
+          if (!adapters.resolveScheduledMembers && targetUserIds.length === 0) {
             return { mode: 'legacy' as const, rows: [] as Array<{ user_id: string }> }
           }
-          const rows = await adapters.applyScheduledAbsenceLegacy(pluginShapedTrx(trx), {
-            orgId: orgKey,
-            workDate,
-            timezone: input.timezone,
-            userIds: targetUserIds,
-          })
+          const rows = await applyLegacyBatch(trx)
           return { mode: 'legacy' as const, rows: rows as Array<{ user_id: string }> }
         }
         // Gate D3 (#4556 / #4844) — SITE A, the org-wide probe: REPLACEMENT BY ROUTING, not a
@@ -3197,7 +3296,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
 
     if (probe.mode === 'suspended') return { kind: 'suspended' }
     if (probe.mode === 'legacy_dedup') return { kind: 'legacy_dedup' }
-    if (probe.mode === 'legacy') return { kind: 'legacy', rows: probe.rows }
+    if (probe.mode === 'legacy') return { kind: 'legacy', rows: probe.rows, ...counts() }
 
     // W4 path only below: an ordinary `cron` run and a recovery sweep use the
     // registered internal scheduler identity; an ordinary `admin_run` mints a
@@ -3218,21 +3317,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
     // FIRST step of the w4 branch — it re-resolves posture and the class-00/
     // class-01 locks independently of the probe above (the same "re-check
     // inside the owning transaction" doctrine every other posture read in this
-    // file already follows). The injected membership resolver wraps the SAME
-    // pre-resolved (generate, review) lists the caller already computed —
-    // `runAutoAbsenceForOrgDate` in index.cjs — never a re-derivation.
-    const membersForRun: AttendanceScheduledRunMemberInputV1[] = [
-      ...targetUserIds.map((userId) => ({ userId, targetKind: 'generate' as const, reviewReasonCode: null })),
-      ...input.reviewTargets.map((rt) => ({
-        userId: rt.userId,
-        targetKind: 'review' as const,
-        reviewReasonCode: rt.reasonCode,
-      })),
-    ]
-    const resolveMembership: AttendanceScheduledRunMembershipResolverV1 = async () => membersForRun
+    // file already follows). The trusted runtime resolves membership and source
+    // facts here, under the pre-acquired org/timeline/schedule prefix. Bare-module
+    // adapters keep their original caller-provided membership contract.
 
     const startOutcome = await withConnection((client) =>
-      runAttendanceResultOperationTransactionV1(client, (trx) => {
+      runAttendanceResultOperationTransactionV1(client, async (trx) => {
+        await adapters.acquireScheduledTimezoneLocks?.(pluginShapedTrx(trx), {orgId:orgKey})
         if (recoveryRunId !== null) {
           return resumeAttendanceScheduledRunByExactIdV1(
             trx,
@@ -3254,30 +3345,26 @@ export function createAttendanceLiveScheduledBoundaryV1(
     if (startOutcome.kind === 'org_legacy_zero_rows') {
       // Posture raced to `legacy_projection_only` between the outer probe and
       // the run-creation transaction (section 1.7 step 1): the SAME null-ID
-      // legacy contract the probe's own legacy branch above takes — a single
-      // batch INSERT..SELECT, zero W4 rows, no per-user split.
+      // legacy contract the probe's own legacy branch above takes. The timezone
+      // runtime prepares and binds each newly inserted target in this transaction.
       if (input.legacyDedupHit === true) return { kind: 'legacy_dedup' }
-      if (targetUserIds.length === 0) return { kind: 'legacy', rows: [] }
+      if (!adapters.resolveScheduledMembers && targetUserIds.length === 0) return { kind: 'legacy', rows: [] }
       const rows = await withConnection((client) =>
-        runAttendanceResultOperationTransactionV1(client, (trx) =>
-          adapters.applyScheduledAbsenceLegacy(pluginShapedTrx(trx), {
-            orgId: orgKey,
-            workDate,
-            timezone: input.timezone,
-            userIds: targetUserIds,
-          }),
-        ),
+        runAttendanceResultOperationTransactionV1(client, async (trx) => {
+          await adapters.acquireScheduledTimezoneLocks?.(pluginShapedTrx(trx), {orgId:orgKey})
+          return applyLegacyBatch(trx)
+        }),
       )
-      return { kind: 'legacy', rows: rows as Array<{ user_id: string }> }
+      return { kind: 'legacy', rows: rows as Array<{ user_id: string }>, ...counts() }
     }
     if (startOutcome.kind === 'created_and_finalized') {
       // Section 1.9: zero `generate` targets — the run-creation transaction
       // WAS the finalization transaction; there is no per-user work and
       // nothing left to do here.
-      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [] }
+      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [], ...counts() }
     }
     if (startOutcome.kind === 'not_running') {
-      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [] }
+      return { kind: 'w4', runId: startOutcome.runId, rows: [], perUser: [], ...counts() }
     }
 
     const runId = startOutcome.runId
@@ -3326,6 +3413,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
         ?? adminRunScheduledAuthorization(orgKey, adminActorId as string, userId)
       const outcome = await withConnectionRetryingTargetContention((client) =>
         runAttendanceResultOperationTransactionV1(client, async (trx) => {
+          const pluginTrx = pluginShapedTrx(trx)
+          await adapters.acquireScheduledTimezoneLocks?.(pluginTrx, {orgId:orgKey,userId})
           const preflight = await attendanceResultOperationPreflightV1(trx, authorization, envelope.registryInput)
           if (preflight.kind === 'replay') {
             const responses = Object.values(preflight.responses.itemResponses)
@@ -3348,7 +3437,6 @@ export function createAttendanceLiveScheduledBoundaryV1(
             // reusing the live-punch sibling's null-ID contract.
             boundaryFail('W4C2_SCHEDULED_RUN_LEGACY_NO_OPERATION_UNREACHABLE')
           }
-          const pluginTrx = pluginShapedTrx(trx)
           const org = preflight.org
           const identity = preflight.itemIdentities[0] as VerifiedAttendanceOperationIdentityV1
           const isLegacyCompat = org.acceptedWritePosture === 'legacy_projection_only'
@@ -3361,6 +3449,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
           // raced abandon, or finalized by a concurrent racer for the same
           // run — is rejected BEFORE the source DML, never after.
           await requireAttendanceScheduledRunRunningBeforeSourceDmlV1(trx, orgKey, runId)
+          const scheduledFacts = await prepareTarget(pluginTrx,userId)
+          if (!scheduledFacts.isWorkday && !scheduledFacts.existing) boundaryFail('W4C2_SCHEDULED_TARGET_CONTEXT_CHANGED',409)
 
           // =================================================================
           // Gate D3 (#4556 / #4844) — SITE B, the AUTHORITATIVE `scheduled` per-target writer.
@@ -3449,8 +3539,8 @@ export function createAttendanceLiveScheduledBoundaryV1(
                   workDate,
                   {
                     orgId: orgKey,
-                    timezone: input.timezone,
-                    isWorkday: input.isWorkday !== false,
+                    timezone: scheduledFacts.timezone,
+                    isWorkday: scheduledFacts.isWorkday,
                   },
                 )
                 if (resolvedParent.kind === 'skip') {
@@ -3476,7 +3566,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
                   const authoritativeResolution = await adapters.resolveScheduledCandidate(pluginTrx, {
                     orgId: orgKey,
                     userId,
-                    timezone: input.timezone,
+                    timezone: scheduledFacts.timezone,
                     calendarWorkDate: workDate,
                   })
                   const authoritativeAttribution = attributionFromResolution(authoritativeResolution, {
@@ -3493,9 +3583,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
                       userId,
                       workDate,
                       shiftId: authoritativeAttribution.value.shiftId,
-                      timezone: input.timezone,
-                      isWorkday: input.isWorkday !== false,
-                      holidayKind: input.holidayKind ?? null,
+                      timezone: scheduledFacts.timezone,
+                      isWorkday: scheduledFacts.isWorkday,
+                      holidayKind: scheduledFacts.holidayKind ?? null,
                     })
                     authoritativeContext = issued.context
                     authoritativeW7GroupShadow = issued.w7GroupShadow
@@ -3582,6 +3672,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
                       legacyProjection: 'read_served_row',
                     })
                   }
+                  await adapters.bindScheduledTimezoneContext?.(pluginTrx,{calculationId:authoritativeWritten.calculationId})
                   await trx.query(`RELEASE SAVEPOINT ${authoritativeSavepoint}`)
                   // §6.3 default: `inserted:true` ⇔ the pointer moved (an authoritative "generated
                   // absence day"), keeping `generated_count`'s meaning intact; a review outcome (or
@@ -3645,12 +3736,13 @@ export function createAttendanceLiveScheduledBoundaryV1(
           const rows = await adapters.applyScheduledAbsenceLegacy(pluginTrx, {
             orgId: orgKey,
             workDate,
-            timezone: input.timezone,
+            timezone: scheduledFacts.timezone,
             userIds: [userId],
           })
           const inserted = rows.length === 1
 
           if (isLegacyCompat) {
+            if (inserted) await adapters.bindScheduledTimezoneContext?.(pluginTrx,{calculationId:null})
             await sealAttendanceResultOperationV1(trx, identity, {
               responseSnapshot: { inserted },
             })
@@ -3680,7 +3772,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
               const resolution = await adapters.resolveScheduledCandidate(pluginTrx, {
                 orgId: orgKey,
                 userId,
-                timezone: input.timezone,
+                timezone: scheduledFacts.timezone,
                 calendarWorkDate: workDate,
               })
               const attribution = attributionFromResolution(resolution, {
@@ -3697,9 +3789,9 @@ export function createAttendanceLiveScheduledBoundaryV1(
                   userId,
                   workDate,
                   shiftId: attribution.value.shiftId,
-                  timezone: input.timezone,
-                  isWorkday: input.isWorkday !== false,
-                  holidayKind: input.holidayKind ?? null,
+                  timezone: scheduledFacts.timezone,
+                  isWorkday: scheduledFacts.isWorkday,
+                  holidayKind: scheduledFacts.holidayKind ?? null,
                 })
                 context = issued.context
                 w7GroupShadow = issued.w7GroupShadow
@@ -3766,6 +3858,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
             }
           }
 
+          if (inserted) await adapters.bindScheduledTimezoneContext?.(pluginTrx,{calculationId})
           await sealAttendanceResultOperationV1(trx, identity, {
             responseSnapshot: { inserted },
             resolvedCalculationId: calculationId,
@@ -3794,7 +3887,7 @@ export function createAttendanceLiveScheduledBoundaryV1(
       ),
     )
 
-    return { kind: 'w4', runId, rows: insertedRows, perUser }
+    return { kind: 'w4', runId, rows: insertedRows, perUser, ...counts() }
   }
 
   async function executeScheduledRun(
@@ -3823,5 +3916,5 @@ export function createAttendanceLiveScheduledBoundaryV1(
     )
   }
 
-  return { executeLivePunch, executeScheduledRun, recoverScheduledRun, probeOnlinePunchReplay, executeOnlinePunch }
+  return { resolvesScheduledTimezone: !!adapters.resolveScheduledMembers, executeLivePunch, executeScheduledRun, recoverScheduledRun, probeOnlinePunchReplay, executeOnlinePunch }
 }
