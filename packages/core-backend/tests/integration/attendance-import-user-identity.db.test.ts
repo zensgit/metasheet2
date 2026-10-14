@@ -100,6 +100,10 @@ describe('attendance import identity resolution against PostgreSQL', () => {
     { identifier: 'shared@example.test', username: 'ｓｈａｒｅｄ＠ｅｘａｍｐｌｅ．ｔｅｓｔ' },
     { identifier: 'shared@example.test', username: 'shared@example.test\t\r\n' },
     { identifier: 'δ@example.test', username: 'Δ@example.test' },
+    { identifier: 'i\u0307@example.test', username: 'İ@example.test' },
+    { identifier: 'ος@example.test', username: 'ΟΣ@example.test' },
+    { identifier: 'ß@example.test', username: 'ẞ@example.test' },
+    { identifier: '\u{10428}@example.test', username: '\u{10400}@example.test' },
     { identifier: '13800000000', mobile: '+86 (138) 0000-0000' },
     { identifier: '13800000000', mobile: '１３８００００００００' },
   ])('rejects different historical owners across alias fields ($identifier)', async ({ identifier, ...otherAlias }) => {

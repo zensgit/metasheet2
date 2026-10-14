@@ -99,6 +99,53 @@ function adoptCanonicalImportUserId(rawUserId, index) {
   }
 }
 
+function buildImportUserCandidateSql(usernameExpr, mobileExpr) {
+  // Unicode aliases need a candidate superset: JS and PostgreSQL can use different
+  // Unicode versions, and JS lower() can expand characters or use contextual casing.
+  // Optional username/mobile are real columns when present. A missing alias column
+  // retries through to_jsonb; a missing activity column or membership table does not.
+  return `SELECT u.id::text AS id, u.email,
+            ${usernameExpr} AS username, ${mobileExpr} AS mobile
+       FROM users u
+       JOIN user_orgs uo ON uo.user_id = u.id
+      WHERE uo.org_id = $1
+        AND uo.is_active = true
+        AND u.is_active = true
+        AND (
+          u.id = ANY($2::text[])
+          OR lower(btrim(normalize(COALESCE(u.email, ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
+          OR lower(btrim(normalize(COALESCE(${usernameExpr}, ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
+          OR translate(normalize(COALESCE(${mobileExpr}, ''), NFKC), $5::text || '-()', '') = ANY($4::text[])
+          OR translate(normalize(COALESCE(${mobileExpr}, ''), NFKC), $5::text || '-()+', '') = ANY($4::text[])
+          OR regexp_replace(translate(normalize(COALESCE(${mobileExpr}, ''), NFKC), $5::text || '-()', ''), '^[+]86', '') = ANY($4::text[])
+          OR (
+            octet_length(COALESCE(u.email, '')) <> length(COALESCE(u.email, ''))
+            OR octet_length(COALESCE(${usernameExpr}, '')) <> length(COALESCE(${usernameExpr}, ''))
+            OR octet_length(COALESCE(${mobileExpr}, '')) <> length(COALESCE(${mobileExpr}, ''))
+          )
+        )`
+}
+
+const IMPORT_USER_CANDIDATE_SQL = buildImportUserCandidateSql('u.username', 'u.mobile')
+const IMPORT_USER_CANDIDATE_SQL_JSON_ALIASES = buildImportUserCandidateSql(
+  "to_jsonb(u)->>'username'",
+  "to_jsonb(u)->>'mobile'",
+)
+
+function isOptionalAliasColumnError(error) {
+  if (error?.code !== '42703') return false
+  const message = String(error?.message ?? '')
+  if (message.includes('is_active')) return false
+  return message.includes('username') || message.includes('mobile')
+}
+
+function rethrowImportUserLookupError(error) {
+  if (error?.code === '42703' || error?.code === '42P01') {
+    throw Object.assign(new Error('ATTENDANCE_IMPORT_IDENTITY_SCHEMA_NOT_READY'), { code: error.code })
+  }
+  throw new Error('ATTENDANCE_IMPORT_IDENTITY_LOOKUP_FAILED')
+}
+
 async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers) {
   const index = new Map()
   const unique = []
@@ -115,37 +162,23 @@ async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers
 
   const lowerKeys = unique.map((value) => importUserIdentifierLookupKey(value))
   const mobileKeys = Array.from(new Set(unique.flatMap((value) => importUserMobileMatchKeys(value))))
-  // Alias columns are optional on older schemas. Authorization columns are required:
-  // never retry without the active user and active organization membership predicates.
-  // Non-ASCII aliases are a candidate superset: JS owns Unicode case folding, not the DB locale.
+  const params = [
+    orgId,
+    unique,
+    lowerKeys,
+    mobileKeys,
+    IMPORT_USER_IDENTIFIER_WHITESPACE,
+  ]
   let users
   try {
-    users = await db.query(
-      `SELECT u.id::text AS id, u.email,
-              to_jsonb(u)->>'username' AS username, to_jsonb(u)->>'mobile' AS mobile
-         FROM users u
-         JOIN user_orgs uo ON uo.user_id = u.id
-        WHERE uo.org_id = $1
-          AND uo.is_active = true
-          AND u.is_active = true
-          AND (
-            u.id = ANY($2::text[])
-            OR lower(btrim(normalize(COALESCE(u.email, ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
-            OR lower(btrim(normalize(COALESCE(to_jsonb(u)->>'username', ''), NFKC), $5::text) COLLATE "C") = ANY($3::text[])
-            OR translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()', '') = ANY($4::text[])
-            OR translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()+', '') = ANY($4::text[])
-            OR regexp_replace(translate(COALESCE(to_jsonb(u)->>'mobile', ''), $5::text || '-()', ''), '^[+]86', '') = ANY($4::text[])
-            OR octet_length(COALESCE(u.email, '')) <> length(COALESCE(u.email, ''))
-            OR octet_length(COALESCE(to_jsonb(u)->>'username', '')) <> length(COALESCE(to_jsonb(u)->>'username', ''))
-            OR octet_length(COALESCE(to_jsonb(u)->>'mobile', '')) <> length(COALESCE(to_jsonb(u)->>'mobile', ''))
-          )`,
-      [orgId, unique, lowerKeys, mobileKeys, IMPORT_USER_IDENTIFIER_WHITESPACE]
-    )
-  } catch (error) {
-    if (error?.code === '42703' || error?.code === '42P01') {
-      throw Object.assign(new Error('ATTENDANCE_IMPORT_IDENTITY_SCHEMA_NOT_READY'), { code: error.code })
+    try {
+      users = await db.query(IMPORT_USER_CANDIDATE_SQL, params)
+    } catch (error) {
+      if (!isOptionalAliasColumnError(error)) throw error
+      users = await db.query(IMPORT_USER_CANDIDATE_SQL_JSON_ALIASES, params)
     }
-    throw new Error('ATTENDANCE_IMPORT_IDENTITY_LOOKUP_FAILED')
+  } catch (error) {
+    rethrowImportUserLookupError(error)
   }
   const owners = buildImportUserOwnerIndexes(users)
   for (const raw of unique) {

@@ -647,7 +647,7 @@ function groupManagerProbeResult(
 }
 
 function importIdentifierQueryResult(sql: string, params: unknown[], identifier: string) {
-  if (!sql.includes("to_jsonb(u)->>'username' AS username")) return undefined
+  if (!sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) return undefined
   expect(sql).toContain('uo.org_id = $1')
   expect(sql).toContain('uo.is_active = true')
   expect(sql).toContain('u.is_active = true')
@@ -2203,7 +2203,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -2342,7 +2342,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -2617,7 +2617,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
 
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(identifier === importEmployeeId ? 0 : 1)
     expect(res.statusCode).toBe(200)
     expect(res.body).toMatchObject({
       ok: true,
@@ -2718,7 +2718,7 @@ describe('attendance UUID route validation', () => {
         const actor = actorContextQueryResult(sql)
         if (actor !== undefined) return actor
         if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
-        if (sql.includes("to_jsonb(u)->>'username' AS username")) {
+        if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
           expect(sql).toContain('uo.org_id = $1')
           expect(sql).toContain('uo.is_active = true')
           expect(sql).toContain('u.is_active = true')
@@ -2763,7 +2763,7 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
-      if (sql.includes("to_jsonb(u)->>'username' AS username")) {
+      if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
         throw Object.assign(new Error('private database error'), { code: '42703' })
       }
       throw new Error(`unexpected query: ${sql}`)
@@ -2774,7 +2774,7 @@ describe('attendance UUID route validation', () => {
     })
     expect(res.statusCode).toBe(503)
     expect(res.body).toEqual({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance scheduling tables missing' } })
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(1)
     expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
     expect(commitSyncImportPlan).not.toHaveBeenCalled()
@@ -2797,7 +2797,7 @@ describe('attendance UUID route validation', () => {
       const actor = actorContextQueryResult(sql)
       if (actor !== undefined) return actor
       if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
-      if (sql.includes("to_jsonb(u)->>'username' AS username")) {
+      if (sql.includes("normalize(COALESCE(u.email, ''), NFKC)")) {
         expect(params[0]).toBe('default')
         expect(params[1]).toEqual(['worker-1'])
         return []
@@ -2813,7 +2813,7 @@ describe('attendance UUID route validation', () => {
       ok: false,
       error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' },
     })
-    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(1)
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toHaveLength(1)
     expect(db.query.mock.calls.some(([sql]) => String(sql).includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
     expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
@@ -2841,7 +2841,7 @@ describe('attendance UUID route validation', () => {
       user: { id: 'scheduler-1', orgId: 'default' },
     })
     expect(res.statusCode).toBe(403)
-    expect(db.query.mock.calls.some(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toBe(false)
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes("normalize(COALESCE(u.email, ''), NFKC)"))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
   })
 

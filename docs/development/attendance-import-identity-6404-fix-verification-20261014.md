@@ -65,3 +65,11 @@
 压力用例改用随机自有组织及 UTC 默认规则；操作者和 500 名普通员工显式加入该组织；prepare、commit、retry、poll、rollback 使用相同组织选择器。5001 行规模、实际写入查询、零失败、幂等及回滚断言保留，查询加强组织条件。仓库 timeout 和生产时区源校验均未放宽，发布依赖 #6051 不变。完整主矩阵和最终 CI 以最终验证 MD 为准。
 
 夹具隔离迭代：独立复审先发现 prepare/poll selector 与 actor membership 漏配，已补齐。真实 PG 再拒绝 prefix+UUID 组织键（W4C0_ROLLOUT_ORG_KEY_INVALID），现用 canonical randomUUID 组织键，不更改生产解析器。中止的 v6（误混入独立矩阵）、v7（本地启动 hook 超时）、v10（非法组织夹具）均不计通过；其自有 PG 已停止。最终本地完整矩阵只抽取 workflow 第一条命令的 128 文件，多时区第二条命令保持独立环境；本地启动 hook 180 秒适配 Mac，单项 testTimeout 仍为 CI 的 30 秒。最终 CI 必须在仓库原 15 秒 hook 下通过。
+
+## 第二次远端协调（2026-10-15）
+
+远端新增 3cef519159，正常合并保留提交历史。其输入派生的单字符 Unicode translate 漏掉 İ 的多字符小写、希腊 final sigma 上下文、ẞ 和 Deseret 字符；独立复审四类 wrong-owner 反例成立，现全部加入真实 PG 回归（SQL 总 28 项）。保留现代 schema 直接列查询及可选列缺失 JSON fallback，每次都保留用户及成员活动过滤；恢复非 ASCII 候选超集，再由 JS 终判。未采用输入 Unicode 条件裁剪，避免 Node/PostgreSQL Unicode 版本差异漏 owner；也保留完整格式化手机号候选。
+
+未采用其旧 null-version 队列预事务 alias Map 缓存：此分支不作用于本次 V1 大 payload，不作为超时根因证据；移动读取时机扩大等待锁期间的撤权窗口。index 保持前一修复相同哈希，#6051 依赖不变。性能结论仅限实际合成演练，不把直接列查询视作并发授权绑定。
+
+旧同步版本的完整 128 文件 Mac 演练 v11 已在 HTTP 167 PASS 后出现独立 CLI 工具用例失败；新远端协调使该版本不再是最终候选，因此中止并停止 PG，不计主矩阵全绿。最终协调版重新迁移/重放和定向完整 HTTP/SQL；最终 head 的 CI 负责验证完整主矩阵及独立多时区矩阵。
