@@ -233,17 +233,13 @@
       </label>
       <label class="attendance__field" for="attendance-holiday-sync-auto-tz">
         <span>{{ tr('Auto sync timezone', '自动同步时区') }}</span>
-        <select id="attendance-holiday-sync-auto-tz" v-model="settingsForm.holidaySyncAutoTimezone" name="holidaySyncAutoTimezone">
-          <optgroup
-            v-for="group in holidaySyncTimezoneOptionGroups"
-            :key="group.id"
-            :label="tr(group.labelEn, group.labelZh)"
-          >
-            <option v-for="timezone in group.options" :key="timezone.value" :value="timezone.value">
-              {{ timezone.label }}
-            </option>
-          </optgroup>
-        </select>
+        <AttendanceTimezoneSelect
+          id="attendance-holiday-sync-auto-tz"
+          name="holidaySyncAutoTimezone"
+          v-model="settingsForm.holidaySyncAutoTimezone"
+          :tr="tr"
+          :groups="holidaySyncTimezoneOptionGroups"
+        />
       </label>
       <label class="attendance__field attendance__field--checkbox" for="attendance-holiday-sync-index">
         <span>{{ tr('Append day index', '追加节假日序号') }}</span>
@@ -287,6 +283,7 @@
 <script setup lang="ts">
 import AttendanceLocaleTimeInput from './AttendanceLocaleTimeInput.vue'
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
+import AttendanceTimezoneSelect from './AttendanceTimezoneSelect.vue'
 import { computed, ref, watch, type Ref } from 'vue'
 import AttendanceHolidayIndexHelp from './AttendanceHolidayIndexHelp.vue'
 import AttendanceOverrideAudienceFields from './AttendanceOverrideAudienceFields.vue'

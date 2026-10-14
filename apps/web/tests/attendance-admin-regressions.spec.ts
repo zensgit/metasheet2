@@ -4811,10 +4811,12 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
     expect(section).toBeTruthy()
-    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
+    const timezone = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="timezone"]')
     expect(timezone).toBeTruthy()
-    timezone!.value = 'Not/AZone'
-    timezone!.dispatchEvent(new Event('input', { bubbles: true }))
+    const timezoneQuery = section!.querySelector<HTMLInputElement>('[data-attendance-timezone-query]')
+    expect(timezoneQuery).toBeTruthy()
+    timezoneQuery!.value = 'Not/AZone'
+    timezoneQuery!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
     section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
     await flushUi(6)

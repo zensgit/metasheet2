@@ -5,6 +5,8 @@ import {
   buildTimezoneOptionGroups,
   formatTimezoneOffsetLabel,
   formatTimezoneOptionLabel,
+  parseTimezoneOffsetQuery,
+  timezoneChoiceMatchesQuery,
 } from '../src/views/attendance/attendanceTimezones'
 
 describe('attendanceTimezones', () => {
@@ -32,6 +34,31 @@ describe('attendanceTimezones', () => {
       value: 'Asia/Shanghai',
       label: 'Asia/Shanghai (UTC+08:00)',
     })
+  })
+
+  it('parses offset queries used by the shared timezone field', () => {
+    expect(parseTimezoneOffsetQuery('+0')).toBe(0)
+    expect(parseTimezoneOffsetQuery('-8')).toBe(-480)
+    expect(parseTimezoneOffsetQuery('+08')).toBe(480)
+    expect(parseTimezoneOffsetQuery('UTC+8')).toBe(480)
+    expect(parseTimezoneOffsetQuery('UTC-5')).toBe(-300)
+    expect(parseTimezoneOffsetQuery('0')).toBe(0)
+    expect(parseTimezoneOffsetQuery('+5:30')).toBe(330)
+    expect(parseTimezoneOffsetQuery('Shanghai')).toBeNull()
+  })
+
+  it('matches a timezone choice by offset equality or by city and IANA text', () => {
+    const shanghai = { value: 'Asia/Shanghai', label: '北京 (UTC+08:00)' }
+    const kolkata = { value: 'Asia/Kolkata', label: '加尔各答 (UTC+05:30)' }
+    expect(timezoneChoiceMatchesQuery(shanghai, '+8')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(shanghai, 'UTC+8')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(shanghai, '8')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(kolkata, '+5:30')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(shanghai, '8')).toBe(true)
+    expect(timezoneChoiceMatchesQuery({ value: 'Pacific/Kiritimati', label: 'UTC+14:00' }, '8')).toBe(false)
+    expect(timezoneChoiceMatchesQuery(shanghai, '北京')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(shanghai, 'shanghai')).toBe(true)
+    expect(timezoneChoiceMatchesQuery(shanghai, 'Not/AZone')).toBe(false)
   })
 
   it('groups timezone options into common and regional buckets', () => {

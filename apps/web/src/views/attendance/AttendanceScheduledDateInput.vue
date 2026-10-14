@@ -15,9 +15,13 @@
         type="button"
         :aria-expanded="pickerOpen"
         :aria-controls="`${fieldId}-picker`"
+        :aria-label="tr('Open calendar', '打开日历')"
         @click="togglePicker"
       >
-        {{ tr('Calendar', '日历') }}
+        <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+          <rect x="2" y="3" width="12" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.2" />
+          <path d="M2 6.5h12M5 2v2.5M11 2v2.5" fill="none" stroke="currentColor" stroke-width="1.2" />
+        </svg>
       </button>
     </div>
 
@@ -181,8 +185,18 @@ function selectDay(dateKey: string): void {
 }
 
 .attendance-date-input__toggle {
-  padding: 0 12px;
-  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  padding: 0;
+  color: #667085;
+}
+
+.attendance-date-input__toggle svg {
+  width: 14px;
+  height: 14px;
+  display: block;
 }
 
 .attendance-date-input__overlay {

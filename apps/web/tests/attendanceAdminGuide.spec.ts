@@ -53,12 +53,47 @@ describe('attendance admin guide', () => {
     container.remove()
   })
 
+  it('filters topics as the search text changes', async () => {
+    const { container, app } = await mount()
+    const search = container.querySelector<HTMLInputElement>('[data-attendance-guide-search]')
+    expect(search).toBeTruthy()
+    search!.value = '口径说明'
+    search!.dispatchEvent(new Event('input'))
+    await nextTick()
+    const topics = Array.from(container.querySelectorAll<HTMLButtonElement>('[data-attendance-guide-topic]'))
+      .map(button => button.getAttribute('data-attendance-guide-topic'))
+    expect(topics).toEqual(['reports'])
+    expect(container.querySelector('[data-attendance-guide-article="reports"]')?.textContent).toContain('口径说明')
+    search!.value = ''
+    search!.dispatchEvent(new Event('input'))
+    await nextTick()
+    expect(container.querySelector('[data-attendance-guide-topic="settings"]')).toBeTruthy()
+    app.unmount()
+    container.remove()
+  })
+
   it('switches articles from the topic list', async () => {
     const { container, app } = await mount({ activeSectionId: 'attendance-admin-settings' })
     expect(container.querySelector('[data-attendance-guide-article="settings"]')).toBeTruthy()
     container.querySelector<HTMLButtonElement>('[data-attendance-guide-topic="import"]')!.click()
     await nextTick()
     expect(container.querySelector('[data-attendance-guide-article="import"]')?.textContent).toContain('导入批次')
+    app.unmount()
+    container.remove()
+  })
+
+  it('lays the article out as intro, scenarios, steps, and FAQ with an outline', async () => {
+    const { container, app } = await mount()
+    const article = container.querySelector('[data-attendance-guide-article="overview"]')
+    expect(article?.querySelector('h1')?.textContent).toContain('总览')
+    expect(article?.querySelector('[data-attendance-guide-section="intro"]')?.textContent).toContain('功能简介')
+    expect(article?.querySelector('[data-attendance-guide-section="scenarios"]')?.textContent).toContain('适用场景')
+    expect(article?.querySelector('[data-attendance-guide-section="steps"]')?.textContent).toContain('操作流程')
+    expect(article?.querySelector('[data-attendance-guide-section="faq"]')?.textContent).toContain('常见问题')
+    expect(article?.querySelector('[data-attendance-guide-section="faq"]')?.textContent).toContain('答')
+    const outline = container.querySelector('[data-attendance-guide-outline]')
+    expect(outline?.textContent).toContain('功能简介')
+    expect(container.querySelector('[data-attendance-guide-group="configure"]')).toBeTruthy()
     app.unmount()
     container.remove()
   })

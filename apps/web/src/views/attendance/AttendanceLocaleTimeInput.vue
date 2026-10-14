@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { computed, useAttrs } from 'vue'
+import { computed, ref, useAttrs, watch } from 'vue'
 import { useLocale } from '../../composables/useLocale'
+import {
+  composeStoredTime,
+  formatLocaleTimeInput,
+  parseLocaleTimeInput,
+  parseStoredTime,
+} from './attendanceLocaleTime'
 
 defineOptions({ inheritAttrs: false })
 
@@ -17,100 +23,93 @@ const emit = defineEmits<{
 
 const attrs = useAttrs()
 const { isZh } = useLocale()
+const focused = ref(false)
+const draft = ref('')
+const listId = `attendance-locale-time-${Math.random().toString(36).slice(2, 10)}`
 
-const hours = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12']
-const minutes = Array.from({ length: 60 }, (_, index) => String(index).padStart(2, '0'))
+const suggestions = computed(() => {
+  const locale = isZh.value ? 'zh' : 'en'
+  const values: string[] = []
+  for (let hour = 0; hour < 24; hour += 1) {
+    const stored = `${String(hour).padStart(2, '0')}:00`
+    values.push(stored, formatLocaleTimeInput(stored, locale))
+  }
+  return values
+})
 
-function parseTime(value: string): { hour12: string; minute: string; period: 'am' | 'pm'; empty: boolean } {
-  const match = /^(\d{1,2}):(\d{2})$/.exec((value || '').trim())
-  if (!match) {
-    return { hour12: '', minute: '', period: 'am', empty: true }
-  }
-  const hour24 = Math.min(23, Math.max(0, Number(match[1])))
-  const minute = Math.min(59, Math.max(0, Number(match[2])))
-  const period: 'am' | 'pm' = hour24 >= 12 ? 'pm' : 'am'
-  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12
-  return {
-    hour12: String(hour12),
-    minute: String(minute).padStart(2, '0'),
-    period,
-    empty: false,
-  }
+function syncDraft(value: string): void {
+  draft.value = formatLocaleTimeInput(value, isZh.value ? 'zh' : 'en') || value || ''
 }
 
-const parts = computed(() => parseTime(props.modelValue || ''))
+watch(() => [props.modelValue, isZh.value] as const, ([value]) => {
+  if (!focused.value) syncDraft(value || '')
+}, { immediate: true })
 
-function emitTime(hour12: number, minute: number, period: 'am' | 'pm'): void {
-  let hour24 = hour12 % 12
-  if (period === 'pm') hour24 += 12
-  const next = `${String(hour24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
+const parts = computed(() => parseStoredTime(props.modelValue || ''))
+
+function emitStored(next: string, event?: Event): void {
   emit('update:modelValue', next)
+  if (event) emit('input', event)
 }
 
-function onHour(event: Event): void {
-  const hour12 = Number((event.target as HTMLSelectElement).value)
-  if (!Number.isFinite(hour12) || hour12 < 1) return
-  const minute = parts.value.empty ? 0 : Number(parts.value.minute)
-  emitTime(hour12, minute, parts.value.period)
+function onCanonicalInput(event: Event): void {
+  emitStored((event.target as HTMLInputElement).value, event)
 }
 
-function onMinute(event: Event): void {
-  const minute = Number((event.target as HTMLSelectElement).value)
-  const hour12 = parts.value.empty ? 12 : Number(parts.value.hour12)
-  emitTime(hour12, minute, parts.value.period)
+function commitDraft(event?: Event): void {
+  focused.value = false
+  const parsed = parseLocaleTimeInput(draft.value)
+  if (!parsed) {
+    syncDraft(props.modelValue || '')
+    return
+  }
+  emitStored(parsed, event)
+  syncDraft(parsed)
 }
 
 function onPeriod(event: Event): void {
   const period = (event.target as HTMLSelectElement).value === 'pm' ? 'pm' : 'am'
-  const hour12 = parts.value.empty ? 12 : Number(parts.value.hour12)
-  const minute = parts.value.empty ? 0 : Number(parts.value.minute)
-  emitTime(hour12, minute, period)
-}
-
-function onValueInput(event: Event): void {
-  emit('update:modelValue', (event.target as HTMLInputElement).value)
-  emit('input', event)
+  const current = parts.value ?? { hour12: 12, minute: 0, period: 'am' as const }
+  emitStored(composeStoredTime(current.hour12, current.minute, period), event)
 }
 </script>
 
 <template>
   <span class="attendance-locale-time" data-attendance-locale-time :data-locale-time="isZh ? 'zh' : 'en'">
     <input
-      :id="id"
-      :name="name"
       class="attendance-locale-time__value"
       type="text"
+      :name="name"
       :value="modelValue || ''"
       v-bind="attrs"
       tabindex="-1"
-      @input="onValueInput"
+      autocomplete="off"
+      @input="onCanonicalInput"
     />
-    <select
-      class="attendance-locale-time__part"
-      data-attendance-locale-time-hour
-      :aria-label="isZh ? '时' : 'Hour'"
-      :value="parts.hour12"
-      @change="onHour"
-    >
-      <option v-if="parts.empty" value=""></option>
-      <option v-for="hour in hours" :key="hour" :value="hour">{{ hour }}</option>
-    </select>
-    <span class="attendance-locale-time__sep" aria-hidden="true">:</span>
-    <select
-      class="attendance-locale-time__part attendance-locale-time__part--minute"
-      data-attendance-locale-time-minute
-      :aria-label="isZh ? '分' : 'Minute'"
-      :value="parts.minute"
-      @change="onMinute"
-    >
-      <option v-if="parts.empty" value=""></option>
-      <option v-for="minute in minutes" :key="minute" :value="minute">{{ minute }}</option>
-    </select>
+    <input
+      :id="id"
+      class="attendance-locale-time__typed"
+      data-attendance-locale-time-typed
+      type="text"
+      :list="listId"
+      :value="draft"
+      :placeholder="isZh ? '9:00 或 18:00' : '9:00 or 18:00'"
+      :aria-label="isZh ? '时间，可输入 9:00 或 18:00' : 'Time, type 9:00 or 18:00'"
+      autocomplete="off"
+      @focus="focused = true"
+      @input="draft = ($event.target as HTMLInputElement).value"
+      @change="commitDraft($event)"
+      @blur="commitDraft($event)"
+      @keydown.enter.prevent="commitDraft($event)"
+    />
+    <datalist :id="listId">
+      <option v-for="suggestion in suggestions" :key="suggestion" :value="suggestion" />
+    </datalist>
     <select
       class="attendance-locale-time__period"
       data-attendance-locale-time-period
       :aria-label="isZh ? '上午或下午' : 'AM or PM'"
-      :value="parts.period"
+      :value="parts?.period || 'am'"
       @change="onPeriod"
     >
       <option value="am">{{ isZh ? '上午' : 'AM' }}</option>
@@ -124,7 +123,7 @@ function onValueInput(event: Event): void {
   position: relative;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   width: fit-content;
   max-width: 100%;
 }
@@ -142,11 +141,8 @@ function onValueInput(event: Event): void {
   clip: rect(0, 0, 0, 0);
 }
 
-.attendance-locale-time__part,
+.attendance-locale-time__typed,
 .attendance-locale-time__period {
-  width: auto;
-  min-width: 0;
-  max-width: 4.5rem;
   min-height: 32px;
   padding: 4px 8px;
   border: 1px solid var(--ms-border, #d0d5dd);
@@ -156,13 +152,14 @@ function onValueInput(event: Event): void {
   font-size: 13px;
 }
 
-.attendance-locale-time__period {
-  max-width: 4.75rem;
+.attendance-locale-time__typed {
+  width: 8.5rem;
+  min-width: 0;
 }
 
-.attendance-locale-time__sep {
-  color: var(--ms-text-3, #667085);
-  font-size: 13px;
-  line-height: 1;
+.attendance-locale-time__period {
+  width: auto;
+  min-width: 0;
+  max-width: 4.75rem;
 }
 </style>
