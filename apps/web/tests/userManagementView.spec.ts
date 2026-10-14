@@ -1423,7 +1423,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
@@ -1528,7 +1528,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')
@@ -1580,7 +1580,7 @@ describe('UserManagementView', () => {
       throw new Error('Bravo detail button not found')
     }
     bravoDetailButton.click()
-    await waitForCondition(() => callLog.includes('/api/admin/users/user-2/access'))
+    await waitForCondition(() => container!.querySelector('input[placeholder="手机号，可留空"]') !== null)
 
     const inputs = Array.from(container!.querySelectorAll('input[type="text"]'))
     const mobileInput = inputs.find((candidate) => (candidate as HTMLInputElement).placeholder === '手机号，可留空')

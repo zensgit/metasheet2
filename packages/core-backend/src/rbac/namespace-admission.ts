@@ -1,12 +1,15 @@
 import { Logger } from '../core/logger'
-import { query } from '../db/pg'
+import { query, transaction } from '../db/pg'
 import { isDatabaseSchemaError } from '../utils/database-errors'
 
 const logger = new Logger('NamespaceAdmission')
 
 const PLATFORM_ADMIN_ROLE_ID = 'admin'
 const DELEGATED_ADMIN_ROLE_SUFFIX = '_admin'
-const allowDegradation = process.env.RBAC_OPTIONAL === '1'
+
+function rbacOptionalEnabled(): boolean {
+  return process.env.RBAC_OPTIONAL === '1'
+}
 
 const NON_NAMESPACED_PERMISSION_RESOURCES = new Set([
   'admin',
@@ -70,6 +73,17 @@ type UserNamespaceRoleContext = {
   controlledNamespaces: string[]
 }
 
+const EMPTY_ROLE_CONTEXT: UserNamespaceRoleContext = {
+  isAdmin: false,
+  roleIds: [],
+  controlledNamespaces: [],
+}
+
+export type NamespaceAdmissionCodeInspection = {
+  codes: string[]
+  unavailable: boolean
+}
+
 let readDegraded = false
 let admissionsTableUnavailable = false
 
@@ -88,7 +102,7 @@ function logReadDegradation(message: string): void {
 }
 
 function handleReadFailure(error: unknown, message: string): boolean {
-  if (isDatabaseSchemaError(error) && allowDegradation) {
+  if (isDatabaseSchemaError(error) && rbacOptionalEnabled()) {
     logReadDegradation(message)
     return true
   }
@@ -194,7 +208,10 @@ const USER_NAMESPACE_ADMISSIONS_SQL = `SELECT namespace, enabled, source, grante
        FROM user_namespace_admissions
        WHERE user_id = $1`
 
-async function fetchUserNamespaceRoleContext(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<UserNamespaceRoleContext> {
+async function readUserNamespaceRoleContext(
+  userId: string,
+  runQuery?: NamespaceAdmissionQueryFn,
+): Promise<{ context: UserNamespaceRoleContext; unavailable: boolean }> {
   try {
     const result = typeof runQuery === 'function'
       ? await runQuery(USER_NAMESPACE_ROLE_CONTEXT_SQL, [userId])
@@ -219,43 +236,56 @@ async function fetchUserNamespaceRoleContext(userId: string, runQuery?: Namespac
     }
 
     return {
-      isAdmin: roleIds.has(PLATFORM_ADMIN_ROLE_ID),
-      roleIds: uniqueSorted(roleIds),
-      controlledNamespaces: uniqueSorted(namespaces),
+      context: {
+        isAdmin: roleIds.has(PLATFORM_ADMIN_ROLE_ID),
+        roleIds: uniqueSorted(roleIds),
+        controlledNamespaces: uniqueSorted(namespaces),
+      },
+      unavailable: false,
     }
   } catch (error) {
     if (handleReadFailure(error, 'Namespace admission degraded: user_roles/role_permissions unavailable')) {
-      return {
-        isAdmin: false,
-        roleIds: [],
-        controlledNamespaces: [],
-      }
+      return { context: EMPTY_ROLE_CONTEXT, unavailable: true }
     }
     throw error
   }
 }
 
-async function fetchNamespaceAdmissions(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<Map<string, NamespaceAdmissionRow>> {
+async function readNamespaceAdmissions(
+  userId: string,
+  runQuery?: NamespaceAdmissionQueryFn,
+): Promise<{ admissions: Map<string, NamespaceAdmissionRow>; unavailable: boolean }> {
   try {
     const result = typeof runQuery === 'function'
       ? await runQuery(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
       : await query<NamespaceAdmissionRow>(USER_NAMESPACE_ADMISSIONS_SQL, [userId])
     admissionsTableUnavailable = false
-    return new Map(
-      (result.rows as NamespaceAdmissionRow[])
-        .map((row) => [normalizeNamespace(row.namespace), row] as const)
-        .filter(([namespace]) => Boolean(namespace)),
-    )
+    return {
+      admissions: new Map(
+        (result.rows as NamespaceAdmissionRow[])
+          .map((row) => [normalizeNamespace(row.namespace), row] as const)
+          .filter(([namespace]) => Boolean(namespace)),
+      ),
+      unavailable: false,
+    }
   } catch (error) {
     if (handleReadFailure(error, 'Namespace admission degraded: user_namespace_admissions unavailable')) {
       admissionsTableUnavailable = true
-      return new Map()
+      return { admissions: new Map(), unavailable: true }
     }
     throw error
   }
 }
 
-export async function listRoleNamespaces(roleId: string): Promise<string[]> {
+async function fetchUserNamespaceRoleContext(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<UserNamespaceRoleContext> {
+  return (await readUserNamespaceRoleContext(userId, runQuery)).context
+}
+
+async function fetchNamespaceAdmissions(userId: string, runQuery?: NamespaceAdmissionQueryFn): Promise<Map<string, NamespaceAdmissionRow>> {
+  return (await readNamespaceAdmissions(userId, runQuery)).admissions
+}
+
+export async function listRoleNamespaces(roleId: string, runQuery: NamespaceAdmissionQueryFn = query): Promise<string[]> {
   const namespaces = new Set<string>()
   const delegatedAdminNamespace = deriveDelegatedAdminNamespace(roleId)
   if (delegatedAdminNamespace && isNamespaceAdmissionControlledResource(delegatedAdminNamespace)) {
@@ -263,11 +293,11 @@ export async function listRoleNamespaces(roleId: string): Promise<string[]> {
   }
 
   try {
-    const result = await query<{ permission_code: string | null }>(
+    const result = await runQuery(
       'SELECT permission_code FROM role_permissions WHERE role_id = $1',
       [roleId],
     )
-    for (const row of result.rows) {
+    for (const row of result.rows as Array<{ permission_code: string | null }>) {
       const permissionNamespace = derivePermissionNamespace(row.permission_code ?? '')
       if (permissionNamespace) {
         namespaces.add(permissionNamespace)
@@ -282,12 +312,12 @@ export async function listRoleNamespaces(roleId: string): Promise<string[]> {
   return uniqueSorted(namespaces)
 }
 
-export async function userHasNamespaceRole(userId: string, namespace: string): Promise<boolean> {
+export async function userHasNamespaceRole(userId: string, namespace: string, runQuery: NamespaceAdmissionQueryFn = query): Promise<boolean> {
   const normalizedNamespace = normalizeNamespace(namespace)
   if (!normalizedNamespace) return false
 
   try {
-    const result = await query<{ allowed: boolean }>(
+    const result = await runQuery(
       `SELECT TRUE AS allowed
        FROM user_roles ur
        LEFT JOIN role_permissions rp ON rp.role_id = ur.role_id
@@ -347,16 +377,43 @@ export async function listUserNamespaceAdmissionSnapshots(userId: string): Promi
  * The two admission reads. On the pool they run concurrently, as they always have; on a caller's
  * transaction client (`runQuery`) they run one after the other on that connection.
  */
+async function readAdmissionInputs(
+  userId: string,
+  runQuery?: NamespaceAdmissionQueryFn,
+): Promise<{
+  roleContext: UserNamespaceRoleContext
+  roleContextUnavailable: boolean
+  admissions: Map<string, NamespaceAdmissionRow>
+  admissionsUnavailable: boolean
+}> {
+  if (typeof runQuery === 'function') {
+    const roleRead = await readUserNamespaceRoleContext(userId, runQuery)
+    const admissionRead = await readNamespaceAdmissions(userId, runQuery)
+    return {
+      roleContext: roleRead.context,
+      roleContextUnavailable: roleRead.unavailable,
+      admissions: admissionRead.admissions,
+      admissionsUnavailable: admissionRead.unavailable,
+    }
+  }
+  const [roleRead, admissionRead] = await Promise.all([
+    readUserNamespaceRoleContext(userId),
+    readNamespaceAdmissions(userId),
+  ])
+  return {
+    roleContext: roleRead.context,
+    roleContextUnavailable: roleRead.unavailable,
+    admissions: admissionRead.admissions,
+    admissionsUnavailable: admissionRead.unavailable,
+  }
+}
+
 async function fetchAdmissionInputs(
   userId: string,
   runQuery?: NamespaceAdmissionQueryFn,
 ): Promise<[UserNamespaceRoleContext, Map<string, NamespaceAdmissionRow>]> {
-  if (typeof runQuery !== 'function') {
-    return Promise.all([fetchUserNamespaceRoleContext(userId), fetchNamespaceAdmissions(userId)])
-  }
-  const roleContext = await fetchUserNamespaceRoleContext(userId, runQuery)
-  const admissions = await fetchNamespaceAdmissions(userId, runQuery)
-  return [roleContext, admissions]
+  const read = await readAdmissionInputs(userId, runQuery)
+  return [read.roleContext, read.admissions]
 }
 
 export async function userHasEffectiveNamespaceAccess(userId: string, namespace: string, runQuery?: NamespaceAdmissionQueryFn): Promise<boolean> {
@@ -377,19 +434,22 @@ export async function isPermissionAllowedByNamespaceAdmission(userId: string, pe
   return userHasEffectiveNamespaceAccess(userId, namespace)
 }
 
-export async function filterPermissionCodesByNamespaceAdmission(userId: string, permissionCodes: string[], runQuery?: NamespaceAdmissionQueryFn): Promise<string[]> {
-  const normalizedCodes = Array.from(new Set(
+function normalizePermissionCodes(permissionCodes: string[]): string[] {
+  return Array.from(new Set(
     permissionCodes
       .map((code) => normalizeString(code))
       .filter(Boolean),
   ))
-  if (normalizedCodes.length === 0) return []
+}
 
-  const [roleContext, admissions] = await fetchAdmissionInputs(userId, runQuery)
-
+function filterCodesByAdmissionInputs(
+  normalizedCodes: string[],
+  roleContext: UserNamespaceRoleContext,
+  admissions: Map<string, NamespaceAdmissionRow>,
+  admissionsUnavailable: boolean,
+): string[] {
   if (roleContext.isAdmin) return normalizedCodes
-  if (admissionsTableUnavailable) return normalizedCodes
-
+  if (admissionsUnavailable) return normalizedCodes
   return normalizedCodes.filter((permissionCode) => {
     const namespace = derivePermissionNamespace(permissionCode)
     if (!namespace) return true
@@ -397,11 +457,64 @@ export async function filterPermissionCodesByNamespaceAdmission(userId: string, 
   })
 }
 
+export async function filterPermissionCodesByNamespaceAdmission(userId: string, permissionCodes: string[], runQuery?: NamespaceAdmissionQueryFn): Promise<string[]> {
+  const normalizedCodes = normalizePermissionCodes(permissionCodes)
+  if (normalizedCodes.length === 0) return []
+
+  const [roleContext, admissions] = await fetchAdmissionInputs(userId, runQuery)
+  return filterCodesByAdmissionInputs(
+    normalizedCodes,
+    roleContext,
+    admissions,
+    admissionsTableUnavailable,
+  )
+}
+
+/**
+ * Inspection-only admission filter. Authorization (`filterPermissionCodesByNamespaceAdmission`)
+ * keeps its optional-schema fallback. This path reports `unavailable` when that fallback hid
+ * unread role-context or admission rows, so empty/fail-open codes are not shown as proven.
+ */
+export async function inspectPermissionCodesByNamespaceAdmission(
+  userId: string,
+  permissionCodes: string[],
+  runQuery?: NamespaceAdmissionQueryFn,
+): Promise<NamespaceAdmissionCodeInspection> {
+  const normalizedCodes = normalizePermissionCodes(permissionCodes)
+  if (normalizedCodes.length === 0) return { codes: [], unavailable: false }
+
+  const read = await readAdmissionInputs(userId, runQuery)
+  if (read.roleContextUnavailable || read.admissionsUnavailable) {
+    return { codes: [], unavailable: true }
+  }
+  return {
+    codes: filterCodesByAdmissionInputs(
+      normalizedCodes,
+      read.roleContext,
+      read.admissions,
+      false,
+    ),
+    unavailable: false,
+  }
+}
+
+/** Serialize bootstrap and admission/revocation writes even when no admission row exists.
+ * The caller MUST hold one transaction through the protected read and all dependent writes.
+ */
+export async function lockNamespaceAdmissionWrites(
+  executor: { query: (sql: string, params?: unknown[]) => Promise<unknown> },
+  userId: string,
+): Promise<void> {
+  await executor.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+    `namespace-admission:${userId}`,
+  ])
+}
+
 /**
  * Enable namespace admissions for a user through a caller-supplied query surface.
  *
- * `setUserNamespaceAdmission` below is the platform-admin endpoint's writer and runs on the
- * pool; provisioning needs the same write inside its own `transaction()`, so this variant
+ * `setUserNamespaceAdmission` below owns the platform-admin endpoint's transaction;
+ * provisioning needs the same write inside its own `transaction()`, so this variant
  * takes the executor. Statement shape mirrors the projected-governance writer in
  * `directory/directory-sync.ts`, which already performs this enable inside a transaction.
  *
@@ -452,59 +565,70 @@ export async function setUserNamespaceAdmission(options: {
   if (!userId) throw new Error('userId is required')
   if (!namespace) throw new Error('namespace is required')
 
-  await query(
-    `INSERT INTO user_namespace_admissions
-       (user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
-     ON CONFLICT (user_id, namespace)
-     DO UPDATE SET
-       enabled = EXCLUDED.enabled,
-       source = EXCLUDED.source,
-       granted_by = CASE
-         WHEN EXCLUDED.enabled THEN EXCLUDED.granted_by
-         ELSE user_namespace_admissions.granted_by
-       END,
-       updated_by = EXCLUDED.updated_by,
-       updated_at = NOW()`,
-    [
-      userId,
-      namespace,
-      options.enabled,
-      options.source ?? 'platform_admin',
-      options.enabled ? options.actorId ?? null : null,
-      options.actorId ?? null,
-    ],
-  )
+  await transaction(async (client) => {
+    await lockNamespaceAdmissionWrites(client, userId)
+    await client.query(
+      `INSERT INTO user_namespace_admissions
+         (user_id, namespace, enabled, source, granted_by, updated_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+       ON CONFLICT (user_id, namespace)
+       DO UPDATE SET
+         enabled = EXCLUDED.enabled,
+         source = EXCLUDED.source,
+         granted_by = CASE
+           WHEN EXCLUDED.enabled THEN EXCLUDED.granted_by
+           ELSE user_namespace_admissions.granted_by
+         END,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()`,
+      [
+        userId,
+        namespace,
+        options.enabled,
+        options.source ?? 'platform_admin',
+        options.enabled ? options.actorId ?? null : null,
+        options.actorId ?? null,
+      ],
+    )
+  })
 
   return listUserNamespaceAdmissionSnapshots(userId)
 }
 
+/** The caller holds lockNamespaceAdmissionWrites through membership DELETE and this witness. */
 export async function disableNamespaceAdmissionsWithoutRoles(options: {
   userId: string
   namespaces: string[]
   actorId?: string | null
   source?: string | null
-}): Promise<string[]> {
+  revokedRoleId?: string
+}, runQuery: NamespaceAdmissionQueryFn): Promise<string[]> {
   const userId = normalizeString(options.userId)
   if (!userId) return []
 
   const disabledNamespaces: string[] = []
-  for (const namespace of uniqueSorted(options.namespaces.map((item) => normalizeNamespace(item)))) {
+  // Removing the default role is an explicit opt-out even if another attendance role
+  // remains. Its admission stays as-is, but source records why bootstrap must not recreate it.
+  const defaultAttendanceRevoked = options.revokedRoleId === 'attendance_employee'
+  const namespaces = defaultAttendanceRevoked ? [...options.namespaces, 'attendance'] : options.namespaces
+  for (const namespace of uniqueSorted(namespaces.map((item) => normalizeNamespace(item)))) {
     if (!namespace) continue
-    if (await userHasNamespaceRole(userId, namespace)) continue
+    const hasRole = await userHasNamespaceRole(userId, namespace, runQuery)
+    if (hasRole && !(defaultAttendanceRevoked && namespace === 'attendance')) continue
 
-    await query(
-      `UPDATE user_namespace_admissions
-       SET enabled = FALSE,
-           source = $3,
-           updated_by = $4,
-           updated_at = NOW()
-       WHERE user_id = $1
-         AND namespace = $2
-         AND enabled = TRUE`,
-      [userId, namespace, options.source ?? 'role_unassigned', options.actorId ?? null],
+    await runQuery(
+      `INSERT INTO user_namespace_admissions
+         (user_id, namespace, enabled, source, updated_by, created_at, updated_at)
+       VALUES ($1, $2, FALSE, $3, $4, NOW(), NOW())
+       ON CONFLICT (user_id, namespace)
+       DO UPDATE SET
+         enabled = CASE WHEN $5::boolean THEN user_namespace_admissions.enabled ELSE FALSE END,
+         source = EXCLUDED.source,
+         updated_by = EXCLUDED.updated_by,
+         updated_at = NOW()`,
+      [userId, namespace, options.source ?? 'role_unassigned', options.actorId ?? null, hasRole],
     )
-    disabledNamespaces.push(namespace)
+    if (!hasRole) disabledNamespaces.push(namespace)
   }
 
   return disabledNamespaces

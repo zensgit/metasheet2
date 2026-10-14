@@ -2211,6 +2211,7 @@ const EXPECTED_ATTENDANCE_SUITES = Object.freeze([
   'tests/integration/attendance-report-cleaning-proposal.db.test.ts',
   'tests/integration/attendance-result-edit.test.ts',
   'tests/integration/attendance-schedule-dispatch.test.ts',
+  'tests/integration/attendance-self-service-revocation-atomicity.db.test.ts',
   'tests/integration/attendance-settlement-table-v1-5a.db.test.ts',
   'tests/integration/attendance-setup-readiness-w4-0.db.test.ts',
   'tests/integration/attendance-shift-flex-policy-migration.db.test.ts',
