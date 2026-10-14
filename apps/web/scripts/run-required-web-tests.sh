@@ -1627,6 +1627,7 @@ exec npx vitest run \
   attendanceEmployeeWorkspaceCommonIcons \
   attendanceEmployeeWorkspacePresentation \
   attendanceFeatureOverride \
+  attendanceLegacyPermissionPayload \
   attendanceLocaleControls.spec.ts \
   attendanceOverviewRequestReveal \
   attendancePayrollHelp.spec.ts \
@@ -1914,6 +1915,7 @@ exec npx vitest run \
   newTodoPill \
   pageShell \
   parallelBranchRunsView \
+  permissionManagementView \
   personal-view-client \
   public-multitable-form \
   recordReportPresentation.spec.ts \
@@ -2011,6 +2013,7 @@ exec npx vitest run \
   useAttendanceRequestTimezone \
   useAutoSumTotal \
   usePlmExportActions \
+  userManagementRoleMembership \
   userManagementView \
   uuid-no-bare-randomuuid \
   view-manager-multitable-contract \

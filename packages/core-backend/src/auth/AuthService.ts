@@ -12,6 +12,11 @@ import { secretManager } from '../security/SecretManager'
 import { getBcryptSaltRounds, getProductionAuthSecurityIssues, resolveRuntimeJwtSecret } from '../security/auth-runtime-config'
 import { invalidateUserPerms, isAdmin as isRbacAdmin, listUserPermissions } from '../rbac/service'
 import { supportsAttendanceSelfService } from '../config/product-mode'
+import {
+  ATTENDANCE_SELF_SERVICE_NAMESPACE,
+  decideAttendanceSelfServiceBackfill,
+  parseAttendanceSelfServiceAdmissionRows,
+} from './attendanceSelfServiceBackfill'
 import { isUserSessionRevoked } from './session-revocation'
 import { createUserSession, isUserSessionActive } from './session-registry'
 import {
@@ -22,6 +27,7 @@ import {
 } from './login-alias-service'
 import type { AliasQueryClient } from './login-alias-service'
 import { assignUserRoles } from '../rbac/role-assignment'
+import { lockNamespaceAdmissionWrites } from '../rbac/namespace-admission'
 import { evaluateUserAuthenticationGate } from './user-activation'
 import { isRecoveryAuthorityBusyError } from '../multitable/recovery-authorization-stability'
 
@@ -78,7 +84,7 @@ const ATTENDANCE_SELF_SERVICE_PERMISSIONS = ['attendance:read', 'attendance:writ
 // Postgres SQLSTATE 40001 (see recovery-authorization-stability.ts's
 // isRecoveryAuthorityBusyError / RECOVERY_AUTHORITY_BUSY_MARKER — reused here, not
 // re-derived). That is transient and retryable, so both retry sites below reuse these
-// constants: assignUserRoles retries its standalone INSERT a bounded number of times
+// constants: backfillAttendanceSelfService retries its locked transaction a bounded number of times
 // in-process (read-path backfill in resolveRbacProfile), and register() retries its WHOLE
 // user-creation transaction the same bounded number of times (O2-S1 — a 40001 aborts the
 // open transaction, so per-statement retry inside it is impossible; the retry unit is the
@@ -116,7 +122,7 @@ function isDuplicateIdentityConflict(error: unknown): boolean {
 }
 
 /**
- * Thrown by assignUserRoles when every retry against a recovery-authority-busy (40001) write
+ * Thrown when every retry against a recovery-authority-busy (40001) write
  * is exhausted. Named and exported so callers (and tests) can distinguish "role assignment is
  * retryable-failed" from every other error assignUserRoles used to swallow unconditionally.
  */
@@ -489,7 +495,7 @@ export class AuthService {
       // writes can fail fast with 40001 while recovery holds the per-subject lease; a 40001
       // aborts the whole open transaction (later statements would fail with 25P02), so the
       // bounded retry re-runs the WHOLE transaction, reusing the same retry-limit/backoff
-      // constants assignUserRoles has always used. Exhaustion throws the same named
+      // constants as the read-path backfill. Exhaustion throws the same named
       // UserRoleAssignmentRecoveryBusyError — but now with zero residue, unlike the
       // pre-slice shape where the user row stayed committed while the role was missing.
       const pool = poolManager.get()
@@ -751,18 +757,12 @@ export class AuthService {
     }
 
     if (this.shouldBackfillAttendanceSelfService(role, permissions)) {
-      // P23: this call is NOT inside a try today, and assignUserRoles can now throw
-      // (UserRoleAssignmentRecoveryBusyError) instead of always swallowing. resolveRbacProfile
-      // is reached from every getUserById/getUserByIdentifier read (login, verifyToken, ...),
-      // so an uncaught throw here would turn a transient recovery-busy lease into "user not
-      // found" for an otherwise-valid session on every authenticated request. Contain the
-      // failure locally: only merge the backfilled attendance permissions into the in-memory
-      // result once assignUserRoles has confirmed they persisted. If it did not persist, the
-      // permissions must not appear in the returned value even though this is a best-effort
-      // backfill — do not fabricate unpersisted permissions.
+      // Only merge after the locked eligibility read + role INSERT commit. Recovery-busy
+      // retries start a fresh transaction and re-read the revoke witness under the same lock.
       try {
-        await this.assignUserRoles(userId, [ATTENDANCE_SELF_SERVICE_ROLE_ID])
-        permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+        if (await this.backfillAttendanceSelfService(userId, role, permissions)) {
+          permissions = Array.from(new Set([...permissions, ...ATTENDANCE_SELF_SERVICE_PERMISSIONS]))
+        }
       } catch (error) {
         this.logger.warn(
           'Attendance self-service role backfill did not persist; omitting unpersisted permissions',
@@ -852,8 +852,8 @@ export class AuthService {
   }
 
   /**
-   * Single-shot user_roles insert against the given query surface (pool for the standalone
-   * retry loop in assignUserRoles, transaction client for register). Deliberately does NOT
+   * Single-shot user_roles insert against the caller's transaction (backfill or register).
+   * Deliberately does NOT
    * retry or invalidate caches — the caller owns both.
    */
   private async insertUserRolesOnce(
@@ -873,14 +873,36 @@ export class AuthService {
     }
   }
 
-  private async assignUserRoles(userId: string, roleIds: string[]): Promise<void> {
-    if (roleIds.length === 0) return
+  private async backfillAttendanceSelfService(
+    userId: string,
+    role: string,
+    permissions: string[],
+  ): Promise<boolean> {
+    const roleIds = [ATTENDANCE_SELF_SERVICE_ROLE_ID]
     const pool = poolManager.get()
     for (let attempt = 1; ; attempt++) {
       try {
-        await this.insertUserRolesOnce(pool, userId, roleIds)
-        invalidateUserPerms(userId)
-        return
+        const persisted = await pool.transaction(async (client) => {
+          await lockNamespaceAdmissionWrites(client, userId)
+          const result = await client.query(
+            `SELECT enabled, source
+               FROM user_namespace_admissions
+              WHERE user_id = $1 AND namespace = $2
+              LIMIT 1`,
+            [userId, ATTENDANCE_SELF_SERVICE_NAMESPACE],
+          )
+          if (decideAttendanceSelfServiceBackfill({
+            supportsProductMode: supportsAttendanceSelfService(process.env.PRODUCT_MODE),
+            role,
+            permissions,
+            admission: parseAttendanceSelfServiceAdmissionRows(result.rows),
+          }) !== 'bootstrap') return false
+
+          await this.insertUserRolesOnce(client, userId, roleIds)
+          return true
+        })
+        if (persisted) invalidateUserPerms(userId)
+        return persisted
       } catch (error) {
         if (isRecoveryAuthorityBusyError(error)) {
           if (attempt >= USER_ROLE_ASSIGNMENT_RETRY_LIMIT) {
@@ -891,9 +913,8 @@ export class AuthService {
           await delay(USER_ROLE_ASSIGNMENT_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1))
           continue
         }
-        // Unrelated errors keep the pre-existing behavior: warn and swallow.
-        this.logger.warn('User role assignment failed during registration', error instanceof Error ? error : undefined)
-        return
+        // Failed reads/writes roll back and must not fabricate attendance permissions.
+        throw error
       }
     }
   }

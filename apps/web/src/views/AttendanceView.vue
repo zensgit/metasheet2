@@ -10561,6 +10561,8 @@ import { canReviewAttendanceRequestRow } from './attendance/attendanceRequestRev
 import { shouldRevealOverviewRequestTools } from './attendance/attendanceOverviewRequestReveal'
 import { usePlugins } from '../composables/usePlugins'
 import { apiFetch as sendApiFetch } from '../utils/api'
+import { permissionUserPayloadUnavailable } from './adminPermissionGrantDisplay'
+import { readAttendanceLegacyPermissionPayload } from './attendance/readAttendanceLegacyPermissionPayload'
 import { provideAttendanceSessionGuard } from '../composables/useAttendanceSessionGuard'
 import { readErrorMessage } from '../utils/error'
 import { buildTimezoneOptions, formatTimezoneLabel } from '../utils/timezones'
@@ -22055,19 +22057,55 @@ function selectProvisionUser(user: AttendanceAdminUserSearchItem) {
   void loadProvisioningUser()
 }
 
+function clearProvisioningReadState(): void {
+  provisionPermissions.value = []
+  provisionRoles.value = []
+  provisionUserIsAdmin.value = false
+  provisionHasLoaded.value = false
+}
+
 async function fetchProvisioningUser(userId: string) {
   provisionRoles.value = []
-  const response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
+  let response: Response
+  try {
+    response = await apiFetch(`/api/permissions/user/${encodeURIComponent(userId)}`)
+  } catch (error) {
+    clearProvisioningReadState()
+    throw error
+  }
   if (response.status === 403) {
     adminForbidden.value = true
+    clearProvisioningReadState()
     throw new Error(tr('Admin permissions required', '需要管理员权限'))
   }
-  const data: PermissionUserResponse = await response.json()
-  if (!response.ok) {
+  let data: PermissionUserResponse | null = null
+  try {
+    data = await response.json() as PermissionUserResponse
+  } catch {
+    clearProvisioningReadState()
+    throw new Error(tr('Failed to load permissions', '加载权限失败'))
+  }
+  if (!response.ok || !data) {
+    clearProvisioningReadState()
     throw new Error(readErrorMessage(data, tr('Failed to load permissions', '加载权限失败')))
   }
-  provisionPermissions.value = Array.isArray(data.permissions) ? data.permissions : []
-  provisionUserIsAdmin.value = Boolean(data.isAdmin)
+  if (permissionUserPayloadUnavailable(data)) {
+    clearProvisioningReadState()
+    throw new Error(tr(
+      'Permission source is unavailable; an empty list is not a loaded grant set.',
+      '权限来源暂时不可用，空列表不能当作已加载的权限。',
+    ))
+  }
+  const parsed = readAttendanceLegacyPermissionPayload(data, userId)
+  if (!parsed) {
+    clearProvisioningReadState()
+    throw new Error(tr(
+      'Permission payload does not match the requested user or is not a permission array.',
+      '权限回读与所请求用户不一致，或不是权限数组，不能当作已加载。',
+    ))
+  }
+  provisionPermissions.value = parsed.permissions
+  provisionUserIsAdmin.value = parsed.isAdmin
 }
 
 async function fetchProvisioningUserAccess(userId: string) {
@@ -22100,6 +22138,7 @@ async function loadProvisioningUser() {
     await fetchProvisioningUserAccess(userId)
     setProvisionStatus(tr(`Loaded ${provisionPermissions.value.length} permission(s).`, `已加载 ${provisionPermissions.value.length} 项权限。`))
   } catch (error: any) {
+    clearProvisioningReadState()
     setProvisionStatus(readErrorMessage(error, tr('Failed to load permissions', '加载权限失败')), 'error')
   } finally {
     provisionLoading.value = false

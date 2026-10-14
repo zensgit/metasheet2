@@ -33,6 +33,7 @@ const namespaceAdmissionMocks = vi.hoisted(() => ({
   isNamespaceAdmissionControlledResource: vi.fn(),
   listRoleNamespaces: vi.fn(),
   listUserNamespaceAdmissionSnapshots: vi.fn(),
+  lockNamespaceAdmissionWrites: vi.fn(),
   normalizeNamespace: vi.fn(),
   roleIdMatchesNamespaces: vi.fn(),
   setUserNamespaceAdmission: vi.fn(),
@@ -135,6 +136,7 @@ vi.mock('../../src/rbac/namespace-admission', async () => ({
   isNamespaceAdmissionControlledResource: namespaceAdmissionMocks.isNamespaceAdmissionControlledResource,
   listRoleNamespaces: namespaceAdmissionMocks.listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots: namespaceAdmissionMocks.listUserNamespaceAdmissionSnapshots,
+  lockNamespaceAdmissionWrites: namespaceAdmissionMocks.lockNamespaceAdmissionWrites,
   normalizeNamespace: namespaceAdmissionMocks.normalizeNamespace,
   roleIdMatchesNamespaces: namespaceAdmissionMocks.roleIdMatchesNamespaces,
   setUserNamespaceAdmission: namespaceAdmissionMocks.setUserNamespaceAdmission,
@@ -154,6 +156,7 @@ vi.mock('../../src/attendance/w4c0-identity', () => attendanceW4Mocks)
 import { LoginAliasClaimError } from '../../src/auth/login-alias-service'
 import { LOGIN_NAME_RULE_MESSAGE } from '../../src/auth/login-name-rule'
 import { adminUsersRouter } from '../../src/routes/admin-users'
+import { transaction } from '../../src/db/pg'
 import { censusFile } from './lib/recovery-census-recorder'
 
 // O2-A1/P3-1 RUNTIME leg linkage: each recovery-census leg below records its
@@ -279,6 +282,8 @@ describe('admin-users routes', () => {
     ))
     namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockReset()
     namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockResolvedValue([])
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockReset()
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockResolvedValue(undefined)
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockReset()
     namespaceAdmissionMocks.isNamespaceAdmissionControlledResource.mockImplementation((namespace: string) => Boolean(namespace))
     namespaceAdmissionMocks.grantNamespaceAdmissions.mockClear()
@@ -3175,6 +3180,170 @@ describe('admin-users routes', () => {
       expect.stringContaining('SET role = CASE'),
       ['user-1', false],
     )
+  })
+
+  it.each(['platform', 'delegated'] as const)('%s unassign holds one transaction through lock, DELETE and revoke witness', async (entry) => {
+    rbacMocks.isAdmin.mockResolvedValue(true)
+    const events: string[] = []
+    const client = {
+      query: vi.fn(async (sql: string, params?: unknown[]) => {
+        if (sql.includes('DELETE FROM user_roles')) events.push('delete')
+        return pgMocks.query(sql, params)
+      }),
+    }
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('FROM users')) return { rows: [{ id: 'user-1', role: 'user', is_active: true, permissions: [] }] }
+      if (sql.includes('FROM roles WHERE')) return { rows: [{ id: 'attendance_employee' }] }
+      if (sql.includes('DELETE FROM user_roles')) return { rows: [{ user_id: 'user-1' }], rowCount: 1 }
+      return { rows: [] }
+    })
+    vi.mocked(transaction).mockImplementationOnce(async (callback) => {
+      events.push('begin')
+      const result = await callback(client)
+      events.push('commit')
+      return result
+    })
+    namespaceAdmissionMocks.lockNamespaceAdmissionWrites.mockImplementationOnce(async (executor, userId) => {
+      expect(executor).toBe(client)
+      expect(userId).toBe('user-1')
+      events.push('lock')
+    })
+    namespaceAdmissionMocks.disableNamespaceAdmissionsWithoutRoles.mockImplementationOnce(async (options, runQuery) => {
+      expect(runQuery).toBe(client.query)
+      expect(options).toEqual({
+        userId: 'user-1', namespaces: [], actorId: 'admin-1',
+        source: 'role_unassigned', revokedRoleId: 'attendance_employee',
+      })
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+      events.push('witness')
+      return []
+    })
+
+    const response = await invokeRoute('post', entry === 'platform'
+      ? '/api/admin/users/:userId/roles/unassign'
+      : '/api/admin/role-delegation/users/:userId/roles/:action(assign|unassign)', {
+      params: { userId: 'user-1', action: 'unassign' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(events).toEqual(['begin', 'lock', 'delete', 'witness', 'commit'])
+    expect(namespaceAdmissionMocks.listRoleNamespaces).toHaveBeenCalledWith('attendance_employee', client.query)
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
+  })
+
+  it('unassigns attendance_employee with DELETE rowCount 1 and reports roleHeld false', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['workflow:read'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ user_id: 'user-1' }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      changedRoleId: 'attendance_employee',
+      actorId: 'admin-1',
+      roleHeld: false,
+      membershipChanged: true,
+      roles: [],
+      permissions: ['workflow:read'],
+    })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('DELETE FROM user_roles'))).toBe(true)
+    expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-1')
+  })
+
+  it('reports leftover membership when unassign DELETE rowCount is 0 and the snapshot still holds the role', async () => {
+    rbacMocks.isAdmin
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    pgMocks.query
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [],
+        rowCount: 0,
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'user-1',
+          email: 'alpha@example.com',
+          name: 'Alpha',
+          role: 'user',
+          is_active: true,
+          is_admin: false,
+          last_login_at: null,
+          created_at: '2026-03-12T00:00:00.000Z',
+          updated_at: '2026-03-12T00:00:00.000Z',
+        }],
+      })
+      .mockResolvedValueOnce({
+        rows: [{ role_id: 'attendance_employee' }],
+      })
+
+    const response = await invokeRoute('post', '/api/admin/users/:userId/roles/unassign', {
+      params: { userId: 'user-1' },
+      body: { roleId: 'attendance_employee' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect((response.body as Record<string, any>).ok).toBe(true)
+    expect((response.body as Record<string, any>).data).toMatchObject({
+      changedRoleId: 'attendance_employee',
+      actorId: 'admin-1',
+      roleHeld: true,
+      membershipChanged: false,
+      roles: ['attendance_employee'],
+      permissions: ['attendance:read'],
+    })
   })
 
   it('lists role catalog with permissions and member counts', async () => {

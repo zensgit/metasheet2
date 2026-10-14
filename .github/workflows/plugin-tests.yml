@@ -1773,6 +1773,7 @@ jobs:
             tests/integration/directory-activation-source-lock.db.test.ts \
             tests/integration/login-alias-writers.db.test.ts \
             tests/integration/auth-register-atomicity.db.test.ts \
+            tests/integration/attendance-self-service-revocation-atomicity.db.test.ts \
             tests/integration/directory-deprovision-ledger-schema.db.test.ts \
             tests/integration/directory-deprovision-writer-ledger.db.test.ts \
             tests/integration/directory-deprovision-race-supersede.db.test.ts \
