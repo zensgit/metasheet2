@@ -124,7 +124,7 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     expect(result.status,result.body.error?.code).toBe(200)
     expect(await row(h.recordId)).toMatchObject({timezone:'UTC',work_date:workDate,first_in_at:h.original.first_in_at})
   })
-  it.each(['missed_check_out','leave'])('new %s and approval use the repaired context despite later assignment changes',async requestType=>{
+  it.each(['missed_check_out','missed_check_in','time_correction','leave'])('new %s and approval use the repaired context despite later assignment changes',async requestType=>{
     const h=await historical();await repair(h.evidence)
     const leaveTypeId=randomUUID()
     await live.pool.query("INSERT INTO attendance_leave_types(id,org_id,code,name) VALUES($1,$2,$3,'synthetic repair')",[leaveTypeId,live.orgId,'repair_'+leaveTypeId])
@@ -139,7 +139,7 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     expect(decided.status,decided.body.error?.code).toBe(200)
     expect(await row(h.recordId)).toMatchObject({timezone:'UTC',work_date:workDate})
   })
-  it.each(['missed_check_out','leave'])('old pending %s without timezone metadata adopts the repaired parent on approval',async requestType=>{
+  it.each(['missed_check_out','missed_check_in','time_correction','leave'])('old pending %s without timezone metadata adopts the repaired parent on approval',async requestType=>{
     const actor=await live.user()
     await live.pool.query("UPDATE users SET activation_status='activated' WHERE id=$1",[actor.userId])
     const leaveTypeId=randomUUID()
@@ -158,6 +158,21 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     expect(decided.status,decided.body.error?.code).toBe(200)
     expect(await row(h.recordId)).toMatchObject({timezone:'UTC',work_date:workDate})
     expect((await live.pool.query('SELECT metadata FROM attendance_requests WHERE id=$1',[requestId])).rows[0].metadata.timezoneContextV1).toBeUndefined()
+    if(requestType==='leave') {
+      const previous=process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED
+      process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED='true'
+      try {
+        const launched=await live.request('/api/attendance/requests/'+requestId+'/cancel-round?orgId='+live.orgId,actor.token,{reason:'synthetic repaired leave cancellation'})
+        expect(launched.status,launched.body.error?.code).toBe(201)
+        const cancelled=await live.request('/api/attendance/requests/'+requestId+'/cancel-round/actions?orgId='+live.orgId,admin.token,{action:'approve',expectedRoundId:launched.body.data.round.roundId})
+        expect(cancelled.status,cancelled.body.error?.code).toBe(200)
+        expect((await live.pool.query('SELECT status FROM attendance_requests WHERE id=$1',[requestId])).rows).toEqual([{status:'cancelled'}])
+        expect(await row(h.recordId)).toMatchObject({timezone:'UTC',work_date:workDate})
+      } finally {
+        if(previous===undefined) delete process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED
+        else process.env.ATTENDANCE_CANCEL_ROUND_ENTRY_ENABLED=previous
+      }
+    }
   })
   it('a closed overnight repair tail does not steal the next day check-in',async()=>{
     const h=await historical()

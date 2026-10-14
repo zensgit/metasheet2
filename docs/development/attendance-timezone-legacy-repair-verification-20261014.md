@@ -45,17 +45,19 @@ pnpm --filter @metasheet/core-backend exec tsx scripts/attendance-timezone-legac
 
 ## 验证与门槛
 
+这是随源码提交的验证快照；最后 CI 与独立旧程序演练结果以 PR 检查及本聊天交付的最终验证 MD 为准。代码级验证在 Mac mini 合成环境完成；合入 main 的新增任务筛选和异步导入计时变更由新 head CI 再验证。
+
 | 门槛 | 当前证据 |
 |---|---|
 | 原故障反例 | 隔离 HTTP/PG 已复现旧日期四入口 409、仅未来排班时缺默认恢复 503 |
 | 新核心单元及邻近测试 | 5 文件 100 项通过（预检参数化 fixture 修正后重跑 14 项通过） |
-| 新真实 HTTP/PG 与迁移重放 | 待最终汇总 |
+| 新真实 HTTP/PG 与迁移重放 | 52 项通过：缺默认恢复 14、旧记录修复 16、邻近读取 22；16 项包含真实 CLI preview/apply/replay、并发精确重放、持久 shadow 拒绝、跨夜次日上班、上下班补卡/更正和旧请假取消审批；新库迁移及再次重放通过 |
 | 实际旧程序上班→升级→下班 | 独立演练进行中，不以手插旧行替代 |
 | 前端及错误显示 | 4 文件 76 项通过；合成 Vue 组件截图，不等同目标环境端到端 |
-| 守卫 mutation | 待最终汇总 |
+| 守卫 mutation | 移除原记录 CAS、持久 rollout 拒绝、class00 锁、完整 repair frame 复核分别导致 1 / 4 / 1 / 1 项匹配测试失败；仅修改独立 probe 副本，原源码 SHA 未变 |
 | CI 接线/溯源/类型/validate | CI 接线 296 项通过；sealed-export-package-provenance、后端 tsc、pnpm validate:all 通过（9 项既有插件警告；lint 为 curated 范围） |
 | 独立复审 | Astra ultra 已审锁序、跨夜反例、默认恢复边界及 preflight；发现并修正假 READY 路径，最终测试证据待确认 |
-| Draft PR / 新 head CI | 待建立并运行 |
+| Draft PR / 新 head CI | [#6396](https://github.com/zensgit/metasheet2/pull/6396)，保持 Draft；已核对 13 项必需 CI 名单，运行中 |
 | 真实环境回填 / 合并 / 部署 / 启用 | 未执行，仍先批后动 |
 
 ## 回滚与发布前检查
