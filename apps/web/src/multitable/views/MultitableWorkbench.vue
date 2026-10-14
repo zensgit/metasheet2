@@ -461,6 +461,8 @@
         :opener-el="inspectorOpenerEl"
         :field-errors="inspectorFieldErrors"
         :sheet-id="workbench.activeSheetId.value ?? undefined"
+        :view-id="workbench.activeViewId.value ?? undefined"
+        :base-id="activeBaseId || undefined"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
