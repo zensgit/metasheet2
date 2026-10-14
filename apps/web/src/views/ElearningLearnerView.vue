@@ -78,7 +78,7 @@
         </div>
         <div>
           <dt>{{ elearningLabel('learner.deadline', isZh) }}</dt>
-          <dd>{{ course.assignment?.deadline || elearningLabel('learner.deadlineNone', isZh) }}</dd>
+          <dd :data-testid="`elearning-due-${course.courseId}`">{{ formatElearningDate(course.assignment?.deadline, isZh) || elearningLabel('learner.deadlineNone', isZh) }}</dd>
         </div>
         <div v-if="isElearningAssessmentCourse(course)">
           <dt>{{ elearningLabel('learner.videoProgress', isZh) }}</dt>
@@ -310,6 +310,7 @@ import {
   elearningLearnerNoMediaSubtitle,
   elearningLearnerVideoProgressLabel,
   elearningQuestionPoints,
+  formatElearningDate,
 } from './elearningLabels'
 
 const { isZh } = useLocale()

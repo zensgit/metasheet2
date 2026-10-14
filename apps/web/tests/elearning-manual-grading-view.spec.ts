@@ -53,6 +53,7 @@ vi.mock('../src/composables/useSessionOrg', async () => {
 import { ElearningApiError } from '../src/services/elearning'
 import { elearningSessionOrgPage } from '../src/composables/useElearningSessionOrg'
 import ElearningManualGradingView from '../src/views/ElearningManualGradingView.vue'
+import { formatElearningDate } from '../src/views/elearningLabels'
 
 const ATTEMPT = '88888888-8888-4888-8888-888888888888'
 const ATTEMPT_2 = '99999999-9999-4999-9999-999999999999'
@@ -210,6 +211,9 @@ describe('ElearningManualGradingView + ElearningManualGradingAttempt', () => {
     expect(q('elearning-grading-loading')).toBeFalsy()
     expect(q('elearning-grading-empty')).toBeFalsy()
     expect(q(`elearning-grading-row-${ATTEMPT}`)).toBeTruthy()
+    // F13: the submitted time goes through the shared formatter, never the raw ISO string.
+    expect(q(`elearning-grading-row-${ATTEMPT}`)?.textContent).toContain(formatElearningDate(SUBMITTED_AT, false))
+    expect(root.textContent).not.toContain(SUBMITTED_AT)
     expect((q('elearning-grading-previous') as HTMLButtonElement).disabled).toBe(true)
     expect((q('elearning-grading-next') as HTMLButtonElement).disabled).toBe(false)
 
@@ -225,7 +229,8 @@ describe('ElearningManualGradingView + ElearningManualGradingAttempt', () => {
     await flushUi()
     expect(h.getDetail).toHaveBeenCalledWith(ATTEMPT_2)
     expect(q('elearning-grading-attempt-learner')).toBeTruthy()
-    void root
+    expect(root.textContent).toContain(formatElearningDate(SUBMITTED_AT, false))
+    expect(root.textContent).not.toContain(SUBMITTED_AT)
   })
 
   it('renders an empty queue distinctly from a closed (404) or error (403/503) queue', async () => {
