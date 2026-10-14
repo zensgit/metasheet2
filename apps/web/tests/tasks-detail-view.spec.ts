@@ -1225,6 +1225,7 @@ describe('TasksView detail — reopen for every assignee (scope all)', () => {
     await reopenAllConfirmed(el)
     expect(shown(el, 'tasks-action-error')?.textContent).toBe('您没有权限修改此任务')
     expect(h_.getTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-detail-reopen-all-confirm')).toBeTruthy()
   })
 
   it('重启全部 asks first: the click alone sends nothing, and cancelling sends nothing and brings the button back', async () => {
