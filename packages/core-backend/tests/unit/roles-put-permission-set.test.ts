@@ -62,6 +62,15 @@ vi.mock('../../src/audit/audit', () => ({
 }))
 
 import { rolesRouter } from '../../src/routes/roles'
+import {
+  canonicalStockPrepRoleName,
+  RESERVED_ROLE_DISPLAY_NAME_OWNERS,
+  reservedRoleDisplayNameOwner,
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+  STOCK_PREP_BUILTIN_ROLE_IDS,
+  STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
+} from '../../src/services/stock-preparation-members'
+import { ELEARNING_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz20260826140000_add_elearning_role_templates'
 
 // --------------------------------------------------------------------------- fake DB
 
@@ -1597,5 +1606,157 @@ describe('DELETE of a namespace main-admin or admin-equivalent role — platform
     expect(db.nameOf('crm_lead')).toBe('CRM 组长')
     expect(db.membersOf('crm_lead')).toEqual(['user-c'])
     expect(db.permissionsOf('crm_lead')).toEqual(['crm:admin', 'crm:read'])
+  })
+})
+
+// ------------------------------------------------- reserved display names (#6348 follow-up)
+
+describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 form)', () => {
+  /** `admin` however it is spelled: case, full width, spaces / format characters, a built-in marker. */
+  const ADMIN_SPELLINGS = [
+    'admin', 'Admin', ' ADMIN ', '\uff41\uff44\uff4d\uff49\uff4e', 'ad\u200bmin', 'ad min', '\u3000admin\u00a0', '\ufeffadmin',
+    'admin（内置）', 'admin (built-in)', 'Admin(builtin)',
+  ]
+  const everyReservedName = () => RESERVED_ROLE_DISPLAY_NAME_OWNERS.flatMap(([ownerId, names]) => [ownerId, ...names])
+
+  function seedNamed(roleNames: Array<[string, string]>) {
+    return makeFakeDb({
+      catalog: CATALOG,
+      state: {
+        roleNames: new Map(roleNames),
+        roleUpdatedAt: new Map(roleNames.map(([id]) => [id, SEEDED_UPDATED_AT])),
+        rolePermissions: new Map(roleNames.map(([id]) => [id, ['roles:read']])),
+        members: new Map(roleNames.map(([id]) => [id, []])),
+      },
+    })
+  }
+
+  const refusalCode = (res: { body: unknown }) => (res.body as { error?: { code?: string } }).error?.code
+
+  it('the table covers every S8 name and id and 「审批与提交」, each canonical name has ONE owner, and the seeded platform roles are in it', () => {
+    const owners = new Map<string, string>()
+    for (const [ownerId, names] of RESERVED_ROLE_DISPLAY_NAME_OWNERS) {
+      for (const name of [ownerId, ...names]) {
+        const canonical = canonicalStockPrepRoleName(name)
+        expect(owners.get(canonical) ?? ownerId, name).toBe(ownerId)
+        owners.set(canonical, ownerId)
+      }
+    }
+    const listed = new Set(everyReservedName())
+    for (const name of [
+      ...STOCK_PREP_BUILTIN_ROLE_IDS,
+      ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+      ...STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
+      ...ELEARNING_ROLE_TEMPLATES.flatMap((template) => [template.id, template.name]),
+      'admin', '管理员', 'user', '普通用户',
+      'attendance_employee', 'Attendance Employee', 'attendance_approver', 'Attendance Approver',
+      'attendance_importer', 'Attendance Importer', 'attendance_admin', 'Attendance Admin',
+    ]) {
+      expect(listed.has(name), name).toBe(true)
+    }
+    expect(STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES).toEqual(['审批与提交'])
+    expect(reservedRoleDisplayNameOwner('审批与提交')).toBe('approvals_operator')
+    for (const name of ADMIN_SPELLINGS) expect(reservedRoleDisplayNameOwner(name), JSON.stringify(name)).toBe('admin')
+    for (const name of ['administrator', 'admins', '管理员甲', '审批与提交组', 'Operators', '备料角色']) {
+      expect(reservedRoleDisplayNameOwner(name), name).toBeNull()
+    }
+  })
+
+  it('POST: a NEW role may not be born as admin (any spelling) or under a built-in / reserved name — 400 ROLE_NAME_RESERVED before any statement, audited as create_denied, never echoed', async () => {
+    for (const name of [...ADMIN_SPELLINGS, ...everyReservedName(), ' 操作人员 ', '审批\u3000与提交', '一线填写（内置）', 'ＯＰＥＲＡＴＯＲ']) {
+      auditMocks.auditLog.mockClear()
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await postRole({ id: 'role-new', name, permissions: ['roles:read'] }, res)
+
+      expect([res.statusCode, refusalCode(res)], JSON.stringify(name)).toEqual([400, 'ROLE_NAME_RESERVED'])
+      expect(db.statements, JSON.stringify(name)).toEqual([])
+      expect(db.nameOf('role-new')).toBeUndefined()
+      expect(writeAuditEntries()).toEqual([])
+      expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['create_denied', 'ROLE_NAME_RESERVED']])
+      if (!/admin/i.test(name) && name.trim().length > 2) expect(JSON.stringify(res.body)).not.toContain(name.trim())
+    }
+  })
+
+  it('POST: the owner id may carry its own reserved name; an ordinary name is unaffected', async () => {
+    for (const [id, name] of [['approvals_operator', '审批与提交'], ['stock-prep_frontline', '操作人员'], ['role-new', '审批与提交组'], ['role-new-2', 'administrator']]) {
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await postRole({ id, name }, res)
+
+      expect(res.statusCode, `${id} ${name}`).toBe(200)
+      expect(db.nameOf(id)).toBe(name)
+    }
+  })
+
+  it('PUT: renaming a role to admin (any spelling) or to another role\'s reserved name is refused — 400, nothing written (name and codes kept)', async () => {
+    for (const name of [...ADMIN_SPELLINGS, '管理员', '操作人员', ' 审批与提交 ', 'Floor operator', 'stock-prep_admin', 'E-learning Admin']) {
+      auditMocks.auditLog.mockClear()
+      const db = seed()
+      wire(db)
+      const res = mockResponse()
+
+      await putRole({ name, permissions: ['roles:read', 'stock-prep:write'] }, res)
+
+      expect([res.statusCode, refusalCode(res)], JSON.stringify(name)).toEqual([400, 'ROLE_NAME_RESERVED'])
+      expect(db.nameOf('role-1')).toBe('备料角色')
+      expect(db.permissionsOf('role-1')).toEqual(['roles:read', 'stock-prep:read'])
+      expect(db.statements.some((s) => /^\s*(UPDATE|DELETE|INSERT)/i.test(s.sql)), JSON.stringify(name)).toBe(false)
+      expect(deniedAuditEntries().map((entry) => [entry.action, entry.meta.refusalCode])).toEqual([['update_denied', 'ROLE_NAME_RESERVED']])
+    }
+  })
+
+  it('PUT: the stored name sent back EXACTLY unchanged always passes (legacy names stay editable); any change of spelling toward admin is a rename and refused; the owner may rename to its own name', async () => {
+    const db = seedNamed([['legacy-x', 'Admin'], ['legacy-y', '操作人员'], ['stock-prep_frontline', '一线填写'], ['approvals_operator', 'approvals operator']])
+    wire(db)
+
+    const unchanged = mockResponse()
+    await putRole({ name: 'Admin', permissions: ['roles:read', 'stock-prep:read'] }, unchanged, 'legacy-x')
+    expect(unchanged.statusCode).toBe(200)
+    expect(db.permissionsOf('legacy-x')).toEqual(['roles:read', 'stock-prep:read'])
+
+    // The editor sends `name.trim()` (RoleManagementView.vue): a stored reserved name with edge
+    // whitespace, saved back trimmed by a permission-only edit, is no rename (fix round 1).
+    const padded = seedNamed([['legacy-p', ' Admin\u3000'], ['legacy-q', '\u00a0操作人员 ']])
+    wire(padded)
+    for (const [id, sent] of [['legacy-p', 'Admin'], ['legacy-q', '操作人员']] as const) {
+      const res = mockResponse()
+      await putRole({ name: sent, permissions: ['roles:read', 'stock-prep:read'] }, res, id)
+      expect(res.statusCode, id).toBe(200)
+      expect(padded.permissionsOf(id), id).toEqual(['roles:read', 'stock-prep:read'])
+    }
+    const paddedToLower = mockResponse()
+    await putRole({ name: 'admin' }, paddedToLower, 'legacy-p')
+    expect([paddedToLower.statusCode, refusalCode(paddedToLower)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    wire(db)
+
+    const nameOmitted = mockResponse()
+    await putRole({ permissions: ['roles:read'] }, nameOmitted, 'legacy-y')
+    expect(nameOmitted.statusCode).toBe(200)
+    expect(db.nameOf('legacy-y')).toBe('操作人员')
+
+    const toLowerAdmin = mockResponse()
+    await putRole({ name: 'admin' }, toLowerAdmin, 'legacy-x')
+    expect([toLowerAdmin.statusCode, refusalCode(toLowerAdmin)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    expect(db.nameOf('legacy-x')).toBe('Admin')
+
+    const ownerRename = mockResponse()
+    await putRole({ name: '操作人员' }, ownerRename, 'stock-prep_frontline')
+    expect(ownerRename.statusCode).toBe(200)
+    expect(db.nameOf('stock-prep_frontline')).toBe('操作人员')
+
+    const splitOwner = mockResponse()
+    await putRole({ name: '审批与提交' }, splitOwner, 'approvals_operator')
+    expect(splitOwner.statusCode).toBe(200)
+    expect(db.nameOf('approvals_operator')).toBe('审批与提交')
+
+    const notOwner = mockResponse()
+    await putRole({ name: '审批与提交' }, notOwner, 'legacy-y')
+    expect([notOwner.statusCode, refusalCode(notOwner)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    expect(db.nameOf('legacy-y')).toBe('操作人员')
   })
 })

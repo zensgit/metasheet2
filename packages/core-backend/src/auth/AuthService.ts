@@ -464,9 +464,18 @@ export class AuthService {
   // user created via this path).
   async register(email: string, password: string, name: string): Promise<User | null> {
     try {
-      // 检查邮箱是否已存在
-      const existingUser = await this.getUserByEmail(email)
-      if (existingUser) {
+      const pool = poolManager.get()
+      const normalizedEmail = email.trim().toLowerCase()
+      const existingIdentity = await pool.query(
+        `SELECT 1
+         FROM users
+         WHERE lower(email) = $1
+            OR ($2::boolean AND lower(username) = $1)
+            OR ($2::boolean AND regexp_replace(COALESCE(mobile, ''), '\\s+', '', 'g') = $3)
+         LIMIT 1`,
+        [normalizedEmail, !isAuthLoginAliasCutoverEnabled(), email.trim().replace(/\s+/g, '')],
+      )
+      if (existingIdentity.rows.length > 0) {
         return null
       }
 
@@ -498,7 +507,6 @@ export class AuthService {
       // constants as the read-path backfill. Exhaustion throws the same named
       // UserRoleAssignmentRecoveryBusyError — but now with zero residue, unlike the
       // pre-slice shape where the user row stayed committed while the role was missing.
-      const pool = poolManager.get()
       for (let attempt = 1; ; attempt++) {
         let newUser: User | null
         try {
@@ -528,7 +536,7 @@ export class AuthService {
           // else — the registration route maps null to 409 "User with this email
           // already exists" (routes/auth.ts). A duplicate-identity conflict (the alias
           // claim losing a concurrent-register race, or the users email unique index
-          // firing — the race twin of the getUserByEmail pre-check) keeps the
+          // firing — the race twin of the email existence pre-check) keeps the
           // historical swallow-to-null; the whole transaction has rolled back,
           // fail-closed. Every OTHER transaction failure now rethrows, so the route's
           // catch answers its real 500 instead of fabricating an "exists" 409.
@@ -557,7 +565,7 @@ export class AuthService {
       if (error instanceof UserRoleAssignmentRecoveryBusyError) throw error
       // O2-A3 (gate NIT-2): the same discrimination as the transaction catch — `null`
       // is reserved for "identity already taken". Anything else (bcrypt failure,
-      // getUserByEmail infrastructure error, rethrown transaction failures passing
+      // email existence-read failure, rethrown transaction failures passing
       // through) propagates to the route's own catch → its real 500, never a
       // fabricated "email already exists" 409.
       if (isDuplicateIdentityConflict(error)) return null
@@ -627,10 +635,6 @@ export class AuthService {
       this.logger.error('Get user by ID error', error instanceof Error ? error : undefined)
       return null
     }
-  }
-
-  private async getUserByEmail(email: string): Promise<(User & { password_hash: string }) | null> {
-    return this.getUserByIdentifier(email)
   }
 
   /**
