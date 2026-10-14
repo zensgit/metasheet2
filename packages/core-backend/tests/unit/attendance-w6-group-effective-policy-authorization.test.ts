@@ -1131,12 +1131,17 @@ describe('the real app assembly (index.ts) registers this route behind the globa
  */
 describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', () => {
   const SCOPE = new Set(['setupMiddleware', 'constructor'])
-  const FROZEN_SAFE_COUNT = 65
-  const FROZEN_SAFE_HASH = 'd38203a375e87cd93eb5b191a4dc6620984ab5f27a83fccf9b74d0fb280dc35f'
+  const FROZEN_SAFE_COUNT = 68
+  const FROZEN_SAFE_HASH = 'd4f6c884e8417a75c8ce7ed410c5a9ba5ca308d0b3717e181f94dba92cec04cc'
   // Frozen census as a LITERAL (owner + gate P2): deriving it live from the
   // same source it partitions makes UNKNOWN-empty vacuous (a novel this-use is
   // auto-added to SAFE). With the literal, a novel this-use lands in UNKNOWN.
   const FROZEN_SAFE_KEYS = new Set<string>([
+      // Host-owned TCP bookkeeping only: register listener, add socket, remove socket.
+      // Exact occurrences, not a property-name exemption or a live-derived allowlist.
+      "constructor//Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpServer//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>ExpressionStatement>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpSockets//#0",
+      "constructor//Block>ExpressionStatement>CallExpression>ArrowFunction>Block>ExpressionStatement>CallExpression>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.httpSockets//#0",
       // Exactly 13 host-owned dispatch closures, mounted after JWT (A7 below).
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#0",
       "setupMiddleware//Block>ExpressionStatement>CallExpression>CallExpression>ObjectLiteralExpression>PropertyAssignment>ArrowFunction>CallExpression>PropertyAccessExpression>PropertyAccessExpression//.automationReadManagement//#1",
@@ -1247,7 +1252,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       assertValidPartition(part, independentThisStarts(source, SCOPE))
     })
 
-    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level, count 52, sha256 pin) — a novel this-use is NOT auto-admitted', () => {
+    it('every SAFE occurrence is a member of the FROZEN literal census (occurrence-level count and sha256 pin) — a novel this-use is NOT auto-admitted', () => {
       expect(part.safe.length).toBe(FROZEN_SAFE_COUNT)
       for (const o of part.safe) expect(FROZEN_SAFE_KEYS.has(o.key)).toBe(true)
       const hash = createHash('sha256').update(part.safe.map((o) => o.key).sort().join('\n')).digest('hex')
@@ -1270,7 +1275,7 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
       expect(mpart.unknown.some((o) => o.shape === 'bare')).toBe(true)
     })
 
-    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime'])(
+    it.each(['yidaOwnerRuntime', 'yidaInitializationRuntime', 'httpServer', 'httpSockets'])(
       'a new use of the registered %s still lands in UNKNOWN rather than inheriting a property-name exemption',
       (property) => {
         const marker = 'private setupMiddleware(): void {'
@@ -1282,6 +1287,16 @@ describe('round 4 — four-bucket this-partition, UNKNOWN census fail-closed', (
         expect(mpart.unknown.some((occurrence) => occurrence.shape === `.${property}`)).toBe(true)
       },
     )
+
+    it('duplicating the constructor socket bookkeeping remains UNKNOWN despite the registered occurrence', () => {
+      const marker = 'this.httpSockets.add(socket)'
+      expect(indexText.split(marker)).toHaveLength(2)
+      const mutated = indexText.replace(marker, marker + '\n      ' + marker)
+      const msrc = ts.createSourceFile('mut.ts', mutated, ts.ScriptTarget.ES2022, true)
+      const mpart = buildThisPartition(msrc, FROZEN_SAFE_KEYS, SCOPE)
+      expect(mpart.total).toBe(independentThisStarts(source, SCOPE).length + 1)
+      expect(mpart.unknown.some((occurrence) => occurrence.shape === '.httpSockets')).toBe(true)
+    })
 
     it('P2-a LOAD-BEARING: a `this` inside an ordinary nested function ENTERS T (not pruned) and reds UNKNOWN — the reference set is not narrowed', () => {
       // Owner counterexample: pre-fix `inScope` EXCLUDED this `this` from T, so
