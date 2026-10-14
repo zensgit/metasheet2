@@ -12,10 +12,14 @@
   with a backed `aria-modal` (focus in on open, Tab trapped, Esc closes only this dialog, focus back to
   the opener on close).
 
-  DOUBLE CREATE: the submit button is disabled from the first click until both writes settle, and is
-  gone once the task exists. Closing and reopening while a request is out does NOT reset the dialog
-  (the guard and the form survive), so a reopen cannot fire a second create. The parent keys this
-  component by record id, so a late result for one record never paints onto another record's dialog.
+  DOUBLE CREATE: the state of a dispatch (in flight / created / failed) is kept per record OUTSIDE
+  this component (tasks/recordTaskDispatchRuns.ts, keyed by `runKey`), because the dialog can be
+  closed (取消 / × / Esc / overlay) or unmounted (the drawer moves to another record) while a create
+  is out. Any dialog for the same record then sees the create still out (submit disabled, no second
+  create) or the task it produced (the success panel and its link, not a blank form). Submit is also
+  disabled from the first click until both writes settle, and gone once the task exists. The record
+  link is captured when submit is clicked, so a late source-line write always names the record the
+  task was created from.
 
   WHAT LEAVES THE RECORD: the title the dispatcher sees and confirms (prefilled from the primary
   field's display text), the user ids they confirm (prefilled from a person field they choose), and the
@@ -61,6 +65,10 @@
             class="meta-dispatch__hint meta-dispatch__hint--warn"
             data-testid="record-task-dispatch-source-note-failed"
           >{{ l('dispatch.sourceNoteFailed') }}</p>
+        </div>
+
+        <div v-else-if="pendingElsewhere" class="meta-dispatch__body" data-testid="record-task-dispatch-pending">
+          <p class="meta-dispatch__hint" role="status">{{ l('dispatch.pendingElsewhere') }}</p>
         </div>
 
         <div v-else class="meta-dispatch__body">
@@ -113,6 +121,11 @@
               </li>
             </ul>
             <p v-else class="meta-dispatch__hint" data-testid="record-task-dispatch-assignees-empty">{{ l('dispatch.assigneesEmptyHint') }}</p>
+            <p
+              v-if="inactiveSkipped"
+              class="meta-dispatch__hint"
+              data-testid="record-task-dispatch-inactive-skipped"
+            >{{ l('dispatch.inactiveSkipped') }}</p>
             <div class="meta-dispatch__inline">
               <label class="meta-dispatch__sublabel" :for="controlId('assignee-input')">{{ l('dispatch.assigneeInputLabel') }}</label>
               <input
@@ -211,8 +224,17 @@ import { MtButton, MtIconButton } from '../ui'
 import { useLocale } from '../../composables/useLocale'
 import { recordLabel, type MetaRecordLabelKey } from '../utils/meta-record-labels'
 import { TASKS_EN, TASKS_ZH } from '../../tasks/labels'
-import { createTask, getTask, patchTask, type CompletionMode } from '../../tasks/tasksApi'
+import { createTask, getTask, patchTask, type CompletionMode, type CreateTaskInput } from '../../tasks/tasksApi'
 import { usableViewerTimeZone } from '../../tasks/tasksDraft'
+import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
+import {
+  beginDispatchRun,
+  forgetDispatchRun,
+  markDispatchRunSeen,
+  readDispatchRun,
+  settleDispatchRun,
+  type DispatchOutcome,
+} from '../../tasks/recordTaskDispatchRuns'
 import {
   DISPATCH_ASSIGNEE_LIMIT,
   addAssignees,
@@ -241,6 +263,8 @@ const props = withDefaults(defineProps<{
   personSummaries?: Record<string, PersonSummary[]>
   /** The record's deep link (ids only), written into the task description after the create. */
   recordLink: string
+  /** The record's dispatch-state key (`dispatchRunKey(sheetId, recordId)`). */
+  runKey: string
 }>(), {
   personFields: () => [],
   personSummaries: () => ({}),
@@ -267,8 +291,15 @@ const dueDate = ref('')
 const dueTime = ref('')
 const assigneeError = ref<MetaRecordLabelKey | null>(null)
 const formError = ref<MetaRecordLabelKey | null>(null)
-const submitting = ref(false)
-const created = ref<{ id: string; sourceNoteFailed: boolean } | null>(null)
+const inactiveSkipped = ref(false)
+// This record's dispatch state lives outside the component (see the header comment).
+const run = computed(() => readDispatchRun(props.runKey))
+const submitting = computed(() => run.value?.inFlight === true)
+const created = computed(() => run.value?.created ?? null)
+// Whether THIS dialog's form sent the create that is out. A dialog mounted later for the same record
+// has a form that was never sent, so it shows a pending note instead of that form.
+const sentHere = ref(false)
+const pendingElsewhere = computed(() => submitting.value && !sentHere.value)
 let previouslyFocused: HTMLElement | null = null
 
 watch(dueDate, (date) => {
@@ -295,12 +326,20 @@ function taskPath(id: string): string {
   return `/tasks/${encodeURIComponent(id)}`
 }
 
-/** Replace the assignee list with a person field's ids (capped at the limit, which is then said). */
+/** A person field's ids without the people the drawer marks as deactivated: the server refuses an
+ *  assignee who is not an active member, so filling one in would make the first submit fail. Such a
+ *  person can still be added by typing the id. */
+function activeIds(field: DispatchPersonField | undefined): string[] {
+  return field ? field.ids.filter((id) => !isInactive(id)) : []
+}
+
+/** Replace the assignee list with a person field's active ids (capped at the limit, which is then said). */
 function applyPersonField(fieldId: string): void {
   personFieldId.value = fieldId
   assigneeError.value = null
   const field = props.personFields.find((entry) => entry.id === fieldId)
-  const ids = field ? field.ids : []
+  const ids = activeIds(field)
+  inactiveSkipped.value = field !== undefined && ids.length < field.ids.length
   if (ids.length > DISPATCH_ASSIGNEE_LIMIT) {
     assignees.value = ids.slice(0, DISPATCH_ASSIGNEE_LIMIT)
     assigneeError.value = 'dispatch.assigneeLimit'
@@ -342,9 +381,10 @@ function resetForm(): void {
   dueDate.value = ''
   dueTime.value = ''
   formError.value = null
-  created.value = null
-  // Prefill from the first person field that holds anyone; the dispatcher can pick another or none.
-  const first = props.personFields.find((field) => field.ids.length > 0)
+  sentHere.value = false
+  // Prefill from the first person field that holds an active person; the dispatcher can pick another
+  // or none.
+  const first = props.personFields.find((field) => activeIds(field).length > 0)
   applyPersonField(first ? first.id : '')
 }
 
@@ -356,11 +396,43 @@ watch(() => props.visible, (open) => {
   }
   previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
   void nextTick(() => modalRef.value?.focus())
-  // A request still out keeps the dialog as it is: resetting here would re-enable submit and let a
-  // reopen send a second create for the same record.
-  if (submitting.value) return
+  const current = run.value
+  // A create for this record is still out: submit stays disabled (it reads the run). The dialog that
+  // sent it keeps the dispatcher's form; a dialog mounted since shows the pending note.
+  if (current?.inFlight) {
+    if (!sentHere.value) resetForm()
+    return
+  }
+  // A task was created and its result has not been on screen yet: show it, not a fresh form.
+  if (current?.created && !current.seen) return
+  if (current?.failure) {
+    if (!sentHere.value) resetForm()
+    formError.value = current.failure as MetaRecordLabelKey
+    forgetDispatchRun(props.runKey)
+    return
+  }
+  forgetDispatchRun(props.runKey)
   resetForm()
 }, { immediate: true })
+
+// A result that lands while this dialog is on screen is shown here: a created task's panel counts as
+// seen (the next open starts afresh), a failure becomes the form's message.
+watch(
+  () => [props.visible, run.value?.inFlight, run.value?.created, run.value?.failure] as const,
+  ([open]) => {
+    const current = run.value
+    if (!open || !current || current.inFlight) return
+    if (current.created) {
+      markDispatchRunSeen(props.runKey)
+      return
+    }
+    if (current.failure) {
+      formError.value = current.failure as MetaRecordLabelKey
+      forgetDispatchRun(props.runKey)
+    }
+  },
+  { immediate: true },
+)
 
 const CHECK_MESSAGES: Record<DispatchCheckCode, MetaRecordLabelKey> = {
   TITLE_REQUIRED: 'dispatch.titleRequired',
@@ -386,20 +458,46 @@ const FAILURE_MESSAGES: Record<DispatchFailure, MetaRecordLabelKey> = {
   FAILED: 'dispatch.errorFailed',
 }
 
-/** The second write: one source line into the new task's description. `false` when it did not land. */
-async function writeSourceLine(taskId: string, version: number | undefined): Promise<boolean> {
+/** The second write: one source line into the new task's description. `false` when it did not land.
+ *  `recordLink` is the link captured when submit was clicked, not the current prop. */
+async function writeSourceLine(taskId: string, version: number | undefined, recordLink: string): Promise<boolean> {
   let expectedVersion = version
   if (expectedVersion === undefined) {
     const read = await getTask(taskId)
     expectedVersion = read.kind === 'ok' ? read.task.version : undefined
   }
   if (expectedVersion === undefined) return false
-  const description = buildSourceLine(l('dispatch.sourceLinePrefix'), props.recordLink)
+  const description = buildSourceLine(l('dispatch.sourceLinePrefix'), recordLink)
   const patched = await patchTask(taskId, { expectedVersion, description })
   return patched.kind === 'ok'
 }
 
+/** Both writes. Never throws: a create that fails is a failure message; a create that succeeds is a
+ *  created task, with a note when only the second write did not land. */
+async function dispatch(input: CreateTaskInput, recordLink: string): Promise<DispatchOutcome> {
+  let taskId: string | null = null
+  try {
+    const result = await createTask(input)
+    if (result.kind !== 'ok') return { failure: FAILURE_MESSAGES[classifyDispatchFailure(result)] }
+    taskId = result.id
+    // The top bar's 待办任务 badge re-reads, as after a create on the task page.
+    notifyTasksChanged()
+    let sourceWritten = false
+    try {
+      sourceWritten = await writeSourceLine(result.id, result.version, recordLink)
+    } catch {
+      sourceWritten = false
+    }
+    return { created: { id: result.id, sourceNoteFailed: !sourceWritten } }
+  } catch {
+    return taskId === null
+      ? { failure: 'dispatch.errorFailed' }
+      : { created: { id: taskId, sourceNoteFailed: true } }
+  }
+}
+
 async function onSubmit(): Promise<void> {
+  // MtButton already drops clicks while it is disabled; this is the handler's own guard.
   if (submitting.value || created.value) return
   formError.value = null
   const built = buildDispatchCreateInput(
@@ -416,28 +514,13 @@ async function onSubmit(): Promise<void> {
     formError.value = CHECK_MESSAGES[built.code]
     return
   }
-  submitting.value = true
-  let taskId: string | null = null
-  try {
-    const result = await createTask(built.input)
-    if (result.kind !== 'ok') {
-      formError.value = FAILURE_MESSAGES[classifyDispatchFailure(result)]
-      return
-    }
-    taskId = result.id
-    let sourceWritten = false
-    try {
-      sourceWritten = await writeSourceLine(result.id, result.version)
-    } catch {
-      sourceWritten = false
-    }
-    created.value = { id: result.id, sourceNoteFailed: !sourceWritten }
-  } catch {
-    if (taskId === null) formError.value = 'dispatch.errorFailed'
-    else created.value = { id: taskId, sourceNoteFailed: true }
-  } finally {
-    submitting.value = false
-  }
+  // Captured now: the dialog may be closed, or the drawer moved to another record, before the
+  // writes settle, and the outcome still belongs to this record.
+  const runKey = props.runKey
+  const recordLink = props.recordLink
+  if (!beginDispatchRun(runKey)) return
+  sentHere.value = true
+  settleDispatchRun(runKey, await dispatch(built.input, recordLink))
 }
 
 function onCancel(): void {

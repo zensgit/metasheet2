@@ -508,7 +508,10 @@
       @submitted="onApprovalSubmitted"
     />
     <!-- 派发任务 dialog: a child with its own local open state, like the 送审 dialog above. Keyed by
-         record id so an in-flight dispatch for one record can never paint onto another record's dialog. -->
+         record id so each record gets a fresh form. The state of a dispatch that is out or done
+         (in flight / created) is NOT in the child: it is kept per record under `run-key`
+         (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
+         lose a result or allow a second create, and the dialog captures the record link at submit. -->
     <MetaRecordTaskDispatchDialog
       v-if="canDispatchTask && sheetId && viewId && record"
       :key="record.id"
@@ -517,6 +520,7 @@
       :person-fields="dispatchPersonFields"
       :person-summaries="personSummariesByField"
       :record-link="dispatchRecordLink"
+      :run-key="dispatchRunKey(sheetId, record.id)"
       @close="showTaskDispatch = false"
     />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
@@ -587,6 +591,8 @@ import { useAuth } from '../../composables/useAuth'
 import { useFeatureFlags } from '../../stores/featureFlags'
 import { canDispatchTasks } from '../../tasks/tasksAccess'
 import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
+import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { AppRouteNames } from '../../router/types'
 import { isNativePersonField } from '../utils/link-fields'
 import {
@@ -633,8 +639,9 @@ const props = withDefaults(defineProps<{
   canManageRecordPermissions?: boolean
   sheetId?: string
   /** 派发任务 (R-45 step 1): the ids of the record's deep link written into the task description.
-   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden (the frozen
-   *  MetaRecordDrawer shell does not pass it). `baseId` is added to the link when known. */
+   *  Without `viewId` there is no link to write, so the 派发任务 entry stays hidden. The deprecated
+   *  MetaRecordDrawer shell does not declare it (a caller of that shell that passes `view-id` still
+   *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
   viewId?: string
   baseId?: string
   apiClient?: MultitableApiClient
@@ -1522,11 +1529,12 @@ const dispatchDefaultTitle = computed(() => {
   return empty ? '' : primaryFieldDisplayText.value
 })
 // Native person fields the viewer can see (a legacy link-backed person stores record ids, not user
-// ids, so it is not offered), each with this record's valid user ids.
+// ids, so it is not offered), each with this record's valid user ids. "Can see" is both masks the
+// details tab applies: the field permission and the field's own hidden property.
 const dispatchPersonFields = computed<DispatchPersonField[]>(() => {
   const record = props.record
   if (!record) return []
-  return visibleRecordFields(props.fields, props.fieldPermissions)
+  return filterPropertyVisibleFields(visibleRecordFields(props.fields, props.fieldPermissions))
     .filter((field) => isNativePersonField(field))
     .map((field) => ({ id: field.id, name: field.name, ids: personValueAssigneeIds(record.data[field.id]) }))
 })

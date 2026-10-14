@@ -10,26 +10,29 @@
  *  1. Gating: the entry is hidden with the tasks feature off, without tasks:write, inside either
  *     focused shell, and without the view id the source link needs; shown otherwise.
  *  2. Prefill: the title is the primary field's display text (empty when the value is empty);
- *     assignees come from the first native person field holding anyone, the dispatcher can switch to
- *     another person field or none, and typed ids are validated, deduplicated and capped at 50.
+ *     assignees come from the first native person field holding an active person (deactivated people
+ *     are left out, but can be typed), the dispatcher can switch to another person field or none,
+ *     and typed ids are validated, deduplicated and capped at 50.
  *  3. A due date is required: no request is sent without one.
  *  4. Request bodies: the create body carries exactly title / completionMode / due keys / assignees,
  *     with no other record value; with no assignee the key is omitted. The second write is a PATCH
  *     carrying exactly `expectedVersion` and a description of one source line with the record link.
- *  5. In-flight guard: a second click and a close/reopen during the create send no second create.
+ *  5. In-flight guard: a second click, a close/reopen and a move to another record and back during
+ *     the create send no second create; a result that lands while the dialog is closed is shown on
+ *     the next open; a late source-line write names the record the task was created from.
  *  6. Error mapping: each known failure reads as its own plain message, and the inactive-member one
  *     names nobody.
- *  7. Success: a link to /tasks/:id; a failed description write still reports the task as created,
- *     with a note.
+ *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
+ *     still reports the task as created, with a note.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
 import { createMemoryHistory, createRouter } from 'vue-router'
 import MetaRecordInspector from '../src/multitable/components/MetaRecordInspector.vue'
-import MetaRecordDrawer from '../src/multitable/components/MetaRecordDrawer.vue'
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
-import { usableViewerTimeZone } from '../src/tasks/tasksDraft'
+import { onTasksChanged } from '../src/tasks/tasksBadgeBus'
+import { resetDispatchRunsForTests } from '../src/tasks/recordTaskDispatchRuns'
 import { canDispatchTasks, canSeeTasksEntry } from '../src/tasks/tasksAccess'
 import {
   DISPATCH_ASSIGNEE_LIMIT,
@@ -172,8 +175,9 @@ interface HarnessOptions {
   viewId?: string | undefined
   baseId?: string | undefined
   withRouter?: boolean
+  /** The router history base (the app served under a sub-path). */
+  routerBase?: string
   fieldPermissions?: Record<string, { visible: boolean; readOnly: boolean }>
-  component?: typeof MetaRecordInspector | typeof MetaRecordDrawer
 }
 
 function mountInspector(options: HarnessOptions = {}) {
@@ -183,7 +187,7 @@ function mountInspector(options: HarnessOptions = {}) {
   const app = createApp({
     data: () => state,
     render() {
-      return h((options.component ?? MetaRecordInspector) as never, {
+      return h(MetaRecordInspector as never, {
         visible: true,
         record: (this as unknown as typeof state).record,
         fields: options.fields ?? FIELDS,
@@ -207,7 +211,7 @@ function mountInspector(options: HarnessOptions = {}) {
   })
   if (options.withRouter) {
     const router = createRouter({
-      history: createMemoryHistory(),
+      history: createMemoryHistory(options.routerBase),
       routes: [
         { path: '/', name: 'home', component: { template: '<div />' } },
         { path: '/multitable/:sheetId/:viewId', name: 'multitable', component: { template: '<div />' } },
@@ -285,6 +289,7 @@ afterEach(() => {
     try { mountedApps.pop()!.unmount() } catch { /* already unmounted */ }
   }
   document.body.innerHTML = ''
+  resetDispatchRunsForTests()
   useLocale().setLocale('en')
 })
 
@@ -304,6 +309,12 @@ describe('tasks entry predicate (tasks/tasksAccess.ts)', () => {
     expect(canDispatchTasks(probe({ perms: ['tasks:read'] }))).toBe(false)
     expect(canDispatchTasks(probe({ att: true }))).toBe(false)
     expect(canDispatchTasks(probe({ plm: true }))).toBe(false)
+  })
+
+  it('dispatch builds on the top-bar rule: a probe without tasks:read keeps it hidden as well', () => {
+    // In the app tasks:write implies tasks:read; this synthetic probe only shows that the dispatch
+    // rule reads the top-bar rule instead of restating part of it.
+    expect(canDispatchTasks(probe({ perms: ['tasks:write'] }))).toBe(false)
   })
 
   it('the top-bar entry keeps its rule: the feature and tasks:read', () => {
@@ -422,14 +433,11 @@ describe('record drawer 派发任务 entry (gating)', () => {
     expect(dispatchItem()).toBeNull()
   })
 
-  it('is hidden without a view id to build the source link (the frozen drawer shell passes none)', async () => {
+  it('is hidden without a view id to build the source link', async () => {
     const { container } = mountInspector({ viewId: undefined })
     await flushUi()
     await openKebab(container)
     expect(dispatchItem()).toBeNull()
-    const shell = mountInspector({ component: MetaRecordDrawer })
-    await flushUi()
-    expect(shell.container.querySelector('[data-testid="record-inspector-menu"]')).not.toBeNull()
   })
 
   it('the workbench hands the inspector the view and base ids the source link is built from', async () => {
@@ -449,14 +457,58 @@ describe('派发任务 dialog: prefill', () => {
     await flushUi()
     await openDialog(container)
     expect(q<HTMLInputElement>('title')!.value).toBe('Alpha')
-    expect(assigneeIds()).toEqual(['usr_a', 'usr_b'])
-    // Display names come from the drawer's own person summaries; an inactive person is marked.
+    expect(q<HTMLSelectElement>('person-field')!.value).toBe('fld_owner')
+    // Display names come from the drawer's own person summaries.
+    expect(assigneeIds()).toEqual(['usr_a'])
     const chips = document.querySelector('[data-testid="record-task-dispatch-assignees"]')!.textContent ?? ''
     expect(chips).toContain('Person A')
-    expect(chips).toContain('已停用')
     // Only native person fields are offered (the legacy link-backed one stores record ids).
     const options = Array.from(q<HTMLSelectElement>('person-field')!.options).map((o) => o.value)
     expect(options).toEqual(['', 'fld_owner', 'fld_reviewer'])
+    // The hint is scoped to the dispatch itself: a later due reminder is outside what it promises.
+    expect(q('access-note')!.textContent).toContain('派发时不会通知负责人')
+  })
+
+  it('leaves a deactivated person out of the prefill, says so, and still lets the dispatcher type them', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(assigneeIds()).toEqual(['usr_a'])
+    expect(q('inactive-skipped')!.textContent).toContain('已停用的人员未带入')
+    setInput('assignee-input', 'usr_b')
+    q<HTMLButtonElement>('assignee-add')!.click()
+    await flushUi()
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_b'])
+    // A typed deactivated person is marked on their chip.
+    const chip = document.querySelector('[data-assignee-id="usr_b"]')!.textContent ?? ''
+    expect(chip).toContain('Person B')
+    expect(chip).toContain('已停用')
+    // A field with nobody deactivated says nothing.
+    setSelect('person-field', 'fld_reviewer')
+    await flushUi()
+    expect(q('inactive-skipped')).toBeNull()
+  })
+
+  it('skips a first person field that holds nobody and prefills from the next one', async () => {
+    serveTasks()
+    const record = { ...RECORD, data: { ...RECORD.data, fld_owner: [] } } as unknown as MetaRecord
+    const { container } = mountInspector({ record })
+    await flushUi()
+    await openDialog(container)
+    expect(q<HTMLSelectElement>('person-field')!.value).toBe('fld_reviewer')
+    expect(assigneeIds()).toEqual(['usr_c'])
+  })
+
+  it('caps a person field of more than 50 people at 50 and says so', async () => {
+    serveTasks()
+    const many = Array.from({ length: 60 }, (_, i) => `usr_m${i}`)
+    const record = { ...RECORD, data: { ...RECORD.data, fld_owner: many } } as unknown as MetaRecord
+    const { container } = mountInspector({ record })
+    await flushUi()
+    await openDialog(container)
+    expect(assigneeIds()).toEqual(many.slice(0, DISPATCH_ASSIGNEE_LIMIT))
+    expect(q('assignee-error')!.textContent).toContain('负责人最多 50 人')
   })
 
   it('lets the dispatcher switch to another person field or none', async () => {
@@ -483,6 +535,17 @@ describe('派发任务 dialog: prefill', () => {
     expect(assigneeIds()).toEqual(['usr_c'])
   })
 
+  it('does not offer a person field hidden by its own property (the details tab hides it too)', async () => {
+    serveTasks()
+    const fields = FIELDS.map((field) => (field.id === 'fld_owner' ? { ...field, property: { hidden: true } } : field)) as MetaField[]
+    const { container } = mountInspector({ fields })
+    await flushUi()
+    await openDialog(container)
+    const options = Array.from(q<HTMLSelectElement>('person-field')!.options).map((o) => o.value)
+    expect(options).toEqual(['', 'fld_reviewer'])
+    expect(assigneeIds()).toEqual(['usr_c'])
+  })
+
   it('starts with an empty title when the primary value is empty (no placeholder dash)', async () => {
     serveTasks()
     const record = { ...RECORD, data: { ...RECORD.data, fld_title: '' } } as unknown as MetaRecord
@@ -500,15 +563,15 @@ describe('派发任务 dialog: prefill', () => {
     const { container } = mountInspector()
     await flushUi()
     await openDialog(container)
-    setInput('assignee-input', 'usr_x, usr_a')
+    setInput('assignee-input', 'usr_x, usr_a usr_b')
     q<HTMLButtonElement>('assignee-add')!.click()
     await flushUi()
-    expect(assigneeIds()).toEqual(['usr_a', 'usr_b', 'usr_x'])
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x', 'usr_b'])
     setInput('assignee-input', 'usr_y, 用户')
     q<HTMLButtonElement>('assignee-add')!.click()
     await flushUi()
     expect(q('assignee-error')!.textContent).toContain('用户 ID 格式不正确')
-    expect(assigneeIds()).toEqual(['usr_a', 'usr_b', 'usr_x'])
+    expect(assigneeIds()).toEqual(['usr_a', 'usr_x', 'usr_b'])
     setInput('assignee-input', Array.from({ length: 48 }, (_, i) => `u${i}`).join(','))
     q<HTMLButtonElement>('assignee-add')!.click()
     await flushUi()
@@ -530,27 +593,38 @@ describe('派发任务 dialog: due date and request bodies', () => {
 
   it('sends exactly the confirmed title, assignees, mode and due keys; then the source line under expectedVersion', async () => {
     serveTasks()
-    const { container } = mountInspector()
-    await flushUi()
-    await openDialog(container)
-    setInput('title', '  Alpha follow-up  ')
-    setSelect('mode', 'any')
-    setInput('due-date', '2031-05-06')
-    await flushUi()
-    setInput('due-time', '09:30')
-    await submit()
+    // The viewer's zone is stubbed to a non-UTC name, so the cell tells the create form's zone helper
+    // apart from a hard-coded 'UTC' on a UTC machine (CI) as well.
+    const realResolvedOptions = Intl.DateTimeFormat.prototype.resolvedOptions
+    const zoneSpy = vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockImplementation(function (this: Intl.DateTimeFormat) {
+      return { ...realResolvedOptions.call(this), timeZone: 'Asia/Shanghai' }
+    })
+    try {
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      setInput('title', '  Alpha follow-up  ')
+      setSelect('mode', 'any')
+      setInput('assignee-input', 'usr_x')
+      q<HTMLButtonElement>('assignee-add')!.click()
+      setInput('due-date', '2031-05-06')
+      await flushUi()
+      setInput('due-time', '09:30')
+      await submit()
+    } finally {
+      zoneSpy.mockRestore()
+    }
 
     const creates = tasksCalls('POST', '/api/tasks')
     expect(creates).toHaveLength(1)
     expect(creates[0][1]).toEqual({
       title: 'Alpha follow-up',
-      assignees: ['usr_a', 'usr_b'],
+      assignees: ['usr_a', 'usr_x'],
       completionMode: 'any',
       dueDate: '2031-05-06',
       dueTime: '09:30',
-      timeZone: usableViewerTimeZone(),
+      timeZone: 'Asia/Shanghai',
     })
-    expect(usableViewerTimeZone()).not.toBe('')
     // No other record value reaches the wire.
     expect(JSON.stringify(mocks.apiFetch.mock.calls)).not.toContain('internal note')
 
@@ -576,9 +650,19 @@ describe('派发任务 dialog: due date and request bodies', () => {
     expect(Object.keys(creates[0][1]).sort()).toEqual(['completionMode', 'dueDate', 'timeZone', 'title'])
   })
 
-  it('builds the source link through the router when there is one', async () => {
+  it('builds the source link through the router, so a sub-path deploy keeps its base path', async () => {
     serveTasks()
-    const { container } = mountInspector({ withRouter: true, baseId: undefined })
+    const { container } = mountInspector({ withRouter: true, routerBase: '/app/' })
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(tasksCalls('PATCH', '/api/tasks/')[0][1].description).toBe('来源：多维表记录 /app/multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
+  })
+
+  it('leaves baseId out of the link when the base is not known', async () => {
+    serveTasks()
+    const { container } = mountInspector({ baseId: undefined })
     await flushUi()
     await openDialog(container)
     setInput('due-date', '2031-05-06')
@@ -612,7 +696,8 @@ describe('派发任务 dialog: in-flight guard', () => {
     expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
     q<HTMLButtonElement>('submit')!.click()
     await flushUi()
-    // Even with the DOM attribute forced off, a click while the create is out sends nothing.
+    // With the DOM attribute forced off, a click while the create is out still sends nothing. This
+    // step exercises MtButton's own check of its `disabled` prop; it does not reach onSubmit.
     const forced = q<HTMLButtonElement>('submit')!
     forced.disabled = false
     forced.click()
@@ -624,6 +709,8 @@ describe('派发任务 dialog: in-flight guard', () => {
     expect(dialog()).toBeNull()
     await openDialog(container)
     expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
+    // The dialog that sent the create keeps the dispatcher's form across the reopen.
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
     q<HTMLButtonElement>('submit')!.click()
     await flushUi()
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
@@ -632,6 +719,95 @@ describe('派发任务 dialog: in-flight guard', () => {
     expect(q('success')).not.toBeNull()
     expect(q('submit')).toBeNull()
     expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+  })
+
+  it('a create that lands after the dialog was closed is shown on the next open, not a blank form', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    expect(dialog()).toBeNull()
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    await openDialog(container)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+    expect(q('submit')).toBeNull()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    // Once that result has been on screen, the next open starts a fresh form.
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    await openDialog(container)
+    expect(q('success')).toBeNull()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('')
+  })
+
+  it('a create that fails after the dialog was closed shows its message on the next open, with the form kept', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    release(jsonResponse(422, { error: { code: 'INACTIVE_ORG_MEMBER' } }))
+    await flushUi(10)
+    await openDialog(container)
+    expect(q('error')!.textContent).toContain('有负责人不是当前组织的有效成员')
+    expect(q<HTMLInputElement>('due-date')!.value).toBe('2031-05-06')
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    expect(q('success')).toBeNull()
+  })
+
+  it('moving to another record and back while the create is out sends no second create', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container, vm } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    // A dialog mounted since shows that the create is still out, with submit disabled.
+    expect(q('pending')!.textContent).toContain('此记录的任务仍在派发中')
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(true)
+    q<HTMLButtonElement>('submit')!.click()
+    await flushUi()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+  })
+
+  it('a create that lands after a move to another record writes the link of the record it came from', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container, vm } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    const patches = tasksCalls('PATCH', '/api/tasks/')
+    expect(patches).toHaveLength(1)
+    expect(patches[0][1].description).toBe('来源：多维表记录 /multitable/sht_1/viw_1?baseId=bse_1&recordId=rec_1')
   })
 })
 
@@ -677,6 +853,27 @@ describe('派发任务 dialog: success', () => {
     expect(link).not.toBeNull()
     expect(link!.getAttribute('href')).toBe('/tasks/tsk_9')
     expect(q('source-note-failed')).toBeNull()
+  })
+
+  it('nudges the top-bar task badge after a create, and not after a failed one', async () => {
+    let nudges = 0
+    const stop = onTasksChanged(() => { nudges += 1 })
+    try {
+      serveTasks({ create: () => jsonResponse(500, {}) })
+      const { container } = mountInspector()
+      await flushUi()
+      await openDialog(container)
+      setInput('due-date', '2031-05-06')
+      await submit()
+      expect(q('error')).not.toBeNull()
+      expect(nudges).toBe(0)
+      serveTasks()
+      await submit()
+      expect(q('success')).not.toBeNull()
+      expect(nudges).toBe(1)
+    } finally {
+      stop()
+    }
   })
 
   it('a failed description write still reports the task as created, with a note', async () => {

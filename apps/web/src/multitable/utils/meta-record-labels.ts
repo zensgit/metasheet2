@@ -153,6 +153,7 @@ export type MetaRecordLabelKey =
   | 'dispatch.errorInactiveMember' | 'dispatch.errorOrgMissing' | 'dispatch.errorForbidden'
   | 'dispatch.errorTasksUnavailable' | 'dispatch.errorFailed'
   | 'dispatch.success' | 'dispatch.openTask' | 'dispatch.sourceNoteFailed' | 'dispatch.sourceLinePrefix'
+  | 'dispatch.pendingElsewhere' | 'dispatch.inactiveSkipped'
   // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
   //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
   //     kebab row (+ its own title key, button-suffix pattern above); every `approval.*` key belongs to
@@ -464,7 +465,7 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.dueDateLabel': { en: 'Due date', zh: '截止日期' },
   'dispatch.dueTimeLabel': { en: 'Due time (optional)', zh: '截止时间（可选）' },
   'dispatch.requiredMark': { en: 'required', zh: '必填' },
-  'dispatch.accessNote': { en: 'Assignees are not notified, and need task access to see the task.', zh: '负责人不会收到通知，且需要有任务权限才能看到该任务。' },
+  'dispatch.accessNote': { en: 'Assignees are not notified when the task is dispatched, and need task access to see the task.', zh: '派发时不会通知负责人；负责人需要有任务权限才能看到该任务。' },
   'dispatch.titleRequired': { en: 'Enter a title', zh: '请填写标题' },
   'dispatch.invalidTitle': { en: 'The title contains characters that cannot be saved', zh: '标题包含无法保存的字符' },
   'dispatch.dueDateRequired': { en: 'Choose a due date', zh: '请选择截止日期' },
@@ -475,12 +476,14 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.errorInactiveMember': { en: 'At least one assignee is not an active member of the current organization. Check the assignees and try again.', zh: '有负责人不是当前组织的有效成员，请检查负责人后重试。' },
   'dispatch.errorOrgMissing': { en: 'Choose an organization first, then dispatch the task.', zh: '请先选择组织，再派发任务。' },
   'dispatch.errorForbidden': { en: 'You do not have permission to create tasks.', zh: '你没有创建任务的权限。' },
-  'dispatch.errorTasksUnavailable': { en: 'Tasks are not enabled on this server.', zh: '任务功能未开启。' },
+  'dispatch.errorTasksUnavailable': { en: 'Tasks are not enabled.', zh: '任务功能未开启。' },
   'dispatch.errorFailed': { en: 'Could not dispatch the task. Try again later.', zh: '派发任务失败，请稍后重试。' },
   'dispatch.success': { en: 'Task created.', zh: '任务已创建。' },
   'dispatch.openTask': { en: 'Open task', zh: '打开任务' },
   'dispatch.sourceNoteFailed': { en: 'The source record link could not be added to the task description. You can add it on the task page.', zh: '来源记录链接未能写入任务描述，可在任务页面手动补充。' },
   'dispatch.sourceLinePrefix': { en: 'Source: multitable record', zh: '来源：多维表记录' },
+  'dispatch.pendingElsewhere': { en: 'A task from this record is still being dispatched. Wait for the result.', zh: '此记录的任务仍在派发中，请等待结果。' },
+  'dispatch.inactiveSkipped': { en: 'Deactivated people in the person field were not filled in.', zh: '人员字段中已停用的人员未带入。' },
   // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
   // convention as every other block in this table.
   'record.submitApproval': { en: 'Submit for approval', zh: '送审' },
