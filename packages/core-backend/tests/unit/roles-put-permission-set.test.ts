@@ -61,13 +61,15 @@ vi.mock('../../src/audit/audit', () => ({
   auditLog: auditMocks.auditLog,
 }))
 
+import { rolesRouter } from '../../src/routes/roles'
 import {
+  canonicalStockPrepRoleName,
   RESERVED_ROLE_DISPLAY_NAME_OWNERS,
-  RESERVED_ROLE_NAME_SOURCES,
   reservedRoleDisplayNameOwner,
-  rolesRouter,
-} from '../../src/routes/roles'
-import { canonicalStockPrepRoleName } from '../../src/services/stock-preparation-members'
+  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+  STOCK_PREP_BUILTIN_ROLE_IDS,
+  STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
+} from '../../src/services/stock-preparation-members'
 import { ELEARNING_ROLE_TEMPLATES } from '../../src/db/migrations/zzzz20260826140000_add_elearning_role_templates'
 
 // --------------------------------------------------------------------------- fake DB
@@ -1642,9 +1644,9 @@ describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 
     }
     const listed = new Set(everyReservedName())
     for (const name of [
-      ...RESERVED_ROLE_NAME_SOURCES.stockPrepBuiltinIds,
-      ...RESERVED_ROLE_NAME_SOURCES.stockPrepBuiltinNames,
-      ...RESERVED_ROLE_NAME_SOURCES.stockPrepPlatformNames,
+      ...STOCK_PREP_BUILTIN_ROLE_IDS,
+      ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
+      ...STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
       ...ELEARNING_ROLE_TEMPLATES.flatMap((template) => [template.id, template.name]),
       'admin', '管理员', 'user', '普通用户',
       'attendance_employee', 'Attendance Employee', 'attendance_approver', 'Attendance Approver',
@@ -1652,7 +1654,7 @@ describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 
     ]) {
       expect(listed.has(name), name).toBe(true)
     }
-    expect(RESERVED_ROLE_NAME_SOURCES.stockPrepPlatformNames).toEqual(['审批与提交'])
+    expect(STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES).toEqual(['审批与提交'])
     expect(reservedRoleDisplayNameOwner('审批与提交')).toBe('approvals_operator')
     for (const name of ADMIN_SPELLINGS) expect(reservedRoleDisplayNameOwner(name), JSON.stringify(name)).toBe('admin')
     for (const name of ['administrator', 'admins', '管理员甲', '审批与提交组', 'Operators', '备料角色']) {
@@ -1661,7 +1663,7 @@ describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 
   })
 
   it('POST: a NEW role may not be born as admin (any spelling) or under a built-in / reserved name — 400 ROLE_NAME_RESERVED before any statement, audited as create_denied, never echoed', async () => {
-    for (const name of [...ADMIN_SPELLINGS, ...everyReservedName(), ' 操作人员 ', '审批　与提交', '一线填写（内置）', 'ＯＰＥＲＡＴＯＲ']) {
+    for (const name of [...ADMIN_SPELLINGS, ...everyReservedName(), ' 操作人员 ', '审批\u3000与提交', '一线填写（内置）', 'ＯＰＥＲＡＴＯＲ']) {
       auditMocks.auditLog.mockClear()
       const db = seed()
       wire(db)
@@ -1716,6 +1718,21 @@ describe('POST / PUT /api/roles — reserved display names (#6348 follow-up, S8 
     await putRole({ name: 'Admin', permissions: ['roles:read', 'stock-prep:read'] }, unchanged, 'legacy-x')
     expect(unchanged.statusCode).toBe(200)
     expect(db.permissionsOf('legacy-x')).toEqual(['roles:read', 'stock-prep:read'])
+
+    // The editor sends `name.trim()` (RoleManagementView.vue): a stored reserved name with edge
+    // whitespace, saved back trimmed by a permission-only edit, is no rename (fix round 1).
+    const padded = seedNamed([['legacy-p', ' Admin\u3000'], ['legacy-q', '\u00a0操作人员 ']])
+    wire(padded)
+    for (const [id, sent] of [['legacy-p', 'Admin'], ['legacy-q', '操作人员']] as const) {
+      const res = mockResponse()
+      await putRole({ name: sent, permissions: ['roles:read', 'stock-prep:read'] }, res, id)
+      expect(res.statusCode, id).toBe(200)
+      expect(padded.permissionsOf(id), id).toEqual(['roles:read', 'stock-prep:read'])
+    }
+    const paddedToLower = mockResponse()
+    await putRole({ name: 'admin' }, paddedToLower, 'legacy-p')
+    expect([paddedToLower.statusCode, refusalCode(paddedToLower)]).toEqual([400, 'ROLE_NAME_RESERVED'])
+    wire(db)
 
     const nameOmitted = mockResponse()
     await putRole({ permissions: ['roles:read'] }, nameOmitted, 'legacy-y')

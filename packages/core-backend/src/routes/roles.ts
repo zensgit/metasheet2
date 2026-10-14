@@ -13,12 +13,8 @@ import {
   type RoleAssignmentResult,
 } from '../rbac/role-assignment'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
-import {
-  canonicalStockPrepRoleName,
-  STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
-  STOCK_PREP_BUILTIN_ROLE_IDS,
-  STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
-} from '../services/stock-preparation-members'
+// The reserved display-name table lives with the S8 check it also feeds (one source, #6348 fix round 1).
+import { reservedRoleDisplayNameOwner } from '../services/stock-preparation-members'
 import { parsePagination } from '../util/response'
 import { Logger } from '../core/logger'
 
@@ -84,63 +80,10 @@ export function isWellFormedNewRoleId(id: string): boolean {
 }
 
 /**
- * RESERVED DISPLAY NAMES (#6348 follow-up, 2026-10-14). Every role a core migration seeds, plus the
- * platform role the stock-prep floor-role move creates, by OWNER id and the display names that id
- * owns. A name is compared in the S8 form (`canonicalStockPrepRoleName`: NFKC, every space / format
- * character dropped, lower-cased, a trailing 「（内置）」 / "(built-in)" marker dropped), and each owner id
- * is itself reserved as a name. Through POST / PUT a role may take a reserved name only if it is that
- * name's owner — so no role can be born as, or renamed to, `admin` (a role whose trimmed display name
- * is `admin` makes its members approval administrators: approval-record-link-txn-auth.ts and
- * multitable/automation-approval-template-access.ts test `roles.has('admin')` over role ids AND
- * display names), nor pose as a built-in in 角色管理 and every appoint list. A PUT that leaves the
- * stored name exactly as it is is never refused (a legacy role already carrying such a name stays
- * editable).
- *
- * Sources: admin / user — migrations/054_create_users_table.sql; attendance_* —
- * zzzz20260208100000_create_roles_table.ts; plugin_elearning_* —
- * zzzz20260826140000_add_elearning_role_templates.ts; stock-prep_* — the S8 list
- * (STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES, seeded by zzzz20261010124500, frontline renamed by
- * zzzz20261012090000); approvals_operator — STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES.
- * roles-put-permission-set.test.ts pins the stock-prep and platform entries equal to those lists.
+ * 400 ROLE_NAME_RESERVED when role `roleId` may not take display name `name`, else null. Never echoes
+ * the name. The table and the comparison form are services/stock-preparation-members.ts
+ * RESERVED_ROLE_DISPLAY_NAME_OWNERS / `reservedRoleDisplayNameOwner`; here a name's OWNER id may take it.
  */
-export const RESERVED_ROLE_DISPLAY_NAME_OWNERS: ReadonlyArray<readonly [ownerId: string, names: readonly string[]]> = Object.freeze([
-  ['admin', ['管理员']],
-  ['user', ['普通用户']],
-  ['attendance_employee', ['Attendance Employee']],
-  ['attendance_approver', ['Attendance Approver']],
-  ['attendance_importer', ['Attendance Importer']],
-  ['attendance_admin', ['Attendance Admin']],
-  ['plugin_elearning_viewer', ['E-learning Viewer']],
-  ['plugin_elearning_operator', ['E-learning Operator']],
-  ['plugin_elearning_admin', ['E-learning Admin']],
-  ['stock-prep_admin', ['备料主管理员', 'Main administrator']],
-  ['stock-prep_puller', ['数据管理员（拉取人员）', 'Data manager (puller)']],
-  ['stock-prep_developer', ['开发成员', 'Developer']],
-  ['stock-prep_frontline', ['操作人员', '一线填写', 'Operator', 'Floor operator']],
-  ['approvals_operator', ['审批与提交']],
-] as const)
-
-const RESERVED_ROLE_NAME_OWNER_BY_CANONICAL: ReadonlyMap<string, string> = (() => {
-  const owners = new Map<string, string>()
-  for (const [ownerId, names] of RESERVED_ROLE_DISPLAY_NAME_OWNERS) {
-    for (const name of [ownerId, ...names]) owners.set(canonicalStockPrepRoleName(name), ownerId)
-  }
-  return owners
-})()
-
-/** Exported for the pin test only: the stock-prep lists this table must cover. */
-export const RESERVED_ROLE_NAME_SOURCES = Object.freeze({
-  stockPrepBuiltinIds: STOCK_PREP_BUILTIN_ROLE_IDS,
-  stockPrepBuiltinNames: STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES,
-  stockPrepPlatformNames: STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES,
-})
-
-/** The id that owns `name` when it is a reserved display name (S8 comparison form), else null. */
-export function reservedRoleDisplayNameOwner(name: unknown): string | null {
-  return RESERVED_ROLE_NAME_OWNER_BY_CANONICAL.get(canonicalStockPrepRoleName(String(name ?? ''))) ?? null
-}
-
-/** 400 ROLE_NAME_RESERVED when role `roleId` may not take display name `name`, else null. Never echoes the name. */
 function reservedRoleNameRefusal(roleId: string, name: unknown): RolePermissionRequestError | null {
   const owner = reservedRoleDisplayNameOwner(name)
   if (owner === null || owner === roleId) return null
@@ -822,8 +765,10 @@ export function rolesRouter(): Router {
           }
 
           // Reserved display names (#6348 follow-up): a RENAME to one is refused unless this role owns
-          // it; the stored name submitted back unchanged (what the editor sends) always passes.
-          if (String(name) !== lockedRow.name) {
+          // it; the stored name submitted back unchanged always passes. Compared TRIMMED, not canonical:
+          // the editor sends `name.trim()` (RoleManagementView.vue), and the server reads names trimmed
+          // anyway, so edge whitespace is no change — but `Admin` -> `admin` still is (fix round 1).
+          if (String(name).trim() !== String(lockedRow.name ?? '').trim()) {
             const nameRefusal = reservedRoleNameRefusal(id, name)
             if (nameRefusal) throw nameRefusal
           }

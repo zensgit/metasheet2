@@ -105,8 +105,8 @@ R66 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-r
 - `split: N of the extra code(s) are admin-level …`：旧角色上有管理级码，由平台管理员手工处理，不自动化；
 - **任何指向拆出角色 id 的拒绝**（`split: role approvals_operator falls inside … namespace(s)`、`already exists and its codes are not exactly …`、`does not exist but … still name that id`、`another role already carries the display name …` 等）：推荐 id `approvals_operator`（旧机转述 owner 已裁定；owner 放行 dry-run 时确认一次即可）。**停下，把这一行原样报给 owner**；不要自己换 id，也不要传 `--split-role-name`——即使脚本提示里写着 "choose another id"；
 - 旧角色仍被审批席位 / 抄送按 id 或显示名指名且有成员：成员会失去这些历史审批的读权限，由 owner 决定后再动。
-- `stock-prep-operator makes N role-scoped approval template(s) visible … that stock-prep_frontline[ or approvals_operator] do(es) not`（#6348 后续，2026-10-14 起由计数改为拒绝）：先在这些模板的「可见范围」里加上 `stock-prep_frontline`（或 `approvals_operator`），再重跑 dry-run，直到这一行消失。
-- 名字比较的首尾空白（#6348 后续）：脚本在 JS 和 SQL 两侧都按 `String.prototype.trim` 的字符集去首尾空白（含全角空格 U+3000、不换行空格 NBSP、U+FEFF 等，与服务端一致；PostgreSQL 单参数 `btrim` 只去半角空格），所以别的角色名为「审批与提交」前后带全角空格 / NBSP 也算撞名，照上一条「指向拆出角色 id 的拒绝」处理；需要库编码为 UTF8（默认），否则脚本在第一条清点语句处以 SQLSTATE 退出 1、什么都不写。
+- `stock-prep-operator makes N role-scoped approval template(s) visible … that stock-prep_frontline[ or approvals_operator] do(es) not`（#6348 后续，2026-10-14 起由计数改为拒绝）：先在这些模板的「可见范围」里加上 `stock-prep_frontline`（或 `approvals_operator`），再重跑 dry-run，直到这一行消失。若拆分是在「角色管理」里手工做的（旧角色已无多余码、全部成员已在拆出角色里），重跑时带上 `--split-extra-codes-to-role <拆出角色 id>`，拆出角色才算在「搬迁后」一侧（脚本此时不做拆分，只搬迁）。
+- 名字比较的首尾空白（#6348 后续）：脚本在 JS 和 SQL 两侧都按 `String.prototype.trim` 的字符集去首尾空白（含全角空格 U+3000、不换行空格 NBSP、U+FEFF 等，与服务端一致；PostgreSQL 单参数 `btrim` 只去半角空格），所以别的角色名为「审批与提交」前后带全角空格 / NBSP 也算撞名，照上一条「指向拆出角色 id 的拒绝」处理；需要库编码为 UTF8 且 `standard_conforming_strings = on`（两者都是 PostgreSQL 默认；后者为 off 时 `U&'…'` 字面量报 SQLSTATE 0A000），否则脚本在第一条清点语句处以 SQLSTATE 退出 1、什么都不写。
 - 「角色管理」（`POST /api/roles`、`PUT /api/roles/:id`）同样拒绝（400 `ROLE_NAME_RESERVED`）把角色新建成或改名为 `admin`（任何大小写 / 全半角 / 空格写法）、内置平台角色名（「管理员」「普通用户」、考勤与云课堂内置角色名）和备料内置角色名；只有拥有该名字的那个 id 可以用它，原样保存现有名字不受影响（#6348 后续）。
 - 「审批与提交」已列入备料成员页的保留名（S8）：不能再新建或改名出第二个「审批与提交」；`approvals_operator` 本身不受影响（#6348 后续）。
 

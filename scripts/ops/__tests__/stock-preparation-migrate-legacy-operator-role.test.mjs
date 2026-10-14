@@ -1277,7 +1277,7 @@ test('the approval designer census counts template versions / published definiti
     if (argv.length > 0) s.tables = new Set(state.tables)
     const { code, out, writes } = await runMain(argv, s)
     assert.equal(code, EXIT_REFUSED, argv.join(' '))
-    assert.ok(out.includes(`${argv.length === 0 ? '--apply would refuse' : 'REFUSED'}: ${OLD} makes 3 role-scoped approval template(s) visible (by role id or display name) that ${TARGET} do(es) not; its 2 member(s) would stop seeing them (记录送审 / approval.completed automation answer 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN) — this script does not change visibility lists; add ${TARGET} to those templates' visibility first`), argv.join(' '))
+    assert.ok(out.includes(`${argv.length === 0 ? '--apply would refuse' : 'REFUSED'}: ${OLD} makes 3 role-scoped approval template(s) visible (by role id or display name) that ${TARGET} do(es) not; its 2 member(s) would stop seeing them (记录送审 / approval.completed automation answer 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN) — this script does not change visibility lists; add ${TARGET} to those templates' visibility first; if every member already holds a separate role for split-off codes (a split done by hand), name it with --split-extra-codes-to-role <id> so it counts on the after side`), argv.join(' '))
     assert.equal(out.filter((line) => line.startsWith('--apply would refuse') || line.startsWith('REFUSED')).length, 1, 'the designer census and the GAIN count do not refuse')
     assert.ok(out.includes(`approval designer — template versions naming ${OLD} as a role approver / handler / CC target (by role id or display name): 6 (templates: 4); NOT changed by this script`), argv.join(' '))
     assert.ok(out.includes(`approval designer — published definitions naming ${OLD} the same way: 2 (active: 1); NOT changed by this script — re-point them in the approval designer`), argv.join(' '))
@@ -1358,6 +1358,44 @@ test('#6348 follow-up (d): a template-visibility LOSS refuses --apply (exit 2, n
   assert.equal(splitLossRun.code, EXIT_REFUSED)
   assert.deepEqual(splitLossRun.writes, [])
   assert.ok(splitLossRun.out.some((line) => line.startsWith(lossRefusal('REFUSED', `${TARGET} or ${SPLIT}`, 1, 2))), splitLossRun.out.join('\n'))
+
+  // fix round 1: a split done BY HAND (ADR §8 step 3 option ①): the split role already holds the extra
+  // codes and every old-role member, the old role holds none of them. Named with
+  // --split-extra-codes-to-role, it counts on the after side; without the flag the script cannot know
+  // it and refuses, saying how to name it.
+  const manualSplit = (members) => {
+    const state = baseState()
+    state.roles.push({ id: SPLIT, name: '审批与提交' })
+    for (const code of EXTRA) state.rolePermissions.push({ role_id: SPLIT, permission_code: code })
+    for (const userId of members) state.userRoles.push({ user_id: userId, role_id: SPLIT })
+    return state
+  }
+  for (const ids of [[OLD, SPLIT], [OLD, '审批与提交']]) {
+    const named = manualSplit(['user-a', 'user-b'])
+    named.templates.push({ visibility_scope: { type: 'role', ids } })
+    const dry = await runMain(['--split-extra-codes-to-role', SPLIT], named)
+    assert.equal(dry.code, EXIT_OK, `${JSON.stringify(ids)}\n${dry.out.join('\n')}`)
+    const applied = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], named)
+    assert.equal(applied.code, EXIT_OK, `${JSON.stringify(ids)}\n${applied.out.join('\n')}`)
+    assert.deepEqual(applied.writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'], 'nothing left to split; the plain move runs')
+    const unnamed = manualSplit(['user-a', 'user-b'])
+    unnamed.templates.push({ visibility_scope: { type: 'role', ids } })
+    const blind = await runMain(['--apply'], unnamed)
+    assert.equal(blind.code, EXIT_REFUSED, JSON.stringify(ids))
+    assert.ok(blind.out.some((line) => line.startsWith(lossRefusal('REFUSED', TARGET, 1, 2)) && line.includes('name it with --split-extra-codes-to-role <id>')), blind.out.join('\n'))
+  }
+  // …a genuine loss still refuses after a manual split (the list names the old role only), and so does
+  // a split role that NOT every old-role member holds (user-b would lose the template)
+  for (const [label, members, ids] of [['old role only', ['user-a', 'user-b'], [OLD]], ['split role held by some', ['user-a'], [OLD, SPLIT]]]) {
+    const state = manualSplit(members)
+    state.templates.push({ visibility_scope: { type: 'role', ids } })
+    const before = snapshot(state)
+    const run1 = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], state)
+    assert.equal(run1.code, EXIT_REFUSED, label)
+    assert.deepEqual(run1.writes, [], label)
+    assert.equal(snapshot(state), before, label)
+    assert.ok(run1.out.some((line) => line.startsWith('REFUSED: stock-prep-operator makes 1 role-scoped approval template(s) visible')), `${label}\n${run1.out.join('\n')}`)
+  }
 })
 
 test('#6348 follow-up (c): every SQL trim uses exactly the String.prototype.trim set (U+3000, NBSP, …) — PostgreSQL one-argument btrim strips U+0020 only', async () => {

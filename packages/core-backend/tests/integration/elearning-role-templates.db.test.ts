@@ -1683,8 +1683,8 @@ describe('#6348 follow-ups of the legacy floor-role move (real PostgreSQL)', () 
         expect(row.js_set, JSON.stringify(sample)).toBe(sample.trim())
       }
       // the defect the follow-up closes: one-argument btrim keeps U+3000 / NBSP
-      const ideographic = rows.rows.find((row) => samples[Number(row.i) - 1] === '　审批与提交　')!
-      expect(ideographic.one_arg).toBe('　审批与提交　')
+      const ideographic = rows.rows.find((row) => samples[Number(row.i) - 1] === '\u3000审批与提交\u3000')!
+      expect(ideographic.one_arg).toBe('\u3000审批与提交\u3000')
       expect(ideographic.js_set).toBe('审批与提交')
     } finally {
       client.release()
@@ -1705,7 +1705,7 @@ describe('#6348 follow-ups of the legacy floor-role move (real PostgreSQL)', () 
         await s5aResetLegacyAndSplit(trx, splitRoleId)
         await stockPrepTemplatesUp(trx)
         // the old role's display name carries U+3000 / NBSP padding (trimmed by the server)
-        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', ${'　OPM legacy floor '})`.execute(trx)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', ${'\u3000OPM legacy floor\u00a0'})`.execute(trx)
         for (const code of ['stock-prep:read', 'stock-prep:operate', ...OPM_EXTRA_CODES]) {
           await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
         }
@@ -1723,7 +1723,7 @@ describe('#6348 follow-ups of the legacy floor-role move (real PostgreSQL)', () 
         }
 
         await scenario('split name taken under padding', async () => {
-          await sql`INSERT INTO roles (id, name) VALUES (${`opm-other-${suffix}`}, ${'　审批与提交 '})`.execute(trx)
+          await sql`INSERT INTO roles (id, name) VALUES (${`opm-other-${suffix}`}, ${'\u3000审批与提交\u00a0'})`.execute(trx)
         }, async () => {
           const { result, lines } = await runLines(true)
           expect(result.exitCode).toBe(2)

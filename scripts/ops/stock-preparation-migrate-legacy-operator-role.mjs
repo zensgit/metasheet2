@@ -127,7 +127,9 @@
  *     automation-approval-template-access.ts `loadApprovalTemplateReader`): the moved members would
  *     stop seeing those templates (记录送审 and the approval.completed automation creator path answer
  *     403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN). "The role(s) they end up in" is the target, plus the
- *     split role when the split step runs. Add those roles to the visibility lists by hand first
+ *     role named by `--split-extra-codes-to-role` when the split step runs or every old-role member
+ *     already holds it (after a split done by hand, pass its id so it counts). Add those roles to the
+ *     visibility lists by hand first
  *     (#6348 follow-up, 2026-10-14: a LOSS refuses, like every other loss above; it used to be a
  *     census count only);
  *   - with `--delete-empty-old-role`: a pending `user_invites` row still names the old role (the
@@ -160,8 +162,9 @@
  * `btrim(x, JS_TRIM_SET_SQL)`. PostgreSQL's one-argument `btrim(x)` strips U+0020 only, so a display
  * name padded with U+3000 or NBSP used to compare unequal in SQL and equal in JavaScript (#6348
  * follow-up, 2026-10-14). JS_TRIM_SET_SQL is a `U&'…'` literal of those code points and needs a UTF8
- * server encoding (the default); on another encoding the first census statement fails with a SQLSTATE
- * (exit 1, nothing written).
+ * server encoding and `standard_conforming_strings = on` (both PostgreSQL defaults; with it off a U&
+ * literal is SQLSTATE 0A000). Otherwise the first census statement fails with that SQLSTATE (exit 1,
+ * nothing written).
  * NOT CHECKED, NOT CHANGED:
  *   - the `requester.role` ROUTING predicate of approval graphs (conditions on the requester's
  *     `approval_usable` roles) and any graph shape other than the five above are not read;
@@ -759,13 +762,8 @@ async function tableExists(client, table) {
   return (await count(client, SQL.tableExists, [table])) > 0
 }
 
-/**
- * Everything the decision needs, read inside the caller's transaction. Never writes. `splitApplied`:
- * this is the re-read right after the split statements (the extra codes are already off the old role
- * and every old-role member is in the split role), so the split role still counts on the "after"
- * side of the template visibility census.
- */
-export async function readCensus(client, { lock, split = null, splitApplied = false }) {
+/** Everything the decision needs, read inside the caller's transaction. Never writes. */
+export async function readCensus(client, { lock, split = null }) {
   for (const table of ['roles', 'user_roles', 'role_permissions']) {
     if (!(await tableExists(client, table))) throw new ScriptError(`required table missing: ${table}`)
   }
@@ -835,13 +833,17 @@ export async function readCensus(client, { lock, split = null, splitApplied = fa
   }
   if (split) census.split = await readSplitCensus(client, split, { lock })
   // Template visibility: before the move a member sees templates through the old role; after it,
-  // through the target and — when the split step will run (decideSplit: both roles exist and the old
-  // role holds a code the target lacks) — the split role. A split role not yet created contributes
-  // the display name it would be created with.
+  // through the target and the split role, when one is named and either the split step will run
+  // (decideSplit: both roles exist and the old role holds a code the target lacks — it then adds every
+  // old-role member) or every old-role member already holds it: on the census re-read right after the
+  // split statements, or after a MANUAL split (ADR §8 step 3 option ① done by hand in 角色管理 — the old
+  // role then holds no extra code and nothing is left to split; #6348 fix round 1). A split role not
+  // yet created contributes the display name it would be created with.
   census.templateVisibility = { lost: 0, gained: 0 }
   if (await tableExists(client, 'approval_templates')) {
+    const splitHeldByAll = split !== null && census.split.exists && census.split.oldMembersAlreadyIn === census.oldMembers
     const splitRuns = split !== null && census.oldRoleExists && census.targetRoleExists
-      && (splitApplied || census.oldCodesMissingOnTarget.length > 0)
+      && (census.oldCodesMissingOnTarget.length > 0 || splitHeldByAll)
     const afterIds = splitRuns ? [TARGET_ROLE_ID, split.roleId] : [TARGET_ROLE_ID]
     const afterNames = splitRuns && !census.split.exists ? [split.roleName] : []
     census.templateVisibility.afterRoles = afterIds
@@ -1012,7 +1014,8 @@ export function decide(census, { deleteEmptyOldRole = false } = {}) {
       `${OLD_ROLE_ID} makes ${lostTemplates} role-scoped approval template(s) visible (by role id or display name) that `
       + `${afterRoles} do(es) not; its ${census.oldMembers} member(s) would stop seeing them (记录送审 / approval.completed `
       + 'automation answer 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN) — this script does not change visibility lists; '
-      + `add ${afterRoles} to those templates' visibility first`,
+      + `add ${afterRoles} to those templates' visibility first; if every member already holds a separate role for `
+      + 'split-off codes (a split done by hand), name it with --split-extra-codes-to-role <id> so it counts on the after side',
     )
   }
   if (deleteEmptyOldRole && census.oldRoleExists && census.pendingInvites > 0) {
@@ -1279,7 +1282,7 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, s
         summary.split.membersAdded = added.rows.length
         const removed = await client.query(SQL.removeExtraCodes, [OLD_ROLE_ID, splitPlan.extraCodes])
         summary.split.codesRemoved = removed.rows.length
-        census = await readCensus(client, { lock: true, split, splitApplied: true })
+        census = await readCensus(client, { lock: true, split })
         verdict = decide(census, { deleteEmptyOldRole })
         splitRefusals = [...postSplitProblems(census, splitPlan), ...verdict.refusals]
       }
