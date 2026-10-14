@@ -264,7 +264,7 @@ Get-Content -LiteralPath $envFile -Tail 3
 3. 记下重启时刻 T0；T0 之后后端日志里必须出现 `Plugin loaded: plugin-integration-core`，否则按没起来处理。
 4. 失败时**维护标志保持开着**，不要自行放行；报开发机。
 
-**删键**：`--update-env` 不会撤掉已从 `app.env` 删掉的键（`design-large-bom-worker-20260906.md:350`），进程环境里旧值还在。所以 §5 回退（字节级还原会让追加的键消失）必须走计划任务：在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里停应用 → 等 `MetaSheet-PM2` 任务离开 `Running` 状态（`Get-ScheduledTask … | Select-Object State`）→ 确认 pm2 命名管道上已没有守护进程（还在就先 `pm2 kill` 再查；原因见 `handoff-r59-two-machine-20260924.md:39`）→ `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'` → 确认进程已重新拉起（后端进程的父进程是 pm2-runtime，不是 `Daemon.js`，`handoff-r59-two-machine-20260924.md:52`）→ 查 health。
+**删键**：`--update-env` 不会撤掉已从 `app.env` 删掉的键（`design-large-bom-worker-20260906.md:350`），进程环境里旧值还在。所以 §5 回退（字节级还原会让追加的键消失）必须走计划任务：在 `PM2_HOME` 指向 `.pm2-runtime` 的会话里停应用 → 等 `MetaSheet-PM2` 任务离开 `Running` 状态（`Get-ScheduledTask … | Select-Object State`）→ 确认 pm2 命名管道上已没有守护进程（任务停掉后还在的是多余的 `node …\pm2\lib\Daemon.js` 进程：**不要 `pm2 kill`**——Windows 上管道名是整机共用的，`pm2 kill` 会打到占着管道的任何守护进程；用 `Get-CimInstance Win32_Process` 按 CommandLine 过滤出它，再按 pid `Stop-Process -Id`，做法见 `runbook-backend-log-rotation-20261012.md` §3.8；为什么会冒出这样的多余进程见 `handoff-r59-two-machine-20260924.md:39`）→ `Start-ScheduledTask -TaskName 'MetaSheet-PM2' -TaskPath '<任务所在文件夹>'` → 确认进程已重新拉起（后端进程的父进程是 pm2-runtime，不是 `Daemon.js`，`handoff-r59-two-machine-20260924.md:52`）→ 查 health。
 
 **是否真的生效，以 §3.1 的接口状态为准**，不以 `app.env` 内容为准；也**不要**为了看环境去跑 `pm2 env`——pm2-runtime 不在守护模式下时，会话里的 pm2 命令会另起一个空守护进程（`handoff-r59-two-machine-20260924.md:50`）。
 
