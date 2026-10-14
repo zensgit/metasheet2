@@ -304,7 +304,7 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 5. F22 断言(必存在文件清单)+ 逐文件哈希核对(比"文件数对得上"更强的检查)+ node_modules 未泄漏检查;
 6. 跑迁移(从 `docker\app.env` 加载 env 到本进程,`pm2` 不会自动重新读 env);
 7. `pm2 restart --update-env` + 健康检查**分两段**:先直连后端 `http://127.0.0.1:<PORT>/health`(PORT 从 `docker\app.env` 读,缺省 8900)→ 通过后**先删 flag** → 再探 `http://127.0.0.1/api/health`(12 次 × 5 秒)。顺序不能反,原因见下一节;
-8. 打印最终报告(包名 / 备份路径 / 迁移退出码 / 后端直连健康 / nginx 健康 / `maintenance flag: <path> (removed)` / `maintenance gate: WIRED|NOT_WIRED|UNKNOWN` —— `(removed)` 只说文件删了,`gate` 那行才说这台机器的 nginx 到底读不读它)。失败路径也一样:try/finally 的 finally 里**无条件删 flag**,RESTORE 框里会再打印一次 flag 路径和手工删除命令。
+8. 打印最终报告(包名 / 备份路径 / 迁移退出码 / 后端直连健康 / nginx 健康 / `maintenance flag: <path> (removed)` / `maintenance gate: WIRED|NOT_WIRED|UNKNOWN` —— `(removed)` 只说文件删了,`gate` 那行才说这台机器的 nginx 到底读不读它)。失败路径也一样:try/finally 的 finally 里删 flag(**R67 起唯一例外**:退出码 20–23 的重启假成功门失败时保留 flag,见 2-3),RESTORE 框里会再打印一次 flag 路径和手工删除命令。终报在 R67 起多一行 `plugin loaded: OK|NOT CONFIRMED`,第 7 步删 flag 的时机也挪到这道门通过之后。
 
 **验证**
 - 终端最后一段"final report"里 `health: OK`。
@@ -314,6 +314,21 @@ pg_dump $env:DATABASE_URL -Fc -f "$backupDir\pre-upgrade-db.dump"
 **失败处理**
 - **脚本本身在第 4-7 步之间的任何异常**(校验失败、迁移失败、重启失败、健康检查超时),脚本会**自动**:停 pm2 → 打印一段"RESTORE REQUIRED"框(备份路径 + 每个被替换路径的精确恢复命令)→ 重新抛出异常。**照着它打印的命令做,不用自己回忆 Step 1 的回滚程序**。
 - 若脚本尚未开始执行就失败(比如包的 SHA-256 校验不过),说明 Step 0-5 传输过程中包损坏,重新传一次,不要跳过校验强行继续。
+
+**2-3. 重启假成功门(R67 起,2026-10-14;来源:#6079 G1 开关上机的终审 B1/B2/M1)**
+
+第 7 步不再只看 `pm2 restart` 跑没跑、health 通没通。脚本头注释 `RESTART GATES` / `EXIT CODES` 两节是准绳,这里只列运维要知道的:
+
+| 退出码 | 门 | 触发 | 怎么办 |
+|---|---|---|---|
+| 0 | — | 全部通过 | 照常 |
+| 1 | — | 其他一切失败(校验、备份、替换、F22/哈希、迁移、health、R59 兜底),与 R67 前相同(flag 照旧删除)。但若备份等先失败、失败处理重新拉起后端时又碰上 20–23 的门,退出码取那道门的码、flag 保留 | 照 RESTORE / UPGRADE NOT APPLIED 框做 |
+| 20 | 重启前(仅 Windows) | `PM2_PRE_RESTART_NO_DAEMON`:`\\.\pipe\rpc.sock` 上没有 pm2 守护进程且没有唯一的 `MetaSheet-PM2` 计划任务;`PM2_PRE_RESTART_PIPE_UNKNOWN`:管道查不了;`PM2_PRE_RESTART_APP_NOT_READY`:`pm2 list`(在解析出的 `PM2_HOME` 下)里应用不是 `online` / `stopped`;`PM2_PRE_RESTART_SPAWNED_DAEMON`:`pm2 list` 自己拉起了守护进程;`PM2_PRE_RESTART_PORT_BUSY`:启动前后端端口上已经有进程在监听(孤儿后端:它会替新进程答 health,新进程因 EADDRINUSE 反复重启) | 没有跑 `pm2 restart`(没有守护进程时跑任何 pm2 命令都会另起一个多余的守护进程)。管道不在但计划任务在时,脚本**不报错**,直接走计划任务路径;第 2 步的 `pm2 stop` 在没有管道时也不跑(打印 `PM2_STOP_SKIPPED_NO_PIPE`),所以"跑之前后端就已经停了"的机器照样走计划任务路径。`PORT_BUSY` 会打印占端口进程的 pid、启动时间和命令行;脚本**不**停它,先弄清是什么再按 pid 处理,不要 `pm2 kill` |
+| 21 | 重启结果(仅 Windows) | `PM2_RESTART_RESULT_FAILED`:`pm2 restart … --update-env` 退出码非 0,或输出含 `not found` / `Spawning PM2 daemon` | 输出里点名多余守护进程的 pid(命令行以 `pm2\lib\Daemon.js` 结尾、T0 之后启动);脚本**不**杀它。按 `runbook-backend-log-rotation-20261012.md` §3 第 8 项按 pid 去掉,**不要 `pm2 kill`** |
+| 22 | 重启后 | `PLUGIN_LOAD_NOT_CONFIRMED`:直连 health 通过后,`-PluginLoadTimeoutSec`(默认 90 秒)内后端 out 日志末尾 `-RestartLogTailMB`(默认 8 MB,只读这么多,整读 1.4 GB 会撑爆内存)里没有 T0 之后带 pm2 时间戳的 `Plugin loaded: plugin-integration-core` | 日志默认取 `<RootDir>\output\logs\metasheet-backend.out[-<pm_id>].log` 中最新的一个,别处的用 `-BackendOutLogPath` 指定。时间戳是 `ecosystem.config.cjs` 的 `time: true` 前缀(pm2 守护进程本机时间,精确到秒;同一块输出里后续没前缀的行沿用前一行的时间)。**注意**:后端日志不在默认位置时,一个其实已正确升级、正在应答的后端也会被判 22——失败处理随即停掉 pm2 并打印 RESTORE REQUIRED。这种情况不要回滚,用 `-BackendOutLogPath` 指到真正的 out 日志重跑 |
+| 23 | 计划任务路径 | `PM2_SCHEDULED_TASK_STILL_RUNNING`:`-ScheduledTaskIdleTimeoutSec`(默认 60 秒)内任务一直是 `Running`(此时 `Start-ScheduledTask` 什么都不做却显示成功);`PM2_BACKEND_UNDER_STRAY_DAEMON`:后端端口的监听进程的父进程是 `Daemon.js` 而不是 pm2-runtime;`PM2_BACKEND_LISTENER_PREDATES_T0`(两条路径都查):health 通过后,后端端口的监听进程启动时间早于 T0,也就是答 health 的不是这次拉起的进程(读不到启动时间时只打印 `PM2_LISTENER_AGE_UNCONFIRMED`,不判失败) | 后者**不要** `Stop-Process` 那个 pid(后端就挂在它下面),停下报开发机。父进程认不出来时只打印 `PM2_TASK_PARENT_UNCONFIRMED`,不判失败,按 `handoff-r59-two-machine-20260924.md` 第 3 节第 5 步手工核对 |
+
+20–23 的共同点:**维护标志保留**(脚本打印 `MAINTENANCE_FLAG_KEPT` 和删除命令;RESTORE / UPGRADE NOT APPLIED 框里写 `KEPT:`)。站点继续显示维护页,直到人确认后端直连 health 通过、且 out 日志在这次重启之后有 `Plugin loaded: plugin-integration-core`,再手工 `Remove-Item`。门失败后的失败处理只 `pm2 stop`、**不再 `pm2 kill`**,打印的手工命令里也不再有 `pm2 kill`,改为"按 pid 去掉多余守护进程"(`runbook-backend-log-rotation-20261012.md` §3 第 8 项)。RESTORE REQUIRED 框和"向前修复、不要回滚"的说法照旧(`handoff-r59-two-machine-20260924.md` 第 3 节)。注意:用 `& .\multitable-onprem-package-upgrade-inplace.ps1` 在别的脚本里调用时,20–23 只体现在 `$LASTEXITCODE` 上,调用方要自己 `exit $LASTEXITCODE`;用 `powershell -File` 直接跑则就是进程退出码。
 
 ---
 
@@ -367,9 +382,9 @@ location = /index.html {
 2. 通过后**立刻删 flag**;
 3. 再探 `http://127.0.0.1/api/health`——这一探同时证明了两件事:后端好了,**且门确实放下了**(门还在的话这里不可能 200)。
 
-失败也不会留下门:整段(从写 flag 到最终报告)包在 try/finally 里,finally 无条件删 flag;RESTORE 框和终报都会打印 flag 路径和手工删除命令。
+失败也不会留下门:整段(从写 flag 到最终报告)包在 try/finally 里,finally 删 flag;RESTORE 框和终报都会打印 flag 路径和手工删除命令。**R67 起唯一例外**:重启假成功门(退出码 20–23,见 Step 2 的 2-3)失败时 flag **保留**,因为后端没被证实在正常服务。
 
-**协调方的上机脚本不要再自己举 flag。** 之前上机脚本里手工 `New-Item maintenance.flag` / 手工删的做法**作废**:两边都管同一个文件,一边删一边举,只会产生"升级早就结束、站点还在 503"或者"门根本没起来"的两种事故。现在 flag 由 `multitable-onprem-package-upgrade-inplace.ps1` 独占管理。人只在一种情况下碰它:脚本异常退出后站点仍然 503 —— 按终报打印的路径手工 `Remove-Item`。
+**协调方的上机脚本不要再自己举 flag。** 之前上机脚本里手工 `New-Item maintenance.flag` / 手工删的做法**作废**:两边都管同一个文件,一边删一边举,只会产生"升级早就结束、站点还在 503"或者"门根本没起来"的两种事故。现在 flag 由 `multitable-onprem-package-upgrade-inplace.ps1` 独占管理。人只在两种情况下碰它:脚本异常退出后站点仍然 503 —— 按终报打印的路径手工 `Remove-Item`;退出码 20–23(flag 被有意保留)—— 先确认后端直连 health 通过、out 日志在这次重启之后有 `Plugin loaded: plugin-integration-core`,再按 `MAINTENANCE_FLAG_KEPT` 行打印的命令删。
 
 **Windows 上怎么 reload(必须以 SYSTEM 身份发)。** 222 的 nginx 以 SYSTEM 身份跑,普通管理员 shell 里 `nginx -s reload` 发的信号进不去(master 进程属于 SYSTEM,信号被拒),表现是"命令没报错,配置没生效"。用一次性计划任务以 SYSTEM 身份发:
 

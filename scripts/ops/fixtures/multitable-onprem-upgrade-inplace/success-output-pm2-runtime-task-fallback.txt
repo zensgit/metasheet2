@@ -37,7 +37,8 @@ migrate-ok marker=from-app-env
 [multitable-onprem-upgrade-inplace] PM2_RESTART_NOT_FOUND_FALLBACK: pm2 reports 'metasheet-backend' not found; scheduled task '/MetaSheet-PM2' exists, so this is a pm2-runtime host whose runtime exited after the stop. Starting the task instead.
 [multitable-onprem-upgrade-inplace] Removing the empty pm2 daemon the restart above started in this session, so the task's pm2-runtime hosts the backend itself (pm2 kill).
 [multitable-onprem-upgrade-inplace] Scheduled task 'MetaSheet-PM2' started; the health polling below decides whether the backend came back.
-[multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health); dropping the maintenance gate before the nginx probe
+[multitable-onprem-upgrade-inplace] Backend answered directly on attempt 1 (http://127.0.0.1:<PORT>/health)
+[multitable-onprem-upgrade-inplace] Post-restart gate: <ROOT>/live/output/logs/metasheet-backend.out-0.log shows 'Plugin loaded: plugin-integration-core' stamped <PM2_TIMESTAMP>, at or after T0 <PM2_TIMESTAMP>; dropping the maintenance gate before the nginx probe
 [multitable-onprem-upgrade-inplace] Maintenance flag removed: <ROOT>/live/output/maintenance.flag
 [multitable-onprem-upgrade-inplace] Plugins summary:
 [multitable-onprem-upgrade-inplace]   plugin-integration-core          version=unknown
@@ -50,6 +51,7 @@ migration exit:   0
 pm2 home:         <ROOT>/profile/.pm2-runtime (source: pm2-runtime (.pm2-runtime + scheduled task 'MetaSheet-PM2'))
 backend started:  scheduled-task
 backend health:   OK (attempt=1, url=http://127.0.0.1:<PORT>/health)
+plugin loaded:    OK (Plugin loaded: plugin-integration-core after T0; log=<ROOT>/live/output/logs/metasheet-backend.out-0.log)
 health:           OK (attempt=1, status=200)
 maintenance flag: <ROOT>/live/output/maintenance.flag (removed)
 maintenance gate: WIRED (probed http://127.0.0.1:<PORT>/api/health while the flag was up; NOT_WIRED = this nginx.conf never got the gate, the window was unshielded)
