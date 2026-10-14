@@ -371,8 +371,8 @@ export const attendanceGuideTopics: GuideTopic[] = [
     labelEn: 'Reports',
     labelZh: '报表',
     intro: [[
-      'Reports is the period view: date range, key numbers, the request table, and the records table. It does not edit rules.',
-      '报表是区间视图：日期、关键数字、申请表和记录表。它不改规则。',
+      'Reports is the period view. Filters, export, and column choices sit on top. Three numbers sit above the records table. Trend, management totals, and status mixes stay folded. It does not edit rules.',
+      '报表是区间视图。筛选、导出和显示字段在上方。记录表上面只有三个数字。考勤趋势、管理统计和状态分布默认收起。它不改规则。',
     ]],
     scenarios: [[
       'Open it to read a period or to export that period. Organization id and user id sit under More filters. They are plain filters, not a person picker, because this page is open to people who are not platform admins.',
@@ -380,12 +380,12 @@ export const attendanceGuideTopics: GuideTopic[] = [
     ]],
     steps: [
       {
-        path: ['Reports → date range → the numbers', '报表 → 日期区间 → 关键数字'],
-        detail: ['Caliber guide stays on the page and starts collapsed. Expand it for the seven plain-language definitions (expected days, attendance days, severe late, absence-level late, and the three overtime buckets). The guide shows the name and the sentence, not the field code. Those codes stay in Report fields and in the CSV header mode under Technical details.', '口径说明留在页面上，默认收起。展开后是七句说明：应出勤天数、出勤天数、严重迟到、旷工迟到，以及工作日/休息日/节假日三类加班。说明里是名称和那一句话，不出现字段编码。编码仍在统计字段里，以及「技术信息」中的 CSV 表头模式。'],
+        path: ['Reports → date range → the numbers → the records table', '报表 → 日期区间 → 关键数字 → 记录表'],
+        detail: ['The three numbers are records on this page, flagged rows, and early leave. Click one to show those rows. A folded section that is all zeros says 暂无 instead of a row of zeros. Caliber guide stays on the page and starts collapsed. Expand it for the seven plain-language definitions (expected days, attendance days, severe late, absence-level late, and the three overtime buckets). The guide shows the name and the sentence, not the field code. Those codes stay in Report fields and in the CSV header mode under Technical details.', '三个数字是本页记录、异常和早退。点一个数字就只看这些行。收起的统计如果全是 0，写成「暂无」，不再排一排 0。口径说明留在页面上，默认收起。展开后是七句说明：应出勤天数、出勤天数、严重迟到、旷工迟到，以及工作日/休息日/节假日三类加班。说明里是名称和那一句话，不出现字段编码。编码仍在统计字段里，以及「技术信息」中的 CSV 表头模式。'],
       },
       {
-        path: ['Records → Columns', '记录 → 显示字段'],
-        detail: ['The choice is remembered in this browser. Date and name stay visible. Show all reveals the full catalog. Export CSV and Export Excel still download the server dataset for the active range and filters. Hiding a column does not drop it from the file.', '选择记在这台浏览器里。日期和姓名始终显示。「全部显示」打开完整目录。导出 CSV 和导出 Excel 仍下载当前区间和筛选条件下的服务端数据集。藏起一列不会让它从文件里消失。'],
+        path: ['Reports → Columns', '报表 → 显示字段'],
+        detail: ['The choice is remembered in this browser. Date and name stay visible. Show all reveals the full catalog. Export CSV and Export Excel still download the server dataset for the active range and filters. Hiding a column does not drop it from the file. Trend, minute totals, and request mixes stay under Breakdown / more stats, which starts collapsed.', '选择记在这台浏览器里。日期和姓名始终显示。「全部显示」打开完整目录。导出 CSV 和导出 Excel 仍下载当前区间和筛选条件下的服务端数据集。藏起一列不会让它从文件里消失。趋势、分钟合计和申请分布在「分布 / 更多统计」里，默认收起。'],
       },
     ],
     callout: [
@@ -396,11 +396,12 @@ export const attendanceGuideTopics: GuideTopic[] = [
       q: ['I hid a column. Why is it still in the CSV?', '我藏了一列，为什么 CSV 里还有？'],
       a: ['The table is a local view. The export is the server dataset for the range and filters.', '表格是本机视图。导出是该区间和筛选条件下的服务端数据集。'],
     }],
-    figureTitle: ['What the page is for', '这一页用来做什么'],
+    figureTitle: ['How to read the page', '这一页怎么读'],
     figureRows: [
-      ['Period and numbers', '区间和关键数字'],
+      ['Filters, export, columns', '筛选、导出、显示字段'],
+      ['Three numbers, then the table', '三个数字，然后是记录表'],
       ['Caliber guide, collapsed', '口径说明，默认收起'],
-      ['Choose columns locally', '本机选择显示字段'],
+      ['Breakdown stays folded', '分布 / 更多统计，默认收起'],
       ['Export stays the full file', '导出仍是完整文件'],
     ],
   },

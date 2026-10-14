@@ -3,7 +3,7 @@
     <p>{{ tr('Your session changed. This page belongs to the previous session; actions are disabled and unsaved drafts remain here until you reload.', '会话已变化。本页面属于原会话，操作已停用；未保存草稿保留在此，直到您重新加载。') }}</p>
     <button type="button" @click="reloadAttendanceSession">{{ tr('Discard unsaved drafts and reload', '放弃未保存草稿并重新加载') }}</button>
   </section>
-  <div class="attendance" :class="{ 'attendance--overview': showOverview }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
+      <div class="attendance" :class="{ 'attendance--overview': showOverview, 'attendance--reports': showReports }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -23,7 +23,7 @@
           <p class="attendance__subtitle">
             {{
               showReports
-                ? tr('Review records, exports, and request totals in one place.', '集中查看记录、导出与申请汇总。')
+                ? tr('Filter a date range, scan the records table, and export.', '选定区间后查看记录表并导出。')
                 : tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。')
             }}
           </p>
@@ -89,6 +89,38 @@
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
+        <div class="attendance__reports-toolbar">
+          <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
+            <summary>{{ tr('Columns', '显示字段') }}</summary>
+            <div class="attendance__records-column-actions">
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
+                {{ tr('Show all', '全部显示') }}
+              </button>
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
+                {{ tr('Restore default', '恢复默认') }}
+              </button>
+            </div>
+            <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
+              <strong>{{ group.label }}</strong>
+              <label v-for="column in group.columns" :key="column.code">
+                <input
+                  type="checkbox"
+                  :data-record-column-code="column.code"
+                  :checked="visibleRecordReportCodeSet.has(column.code)"
+                  :disabled="recordReportColumnPinned(column.code)"
+                  @change="onToggleRecordReportColumn(column.code, $event)"
+                />
+                {{ column.label }}
+              </label>
+            </div>
+          </details>
+          <button class="attendance__btn" type="button" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
+            {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
+          </button>
+          <button class="attendance__btn" type="button" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+            {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
+          </button>
+        </div>
         <details class="attendance__filters-more">
           <summary>{{ tr('More filters', '更多筛选') }}</summary>
           <label class="attendance__field" for="attendance-org-id">
@@ -353,172 +385,68 @@
         collapsed-by-default details — not an equal-weight sibling of the
         calendar. Quick actions and approval-center deep links open it.
       -->
-      <section v-if="showReports" class="attendance__reports-brief">
-        <div class="attendance__card" data-reports-insight="snapshot">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Report Snapshot', '报表快照') }}</h3>
-            <button
-              v-if="reportsFiltersActive"
-              class="attendance__btn attendance__btn--inline"
-              type="button"
-              @click="clearReportsFilters"
-            >
-              {{ tr('Clear filters', '清除筛选') }}
-            </button>
-          </div>
-          <p class="attendance__field-hint attendance__reports-quiet">
-            {{ reportRangeLabel }}
-          </p>
-          <div
-            v-if="reportsUnavailable"
-            class="attendance__empty"
-            data-reports-state="unavailable"
+      <section v-if="showReports" class="attendance__reports-brief" data-reports-layout="table-first">
+        <div
+          v-if="reportsUnavailable"
+          class="attendance__empty"
+          data-reports-state="unavailable"
+        >
+          {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
+        </div>
+        <p
+          v-else-if="reportsDataStale"
+          class="attendance__field-hint attendance__field-hint--strong"
+          data-reports-state="stale"
+        >
+          {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
+        </p>
+        <div
+          v-if="!reportsUnavailable"
+          class="attendance__kpi-strip"
+          data-reports-insight="snapshot"
+        >
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'all' }"
+            type="button"
+            data-report-kpi="records"
+            :aria-pressed="recordStatusFilter === 'all'"
+            @click="applyReportRecordKpi('all')"
           >
-            {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
-          </div>
-          <p
-            v-else-if="reportsDataStale"
-            class="attendance__field-hint attendance__field-hint--strong"
-            data-reports-state="stale"
+            <span>{{ tr('Records', '记录') }}</span>
+            <strong>{{ records.length }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'flagged' }"
+            type="button"
+            data-report-kpi="flagged"
+            :aria-pressed="recordStatusFilter === 'flagged'"
+            @click="applyReportRecordKpi('flagged')"
           >
-            {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
-          </p>
-          <div class="attendance__summary attendance__summary--reports">
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible requests', '筛选后申请') }}</span>
-              <strong>{{ filteredRequestReportTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible minutes', '筛选后分钟') }}</span>
-              <strong>{{ filteredRequestReportMinutesTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible groups', '筛选后分组') }}</span>
-              <strong>{{ filteredRequestReport.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible records', '筛选后记录') }}</span>
-              <strong>{{ filteredRecords.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Flagged records', '异常记录') }}</span>
-              <strong>{{ filteredFlaggedRecordsCount }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ filteredRecordsWorkMinutes }}</strong>
-            </div>
-          </div>
+            <span>{{ tr('Flagged', '异常') }}</span>
+            <strong>{{ reportPageFlaggedCount }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'early_leave' }"
+            type="button"
+            data-report-kpi="early-leave"
+            :aria-pressed="recordStatusFilter === 'early_leave'"
+            @click="applyReportRecordKpi('early_leave')"
+          >
+            <span>{{ tr('Early leave', '早退') }}</span>
+            <strong>{{ reportPageEarlyLeaveCount }}</strong>
+          </button>
+          <button
+            v-if="reportsFiltersActive"
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            @click="clearReportsFilters"
+          >
+            {{ tr('Clear filters', '清除筛选') }}
+          </button>
         </div>
-
-        <div class="attendance__card" data-reports-insight="trend">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportTrendItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.count }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="metrics">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportMetricItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-type">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-type">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportTypeFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportTypeBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportTypeFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="record-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="record-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="recordStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ records.length }}
-            </button>
-            <button
-              v-for="item in recordStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="recordStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
         <details class="attendance__reports-caliber" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
           <summary>{{ tr('Caliber guide', '口径说明') }}</summary>
           <p class="attendance__field-hint">
@@ -549,7 +477,7 @@
         class="attendance__grid"
         :class="{ 'attendance__grid--overview-history': showOverview }"
         :data-attendance-overview-history="showOverview ? 'true' : undefined"
-        v-if="showOverview || showReports"
+        v-if="showOverview"
       >
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
@@ -1208,54 +1136,6 @@
             </table>
           </div>
         </div>
-
-        <div
-          v-if="showReports"
-          class="attendance__card"
-          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
-          data-reports-surface="reports"
-          data-report-card="request-report"
-        >
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Report', '申请报表') }}</h3>
-            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
-              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
-            </button>
-          </div>
-          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{
-              tr(
-                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
-                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
-              )
-            }}
-          </p>
-          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
-          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
-            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
-          </div>
-          <div v-else class="attendance__table-wrapper">
-            <table class="attendance__table">
-              <thead>
-                <tr>
-                  <th>{{ tr('Type', '类型') }}</th>
-                  <th>{{ tr('Status', '状态') }}</th>
-                  <th>{{ tr('Total', '总数') }}</th>
-                  <th>{{ tr('Minutes', '分钟') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
-                  <td>{{ formatRequestType(row.requestType) }}</td>
-                  <td>{{ formatStatus(row.status) }}</td>
-                  <td>{{ row.total }}</td>
-                  <td>{{ row.minutes }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
       <section v-if="showOverview" class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
@@ -1374,39 +1254,6 @@
                 )
               }}
             </p>
-          </div>
-          <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
-            <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
-              <summary>{{ tr('Columns', '显示字段') }}</summary>
-              <div class="attendance__records-column-actions">
-                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
-                  {{ tr('Show all', '全部显示') }}
-                </button>
-                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
-                  {{ tr('Restore default', '恢复默认') }}
-                </button>
-              </div>
-              <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
-                <strong>{{ group.label }}</strong>
-                <label v-for="column in group.columns" :key="column.code">
-                  <input
-                    type="checkbox"
-                    :data-record-column-code="column.code"
-                    :checked="visibleRecordReportCodeSet.has(column.code)"
-                    :disabled="recordReportColumnPinned(column.code)"
-                    @change="onToggleRecordReportColumn(column.code, $event)"
-                  />
-                  {{ column.label }}
-                </label>
-              </div>
-            </details>
-            <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
-              {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
-            </button>
-            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
-              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
-            </button>
           </div>
         </div>
         <details
@@ -1555,6 +1402,174 @@
           </button>
         </div>
       </section>
+
+      <details
+        v-if="showReports"
+        class="attendance__reports-more"
+        data-reports-insight="more-stats"
+      >
+        <summary>{{ tr('Breakdown / more stats', '分布 / 更多统计') }}</summary>
+
+        <section data-reports-insight="trend">
+          <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
+          <p v-if="visibleReportTrendItems.length === 0" class="attendance__empty" data-reports-empty="trend">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportTrendItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="metrics">
+          <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
+          <p v-if="visibleReportMetricItems.length === 0" class="attendance__empty" data-reports-empty="metrics">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportMetricItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-status">
+          <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-type">
+          <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-type">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-type">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportTypeFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportTypeBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportTypeFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="record-status">
+          <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
+          <p v-if="records.length === 0" class="attendance__empty" data-reports-empty="record-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="record-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="recordStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ records.length }}
+            </button>
+            <button
+              v-for="item in recordStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="recordStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <div
+          class="attendance__card"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
+          data-reports-surface="reports"
+          data-report-card="request-report"
+        >
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Request Report', '申请报表') }}</h3>
+            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
+              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
+            </button>
+          </div>
+          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
+                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
+              )
+            }}
+          </p>
+          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
+          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
+            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
+          </div>
+          <div v-else class="attendance__table-wrapper">
+            <table class="attendance__table">
+              <thead>
+                <tr>
+                  <th>{{ tr('Type', '类型') }}</th>
+                  <th>{{ tr('Status', '状态') }}</th>
+                  <th>{{ tr('Total', '总数') }}</th>
+                  <th>{{ tr('Minutes', '分钟') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
+                  <td>{{ formatRequestType(row.requestType) }}</td>
+                  <td>{{ formatStatus(row.status) }}</td>
+                  <td>{{ row.total }}</td>
+                  <td>{{ row.minutes }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
 
       <section class="attendance__grid" v-if="showAdmin">
         <div ref="adminConsoleRef" class="attendance__card attendance__card--admin">
@@ -13488,8 +13503,13 @@ const lastRecordCsvExportDetails = computed<AttendanceRecordReportConfigDetail[]
 
 const recordsTableColumnCount = computed(() => Math.max(1, visibleRecordReportColumns.value.length) + 1)
 
+function isFlaggedAttendanceRecord(record: AttendanceRecord): boolean {
+  return !['normal', 'off'].includes(String(record.status || ''))
+}
+
 const filteredRecords = computed(() =>
   records.value.filter((record) => {
+    if (recordStatusFilter.value === 'flagged') return isFlaggedAttendanceRecord(record)
     if (recordStatusFilter.value !== 'all' && record.status !== recordStatusFilter.value) {
       return false
     }
@@ -13497,12 +13517,12 @@ const filteredRecords = computed(() =>
   })
 )
 
-const filteredFlaggedRecordsCount = computed(() =>
-  filteredRecords.value.filter(record => !['normal', 'off'].includes(record.status)).length
+const reportPageFlaggedCount = computed(() =>
+  records.value.filter(record => isFlaggedAttendanceRecord(record)).length
 )
 
-const filteredRecordsWorkMinutes = computed(() =>
-  filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
+const reportPageEarlyLeaveCount = computed(() =>
+  records.value.filter(record => record.status === 'early_leave').length
 )
 
 const reportTrendItems = computed(() => {
@@ -13528,6 +13548,14 @@ const reportMetricItems = computed(() => {
     { key: 'off-days', label: tr('Off days', '休息日'), value: current?.off_days ?? 0 },
   ]
 })
+
+const visibleReportTrendItems = computed(() =>
+  reportTrendItems.value.filter(item => Number(item.count) > 0)
+)
+
+const visibleReportMetricItems = computed(() =>
+  reportMetricItems.value.filter(item => Number(item.value) > 0)
+)
 
 // #3575 caliber-transparency lock (G3): one-sentence definitions for the headline attendance
 // numbers, reusing the same field codes + labels as the record-report column catalog
@@ -13902,6 +13930,10 @@ function clearReportsFilters(): void {
   requestReportStatusFilter.value = 'all'
   requestReportTypeFilter.value = 'all'
   recordStatusFilter.value = 'all'
+}
+
+function applyReportRecordKpi(filter: 'all' | 'flagged' | 'early_leave'): void {
+  recordStatusFilter.value = filter === 'all' || recordStatusFilter.value === filter ? 'all' : filter
 }
 
 function clearReportsDataset(): void {
@@ -16202,6 +16234,10 @@ async function focusInitialAttendanceSection(): Promise<void> {
 
   if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
+  if (showReports.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport) {
+    const moreStats = document.querySelector('[data-reports-insight="more-stats"]')
+    if (moreStats instanceof HTMLDetailsElement) moreStats.open = true
+  }
   if (revealRequests) {
     revealOverviewRequestTools()
   }
@@ -23518,25 +23554,6 @@ async function reloadRequestReportWithStatus() {
   }
 }
 
-async function reloadRecordsWithStatus() {
-  try {
-    await loadRecords()
-    setStatus(
-      appendStatusContext(
-        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
-        recordsTimezoneContextHint.value,
-      ),
-    )
-  } catch (error: any) {
-    setStatusFromErrorWithContext(
-      error,
-      tr('Failed to load records', '加载记录失败'),
-      recordsTimezoneContextHint.value,
-      'refresh',
-    )
-  }
-}
-
 async function reloadRequestsWithStatus() {
   try {
     await loadRequests()
@@ -30726,7 +30743,7 @@ watch(requestReportTypeBreakdown, (items) => {
 }, { immediate: true })
 
 watch(recordStatusBreakdown, (items) => {
-  if (recordStatusFilter.value === 'all') return
+  if (recordStatusFilter.value === 'all' || recordStatusFilter.value === 'flagged') return
   if (!items.some(item => item.key === recordStatusFilter.value)) {
     recordStatusFilter.value = 'all'
   }
@@ -31404,11 +31421,78 @@ defineExpose({
 .attendance__reports-brief {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  margin-bottom: 20px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
-.attendance__reports-brief > .attendance__card {
+.attendance__reports-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.attendance__kpi strong {
+  color: var(--ms-text-1);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__kpi--active {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+}
+
+.attendance--reports [data-report-card="records"] {
+  margin-top: 0;
+}
+
+.attendance__reports-more {
+  margin-top: 12px;
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+}
+
+.attendance__reports-more > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.attendance__reports-more > section {
+  margin-top: 14px;
+}
+
+.attendance__reports-more h3 {
+  margin: 16px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.attendance__reports-more .attendance__card {
   border: 0;
   box-shadow: none;
   padding: 0;

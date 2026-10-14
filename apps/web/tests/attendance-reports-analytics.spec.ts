@@ -221,19 +221,59 @@ describe('Attendance reports analytics', () => {
     container = null
   })
 
-  it('renders report snapshot cards and filter breakdowns in reports mode', async () => {
+  it('renders a table-first report with three kpi chips and folded breakdowns', async () => {
     app = createApp(AttendanceView, { mode: 'reports' })
     app.mount(container!)
     await flushUi()
 
-    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('Visible requests')
-    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('4')
-    expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Normal')
-    expect(container?.querySelector('[data-reports-insight="trend"]')?.textContent).toContain('Late + Early')
+    const kpis = container!.querySelectorAll('[data-report-kpi]')
+    expect(kpis).toHaveLength(3)
+    expect(container?.querySelector('[data-report-kpi="records"]')?.textContent).toContain('Records')
+    expect(container?.querySelector('[data-report-kpi="records"]')?.textContent).toContain('3')
+    expect(container?.querySelector('[data-report-kpi="flagged"]')?.textContent).toContain('2')
+    expect(container?.querySelector('[data-report-kpi="early-leave"]')?.textContent).toContain('0')
+
+    const recordsCard = container!.querySelector('[data-report-card="records"]')
+    const moreStats = container!.querySelector('[data-reports-insight="more-stats"]')
+    expect(recordsCard).toBeTruthy()
+    expect(moreStats).toBeTruthy()
+    expect((moreStats as HTMLDetailsElement).open).toBe(false)
+    expect(recordsCard!.compareDocumentPosition(moreStats!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(container!.querySelector('.attendance__reports-brief')?.textContent).not.toContain('Attendance Trend')
+    expect(container!.querySelector('.attendance__filters [data-record-column-picker]')).toBeTruthy()
+
+    const trend = container!.querySelector('[data-reports-insight="trend"]')
+    expect(trend?.textContent).toContain('Normal')
+    expect(trend?.textContent).toContain('Late + Early')
+    expect(trend?.textContent).not.toContain('Absent')
+    expect(trend?.querySelectorAll('.attendance__summary-item')).toHaveLength(5)
     expect(container?.querySelector('[data-reports-insight="metrics"]')?.textContent).toContain('Overtime minutes')
+    expect(container?.querySelector('[data-reports-empty="trend"]')).toBeNull()
     expect(findFilterButton(container!, 'request-status', 'pending').textContent).toContain('2')
     expect(findFilterButton(container!, 'request-type', 'overtime').textContent).toContain('1')
     expect(findFilterButton(container!, 'record-status', 'adjusted').textContent).toContain('1')
+  })
+
+  it('kpi chips filter the records table without another request', async () => {
+    app = createApp(AttendanceView, { mode: 'reports' })
+    app.mount(container!)
+    await flushUi()
+
+    const initialCallCount = vi.mocked(apiFetch).mock.calls.length
+    container!.querySelector<HTMLButtonElement>('[data-report-kpi="flagged"]')!.click()
+    await flushUi(3)
+
+    const recordRows = Array.from(
+      container!.querySelectorAll<HTMLElement>('[data-report-card="records"] tbody > tr'),
+    ).filter(row => !row.classList.contains('attendance__table-row--meta'))
+    expect(recordRows).toHaveLength(2)
+    expect(recordRows.map(row => row.textContent || '').join('\n')).not.toContain('2026-04-01')
+    expect(container!.querySelector('[data-report-kpi="flagged"]')?.classList.contains('attendance__kpi--active')).toBe(true)
+    expect(vi.mocked(apiFetch).mock.calls.length).toBe(initialCallCount)
+
+    container!.querySelector<HTMLButtonElement>('[data-report-kpi="records"]')!.click()
+    await flushUi(3)
+    expect(container!.querySelectorAll('[data-report-card="records"] tbody > tr')).toHaveLength(3)
   })
 
   it('filters request and record tables locally without extra API calls', async () => {
@@ -372,7 +412,7 @@ describe('Attendance reports analytics', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('4')
+    expect(container?.querySelector('[data-report-kpi="records"]')?.textContent).toContain('3')
     expect(container?.querySelectorAll('[data-report-card="records"] tbody > tr')).toHaveLength(3)
 
     const userInput = container!.querySelector<HTMLInputElement>('#attendance-user-id')
@@ -390,8 +430,10 @@ describe('Attendance reports analytics', () => {
     expect(requestedUrls.some(url => url.includes('/api/attendance/summary?') && url.includes('userId=forbidden-user'))).toBe(true)
     expect(requestedUrls.some(url => url.includes('/api/attendance/export?') && url.includes('userId=forbidden-user'))).toBe(false)
     expect(container?.querySelector('[data-reports-state="unavailable"]')?.textContent).toContain('unavailable')
-    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('Visible requests')
-    expect(container?.querySelector('[data-reports-insight="snapshot"]')?.textContent).toContain('0')
+    expect(container?.querySelector('[data-reports-insight="snapshot"]')).toBeNull()
+    expect(container?.querySelector('[data-reports-empty="trend"]')?.textContent).toContain('None yet')
+    expect(container?.querySelector('[data-reports-empty="metrics"]')?.textContent).toContain('None yet')
+    expect(container?.querySelector('[data-reports-insight="trend"] .attendance__summary-item')).toBeNull()
     expect(container?.querySelector('[data-report-card="request-report"]')?.textContent).toContain('No report data.')
     expect(container?.querySelector('[data-report-card="records"]')?.textContent).toContain('No records.')
     expect(container?.querySelectorAll('[data-report-card="records"] tbody > tr')).toHaveLength(0)
