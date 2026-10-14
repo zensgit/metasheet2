@@ -6661,7 +6661,7 @@
               class="attendance__admin-section"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
             >
-              <AttendanceTeamAvailabilitySection :tr="tr" />
+              <AttendanceTeamAvailabilitySection :tr="tr" :user-scope="attendanceTeamAvailabilityUserScope" />
             </div>
 
             <div
@@ -18157,6 +18157,12 @@ function attendanceAdminUserScopePayload(): { scope: 'global' } | { orgId: strin
     ? { scope: 'global' }
     : { orgId: requiredAttendanceAdminOrgId() }
 }
+
+const attendanceTeamAvailabilityUserScope = computed<{ scope: 'global' } | { orgId: string } | null>(() => {
+  if (attendanceAdminGlobalUserScope.value) return { scope: 'global' }
+  const org = normalizedOrgId()
+  return org ? { orgId: org } : null
+})
 
 function attendanceAdminUserScopeQuery(): string {
   return new URLSearchParams(attendanceAdminUserScopePayload()).toString()

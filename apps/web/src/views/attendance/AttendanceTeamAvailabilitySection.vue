@@ -16,8 +16,8 @@
       ) }}
     </p>
 
-    <div class="attendance__admin-grid">
-      <label class="attendance__field attendance-ta__group" for="attendance-ta-group">
+    <div class="attendance-ta__filters" data-attendance-team-availability-filters>
+      <label class="attendance-ta__field attendance-ta__group" for="attendance-ta-group">
         <span>{{ tr('Attendance group', '考勤组') }}</span>
         <input
           id="attendance-ta-group"
@@ -36,11 +36,11 @@
           </li>
         </ul>
       </label>
-      <label class="attendance__field" for="attendance-ta-from">
+      <label class="attendance-ta__field" for="attendance-ta-from">
         <span>{{ tr('From', '起') }}</span>
         <AttendanceLocaleDateInput id="attendance-ta-from" v-model="from" />
       </label>
-      <label class="attendance__field" for="attendance-ta-to">
+      <label class="attendance-ta__field" for="attendance-ta-to">
         <span>{{ tr('To', '止') }}</span>
         <AttendanceLocaleDateInput id="attendance-ta-to" v-model="to" />
       </label>
@@ -80,13 +80,24 @@
         <table class="attendance__table attendance-ta__matrix" data-attendance-team-availability-matrix>
           <thead>
             <tr>
-              <th>{{ tr('Member', '成员') }}</th>
+              <th>{{ tr('Name', '姓名') }}</th>
               <th v-for="d in dates" :key="d">{{ d }}</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="member in memberIds" :key="member">
-              <td class="attendance-ta__member">{{ member }}</td>
+            <tr v-for="member in members" :key="member">
+              <td class="attendance-ta__member">
+                <span class="attendance-ta__member-identity">
+                  <strong
+                    v-if="memberPrimaryLabel(member)"
+                    data-attendance-team-availability-member-label
+                  >{{ memberPrimaryLabel(member) }}</strong>
+                  <span
+                    data-attendance-team-availability-member-id
+                    :class="{ 'attendance-ta__id-clip': Boolean(memberPrimaryLabel(member)) }"
+                  >{{ member }}</span>
+                </span>
+              </td>
               <td v-for="d in dates" :key="d">
                 <span
                   v-if="metaAt(member, d)"
@@ -122,17 +133,22 @@
 
 <script setup lang="ts">
 import AttendanceLocaleDateInput from './AttendanceLocaleDateInput.vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { TranslateFn } from './useAttendanceAdminRail'
 import { useTeamAvailability } from './useTeamAvailability'
 import { fetchTeamAvailability, teamAvailabilityStateMeta, type TeamAvailabilityStateMeta } from '../../services/attendance/teamAvailability'
 import { useAttendanceSessionGuard } from '../../composables/useAttendanceSessionGuard'
 import { apiFetch } from '../../utils/api'
 
-const props = defineProps<{ tr: TranslateFn }>()
+const props = defineProps<{
+  tr: TranslateFn
+  /** Same directory scope the group-member name resolver sends. Null skips the lookup. */
+  userScope?: { scope: 'global' } | { orgId: string } | null
+}>()
 const tr = props.tr
 
 interface AttendanceGroupChoice { id: string; name: string }
+interface ResolvedMemberLabel { name: string | null; email: string }
 
 const groupId = ref('')
 const groupDraft = ref('')
@@ -173,12 +189,28 @@ async function loadGroupChoices(): Promise<void> {
   }
 }
 
+function applyKnownGroup(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  const byName = groups.value.find(group => group.name === trimmed)
+  if (byName) {
+    groupDraft.value = byName.name
+    groupId.value = byName.id
+    return true
+  }
+  const byId = groups.value.find(group => group.id === trimmed)
+  if (byId) {
+    groupDraft.value = byId.name
+    groupId.value = byId.id
+    return true
+  }
+  return false
+}
+
 function onGroupInput(event: Event): void {
   const text = (event.target as HTMLInputElement).value
   groupDraft.value = text
-  const trimmed = text.trim()
-  const match = groups.value.find(group => group.name === trimmed)
-  groupId.value = match ? match.id : trimmed
+  if (!applyKnownGroup(text)) groupId.value = text.trim()
   menuOpen.value = true
   void loadGroupChoices()
 }
@@ -188,6 +220,10 @@ function chooseGroup(group: AttendanceGroupChoice): void {
   groupId.value = group.id
   menuOpen.value = false
 }
+
+watch(groups, () => {
+  if (groupDraft.value.trim()) applyKnownGroup(groupDraft.value)
+})
 
 onMounted(() => { void loadGroupChoices() })
 const pendingTooltip = computed(() => tr('Pending approval, not yet effective', '待审批，未生效'))
@@ -201,11 +237,70 @@ const errorText = computed(() => {
 
 // unique sorted dates (from the summary) + unique members (from items).
 const dates = computed(() => (data.value?.summary ?? []).map((s) => s.date))
-const memberIds = computed(() => {
+const memberLabels = ref<Record<string, ResolvedMemberLabel>>({})
+let resolveSeq = 0
+
+function memberPrimaryLabel(userId: string): string {
+  const item = memberLabels.value[userId]
+  if (!item) return ''
+  const name = item.name?.trim() || ''
+  if (name) return name
+  return item.email.trim()
+}
+
+const members = computed(() => {
   const seen = new Set<string>()
-  for (const it of data.value?.items ?? []) seen.add(it.userId)
-  return Array.from(seen).sort()
+  for (const it of data.value?.items ?? []) {
+    if (it.userId) seen.add(it.userId)
+  }
+  return Array.from(seen).sort((a, b) => {
+    const left = memberPrimaryLabel(a) || a
+    const right = memberPrimaryLabel(b) || b
+    const byLabel = left.localeCompare(right, 'zh')
+    return byLabel || a.localeCompare(b)
+  })
 })
+
+async function resolveMemberLabels(userIds: string[], seq: number): Promise<void> {
+  const scope = props.userScope
+  if (!scope || userIds.length === 0) {
+    if (seq === resolveSeq) memberLabels.value = {}
+    return
+  }
+  try {
+    const response = await guardedFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds, ...scope }),
+    })
+    if (seq !== resolveSeq) return
+    if (!response || response.status === 403 || response.status === 404) {
+      memberLabels.value = {}
+      return
+    }
+    const payload = await response.json().catch(() => null)
+    if (seq !== resolveSeq) return
+    if (!response.ok || !payload?.ok) {
+      memberLabels.value = {}
+      return
+    }
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const requested = new Set(userIds)
+    const next: Record<string, ResolvedMemberLabel> = {}
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = String((raw as { id?: string }).id || '').trim()
+      if (!id || !requested.has(id) || next[id]) continue
+      const record = raw as { name?: unknown; email?: unknown }
+      next[id] = {
+        name: record.name == null ? null : String(record.name),
+        email: String(record.email || ''),
+      }
+    }
+    memberLabels.value = next
+  } catch {
+    if (seq === resolveSeq) memberLabels.value = {}
+  }
+}
 
 const metaIndex = computed(() => {
   const map = new Map<string, TeamAvailabilityStateMeta>()
@@ -223,11 +318,50 @@ function chipTitle(meta: TeamAvailabilityStateMeta): string {
 
 async function reload(): Promise<void> {
   if (!canLoad.value) return
+  const seq = ++resolveSeq
+  memberLabels.value = {}
   await load(groupId.value, from.value, to.value)
+  if (seq !== resolveSeq) return
+  const userIds = Array.from(new Set((data.value?.items ?? []).map(item => item.userId).filter(Boolean)))
+  await resolveMemberLabels(userIds, seq)
 }
 </script>
 
 <style scoped>
+.attendance-ta__filters {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 12px;
+}
+.attendance-ta__field {
+  display: flex;
+  flex-flow: row nowrap;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: 12px;
+  color: #555;
+}
+.attendance-ta__field > span {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.attendance-ta__field > input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+}
+.attendance-ta__filters :deep(.attendance-locale-date) {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
 .attendance-ta__group { position: relative; }
 .attendance-ta__group-menu {
   position: absolute;
@@ -252,7 +386,27 @@ async function reload(): Promise<void> {
   cursor: pointer;
 }
 .attendance-ta__matrix-wrap { overflow-x: auto; }
-.attendance-ta__member { font-family: var(--font-mono, monospace); font-size: 0.85em; white-space: nowrap; }
+.attendance-ta__member { font-size: 13px; white-space: nowrap; }
+.attendance-ta__member-identity {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.attendance-ta__member-identity strong {
+  font-weight: 600;
+}
+.attendance-ta__id-clip {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .attendance-ta__col--provisional { color: #b45309; }
 .attendance-ta__chip {
   display: inline-block;

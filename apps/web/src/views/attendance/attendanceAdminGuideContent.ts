@@ -248,7 +248,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Team availability → group, from, to → Load', '团队可用性 → 考勤组、起、止 → 查询'],
-        detail: ['Each member-day is one state. An approved personal-leave overlay wins. Otherwise a pending-leave overlay is “pending”, shown as tentative. Otherwise a day with no schedule is unscheduled. A scheduled working day is “scheduled”; a scheduled non-working day is “rest”.', '每个成员的每一天只有一种状态。已批事假覆盖优先。否则待审批请假记为「待审批」，以暂定样式显示。再否则，这一天没有排班就是未排班。已排班且为工作日是「排班」；已排班但非工作日是「休息」。'],
+        detail: ['Group, from, and to sit on one row. Pick the group by name; its id stays off the field and out of the menu. The matrix lists each person by name. Each member-day is one state. An approved personal-leave overlay wins. Otherwise a pending-leave overlay is “pending”, shown as tentative. Otherwise a day with no schedule is unscheduled. A scheduled working day is “scheduled”; a scheduled non-working day is “rest”.', '考勤组、起、止在同一行。按名称选择考勤组，组 id 不出现在输入框和候选列表里。矩阵按姓名列出每个人。每个成员的每一天只有一种状态。已批事假覆盖优先。否则待审批请假记为「待审批」，以暂定样式显示。再否则，这一天没有排班就是未排班。已排班且为工作日是「排班」；已排班但非工作日是「休息」。'],
       },
     ],
     callout: [
