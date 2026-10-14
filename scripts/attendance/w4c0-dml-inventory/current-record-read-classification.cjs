@@ -10,6 +10,16 @@ function entry(relPath, enclosingSymbol, count, role) {
 }
 
 const ATTENDANCE_RECORD_BASE_READ_CLASSIFICATIONS = Object.freeze([
+  // Reviewed operator archive repair uses the complete original row for readonly
+  // planning and apply FOR UPDATE/CAS; it never updates or lists parent records.
+  entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'runRepair', 1, 'reviewed_legacy_repair_row_cas'),
+  // The scanner attributes both active-parent and pending-related joins to the
+  // local keyset helper `scan`. Both are org-scoped readonly preflight counts.
+  entry('packages/core-backend/src/attendance/attendance-timezone-legacy-repair.ts', 'scan', 2, 'values_free_upgrade_preflight'),
+  entry('plugins/plugin-attendance/lib/attendance-timezone-companion-store.cjs', 'readEligibleLegacyRepair', 1, 'legacy_repair_live_continuation_precondition'),
+  // Nearest-declaration attribution is `query` inside the authorized default-PUT
+  // helper; the read checks active open parents for original frozen authority.
+  entry('plugins/plugin-attendance/lib/attendance-timezone-default-recovery.cjs', 'query', 1, 'missing_default_recovery_open_freeze_precondition'),
   // Exact internal frozen-context and source-change preconditions; no public record listing.
   // Scheduled generation checks physical parent existence before current-policy resolution.
   // Match generateAbsenceRecords' base-table NOT EXISTS, including retired/review placeholders;

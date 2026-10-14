@@ -210,6 +210,10 @@ describe('controlled legacy timezone repair actual HTTP/PostgreSQL', () => {
     await live.pool.query('INSERT INTO user_orgs(user_id,org_id,is_active) VALUES($1,$2,true)',[h.actor.userId,otherOrg])
     const crossed={...h.evidence,orgId:otherOrg,rule:{...h.evidence.rule,orgId:otherOrg}}
     await expect(preview(live.pool,input(crossed))).rejects.toMatchObject({code:'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_RECORD_NOT_FOUND'})
+    const otherAdmission=await inspect(live.pool,{orgId:otherOrg,actorId:admin.userId})
+    expect(otherAdmission).toMatchObject({code:'ATTENDANCE_TIMEZONE_LEGACY_REPAIR_PREFLIGHT_BLOCKED',scanComplete:true,counts:{
+      defaultRules:0,missingDefaultRules:1,recordsScanned:0,pendingRelatedRequestsScanned:0,ordinaryLegacyRecordsWithoutCompanion:0,
+    }})
   })
   it('serializes concurrent approved replay into one companion without changing the parent',async()=>{
     const h=await historical(),request=input(h.evidence),plan=await preview(live.pool,request)
