@@ -65,7 +65,7 @@ python3 -B "$TOOLS/restore-verified.py"
 
 DB test命令只可使用已准备的全合成 test DB URL；guard mutation回到原实现／中和adapter后必须红，并恢复原字节后再验证。源代码三项可公开的变更为 V1终态时钟、独立COMMIT adapter和两host接线；相关新测试加入已有 wired DB文件，`plugin-tests.yml`的原 invocation保留。
 
-values-free材料在任务 artifacts目录：`initial-scale-failure.json`、`original-source-receipts.json`、`pre-20k-repair-receipts.json`、`commit-timeout-evidence.json`、`connection-regression-receipt.json`、`witness-paired-profile.json`、`pre-witness-optimization-receipts.json`、`final-source-hashes.json`、`final-harness-hashes.json`以及待生成的`final-qualification-receipts.json`。独立报告为`astra-independent-review.md`和`astra-ultra-20k-root-cause.md`。这些文件中的 raw／private引用不作为公开数据。
+values-free材料在任务 artifacts目录：`initial-scale-failure.json`、`original-source-receipts.json`、`pre-20k-repair-receipts.json`、`commit-timeout-evidence.json`、`connection-regression-receipt.json`、`witness-paired-profile.json`、`pre-witness-optimization-receipts.json`、`final-source-hashes.json`、`final-harness-hashes.json`以及`final-qualification-receipts.json`。独立报告为`astra-independent-review.md`和`astra-ultra-20k-root-cause.md`。这些文件中的 raw／private引用不作为公开数据。
 
 ## 六轮最终结果
 
@@ -117,3 +117,9 @@ Kimi只做本机CLI preflight，未验证 K3 model alias，未声称运行 K3任
 | Development / verification MD and local code | COMPLETE: two scoped local fixes and reviewable PR materials |
 | Public branches / Draft PR / CI | NOT EXECUTED: separate owner approval required |
 | Merge / deploy / real operational configuration | NOT AUTHORIZED OR EXECUTED |
+
+## Draft publication authorization — 2026-10-14
+
+The owner separately approved public publication of both branches, two dependent Draft PRs, and CI. Merge and deployment remain outside that approval. The preceding qualification is a historical receipt for frozen product source `1ef38f6b17a7fdcf77e1934c99d84a3be7e1efcb`; documentation-only publication commits do not change that source.
+
+Publication preflight fetched main `d86cf921d852cc46ab4d17760f0bdf0c1161727a`. Both candidate trees merge without a textual conflict, but main has since added attendance timezone behavior and migrations. The six scale samples do not qualify that newer combined runtime. Preserve the frozen branches for Draft review, run the first PR's normal CI against its merge ref, and explicitly dispatch Plugin System Tests on the second branch because its stacked base is outside that workflow's pull-request branch filter. Record exact run/head identities separately; before any future merge, refresh main, reconcile the stack, and validate the resulting source.
