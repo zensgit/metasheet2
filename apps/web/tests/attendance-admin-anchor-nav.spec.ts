@@ -1426,4 +1426,43 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
     expect(container!.querySelector('[data-admin-shortcut="attendance-admin-shifts"]')?.textContent).toContain('Scheduling · Shifts')
   })
+
+  it('filters the jump block by Chinese label and keeps the active section highlighted', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const search = container!.querySelector<HTMLInputElement>('[data-admin-nav-search]')
+    expect(search).toBeTruthy()
+    expect(container!.querySelector('[data-admin-page-search-input]')).toBeNull()
+
+    const shifts = container!.querySelector<HTMLButtonElement>('[data-admin-anchor="attendance-admin-shifts"]')
+    expect(shifts).toBeTruthy()
+    shifts!.click()
+    await flushUi(2)
+    expect(shifts!.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
+
+    search!.value = '班次'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const visible = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-anchor]'))
+    expect(visible.map(item => item.textContent?.trim())).toEqual(['Shifts'])
+    expect(visible[0]?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor-group="scheduling"] .attendance__admin-nav-group-header')?.getAttribute('aria-expanded')).toBe('true')
+
+    search!.value = '用户权限'
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')?.textContent).toContain('User Access')
+    expect(container!.querySelector('[data-admin-anchor-group="workspace"] .attendance__admin-nav-group-header')?.getAttribute('aria-expanded')).toBe('true')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')).toBeNull()
+
+    search!.value = ''
+    search!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelectorAll('[data-admin-anchor="attendance-admin-shifts"]').length).toBe(1)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
+  })
 })

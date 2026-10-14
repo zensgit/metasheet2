@@ -3,6 +3,17 @@
     <div class="attendance__admin-nav-header">
       <strong>{{ tr('Jump to', '跳转区块') }}</strong>
     </div>
+    <label class="attendance__admin-nav-search">
+      <input
+        :value="adminSectionFilter"
+        type="search"
+        autocomplete="off"
+        data-admin-nav-search="true"
+        :placeholder="tr('Search sections', '搜索区块')"
+        :aria-label="tr('Search workbench sections', '搜索工作台区块')"
+        @input="onSectionFilterInput"
+      />
+    </label>
     <button
       v-if="isCompactAdminNav"
       class="attendance__admin-nav-toggle"
@@ -62,7 +73,7 @@ import type {
   TranslateFn,
 } from './useAttendanceAdminRail'
 
-withDefaults(defineProps<{
+const props = withDefaults(defineProps<{
   tr: TranslateFn
   adminSectionNavCountLabel?: string
   adminNavStorageScope?: string
@@ -105,6 +116,14 @@ const emit = defineEmits<{
   (event: 'toggleGroup', id: string): void
   (event: 'selectSection', id: string): void
 }>()
+
+function onSectionFilterInput(event: Event): void {
+  const value = (event.target as HTMLInputElement).value
+  emit('update:sectionFilter', value)
+  if (props.isCompactAdminNav && !props.adminCompactNavOpen && value.trim()) {
+    emit('update:compactNavOpen', true)
+  }
+}
 </script>
 
 <style scoped>
@@ -163,6 +182,21 @@ const emit = defineEmits<{
   font-size: 13px;
   font-weight: var(--ms-font-weight-title);
   color: var(--ms-text-1);
+}
+
+.attendance__admin-nav-search {
+  display: block;
+  margin: 0;
+}
+
+.attendance__admin-nav-search input {
+  width: 100%;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--ms-border, #d0d0d0);
+  border-radius: 6px;
+  font-size: 13px;
 }
 
 .attendance__admin-nav-toggle {

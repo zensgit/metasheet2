@@ -1699,9 +1699,11 @@
               :active-admin-section-context-label="activeAdminSectionContextLabel"
               :is-compact-admin-nav="isCompactAdminNav"
               :admin-compact-nav-open="adminCompactNavOpen"
+              :admin-section-filter="adminSectionFilter"
               :visible-admin-section-nav-groups="visibleAdminSectionNavGroups"
               :admin-active-section-id="adminActiveSectionId"
               @update:compact-nav-open="adminCompactNavOpen = $event"
+              @update:section-filter="adminSectionFilter = $event"
               @toggle-group="toggleAdminSectionGroup"
               @select-section="selectAdminSection"
             />
