@@ -146,4 +146,22 @@ describe('AttendanceTimezoneSelect', () => {
     app.unmount()
     container.remove()
   })
+
+  it('clears the saved zone when the field change event is empty, and a focus blur does not', async () => {
+    const { container, app, updates } = await mount()
+    const input = container.querySelector<HTMLInputElement>('#policy-timezone')!
+    input.value = ''
+    input.dispatchEvent(new Event('change'))
+    await nextTick()
+    expect(updates.at(-1)).toBe('')
+
+    input.dispatchEvent(new Event('focus'))
+    input.dispatchEvent(new Event('blur'))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await nextTick()
+    expect(updates).toEqual([''])
+
+    app.unmount()
+    container.remove()
+  })
 })

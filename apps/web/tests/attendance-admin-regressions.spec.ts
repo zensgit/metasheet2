@@ -2082,8 +2082,8 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(section!.querySelector('[data-attendance-help="annual-policy"]')?.textContent).toContain('Attendance help')
     expect(section!.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
-    const tzInput = section!.querySelector<HTMLSelectElement>('#attendance-annual-policy-tz')!
-    expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
+    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
+    expect(tzInput.getAttribute('data-attendance-timezone-value')).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
     // FIRST save WITHOUT ever clicking Reload → must PUT the real (hydrated) policy, never the local defaults.

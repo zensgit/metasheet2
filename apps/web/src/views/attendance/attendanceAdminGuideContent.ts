@@ -90,7 +90,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Settings → Auto absence', '设置 → 自动缺勤'],
-        detail: ['Set the switch, the run time, and the lookback days, then save. Saving stores the values. It does not itself scan punches. A time control shows 上午/下午 in Chinese and still stores 24-hour HH:mm.', '填写开关、执行时间和回溯天数后保存。保存只写入这些值，不会当场去扫打卡。中文界面的时间控件显示上午/下午，保存的仍是 24 小时制 HH:mm。'],
+        detail: ['Set the switch, the run time, and the lookback days, then save. Saving stores the values. It does not itself scan punches. The run time is one 24-hour field, such as 09:00. A small read-only 上午 or 下午 hint follows the value. The stored time is still HH:mm.', '填写开关、执行时间和回溯天数后保存。保存只写入这些值，不会当场去扫打卡。执行时间是一个 24 小时字段，例如 09:00，旁边只读显示上午或下午。保存的仍是 HH:mm。'],
       },
       {
         path: ['Makeup punch policy → Policy timezone', '补卡策略 → 规则时区'],
@@ -192,7 +192,7 @@ export const attendanceGuideTopics: GuideTopic[] = [
     steps: [
       {
         path: ['Default rule → Timezone, work start, work end', '默认规则 → 时区、上班时间、下班时间'],
-        detail: ['The timezone picker accepts a city, an IANA id, or an offset such as +8. Work start and work end can be typed as 9:00 or 18:00; Chinese still shows 上午/下午. The stored time is 24-hour HH:mm.', '时区可以输入城市、IANA 标识，或 +8 这类偏移。上班时间和下班时间可以输入 9:00 或 18:00；中文仍显示上午/下午。保存的时间是 24 小时制 HH:mm。'],
+        detail: ['The timezone picker accepts a city, an IANA id, or an offset such as +8. Work start and work end are each one 24-hour field, such as 09:00 or 18:00, with a small read-only 上午 or 下午 hint. There is no separate morning/afternoon selector. The stored time is 24-hour HH:mm.', '时区可以输入城市、IANA 标识，或 +8 这类偏移。上班时间和下班时间各是一个 24 小时字段，例如 09:00 或 18:00，旁边只读显示上午或下午，没有单独的上午/下午选择。保存的时间是 24 小时制 HH:mm。'],
       },
       {
         path: ['Rule sets → the group’s rule policy', '规则集 → 考勤组的规则策略'],

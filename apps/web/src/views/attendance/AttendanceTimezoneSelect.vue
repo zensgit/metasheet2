@@ -130,6 +130,10 @@ function onChange(event: Event): void {
   const text = (event.target as HTMLInputElement).value
   query.value = text
   editing.value = true
+  if (!text.trim()) {
+    emitValue('')
+    return
+  }
   commitFromText(text)
 }
 

@@ -35237,11 +35237,12 @@ defineExpose({
   min-width: 0;
 }
 
-.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time select),
-#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time select) {
+.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint),
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint) {
   width: auto;
-  max-width: 4.75rem;
-  min-width: 0;
+  max-width: 3rem;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .attendance__control-with-unit {

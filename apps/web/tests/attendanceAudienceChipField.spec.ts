@@ -111,7 +111,7 @@ describe('holiday index help', () => {
 })
 
 describe('locale time input', () => {
-  it('shows 上午/下午 in Chinese and keeps a 24-hour value', async () => {
+  it('shows one 24-hour field and a read-only 上午/下午 hint', async () => {
     useLocale().setLocale('zh-CN')
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -126,15 +126,27 @@ describe('locale time input', () => {
     app.mount(container)
     await flush()
 
-    expect(container.textContent).toContain('上午')
-    expect(container.textContent).toContain('下午')
+    const typed = container.querySelector<HTMLInputElement>('[data-attendance-locale-time-typed]')
+    expect(typed?.value).toBe('01:30')
+    expect(typed?.getAttribute('aria-label')).toContain('24 小时')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('上午')
+    expect(container.querySelector('select')).toBeNull()
+    expect(container.querySelector('[data-attendance-locale-time-period]')).toBeNull()
     expect(container.querySelector('input[type="time"]')).toBeNull()
-    const period = container.querySelector<HTMLSelectElement>('[data-attendance-locale-time-period]')
-    expect(period?.value).toBe('am')
-    period!.value = 'pm'
-    period!.dispatchEvent(new Event('change'))
+
+    typed!.value = '18:00'
+    typed!.dispatchEvent(new Event('change'))
     await flush()
-    expect(value).toBe('13:30')
+    expect(value).toBe('18:00')
+    expect(typed!.value).toBe('18:00')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('下午')
+
+    typed!.value = '9:05'
+    typed!.dispatchEvent(new Event('change'))
+    await flush()
+    expect(value).toBe('09:05')
+    expect(typed!.value).toBe('09:05')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('上午')
 
     useLocale().setLocale('en')
     app.unmount()
