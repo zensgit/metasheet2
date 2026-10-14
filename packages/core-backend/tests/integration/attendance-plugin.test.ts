@@ -1791,8 +1791,8 @@ attendanceIntegrationDescribe(
       },
     })
     expect(importTemplateCsvRes.status).toBe(200)
-    expect(importTemplateCsvRes.raw).toContain('日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
-    expect(importTemplateCsvRes.raw).toContain('2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,')
+    expect(importTemplateCsvRes.raw).toContain('UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
+    expect(importTemplateCsvRes.raw).toContain('user@example.com,2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,')
 
     const importTemplateCsvProfileRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv?profileId=manual_rows`, {
       headers: {
@@ -15682,6 +15682,164 @@ attendanceIntegrationDescribe(
     await expect(fs.stat(metaPath)).rejects.toBeTruthy()
   })
 
+  it('resolves an email UserId on preview and commit, and skips an unknown email without HTTP 500', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const subjectId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(subjectId)
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(subjectId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const orgId = 'default'
+    const email = `${subjectId}@example.test`
+    const knownCsv = [
+      'UserId,Date,ClockIn,ClockOut',
+      `${email},2026-03-23,2026-03-23 09:00,2026-03-23 18:00`,
+      '',
+    ].join('\n')
+
+    const uploadKnown = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=email-userid.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: knownCsv,
+    })
+    expect(uploadKnown.status).toBe(201)
+    const knownFileId = (uploadKnown.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof knownFileId).toBe('string')
+    if (!knownFileId) return
+
+    const preparePreview = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    expect(preparePreview.status).toBe(200)
+    const previewToken = (preparePreview.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewToken).toBeTruthy()
+    if (!previewToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: knownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: previewToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewItem = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string; status?: string; warnings?: string[] }> } } | undefined)?.data?.items?.[0]
+    expect(previewItem?.userId).toBe(subjectId)
+    expect(previewItem?.workDate).toBe('2026-03-23')
+    expect(previewItem?.status).not.toBe('invalid')
+    expect(previewItem?.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining('Unresolved user identifier')]))
+
+    const prepareCommit = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const commitToken = (prepareCommit.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: knownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken,
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitBody = commitRes.body as { ok?: boolean; error?: { code?: string }; data?: { imported?: number; failedRows?: number; batchId?: string } }
+    expect(commitBody.error?.code).not.toBe('INTERNAL_ERROR')
+    expect(commitBody.data?.imported).toBe(1)
+    expect(commitBody.data?.failedRows).toBe(0)
+
+    const unknownCsv = [
+      'UserId,日期,上班1打卡时间,下班1打卡时间',
+      'nobody-not-a-member@metasheet.test,2026-03-24,2026-03-24 09:00,2026-03-24 18:00',
+      '',
+    ].join('\n')
+    const uploadUnknown = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=unknown-email.csv`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/csv' },
+      body: unknownCsv,
+    })
+    expect(uploadUnknown.status).toBe(201)
+    const unknownFileId = (uploadUnknown.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    if (!unknownFileId) return
+
+    const prepareUnknownPreview = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const unknownPreviewToken = (prepareUnknownPreview.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    const unknownPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: unknownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: unknownPreviewToken,
+      }),
+    })
+    expect(unknownPreviewRes.status).toBe(200)
+    const unknownItem = (unknownPreviewRes.body as { data?: { items?: Array<{ status?: string; warnings?: string[] }> } } | undefined)?.data?.items?.[0]
+    expect(unknownItem?.status).toBe('invalid')
+    expect(unknownItem?.warnings?.join('\n')).toContain('Unresolved user identifier')
+    expect(unknownItem?.warnings?.join('\n')).toContain('nobody-not-a-member@metasheet.test')
+
+    const prepareUnknownCommit = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const unknownCommitToken = (prepareUnknownCommit.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    const unknownCommitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: unknownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: unknownCommitToken,
+        returnItems: false,
+      }),
+    })
+    expect(unknownCommitRes.status).toBe(200)
+    const unknownCommit = unknownCommitRes.body as { error?: { code?: string }; data?: { imported?: number; failedRows?: number; skipped?: Array<{ warnings?: string[] }> } }
+    expect(unknownCommit.error?.code).not.toBe('INTERNAL_ERROR')
+    expect(unknownCommit.data?.imported).toBe(0)
+    expect(Number(unknownCommit.data?.failedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(unknownCommit.data?.skipped?.[0]?.warnings?.join('\n')).toContain('Unresolved user identifier')
+
+    const batchId = commitBody.data?.batchId
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      expect(rollbackRes.status).toBe(200)
+    }
+  })
+
   it('routes high-scale csvFileId imports to async endpoints and preserves upload for async lanes', async () => {
     if (!baseUrl) return
     if (!importUploadDir) return
@@ -15697,12 +15855,12 @@ attendanceIntegrationDescribe(
     const baseRows = 1000
     const totalRows = baseRows + 2
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const highScaleUserId = (index: number) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`
     const csvRows = Array.from({ length: baseRows }, (_, index) => {
-      const rowUserId = `attendance-highscale-${String(index + 1).padStart(4, '0')}`
-      return `${workDate},${rowUserId},CSV High Scale,09:00,18:00,正常`
+      return `${workDate},${highScaleUserId(index + 1)},CSV High Scale,09:00,18:00,正常`
     })
-    csvRows.push(`${workDate},attendance-highscale-0001,CSV High Scale,09:05,18:05,正常`)
-    csvRows.push(`,attendance-highscale-invalid,CSV High Scale,09:10,18:10,正常`)
+    csvRows.push(`${workDate},${highScaleUserId(1)},CSV High Scale,09:05,18:05,正常`)
+    csvRows.push(`,${highScaleUserId(baseRows + 1)},CSV High Scale,09:10,18:10,正常`)
     const csvText = `${csvHeader}\n${csvRows.join('\n')}\n`
 
     const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=highscale-async.csv`, {

@@ -10395,6 +10395,7 @@ import {
 import {
   IMPORT_TEMPLATE_DEFAULT_SELECTED_KEYS,
   allSelectableImportFieldKeys,
+  buildCanonicalAttendanceImportTemplateCsv,
   buildImportColumnFormatRows,
   buildTemplateExampleRow,
   buildTemplateHeaderFromSelection,
@@ -20200,52 +20201,63 @@ async function loadImportTemplate() {
   }
 }
 
-async function downloadImportTemplateCsv() {
-  // One-click (import-section-ux design-lock D2): auto-load the template first
-  // instead of erroring, so the download works from a cold panel. Guard: only
-  // when the payload is untouched — loadImportTemplate overwrites
-  // importForm.payload, and a hand-edited (or mid-edit, unparseable) payload
-  // must never be silently destroyed by a template download.
-  if (!importTemplateGuide.value) {
-    const rawPayload = String(importForm.payload ?? '').trim()
-    if (rawPayload && rawPayload !== '{}') {
-      setStatus(
-        tr(
-          'Payload JSON has content but no template columns — fix or clear it, or click "Load template" to replace it.',
-          '负载 JSON 已有内容但无法生成模板——请修正/清空后再试，或点「加载模板」覆盖当前负载。',
-        ),
-        'error',
-      )
-      return
-    }
-    await loadImportTemplate()
-  }
-  const guide = importTemplateGuide.value
-  if (!guide) {
-    setStatus(tr('Load the import template before downloading CSV guidance.', '请先加载导入模板，再下载 CSV 模板。'), 'error')
-    return
-  }
-  const columns = guide.columns.length > 0
-    ? guide.columns
-    : guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
-  if (columns.length === 0) {
-    setStatus(tr('The current template does not expose CSV header guidance yet.', '当前模板尚未提供 CSV 表头指导。'), 'error')
-    return
-  }
-  // Harmonized with the selected-fields download (#3793 review NIT-3): ship a
-  // concrete example row instead of an empty line.
-  const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
-  const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+function triggerAttendanceTemplateDownload(filename: string, csv: string) {
   const blob = new Blob([withCsvBom(csv)], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
-  const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
   link.href = url
-  link.download = `${source}-attendance-template.csv`
+  link.download = filename
   document.body.appendChild(link)
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+async function downloadImportTemplateCsv() {
+  // Prefer the CSV endpoint so the file matches the importer's mapped headers.
+  // A tunnel/origin failure (including HTTP 530) must still produce a file:
+  // fall back to the loaded guide, then to the built-in mapped template.
+  // Do not call loadImportTemplate here — that overwrites a hand-edited payload.
+  const profileId = importProfileId.value.trim()
+  const query = new URLSearchParams()
+  if (profileId) query.set('profileId', profileId)
+  const endpoint = query.size > 0
+    ? `/api/attendance/import/template.csv?${query.toString()}`
+    : '/api/attendance/import/template.csv'
+  try {
+    const response = await apiFetch(endpoint, { headers: { Accept: 'text/csv' } })
+    if (response.ok) {
+      const csvText = await response.text()
+      if (csvText.trim()) {
+        const source = normalizeText(selectedImportProfile.value?.source ?? 'dingtalk_csv') || 'dingtalk_csv'
+        triggerAttendanceTemplateDownload(`${source}-attendance-template.csv`, csvText)
+        setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+        return
+      }
+    }
+  } catch {
+    // Fall through to a local file. The button must not stop at a network error.
+  }
+
+  const guide = importTemplateGuide.value
+  const columns = guide && guide.columns.length > 0
+    ? guide.columns
+    : guide
+      ? guide.sampleHeader.split(',').map(item => item.trim()).filter(Boolean)
+      : []
+  if (columns.length > 0 && guide) {
+    const exampleRow = buildTemplateExampleRow(importColumnFormatRows.value, columns)
+    const csv = `${columns.map(escapeCsvCell).join(',')}\n${exampleRow.map(escapeCsvCell).join(',')}\n`
+    const source = normalizeText(selectedImportProfile.value?.source ?? guide.source) || 'attendance'
+    triggerAttendanceTemplateDownload(`${source}-attendance-template.csv`, csv)
+    setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
+    return
+  }
+
+  triggerAttendanceTemplateDownload(
+    'dingtalk_csv-attendance-template.csv',
+    buildCanonicalAttendanceImportTemplateCsv(),
+  )
   setStatus(tr('CSV template downloaded.', 'CSV 模板已下载。'))
 }
 

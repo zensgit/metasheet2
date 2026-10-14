@@ -721,9 +721,11 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: '1_on_duty_user_check_time', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '上班1打卡时间', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: 'check_in', targetField: 'firstInAt', dataType: 'time' },
+  { sourceField: 'ClockIn', targetField: 'firstInAt', dataType: 'time' },
   { sourceField: '1_off_duty_user_check_time', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '下班1打卡时间', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: 'check_out', targetField: 'lastOutAt', dataType: 'time' },
+  { sourceField: 'ClockOut', targetField: 'lastOutAt', dataType: 'time' },
   { sourceField: '2_on_duty_user_check_time', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '上班2打卡时间', targetField: 'clockIn2', dataType: 'time' },
   { sourceField: '2_off_duty_user_check_time', targetField: 'clockOut2', dataType: 'time' },
@@ -776,6 +778,8 @@ const IMPORT_MAPPING_COLUMNS = [
   { sourceField: 'userId', targetField: 'userId', dataType: 'string' },
   { sourceField: 'work_date', targetField: 'workDate', dataType: 'date' },
   { sourceField: 'workDate', targetField: 'workDate', dataType: 'date' },
+  { sourceField: 'date', targetField: 'workDate', dataType: 'date' },
+  { sourceField: 'Date', targetField: 'workDate', dataType: 'date' },
   { sourceField: '入职时间', targetField: 'entryTime', dataType: 'date' },
   { sourceField: 'entry_time', targetField: 'entryTime', dataType: 'date' },
   { sourceField: '离职时间', targetField: 'resignTime', dataType: 'date' },
@@ -799,8 +803,8 @@ const IMPORT_MAPPING_PROFILES = [
     userMapSourceFields: ['empNo', '工号', '姓名'],
     requiredFields: DEFAULT_REQUIRED_FIELDS,
     punchRequiredFields: DEFAULT_PUNCH_REQUIRED_FIELDS,
-    templateColumns: ['日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
-    templateSampleRow: ['2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
+    templateColumns: ['UserId', '日期', '工号', '姓名', '考勤组', '上班1打卡时间', '下班1打卡时间', '考勤结果', '异常原因'],
+    templateSampleRow: ['user@example.com', '2026-03-23', 'EMP001', '张三', '总部日班', '2026-03-23 09:00', '2026-03-23 18:00', '正常', ''],
   },
   {
     id: 'dingtalk_api_columns',
@@ -825,10 +829,10 @@ const IMPORT_MAPPING_PROFILES = [
 ]
 
 const IMPORT_REQUIRED_FIELD_ALIASES = {
-  '日期': ['workDate', 'work_date', 'date'],
-  workDate: ['日期', 'work_date', 'date'],
-  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1', 'check_in'],
-  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out'],
+  '日期': ['workDate', 'work_date', 'date', 'Date'],
+  workDate: ['日期', 'work_date', 'date', 'Date'],
+  '上班1打卡时间': ['1_on_duty_user_check_time', 'firstInAt', 'clockIn1', 'check_in', 'ClockIn'],
+  '下班1打卡时间': ['1_off_duty_user_check_time', 'lastOutAt', 'clockOut1', 'check_out', 'ClockOut'],
   '上班2打卡时间': ['2_on_duty_user_check_time', 'clockIn2'],
   '下班2打卡时间': ['2_off_duty_user_check_time', 'clockOut2'],
   '上班3打卡时间': ['3_on_duty_user_check_time', 'clockIn3'],
@@ -7554,6 +7558,8 @@ const IMPORT_HEADER_CONTEXT_KEYS = new Set([
   'shiftname',
   '上班1打卡时间',
   '下班1打卡时间',
+  'clockin',
+  'clockout',
   '考勤结果',
   '考勤组',
   '班次',
@@ -7756,7 +7762,7 @@ function buildImportRowFromCsvRawRow(header, rawRow) {
   })
   if (!hasValue) return null
 
-  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date)
+  const workDate = normalizeCsvWorkDate(fields['日期'] ?? fields.workDate ?? fields.work_date ?? fields.date ?? fields.Date)
   const userId = fields.UserId ?? fields.userId ?? fields.user_id ?? fields['用户ID']
   return {
     workDate: workDate ?? '',
@@ -8196,6 +8202,201 @@ function collectRowUserIdentityValues({ row, userMapKeyField, userMapSourceField
     values.push({ field: key, value: normalized })
   }
   return values
+}
+
+// W4 commit accepts only a canonical 8-4-4-4-12 user id. Preview used to treat any
+// non-empty UserId cell (including an email) as already resolved, then commit threw
+// W4C0_USER_ID_INVALID and the route answered HTTP 500. Both paths now share this check.
+const CANONICAL_IMPORT_USER_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+
+function isCanonicalImportUserId(value) {
+  return typeof value === 'string' && value.length === 36 && CANONICAL_IMPORT_USER_ID_RE.test(value)
+}
+
+function importUserIdentifierLookupKey(value) {
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return ''
+  try {
+    return trimmed.normalize('NFKC').toLowerCase()
+  } catch (_error) {
+    return trimmed.toLowerCase()
+  }
+}
+
+function importUserMobileMatchKeys(value) {
+  const compact = String(value ?? '').replace(/[\s\-()]/g, '')
+  if (!/^\+?\d{7,15}$/.test(compact)) return []
+  const keys = new Set([compact])
+  if (compact.startsWith('+')) keys.add(compact.slice(1))
+  if (compact.startsWith('+86') && compact.length > 3) keys.add(compact.slice(3))
+  if (/^1\d{10}$/.test(compact)) keys.add(`+86${compact}`)
+  return Array.from(keys)
+}
+
+function classifyImportUserIdentifier(raw, users) {
+  const trimmed = String(raw ?? '').trim()
+  const key = importUserIdentifierLookupKey(trimmed)
+  const list = Array.isArray(users) ? users : []
+  const exact = list.filter((user) => user && String(user.id) === trimmed)
+  if (exact.length > 1) return { ambiguous: true }
+  if (exact.length === 1) {
+    const id = String(exact[0].id)
+    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
+  }
+  const emailMatches = list.filter((user) => (
+    typeof user?.email === 'string' && importUserIdentifierLookupKey(user.email) === key
+  ))
+  if (emailMatches.length > 1) return { ambiguous: true }
+  if (emailMatches.length === 1) {
+    const id = String(emailMatches[0].id)
+    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
+  }
+  const usernameMatches = list.filter((user) => (
+    typeof user?.username === 'string' && user.username.trim() && importUserIdentifierLookupKey(user.username) === key
+  ))
+  if (usernameMatches.length > 1) return { ambiguous: true }
+  if (usernameMatches.length === 1) {
+    const id = String(usernameMatches[0].id)
+    return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
+  }
+  const wantedMobile = new Set(importUserMobileMatchKeys(trimmed))
+  if (wantedMobile.size > 0) {
+    const mobileMatches = list.filter((user) => {
+      const keys = importUserMobileMatchKeys(user?.mobile)
+      return keys.some((mobileKey) => wantedMobile.has(mobileKey))
+    })
+    if (mobileMatches.length > 1) return { ambiguous: true }
+    if (mobileMatches.length === 1) {
+      const id = String(mobileMatches[0].id)
+      return isCanonicalImportUserId(id) ? { userId: id } : { nonCanonical: true }
+    }
+  }
+  return { missing: true }
+}
+
+function adoptCanonicalImportUserId(rawUserId, index) {
+  if (!rawUserId) return { userId: null, warning: null }
+  const raw = String(rawUserId).trim()
+  if (!raw) return { userId: null, warning: null }
+  if (isCanonicalImportUserId(raw)) return { userId: raw.toLowerCase(), warning: null }
+  const entry = index instanceof Map ? index.get(importUserIdentifierLookupKey(raw)) : null
+  if (entry?.userId && isCanonicalImportUserId(entry.userId)) {
+    return { userId: entry.userId.toLowerCase(), warning: null }
+  }
+  if (entry?.ambiguous) {
+    return {
+      userId: null,
+      warning: `Unresolved user identifier (${raw}); more than one user in this organization matches`,
+    }
+  }
+  if (entry?.nonCanonical) {
+    return {
+      userId: null,
+      warning: `Unresolved user identifier (${raw}); the matched account id is not a canonical user id`,
+    }
+  }
+  return {
+    userId: null,
+    warning: `Unresolved user identifier (${raw}); use a user id, or an email, username, or mobile that matches one user in this organization`,
+  }
+}
+
+async function queryAttendanceImportIdentifierUsers(db, orgId, unique, lowerKeys, mobileKeys) {
+  try {
+    return await db.query(
+      `SELECT u.id::text AS id, u.email, u.username, u.mobile
+         FROM users u
+         JOIN user_orgs uo ON uo.user_id = u.id
+        WHERE uo.org_id = $1
+          AND COALESCE(uo.is_active, true) = true
+          AND COALESCE(u.is_active, true) = true
+          AND (
+            u.id = ANY($2::text[])
+            OR lower(COALESCE(u.email, '')) = ANY($3::text[])
+            OR lower(COALESCE(u.username, '')) = ANY($3::text[])
+            OR regexp_replace(COALESCE(u.mobile, ''), '[\\s\\-()]+', '', 'g') = ANY($4::text[])
+          )`,
+      [orgId, unique, lowerKeys, mobileKeys]
+    )
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+  }
+  // Older schemas may lack username/mobile/is_active. Email + id still resolve.
+  try {
+    return await db.query(
+      `SELECT u.id::text AS id, u.email, NULL::text AS username, NULL::text AS mobile
+         FROM users u
+         JOIN user_orgs uo ON uo.user_id = u.id
+        WHERE uo.org_id = $1
+          AND (
+            u.id = ANY($2::text[])
+            OR lower(COALESCE(u.email, '')) = ANY($3::text[])
+          )`,
+      [orgId, unique, lowerKeys]
+    )
+  } catch (error) {
+    if (!isDatabaseSchemaError(error)) throw error
+    return []
+  }
+}
+
+async function loadAttendanceImportUserIdentifierIndex(db, orgId, rawIdentifiers) {
+  const index = new Map()
+  const unique = []
+  const seen = new Set()
+  for (const raw of Array.isArray(rawIdentifiers) ? rawIdentifiers : []) {
+    const trimmed = String(raw ?? '').trim()
+    if (!trimmed || isCanonicalImportUserId(trimmed)) continue
+    const key = importUserIdentifierLookupKey(trimmed)
+    if (!key || seen.has(key)) continue
+    seen.add(key)
+    unique.push(trimmed)
+  }
+  if (!unique.length || !db || typeof db.query !== 'function') return index
+
+  const lowerKeys = unique.map((value) => importUserIdentifierLookupKey(value))
+  const mobileKeys = Array.from(new Set(unique.flatMap((value) => importUserMobileMatchKeys(value))))
+  const rows = await queryAttendanceImportIdentifierUsers(db, orgId, unique, lowerKeys, mobileKeys)
+  const users = Array.isArray(rows) ? rows : []
+
+  for (const raw of unique) {
+    index.set(importUserIdentifierLookupKey(raw), classifyImportUserIdentifier(raw, users))
+  }
+  return index
+}
+
+async function loadImportUserIdentifierIndexForIterator(db, orgId, iterateRows, options) {
+  const pending = []
+  const seen = new Set()
+  if (typeof iterateRows === 'function') {
+    await iterateRows((row) => {
+      const raw = resolveRowUserId({
+        row,
+        fallbackUserId: options?.fallbackUserId,
+        userMap: options?.userMap,
+        userMapKeyField: options?.userMapKeyField,
+        userMapSourceFields: options?.userMapSourceFields,
+      })
+      if (!raw || isCanonicalImportUserId(raw)) return true
+      const key = importUserIdentifierLookupKey(raw)
+      if (!key || seen.has(key)) return true
+      seen.add(key)
+      pending.push(String(raw).trim())
+      return true
+    })
+  }
+  return loadAttendanceImportUserIdentifierIndex(db, orgId, pending)
+}
+
+function resolveImportRowUserReference(row, options) {
+  const rawUserId = resolveRowUserId({
+    row,
+    fallbackUserId: options?.fallbackUserId,
+    userMap: options?.userMap,
+    userMapKeyField: options?.userMapKeyField,
+    userMapSourceFields: options?.userMapSourceFields,
+  })
+  return adoptCanonicalImportUserId(rawUserId, options?.userIdentifierIndex)
 }
 
 function resolveRowUserId({ row, fallbackUserId, userMap, userMapKeyField, userMapSourceFields }) {
@@ -24945,6 +25146,15 @@ module.exports = {
     buildUnresolvedRowUserWarning,
     collectRowUserIdentityValues,
     resolveRowUserId,
+    isCanonicalImportUserId,
+    adoptCanonicalImportUserId,
+    importUserIdentifierLookupKey,
+    loadAttendanceImportUserIdentifierIndex,
+    applyFieldMappings,
+    buildImportTemplateCsv,
+    getDefaultImportTemplateProfile,
+    IMPORT_MAPPING_COLUMNS,
+    resolveRequiredFieldValue,
     rawImportFieldPresence,
     firstDefinedPresence,
     buildRawImportEvidenceV1,
@@ -28593,6 +28803,18 @@ module.exports = {
 	        orgId,
 	        fallbackUserId: payload.userId ?? requesterId,
 	      })
+	      const asyncPreviewUserOptions = {
+	        fallbackUserId: payload.userId ?? requesterId,
+	        userMap: payload.userMap,
+	        userMapKeyField: payload.userMapKeyField,
+	        userMapSourceFields: payload.userMapSourceFields,
+	      }
+	      const asyncPreviewUserIndex = await loadImportUserIdentifierIndexForIterator(
+	        db,
+	        orgId,
+	        (onRow) => rowSource.iterateRows(onRow),
+	        asyncPreviewUserOptions,
+	      )
 
 	      const previewLimit = normalizePreviewAsyncLimit(payload.previewLimit)
 	      const preview = []
@@ -28606,16 +28828,14 @@ module.exports = {
 	        previewStats.rowCount += 1
 	        const shouldRender = preview.length < previewLimit
 	        const workDate = row.workDate
-	        const rowUserId = resolveRowUserId({
-	          row,
-	          fallbackUserId: payload.userId ?? requesterId,
-	          userMap: payload.userMap,
-	          userMapKeyField: payload.userMapKeyField,
-	          userMapSourceFields: payload.userMapSourceFields,
-        })
+	        const rowUserRef = resolveImportRowUserReference(row, {
+	          ...asyncPreviewUserOptions,
+	          userIdentifierIndex: asyncPreviewUserIndex,
+	        })
+	        const rowUserId = rowUserRef.userId
         const warnings = []
         if (!rowUserId) {
-          warnings.push(buildUnresolvedRowUserWarning({
+          warnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
             row,
             userMapKeyField: payload.userMapKeyField,
             userMapSourceFields: payload.userMapSourceFields,
@@ -29114,6 +29334,18 @@ module.exports = {
 	        orgId,
 	        fallbackUserId: payload.userId ?? requesterId,
 	      })
+	      const importUserResolveOptions = {
+	        fallbackUserId: payload.userId ?? requesterId,
+	        userMap: payload.userMap,
+	        userMapKeyField: payload.userMapKeyField,
+	        userMapSourceFields: payload.userMapSourceFields,
+	      }
+	      const userIdentifierIndex = await loadImportUserIdentifierIndexForIterator(
+	        db,
+	        orgId,
+	        (onRow) => rowSource.iterateRows(onRow),
+	        importUserResolveOptions,
+	      )
 		      const groupSync = normalizeGroupSyncOptions(payload.groupSync, payload.ruleSetId, payload.timezone)
 		      const groupNames = new Map()
 		      const groupFirstSourceOrdinals = new Map()
@@ -29122,13 +29354,10 @@ module.exports = {
 		      const rowScan = await rowSource.iterateRows((row, sourceOrdinal) => {
 	        const workDate = row?.workDate
 	        if (typeof workDate === 'string' && workDate.trim()) scopeWorkDates.add(workDate.trim())
-	        const rowUserId = resolveRowUserId({
-	          row,
-	          fallbackUserId: payload.userId ?? requesterId,
-	          userMap: payload.userMap,
-	          userMapKeyField: payload.userMapKeyField,
-	          userMapSourceFields: payload.userMapSourceFields,
-	        })
+	        const rowUserId = resolveImportRowUserReference(row, {
+	          ...importUserResolveOptions,
+	          userIdentifierIndex,
+	        }).userId
 	        if (rowUserId) scopeUserIds.add(rowUserId)
 		        if (groupSync) {
 		          appendAttendanceGroupName(groupNames, row)
@@ -29608,13 +29837,11 @@ module.exports = {
 	        await rowSource.iterateRows(async (row, sourceOrdinal) => {
 	          const workDate = row.workDate
 	          const groupKey = resolveAttendanceGroupKey(row)
-	          const rowUserId = resolveRowUserId({
-	            row,
-	            fallbackUserId: payload.userId ?? requesterId,
-	            userMap: payload.userMap,
-	            userMapKeyField: payload.userMapKeyField,
-	            userMapSourceFields: payload.userMapSourceFields,
+	          const rowUserRef = resolveImportRowUserReference(row, {
+	            ...importUserResolveOptions,
+	            userIdentifierIndex,
 	          })
+	          const rowUserId = rowUserRef.userId
 	          const userProfile = resolveRowUserProfile({
 	            row,
 	            fallbackUserId: payload.userId ?? requesterId,
@@ -29624,7 +29851,7 @@ module.exports = {
           })
           const importWarnings = []
           if (!rowUserId) {
-            importWarnings.push(buildUnresolvedRowUserWarning({
+            importWarnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
               row,
               userMapKeyField: payload.userMapKeyField,
               userMapSourceFields: payload.userMapSourceFields,
@@ -43189,16 +43416,25 @@ module.exports = {
           }
           const preview = []
           const seenKeys = new Set()
+          const previewUserOptions = {
+            fallbackUserId: userId,
+            userMap: parsed.data.userMap,
+            userMapKeyField: parsed.data.userMapKeyField,
+            userMapSourceFields: parsed.data.userMapSourceFields,
+          }
+          const previewUserIndex = await loadAttendanceImportUserIdentifierIndex(
+            db,
+            orgId,
+            rows.map((row) => resolveRowUserId({ row, ...previewUserOptions })),
+          )
           for (const row of rows) {
             const shouldRender = previewLimit == null || preview.length < previewLimit
             const workDate = row.workDate
-            const rowUserId = resolveRowUserId({
-              row,
-              fallbackUserId: userId,
-              userMap: parsed.data.userMap,
-              userMapKeyField: parsed.data.userMapKeyField,
-              userMapSourceFields: parsed.data.userMapSourceFields,
+            const rowUserRef = resolveImportRowUserReference(row, {
+              ...previewUserOptions,
+              userIdentifierIndex: previewUserIndex,
             })
+            const rowUserId = rowUserRef.userId
             const userProfile = resolveRowUserProfile({
               row,
               fallbackUserId: userId,
@@ -43208,7 +43444,7 @@ module.exports = {
             })
             const importWarnings = []
             if (!rowUserId) {
-              importWarnings.push(buildUnresolvedRowUserWarning({
+              importWarnings.push(rowUserRef.warning || buildUnresolvedRowUserWarning({
                 row,
                 userMapKeyField: parsed.data.userMapKeyField,
                 userMapSourceFields: parsed.data.userMapSourceFields,
