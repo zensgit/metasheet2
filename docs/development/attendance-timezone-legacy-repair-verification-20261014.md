@@ -52,7 +52,7 @@ pnpm --filter @metasheet/core-backend exec tsx scripts/attendance-timezone-legac
 | 原故障反例 | 隔离 HTTP/PG 已复现旧日期四入口 409、仅未来排班时缺默认恢复 503 |
 | 新核心单元及邻近测试 | 5 文件 100 项通过（预检参数化 fixture 修正后重跑 14 项通过） |
 | 新真实 HTTP/PG 与迁移重放 | 52 项通过：缺默认恢复 14、旧记录修复 16、邻近读取 22；16 项包含真实 CLI preview/apply/replay、并发精确重放、持久 shadow 拒绝、跨夜次日上班、上下班补卡/更正和旧请假取消审批；新库迁移及再次重放通过 |
-| 实际旧程序上班→升级→下班 | 独立演练进行中，不以手插旧行替代 |
+| 实际旧程序上班→升级→下班 | 通过：精确旧 ref `13fdaca558` 真实 HTTP 上班；旧/候选迁移及重放全部通过；修复前下班 409，预览及修复不改父记录，修复后下班 200；1 条原记录/2 个打卡事件，540 分钟，原日期/时区/上班时间保留；打卡和修复重放幂等。合成 UTC 默认规则场景，候选为冻结 v3 源码快照（manifest SHA `5148b3d4d7793d65a3ce5b05a89310de14d6189445ab6a8a0eaf9924675f32c2`），不是全部历史类型证明 |
 | 前端及错误显示 | 4 文件 76 项通过；合成 Vue 组件截图，不等同目标环境端到端 |
 | 守卫 mutation | 移除原记录 CAS、持久 rollout 拒绝、class00 锁、完整 repair frame 复核分别导致 1 / 4 / 1 / 1 项匹配测试失败；仅修改独立 probe 副本，原源码 SHA 未变 |
 | CI 接线/溯源/类型/validate | CI 接线 296 项通过；sealed-export-package-provenance、后端 tsc、pnpm validate:all 通过（9 项既有插件警告；lint 为 curated 范围） |
