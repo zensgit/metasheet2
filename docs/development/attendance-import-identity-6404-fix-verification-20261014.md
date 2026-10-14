@@ -16,7 +16,7 @@
 | 3 文件邻近单元 | 23 PASS / 0 skipped；导入权限、raw evidence 与 calculation graph |
 | 4 文件前端 | 79 PASS / 0 skipped；回退文件 BOM/内容和 payload 原值保护，picker/prefs 不减断言 |
 | 真 PostgreSQL SQL | 15 PASS / 0 skipped；现代/缺可选列、必需授权列缺失、NULL/停用/其他组织、Unicode 与格式化手机号碰撞 |
-| 真 HTTP 导入/撤销与范围角色 | 2 selected PASS，165 被 `-t` 过滤不计 pass；邮箱预览/提交/未知邮箱跳过/批次撤销；scope 角色同员工 UUID 与邮箱均通过、范围外 403且记录零写 |
+| 真 HTTP 完整集成 | 完整文件 167 PASS / 0 skipped；含邮箱预览/提交/未知邮箱跳过/批次撤销，scope UUID/邮箱及范围外 403；大 payload 保留 5001 行/500 活动普通员工，实际写入 5001 条、零失败行，幂等及回滚通过 |
 | 全新迁移及重放 | 两轮 HTTP 场景均 exit 0；owned 集群已停止，源文件状态未漂移 |
 | 守卫 mutation | 在独立副本去掉活动过滤或歧义拒绝，各产生 6 个真实 PG 断言失败；匹配目标反例，无 lookup failure；原模块 SHA 未变 |
 | SQL inventory + CI wiring | 完整 63 + 294 = 357 PASS / 0 skipped。首轮缺 PyYAML，隔离 runtime 补齐后全部通过；不修改或豁免守卫 |
@@ -43,3 +43,11 @@
 ## CI 首轮收尾修正（2026-10-15）
 
 `f3ddaa7cf8` 的 12/13 必需检查通过；Node 20 的后端全套唯一失败是 W7 清单漏登新身份模块（21115 PASS / 1 FAIL，1751 为既有跳过，不算通过）。新模块现已加入 `CALCULATION_PATH`，两项 aggregate 禁止规则均适用，未添加排除。既有真实扫描正控增加该模块，分别证明违规 require、HTTP 调用及两者组合都会被发现。Mac mini 的守卫与身份/路由三个文件共 175 PASS、零 skip。清理步骤的连接拒绝是前序失败导致 PG 尚未启动；没有放宽 workflow。最终 CI 在补齐登记的新 head 上重新运行。
+
+## 完整 HTTP 补验与夹具修正（2026-10-15）
+
+完整 167 项补验首轮 166 PASS / 1 FAIL：大 rows 用例的 500 名员工是不存在的非 UUID 文本标识，因此本修复按安全语义将它们跳过，processedRows 为 0。该用例的目标是大 payload 完整保留，不是允许未知标识写入；现使用随机 UUID 的真实活动普通成员，复用已有种子与清理登记，保留 5001 行/500 人规模。断言加强为 processedRows=5001、failedRows=0，并直接查询批次实际写入 5001 条记录；幂等重试和 rollback 200 保留。Astra ultra 只读复审 PASS。
+
+在全新自有 PG 集群迁移及重放后，整个文件 167 PASS / 0 skipped（测试 252.931 秒）；集群已停止，源文件状态未漂移。自有隔离数据库及日志保留，不声称业务历史被物理删除或吞异常的既有 fixture 清理零残留。测试 runtime 的 Git 基线为 e264 加同步修复源文件，不能冒称 clean 的最终提交；生产两模块哈希和同步测试文件作为对应证据，最终 Git 合并树由 CI 验证。
+
+`3c1a47e91e` 的 CI 在本地发现该已知后续失败后主动取消，不能计为 13/13 全绿；该轮已通过后端全套、drain 和 checkpoint。最终验收只使用夹具修正后的新 head 全套 CI。

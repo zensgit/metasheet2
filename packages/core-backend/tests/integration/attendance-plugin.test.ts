@@ -14317,6 +14317,8 @@ attendanceIntegrationDescribe(
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const totalRows = 5_001
     const distinctUsers = 500
+    const largeUserIds = Array.from({ length: distinctUsers }, () => randomUUID())
+    for (const userId of largeUserIds) await seedNeutralAttendanceSubjectForTest(userId)
     const rows = Array.from({ length: totalRows }, (_, index) => {
       const dayOffset = Math.floor(index / distinctUsers)
       const rowDate = new Date(seedDate)
@@ -14324,7 +14326,7 @@ attendanceIntegrationDescribe(
       const workDate = rowDate.toISOString().slice(0, 10)
       return {
         workDate,
-        userId: `attendance-large-${String((index % distinctUsers) + 1).padStart(5, '0')}`,
+        userId: largeUserIds[index % distinctUsers],
         fields: {
           firstInAt: `${workDate}T09:00:00Z`,
           lastOutAt: `${workDate}T18:00:00Z`,
@@ -14379,7 +14381,13 @@ attendanceIntegrationDescribe(
 
     expect(completedJob).toBeTruthy()
     expect(batchId).toBeTruthy()
-    expect(Number(completedJob?.processedRows ?? 0)).toBeGreaterThanOrEqual(totalRows)
+    expect(Number(completedJob?.processedRows ?? 0)).toBe(totalRows)
+    expect(Number(completedJob?.failedRows ?? 0)).toBe(0)
+    const writtenRows = await settingsRowPool!.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM attendance_records WHERE source_batch_id = $1',
+      [batchId],
+    )
+    expect(writtenRows.rows).toEqual([{ n: totalRows }])
 
     const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
       method: 'POST',
