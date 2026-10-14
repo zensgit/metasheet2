@@ -9481,17 +9481,6 @@ attendanceIntegrationDescribe(
     expect(groupId).toBeTruthy()
     if (!groupId) return
 
-    await ensureActiveImportIdentitiesForTest(testUserId)
-    const groupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ user_id: testUserId }),
-    })
-    expect(groupMemberRes.status).toBe(200)
-
     const assignmentRes = await requestJson(`${baseUrl}/api/attendance/assignments`, {
       method: 'POST',
       headers: {
@@ -9507,6 +9496,19 @@ attendanceIntegrationDescribe(
       }),
     })
     expect(assignmentRes.status).toBe(201)
+    // Membership is added after the already-started assignment. An active org
+    // member is inside the timezone source scan, and this past start date would
+    // change that started context.
+    await ensureActiveImportIdentitiesForTest(testUserId)
+    const groupMemberRes = await requestJson(`${baseUrl}/api/attendance/groups/${groupId}/members`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ user_id: testUserId }),
+    })
+    expect(groupMemberRes.status).toBe(200)
     const assignmentId = (assignmentRes.body as { data?: { assignment?: { id?: string } } } | undefined)?.data?.assignment?.id
     expect(assignmentId).toBeTruthy()
 

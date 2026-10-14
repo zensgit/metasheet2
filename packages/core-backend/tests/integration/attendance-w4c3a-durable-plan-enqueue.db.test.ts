@@ -7,6 +7,8 @@ import { up as w4c0Up } from '../../src/db/migrations/zzzz20260725120000_w4c0_at
 import { up as w4c3aUp } from '../../src/db/migrations/zzzz20260730120000_w4c3a_durable_legacy_execution_plan'
 import { up as memberSourcesUp } from '../../src/db/migrations/zzzz20261013090000_attendance_roster_member_source_ordinals'
 import { up as rosterOrgReasonUp } from '../../src/db/migrations/zzzz20260924180000_attendance_roster_org_gate_job_reason'
+import { up as timezonePolicyUp } from '../../src/db/migrations/zzzz20261012100000_create_attendance_timezone_policy'
+import { registerAttendanceRequestTimezoneSourceGuardV1 } from '../../src/attendance/attendance-business-trip-locks'
 import { createAttendanceLegacyPlanProcessorV1 } from '../../src/attendance/w4c3a-legacy-plan-processor'
 import {
   type LegacyImportGroupEffectDraftV1,
@@ -231,6 +233,11 @@ async function createBase(pool: Pool): Promise<void> {
     CREATE TABLE attendance_import_items (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), batch_id uuid NOT NULL, org_id text NOT NULL,
       record_id uuid
+    )`)
+  await pool.query(`
+    CREATE TABLE attendance_rules (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      timezone text NOT NULL DEFAULT 'UTC'
     )`)
   await pool.query(`
     CREATE TABLE attendance_groups (
@@ -710,6 +717,8 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     await w4c3aUp(db)
     await rosterOrgReasonUp(db)
     await memberSourcesUp(db)
+    await timezonePolicyUp(db)
+    registerAttendanceRequestTimezoneSourceGuardV1(async () => async () => {})
     await pool.query(
       `INSERT INTO users (id) VALUES ($1), ($2), ($3), ($4), ($5), ($6)`,
       [
@@ -797,6 +806,7 @@ describeIfDatabase('W4C-3a enqueue foundation (real PostgreSQL)', () => {
     for (const current of [pool, migrationPool, adminPool]) {
       current?.on('error', ignoreForcedScratchDrop)
     }
+    registerAttendanceRequestTimezoneSourceGuardV1(null)
     await db?.destroy()
     await pool?.end()
     await adminPool?.query(`DROP DATABASE IF EXISTS ${scratchName} WITH (FORCE)`).catch(() => undefined)
