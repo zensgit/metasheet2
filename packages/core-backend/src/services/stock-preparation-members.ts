@@ -173,6 +173,19 @@ export const STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES = Object.freeze([
   'Operator',
   'Floor operator',
 ] as const)
+/**
+ * Display names of roles OUTSIDE the stock-prep namespace that the stock-prep line itself created,
+ * reserved the same way (#6348 follow-up, 2026-10-14): 「审批与提交」 is the display name of the platform
+ * role `approvals_operator` that the floor-role move script's option ① split step creates
+ * (DEFAULT_SPLIT_ROLE_NAME in scripts/ops/stock-preparation-migrate-legacy-operator-role.mjs; created
+ * on the demo server 2026-10-13). It carries the approval codes the floor staff kept, so a second role
+ * under that name would pose as it in every appoint list. Kept apart from
+ * STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES, which the script copies to refuse SPLIT role names — the split
+ * role itself must stay free to take this name.
+ */
+export const STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES = Object.freeze([
+  '审批与提交',
+] as const)
 export const STOCK_PREP_CUSTOM_ROLE_ID_PREFIX = 'stock-prep_c_'
 export const STOCK_PREP_CUSTOM_ROLE_ID_PATTERN = /^stock-prep_c_[0-9a-f]{8}$/
 
@@ -373,6 +386,7 @@ export function canonicalStockPrepRoleName(raw: string): string {
 
 const RESERVED_ROLE_NAMES = new Set<string>([
   ...STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES.map(canonicalStockPrepRoleName),
+  ...STOCK_PREP_RESERVED_PLATFORM_ROLE_DISPLAY_NAMES.map(canonicalStockPrepRoleName),
   ...STOCK_PREP_BUILTIN_ROLE_IDS.map(canonicalStockPrepRoleName),
 ])
 

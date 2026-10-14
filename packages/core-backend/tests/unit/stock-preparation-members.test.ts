@@ -1112,6 +1112,9 @@ describe('stock-prep members port (S5b, R-39)', () => {
       // name stays reserved too (an instance not yet upgraded still shows it).
       '操作人员', ' 操作人员 ', '操作人员（内置）', '操作 人员', 'Operator', 'OPERATOR', 'ｏｐｅｒａｔｏｒ (built-in)',
       '一线填写', 'Floor operator',
+      // #6348 follow-up (2026-10-14): the platform role approvals_operator 「审批与提交」 that the
+      // floor-role move's split step creates is reserved as well.
+      '审批与提交', ' 审批与提交 ', '\u3000审批与提交\u00a0', '审批 与\u3000提交', '审批与提交（内置）',
     ]
     const h = harness()
     for (const name of reserved) {
@@ -1121,7 +1124,7 @@ describe('stock-prep members port (S5b, R-39)', () => {
       expect([rename.status, rename.code], `rename ${JSON.stringify(name)}`).toEqual([400, 'STOCK_PREP_CUSTOM_ROLE_NAME_RESERVED'])
     }
     expect(h.depCallCount(), 'zero IO').toBe(0)
-    for (const name of ['开发成员甲', '一线填写组', '备料主管理员助理', 'Developers', '操作人员组', 'Operators', '审批与提交']) {
+    for (const name of ['开发成员甲', '一线填写组', '备料主管理员助理', 'Developers', '操作人员组', 'Operators', '审批与提交组', '审批']) {
       await expect(h.port.createCustomRole({ actorId: PLATFORM_ADMIN, name, permissionCodes: [] }), name).resolves.toMatchObject({ name })
     }
   })

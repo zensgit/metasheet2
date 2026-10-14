@@ -29,6 +29,7 @@ const {
   main, run, OLD_ROLE_ID, TARGET_ROLE_ID, EXIT_OK, EXIT_FAILURE, EXIT_REFUSED,
   RECOMMENDED_SPLIT_ROLE_ID, DEFAULT_SPLIT_ROLE_NAME, parseArgs, splitRoleIdProblem, splitRoleNameProblem,
   STOCK_PREP_BUILTIN_ROLE_DISPLAY_NAMES, isEntryPoint, databaseUrlFromAppEnvText,
+  SQL, JS_TRIM_CODE_POINTS, JS_TRIM_SET_SQL,
 } = await import(pathToFileURL(SCRIPT_PATH).href)
 
 const OLD = 'stock-prep-operator'
@@ -37,8 +38,12 @@ const OTHER = 'stock-prep_puller'
 
 const norm = (text) => text.replace(/\s+/g, ' ').trim()
 
+// The second argument of every SQL btrim (#6348 follow-up): the code points String.prototype.trim
+// strips, written out by hand so a change to the script's set fails the goldens too.
+const TRIM_GOLDEN = "U&'\\0009\\000A\\000B\\000C\\000D\\0020\\00A0\\1680\\2000\\2001\\2002\\2003\\2004\\2005\\2006\\2007\\2008\\2009\\200A\\2028\\2029\\202F\\205F\\3000\\FEFF'"
+
 // ── golden statements ──────────────────────────────────────────────────────────────────────────
-const ROLE_KEYS_GOLDEN = "WITH role_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text) AS role_key UNION SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' )"
+const ROLE_KEYS_GOLDEN = `WITH role_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text, ${TRIM_GOLDEN}) AS role_key UNION SELECT btrim(r.name, ${TRIM_GOLDEN}) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' )`
 const GRAPH_PATHS_GOLDEN = [
   '$.nodes[*].config ? (@.assigneeType == "role").assigneeIds[*] ? (@ == $k)',
   '$.nodes[*].config.assigneeSources[*] ? (@.kind == "static_role").roleIds[*] ? (@ == $k)',
@@ -70,8 +75,8 @@ const G = {
   activeRoleApprovals: "SELECT count(*)::int AS count FROM approval_assignments WHERE assignment_type = 'role' AND assignee_id = $1 AND is_active = TRUE",
   // Approval READ through a role: no is_active filter (the read arm is is_active-insensitive); keys
   // are the role id and its trimmed display name, minus what the other role of the pair carries.
-  approvalRoleSeats: "WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text) AS role_key UNION SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name) = k.role_key) ) SELECT count(*)::int AS count FROM approval_assignments a WHERE a.assignment_type = 'role' AND a.assignee_id IN (SELECT role_key FROM role_read_keys)",
-  approvalRoleCcRecords: "WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text) AS role_key UNION SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name) = k.role_key) ) SELECT count(*)::int AS count FROM approval_records rec WHERE rec.action = 'cc' AND rec.metadata->>'targetType' = 'role' AND rec.metadata->>'targetId' IN (SELECT role_key FROM role_read_keys)",
+  approvalRoleSeats: `WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text, ${TRIM_GOLDEN}) AS role_key UNION SELECT btrim(r.name, ${TRIM_GOLDEN}) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text, ${TRIM_GOLDEN}) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name, ${TRIM_GOLDEN}) = k.role_key) ) SELECT count(*)::int AS count FROM approval_assignments a WHERE a.assignment_type = 'role' AND a.assignee_id IN (SELECT role_key FROM role_read_keys)`,
+  approvalRoleCcRecords: `WITH role_read_keys AS ( SELECT k.role_key FROM ( SELECT btrim($1::text, ${TRIM_GOLDEN}) AS role_key UNION SELECT btrim(r.name, ${TRIM_GOLDEN}) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL ) k WHERE k.role_key <> '' AND k.role_key <> btrim($2::text, ${TRIM_GOLDEN}) AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name, ${TRIM_GOLDEN}) = k.role_key) ) SELECT count(*)::int AS count FROM approval_records rec WHERE rec.action = 'cc' AND rec.metadata->>'targetType' = 'role' AND rec.metadata->>'targetId' IN (SELECT role_key FROM role_read_keys)`,
   moveMembers: 'WITH moved AS ( DELETE FROM user_roles WHERE role_id = $1 RETURNING user_id ), inserted AS ( INSERT INTO user_roles (user_id, role_id) SELECT user_id, $2 FROM moved ON CONFLICT DO NOTHING RETURNING 1 ) SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM inserted)::int AS inserted',
   moveSheetGrants: "WITH moved AS ( DELETE FROM spreadsheet_permissions WHERE subject_type = 'role' AND subject_id = $1 RETURNING sheet_id, perm_code, created_at ), inserted AS ( INSERT INTO spreadsheet_permissions (sheet_id, user_id, subject_type, subject_id, perm_code, created_at) SELECT sheet_id, NULL, 'role', $2, perm_code, created_at FROM moved ON CONFLICT (sheet_id, subject_type, subject_id, perm_code) DO NOTHING RETURNING 1 ) SELECT (SELECT count(*) FROM moved)::int AS moved, (SELECT count(*) FROM inserted)::int AS inserted",
   deleteOldRoleCodes: 'DELETE FROM role_permissions WHERE role_id = $1',
@@ -80,17 +85,17 @@ const G = {
   approvalTemplateVersionsNamingRole: `${ROLE_KEYS_GOLDEN} SELECT count(*)::int AS count, count(DISTINCT v.template_id)::int AS templates FROM approval_template_versions v WHERE EXISTS (SELECT 1 FROM role_keys k WHERE ${graphGolden('v.approval_graph')})`,
   approvalPublishedDefinitionsNamingRole: `${ROLE_KEYS_GOLDEN} SELECT count(*)::int AS count, count(*) FILTER (WHERE d.is_active)::int AS active FROM approval_published_definitions d WHERE EXISTS (SELECT 1 FROM role_keys k WHERE ${graphGolden('d.runtime_graph')})`,
   // ── template visibility census (fix round 1): role-scoped visibility lists, keys in / keys out ──
-  approvalTemplatesVisibleThrough: "WITH keys_in AS ( SELECT btrim(k) AS role_key FROM unnest($1::text[]) AS k UNION SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n) FROM unnest($2::text[]) AS n ), keys_out AS ( SELECT btrim(k) AS role_key FROM unnest($3::text[]) AS k UNION SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n) FROM unnest($4::text[]) AS n ) SELECT count(*)::int AS count FROM approval_templates t WHERE t.visibility_scope->>'type' = 'role' AND EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_in WHERE role_key <> '') ) AND NOT EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_out WHERE role_key <> '') )",
+  approvalTemplatesVisibleThrough: `WITH keys_in AS ( SELECT btrim(k, ${TRIM_GOLDEN}) AS role_key FROM unnest($1::text[]) AS k UNION SELECT btrim(r.name, ${TRIM_GOLDEN}) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n, ${TRIM_GOLDEN}) FROM unnest($2::text[]) AS n ), keys_out AS ( SELECT btrim(k, ${TRIM_GOLDEN}) AS role_key FROM unnest($3::text[]) AS k UNION SELECT btrim(r.name, ${TRIM_GOLDEN}) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL UNION SELECT btrim(n, ${TRIM_GOLDEN}) FROM unnest($4::text[]) AS n ) SELECT count(*)::int AS count FROM approval_templates t WHERE t.visibility_scope->>'type' = 'role' AND EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_in WHERE role_key <> '') ) AND NOT EXISTS ( SELECT 1 FROM jsonb_array_elements_text(COALESCE(t.visibility_scope->'ids', '[]'::jsonb)) AS v(id) WHERE v.id IN (SELECT role_key FROM keys_out WHERE role_key <> '') )`,
   // ── the option ① split step ──
   lockTimeout: "SET LOCAL lock_timeout = '5s'",
   lockRoleTables: 'LOCK TABLE user_roles, role_permissions IN SHARE MODE',
   splitRoleRead: 'SELECT id, name FROM roles WHERE id = $1',
   splitRoleLock: 'SELECT id, name FROM roles WHERE id = $1 FOR UPDATE',
   roleCodes: 'SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code',
-  splitNameTaken: 'SELECT count(*)::int AS count FROM roles WHERE id <> $1 AND btrim(name) = btrim($2::text)',
-  splitApprovalSeats: "SELECT count(*)::int AS count FROM approval_assignments WHERE assignment_type = 'role' AND assignee_id IN (btrim($1::text), btrim($2::text))",
-  splitApprovalCcRecords: "SELECT count(*)::int AS count FROM approval_records WHERE action = 'cc' AND metadata->>'targetType' = 'role' AND metadata->>'targetId' IN (btrim($1::text), btrim($2::text))",
-  delegatedAdminRoleIds: "SELECT DISTINCT btrim(r.role_id) AS id FROM (SELECT id AS role_id FROM roles UNION SELECT role_id FROM user_roles UNION SELECT role_id FROM role_permissions) r WHERE right(btrim(r.role_id), 6) = '_admin'",
+  splitNameTaken: `SELECT count(*)::int AS count FROM roles WHERE id <> $1 AND btrim(name, ${TRIM_GOLDEN}) = btrim($2::text, ${TRIM_GOLDEN})`,
+  splitApprovalSeats: `SELECT count(*)::int AS count FROM approval_assignments WHERE assignment_type = 'role' AND assignee_id IN (btrim($1::text, ${TRIM_GOLDEN}), btrim($2::text, ${TRIM_GOLDEN}))`,
+  splitApprovalCcRecords: `SELECT count(*)::int AS count FROM approval_records WHERE action = 'cc' AND metadata->>'targetType' = 'role' AND metadata->>'targetId' IN (btrim($1::text, ${TRIM_GOLDEN}), btrim($2::text, ${TRIM_GOLDEN}))`,
+  delegatedAdminRoleIds: `SELECT DISTINCT btrim(r.role_id, ${TRIM_GOLDEN}) AS id FROM (SELECT id AS role_id FROM roles UNION SELECT role_id FROM user_roles UNION SELECT role_id FROM role_permissions) r WHERE right(btrim(r.role_id, ${TRIM_GOLDEN}), 6) = '_admin'`,
   catalogueCodes: 'SELECT DISTINCT code AS code FROM permissions',
   roleCodesAll: 'SELECT DISTINCT permission_code AS code FROM role_permissions',
   userCodesAll: 'SELECT DISTINCT permission_code AS code FROM user_permissions',
@@ -1233,7 +1238,7 @@ test('split with nothing to split (the old role holds no code the target lacks):
   assert.ok(out.includes('split: extra codes (on stock-prep-operator, not on stock-prep_frontline): 0'))
 })
 
-test('the approval designer census counts template versions / published definitions naming the old role as a ROLE target (id or display name), never refuses, never writes', async () => {
+test('the approval designer census counts template versions / published definitions naming the old role as a ROLE target (id or display name) and never refuses; the template-visibility LOSS refuses (#6348 follow-up); nothing is written', async () => {
   const state = baseState()
   const graph = (type, config) => ({ nodes: [{ key: 'n', type, config }] })
   // Template visibility (fix round 1): role-typed lists, matched exactly against role ids and trimmed
@@ -1271,32 +1276,121 @@ test('the approval designer census counts template versions / published definiti
     const s = argv.length === 0 ? state : structuredClone({ ...state, tables: [] })
     if (argv.length > 0) s.tables = new Set(state.tables)
     const { code, out, writes } = await runMain(argv, s)
-    assert.equal(code, EXIT_OK, argv.join(' '))
+    assert.equal(code, EXIT_REFUSED, argv.join(' '))
+    assert.ok(out.includes(`${argv.length === 0 ? '--apply would refuse' : 'REFUSED'}: ${OLD} makes 3 role-scoped approval template(s) visible (by role id or display name) that ${TARGET} do(es) not; its 2 member(s) would stop seeing them (记录送审 / approval.completed automation answer 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN) — this script does not change visibility lists; add ${TARGET} to those templates' visibility first`), argv.join(' '))
+    assert.equal(out.filter((line) => line.startsWith('--apply would refuse') || line.startsWith('REFUSED')).length, 1, 'the designer census and the GAIN count do not refuse')
     assert.ok(out.includes(`approval designer — template versions naming ${OLD} as a role approver / handler / CC target (by role id or display name): 6 (templates: 4); NOT changed by this script`), argv.join(' '))
     assert.ok(out.includes(`approval designer — published definitions naming ${OLD} the same way: 2 (active: 1); NOT changed by this script — re-point them in the approval designer`), argv.join(' '))
-    assert.ok(out.includes(`approval template visibility — role-scoped templates visible through ${OLD} but not through ${TARGET} (by role id or display name): 3; moved members would stop seeing them (记录送审); NOT changed by this script`), argv.join(' '))
+    assert.ok(out.includes(`approval template visibility — role-scoped templates visible through ${OLD} but not through ${TARGET} (by role id or display name): 3; moved members would stop seeing them (记录送审); NOT changed by this script — --apply refuses while this is above 0 and the old role has members`), argv.join(' '))
     assert.ok(out.includes(`approval template visibility — role-scoped templates visible through ${TARGET} but not through ${OLD} (by role id or display name): 2; moved members would newly see them; NOT changed by this script`), argv.join(' '))
-    assert.ok(!writes.some((w) => !['moveMembers', 'moveSheetGrants'].includes(w.key)))
+    assert.deepEqual(writes, [], argv.join(' '))
     assertValuesFree(out)
   }
   assert.equal(snapshot(state), before, 'the dry run wrote nothing')
 
   // With the split step the members also end up in the split role: its id and the name it would be
   // created with count on the "after" side. With nothing to split (no extra code) they do not.
-  const lostLine = (after, n) => `approval template visibility — role-scoped templates visible through ${OLD} but not through ${after} (by role id or display name): ${n}; moved members would stop seeing them (记录送审); NOT changed by this script`
+  const lostLine = (after, n) => `approval template visibility — role-scoped templates visible through ${OLD} but not through ${after} (by role id or display name): ${n}; moved members would stop seeing them (记录送审); NOT changed by this script — --apply refuses while this is above 0 and the old role has members`
   const gainedLine = (after, n) => `approval template visibility — role-scoped templates visible through ${after} but not through ${OLD} (by role id or display name): ${n}; moved members would newly see them; NOT changed by this script`
   const withSplit = splitState()
   withSplit.templates.push(...visibilityTemplates())
   const split = await runMain(['--split-extra-codes-to-role', SPLIT], withSplit)
-  assert.equal(split.code, EXIT_OK)
+  assert.equal(split.code, EXIT_REFUSED)
   assert.ok(split.out.includes(lostLine(`${TARGET} or ${SPLIT}`, 2)), split.out.join('\n'))
   assert.ok(split.out.includes(gainedLine(`${TARGET} or ${SPLIT}`, 4)), split.out.join('\n'))
   const nothingToSplit = baseState()
   nothingToSplit.templates.push(...visibilityTemplates())
   const idle = await runMain(['--split-extra-codes-to-role', SPLIT], nothingToSplit)
-  assert.equal(idle.code, EXIT_OK)
+  assert.equal(idle.code, EXIT_REFUSED)
   assert.ok(idle.out.includes(lostLine(TARGET, 3)) && idle.out.includes(gainedLine(TARGET, 2)), idle.out.join('\n'))
   assertValuesFree([...split.out, ...idle.out])
+})
+
+// ── #6348 follow-ups (2026-10-14) ────────────────────────────────────────────────────────────────
+
+test('#6348 follow-up (d): a template-visibility LOSS refuses --apply (exit 2, nothing written) while the old role has members; no member, a GAIN alone, or a list that also names the after role does not; the split role stays on the after side on the post-split re-read', async () => {
+  const lossRefusal = (prefix, after, n, members) => `${prefix}: ${OLD} makes ${n} role-scoped approval template(s) visible (by role id or display name) that ${after} do(es) not; its ${members} member(s) would stop seeing them`
+  // by id, and by the old role's trimmed display name
+  for (const ids of [[OLD], ['legacy floor']]) {
+    const state = baseState()
+    state.templates.push({ visibility_scope: { type: 'role', ids } })
+    const before = snapshot(state)
+    const dry = await runMain([], state)
+    assert.equal(dry.code, EXIT_REFUSED, JSON.stringify(ids))
+    assert.ok(dry.out.some((line) => line.startsWith(lossRefusal('--apply would refuse', TARGET, 1, 2))), dry.out.join('\n'))
+    const applied = await runMain(['--apply'], state)
+    assert.equal(applied.code, EXIT_REFUSED, JSON.stringify(ids))
+    assert.deepEqual(applied.writes, [])
+    assert.ok(applied.out.some((line) => line.startsWith(lossRefusal('REFUSED', TARGET, 1, 2))), applied.out.join('\n'))
+    assert.equal(snapshot(state), before)
+    assertValuesFree([...dry.out, ...applied.out])
+  }
+  // no member left in the old role (and no table grant to move): nobody loses anything -> no refusal
+  const empty = baseState()
+  empty.userRoles = empty.userRoles.filter((r) => r.role_id !== OLD)
+  empty.sheetGrants = empty.sheetGrants.filter((g) => !(g.subject_type === 'role' && g.subject_id === OLD))
+  empty.templates.push({ visibility_scope: { type: 'role', ids: [OLD] } })
+  const emptyRun = await runMain([], empty)
+  assert.equal(emptyRun.code, EXIT_OK, emptyRun.out.join('\n'))
+  // the list also names the target (or its display name), and a GAIN-only list: no refusal, the move runs
+  const kept = baseState()
+  kept.templates.push({ visibility_scope: { type: 'role', ids: [OLD, TARGET] } }, { visibility_scope: { type: 'role', ids: [OLD, '一线填写'] } }, { visibility_scope: { type: 'role', ids: [TARGET] } })
+  const keptRun = await runMain(['--apply'], kept)
+  assert.equal(keptRun.code, EXIT_OK, keptRun.out.join('\n'))
+  assert.deepEqual(keptRun.writes.map((w) => w.key), ['moveMembers', 'moveSheetGrants'])
+  // with the split: a list naming the old role and the split role (id, or the name it is created with)
+  // is kept — on the dry run AND on the census re-read after the split statements (the old role then
+  // holds no extra code any more, yet the split role must still count on the after side)
+  for (const ids of [[OLD, SPLIT], [OLD, '审批与提交']]) {
+    const state = splitState()
+    state.templates.push({ visibility_scope: { type: 'role', ids } })
+    const dry = await runMain(['--split-extra-codes-to-role', SPLIT], state)
+    assert.equal(dry.code, EXIT_OK, `${JSON.stringify(ids)}\n${dry.out.join('\n')}`)
+    const applied = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], state)
+    assert.equal(applied.code, EXIT_OK, `${JSON.stringify(ids)}\n${applied.out.join('\n')}`)
+    assert.deepEqual(applied.writes.map((w) => w.key), [...SPLIT_WRITES, 'moveMembers', 'moveSheetGrants'])
+    assert.ok(!applied.client.calls.some((c) => c.key === 'rollbackToSavepoint'))
+  }
+  // …while a list naming the old role only refuses with the split too, before any write
+  const splitLoss = splitState()
+  splitLoss.templates.push({ visibility_scope: { type: 'role', ids: [OLD] } })
+  const splitLossRun = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], splitLoss)
+  assert.equal(splitLossRun.code, EXIT_REFUSED)
+  assert.deepEqual(splitLossRun.writes, [])
+  assert.ok(splitLossRun.out.some((line) => line.startsWith(lossRefusal('REFUSED', `${TARGET} or ${SPLIT}`, 1, 2))), splitLossRun.out.join('\n'))
+})
+
+test('#6348 follow-up (c): every SQL trim uses exactly the String.prototype.trim set (U+3000, NBSP, …) — PostgreSQL one-argument btrim strips U+0020 only', async () => {
+  const stripped = []
+  for (let cp = 0; cp <= 0x10ffff; cp += 1) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue
+    if (String.fromCodePoint(cp).trim() === '') stripped.push(cp)
+  }
+  assert.deepEqual([...JS_TRIM_CODE_POINTS], stripped, 'JS_TRIM_CODE_POINTS is exactly what .trim() strips')
+  assert.ok(JS_TRIM_CODE_POINTS.includes(0x3000) && JS_TRIM_CODE_POINTS.includes(0x00a0) && JS_TRIM_CODE_POINTS.includes(0xfeff))
+  const literal = /^U&'((?:\\[0-9A-F]{4})+)'$/.exec(JS_TRIM_SET_SQL)
+  assert.ok(literal, JS_TRIM_SET_SQL)
+  assert.deepEqual(literal[1].split('\\').slice(1).map((hex) => Number.parseInt(hex, 16)), stripped)
+  assert.equal(JS_TRIM_SET_SQL, TRIM_GOLDEN)
+  let twoArgument = 0
+  const statements = Object.entries(SQL).map(([key, value]) => [key, typeof value === 'function' ? value('meta_view_permissions') : value])
+  for (const [key, text] of statements) {
+    assert.ok(!/btrim\(\s*[^(),]+\)/.test(text), `${key}: a one-argument btrim`)
+    twoArgument += text.split(`, ${JS_TRIM_SET_SQL})`).length - 1
+    assert.equal(text.split('btrim(').length, text.split(`, ${JS_TRIM_SET_SQL})`).length, `${key}: every btrim carries the set`)
+  }
+  assert.ok(twoArgument >= 20, String(twoArgument))
+  // The split name is compared trimmed on both sides: another role named 「审批与提交」 padded with
+  // U+3000 / NBSP / U+FEFF carries the name; a --split-role-name so padded is refused before connecting.
+  for (const padded of ['\u3000审批与提交', '审批与提交\u00a0', '\ufeff审批与提交\u2003']) {
+    const state = splitState()
+    state.roles.push({ id: 'some-role', name: padded })
+    const { code, out, writes } = await runMain(['--apply', '--split-extra-codes-to-role', SPLIT], state)
+    assert.equal(code, EXIT_REFUSED, JSON.stringify(padded))
+    assert.deepEqual(writes, [])
+    assert.ok(out.some((line) => line.startsWith('REFUSED: split:') && line.includes('another role already carries the display name')), JSON.stringify(padded))
+    assert.notEqual(splitRoleNameProblem(padded), null, JSON.stringify(padded))
+  }
 })
 
 // ── fix round 4 (old-machine review of #6348) ──────────────────────────────────────────────────

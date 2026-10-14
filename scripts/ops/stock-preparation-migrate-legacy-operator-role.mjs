@@ -121,6 +121,15 @@
  *     strand them;
  *   - the target role already has members who are not in the old role while there are table grants
  *     to move — the moved grants would extend to them;
+ *   - the old role still has members and makes role-scoped approval templates visible that the
+ *     role(s) the members end up in do not (`approval_templates.visibility_scope`, `type = 'role'` +
+ *     `ids`, matched like the server matches it — a user's role ids AND trimmed display names,
+ *     automation-approval-template-access.ts `loadApprovalTemplateReader`): the moved members would
+ *     stop seeing those templates (记录送审 and the approval.completed automation creator path answer
+ *     403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN). "The role(s) they end up in" is the target, plus the
+ *     split role when the split step runs. Add those roles to the visibility lists by hand first
+ *     (#6348 follow-up, 2026-10-14: a LOSS refuses, like every other loss above; it used to be a
+ *     census count only);
  *   - with `--delete-empty-old-role`: a pending `user_invites` row still names the old role (the
  *     invite list would point at a deleted role), or role-typed approval seats / role-targeted CC
  *     records still name it (they stay after the move; a role re-created later under that id or
@@ -137,15 +146,22 @@
  *     ApprovalProductService requester-choice validation, so after the move nobody can be chosen and
  *     submit answers 422). Future instances started from them would still seat, CC or scope the old
  *     role, which has nobody in it after the move. Re-point them in the approval designer;
- *   - approval templates whose visibility scope is role-typed (`approval_templates.visibility_scope`,
- *     `type = 'role'` + `ids`), matched like the server matches it — a user's role ids AND trimmed
- *     display names (automation-approval-template-access.ts `loadApprovalTemplateReader`) — so it
- *     gates 记录送审 and the approval.completed automation creator path: templates visible through the
- *     old role but not through the role(s) the members end up in (LOSS: moved members stop seeing
- *     them, 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN), and templates visible through the target role —
- *     and, with the split, the split role — but not through the old role (GAIN: moved members newly
- *     see them). Widen or narrow those visibility lists by hand.
- *   Every run prints these counts as census lines; none of them is a refusal.
+ *   - approval templates whose role-typed visibility list (see the refusal above) reaches the target
+ *     role — and, with the split, the split role — but not the old role (GAIN: moved members newly
+ *     see them). Narrow those visibility lists by hand if that is not wanted. The LOSS side is
+ *     printed too, and refuses (above).
+ *   Every run prints these counts as census lines; apart from the template-visibility LOSS, none of
+ *   them is a refusal.
+ * TRIMMING: every role id / display name this script compares is trimmed with the whitespace set of
+ * `String.prototype.trim` (ECMAScript WhiteSpace + LineTerminator: TAB, LF, VT, FF, CR, SPACE, NBSP,
+ * U+1680, U+2000-U+200A, U+2028, U+2029, U+202F, U+205F, U+3000 IDEOGRAPHIC SPACE, U+FEFF) — the set
+ * the server trims them with (approval-instance-readability.ts `viewerRoles`,
+ * automation-approval-template-access.ts) — on BOTH sides: in JavaScript with `.trim()`, in SQL with
+ * `btrim(x, JS_TRIM_SET_SQL)`. PostgreSQL's one-argument `btrim(x)` strips U+0020 only, so a display
+ * name padded with U+3000 or NBSP used to compare unequal in SQL and equal in JavaScript (#6348
+ * follow-up, 2026-10-14). JS_TRIM_SET_SQL is a `U&'…'` literal of those code points and needs a UTF8
+ * server encoding (the default); on another encoding the first census statement fails with a SQLSTATE
+ * (exit 1, nothing written).
  * NOT CHECKED, NOT CHANGED:
  *   - the `requester.role` ROUTING predicate of approval graphs (conditions on the requester's
  *     `approval_usable` roles) and any graph shape other than the five above are not read;
@@ -217,6 +233,20 @@ export const DEFAULT_SPLIT_ROLE_NAME = '审批与提交'
 export const SPLIT_ROLE_NAME_MAX = 64
 /** Stricter than the server's `isWellFormedNewRoleId`, so the id is safe to print. */
 const SPLIT_ROLE_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/
+
+/**
+ * Exactly the code points `String.prototype.trim` strips (ECMAScript WhiteSpace + LineTerminator; see
+ * TRIMMING in the header). The server trims role ids and display names with `.trim()`, so this set
+ * wins over PostgreSQL's one-argument `btrim` (U+0020 only). The node:test suite pins it equal to
+ * what `.trim()` strips over every code point.
+ */
+export const JS_TRIM_CODE_POINTS = Object.freeze([
+  0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x0020, 0x00a0, 0x1680,
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a,
+  0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+])
+/** The same set as an SQL literal: the second argument of every `btrim` below. */
+export const JS_TRIM_SET_SQL = `U&'${JS_TRIM_CODE_POINTS.map((cp) => `\\${cp.toString(16).toUpperCase().padStart(4, '0')}`).join('')}'`
 
 // ── mirrors of the server's role-id / permission-code predicates ─────────────────────────────────
 // A plain-node ops script cannot import the backend's TypeScript, so these are copies, pinned equal
@@ -411,22 +441,22 @@ Reads DATABASE_URL from the environment. Exit: 0 done · 1 usage/execution failu
 const ROLE_READ_KEYS = `role_read_keys AS (
   SELECT k.role_key
     FROM (
-      SELECT btrim($1::text) AS role_key
+      SELECT btrim($1::text, ${JS_TRIM_SET_SQL}) AS role_key
       UNION
-      SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL
+      SELECT btrim(r.name, ${JS_TRIM_SET_SQL}) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL
     ) k
    WHERE k.role_key <> ''
-     AND k.role_key <> btrim($2::text)
-     AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name) = k.role_key)
+     AND k.role_key <> btrim($2::text, ${JS_TRIM_SET_SQL})
+     AND NOT EXISTS (SELECT 1 FROM roles t WHERE t.id = $2 AND btrim(t.name, ${JS_TRIM_SET_SQL}) = k.role_key)
 )`
 
 // The keys an approval graph can name role $1 by: its id and its trimmed display name.
 const ROLE_KEYS = `role_keys AS (
   SELECT k.role_key
     FROM (
-      SELECT btrim($1::text) AS role_key
+      SELECT btrim($1::text, ${JS_TRIM_SET_SQL}) AS role_key
       UNION
-      SELECT btrim(r.name) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL
+      SELECT btrim(r.name, ${JS_TRIM_SET_SQL}) FROM roles r WHERE r.id = $1 AND r.name IS NOT NULL
     ) k
    WHERE k.role_key <> ''
 )`
@@ -583,19 +613,21 @@ SELECT count(*)::int AS count, count(*) FILTER (WHERE d.is_active)::int AS activ
   // ── template visibility census (read-only): templates whose ROLE-typed visibility list names a key
   // of the "in" roles — role ids $1 plus their trimmed display names, plus extra names $2 — and no key
   // of the "out" roles ($3 / $4 likewise). The visibility arm compares each list entry exactly against
-  // a user's trimmed role ids and names (ApprovalProductService visibility condition). Never a refusal.
+  // a user's trimmed role ids and names (ApprovalProductService visibility condition). The LOSS count
+  // (in = old role, out = the roles the members end up in) refuses `--apply` while the old role has
+  // members (decide); the GAIN count is printed only.
   approvalTemplatesVisibleThrough: `WITH keys_in AS (
-  SELECT btrim(k) AS role_key FROM unnest($1::text[]) AS k
+  SELECT btrim(k, ${JS_TRIM_SET_SQL}) AS role_key FROM unnest($1::text[]) AS k
   UNION
-  SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL
+  SELECT btrim(r.name, ${JS_TRIM_SET_SQL}) FROM roles r WHERE r.id = ANY($1::text[]) AND r.name IS NOT NULL
   UNION
-  SELECT btrim(n) FROM unnest($2::text[]) AS n
+  SELECT btrim(n, ${JS_TRIM_SET_SQL}) FROM unnest($2::text[]) AS n
 ), keys_out AS (
-  SELECT btrim(k) AS role_key FROM unnest($3::text[]) AS k
+  SELECT btrim(k, ${JS_TRIM_SET_SQL}) AS role_key FROM unnest($3::text[]) AS k
   UNION
-  SELECT btrim(r.name) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL
+  SELECT btrim(r.name, ${JS_TRIM_SET_SQL}) FROM roles r WHERE r.id = ANY($3::text[]) AND r.name IS NOT NULL
   UNION
-  SELECT btrim(n) FROM unnest($4::text[]) AS n
+  SELECT btrim(n, ${JS_TRIM_SET_SQL}) FROM unnest($4::text[]) AS n
 )
 SELECT count(*)::int AS count
   FROM approval_templates t
@@ -616,21 +648,21 @@ SELECT count(*)::int AS count
   splitRoleLock: 'SELECT id, name FROM roles WHERE id = $1 FOR UPDATE',
   roleCodes: 'SELECT permission_code FROM role_permissions WHERE role_id = $1 ORDER BY permission_code',
   // $1 split role id, $2 its (intended) display name: another role already carrying that name.
-  splitNameTaken: 'SELECT count(*)::int AS count FROM roles WHERE id <> $1 AND btrim(name) = btrim($2::text)',
+  splitNameTaken: `SELECT count(*)::int AS count FROM roles WHERE id <> $1 AND btrim(name, ${JS_TRIM_SET_SQL}) = btrim($2::text, ${JS_TRIM_SET_SQL})`,
   // $1 split role id, $2 its (intended) display name: the approval read keys a new member would gain.
   splitApprovalSeats: `SELECT count(*)::int AS count
   FROM approval_assignments
  WHERE assignment_type = 'role'
-   AND assignee_id IN (btrim($1::text), btrim($2::text))`,
+   AND assignee_id IN (btrim($1::text, ${JS_TRIM_SET_SQL}), btrim($2::text, ${JS_TRIM_SET_SQL}))`,
   splitApprovalCcRecords: `SELECT count(*)::int AS count
   FROM approval_records
  WHERE action = 'cc'
    AND metadata->>'targetType' = 'role'
-   AND metadata->>'targetId' IN (btrim($1::text), btrim($2::text))`,
+   AND metadata->>'targetId' IN (btrim($1::text, ${JS_TRIM_SET_SQL}), btrim($2::text, ${JS_TRIM_SET_SQL}))`,
   // No parameter: every role id that derives a delegated-admin namespace, wherever it appears.
-  delegatedAdminRoleIds: `SELECT DISTINCT btrim(r.role_id) AS id
+  delegatedAdminRoleIds: `SELECT DISTINCT btrim(r.role_id, ${JS_TRIM_SET_SQL}) AS id
   FROM (SELECT id AS role_id FROM roles UNION SELECT role_id FROM user_roles UNION SELECT role_id FROM role_permissions) r
- WHERE right(btrim(r.role_id), 6) = '_admin'`,
+ WHERE right(btrim(r.role_id, ${JS_TRIM_SET_SQL}), 6) = '_admin'`,
   // No parameter: every permission code the database knows (catalogue, role codes, direct codes).
   catalogueCodes: 'SELECT DISTINCT code AS code FROM permissions',
   roleCodesAll: 'SELECT DISTINCT permission_code AS code FROM role_permissions',
@@ -727,8 +759,13 @@ async function tableExists(client, table) {
   return (await count(client, SQL.tableExists, [table])) > 0
 }
 
-/** Everything the decision needs, read inside the caller's transaction. Never writes. */
-export async function readCensus(client, { lock, split = null }) {
+/**
+ * Everything the decision needs, read inside the caller's transaction. Never writes. `splitApplied`:
+ * this is the re-read right after the split statements (the extra codes are already off the old role
+ * and every old-role member is in the split role), so the split role still counts on the "after"
+ * side of the template visibility census.
+ */
+export async function readCensus(client, { lock, split = null, splitApplied = false }) {
   for (const table of ['roles', 'user_roles', 'role_permissions']) {
     if (!(await tableExists(client, table))) throw new ScriptError(`required table missing: ${table}`)
   }
@@ -803,7 +840,8 @@ export async function readCensus(client, { lock, split = null }) {
   // the display name it would be created with.
   census.templateVisibility = { lost: 0, gained: 0 }
   if (await tableExists(client, 'approval_templates')) {
-    const splitRuns = split !== null && census.oldRoleExists && census.targetRoleExists && census.oldCodesMissingOnTarget.length > 0
+    const splitRuns = split !== null && census.oldRoleExists && census.targetRoleExists
+      && (splitApplied || census.oldCodesMissingOnTarget.length > 0)
     const afterIds = splitRuns ? [TARGET_ROLE_ID, split.roleId] : [TARGET_ROLE_ID]
     const afterNames = splitRuns && !census.split.exists ? [split.roleName] : []
     census.templateVisibility.afterRoles = afterIds
@@ -965,6 +1003,16 @@ export function decide(census, { deleteEmptyOldRole = false } = {}) {
     refusals.push(
       `${TARGET_ROLE_ID} already has ${census.targetOnlyMembers} member(s) outside ${OLD_ROLE_ID}; `
       + `moving ${census.oldSheetGrants} table grant(s) would extend them to those members`,
+    )
+  }
+  const lostTemplates = census.templateVisibility?.lost ?? 0
+  if (census.oldMembers > 0 && lostTemplates > 0) {
+    const afterRoles = (census.templateVisibility.afterRoles ?? [TARGET_ROLE_ID]).join(' or ')
+    refusals.push(
+      `${OLD_ROLE_ID} makes ${lostTemplates} role-scoped approval template(s) visible (by role id or display name) that `
+      + `${afterRoles} do(es) not; its ${census.oldMembers} member(s) would stop seeing them (记录送审 / approval.completed `
+      + 'automation answer 403 RECORD_APPROVAL_TEMPLATE_FORBIDDEN) — this script does not change visibility lists; '
+      + `add ${afterRoles} to those templates' visibility first`,
     )
   }
   if (deleteEmptyOldRole && census.oldRoleExists && census.pendingInvites > 0) {
@@ -1142,7 +1190,8 @@ function describeCensus(census, write) {
     + `(active: ${designer.activePublishedDefinitions}); NOT changed by this script — re-point them in the approval designer`)
   const afterRoles = (census.templateVisibility.afterRoles ?? [TARGET_ROLE_ID]).join(' or ')
   write(`approval template visibility — role-scoped templates visible through ${OLD_ROLE_ID} but not through ${afterRoles} `
-    + `(by role id or display name): ${census.templateVisibility.lost}; moved members would stop seeing them (记录送审); NOT changed by this script`)
+    + `(by role id or display name): ${census.templateVisibility.lost}; moved members would stop seeing them (记录送审); NOT changed by this script — `
+    + '--apply refuses while this is above 0 and the old role has members')
   write(`approval template visibility — role-scoped templates visible through ${afterRoles} but not through ${OLD_ROLE_ID} `
     + `(by role id or display name): ${census.templateVisibility.gained}; moved members would newly see them; NOT changed by this script`)
 }
@@ -1230,7 +1279,7 @@ export async function run({ client, apply = false, deleteEmptyOldRole = false, s
         summary.split.membersAdded = added.rows.length
         const removed = await client.query(SQL.removeExtraCodes, [OLD_ROLE_ID, splitPlan.extraCodes])
         summary.split.codesRemoved = removed.rows.length
-        census = await readCensus(client, { lock: true, split })
+        census = await readCensus(client, { lock: true, split, splitApplied: true })
         verdict = decide(census, { deleteEmptyOldRole })
         splitRefusals = [...postSplitProblems(census, splitPlan), ...verdict.refusals]
       }

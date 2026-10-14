@@ -97,7 +97,7 @@ R66 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-r
 - `dry run: --apply would move M membership(s) and K table grant(s)`；
 - 审批席位 / 抄送、待接受邀请、`gains — …` 各行；
 - 两行 `approval designer — …`：模板版本数与已发布定义数（第 3 步之后要用）。现在也数「提交人自选」节点里角色范围指名旧角色的情形——服务端按角色 id 校验这种范围，搬迁后旧角色没人，提交会被 422 拒绝；
-- 两行 `approval template visibility — …`（只计数，不拒绝，脚本不改）：
+- 两行 `approval template visibility — …`（脚本不改可见范围；「失」那一行大于 0 且旧角色仍有成员时 `--apply` 拒绝，见下；「得」那一行只计数）：
   - `… visible through stock-prep-operator but not through stock-prep_frontline[ or approvals_operator] …: N; moved members would stop seeing them (记录送审)`：可见范围按角色 id 或显示名只指名了旧角色的模板。N 大于 0 时，**搬迁前**在审批模板的「可见范围」里把 `stock-prep_frontline`（或 `approvals_operator`）加进去，否则搬完后这些成员对这些模板发起记录送审会被拒绝（403）；
   - `… visible through stock-prep_frontline[ or approvals_operator] but not through stock-prep-operator …: N; moved members would newly see them`：可见范围指名了内置角色或拆出角色（按 id 或显示名，含「操作人员」「审批与提交」）的模板，搬迁后原旧角色成员会新看到。N 大于 0 时由 owner 判断是否可接受；不可接受就先收窄这些模板的可见范围再执行。
 
@@ -105,6 +105,10 @@ R66 安装包**不含** `scripts/ops/stock-preparation-migrate-legacy-operator-r
 - `split: N of the extra code(s) are admin-level …`：旧角色上有管理级码，由平台管理员手工处理，不自动化；
 - **任何指向拆出角色 id 的拒绝**（`split: role approvals_operator falls inside … namespace(s)`、`already exists and its codes are not exactly …`、`does not exist but … still name that id`、`another role already carries the display name …` 等）：推荐 id `approvals_operator`（旧机转述 owner 已裁定；owner 放行 dry-run 时确认一次即可）。**停下，把这一行原样报给 owner**；不要自己换 id，也不要传 `--split-role-name`——即使脚本提示里写着 "choose another id"；
 - 旧角色仍被审批席位 / 抄送按 id 或显示名指名且有成员：成员会失去这些历史审批的读权限，由 owner 决定后再动。
+- `stock-prep-operator makes N role-scoped approval template(s) visible … that stock-prep_frontline[ or approvals_operator] do(es) not`（#6348 后续，2026-10-14 起由计数改为拒绝）：先在这些模板的「可见范围」里加上 `stock-prep_frontline`（或 `approvals_operator`），再重跑 dry-run，直到这一行消失。
+- 名字比较的首尾空白（#6348 后续）：脚本在 JS 和 SQL 两侧都按 `String.prototype.trim` 的字符集去首尾空白（含全角空格 U+3000、不换行空格 NBSP、U+FEFF 等，与服务端一致；PostgreSQL 单参数 `btrim` 只去半角空格），所以别的角色名为「审批与提交」前后带全角空格 / NBSP 也算撞名，照上一条「指向拆出角色 id 的拒绝」处理；需要库编码为 UTF8（默认），否则脚本在第一条清点语句处以 SQLSTATE 退出 1、什么都不写。
+- 「角色管理」（`POST /api/roles`、`PUT /api/roles/:id`）同样拒绝（400 `ROLE_NAME_RESERVED`）把角色新建成或改名为 `admin`（任何大小写 / 全半角 / 空格写法）、内置平台角色名（「管理员」「普通用户」、考勤与云课堂内置角色名）和备料内置角色名；只有拥有该名字的那个 id 可以用它，原样保存现有名字不受影响（#6348 后续）。
+- 「审批与提交」已列入备料成员页的保留名（S8）：不能再新建或改名出第二个「审批与提交」；`approvals_operator` 本身不受影响（#6348 后续）。
 
 ## 3. owner 放行后：维护窗口里执行
 
