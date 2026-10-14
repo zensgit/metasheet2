@@ -12,7 +12,7 @@
 
 | 检查 | 结果 |
 |---|---|
-| 3 文件核心单元 | 179 PASS / 0 skipped；含三入口 UUID/邮箱/用户名/手机号正控、拒绝零写、混合源与空 CSV 大小回归 |
+| 3 文件核心单元 | 协调后 183 PASS / 0 skipped；含三入口 UUID/邮箱/用户名/手机号正控、拒绝零写、混合源与空 CSV 大小回归 |
 | 3 文件邻近单元 | 23 PASS / 0 skipped；导入权限、raw evidence 与 calculation graph |
 | 4 文件前端 | 79 PASS / 0 skipped；回退文件 BOM/内容和 payload 原值保护，picker/prefs 不减断言 |
 | 真 PostgreSQL SQL | 15 PASS / 0 skipped；现代/缺可选列、必需授权列缺失、NULL/停用/其他组织、Unicode 与格式化手机号碰撞 |
@@ -33,3 +33,9 @@
 #6400 原邮箱 CSV 故障已在隔离环境用真实 HTTP 验证修复，不代表原上机包已更新。Issue 保留，不用 closing keyword 自动关闭。
 
 #6051 的认证组织 selector 绑定及 worker 写前会员锁仍未合入 main。本次 alias lookup 不能替代它们；发布前需另行批准合入 #6051，再对齐 #6404 复验。没有触碰实际业务环境，所有合并、部署、启用仍先批后动。
+
+## 远端更新协调
+
+推送时远端新增 `28931ad9e5`，已普通合并保留提交历史，不强推。该提交的 opaque ID 直接透传无法通过真实 W4 UUID 写入约束；本修复保留严格 canonical 输出，未知文本 ID 为无效行/跳过，不声称旧文本 ID 可写。前端仍保留服务器 CSV 优先、网络故障回退和手改 payload 保护；远端正文所述与实际删除回退的源码差异已复审。协调后的源文件与 CI 证据以最终验证 MD 为准。
+
+协调后新增 1 个 resolver 及 3 个 scoped 路由回归，核心三文件共 183 PASS；commit/legacy 正控调用真实 W4 UUID parser。Astra ultra 对最终协调差异复审 PASS，生产模块及 index 哈希与前一验证轮相同。

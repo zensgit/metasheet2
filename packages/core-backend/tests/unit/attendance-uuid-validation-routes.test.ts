@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it, vi } from 'vitest'
 import { validateAttendanceIanaTimezoneV1 } from '../../src/attendance/w4c1-strict-time'
+import { parseCanonicalAttendanceUserIdV1 } from '../../src/attendance/w4c0-identity'
 import {
   buildAttendanceImportAttributionFreezeV1,
   buildAttendanceImportPolicySourceProofV1,
@@ -2276,10 +2277,14 @@ describe('attendance UUID route validation', () => {
   })
 
   it.each(importEmployeeIdentifiers)('lets scoped non-admin schedulers commit import rows inside their import scope (%s)', async (identifier) => {
-    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
-      '00000000-0000-4000-8000-000000000411',
-      '00000000-0000-4000-8000-000000000401',
-    ))
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult(
+        '00000000-0000-4000-8000-000000000411',
+        '00000000-0000-4000-8000-000000000401',
+      )
+    })
     const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
@@ -2549,10 +2554,14 @@ describe('attendance UUID route validation', () => {
   })
 
   it.each(importEmployeeIdentifiers)('lets scoped non-admin schedulers run legacy import rows inside their import scope (%s)', async (identifier) => {
-    const commitSyncImportPlan = vi.fn(async () => syncImportResult(
-      '00000000-0000-4000-8000-000000000412',
-      '00000000-0000-4000-8000-000000000402',
-    ))
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult(
+        '00000000-0000-4000-8000-000000000412',
+        '00000000-0000-4000-8000-000000000402',
+      )
+    })
     const { db, routes } = await createHarness('false', commitSyncImportPlan)
 
     db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
@@ -2769,6 +2778,48 @@ describe('attendance UUID route validation', () => {
     expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
     expect(db.transaction).not.toHaveBeenCalled()
     expect(commitSyncImportPlan).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    'POST /api/attendance/import/preview',
+    'POST /api/attendance/import/commit',
+    'POST /api/attendance/import',
+  ])('rejects unknown opaque targets before scope or W4 writes (%s)', async (route) => {
+    const commitSyncImportPlan = vi.fn(async (input: unknown) => {
+      const plan = input as { recordWrites: Array<{ userId: unknown }> }
+      for (const record of plan.recordWrites) parseCanonicalAttendanceUserIdV1(record.userId)
+      return syncImportResult('00000000-0000-4000-8000-000000000441', '00000000-0000-4000-8000-000000000442')
+    })
+    const { db, routes } = await createHarness('false', commitSyncImportPlan)
+    db.query.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      const rbac = rbacQueryResult(sql, params)
+      if (rbac !== undefined) return rbac
+      const actor = actorContextQueryResult(sql)
+      if (actor !== undefined) return actor
+      if (sql.includes('FROM attendance_scheduler_scopes')) return [schedulerScopeImportRow()]
+      if (sql.includes("to_jsonb(u)->>'username' AS username")) {
+        expect(params[0]).toBe('default')
+        expect(params[1]).toEqual(['worker-1'])
+        return []
+      }
+      throw new Error(`unexpected query: ${sql}`)
+    })
+    const res = await invokeRoute(routes, route, {
+      body: { commitToken: 'must-not-consume', rows: [{ userId: 'worker-1', workDate: '2026-06-10', fields: {} }] },
+      user: { id: 'scheduler-1', orgId: 'default' },
+    })
+    expect(res.statusCode).toBe(403)
+    expect(res.body).toEqual({
+      ok: false,
+      error: { code: 'SCHEDULER_SCOPE_FORBIDDEN', message: 'Scheduler scope does not allow this attendance scheduling action' },
+    })
+    expect(db.query.mock.calls.filter(([sql]) => String(sql).includes("to_jsonb(u)->>'username' AS username"))).toHaveLength(1)
+    expect(db.query.mock.calls.some(([sql]) => String(sql).includes('SELECT DISTINCT m.schedule_group_id'))).toBe(false)
+    expect(db.query.mock.calls.some(([sql]) => /INSERT|UPDATE|DELETE/.test(String(sql)))).toBe(false)
+    expect(db.transaction).not.toHaveBeenCalled()
+    expect(commitSyncImportPlan).not.toHaveBeenCalled()
+    // The current W4 host contract is the counter-control for the remote passthrough rationale.
+    expect(() => parseCanonicalAttendanceUserIdV1('worker-1')).toThrowError('W4C0_USER_ID_INVALID')
   })
 
   it.each([

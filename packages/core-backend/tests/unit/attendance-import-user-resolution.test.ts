@@ -98,6 +98,18 @@ describe('attendance import row user resolution', () => {
     expect(helpers.resolveRequiredFieldValue({ fields: row.fields }, '下班1打卡时间')).toBe('2026-03-23 18:00')
   })
 
+  it('preserves raw legacy references while refusing unknown opaque ids as W4 targets', async () => {
+    const opaqueId = 'worker-1'
+    const db = { query: vi.fn(async () => []) }
+    expect(helpers.resolveRowUserId({ row: { userId: opaqueId } })).toBe(opaqueId)
+    const index = await helpers.loadAttendanceImportUserIdentifierIndex(db, 'default', [opaqueId])
+    expect(helpers.adoptCanonicalImportUserId(opaqueId, index)).toEqual({
+      userId: null,
+      warning: 'Unresolved user identifier; use a user id, or an email, username, or mobile that matches one user in this organization',
+    })
+    expect(db.query).toHaveBeenCalledTimes(1)
+  })
+
   it('flags an unknown email instead of treating it as a resolved user id', async () => {
     const email = 'nobody@metasheet.test'
     const db = {
