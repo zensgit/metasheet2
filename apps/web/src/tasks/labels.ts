@@ -31,11 +31,19 @@ export const TASKS_ZH = {
   viewCreated: '我创建的',
   viewDelegated: '我委派的',
   viewAnyRole: '任一角色',
+  // G2-core: the status switch beside the view switcher (default 未完成).
+  statusFilterLabel: '任务状态',
+  statusFilterOpen: '未完成',
+  statusFilterDone: '已完成',
+  statusFilterAll: '全部',
   createTitlePlaceholder: '新建任务标题',
   create: '创建',
   createInvalidTitle: '标题为空或包含无法保存的字符',
   createFailed: '创建任务失败，请稍后重试',
   listEmpty: '暂无任务',
+  // G2-core: the empty line names the status filter it was read under.
+  listEmptyOpen: '暂无未完成任务',
+  listEmptyDone: '暂无已完成任务',
   listLoadFailed: '加载任务失败，请稍后重试',
   loading: '加载中…',
   statusOpen: '进行中',
@@ -372,11 +380,17 @@ export const TASKS_EN: Record<keyof typeof TASKS_ZH, string> = {
   viewCreated: 'Created by me',
   viewDelegated: 'Delegated by me',
   viewAnyRole: 'Any role',
+  statusFilterLabel: 'Task status',
+  statusFilterOpen: 'Not completed',
+  statusFilterDone: 'Completed',
+  statusFilterAll: 'All',
   createTitlePlaceholder: 'New task title',
   create: 'Create',
   createInvalidTitle: 'The title is empty or contains characters that cannot be saved',
   createFailed: 'Could not create the task. Please try again later.',
   listEmpty: 'No tasks yet',
+  listEmptyOpen: 'No incomplete tasks',
+  listEmptyDone: 'No completed tasks',
   listLoadFailed: 'Could not load tasks. Please try again later.',
   loading: 'Loading…',
   statusOpen: 'In progress',
@@ -678,6 +692,8 @@ export const TASKS_FMT_ZH = {
   groupsRenameNamed: (name: string): string => `重命名分组「${name}」`,
   groupsDeleteNamed: (name: string): string => `删除分组「${name}」`,
   groupsDeletePrompt: (name: string): string => `确认删除分组「${name}」？其中的任务将回到默认分组`,
+  /** G2-core (design §4.1): placed tasks the status filter leaves out; moves still count them. */
+  groupsHiddenByFilter: (count: number): string => `另有 ${count} 项已分组任务不在当前状态筛选中，未显示`,
 }
 
 export type TasksFmt = typeof TASKS_FMT_ZH
@@ -706,6 +722,10 @@ export const TASKS_FMT_EN: { [K in keyof TasksFmt]: (...args: Parameters<TasksFm
   groupsRenameNamed: (name) => `Rename group "${name}"`,
   groupsDeleteNamed: (name) => `Delete group "${name}"`,
   groupsDeletePrompt: (name) => `Delete group "${name}"? Its tasks go back to the default group.`,
+  groupsHiddenByFilter: (count) =>
+    count === 1
+      ? '1 grouped task is outside the status filter and not shown'
+      : `${count} grouped tasks are outside the status filter and not shown`,
 }
 
 /** Contract error code -> key of the plain-string table. Codes the M4 surfaces read with a

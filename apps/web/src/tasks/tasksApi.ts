@@ -236,14 +236,21 @@ export function resolveViewerTimeZone(): string {
   }
 }
 
+/** G2-core: the closed set of `GET /api/tasks?status=` (open | done | all). */
+export type TaskStatusFilter = 'open' | 'done' | 'all'
+
 /** `GET /api/tasks?view=…`. Without `page` the request string is the M2 one; with it, the M4
  *  page parameters are appended (`limit` fixed at `TASK_PAGE_LIMIT`). The views call it without
- *  `page`; `total` is parsed but not used (`[fe-10]`). */
-export async function listTasks(view: TaskView, page?: { offset: number }): Promise<ListTasksResult> {
+ *  `page`; `total` is parsed but not used (`[fe-10]`). G2-core: `status`, when given, is sent as
+ *  `&status=` after the view (and before the page); without it the request string is unchanged.
+ *  The list page always passes it, `all` included, so its answer never depends on the server's
+ *  default for an absent status. */
+export async function listTasks(view: TaskView, page?: { offset: number }, status?: TaskStatusFilter): Promise<ListTasksResult> {
+  const statusQuery = status === undefined ? '' : `&status=${encodeURIComponent(status)}`
   const query = page === undefined ? '' : `&limit=${TASK_PAGE_LIMIT}&offset=${page.offset}`
   let response: Response
   try {
-    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${query}`)
+    response = await apiFetch(`/api/tasks?view=${encodeURIComponent(view)}${statusQuery}${query}`)
   } catch {
     return { kind: 'error', status: 0 }
   }

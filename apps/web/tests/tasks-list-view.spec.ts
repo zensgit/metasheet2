@@ -253,13 +253,14 @@ describe('TasksView view switcher', () => {
     h.listTasks.mockResolvedValue({ kind: 'ok', items: [] })
     const el = await mountReady()
 
-    expect(h.listTasks).toHaveBeenCalledWith('assigned')
+    // G2-core: every list read carries the status filter; with nothing remembered it is `open`.
+    expect(h.listTasks).toHaveBeenCalledWith('assigned', undefined, 'open')
 
     const followingButton = shown(el, 'tasks-view-switch-following') as HTMLButtonElement
     followingButton.click()
     await flush()
 
-    expect(h.listTasks).toHaveBeenLastCalledWith('following')
+    expect(h.listTasks).toHaveBeenLastCalledWith('following', undefined, 'open')
   })
 })
 

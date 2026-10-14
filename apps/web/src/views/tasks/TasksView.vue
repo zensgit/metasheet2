@@ -447,6 +447,22 @@
                 @click="switchView(viewOption.value)"
               >{{ t[viewOption.labelKey] }}</button>
             </nav>
+            <!-- G2-core: the status switch, orthogonal to the view switcher above. Default 未完成;
+                 the choice is remembered per browser (tasks/tasksStatusFilter.ts). The current
+                 option stays enabled (only `aria-pressed` marks it), so keyboard focus stays on it
+                 after activation and screen-reader focus mode can reach it; `switchStatus` makes
+                 pressing it again a no-op. -->
+            <nav class="tasks-view__switcher" :aria-label="t.statusFilterLabel" data-testid="tasks-status-switcher">
+              <button
+                v-for="statusOption in STATUS_FILTERS"
+                :key="statusOption.value"
+                type="button"
+                class="tasks-view__switch-button"
+                :data-testid="`tasks-status-switch-${statusOption.value}`"
+                :aria-pressed="currentStatus === statusOption.value"
+                @click="switchStatus(statusOption.value)"
+              >{{ t[statusOption.labelKey] }}</button>
+            </nav>
 
             <form class="tasks-view__create" data-testid="tasks-create-form" @submit.prevent="onCreate">
               <input
@@ -517,6 +533,8 @@
             <TaskPersonalGroups
               v-if="listResult.kind === 'ok' && currentView === 'assigned'"
               :items="listResult.items"
+              :rows-filtered="currentStatus !== 'all'"
+              :rows-truncated="listResult.truncated"
               :reload-items="reloadListQuietly"
               @org-missing="onListsOrgMissing"
             >
@@ -576,7 +594,7 @@
               </li>
             </ul>
             <p v-else-if="listResult.kind === 'empty'" class="tasks-view__message" data-testid="tasks-list-empty">
-              {{ t.listEmpty }}
+              {{ currentStatus === 'open' ? t.listEmptyOpen : currentStatus === 'done' ? t.listEmptyDone : t.listEmpty }}
             </p>
             <p v-else-if="listResult.kind === 'error'" class="tasks-view__message" data-testid="tasks-list-error" role="alert">
               {{ t.listLoadFailed }}
@@ -651,6 +669,7 @@ import {
   type TaskDetail,
   type TaskListItem,
   type TaskPatch,
+  type TaskStatusFilter,
   type TaskView,
   type WriteFailure,
 } from '../../tasks/tasksApi'
@@ -658,6 +677,7 @@ import { notifyTasksChanged } from '../../tasks/tasksBadgeBus'
 import { formatDueDisplay, formatStartDisplay, formatViewerInstant } from '../../tasks/tasksDateDisplay'
 import { focusAfterSwap } from '../../tasks/tasksFocus'
 import { onListsChanged } from '../../tasks/tasksListsBus'
+import { readTaskStatusFilter, writeTaskStatusFilter } from '../../tasks/tasksStatusFilter'
 import { completeNoopReason, offersReopenAll, reopenSelfIsNoop, type CompleteNoopReason } from '../../tasks/tasksCompletion'
 import {
   buildCreateDue,
@@ -712,9 +732,22 @@ const VIEWS: Array<{ value: TaskView; labelKey: keyof TasksText }> = [
 
 const currentView = ref<TaskView>('assigned')
 
+// G2-core: the status filter (lock §2 item 1: 未完成 by default, switchable to 已完成 / 全部),
+// orthogonal to the view. Read once at setup from this browser's storage; every list read sends it.
+const STATUS_FILTERS: Array<{ value: TaskStatusFilter; labelKey: keyof TasksText }> = [
+  { value: 'open', labelKey: 'statusFilterOpen' },
+  { value: 'done', labelKey: 'statusFilterDone' },
+  { value: 'all', labelKey: 'statusFilterAll' },
+]
+
+const currentStatus = ref<TaskStatusFilter>(readTaskStatusFilter())
+
 type ListRenderState =
   | { kind: 'loading' }
-  | { kind: 'ok'; items: TaskListItem[] }
+  // `truncated`: the read stopped short of its `total` (G2-core: handed to the assigned view's
+  // board, which under a status filter can no longer tell a row cut off by the page from a row the
+  // filter leaves out).
+  | { kind: 'ok'; items: TaskListItem[]; truncated: boolean }
   | { kind: 'empty' }
   | { kind: 'error' }
 
@@ -941,11 +974,14 @@ async function loadList(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
   listResult.value = { kind: 'loading' }
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
 
   if (result.kind === 'ok') {
-    listResult.value = result.items.length === 0 ? { kind: 'empty' } : { kind: 'ok', items: result.items }
+    listResult.value =
+      result.items.length === 0
+        ? { kind: 'empty' }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
     return
   }
   if (result.kind === 'org_missing') {
@@ -965,10 +1001,13 @@ async function loadList(): Promise<void> {
 async function reloadListQuietly(): Promise<void> {
   listGeneration += 1
   const mine = listGeneration
-  const result = await listTasks(currentView.value)
+  const result = await listTasks(currentView.value, undefined, currentStatus.value)
   if (mine !== listGeneration) return
   if (result.kind === 'ok') {
-    listResult.value = result.items.length === 0 ? { kind: 'empty' } : { kind: 'ok', items: result.items }
+    listResult.value =
+      result.items.length === 0
+        ? { kind: 'empty' }
+        : { kind: 'ok', items: result.items, truncated: result.total !== undefined && result.items.length < result.total }
     return
   }
   if (result.kind === 'org_missing') {
@@ -1025,6 +1064,16 @@ function switchView(view: TaskView): void {
   if (view === currentView.value) return
   listPageToken += 1
   currentView.value = view
+  void loadList()
+}
+
+/** G2-core: same page-moved-on discipline as `switchView` — a row action or create started under
+ *  the previous status must not act on this one's rows. */
+function switchStatus(status: TaskStatusFilter): void {
+  if (status === currentStatus.value) return
+  listPageToken += 1
+  currentStatus.value = status
+  writeTaskStatusFilter(status)
   void loadList()
 }
 
