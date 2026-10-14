@@ -1465,4 +1465,81 @@ describe('Attendance admin anchor navigation', () => {
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
     expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeNull()
   })
+
+  it('searches the workbench catalog from the page search scope and jumps to the section', async () => {
+    app = createApp(AttendanceView, { mode: 'admin' })
+    app.mount(container!)
+    await flushUi()
+
+    const toggle = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-toggle]')
+    expect(toggle?.textContent).toContain('Search this page')
+    expect(container!.querySelector('[data-admin-page-search-input]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-scope]')).toBeNull()
+
+    toggle!.click()
+    await flushUi()
+
+    const pageScope = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-scope="page"]')
+    const workbenchScope = container!.querySelector<HTMLButtonElement>('[data-admin-page-search-scope="workbench"]')
+    const input = container!.querySelector<HTMLInputElement>('[data-admin-page-search-input]')
+    expect(pageScope?.textContent).toContain('This page')
+    expect(pageScope?.getAttribute('aria-pressed')).toBe('true')
+    expect(workbenchScope?.textContent).toContain('All workbench')
+    expect(workbenchScope?.getAttribute('aria-pressed')).toBe('false')
+    expect(input).toBeTruthy()
+    expect(container!.querySelectorAll('[data-admin-page-search-input]')).toHaveLength(1)
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+
+    input!.value = 'zzz-no-such-page-text'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    expect(container!.querySelector('[data-admin-home-context="true"] [data-admin-page-search-hidden="true"]')).toBeTruthy()
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matches on this page.')
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+
+    workbenchScope!.click()
+    await flushUi()
+    expect(workbenchScope?.getAttribute('aria-pressed')).toBe('true')
+    expect(pageScope?.getAttribute('aria-pressed')).toBe('false')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-results]')).toBeNull()
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('No matching workbench sections.')
+
+    input!.value = '排班执行'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const schedulingHits = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-page-search-result]'))
+    expect(schedulingHits.map(item => item.textContent?.trim())).toEqual([
+      'Scheduling · Advanced scheduling',
+      'Scheduling · Comprehensive hours',
+      'Scheduling · Rotation Rules',
+      'Scheduling · Rotation Assignments',
+      'Scheduling · Shifts',
+      'Scheduling · Assignments',
+      'Scheduling · Scheduler scope mgmt',
+      'Scheduling · Holidays',
+    ])
+    expect(container!.querySelector('[data-admin-page-search-status]')?.textContent).toContain('Workbench matches: 8')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+
+    input!.value = '班次'
+    input!.dispatchEvent(new Event('input'))
+    await flushUi()
+    const shiftHits = Array.from(container!.querySelectorAll<HTMLButtonElement>('[data-admin-page-search-result]'))
+    expect(shiftHits.map(item => item.getAttribute('data-admin-page-search-result'))).toEqual(['attendance-admin-shifts'])
+    expect(shiftHits[0]?.textContent).toContain('Scheduling · Shifts')
+    expect(container!.querySelector('[data-admin-nav-search]')?.value ?? '').toBe('')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-user-access"]')).toBeTruthy()
+
+    shiftHits[0]!.click()
+    await flushUi(2)
+
+    expect(window.location.hash).toBe('#attendance-admin-shifts')
+    expect(container!.querySelector('[data-admin-current-section="true"]')?.textContent).toContain('Scheduling · Shifts')
+    expect(container!.querySelector('[data-admin-anchor="attendance-admin-shifts"]')?.classList.contains('attendance__admin-nav-link--active')).toBe(true)
+    expect(container!.querySelectorAll('[data-admin-page-search-input]')).toHaveLength(1)
+    expect(container!.querySelector('[data-admin-page-search-scope="workbench"]')?.getAttribute('aria-pressed')).toBe('true')
+    expect(container!.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(container!.querySelector('.attendance__admin-header')).toBeNull()
+  })
 })

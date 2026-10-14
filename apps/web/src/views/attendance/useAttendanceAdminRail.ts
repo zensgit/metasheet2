@@ -460,6 +460,9 @@ export function useAttendanceAdminRail({
             ...item,
             groupLabel,
             contextLabel,
+            // Item aliases plus the group name, so workbench search matches the
+            // same Chinese and English catalog as the jump-block filter.
+            matchText: `${item.matchText ?? item.label}\n${group.matchText}`.toLowerCase(),
           }
         })
     })

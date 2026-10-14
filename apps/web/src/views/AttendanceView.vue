@@ -1588,16 +1588,62 @@
                     {{ tr('Search this page', '搜索本页') }}
                   </button>
                   <div v-else class="attendance__admin-page-search-field" role="search">
-                    <input
-                      ref="adminPageSearchInputRef"
-                      v-model="adminPageSearchQuery"
-                      class="attendance__admin-page-search-input"
-                      type="search"
-                      data-admin-page-search-input="true"
-                      :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
-                      :aria-label="tr('Search this page', '搜索本页')"
-                      @keydown.esc.prevent="closeAdminPageSearch"
-                    />
+                    <div
+                      class="attendance__admin-page-search-scope"
+                      role="group"
+                      :aria-label="tr('Search scope', '搜索范围')"
+                    >
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                        type="button"
+                        data-admin-page-search-scope="page"
+                        :aria-pressed="adminPageSearchScope === 'page'"
+                        @click="setAdminPageSearchScope('page')"
+                      >
+                        {{ tr('This page', '本页') }}
+                      </button>
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                        type="button"
+                        data-admin-page-search-scope="workbench"
+                        :aria-pressed="adminPageSearchScope === 'workbench'"
+                        @click="setAdminPageSearchScope('workbench')"
+                      >
+                        {{ tr('All workbench', '全部工作台') }}
+                      </button>
+                    </div>
+                    <div class="attendance__admin-page-search-combo">
+                      <input
+                        ref="adminPageSearchInputRef"
+                        v-model="adminPageSearchQuery"
+                        class="attendance__admin-page-search-input"
+                        type="search"
+                        data-admin-page-search-input="true"
+                        :placeholder="adminPageSearchPlaceholder"
+                        :aria-label="adminPageSearchAriaLabel"
+                        @keydown="onAdminPageSearchKeydown"
+                      />
+                      <ul
+                        v-if="adminPageSearchScope === 'workbench' && adminWorkbenchSearchHits.length > 0"
+                        class="attendance__admin-page-search-results"
+                        data-admin-page-search-results
+                        role="listbox"
+                      >
+                        <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                          <button
+                            class="attendance__admin-page-search-result"
+                            type="button"
+                            role="option"
+                            :data-admin-page-search-result="item.id"
+                            @click="openAdminWorkbenchSearchHit(item.id)"
+                          >
+                            {{ item.contextLabel }}
+                          </button>
+                        </li>
+                      </ul>
+                    </div>
                     <button
                       class="attendance__btn attendance__btn--inline"
                       type="button"
@@ -1607,15 +1653,11 @@
                       {{ tr('Clear', '清除') }}
                     </button>
                     <span
-                      v-if="adminPageSearchQuery.trim()"
+                      v-if="adminPageSearchStatusText"
                       class="attendance__admin-page-search-status"
                       data-admin-page-search-status
                     >
-                      {{
-                        adminPageSearchMatched === 0
-                          ? tr('No matches on this page.', '当前页面没有匹配内容。')
-                          : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
-                      }}
+                      {{ adminPageSearchStatusText }}
                     </span>
                   </div>
                 </div>
@@ -1730,16 +1772,62 @@
                       {{ tr('Search this page', '搜索本页') }}
                     </button>
                     <div v-else class="attendance__admin-page-search-field" role="search">
-                      <input
-                        ref="adminPageSearchInputRef"
-                        v-model="adminPageSearchQuery"
-                        class="attendance__admin-page-search-input"
-                        type="search"
-                        data-admin-page-search-input="true"
-                        :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
-                        :aria-label="tr('Search this page', '搜索本页')"
-                        @keydown.esc.prevent="closeAdminPageSearch"
-                      />
+                      <div
+                        class="attendance__admin-page-search-scope"
+                        role="group"
+                        :aria-label="tr('Search scope', '搜索范围')"
+                      >
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                          type="button"
+                          data-admin-page-search-scope="page"
+                          :aria-pressed="adminPageSearchScope === 'page'"
+                          @click="setAdminPageSearchScope('page')"
+                        >
+                          {{ tr('This page', '本页') }}
+                        </button>
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                          type="button"
+                          data-admin-page-search-scope="workbench"
+                          :aria-pressed="adminPageSearchScope === 'workbench'"
+                          @click="setAdminPageSearchScope('workbench')"
+                        >
+                          {{ tr('All workbench', '全部工作台') }}
+                        </button>
+                      </div>
+                      <div class="attendance__admin-page-search-combo">
+                        <input
+                          ref="adminPageSearchInputRef"
+                          v-model="adminPageSearchQuery"
+                          class="attendance__admin-page-search-input"
+                          type="search"
+                          data-admin-page-search-input="true"
+                          :placeholder="adminPageSearchPlaceholder"
+                          :aria-label="adminPageSearchAriaLabel"
+                          @keydown="onAdminPageSearchKeydown"
+                        />
+                        <ul
+                          v-if="adminPageSearchScope === 'workbench' && adminWorkbenchSearchHits.length > 0"
+                          class="attendance__admin-page-search-results"
+                          data-admin-page-search-results
+                          role="listbox"
+                        >
+                          <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                            <button
+                              class="attendance__admin-page-search-result"
+                              type="button"
+                              role="option"
+                              :data-admin-page-search-result="item.id"
+                              @click="openAdminWorkbenchSearchHit(item.id)"
+                            >
+                              {{ item.contextLabel }}
+                            </button>
+                          </li>
+                        </ul>
+                      </div>
                       <button
                         class="attendance__btn attendance__btn--inline"
                         type="button"
@@ -1749,15 +1837,11 @@
                         {{ tr('Clear', '清除') }}
                       </button>
                       <span
-                        v-if="adminPageSearchQuery.trim()"
+                        v-if="adminPageSearchStatusText"
                         class="attendance__admin-page-search-status"
                         data-admin-page-search-status
                       >
-                        {{
-                          adminPageSearchMatched === 0
-                            ? tr('No matches on this page.', '当前页面没有匹配内容。')
-                            : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
-                        }}
+                        {{ adminPageSearchStatusText }}
                       </span>
                     </div>
                   </div>
@@ -15536,6 +15620,7 @@ const {
   readLastAdminSection,
   collapseAllAdminSectionGroups,
   toggleAdminSectionGroup,
+  orderedAdminSectionNavItems,
   visibleAdminSectionNavGroups,
   visibleRecentAdminSectionNavItems,
 } = useAttendanceAdminRail({
@@ -15563,8 +15648,41 @@ const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHo
 const adminConsoleRef = ref<HTMLElement | null>(null)
 const adminPageSearchOpen = ref(false)
 const adminPageSearchQuery = ref('')
+const adminPageSearchScope = ref<'page' | 'workbench'>('page')
 const adminPageSearchInputRef = ref<HTMLInputElement | null>(null)
 const adminPageSearchMatched = ref(0)
+const ADMIN_WORKBENCH_SEARCH_LIMIT = 8
+
+const adminWorkbenchSearchMatches = computed(() => {
+  const query = adminPageSearchQuery.value.trim().toLowerCase()
+  if (adminPageSearchScope.value !== 'workbench' || !query) return []
+  return orderedAdminSectionNavItems.value.filter(item =>
+    `${item.matchText ?? ''}\n${item.contextLabel}`.toLowerCase().includes(query),
+  )
+})
+const adminWorkbenchSearchHits = computed(() => adminWorkbenchSearchMatches.value.slice(0, ADMIN_WORKBENCH_SEARCH_LIMIT))
+const adminPageSearchPlaceholder = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search workbench sections', '搜索工作台区块')
+    : tr('Search titles, fields, and rows', '搜索标题、字段和列表')
+))
+const adminPageSearchAriaLabel = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search all workbench sections', '搜索全部工作台')
+    : tr('Search this page', '搜索本页')
+))
+const adminPageSearchStatusText = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return ''
+  if (adminPageSearchScope.value === 'workbench') {
+    const count = adminWorkbenchSearchMatches.value.length
+    return count === 0
+      ? tr('No matching workbench sections.', '没有匹配的工作台入口。')
+      : `${tr('Workbench matches', '工作台匹配')}: ${count}`
+  }
+  return adminPageSearchMatched.value === 0
+    ? tr('No matches on this page.', '当前页面没有匹配内容。')
+    : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched.value}`
+})
 
 function adminPageSearchRoot(): HTMLElement | null {
   const host = adminConsoleRef.value
@@ -15580,7 +15698,7 @@ function syncAdminPageContentSearch(): void {
   if (!host) return
   clearAdminPageContentSearch(host)
   const query = adminPageSearchQuery.value.trim()
-  if (!query) {
+  if (!query || adminPageSearchScope.value !== 'page') {
     adminPageSearchMatched.value = 0
     return
   }
@@ -15597,6 +15715,11 @@ function openAdminPageSearch(): void {
   void nextTick(() => adminPageSearchInputRef.value?.focus())
 }
 
+function setAdminPageSearchScope(scope: 'page' | 'workbench'): void {
+  adminPageSearchScope.value = scope
+  void nextTick(() => adminPageSearchInputRef.value?.focus())
+}
+
 function clearAdminPageSearchQuery(): void {
   adminPageSearchQuery.value = ''
 }
@@ -15606,7 +15729,24 @@ function closeAdminPageSearch(): void {
   adminPageSearchOpen.value = false
 }
 
-watch(adminPageSearchQuery, () => {
+function openAdminWorkbenchSearchHit(id: string): void {
+  selectAdminSection(id)
+}
+
+function onAdminPageSearchKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeAdminPageSearch()
+    return
+  }
+  if (event.key !== 'Enter' || adminPageSearchScope.value !== 'workbench') return
+  const first = adminWorkbenchSearchHits.value[0]
+  if (!first) return
+  event.preventDefault()
+  openAdminWorkbenchSearchHit(first.id)
+}
+
+watch([adminPageSearchQuery, adminPageSearchScope], () => {
   syncAdminPageContentSearch()
 }, { flush: 'post' })
 
@@ -32460,6 +32600,8 @@ defineExpose({
 }
 
 .attendance__admin-page-search {
+  position: relative;
+  z-index: 8;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -32468,13 +32610,50 @@ defineExpose({
 .attendance__admin-page-search-field {
   display: inline-flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
 }
 
+.attendance__admin-page-search-scope {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.attendance__admin-page-search-scope-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1;
+  min-height: 32px;
+  padding: 6px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-scope-btn + .attendance__admin-page-search-scope-btn {
+  border-left: 1px solid var(--ms-border);
+}
+
+.attendance__admin-page-search-scope-btn--active {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__admin-page-search-combo {
+  position: relative;
+  min-width: 0;
+}
+
 .attendance__admin-page-search-input {
-  width: 220px;
-  max-width: 42vw;
+  width: 168px;
+  max-width: 32vw;
   min-height: 32px;
   padding: 6px 10px;
   border: 1px solid var(--ms-border);
@@ -32484,9 +32663,49 @@ defineExpose({
   font-size: 13px;
 }
 
+.attendance__admin-page-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  width: max(240px, 100%);
+  max-height: 240px;
+  margin: 0;
+  padding: 4px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__admin-page-search-result {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ms-text-1);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-result:hover,
+.attendance__admin-page-search-result:focus {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+}
+
 .attendance__admin-page-search-status {
+  max-width: 148px;
+  overflow: hidden;
   color: var(--ms-text-3);
   font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -33720,9 +33939,14 @@ defineExpose({
   .attendance__admin-header-tools,
   .attendance__admin-current-section-tools,
   .attendance__admin-header-tools .attendance__admin-actions,
-  .attendance__admin-current-section-tools .attendance__admin-actions {
+  .attendance__admin-current-section-tools .attendance__admin-actions,
+  .attendance__admin-page-search-field {
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+
+  .attendance__admin-page-search-input {
+    width: min(168px, 70vw);
   }
 
   .attendance__missed-reminder-toolbar {
