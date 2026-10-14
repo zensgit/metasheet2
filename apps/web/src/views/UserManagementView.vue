@@ -852,6 +852,10 @@
                 class="user-admin__search"
                 type="text"
                 placeholder="可选：设置临时密码"
+                data-testid="admin-temporary-password"
+                aria-label="临时密码"
+                :aria-invalid="passwordResetInlineError ? 'true' : 'false'"
+                :aria-describedby="passwordResetInlineError ? 'admin-temporary-password-rule admin-temporary-password-error' : 'admin-temporary-password-rule'"
               />
               <button class="user-admin__button user-admin__button--secondary" type="button" :disabled="busy" @click="void resetPassword()">
                 重置密码
@@ -860,8 +864,20 @@
                 全部下线
               </button>
             </div>
+            <p id="admin-temporary-password-rule" data-testid="admin-temporary-password-rule" class="user-admin__hint">
+              {{ adminTemporaryPasswordRuleHint }}
+            </p>
+            <p
+              v-if="passwordResetInlineError"
+              id="admin-temporary-password-error"
+              data-testid="admin-temporary-password-error"
+              class="user-admin__status user-admin__status--error"
+              role="alert"
+            >
+              {{ passwordResetInlineError }}
+            </p>
             <p class="user-admin__hint">重置密码或停用账号会让该用户的现有会话失效。</p>
-            <p v-if="temporaryPassword" class="user-admin__status">
+            <p v-if="temporaryPassword" class="user-admin__status" data-testid="admin-reset-temporary-password">
               临时密码：{{ temporaryPassword }}
             </p>
           </div>
@@ -968,6 +984,12 @@ import {
   type RoleMembershipSnapshot,
   type RoleMembershipWriteOutcome,
 } from './adminUserRoleAction'
+import {
+  ADMIN_TEMPORARY_PASSWORD_RULE_HINT,
+  ADMIN_TEMPORARY_PASSWORD_TOO_SHORT,
+  classifyManualTemporaryPassword,
+  describeAdminResetPasswordInlineError,
+} from './adminTemporaryPasswordFeedback'
 
 type ManagedUser = {
   id: string
@@ -1290,6 +1312,8 @@ const userAccessReadGeneration = ref(0)
 const selectedRoleId = ref('')
 const roleActionFeedback = ref<{ tone: 'info' | 'error'; message: string } | null>(null)
 const manualPassword = ref('')
+const passwordResetInlineError = ref('')
+const adminTemporaryPasswordRuleHint = ADMIN_TEMPORARY_PASSWORD_RULE_HINT
 const temporaryPassword = ref('')
 const createdTemporaryPassword = ref('')
 const createdInviteMessage = ref('')
@@ -2495,6 +2519,7 @@ async function selectUser(userId: string): Promise<void> {
   selectedRoleId.value = ''
   roleActionFeedback.value = null
   manualPassword.value = ''
+  passwordResetInlineError.value = ''
   temporaryPassword.value = ''
   createdTemporaryPassword.value = ''
   dingtalkAccess.value = null
@@ -3071,23 +3096,39 @@ async function toggleUserStatus(): Promise<void> {
 
 async function resetPassword(): Promise<void> {
   if (!access.value) return
+  const requestedUserId = access.value.user.id
+  const intent = classifyManualTemporaryPassword(manualPassword.value)
+  if (intent.kind === 'too-short') {
+    passwordResetInlineError.value = ADMIN_TEMPORARY_PASSWORD_TOO_SHORT
+    return
+  }
+  passwordResetInlineError.value = ''
   busy.value = true
   try {
-    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(access.value.user.id)}/reset-password`, {
+    const response = await apiFetch(`/api/admin/users/${encodeURIComponent(requestedUserId)}/reset-password`, {
       method: 'POST',
       body: JSON.stringify({
-        password: manualPassword.value || undefined,
+        password: intent.kind === 'submit' ? intent.password : undefined,
       }),
     })
     const payload = await readJson(response)
+    if (selectedUserId.value !== requestedUserId) return
     if (!response.ok || payload.ok !== true) {
-      throw new Error(String((payload.error as Record<string, unknown> | undefined)?.message || '重置密码失败'))
+      const errorPayload = payload.error as { code?: unknown; message?: unknown } | undefined
+      const inlineError = describeAdminResetPasswordInlineError(errorPayload)
+      if (inlineError) {
+        passwordResetInlineError.value = inlineError
+        return
+      }
+      throw new Error(String(errorPayload?.message || '重置密码失败'))
     }
 
     temporaryPassword.value = String((payload.data as Record<string, unknown> | undefined)?.temporaryPassword || '')
     manualPassword.value = ''
+    passwordResetInlineError.value = ''
     setStatus('密码已重置')
   } catch (error) {
+    if (selectedUserId.value !== requestedUserId) return
     setStatus(error instanceof Error ? error.message : '重置密码失败', 'error')
   } finally {
     busy.value = false
