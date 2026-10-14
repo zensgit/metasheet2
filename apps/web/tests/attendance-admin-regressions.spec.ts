@@ -7609,10 +7609,16 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
 
-    const userInput = section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-user-id]')
-    expect(userInput).toBeTruthy()
-    userInput!.value = 'user-1'
-    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')?.textContent).toContain('Not previewed yet')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate]')).toBeNull()
+    expect(section!.querySelector('.attendance__admin-section-header [data-attendance-comprehensive-hours-preview-run]')).toBeNull()
+    expect(section!.querySelector('.attendance__form-actions [data-attendance-comprehensive-hours-preview-run]')).toBeTruthy()
+    expect(section!.querySelector('.attendance__admin-grid [data-attendance-comprehensive-hours-save-block-mode]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-save-block-mode]')?.textContent).toContain('Save-time strong control')
+    expect(section!.querySelector('#attendance-comprehensive-hours-user-id')).toBeTruthy()
+    expect(section!.textContent).not.toContain('User ID')
+
+    selectUserPicker(section!, '#attendance-comprehensive-hours-user-id', 'user-1')
     await flushUi(2)
 
     const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
@@ -7634,7 +7640,10 @@ describe('Attendance admin regressions', () => {
     })
 
     expect(section!.textContent).toContain('Read-only preview')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-status]')?.textContent).toContain('No policy was saved')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="ok"]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="warning"]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="violation"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('user-1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('Violation')

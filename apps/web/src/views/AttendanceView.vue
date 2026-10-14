@@ -8504,7 +8504,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet attendance__ch-preview"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
               data-attendance-comprehensive-hours-preview
             >
@@ -8512,29 +8512,12 @@
                 <div>
                   <h4>{{ tr('Comprehensive hours preview', '综合工时预览') }}</h4>
                   <small class="attendance__field-hint">
-                    {{ tr('Read-only cap comparison for explicit users. It does not save policies or block schedule changes.', '面向指定员工的只读工时上限对比，不保存策略，也不会阻断排班变更。') }}
+                    {{ tr('Read-only cap check. Nothing is saved or blocked.', '只读对比工时上限，不保存，也不拦截排班。') }}
                   </small>
                 </div>
-                <button
-                  class="attendance__btn"
-                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
-                  @click="previewComprehensiveHours"
-                  data-attendance-comprehensive-hours-preview-run
-                >
-                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
-                </button>
               </div>
 
-              <div class="attendance__admin-meta">
-                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
-                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
-                </span>
-                <span class="attendance__status-chip">
-                  {{ comprehensiveHoursPreviewPeriodLabel }}
-                </span>
-              </div>
-
-              <div class="attendance__admin-grid">
+              <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field" for="attendance-comprehensive-hours-user-mode">
                   <span>{{ tr('Scope', '范围') }}</span>
                   <select
@@ -8543,41 +8526,38 @@
                     data-attendance-comprehensive-hours-user-mode
                   >
                     <option value="single">{{ tr('Single user', '单个员工') }}</option>
-                    <option value="multiple">{{ tr('User IDs', '多个员工 ID') }}</option>
+                    <option value="multiple">{{ tr('Several employees', '多名员工') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr('Preview v1 intentionally requires explicit users; all-users batch remains out of scope.', '预览 v1 必须显式指定员工；全员批量仍不在本次范围。') }}
-                  </small>
                 </label>
-                <label
+                <AttendanceUserPickerField
                   v-if="comprehensiveHoursPreviewForm.userMode === 'single'"
-                  class="attendance__field"
-                  for="attendance-comprehensive-hours-user-id"
-                >
-                  <span>{{ tr('User ID', '员工 ID') }}</span>
-                  <input
-                    id="attendance-comprehensive-hours-user-id"
-                    v-model="comprehensiveHoursPreviewForm.userId"
-                    type="text"
-                    placeholder="user-1"
-                    data-attendance-comprehensive-hours-user-id
-                  />
-                </label>
+                  v-model="comprehensiveHoursPreviewForm.userId"
+                  :tr="tr"
+                  typeahead
+                  :label="tr('Employee', '员工')"
+                  name="comprehensiveHoursUserId"
+                  input-id="attendance-comprehensive-hours-user-id"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
+                  :search-placeholder="tr('Name or email', '姓名或邮箱')"
+                  @update:display-name="comprehensiveHoursPreviewUserLabel = $event"
+                />
                 <label
                   v-else
                   class="attendance__field"
                   for="attendance-comprehensive-hours-user-ids"
                 >
-                  <span>{{ tr('User IDs', '员工 ID 列表') }}</span>
+                  <span>{{ tr('Employees', '员工') }}</span>
                   <textarea
                     id="attendance-comprehensive-hours-user-ids"
                     v-model="comprehensiveHoursPreviewForm.userIds"
-                    rows="3"
-                    placeholder="user-1, user-2"
+                    rows="2"
+                    :placeholder="tr('Separate with commas', '用逗号分隔')"
                     data-attendance-comprehensive-hours-user-ids
                   />
                   <small class="attendance__field-hint">
-                    {{ tr('Comma, space, or newline separated. The backend caps preview scope at 100 users.', '可用逗号、空格或换行分隔；后端最多预览 100 人。') }}
+                    {{ tr('Comma or newline. Up to 100.', '逗号或换行，最多 100 人。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-metric">
@@ -8612,29 +8592,6 @@
                     <option value="warn">{{ tr('Warn preview', '预警预览') }}</option>
                     <option value="block">{{ tr('Strict preview', '严格预览') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'Mode only changes preview status. It is not persisted. See \'Save-time strong control\' below to enable save blocking.',
-                      '模式只影响预览状态，不会持久化。如需保存时拦截，请使用下方“保存时强管控”。'
-                    ) }}
-                  </small>
-                </label>
-                <label
-                  class="attendance__field attendance__field--checkbox"
-                  data-attendance-comprehensive-hours-save-block-mode
-                >
-                  <input
-                    type="checkbox"
-                    id="attendance-comprehensive-hours-save-block-mode"
-                    v-model="comprehensiveHoursSaveBlockMode"
-                  />
-                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'When enabled, shift and rotation assignment saves are blocked if the comprehensive-hours preview returns a violation. Preview errors and degraded data never block saves.',
-                      '启用后，若综合工时预览返回违规，将拦截班次和轮班分配保存；预览失败或降级数据不会拦截保存。'
-                    ) }}
-                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-period-type">
                   <span>{{ tr('Period', '周期') }}</span>
@@ -8737,6 +8694,32 @@
                 </label>
               </div>
 
+              <div class="attendance__ch-save-row" data-attendance-comprehensive-hours-save-block-mode>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-comprehensive-hours-save-block-mode">
+                  <input
+                    type="checkbox"
+                    id="attendance-comprehensive-hours-save-block-mode"
+                    v-model="comprehensiveHoursSaveBlockMode"
+                  />
+                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
+                </label>
+                <small class="attendance__field-hint">
+                  {{ tr('Blocks shift and rotation saves on a violation. A failed preview does not block.', '违规时拦截班次和轮班保存。预览失败不拦截。') }}
+                </small>
+              </div>
+
+              <div class="attendance__form-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  type="button"
+                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
+                  data-attendance-comprehensive-hours-preview-run
+                  @click="previewComprehensiveHours"
+                >
+                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
+                </button>
+              </div>
+
               <p
                 v-if="comprehensiveHoursPreviewStatus.message"
                 class="attendance__status"
@@ -8746,22 +8729,39 @@
                 {{ comprehensiveHoursPreviewStatus.message }}
               </p>
 
-              <div class="attendance__summary attendance__summary--workbench" data-attendance-comprehensive-hours-aggregate>
-                <div
-                  v-for="item in comprehensiveHoursPreviewAggregateItems"
+              <p
+                v-if="!comprehensiveHoursPreview"
+                class="attendance__ch-empty"
+                data-attendance-comprehensive-hours-empty
+              >
+                {{ tr('Not previewed yet', '尚未预览') }}
+              </p>
+              <div
+                v-else
+                class="attendance__kpi-strip attendance__ch-results"
+                data-attendance-comprehensive-hours-aggregate
+              >
+                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
+                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
+                </span>
+                <span class="attendance__status-chip">
+                  {{ comprehensiveHoursPreviewPeriodLabel }}
+                </span>
+                <span
+                  v-for="item in comprehensiveHoursPreviewVisibleAggregateItems"
                   :key="item.key"
-                  class="attendance__summary-item"
+                  class="attendance__kpi attendance__kpi--static"
                   :data-attendance-comprehensive-hours-aggregate-item="item.key"
                 >
                   <span>{{ item.label }}</span>
                   <strong>{{ item.value }}</strong>
-                </div>
+                </span>
               </div>
 
-              <div v-if="comprehensiveHoursPreviewRows.length === 0" class="attendance__empty" data-attendance-comprehensive-hours-empty>
-                {{ tr('Run a read-only preview to compare comprehensive-hours caps.', '运行只读预览以对比综合工时上限。') }}
+              <div v-if="comprehensiveHoursPreview && comprehensiveHoursPreviewRows.length === 0" class="attendance__empty">
+                {{ tr('No employee rows in this preview.', '这次预览没有员工结果。') }}
               </div>
-              <div v-else class="attendance__table-wrapper">
+              <div v-else-if="comprehensiveHoursPreviewRows.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table" data-attendance-comprehensive-hours-rows>
                   <thead>
                     <tr>
@@ -8777,7 +8777,11 @@
                   <tbody>
                     <tr v-for="row in comprehensiveHoursPreviewRows" :key="row.userId">
                       <td>
-                        <strong>{{ row.userId }}</strong>
+                        <strong>{{ comprehensiveHoursRowPrimaryLabel(row.userId) }}</strong>
+                        <span
+                          v-if="comprehensiveHoursRowPrimaryLabel(row.userId) !== row.userId"
+                          class="attendance__id-clip"
+                        >{{ row.userId }}</span>
                         <div v-if="row.days !== undefined" class="attendance__field-hint">
                           {{ tr(`${row.workingDays ?? 0}/${row.days ?? 0} working days`, `${row.workingDays ?? 0}/${row.days ?? 0} 个工作日`) }}
                         </div>
@@ -17467,6 +17471,7 @@ const comprehensiveHoursPreviewForm = reactive({
   capHours: 160,
   enforcement: 'warn' as AttendanceComprehensiveHoursEnforcement,
 })
+const comprehensiveHoursPreviewUserLabel = ref('')
 
 function comprehensiveHoursUserIds(): string[] {
   if (comprehensiveHoursPreviewForm.userMode === 'multiple') {
@@ -17549,6 +17554,17 @@ const comprehensiveHoursPreviewAggregateItems = computed(() => {
     { key: 'excess', label: tr('Excess minutes', '超出分钟'), value: aggregate?.totalExcessMinutes ?? 0 },
   ]
 })
+
+const comprehensiveHoursPreviewVisibleAggregateItems = computed(() =>
+  comprehensiveHoursPreviewAggregateItems.value.filter(item => Number(item.value) !== 0),
+)
+
+function comprehensiveHoursRowPrimaryLabel(userId: string): string {
+  const label = comprehensiveHoursPreviewUserLabel.value.trim()
+  const selectedId = comprehensiveHoursPreviewForm.userId.trim()
+  if (label && selectedId && userId === selectedId && label !== selectedId) return label
+  return userId
+}
 
 function toDateKey(date: Date): string {
   const year = date.getFullYear()
@@ -27730,7 +27746,7 @@ async function previewComprehensiveHours() {
   if (userIds.length === 0) {
     comprehensiveHoursPreviewStatus.value = {
       kind: 'error',
-      message: tr('Enter at least one user ID before previewing.', '请先填写至少一个员工 ID。'),
+      message: tr('Choose an employee before previewing.', '请先选择员工。'),
     }
     return
   }
@@ -34853,6 +34869,37 @@ defineExpose({
 .attendance__form-actions {
   display: flex;
   justify-content: flex-end;
+}
+
+.attendance__ch-save-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.attendance__ch-save-row .attendance__field-hint {
+  margin: 0;
+  flex: 1 1 220px;
+}
+
+.attendance__ch-preview .attendance__form-actions {
+  margin-top: 8px;
+}
+
+.attendance__ch-empty {
+  margin: 12px 0 0;
+  color: var(--ms-text-3);
+  font-size: 13px;
+}
+
+.attendance__ch-results {
+  margin-top: 12px;
+}
+
+.attendance__kpi--static {
+  cursor: default;
 }
 
 .attendance__form-sheet .attendance__btn,
