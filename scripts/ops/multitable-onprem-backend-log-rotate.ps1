@@ -68,12 +68,35 @@ function Test-Pm2PipePresent([string]$Pm2HomeDir) {
 function Find-StrayPm2Daemon([datetime]$Since) {
   # pm2-runtime never runs pm2\lib\Daemon.js; a node process running it was spawned by a pm2 CLI call.
   # -Since [datetime]::MinValue lists every such process, including ones that existed before the call.
+  # $script:Pm2UnreadableCount = node processes whose command line could not be read (other user / elevated).
+  $script:Pm2UnreadableCount = 0
   if (-not (Test-IsWindowsHost)) { return @() }
   try {
-    return @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object {
-        [string]$_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' -and $_.CreationDate -ge $Since
-      } | ForEach-Object { [int]$_.ProcessId })
+    $nodes = @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CreationDate -ge $Since })
+    $script:Pm2UnreadableCount = @($nodes | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.CommandLine) }).Count
+    return @($nodes | Where-Object { [string]$_.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$' } | ForEach-Object { [int]$_.ProcessId })
   } catch { return @() }
+}
+
+function Get-Pm2CliDescendants($All, [int]$RootId, $RootStart) {
+  # Pids below $RootId by ParentProcessId. A child counts only if it was created at or after its parent
+  # (a reused pid would otherwise adopt unrelated orphans), and a pm2\lib\Daemon.js process is never
+  # included nor walked into. $All = Win32_Process-like objects (ProcessId, ParentProcessId, CommandLine, CreationDate).
+  $queue = New-Object System.Collections.ArrayList
+  [void]$queue.Add([int]$RootId)
+  $starts = @{ ([string]$RootId) = $RootStart }
+  $victims = @()
+  for ($i = 0; $i -lt $queue.Count; $i++) {
+    $parentStart = $starts[[string]$queue[$i]]
+    foreach ($c in @($All | Where-Object { [int]$_.ParentProcessId -eq [int]$queue[$i] -and [int]$_.ProcessId -ne [int]$RootId })) {
+      if ([string]$c.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$') { continue }
+      if ($null -ne $parentStart -and $null -ne $c.CreationDate -and $c.CreationDate -lt $parentStart) { continue }
+      if ($queue.Contains([int]$c.ProcessId)) { continue }
+      [void]$queue.Add([int]$c.ProcessId); $victims += [int]$c.ProcessId
+      $starts[[string]$c.ProcessId] = $c.CreationDate
+    }
+  }
+  return $victims
 }
 
 function Stop-Pm2CliProcess($Proc) {
@@ -82,20 +105,27 @@ function Stop-Pm2CliProcess($Proc) {
   try {
     if (Test-IsWindowsHost) {
       $all = @(Get-CimInstance Win32_Process)
-      $queue = New-Object System.Collections.ArrayList
-      [void]$queue.Add([int]$Proc.Id)
-      $victims = @()
-      for ($i = 0; $i -lt $queue.Count; $i++) {
-        foreach ($c in @($all | Where-Object { [int]$_.ParentProcessId -eq [int]$queue[$i] -and [int]$_.ProcessId -ne [int]$Proc.Id })) {
-          if ([string]$c.CommandLine -match '[\\/]pm2[\\/]lib[\\/]Daemon\.js"?\s*$') { continue }
-          if ($queue.Contains([int]$c.ProcessId)) { continue }
-          [void]$queue.Add([int]$c.ProcessId); $victims += [int]$c.ProcessId
-        }
-      }
+      $rootStart = $null
+      $me = @($all | Where-Object { [int]$_.ProcessId -eq [int]$Proc.Id } | Select-Object -First 1)
+      if ($me.Count -eq 1) { $rootStart = $me[0].CreationDate }
+      $victims = @(Get-Pm2CliDescendants $all ([int]$Proc.Id) $rootStart)
       foreach ($v in @($victims | Sort-Object -Descending)) { try { Stop-Process -Id $v -Force -ErrorAction Stop } catch { } }
     }
   } catch { }
   try { if (-not $Proc.HasExited) { $Proc.Kill() } } catch { }
+}
+
+function Resolve-Pm2Command([string]$Root) {
+  # Order: <install root>\node_modules\.bin\pm2.cmd, then pm2.cmd on PATH, then an application named pm2 (.exe).
+  # Never a .ps1 (npm installs pm2.ps1 beside pm2.cmd and PowerShell prefers it; it cannot be bounded by a timeout).
+  # Returns '' when nothing qualifies.
+  $local = Join-Path (Join-Path (Join-Path $Root 'node_modules') '.bin') 'pm2.cmd'
+  if (Test-Path -LiteralPath $local) { return $local }
+  foreach ($n in @('pm2.cmd', 'pm2')) {
+    $f = Get-Command -Name $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { [string]$_.Source -notmatch '(?i)\.ps1$' } | Select-Object -First 1
+    if ($f) { return [string]$f.Source }
+  }
+  return ''
 }
 
 function Invoke-Pm2ReloadLogs([string]$Command, [string]$Pm2HomeDir, [int]$TimeoutSec = 60) {
@@ -252,11 +282,10 @@ function Invoke-Main {
   if ($Keep -lt 1 -or $MinSizeMB -lt 0) { Write-Step 'USAGE: -Keep must be >= 1 and -MinSizeMB >= 0'; return 2 }
   if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) { Write-Step ("STOP: logs directory not found: " + $logsDir); return 2 }
   $cmd = $Pm2Command
-  if ([string]::IsNullOrWhiteSpace($cmd)) {
-    $cmd = Join-Path (Join-Path (Join-Path $root 'node_modules') '.bin') 'pm2.cmd'
-    if (-not (Test-Path -LiteralPath $cmd)) { $cmd = 'pm2'; $found = Get-Command 'pm2' -ErrorAction SilentlyContinue; if ($found) { $cmd = $found.Source } }
-  }
+  if ([string]::IsNullOrWhiteSpace($cmd)) { $cmd = Resolve-Pm2Command $root }
+  elseif ($cmd -match '(?i)\.ps1$') { $cmd = '' }
   if ($Register) {
+    if ([string]::IsNullOrWhiteSpace($cmd)) { Write-Step 'REFUSED: pm2 is not resolvable as a .cmd or .exe (a .ps1 is never used); nothing registered. Pass -Pm2Command <path to pm2.cmd>.'; return 3 }
     $self = $PSCommandPath
     if (-not $self) { $self = $MyInvocation.ScriptName }
     return (Invoke-RegisterTask @{ HostTaskName = $HostTaskName; TaskName = $TaskName; At = $At; ScriptPath = $self; InstallRoot = $root; ArchiveDir = $archive; Pm2Home = $pm2HomeDir; Pm2Command = $cmd; Keep = $Keep; MinSizeMB = $MinSizeMB; Mode = $Mode; DoIt = $doIt })
@@ -273,6 +302,8 @@ function Invoke-Main {
     $effectiveMode = 'CopyTruncate'
     Write-Step 'FALLBACK: no pm2 RPC endpoint (rpc.sock) on this host, so pm2 is not called (it would spawn a stray daemon); using CopyTruncate for this run'
   }
+  if ($doIt -and $effectiveMode -eq 'Rename' -and [string]::IsNullOrWhiteSpace($cmd)) { Write-Step 'STOP: pm2 is not resolvable as a .cmd or .exe (looked for <install root>\node_modules\.bin\pm2.cmd, pm2.cmd and pm2 on PATH; a .ps1 is never used, it cannot be time-bounded). Nothing changed. Pass -Pm2Command <path to pm2.cmd>.'; return 2 }
+  if ([string]::IsNullOrWhiteSpace($cmd)) { $cmd = '(not resolved)' }
   Write-Step ("{0}rotate: logs={1} archive={2} mode={3} keep={4} minSizeMB={5} pm2Home={6} pm2={7}" -f $label, $logsDir, $archive, $effectiveMode, $Keep, $MinSizeMB, $pm2HomeDir, $cmd)
   $stamp = Get-RotateStamp
   $renamed = @()
@@ -317,8 +348,10 @@ function Invoke-Main {
       }
       Write-Step 'pm2 did not reopen the live log(s); check -Pm2Home, that this runs as the pm2-runtime account, and that the MetaSheet-PM2 task is running'
       # Exit 4 for ANY reason: name every pm2\lib\Daemon.js process, also ones that existed before the call. Never killed here.
+      $script:Pm2UnreadableCount = 0
       $anyDaemon = @(Find-StrayPm2Daemon ([datetime]::MinValue))
       if ($anyDaemon.Count -gt 0) { Write-Step ("pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: pid " + ($anyDaemon -join ', ') + ". pm2-runtime never runs Daemon.js, so each is a stray (it may predate this call). This script does not stop it; runbook section 3 item 8.") }
+      elseif ($script:Pm2UnreadableCount -gt 0) { Write-Step ("pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: unknown (" + $script:Pm2UnreadableCount + " process(es) with unreadable command line)") }
       else { Write-Step 'pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: none' }
     } else { Write-Step 'live log(s) reopened by pm2' }
   }

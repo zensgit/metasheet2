@@ -211,8 +211,65 @@ else {
   elseif (Test-Path $pidFile) { $alive = ($null -ne (Get-Process -Id ([int]([System.IO.File]::ReadAllText($pidFile).Trim())) -ErrorAction SilentlyContinue)) }
   Check 'the timed-out stub process was killed' (-not $alive)
   Remove-Item Env:LOGROT_LIVE -ErrorAction SilentlyContinue
+  if ($isWin) {
+    # The stub CLI spawns a child whose command line ends in pm2\lib\Daemon.js plus an ordinary child; on timeout
+    # the stub and the ordinary child must die, the Daemon.js-shaped child must survive (killed in finally).
+    $dMark = 'D' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $cMark = 'C' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $spawnStub = Join-Path $stubDir 'pm2-spawn.cmd'
+    $psExe = (Get-Process -Id $PID).Path
+    [System.IO.File]::WriteAllText($spawnStub, "@echo off`r`nstart `"`" /b `"$psExe`" -NoProfile -Command `"Start-Sleep 90; # $dMark \pm2\lib\Daemon.js`"`r`nstart `"`" /b `"$psExe`" -NoProfile -Command `"Start-Sleep 90; # $cMark`"`r`nping -n $marker 127.0.0.1 >nul`r`n")
+    $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+    try {
+      $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = $spawnStub; Pm2TimeoutSec = 3; ReopenTimeoutSec = 1 } ([scriptblock]::Create($okOver.ToString() + "`nfunction Find-StrayPm2Daemon { param(`$Since) @() }"))
+      Start-Sleep -Milliseconds 800
+      $procs = @(Get-CimInstance Win32_Process)
+      $daemonAlive = (@($procs | Where-Object { [string]$_.CommandLine -like "*$dMark*" }).Count -gt 0)
+      $childAlive = (@($procs | Where-Object { [string]$_.CommandLine -like "*$cMark*" }).Count -gt 0)
+      $stubAlive = (@($procs | Where-Object { [string]$_.CommandLine -match ('ping(\.exe)?"? -n ' + $marker + ' ') }).Count -gt 0)
+      Check 'timeout: exit 4; the stub CLI and its ordinary child are killed, the Daemon.js-shaped child SURVIVES' ($r.Code -eq 4 -and $r.Out -match 'pm2 call timed out after 3 s' -and $daemonAlive -and -not $childAlive -and -not $stubAlive)
+    } finally {
+      foreach ($p in @(Get-CimInstance Win32_Process | Where-Object { [string]$_.CommandLine -like "*$dMark*" -or [string]$_.CommandLine -like "*$cMark*" -or [string]$_.CommandLine -match ('ping(\.exe)?"? -n ' + $marker + ' ') })) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction Stop } catch { } }
+    }
+  } else { Write-Host '  SKIP  Daemon.js-shaped child survives a timeout kill (Windows only)' }
 }
 Remove-Item -LiteralPath $stubDir -Recurse -Force -ErrorAction SilentlyContinue
+
+Write-Host '== pm2 resolution (never a .ps1) and descendant selection'
+$resRoot = Join-Path $WorkRoot ('logrot-test-res-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$resBin = Join-Path (Join-Path $resRoot 'node_modules') '.bin'
+New-Item -ItemType Directory -Force -Path $resBin | Out-Null
+foreach ($n in 'pm2', 'pm2.cmd', 'pm2.ps1') { [System.IO.File]::WriteAllText((Join-Path $resBin $n), 'x') }
+$resFn = & { . $ScriptUnderTest; ${function:Resolve-Pm2Command} }
+Check 'Resolve-Pm2Command prefers <root>\node_modules\.bin\pm2.cmd over pm2.ps1' ((& $resFn $resRoot) -eq (Join-Path $resBin 'pm2.cmd'))
+$psOnly = Join-Path $resRoot 'pathdir'
+New-Item -ItemType Directory -Force -Path $psOnly | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $psOnly 'pm2.ps1'), 'x')
+$savedPath = $env:PATH
+try { $env:PATH = $psOnly; $resolvedPs = (& $resFn (Join-Path $resRoot 'empty')) } finally { $env:PATH = $savedPath }
+Check 'only pm2.ps1 reachable -> not resolved (empty), never the .ps1' ($resolvedPs -eq '')
+$lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true } { function Test-Pm2PipePresent { $true }; function Resolve-Pm2Command { '' } }
+Check 'pm2 not resolvable (Rename, -Apply) -> STOP exit 2 before anything is renamed' ($r.Code -eq 2 -and $r.Out -match 'STOP: pm2 is not resolvable' -and (Get-Item (Join-Path $lab.Logs 'metasheet-backend.out-0.log')).Length -eq 2 * $mb -and @(Get-ChildItem -LiteralPath $lab.Archive -Filter 'metasheet-backend.*' -ErrorAction SilentlyContinue).Count -eq 0)
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = (Join-Path $resBin 'pm2.ps1') } { function Test-Pm2PipePresent { $true } }
+Check 'explicit -Pm2Command pointing at a .ps1 -> exit 2, nothing renamed' ($r.Code -eq 2 -and $r.Out -match 'STOP: pm2 is not resolvable' -and (Get-Item (Join-Path $lab.Logs 'metasheet-backend.out-0.log')).Length -eq 2 * $mb)
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; Pm2Command = (Join-Path $resBin 'pm2.ps1') } $null
+Check '-Register with a .ps1 pm2 -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Out -match 'REFUSED: pm2 is not resolvable')
+Remove-Item -LiteralPath $resRoot -Recurse -Force -ErrorAction SilentlyContinue
+
+$descFn = & { . $ScriptUnderTest; ${function:Get-Pm2CliDescendants} }
+$t0 = [datetime]'2026-10-14T10:00:00'
+function New-Proc([int]$ProcId, [int]$ParentId, [string]$CmdLine, [datetime]$Created) { [pscustomobject]@{ ProcessId = $ProcId; ParentProcessId = $ParentId; CommandLine = $CmdLine; CreationDate = $Created } }
+$fake = @(
+  (New-Proc 100 1 'pm2.cmd reloadLogs' $t0),
+  (New-Proc 200 100 'node pm2 reloadLogs' $t0.AddSeconds(1)),
+  (New-Proc 400 200 'helper' $t0.AddSeconds(2)),
+  (New-Proc 300 100 'orphan adopted by a reused pid' $t0.AddSeconds(-50)),
+  (New-Proc 500 100 'C:\x\node.exe C:\x\node_modules\pm2\lib\Daemon.js' $t0.AddSeconds(1)),
+  (New-Proc 600 500 'child of the daemon' $t0.AddSeconds(3))
+)
+$got = @(& $descFn $fake 100 $t0 | Sort-Object)
+Check 'descendants: children and grandchildren yes; older-than-parent orphan, Daemon.js and the daemon''s children no' ($got.Count -eq 2 -and $got[0] -eq 200 -and $got[1] -eq 400)
 Write-Host '== archive name collision, -Keep 0'
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 2 * $mb }
 New-Item -ItemType Directory -Force -Path $lab.Archive | Out-Null
@@ -262,20 +319,20 @@ $taskMocks = {
   function Register-ScheduledTask { param($TaskName, $InputObject, [switch]$Force) [void]$calls.Add(@{ TaskName = $TaskName; Task = $InputObject }) }
 }
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 10 }
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true } ([scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 1; 'ERROR: The system cannot find the file specified.' }"))
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true } ([scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 1; 'ERROR: The system cannot find the file specified.' }"))
 Check 'host task missing -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Out -match "REFUSED: scheduled task 'MetaSheet-PM2' not found" -and $r.Calls.Count -eq 0)
 $withHost = [scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 0; '$taskXml' }")
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd' } $withHost
 Check '-Register without -Apply prints the task and registers nothing' ($r.Code -eq 0 -and $r.Out -match 'nothing registered' -and $r.Calls.Count -eq 0)
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true } $withHost
 $reg = $null
 if ($r.Calls.Count -eq 1) { $reg = $r.Calls[0] }
 Check '-Register -Apply registers MetaSheet-LogRotate as the host task user (S4U, Highest), daily 03:30, running -Apply' ($r.Code -eq 0 -and $null -ne $reg -and $reg.TaskName -eq 'MetaSheet-LogRotate' -and $reg.Task.Principal.UserId -eq 'svc-user' -and $reg.Task.Principal.LogonType -eq 'S4U' -and $reg.Task.Principal.RunLevel -eq 'Highest' -and $reg.Task.Trigger.At -eq '03:30' -and $reg.Task.Action.Argument -match ' -Apply$' -and $reg.Task.Action.Argument -match [regex]::Escape('-Pm2Home "' + $lab.Pm2Home + '"'))
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; At = '3pm' } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true; At = '3pm' } $withHost
 Check 'bad -At -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Calls.Count -eq 0)
 $withHostCounted = [scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { [void]`$calls.Add('schtasks'); `$global:LASTEXITCODE = 0; '$taskXml' }")
 foreach ($name in @('MetaSheet-PM2', ' metasheet-pm2 ', '')) {
-  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; TaskName = $name } $withHostCounted
+  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true; TaskName = $name } $withHostCounted
   Check ("-TaskName '$name' (the host task, or empty) -> exit 3 before any schtasks / Register call") ($r.Code -eq 3 -and $r.Out -match 'REFUSED: -TaskName' -and $r.Calls.Count -eq 0)
 }
 

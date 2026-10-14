@@ -63,7 +63,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
 | `-Keep` | 14 | 每个日志流保留的归档个数，必须 ≥ 1（`0` 退出码 2）；`rotate-*.log` 也保留同样个数 |
 | `-MinSizeMB` | 64 | 活动日志小于这个大小就跳过（不轮转）；必须 ≥ 0 |
 | `-Mode` | `Rename` | 或 `CopyTruncate`，见 §5 (c) |
-| `-Pm2Command` | `<安装根目录>\node_modules\.bin\pm2.cmd`，没有就用 PATH 上的 `pm2` | 与升级脚本相同的查找顺序 |
+| `-Pm2Command` | `<安装根目录>\node_modules\.bin\pm2.cmd`，没有就用 PATH 上的 `pm2.cmd`，再没有就用 PATH 上名为 `pm2` 的程序（`.exe`） | **绝不使用 `.ps1`**（npm 把 `pm2.ps1` 与 `pm2.cmd` 并排装，PowerShell 偏向 `.ps1`，它无法被 `-Pm2TimeoutSec` 限时）。显式传入 `.ps1` 或都找不到：`-Apply` 退出码 2（`STOP: pm2 is not resolvable`，什么都没改），`-Register` 退出码 3 |
 | `-ReopenTimeoutSec` | 10 | `reloadLogs` 之后等活动日志重新出现的秒数 |
 | `-Pm2TimeoutSec` | 60 | `pm2 reloadLogs` 调用本身最多等的秒数；超时按 `reloadLogs` 失败处理（回滚、退出码 4），见 §2.4 |
 | `-DryRun` / `-Apply` | 都不给 = dry-run | 两个同时给是用法错误（退出码 2） |
@@ -80,14 +80,14 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
 | 4 | `reloadLogs` 失败（退出码非 0 或输出含 `Spawning PM2 daemon`）或活动日志没在 `-ReopenTimeoutSec` 内重新出现。逐个文件看日志：`ROLLED BACK` = 已移回原名，后端继续写原文件，什么都没丢；`LATE REOPEN` = pm2 在等待结束后才重建了活动日志，归档保留，这个文件实际已轮转 |
 | 5 | 某个文件操作失败（看 `rotate-<日期>.log` 里的 `FAILED:` 行；例如同名归档已存在） |
 
-**pm2 调用有时限：`-Pm2TimeoutSec`（默认 60 秒）。** 脚本把 pm2 作为独立进程启动，标准输出/错误重定向到临时文件（不用管道，所以 pm2 拉起的 daemon 不会让读输出的一方永远挂住），`.cmd` 垫片（`pm2.cmd`）经 `cmd.exe /d /c` 启动，用有时限的等待。超时：只结束脚本自己启动的那个 pm2 CLI 进程（及其非 daemon 子进程；`pm2\lib\Daemon.js` 进程绝不碰），按 `reloadLogs` 失败处理——已改名的文件原名仍不存在就移回原名（`ROLLED BACK`），日志里打印 `pm2 call timed out after N s`，退出码 4。因此活动日志不会再停在改名后的归档名下。若 pm2 在超时前已经拉起 daemon，处理见 §3 第 8 项。
+**pm2 调用有时限：`-Pm2TimeoutSec`（默认 60 秒；解析到的 pm2 必须是 `.cmd` 或 `.exe`，操作者看到解析结果不是这两种就停下）。** 脚本把 pm2 作为独立进程启动，标准输出/错误重定向到临时文件（不用管道，所以 pm2 拉起的 daemon 不会让读输出的一方永远挂住），`.cmd` 垫片（`pm2.cmd`）经 `cmd.exe /d /c` 启动，用有时限的等待。超时：只结束脚本自己启动的那个 pm2 CLI 进程（及其非 daemon 子进程；`pm2\lib\Daemon.js` 进程绝不碰；只认创建时间不早于父进程的子进程，防止 pid 复用后误收养无关进程），按 `reloadLogs` 失败处理——已改名的文件原名仍不存在就移回原名（`ROLLED BACK`），日志里打印 `pm2 call timed out after N s`，退出码 4。因此活动日志不会再停在改名后的归档名下。若 pm2 在超时前已经拉起 daemon，处理见 §3 第 8 项。
 
 ## 1. 首次手工归档（活动日志约 1.4 GB）
 
 **用 `Rename`（默认），不要用 `CopyTruncate`。** 改名只改目录项，与文件大小无关（开发机上 1.42 GB 改名 1 ms），不占额外磁盘；复制要多占一份 1.4 GB，耗时取决于磁盘（开发机 NVMe 且文件在缓存里 0.36 s，演示机冷读会慢得多，没有在演示机上量过），而且复制开始到截断之间写的行会丢。改名失败（共享冲突）时脚本自动对该文件改用 `CopyTruncate`，此时需要日志卷上有 1.4 GB 以上空闲。
 
 1. **dry-run**（按 0.5 的写法，不带 `-Apply`）。逐行核对：
-   - `[dry-run] rotate: logs=… archive=… mode=Rename keep=14 minSizeMB=64 pm2Home=… pm2=…`：`mode` 必须是 `Rename`；`pm2=` 后面应是一个完整路径（通常是 `<安装根目录>\node_modules\.bin\pm2.cmd`）；只显示 `pm2` 表示没找到 pm2，停下；
+   - `[dry-run] rotate: logs=… archive=… mode=Rename keep=14 minSizeMB=64 pm2Home=… pm2=…`：`mode` 必须是 `Rename`；`pm2=` 后面应是一个完整路径（通常是 `<安装根目录>\node_modules\.bin\pm2.cmd`）；只显示 `(not resolved)`、或路径不是 `.cmd` / `.exe`，表示没找到可用的 pm2，停下（`-Apply` 此时也会自己 STOP，退出码 2）；
    - 如果先出现 `FALLBACK: no pm2 RPC endpoint …`：本机此刻没有任何 pm2 在监听管道，也就是 pm2-runtime 没在跑——**停下**，先查后端为什么没在跑（`Get-ScheduledTask -TaskName 'MetaSheet-PM2'` 的状态、health），不要继续；
    - `[dry-run] would Rename metasheet-backend.out-0.log (… MB) -> <归档目录>\metasheet-backend.out-0.<时间>.log`；`err` 小于 64 MB 时是 `[dry-run] skip metasheet-backend.err-0.log (…)`；
    - 末行 `[dry-run] done, exit 0`，`$LASTEXITCODE` 为 0。
@@ -96,7 +96,7 @@ R66 安装包**不含**本脚本：打包脚本只复制 `scripts/ops/multitable
    - `pm2 reloadLogs exit=0: Reloading all logs... | All logs reloaded`；
    - `live log(s) reopened by pm2`；
    - `done, exit 0`。
-3. 退出码 4：逐个文件看日志。`ROLLED BACK: … moved back to …` = 已移回原名，后端照常写原文件，什么都没丢；`LATE REOPEN: … came back after the wait; archive … kept` = pm2 晚到地重建了活动日志，这个文件已轮转，不用处理。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行。有 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; …` 时**不要 `pm2 kill`**，按 §3 第 8 项去掉那个 daemon（必须在下一次 `MetaSheet-PM2` 启动之前），再把这一段日志报给开发机。退出码 4 但**没有**任何 `WARNING: … stray daemon` 行时，脚本在**任何**退出码 4 时都会扫描全部命令行以 `pm2\lib\Daemon.js` 结尾的 node 进程（不按启动时间过滤，调用之前就在的也算），并打印 `pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: pid <pid…>` 或 `… present now: none`；脚本从不停止它们，有 pid 时按 §3 第 8 项处理。
+3. 退出码 4：逐个文件看日志。`ROLLED BACK: … moved back to …` = 已移回原名，后端照常写原文件，什么都没丢；`LATE REOPEN: … came back after the wait; archive … kept` = pm2 晚到地重建了活动日志，这个文件已轮转，不用处理。按 0.3 核对账号与提权、`MetaSheet-PM2` 是否在运行。有 `WARNING: pm2 could not reach pm2-runtime and spawned a stray pm2 daemon; …` 时**不要 `pm2 kill`**，按 §3 第 8 项去掉那个 daemon（必须在下一次 `MetaSheet-PM2` 启动之前），再把这一段日志报给开发机。退出码 4 但**没有**任何 `WARNING: … stray daemon` 行时，脚本在**任何**退出码 4 时都会扫描全部命令行以 `pm2\lib\Daemon.js` 结尾的 node 进程（不按启动时间过滤，调用之前就在的也算），并打印 `pm2 daemon process(es) (node ...pm2\lib\Daemon.js) present now: pid <pid…>` 或 `… present now: none`（若有读不到命令行的 node 进程，例如其他账号或提权的进程，则打印 `unknown (N process(es) with unreadable command line)`，此时要按 §3 第 8 项第 1 步手工查）；脚本从不停止它们，有 pid 时按 §3 第 8 项处理。
 4. 退出码 5：把 `FAILED:` 那几行报给开发机；活动日志不会被删除（脚本从不删活动日志）。
 5. 不停服务、不挂维护标志、不碰数据库。pm2 换文件的那一瞬间（毫秒级）到达的输出会被丢弃（§5 源码第 4 条），其余不丢。
 
