@@ -108,6 +108,7 @@ function Stop-Pm2CliProcess($Proc) {
       $rootStart = $null
       $me = @($all | Where-Object { [int]$_.ProcessId -eq [int]$Proc.Id } | Select-Object -First 1)
       if ($me.Count -eq 1) { $rootStart = $me[0].CreationDate }
+      if ($null -eq $rootStart) { try { $rootStart = $Proc.StartTime } catch { } }
       $victims = @(Get-Pm2CliDescendants $all ([int]$Proc.Id) $rootStart)
       foreach ($v in @($victims | Sort-Object -Descending)) { try { Stop-Process -Id $v -Force -ErrorAction Stop } catch { } }
     }
@@ -122,21 +123,39 @@ function Resolve-Pm2Command([string]$Root) {
   $local = Join-Path (Join-Path (Join-Path $Root 'node_modules') '.bin') 'pm2.cmd'
   if (Test-Path -LiteralPath $local) { return $local }
   foreach ($n in @('pm2.cmd', 'pm2')) {
-    $f = Get-Command -Name $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { [string]$_.Source -notmatch '(?i)\.ps1$' } | Select-Object -First 1
+    $f = Get-Command -Name $n -CommandType Application -ErrorAction SilentlyContinue | Where-Object { Test-Pm2PathUsable ([string]$_.Source) } | Select-Object -First 1
     if ($f) { return [string]$f.Source }
   }
   return ''
 }
 
+function Test-Pm2PathUsable([string]$Path) {
+  # Windows: only .cmd / .bat / .exe (never the .ps1 or the extensionless sh shim npm installs beside pm2.cmd).
+  if (-not (Test-IsWindowsHost)) { return $true }
+  return ($Path -match '(?i)\.(cmd|exe)$')
+}
+
+function Test-Pm2CommandUsable([string]$Command) {
+  # A PowerShell function (test stubs) or an external program that resolves to a usable path; nothing else.
+  if ([string]::IsNullOrWhiteSpace($Command)) { return $false }
+  if (Get-Command -Name $Command -CommandType Function -ErrorAction SilentlyContinue) { return $true }
+  $f = Get-Command -Name $Command -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $f) { return $false }
+  return (Test-Pm2PathUsable ([string]$f.Source))
+}
+
 function Invoke-Pm2ReloadLogs([string]$Command, [string]$Pm2HomeDir, [int]$TimeoutSec = 60) {
   $previous = $env:PM2_HOME
   $ErrorActionPreference = 'Continue'
-  $isApp = $false
   $resolved = $null
   try { $resolved = Get-Command -Name $Command -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { }
-  if ($null -ne $resolved) { $isApp = $true }
-  if (-not $isApp) {
-    # Not an external program (a PowerShell function/alias, e.g. a test stub): in-process call, no timeout possible.
+  $isFunction = $false
+  if ($null -eq $resolved -and (Get-Command -Name $Command -CommandType Function -ErrorAction SilentlyContinue)) { $isFunction = $true }
+  if ($null -eq $resolved -and -not $isFunction) {
+    return [pscustomobject]@{ Ok = $false; Code = 1; Text = 'pm2 command is not an external program or a function'; TimedOut = $false }
+  }
+  if ($isFunction) {
+    # A PowerShell function (only the test stubs get here; Invoke-Main refuses anything else): in-process call, no timeout possible.
     try {
       $env:PM2_HOME = $Pm2HomeDir
       $raw = & $Command 'reloadLogs' 2>&1
@@ -283,7 +302,7 @@ function Invoke-Main {
   if (-not (Test-Path -LiteralPath $logsDir -PathType Container)) { Write-Step ("STOP: logs directory not found: " + $logsDir); return 2 }
   $cmd = $Pm2Command
   if ([string]::IsNullOrWhiteSpace($cmd)) { $cmd = Resolve-Pm2Command $root }
-  elseif ($cmd -match '(?i)\.ps1$') { $cmd = '' }
+  elseif (-not (Test-Pm2CommandUsable $cmd)) { $cmd = '' }
   if ($Register) {
     if ([string]::IsNullOrWhiteSpace($cmd)) { Write-Step 'REFUSED: pm2 is not resolvable as a .cmd or .exe (a .ps1 is never used); nothing registered. Pass -Pm2Command <path to pm2.cmd>.'; return 3 }
     $self = $PSCommandPath

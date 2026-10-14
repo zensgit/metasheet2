@@ -240,7 +240,7 @@ $resRoot = Join-Path $WorkRoot ('logrot-test-res-' + [guid]::NewGuid().ToString(
 $resBin = Join-Path (Join-Path $resRoot 'node_modules') '.bin'
 New-Item -ItemType Directory -Force -Path $resBin | Out-Null
 foreach ($n in 'pm2', 'pm2.cmd', 'pm2.ps1') { [System.IO.File]::WriteAllText((Join-Path $resBin $n), 'x') }
-$resFn = & { . $ScriptUnderTest; ${function:Resolve-Pm2Command} }
+$resFn = { param($RootArg) . $ScriptUnderTest; Resolve-Pm2Command $RootArg }
 Check 'Resolve-Pm2Command prefers <root>\node_modules\.bin\pm2.cmd over pm2.ps1' ((& $resFn $resRoot) -eq (Join-Path $resBin 'pm2.cmd'))
 $psOnly = Join-Path $resRoot 'pathdir'
 New-Item -ItemType Directory -Force -Path $psOnly | Out-Null
@@ -255,6 +255,21 @@ $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB
 Check 'explicit -Pm2Command pointing at a .ps1 -> exit 2, nothing renamed' ($r.Code -eq 2 -and $r.Out -match 'STOP: pm2 is not resolvable' -and (Get-Item (Join-Path $lab.Logs 'metasheet-backend.out-0.log')).Length -eq 2 * $mb)
 $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Apply = $true; Pm2Command = (Join-Path $resBin 'pm2.ps1') } $null
 Check '-Register with a .ps1 pm2 -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Out -match 'REFUSED: pm2 is not resolvable')
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; MinSizeMB = 1; Apply = $true; Pm2Command = (Join-Path (Join-Path $lab.Root 'no-such') 'pm2.cmd') } { function Test-Pm2PipePresent { $true } }
+Check 'explicit -Pm2Command that resolves to nothing -> exit 2 before any rename (never the in-process branch)' ($r.Code -eq 2 -and $r.Out -match 'STOP: pm2 is not resolvable' -and (Get-Item (Join-Path $lab.Logs 'metasheet-backend.out-0.log')).Length -eq 2 * $mb)
+$usableFn = { param($CmdArg) . $ScriptUnderTest; Test-Pm2CommandUsable $CmdArg }
+Check 'Test-Pm2CommandUsable: bogus path no, empty no' ((-not (& $usableFn (Join-Path $WorkRoot 'no-such-dir/pm2.cmd'))) -and (-not (& $usableFn '')))
+$fnOk = & { . $ScriptUnderTest; function Stub-Pm2Probe { }; & ${function:Test-Pm2CommandUsable} 'Stub-Pm2Probe' }
+Check 'Test-Pm2CommandUsable: a PowerShell function (test stub) is usable' ($fnOk -eq $true)
+if ($isWin) {
+  $shDir = Join-Path $WorkRoot ('logrot-test-sh-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+  New-Item -ItemType Directory -Force -Path $shDir | Out-Null
+  [System.IO.File]::WriteAllText((Join-Path $shDir 'pm2'), 'x')
+  $savedPath = $env:PATH
+  try { $env:PATH = $shDir; $resolvedSh = (& $resFn (Join-Path $shDir 'empty')); $shUsable = (& $usableFn 'pm2') } finally { $env:PATH = $savedPath }
+  Remove-Item -LiteralPath $shDir -Recurse -Force -ErrorAction SilentlyContinue
+  Check 'Windows: an extensionless pm2 (sh shim) on PATH is not resolved and not usable' ($resolvedSh -eq '' -and -not $shUsable)
+}
 Remove-Item -LiteralPath $resRoot -Recurse -Force -ErrorAction SilentlyContinue
 
 $descFn = & { . $ScriptUnderTest; ${function:Get-Pm2CliDescendants} }
@@ -311,6 +326,7 @@ if ($isWin) {
 Write-Host '== -Register'
 $taskXml = '<?xml version="1.0" encoding="UTF-16"?><Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><Principals><Principal id="Author"><UserId>svc-user</UserId><LogonType>Password</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals></Task>'
 $taskMocks = {
+  function Stub-Pm2 { }
   function New-ScheduledTaskAction { param($Execute, $Argument) @{ Execute = $Execute; Argument = $Argument } }
   function New-ScheduledTaskTrigger { param([switch]$Daily, $At) @{ At = $At } }
   function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel) @{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel } }
@@ -319,20 +335,20 @@ $taskMocks = {
   function Register-ScheduledTask { param($TaskName, $InputObject, [switch]$Force) [void]$calls.Add(@{ TaskName = $TaskName; Task = $InputObject }) }
 }
 $lab = New-Lab @{ 'metasheet-backend.out-0.log' = 10 }
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true } ([scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 1; 'ERROR: The system cannot find the file specified.' }"))
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'Stub-Pm2'; Apply = $true } ([scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 1; 'ERROR: The system cannot find the file specified.' }"))
 Check 'host task missing -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Out -match "REFUSED: scheduled task 'MetaSheet-PM2' not found" -and $r.Calls.Count -eq 0)
 $withHost = [scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { `$global:LASTEXITCODE = 0; '$taskXml' }")
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd' } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'Stub-Pm2' } $withHost
 Check '-Register without -Apply prints the task and registers nothing' ($r.Code -eq 0 -and $r.Out -match 'nothing registered' -and $r.Calls.Count -eq 0)
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'Stub-Pm2'; Apply = $true } $withHost
 $reg = $null
 if ($r.Calls.Count -eq 1) { $reg = $r.Calls[0] }
 Check '-Register -Apply registers MetaSheet-LogRotate as the host task user (S4U, Highest), daily 03:30, running -Apply' ($r.Code -eq 0 -and $null -ne $reg -and $reg.TaskName -eq 'MetaSheet-LogRotate' -and $reg.Task.Principal.UserId -eq 'svc-user' -and $reg.Task.Principal.LogonType -eq 'S4U' -and $reg.Task.Principal.RunLevel -eq 'Highest' -and $reg.Task.Trigger.At -eq '03:30' -and $reg.Task.Action.Argument -match ' -Apply$' -and $reg.Task.Action.Argument -match [regex]::Escape('-Pm2Home "' + $lab.Pm2Home + '"'))
-$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true; At = '3pm' } $withHost
+$r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'Stub-Pm2'; Apply = $true; At = '3pm' } $withHost
 Check 'bad -At -> exit 3, nothing registered' ($r.Code -eq 3 -and $r.Calls.Count -eq 0)
 $withHostCounted = [scriptblock]::Create($taskMocks.ToString() + "`nfunction schtasks { [void]`$calls.Add('schtasks'); `$global:LASTEXITCODE = 0; '$taskXml' }")
 foreach ($name in @('MetaSheet-PM2', ' metasheet-pm2 ', '')) {
-  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'pm2-stub.cmd'; Apply = $true; TaskName = $name } $withHostCounted
+  $r = Invoke-Rotate @{ InstallRoot = $lab.Root; Pm2Home = $lab.Pm2Home; Register = $true; Pm2Command = 'Stub-Pm2'; Apply = $true; TaskName = $name } $withHostCounted
   Check ("-TaskName '$name' (the host task, or empty) -> exit 3 before any schtasks / Register call") ($r.Code -eq 3 -and $r.Out -match 'REFUSED: -TaskName' -and $r.Calls.Count -eq 0)
 }
 
