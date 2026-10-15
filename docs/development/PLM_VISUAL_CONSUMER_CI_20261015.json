@@ -1,0 +1,268 @@
+{
+  "pr": "https://github.com/zensgit/metasheet2/pull/6424",
+  "verifiedSource": "73024fc856dcc89fe313a0a8dc749cfaf383d645",
+  "draft": true,
+  "workflowRuns": 43,
+  "successfulChecks": 46,
+  "runs": [
+    {
+      "id": 38731651282,
+      "name": "PLM record ingress",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651282",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650820,
+      "name": "Attendance Web Guard",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650820",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651338,
+      "name": "Data Source Exposure Inventory",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651338",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651241,
+      "name": "Approval S1 Evidence Replay Gate",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651241",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650620,
+      "name": "PLM Embed Web Guard",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650620",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651280,
+      "name": "Integration Guard",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651280",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650600,
+      "name": "SSH Host-Key Pin Contract",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650600",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651308,
+      "name": "Multitable O2 Observation Kit",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651308",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651095,
+      "name": "Approval Browser Verify",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651095",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650698,
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 slice 1 \u2014 G-W2 PLM mirror)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650698",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651265,
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 W-4 attendance writer)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651265",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650776,
+      "name": "Approval real-DB acceptance (S1 Migration B \u2014 org_id backfill)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650776",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651211,
+      "name": "Approval real-DB acceptance (todo-center shared pending query)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651211",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651227,
+      "name": "Approval real-DB acceptance (Lock-4 F4-B designated fallback, gates B-1/B-2/legacy)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651227",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651252,
+      "name": "Approval real-DB acceptance (projection participant key parity)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651252",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651248,
+      "name": "Approval real-DB acceptance (viewer-scoped canDecideCurrentNode)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651248",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651475,
+      "name": "Approval real-DB acceptance (legacy decision seat + node attribution)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651475",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651149,
+      "name": "Approval real-DB acceptance (P3-3 form drafts)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651149",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651270,
+      "name": "Approval real-DB acceptance (writers-stamp-org S1 \u2014 G-W3 after-sales refund bridge)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651270",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650703,
+      "name": "Multitable recovery-schema drift (A-vs-B)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650703",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651113,
+      "name": "Approval real-DB acceptance (P7-R1 coverage repair)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651113",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651096,
+      "name": "Approval real-DB acceptance (Lock-5 per-node operation policy)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651096",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651351,
+      "name": "Multitable real-DB acceptance (/context read verdict)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651351",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651323,
+      "name": "Approval real-DB acceptance (CSV export read-parity)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651323",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651304,
+      "name": "Approval real-DB acceptance (revoke terminal-status guard)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651304",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650740,
+      "name": "Approval real-DB acceptance (Lock-11 W-1/W-2 org stamping \u2014 G-L11-0/1/2/3/10 + refusal precedence)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650740",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651335,
+      "name": "Approval real-DB acceptance (Lock-11 \u00a710.3 gap-closer \u2014 Migration-B->W1W2 window)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651335",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650850,
+      "name": "Approval real-DB acceptance (permission catalogue registration)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650850",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650881,
+      "name": ".github/workflows/approval-realdb-attachment-roundtrip-guard.yml",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650881",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651129,
+      "name": "Approval sequential mode real-DB acceptance (Lock-1 K6)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651129",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650826,
+      "name": "Approval real-DB acceptance (list scope determined server-side)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650826",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651278,
+      "name": "Approval real-DB acceptance (S1 instance readability)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651278",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651272,
+      "name": "Phase 5 PR Validation (External Metrics Gate)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651272",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650687,
+      "name": "Docker Publish Guard",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650687",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651237,
+      "name": "Stock-prep Browser Verify",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651237",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651178,
+      "name": "Approval real-DB acceptance (history guard alignment)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651178",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651375,
+      "name": "Approval real-DB acceptance (S2 comments)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651375",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650597,
+      "name": "Approval real-DB acceptance (Lock-4 P3-A F4-A/F4-C)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650597",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651250,
+      "name": "Approval real-DB acceptance (Lock-9 process attachments)",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651250",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650823,
+      "name": ".github/workflows/plm-bom-listener.yml",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650823",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731650606,
+      "name": "PLM Visual consumer verification",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731650606",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651364,
+      "name": "PLM personal approval verification",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651364",
+      "conclusion": "success"
+    },
+    {
+      "id": 38731651300,
+      "name": "Tasks real DB",
+      "url": "https://github.com/zensgit/metasheet2/actions/runs/38731651300",
+      "conclusion": "success"
+    }
+  ],
+  "boundary": "Stacked on #6423; not evidence for missing main-base required contexts. Subsequent pure-documentation head checks are tracked separately without another SHA-chasing commit."
+}

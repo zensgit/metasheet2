@@ -55,3 +55,8 @@ The final narrow-screen capture is [available here](assets/plm-visual-consumer-2
 ## First remote CI contract follow-up
 
 On source9d8938, PLM Embed Web Guard run38731299585/job116409470300 failed eight legacy service assertions: exact result objects lacked the newly returned default-false Visual flag or entitled Part identifier. Update their complete expected shapes and add ten literal-boolean/invalid-Part counterexamples; no assertion was loosened to partial matching. The existing guard plus all Visual web modules now pass **199tests across10modules** locally. The new dedicated consumer lane also runs this service suite. This follow-up changes only tests, CI wiring and documentation; browser-verified product source bytes are unchanged. New-head remote CI remains pending.
+
+
+## Verified source CI
+
+PR6424 source `73024fc856dcc89fe313a0a8dc749cfaf383d645` completed **43/43triggered workflows successfully and46/46checks SUCCESS**, including [PLM Visual consumer verification](https://github.com/zensgit/metasheet2/actions/runs/38731650606). The compact [CI record](PLM_VISUAL_CONSUMER_CI_20261015.json) lists exact run URLs. This is the stacked base #6423, not proof of missing main-base required contexts. A subsequent documentation-only commit records this source result; its own checks are followed separately in the PR without another documentation SHA loop. Companion Yuantus345 remains pending. Both remain Draft.
