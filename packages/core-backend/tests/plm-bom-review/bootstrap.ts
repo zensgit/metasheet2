@@ -1,4 +1,5 @@
 import { up as listenerUp } from '../../src/db/migrations/zzzz20261015010000_add_plm_change_listeners'
+import { up as listenerAuthorityUp } from '../../src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version'
 import { up as changeDispatch } from '../../src/db/migrations/zzzz20261014080000_dispatch_plm_change_events'
 import { up as changeInbox } from '../../src/db/migrations/zzzz20261014070000_add_plm_change_inbox'
 import type { Pool } from 'pg'
@@ -29,6 +30,6 @@ export async function bootstrapPlmBomReviewTestDb(pool: Pool): Promise<void> {
   CREATE TABLE data_sources(id text PRIMARY KEY,name text,type text,config jsonb,owner_id text,is_active boolean,deleted_at timestamptz,workspace_id text,tenant_id text,scope_kind text);
   `)
   const db = new Kysely<unknown>({ dialect: new PostgresDialect({ pool }) })
-  for (const up of [config, configSource, subscriptions, subscriptionMessage, webhooks, webhookRetry, bom, ownerView, reviewStates, completion, statusViews, rowCompletionEvents, completionIntents, completionAttempts, changeInbox, changeDispatch, listenerUp])
+  for (const up of [config, configSource, subscriptions, subscriptionMessage, webhooks, webhookRetry, bom, ownerView, reviewStates, completion, statusViews, rowCompletionEvents, completionIntents, completionAttempts, changeInbox, changeDispatch, listenerUp, listenerAuthorityUp])
     await up(db)
 }

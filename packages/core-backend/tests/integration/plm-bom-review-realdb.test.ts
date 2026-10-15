@@ -1,5 +1,6 @@
 import { registerChangeCrossprocess } from '../plm-bom-review/change-crossprocess'
 import { up as listenerUp, down as listenerDown } from '../../src/db/migrations/zzzz20261015010000_add_plm_change_listeners'
+import { up as listenerAuthorityUp, down as listenerAuthorityDown } from '../../src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version'
 import { up as changeDispatchUp, down as changeDispatchDown } from '../../src/db/migrations/zzzz20261014080000_dispatch_plm_change_events'
 import { up as changeInboxUp, down as changeInboxDown } from '../../src/db/migrations/zzzz20261014070000_add_plm_change_inbox'
 import { registerBomReviewRealAuthHttpTests } from '../plm-bom-review/auth-http'
@@ -143,6 +144,7 @@ beforeAll(async () => {
   process.env.MULTITABLE_ENABLE_WRITER_FENCE = 'true'
   await bootstrapPlmBomReviewTestDb(pool)
   const db = new Kysely({ dialect: new PostgresDialect({ pool }) })
+  await listenerAuthorityDown(db)
   await listenerDown(db)
   await changeDispatchDown(db)
   await changeInboxDown(db)
@@ -165,6 +167,7 @@ beforeAll(async () => {
   await changeInboxUp(db)
   await changeDispatchUp(db)
   await listenerUp(db)
+  await listenerAuthorityUp(db)
   await pool.query(
     "INSERT INTO users VALUES('owner',true,'user','activated',true,'{}'),('member',true,'user','activated',true,'{}'),('outsider',true,'user','activated',true,'{}'); INSERT INTO meta_bases(id,name,owner_id) VALUES('base','Team','owner')",
   )
@@ -2297,6 +2300,25 @@ describe('PLM snapshot uses the native record-lock rule', () => {
 })
 
 describe('durable owner-authorized PLM listener', () => {
+  it('retains source authority for name edits but invalidates owner ABA and supplied versions', async () => {
+    const read = async () => (await pool.query("SELECT name,plm_bom_listener_authority_version AS version FROM data_sources WHERE id='ds'")).rows[0]
+    const initial = await read()
+    try {
+      await pool.query("UPDATE data_sources SET name='renamed fixture' WHERE id='ds'")
+      expect((await read()).version).toBe(initial.version)
+      await pool.query("UPDATE data_sources SET owner_id='member' WHERE id='ds'")
+      const transferred = await read()
+      expect(transferred.version).not.toBe(initial.version)
+      await pool.query("UPDATE data_sources SET owner_id='owner' WHERE id='ds'")
+      const restored = await read()
+      expect(restored.version).not.toBe(initial.version)
+      expect(restored.version).not.toBe(transferred.version)
+      await pool.query("UPDATE data_sources SET plm_bom_listener_authority_version=$1 WHERE id='ds'",[initial.version])
+      expect((await read()).version).not.toBe(initial.version)
+      expect((await read()).version).not.toBe(restored.version)
+    } finally { await pool.query("UPDATE data_sources SET owner_id='owner',name=$1 WHERE id='ds'",[initial.name]) }
+  })
+
   it.each(['bom_line_writeback','eco_batch_apply'])('baselines, atomically consumes and stops %s', async kind => {
     const local = await service.create('owner',{ previewId: (await makePreview()).previewId,requestId: randomUUID() })
     const b = (await pool.query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1',[local.id])).rows[0]
@@ -2392,12 +2414,67 @@ describe('durable owner-authorized PLM listener', () => {
       // Merely restoring the previous owner cannot restart a revoked authorization.
       expect(await receiver().pollChanges(b.id)).toEqual({ state: 'inactive' })
       await expect(listenerDown(new Kysely({ dialect: new PostgresDialect({ pool }) }))).rejects.toThrow('plm_change_listener_evidence_present')
+      await expect(listenerAuthorityDown(new Kysely({ dialect: new PostgresDialect({ pool }) }))).rejects.toThrow('plm_change_listener_evidence_present')
     } finally {
       await pool.query("UPDATE data_sources SET owner_id='owner' WHERE id='ds'")
       await pool.query('UPDATE multitable_webhooks SET active=false WHERE id=$1',[target])
       await pool.query("DELETE FROM user_permissions WHERE user_id='owner' AND permission_code='multitable:send_webhook'")
     }
   })
+
+  it.each([['fresh','source'],['stopped','source'],['fresh','account'],['stopped','account'],['active','account']])('rejects authority ABA during %s listener authorization (%s)', async (scenario,transition) => {
+    const local = await service.create('owner',{ previewId: (await makePreview()).previewId,requestId: randomUUID() })
+    const b = (await pool.query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1',[local.id])).rows[0]
+    const target = randomUUID()
+    await pool.query("INSERT INTO multitable_webhooks(id,name,url,created_by) VALUES($1,'ABA regression','https://synthetic.invalid/listener','owner')",[target])
+    await pool.query("INSERT INTO user_permissions VALUES('owner','multitable:send_webhook')")
+    let onPage: (() => Promise<void>) | undefined
+    const source = { ...adapter,getPlmChangePage: async (request: any) => {
+      if (onPage) await onPage()
+      return { schema: 'yuantus.plm-change-page.v1',source: request.source,head_sequence: 5,next_sequence: 5,events: [] }
+    } }
+    const receiver = () => new PlmBomReviewService({ pool: tx,dataSourceManager: { getDataSource: () => source as never } })
+    const state = async () => (await pool.query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1',[b.id])).rows[0]
+    const enable = () => receiver().changeListener('owner',b.id,{ expectedVersion: Number(b.version) })
+    try {
+      await service.completionWebhooks('owner',local.id,{ expectedVersion: 0,webhooks: {
+        reviewCompleted: { enabled: false,webhookId: null,granularity: null },
+        plmChangeApplied: { enabled: true,webhookId: target,source: 'bom_line_writeback' } } })
+      if (scenario !== 'fresh') await enable()
+      if (scenario === 'stopped') {
+        await pool.query("UPDATE data_sources SET owner_id='member' WHERE id='ds'")
+        await pool.query("UPDATE data_sources SET owner_id='owner' WHERE id='ds'")
+        expect((await state()).status).toBe('stopped')
+      }
+      const prior = await state()
+      let entered!: () => void,release!: () => void
+      const started = new Promise<void>(resolve => { entered=resolve })
+      const hold = new Promise<void>(resolve => { release=resolve })
+      onPage=async () => { entered(); await hold }
+      const enabling=enable()
+      await started
+      try {
+        if (transition === 'source') {
+          await pool.query("UPDATE data_sources SET owner_id='member' WHERE id='ds'")
+          await pool.query("UPDATE data_sources SET owner_id='owner' WHERE id='ds'")
+        } else {
+          await pool.query("UPDATE users SET is_active=false WHERE id='owner'")
+          await pool.query("UPDATE users SET is_active=true WHERE id='owner'")
+        }
+      } finally { onPage=undefined; release() }
+      await expect(enabling).rejects.toMatchObject({ status: 409 })
+      const after = await state()
+      expect(after?.status).toBe(scenario === 'active' ? 'stopped' : prior?.status)
+      expect(after?.generation).toBe(prior?.generation)
+      expect(after?.cursor).toBe(prior?.cursor)
+    } finally {
+      onPage=undefined
+      await pool.query("UPDATE data_sources SET owner_id='owner' WHERE id='ds'")
+      await pool.query('UPDATE multitable_webhooks SET active=false WHERE id=$1',[target])
+      await pool.query("DELETE FROM user_permissions WHERE user_id='owner' AND permission_code='multitable:send_webhook'")
+    }
+  })
+
 })
 
 registerChangeCrossprocess(pool,tx)

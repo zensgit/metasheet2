@@ -131,5 +131,34 @@
     ],
     "referencedTimers": [],
     "activeSockets": []
+  },
+  "authorityFix": {
+    "sourceHashes": {
+      "packages/core-backend/src/multitable/plm-bom-review-service.ts": "ab0ced921448a059cbb1f0f19af071610c5f11eada6990c56e02a1aec6162879",
+      "packages/core-backend/src/db/migrations/zzzz20261015020000_add_plm_listener_authority_version.ts": "616fc843caed885c4351b897939efa952d64f68a4b756eed8a275b3e41f9b777",
+      "packages/core-backend/tests/plm-bom-review/change-crossprocess.ts": "184b8d59da175f20ab6685c3599ca3cb4f6ea2a92580412d52b6f6a31943dd5c",
+      "packages/core-backend/tests/plm-bom-review/completion-recover.ts": "2b9c5e1337b3cb34078357aa73031a4abae1a26c3e2f2395da26eb5b566c8504",
+      "packages/core-backend/tests/integration/plm-bom-review-realdb.test.ts": "623a173301230b23e3df6bdbf826767ad7eb8347e7e7774575ddb7c53c9e446f",
+      "packages/core-backend/tests/plm-bom-review/bootstrap.ts": "5c4e676f6e19273e6eaa2e2728f9d83d215430fca7cedac8b76c17722831b46c"
+    },
+    "standalone": {
+      "passed": 131,
+      "failed": 0,
+      "skipped": 0
+    },
+    "crossProcess": {
+      "passed": 132,
+      "failed": 0,
+      "skipped": 0
+    },
+    "cleanup": {
+      "providerExit": 0,
+      "privateCredentialsRemoved": true,
+      "privateConsumerDatabaseRemoved": true,
+      "providerPortClosed": true,
+      "sourceStable": true
+    },
+    "ci": "pending for new source; prior source results are historical",
+    "nativeAutoCAD": false
   }
 }

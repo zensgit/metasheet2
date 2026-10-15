@@ -95,6 +95,7 @@ type SourceRow = {
   workspace_id: unknown
   tenant_id: unknown
   scope_kind: unknown
+  plm_bom_listener_authority_version?: string
 }
 type ChangeCursor = { generation: string; cursor: number; sequence: number }
 type Adapter = {
@@ -360,13 +361,16 @@ export class PlmBomReviewService {
       throw new Failure(503,'RUNTIME_UNAVAILABLE')
     if (b.status !== 'active') throw new Failure(409,'SOURCE_CHANGED')
     const source = await this.source(query,actor,b.data_source_id,true)
+    const owner = (await query('SELECT * FROM users WHERE id=$1',[actor])).rows[0]
+    if (!source.row.plm_bom_listener_authority_version || !owner?.plm_bom_listener_authority_version)
+      throw new Failure(503,'RUNTIME_UNAVAILABLE')
     const policy = (await query(`SELECT c.* FROM meta_plm_bom_review_completion_config c
       JOIN meta_config_revisions a ON a.id=c.revision_id WHERE c.binding_id=$1
       AND a.actor_id=c.updated_by AND a.sheet_id=$2 AND a.entity_type='sheet_config'
       AND lower(a.entity_id)='plm-bom-review:'||c.binding_id::text||':completion-webhooks'
       AND a.after->'webhooks'=c.webhooks FOR SHARE OF c,a`,[id,b.sheet_id])).rows[0]
     if (!policy?.webhooks?.plmChangeApplied?.enabled) throw new Failure(409,'RULE_DISABLED')
-    return { b,source,policy }
+    return { b,source,policy,ownerAuthorityVersion: String(owner.plm_bom_listener_authority_version) }
   }
   private async checkChangeCursor(query: PlmQuery, id: string, cursor: ChangeCursor) {
     const row = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
@@ -411,6 +415,8 @@ export class PlmBomReviewService {
     return this.deps.pool.transaction(async ({ query }) => {
       const after = await this.listenerContext(query,actor,id)
       if (Number(after.b.version) !== expectedVersion || after.source.fingerprint !== before.source.fingerprint ||
+        after.source.row.plm_bom_listener_authority_version !== before.source.row.plm_bom_listener_authority_version ||
+        after.ownerAuthorityVersion !== before.ownerAuthorityVersion ||
         after.source.adapter !== before.source.adapter || after.policy.revision_id !== before.policy.revision_id)
         throw new Failure(409,'SOURCE_CHANGED')
       const previous = (await query('SELECT * FROM meta_plm_bom_change_listeners WHERE binding_id=$1 FOR UPDATE',[id])).rows[0]
