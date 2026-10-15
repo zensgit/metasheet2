@@ -80,6 +80,20 @@
             {{ ecoIntentMessage }}
           </p>
         </div>
+        <button
+          v-if="result?.data_source_id === dataSourceId"
+          type="button"
+          class="bom-review__button"
+          data-testid="plm-bom-collaboration-open"
+          @click="showCollaboration = true"
+        >分享至协作表 / 管理已有协作表</button>
+        <PlmBomCollaborationDialog
+          v-if="showCollaboration && result?.data_source_id === dataSourceId"
+          :key="`${dataSourceId}:${context.part.part_id}`"
+          :data-source-id="dataSourceId"
+          :part-id="context.part.part_id"
+          @close="showCollaboration = false"
+        />
         <PlmBomReviewTable
           :context="context"
           :editable="!advisoryLocked"
@@ -93,7 +107,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import {
   getPlmBomMultitableContext,
   requestPlmBomEcoRevisionIntent,
@@ -103,15 +118,18 @@ import {
   type PlmBomMultitableResult,
 } from '../../services/integration/workbench'
 import PlmBomReviewTable from './PlmBomReviewTable.vue'
+import PlmBomCollaborationDialog from './PlmBomCollaborationDialog.vue'
 import { randomUuid } from '../../utils/uuid'
 
 // ecoIntentEnabled: the ECO Phase 3 CTA pre-gate, computed by the WORKBENCH view from the
 // capabilities advisory (features.bom_eco_revision supported+entitled+actions includes
 // eco_revision_intent) and passed down — the panel itself never fetches capabilities
 // (P3-C invariant: mounting the panel triggers no PLM call).
-const props = defineProps<{ dataSourceId: string; ecoIntentEnabled?: boolean }>()
+const props = defineProps<{ dataSourceId: string; ecoIntentEnabled?: boolean; initialPartId?: string }>()
+const showCollaboration = ref(false)
+let loadGeneration = 0
 
-const partId = ref('')
+const partId = ref(props.initialPartId ?? '')
 const loading = ref(false)
 const result = ref<PlmBomMultitableResult | null>(null)
 const submittingLineId = ref<string | null>(null)
@@ -122,6 +140,26 @@ const retryKeys = ref<Record<string, string>>({})
 const writebackLocked = ref(false)
 const ecoIntentStatus = ref<'idle' | 'requesting' | 'done'>('idle')
 const ecoIntentMessage = ref('')
+
+function clearContext() {
+  loadGeneration += 1
+  result.value = null
+  submittingLineId.value = null
+  loading.value = false
+  showCollaboration.value = false
+  lineMessages.value = {}
+  retryKeys.value = {}
+  writebackLocked.value = false
+  ecoIntentStatus.value = 'idle'
+  ecoIntentMessage.value = ''
+}
+watch(() => [props.dataSourceId, props.initialPartId], () => {
+  partId.value = props.initialPartId ?? ''
+  clearContext()
+}, { flush: 'sync' })
+watch(partId, clearContext, { flush: 'sync' })
+const unsubscribeSession = onAuthSessionSwitch(() => { partId.value = ''; clearContext() })
+onBeforeUnmount(() => { loadGeneration++; unsubscribeSession() })
 
 const context = computed(() =>
   result.value && result.value.available ? result.value.context : null,
@@ -153,10 +191,12 @@ const ecoIntentRelevant = computed(() =>
 async function requestEcoIntent(): Promise<void> {
   const part = context.value?.part.part_id
   if (!part || ecoIntentStatus.value !== 'idle') return
+  const generation = loadGeneration
   ecoIntentStatus.value = 'requesting'
   ecoIntentMessage.value = ''
   try {
     const outcome = await requestPlmBomEcoRevisionIntent(props.dataSourceId, part)
+    if (generation !== loadGeneration) return
     if (outcome.ok) {
       ecoIntentStatus.value = 'done'
       ecoIntentMessage.value = outcome.attached
@@ -182,6 +222,7 @@ async function requestEcoIntent(): Promise<void> {
     }
     ecoIntentMessage.value = '发起 ECO 修订失败，请稍后重试。'
   } catch {
+    if (generation !== loadGeneration) return
     ecoIntentStatus.value = 'idle'
     ecoIntentMessage.value = '发起 ECO 修订失败，请稍后重试。'
   }
@@ -208,7 +249,11 @@ const reviewState = computed<'idle' | 'loading' | 'unavailable' | 'upgrade' | 'e
 async function load(): Promise<void> {
   const pid = partId.value.trim()
   if (!pid || loading.value) return
+  const generation = ++loadGeneration
+  const dataSourceId = props.dataSourceId
+  submittingLineId.value = null
   loading.value = true
+  showCollaboration.value = false
   lineMessages.value = {}
   retryKeys.value = {}
   // A fresh load is a fresh part/context: reset the ECO-intent CTA state machine.
@@ -216,11 +261,12 @@ async function load(): Promise<void> {
   ecoIntentStatus.value = 'idle'
   ecoIntentMessage.value = ''
   try {
-    result.value = await getPlmBomMultitableContext(props.dataSourceId, pid)
+    const response = await getPlmBomMultitableContext(dataSourceId, pid)
+    if (generation === loadGeneration) result.value = response
   } catch {
-    result.value = { data_source_id: props.dataSourceId, available: false, reason: 'unavailable' }
+    if (generation === loadGeneration) result.value = { data_source_id: dataSourceId, available: false, reason: 'unavailable' }
   } finally {
-    loading.value = false
+    if (generation === loadGeneration) loading.value = false
   }
 }
 
@@ -255,6 +301,7 @@ function applyLinePatch(line: PlmBomMultitableLine, patch: PlmBomMultitableLineP
 async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: PlmBomMultitableLinePatch }): Promise<void> {
   const lineId = payload.line.bom_line_id
   if (!context.value || submittingLineId.value) return
+  const generation = loadGeneration
   const key = retryKeys.value[lineId] || makeIdempotencyKey()
   retryKeys.value = { ...retryKeys.value, [lineId]: key }
   submittingLineId.value = lineId
@@ -268,6 +315,7 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       key,
       payload.line.write_etag,
     )
+    if (generation !== loadGeneration) return
     if (outcome.ok) {
       applyLinePatch(payload.line, payload.patch)
       const { [lineId]: _doneKey, ...rest } = retryKeys.value
@@ -281,6 +329,7 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       // Idempotency-Key rather than replaying the cached original), then surface the conflict so the
       // user reviews the current value and re-decides. Never report the dropped edit as success.
       await load()
+      if (loadGeneration !== generation + 1) return
       lineMessages.value = { ...lineMessages.value, [lineId]: writebackMessage(412) }
       return
     }
@@ -312,9 +361,9 @@ async function submitLinePatch(payload: { line: PlmBomMultitableLine; patch: Plm
       [lineId]: writebackMessage(outcome.status, outcome.reason),
     }
   } catch {
-    lineMessages.value = { ...lineMessages.value, [lineId]: '写回暂时失败，请稍后重试。' }
+    if (generation === loadGeneration) lineMessages.value = { ...lineMessages.value, [lineId]: '写回暂时失败，请稍后重试。' }
   } finally {
-    submittingLineId.value = null
+    if (generation === loadGeneration) submittingLineId.value = null
   }
 }
 </script>

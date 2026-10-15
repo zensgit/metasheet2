@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { createApp, nextTick, type App as VueApp } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createApp, h, nextTick, shallowRef, type App as VueApp } from 'vue'
 
 const getContextMock = vi.fn()
 const updateLineMock = vi.fn()
@@ -11,6 +11,7 @@ vi.mock('../src/services/integration/workbench', () => ({
 }))
 
 import PlmBomReviewPanel from '../src/components/plm/PlmBomReviewPanel.vue'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 
 const CONTEXT = {
   // Root part state 'Draft': the write specs below model the provider's Draft fast-path (200 on
@@ -444,5 +445,160 @@ describe('ECO Phase 3: locked-BOM revision-intent CTA', () => {
     await setPartAndLoad('P1')
     expect(container.querySelector('[data-testid="plm-bom-review-eco-intent-message"]')).toBeNull()
     expect((container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).disabled).toBe(false)
+  })
+})
+
+
+describe('BOM collaboration entry session boundary', () => {
+  beforeEach(() => localStorage.setItem('auth_token', 'account-a'))
+  afterEach(() => localStorage.removeItem('auth_token'))
+  it('offers sharing only after an explicit successful BOM load', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    mountPanel()
+    expect(container.querySelector('[data-testid="plm-bom-collaboration-open"]')).toBeNull()
+    await setPartAndLoad('P1')
+    expect(container.querySelector('[data-testid="plm-bom-collaboration-open"]')).not.toBeNull()
+  })
+  it('clears the previous account BOM and sharing entry on a session switch', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    mountPanel()
+    await setPartAndLoad('P1')
+    notifyAuthPrincipalChange()
+    localStorage.setItem('auth_token', 'account-b')
+    await flushUi()
+    expect(stateOf()).toBe('idle')
+    expect(container.textContent).not.toContain('Assembly')
+    expect(container.querySelector('[data-testid="plm-bom-collaboration-open"]')).toBeNull()
+    expect(getContextMock).toHaveBeenCalledTimes(1)
+  })
+  it('does not restore a late BOM response after switching sessions', async () => {
+    let resolve!: (value: unknown) => void
+    getContextMock.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    mountPanel()
+    await setPartAndLoad('P1')
+    notifyAuthPrincipalChange()
+    localStorage.setItem('auth_token', 'account-b')
+    resolve({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    await flushUi()
+    expect(stateOf()).toBe('idle')
+    expect(container.textContent).not.toContain('Assembly')
+    expect(container.querySelector('[data-testid="plm-bom-collaboration-open"]')).toBeNull()
+  })
+})
+
+describe('BOM return link prefill', () => {
+  it('prefills a Part without loading until the explicit button is pressed', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    mountPanel('plm-ds', { initialPartId: 'P1' })
+    await flushUi()
+    expect((container.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('P1')
+    expect(getContextMock).not.toHaveBeenCalled()
+    ;(container.querySelector('[data-testid="plm-bom-review-load"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(getContextMock).toHaveBeenCalledWith('plm-ds', 'P1')
+    expect(container.querySelector('[data-testid="plm-bom-review-part"]')?.textContent).toContain('Assembly')
+  })
+
+  it('clears an already visible result when the source target changes, with no automatic fetch', async () => {
+    getContextMock.mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    const target = shallowRef({ dataSourceId: 'plm-ds', initialPartId: 'P1' })
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({ render: () => h(PlmBomReviewPanel, target.value) }); app.mount(container)
+    await setPartAndLoad('P1')
+    expect(container.querySelector('[data-testid="plm-bom-review-part"]')?.textContent).toContain('Assembly')
+    target.value = { dataSourceId: 'other-ds', initialPartId: 'P2' }
+    await flushUi()
+    expect(container.querySelector('[data-testid="plm-bom-review-part"]')).toBeNull()
+    expect(getContextMock).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([412, 409])('BOM return link ignores an old pending PATCH %s after switching Part', async (status) => {
+    let resolve!: (value: unknown) => void
+    updateLineMock.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    const oldContext = cloneContext()
+    const nextContext = cloneContext(); nextContext.part.part_id = 'P2'
+    getContextMock.mockResolvedValueOnce({ data_source_id: 'plm-ds', available: true, entitled: true, context: oldContext })
+      .mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: nextContext })
+    const target = shallowRef({ dataSourceId: 'plm-ds', initialPartId: 'P1', ecoIntentEnabled: true })
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({ render: () => h(PlmBomReviewPanel, target.value) }); app.mount(container)
+    await setPartAndLoad('P1')
+    const quantity = container.querySelector('[data-testid="plm-bom-review-quantity-input"]') as HTMLInputElement
+    quantity.value = '6'; quantity.dispatchEvent(new Event('input', { bubbles: true })); await flushUi()
+    ;(container.querySelector('[data-testid="plm-bom-review-save"]') as HTMLButtonElement).click(); await flushUi()
+    expect(updateLineMock).toHaveBeenCalledTimes(1)
+    target.value = { ...target.value, initialPartId: 'P2' }; await flushUi()
+    if (status === 409) await setPartAndLoad('P2')
+    resolve({ ok: false, status, reason: status === 409 ? 'lifecycle_locked' : 'stale' }); await flushUi()
+    expect(getContextMock).toHaveBeenCalledTimes(status === 409 ? 2 : 1)
+    if (status === 412) {
+      expect(stateOf()).toBe('idle')
+      await setPartAndLoad('P2')
+    }
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent"]')).toBeNull()
+    expect(container.textContent).not.toContain('此行已被他人修改')
+  })
+
+  it.each(['success', 'error'])('BOM return link ignores an old pending ECO %s after switching Part', async (outcome) => {
+    let resolve!: (value: unknown) => void
+    let reject!: (error: Error) => void
+    ecoIntentMock.mockImplementationOnce(() => new Promise((done, fail) => { resolve = done; reject = fail }))
+    const oldContext = cloneContext(); oldContext.part.state = 'Released'
+    const nextContext = cloneContext(); nextContext.part.part_id = 'P2'
+    getContextMock.mockResolvedValueOnce({ data_source_id: 'plm-ds', available: true, entitled: true, context: oldContext })
+      .mockResolvedValue({ data_source_id: 'plm-ds', available: true, entitled: true, context: nextContext })
+    const target = shallowRef({ dataSourceId: 'plm-ds', initialPartId: 'P1', ecoIntentEnabled: true })
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({ render: () => h(PlmBomReviewPanel, target.value) }); app.mount(container)
+    await setPartAndLoad('P1')
+    ;(container.querySelector('[data-testid="plm-bom-review-eco-intent-cta"]') as HTMLButtonElement).click(); await flushUi()
+    expect(ecoIntentMock).toHaveBeenCalledWith('plm-ds', 'P1')
+    target.value = { ...target.value, initialPartId: 'P2' }; await flushUi()
+    await setPartAndLoad('P2')
+    if (outcome === 'success') resolve({ ok: true, eco_id: 'OLD-ECO', attached: false })
+    else reject(new Error('old request failed'))
+    await flushUi()
+    expect(container.querySelector('[data-testid="plm-bom-review-eco-intent"]')).toBeNull()
+    expect(container.textContent).not.toContain('OLD-ECO')
+    expect(getContextMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the previous result and ignores an in-flight old-source answer when the target changes', async () => {
+    let resolve!: (value: unknown) => void
+    getContextMock.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    const target = shallowRef({ dataSourceId: 'plm-ds', initialPartId: 'P1' })
+    container = document.createElement('div'); document.body.appendChild(container)
+    app = createApp({ render: () => h(PlmBomReviewPanel, target.value) }); app.mount(container)
+    await setPartAndLoad('P1')
+    target.value = { dataSourceId: 'other-ds', initialPartId: 'P2' }
+    await flushUi()
+    resolve({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    await flushUi()
+    expect((container.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement).value).toBe('P2')
+    expect(container.querySelector('[data-testid="plm-bom-review-part"]')).toBeNull()
+    expect(getContextMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('BOM query target invalidation', () => {
+  it('discards an old in-flight BOM when the typed Part changes and lets the new explicit load proceed', async () => {
+    let resolve!: (value: unknown) => void
+    getContextMock.mockImplementationOnce(() => new Promise((done) => { resolve = done }))
+    mountPanel()
+    await setPartAndLoad('P1')
+    const input = container.querySelector('[data-testid="plm-bom-review-part-input"]') as HTMLInputElement
+    input.value = 'P2'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    resolve({ data_source_id: 'plm-ds', available: true, entitled: true, context: cloneContext() })
+    await flushUi()
+    expect(stateOf()).toBe('idle')
+    expect(container.querySelector('[data-testid="plm-bom-collaboration-open"]')).toBeNull()
+    const next = cloneContext(); next.part.part_id = 'P2'
+    getContextMock.mockResolvedValueOnce({ data_source_id: 'plm-ds', available: true, entitled: true, context: next })
+    await setPartAndLoad('P2')
+    expect(getContextMock).toHaveBeenLastCalledWith('plm-ds', 'P2')
+    expect(getContextMock).toHaveBeenCalledTimes(2)
+    expect(stateOf()).toBe('table')
   })
 })

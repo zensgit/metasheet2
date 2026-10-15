@@ -1,0 +1,36 @@
+{
+  "base": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+  "sourceHashes": {
+    "apps/web/src/components/plm/PlmBomReviewPanel.vue": "8ba1d0e9450c680222601a36789f327e0924cc7cc9ed4be89ca721ac37f133f5",
+    "apps/web/src/components/plm/PlmBomCollaborationDialog.vue": "be88e1ef2c8b8f98e12a2347418dbff79b68a52dd8deb4eb51daec8b593df41d",
+    "apps/web/src/components/plm/PlmBomCompletionWebhookConfig.vue": "b7e829d61e1271971f73f95fc5324c6a1fd365eaada573c36a1b0c37171e0ce9",
+    "apps/web/src/components/plm/PlmBomNotificationConfig.vue": "440cff9abd5204ab69a0a8e0225c1badbedb6d010eef59e4debf9f3c8a72eb3d",
+    "apps/web/src/services/plm/plmBomCollaboration.ts": "0fb14de0eb9cc3a0375afb23844537cbd65413232449238a77fa1e50d234520e"
+  },
+  "focusedTests": {
+    "passed": 116,
+    "failed": 0,
+    "skipped": 0
+  },
+  "typecheck": true,
+  "browserAndRealBackend": "pending",
+  "ci": "not published yet",
+  "models": {
+    "kimi": {
+      "version": "2.1.1",
+      "requested": "kimi-code/k3",
+      "exit": 1,
+      "result": "403 monthly quota; no review"
+    },
+    "grok": {
+      "actualUi": "Grok 4.7 (xhigh)",
+      "scope": "3 read-only source files",
+      "result": "incomplete; connection retry; interrupted and closed",
+      "reviewPassed": false
+    }
+  },
+  "lint": {
+    "passed": true,
+    "warnings": 0
+  }
+}
