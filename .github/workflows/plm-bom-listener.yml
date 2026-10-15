@@ -29,7 +29,6 @@ jobs:
           --health-cmd "pg_isready -U postgres -d plm_listener"
           --health-interval 5s --health-timeout 5s --health-retries 20
     env:
-      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/plm_listener
       EXPECT_DB: '1'
       NODE_ENV: test
     steps:
@@ -46,6 +45,8 @@ jobs:
         working-directory: packages/core-backend
         run: node node_modules/typescript/bin/tsc --noEmit
       - name: Real PostgreSQL authority and concurrency regression
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_listener
         working-directory: packages/core-backend
         run: node node_modules/vitest/vitest.mjs run --config vitest.plm-bom-review.config.ts
       - name: Wire, transport, login and worker regression
