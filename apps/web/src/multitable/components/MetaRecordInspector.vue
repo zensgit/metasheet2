@@ -509,9 +509,11 @@
     />
     <!-- 派发任务 dialog: a child with its own local open state, like the 送审 dialog above. Keyed by
          record id so each record gets a fresh form. The state of a dispatch that is out or done
-         (in flight / created) is NOT in the child: it is kept per record under `run-key`
+         (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
          (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
-         lose a result or allow a second create, and the dialog captures the record link at submit. -->
+         lose a result or allow a second create, and the dialog captures the record link at submit.
+         `bound-identity` is the signed-in user and org read when this record was bound; the dialog
+         sends nothing under any other (tasks/recordTaskDispatchIdentity.ts). -->
     <MetaRecordTaskDispatchDialog
       v-if="canDispatchTask && sheetId && viewId && record"
       :key="record.id"
@@ -520,7 +522,8 @@
       :person-fields="dispatchPersonFields"
       :person-summaries="personSummariesByField"
       :record-link="dispatchRecordLink"
-      :run-key="dispatchRunKey(sheetId, record.id)"
+      :bound-identity="dispatchIdentity"
+      :run-key="dispatchRunKey(dispatchIdentity, sheetId, record.id)"
       @close="showTaskDispatch = false"
     />
     <!-- Record inspector v3 (2026-09-05, PR-A §1.2): moved from the FIRST child (pre-PR-A) to the
@@ -592,6 +595,7 @@ import { useFeatureFlags } from '../../stores/featureFlags'
 import { canDispatchTasks } from '../../tasks/tasksAccess'
 import { personValueAssigneeIds } from '../../tasks/recordTaskDispatch'
 import { dispatchRunKey } from '../../tasks/recordTaskDispatchRuns'
+import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
 import { filterPropertyVisibleFields } from '../utils/field-permissions'
 import { AppRouteNames } from '../../router/types'
 import { isNativePersonField } from '../utils/link-fields'
@@ -1518,6 +1522,14 @@ const canDispatchTask = computed(() => {
     isAttendanceFocused: featureFlags.isAttendanceFocused,
     isPlmWorkbenchFocused: featureFlags.isPlmWorkbenchFocused,
   })
+})
+// The identity (signed-in user + the org the requests carry) this record was bound under: read now and
+// again whenever the drawer moves to another record, never when the dialog opens. The record's values
+// on screen were read under it, so the dialog may send them only under it; see
+// tasks/recordTaskDispatchIdentity.ts.
+const dispatchIdentity = ref(readDispatchIdentity())
+watch(() => props.record?.id, () => {
+  dispatchIdentity.value = readDispatchIdentity()
 })
 // The title the dispatcher confirms: the header's own display text of the primary field, or nothing
 // when that value is empty (the header's '—' placeholder is not a title).

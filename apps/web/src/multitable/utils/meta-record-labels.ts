@@ -154,6 +154,7 @@ export type MetaRecordLabelKey =
   | 'dispatch.errorTasksUnavailable' | 'dispatch.errorFailed'
   | 'dispatch.success' | 'dispatch.openTask' | 'dispatch.sourceNoteFailed' | 'dispatch.sourceLinePrefix'
   | 'dispatch.pendingElsewhere' | 'dispatch.inactiveSkipped'
+  | 'dispatch.identityChanged' | 'dispatch.identityUnavailable'
   // --- 记录级送审 / record-level approval submit (多维表 × 审批 阶段二, design
   //     multitable-approval-phase2-record-submit-design-20260915.md §5). `record.submitApproval` is the
   //     kebab row (+ its own title key, button-suffix pattern above); every `approval.*` key belongs to
@@ -484,6 +485,8 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.sourceLinePrefix': { en: 'Source: multitable record', zh: '来源：多维表记录' },
   'dispatch.pendingElsewhere': { en: 'A task from this record is still being dispatched. Wait for the result.', zh: '此记录的任务仍在派发中，请等待结果。' },
   'dispatch.inactiveSkipped': { en: 'Deactivated people in the person field were not filled in.', zh: '人员字段中已停用的人员未带入。' },
+  'dispatch.identityChanged': { en: 'The signed-in account or organization has changed, so this dispatch was stopped and the form cleared. Reload the page to dispatch again.', zh: '登录账号或组织已变化，本次派发已停止，表单已清空。请刷新页面后再派发任务。' },
+  'dispatch.identityUnavailable': { en: 'The signed-in account could not be confirmed. Sign in again, then reload the page to dispatch a task.', zh: '无法确认当前登录账号。请重新登录并刷新页面后再派发任务。' },
   // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
   // convention as every other block in this table.
   'record.submitApproval': { en: 'Submit for approval', zh: '送审' },

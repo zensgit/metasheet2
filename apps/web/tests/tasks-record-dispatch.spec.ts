@@ -24,6 +24,13 @@
  *     names nobody.
  *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
  *     still reports the task as created, with a note.
+ *  8. Identity: a dispatch is bound to the signed-in user and org read when the drawer bound the
+ *     record. A sign-in as someone else in another tab, a sign-out, an org change (stored hint or an
+ *     explicit session org) or a sign-in in this tab makes the dialog send nothing more — no create,
+ *     no description read or write — clear the draft and refuse for good (a reopen does not offer a
+ *     fresh form for the same record). Dispatch state is kept per identity: another identity sees
+ *     neither a pending note nor a created task, and a session change in this tab drops the state of
+ *     every other identity.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, h, nextTick, type App } from 'vue'
@@ -32,7 +39,20 @@ import MetaRecordInspector from '../src/multitable/components/MetaRecordInspecto
 import type { MetaField, MetaRecord } from '../src/multitable/types'
 import { useLocale } from '../src/composables/useLocale'
 import { onTasksChanged } from '../src/tasks/tasksBadgeBus'
-import { resetDispatchRunsForTests } from '../src/tasks/recordTaskDispatchRuns'
+import {
+  beginDispatchRun,
+  dispatchRunKey,
+  readDispatchRun,
+  resetDispatchRunsForTests,
+  settleDispatchRun,
+} from '../src/tasks/recordTaskDispatchRuns'
+import {
+  NO_DISPATCH_IDENTITY,
+  isSameDispatchIdentity,
+  readDispatchIdentity,
+} from '../src/tasks/recordTaskDispatchIdentity'
+import { useAuth } from '../src/composables/useAuth'
+import { EXPLICIT_SESSION_ORG_KEY } from '../src/utils/explicitSessionOrg'
 import { canDispatchTasks, canSeeTasksEntry } from '../src/tasks/tasksAccess'
 import {
   DISPATCH_ASSIGNEE_LIMIT,
@@ -275,7 +295,20 @@ async function submit() {
   await flushUi(10)
 }
 
+/** A JWT-shaped token the app's own payload reader understands (header and signature are not read). */
+function fakeToken(payload: Record<string, unknown>): string {
+  return `h.${btoa(JSON.stringify(payload)).replace(/=+$/, '')}.s`
+}
+const TOKEN_A = fakeToken({ sub: 'usr_me' })
+
+function signIn(token: string | null) {
+  if (token === null) localStorage.removeItem('auth_token')
+  else localStorage.setItem('auth_token', token)
+}
+
 beforeEach(() => {
+  localStorage.clear()
+  signIn(TOKEN_A)
   mocks.apiFetch.mockReset()
   mocks.features = { tasks: true }
   mocks.permissions = new Set(['tasks:read', 'tasks:write'])
@@ -290,6 +323,7 @@ afterEach(() => {
   }
   document.body.innerHTML = ''
   resetDispatchRunsForTests()
+  localStorage.clear()
   useLocale().setLocale('en')
 })
 
@@ -900,5 +934,283 @@ describe('派发任务 dialog: success', () => {
     vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
     await flushUi(6)
     expect(dialog()).toBeNull()
+  })
+})
+
+// ---- identity binding (owner §74 review of #6411) -----------------------------------------------
+
+const TOKEN_A_REFRESHED = fakeToken({ sub: 'usr_me', iat: 2 })
+const TOKEN_B = fakeToken({ sub: 'usr_other' })
+const REFUSAL_ZH = '登录账号或组织已变化'
+
+/** Another tab signs in: the shared storage changes and this tab is told nothing. */
+function signInElsewhere(token: string | null) {
+  signIn(token)
+}
+
+/** The same, plus the `storage` event a browser delivers to the other tabs. */
+function signInElsewhereWithEvent(token: string | null) {
+  signIn(token)
+  window.dispatchEvent(new StorageEvent('storage', { key: 'auth_token', newValue: token }))
+}
+
+function expectRefused() {
+  expect(q('identity-refused')!.textContent).toContain(REFUSAL_ZH)
+  // No form, nothing of the record left on screen, nothing to click.
+  expect(q('title')).toBeNull()
+  expect(q('assignees')).toBeNull()
+  expect(q('submit')).toBeNull()
+  expect(q('open-task')).toBeNull()
+  expect(q('pending')).toBeNull()
+  expect(dialog()!.textContent).not.toContain('Alpha')
+}
+
+describe('派发任务 identity (tasks/recordTaskDispatchIdentity.ts)', () => {
+  it('is the user plus the org the requests carry; a token refresh for the same user and org keeps it', () => {
+    const a = readDispatchIdentity()
+    expect(a).not.toBe(NO_DISPATCH_IDENTITY)
+    signIn(TOKEN_A_REFRESHED)
+    expect(readDispatchIdentity()).toBe(a)
+    signIn(TOKEN_B)
+    expect(readDispatchIdentity()).not.toBe(a)
+    signIn(TOKEN_A)
+    localStorage.setItem('tenantId', 'org_2')
+    expect(readDispatchIdentity()).not.toBe(a)
+  })
+
+  it('without a session there is no identity, and no identity matches anything, itself included', () => {
+    signIn(null)
+    expect(readDispatchIdentity()).toBe(NO_DISPATCH_IDENTITY)
+    expect(isSameDispatchIdentity(NO_DISPATCH_IDENTITY, NO_DISPATCH_IDENTITY)).toBe(false)
+    signIn(TOKEN_A)
+    const a = readDispatchIdentity()
+    expect(isSameDispatchIdentity(a, a)).toBe(true)
+    expect(isSameDispatchIdentity(NO_DISPATCH_IDENTITY, a)).toBe(false)
+  })
+})
+
+describe('派发任务 dialog: bound to the signed-in identity', () => {
+  it('a sign-in as someone else in another tab: the submit sends nothing, the draft is gone, the dialog refuses', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    // The reviewed path: 不带入 avoids the assignee check that would otherwise stop the create.
+    setSelect('person-field', '')
+    setInput('due-date', '2031-05-06')
+    await flushUi()
+    signInElsewhere(TOKEN_B)
+    await submit()
+    expect(mocks.apiFetch.mock.calls.filter(([url]) => String(url).startsWith('/api/tasks'))).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('a reopen after the change still refuses: no fresh form prefilled from the record on screen', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    // The drawer bound the record under A; B signs in elsewhere before the dialog is ever opened.
+    signInElsewhere(TOKEN_B)
+    await openDialog(container)
+    expectRefused()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('an open form flips to the refusal as soon as another tab signs in (storage event), before any click', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(q('title')).not.toBeNull()
+    signInElsewhereWithEvent(TOKEN_B)
+    await flushUi()
+    expectRefused()
+  })
+
+  it('a sign-out (no token left) refuses with its own message and sends nothing', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    signInElsewhere(null)
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('a record bound with no session refuses with the sign-in message', async () => {
+    signIn(null)
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(q('identity-refused')!.textContent).toContain('无法确认当前登录账号')
+    expect(q('submit')).toBeNull()
+  })
+
+  it('an org change through the stored org hint refuses, and sends nothing', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    localStorage.setItem('tenantId', 'org_2')
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('an explicitly selected session org (same user) refuses, and sends nothing', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    const exp = Math.floor(Date.now() / 1000) + 3600
+    const switched = fakeToken({ sub: 'usr_me', userId: 'usr_me', tenantId: 'org_2', exp })
+    localStorage.setItem('auth_token', switched)
+    localStorage.setItem('jwt', switched)
+    localStorage.setItem(EXPLICIT_SESSION_ORG_KEY, JSON.stringify({
+      state: 'ready', token: switched, actor: 'usr_me', tenantId: 'org_2', exp, epoch: 'epoch_1',
+    }))
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('a sign-in in this tab (useAuth) flips an open form to the refusal before any click', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    expect(q('title')).not.toBeNull()
+    useAuth().setToken(TOKEN_B)
+    await flushUi()
+    expectRefused()
+  })
+
+  it('a change while the create is out: no description write under the new identity, and no task link shown to it', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    signInElsewhere(TOKEN_B)
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('a change while the create is out, with no version in its answer: not even the version read is sent', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    signInElsewhere(TOKEN_B)
+    release(jsonResponse(200, { id: 'tsk_9' }))
+    await flushUi(10)
+    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(0)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+  })
+
+  it('a change between the version read and the description write: the write is not sent', async () => {
+    let releaseRead: (value: Response) => void = () => {}
+    serveTasks({
+      create: () => jsonResponse(200, { id: 'tsk_9' }),
+      get: () => new Promise<Response>((resolve) => { releaseRead = resolve }),
+    })
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    expect(tasksCalls('GET', '/api/tasks/')).toHaveLength(1)
+    signInElsewhere(TOKEN_B)
+    releaseRead(jsonResponse(200, taskBody({ version: 1 })))
+    await flushUi(10)
+    expect(tasksCalls('PATCH', '/api/tasks/')).toHaveLength(0)
+    expectRefused()
+  })
+
+  it('dispatch state is per identity: another identity sees a fresh form, not the pending note; the first sees its task', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const { container, vm } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    // B signs in elsewhere; the drawer then binds the record again (a move away and back) under B.
+    signInElsewhere(TOKEN_B)
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    expect(q('pending')).toBeNull()
+    expect(q('identity-refused')).toBeNull()
+    expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    // A's create lands; B still sees nothing of it.
+    release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
+    await flushUi(10)
+    await openDialog(container)
+    expect(q('open-task')).toBeNull()
+    expect(q('success')).toBeNull()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    // Back to A (another tab again): the record bound under A shows A's task.
+    signInElsewhere(TOKEN_A)
+    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
+    await flushUi(6)
+    vm.record = RECORD
+    await flushUi(6)
+    await openDialog(container)
+    expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
+  })
+
+  it('a session change in this tab drops the dispatch state of every other identity, in flight or settled', async () => {
+    const a = readDispatchIdentity()
+    const settledKey = dispatchRunKey(a, 'sht_1', 'rec_1')
+    const outKey = dispatchRunKey(a, 'sht_1', 'rec_2')
+    expect(beginDispatchRun(settledKey, a)).toBe(true)
+    settleDispatchRun(settledKey, { created: { id: 'tsk_9', sourceNoteFailed: false } })
+    expect(beginDispatchRun(outKey, a)).toBe(true)
+    useAuth().setToken(TOKEN_B)
+    await flushUi()
+    expect(readDispatchRun(settledKey)).toBeUndefined()
+    expect(readDispatchRun(outKey)).toBeUndefined()
+    // The create that was out settles into nothing.
+    settleDispatchRun(outKey, { created: { id: 'tsk_10', sourceNoteFailed: false } })
+    expect(readDispatchRun(outKey)).toBeUndefined()
+  })
+
+  it('a same-user token refresh keeps the dispatch state and the form', async () => {
+    serveTasks()
+    const { container } = mountInspector()
+    await flushUi()
+    await openDialog(container)
+    setInput('due-date', '2031-05-06')
+    signInElsewhereWithEvent(TOKEN_A_REFRESHED)
+    await flushUi()
+    expect(q('identity-refused')).toBeNull()
+    await submit()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(1)
+    expect(q('success')).not.toBeNull()
   })
 })
