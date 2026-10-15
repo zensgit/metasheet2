@@ -12,6 +12,7 @@ interface PreviewAdapter {
   getVisualPreviewImage(token: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage>
   isVisualReviewEnabled(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -22,6 +23,7 @@ function isPreviewAdapter(value: unknown): value is PreviewAdapter {
     && typeof a?.getVisualPreviewImage === 'function'
     && typeof a?.isVisualReviewEnabled === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
@@ -49,6 +51,11 @@ async function guardedAdapter(req: Request, res: Response): Promise<PreviewAdapt
   const tenant = adapter.getEffectiveTenantId()
   if (!tenant || tenant !== claims.tenant_id) {
     res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH' } })
+    return null
+  }
+  const org = adapter.getEffectiveOrgId()
+  if (!org || org !== claims.org_id) {
+    res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH' } })
     return null
   }
   const now = Math.floor(Date.now() / 1000)

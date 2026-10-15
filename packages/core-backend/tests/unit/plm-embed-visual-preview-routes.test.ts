@@ -36,7 +36,8 @@ function adapter() {
   return {
     listVisualPreviewFiles: vi.fn().mockResolvedValue({ data: [{ files: [{ file_id: 'F1', version_id: 'V1', filename: 'real.png', version_is_current: true }], has_more: false }] }),
     getVisualPreviewImage: vi.fn().mockResolvedValue({ render: 'unavailable' }),
-    isVisualReviewEnabled: vi.fn().mockReturnValue(true), getEffectiveTenantId: () => 'default', isConnected: () => true, connect: vi.fn(),
+    isVisualReviewEnabled: vi.fn().mockReturnValue(true), getEffectiveTenantId: () => 'default',
+    getEffectiveOrgId: (): string | undefined => 'org-1', isConnected: () => true, connect: vi.fn(),
   }
 }
 
@@ -120,6 +121,30 @@ describe('visual-preview embed relay', () => {
     const replay = await request(pinned.url()).post('/api/plm-embed/visual-preview/files').set('X-PLM-Embed-Token', token())
     expect(replay.status).toBe(401)
     expect(a.listVisualPreviewFiles).not.toHaveBeenCalled()
+  })
+
+  it.each([{ org_id: 'org-2' }, { org_id: undefined }])('rejects a token outside the served org (%o) before nonce or provider calls', async (claims) => {
+    process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED = 'true'
+    const a = adapter()
+    ds.get.mockReturnValue(a)
+    const response = await request(pinned.url()).post('/api/plm-embed/visual-preview/files').set('X-PLM-Embed-Token', token(claims))
+    expect(response.status).toBe(403)
+    expect(response.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(jti.consume).not.toHaveBeenCalled()
+    expect(a.listVisualPreviewFiles).not.toHaveBeenCalled()
+  })
+
+  it('rejects an absent served org before nonce or provider calls', async () => {
+    process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED = 'true'
+    const a = adapter()
+    a.getEffectiveOrgId = () => undefined
+    ds.get.mockReturnValue(a)
+    const response = await request(pinned.url()).post('/api/plm-embed/visual-preview/image')
+      .set('X-PLM-Embed-Token', token()).send({ file_id: 'F1', version_id: 'V1' })
+    expect(response.status).toBe(403)
+    expect(response.body.error.code).toBe('EMBED_ORG_MISMATCH')
+    expect(jti.consume).not.toHaveBeenCalled()
+    expect(a.getVisualPreviewImage).not.toHaveBeenCalled()
   })
 
   it('returns only raster bytes and never a preview capability', async () => {

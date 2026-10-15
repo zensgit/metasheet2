@@ -27,8 +27,9 @@ const BOM_FEATURE_KEY = 'bom_multitable'
 
 interface PlmBomAdapter {
   getBomMultitableContext(partId: string): Promise<BomMultitableContextResult>
-  // the tenant actually served (x-tenant-id), used to cross-check the embed token's tenant_id
+  // the tenant/org actually served (x-tenant-id/x-org-id), cross-checked against the embed token
   getEffectiveTenantId(): string | undefined
+  getEffectiveOrgId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
 }
@@ -36,6 +37,7 @@ function isPlmBomAdapter(adapter: unknown): adapter is PlmBomAdapter {
   const a = adapter as Partial<PlmBomAdapter> | null
   return typeof a?.getBomMultitableContext === 'function'
     && typeof a?.getEffectiveTenantId === 'function'
+    && typeof a?.getEffectiveOrgId === 'function'
     && typeof a?.isConnected === 'function'
     && typeof a?.connect === 'function'
 }
@@ -99,6 +101,12 @@ export default function plmEmbedRouter(): Router {
       const servedTenantId = adapter.getEffectiveTenantId()
       if (!servedTenantId || claims.tenant_id !== servedTenantId) {
         return res.status(403).json({ ok: false, error: { code: 'EMBED_TENANT_MISMATCH', message: 'token tenant does not match the embed data source tenant' } })
+      }
+      // The context is read with the source's own credentials, so a matching tenant is not enough:
+      // a token minted in another org of the same tenant must never read the served org's BOM.
+      const servedOrgId = adapter.getEffectiveOrgId()
+      if (!servedOrgId || claims.org_id !== servedOrgId) {
+        return res.status(403).json({ ok: false, error: { code: 'EMBED_ORG_MISMATCH', message: 'token org does not match the embed data source org' } })
       }
 
       // Single-use: atomically consume the token's jti against the SHARED store BEFORE querying, so a
