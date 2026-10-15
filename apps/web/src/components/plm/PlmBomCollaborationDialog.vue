@@ -47,9 +47,11 @@
             <button v-if="binding.canDisable" type="button" :disabled="busy" @click="changeBinding(binding, 'disable')">停用后续刷新</button>
             <button v-if="binding.canConfigureNotifications" type="button" :disabled="busy" @click="notificationBinding = binding.id">配置通知规则</button>
             <button v-if="binding.canConfigureNotifications" type="button" :disabled="busy" @click="completionBinding = binding.id">配置完成 Webhook</button>
+            <button v-if="binding.canConfigureNotifications" type="button" :disabled="busy" @click="listenerBinding = binding.id">配置来源监听</button>
           </li>
         </ul>
       </section>
+      <PlmBomChangeListenerConfig v-if="selectedListenerBinding" :key="selectedListenerBinding.id" :binding-id="selectedListenerBinding.id" :binding-version="selectedListenerBinding.version" @reload-binding="load" @close="listenerBinding = ''" />
       <PlmBomCompletionWebhookConfig v-if="completionBinding" :key="completionBinding" :binding-id="completionBinding" @close="completionBinding = ''" />
       <PlmBomNotificationConfig v-if="notificationBinding" :key="notificationBinding" :binding-id="notificationBinding" @close="notificationBinding = ''" />
     </section>
@@ -62,6 +64,7 @@ import { useRouter } from 'vue-router'
 import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { AppRouteNames } from '../../router/types'
 import { randomUuid } from '../../utils/uuid'
+import PlmBomChangeListenerConfig from './PlmBomChangeListenerConfig.vue'
 import PlmBomCompletionWebhookConfig from './PlmBomCompletionWebhookConfig.vue'
 import PlmBomNotificationConfig from './PlmBomNotificationConfig.vue'
 import {
@@ -84,7 +87,8 @@ const busy = ref(false)
 const loaded = ref(false)
 const error = ref('')
 const message = ref('')
-const notificationBinding = ref(''),completionBinding = ref('')
+const notificationBinding = ref(''),completionBinding = ref(''),listenerBinding = ref('')
+const selectedListenerBinding = computed(() => bindings.value.find(row => row.id === listenerBinding.value && row.canConfigureNotifications))
 let requestId = ''
 let generation = 0
 let controller: AbortController | undefined
@@ -93,7 +97,7 @@ const selectedBaseName = computed(() => bases.value.find((base) => base.id === b
 
 function clearPreview() { preview.value = null; confirmed.value = false; requestId = '' }
 watch([baseId, name], clearPreview, { flush: 'sync' })
-function invalidate() { generation++; controller?.abort(); busy.value = false; bindingErrors.value = {}; notificationBinding.value = ''; completionBinding.value = ''; clearPreview() }
+function invalidate() { generation++; controller?.abort(); busy.value = false; bindingErrors.value = {}; notificationBinding.value = ''; completionBinding.value = ''; listenerBinding.value = ''; clearPreview() }
 function close() { invalidate(); emit('close') }
 const unsubscribe = onAuthSessionSwitch(() => { bindings.value = []; bases.value = []; close() })
 onBeforeUnmount(() => { invalidate(); unsubscribe() })
@@ -129,6 +133,7 @@ function load() {
       bases.value = nextBases; bindings.value = nextBindings; bindingErrors.value = {}; loaded.value = true
       if (!nextBindings.some((row) => row.id === notificationBinding.value && row.canConfigureNotifications)) notificationBinding.value = ''
       if (!nextBindings.some((row) => row.id === completionBinding.value && row.canConfigureNotifications)) completionBinding.value = ''
+      if (!nextBindings.some((row) => row.id === listenerBinding.value && row.canConfigureNotifications)) listenerBinding.value = ''
     }
   })
 }

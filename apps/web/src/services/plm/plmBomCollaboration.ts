@@ -42,6 +42,8 @@ const messages: Record<string, string> = {
   SOURCE_UNENTITLED: 'PLM 当前未开通此来源分享能力。',
   SOURCE_CHANGED: '来源快照已变化，请重新预览并确认。',
   PREVIEW_EXPIRED: '分享预览已过期，请重新预览并确认。',
+  LISTENER_CHANGED: '监听已被其他操作修改，请重新加载并再次确认。',
+  RULE_DISABLED: '请先保存已启用的 PLM 修改成功完成规则，再开启来源监听。',
   VERSION_CONFLICT: '协作绑定已被修改，请重新加载状态。',
   BINDING_CONFLICT: '此来源或目标已存在不兼容的绑定，请重新加载状态。',
   NOT_FOUND: '未找到当前可访问的来源或协作表。',
@@ -211,4 +213,23 @@ export async function listBomCompletionWebhookDestinations(id: string, signal?: 
   const values = await call(`${BASE}/${encodeURIComponent(id)}/completion-webhook-destinations`,'GET',undefined,signal)
   if (!Array.isArray(values)) return invalid()
   return values.map((value) => { const row = object(value); return { id: text(row.id),name: text(row.name) } })
+}
+
+export type BomChangeListener = { status: 'not_started' } | {
+  status: 'active' | 'stopped'; generation: string; cursor: number
+}
+function changeListener(value: unknown): BomChangeListener {
+  const row = object(value)
+  if (row.status === 'not_started') return { status: 'not_started' }
+  if (row.status !== 'active' && row.status !== 'stopped') return invalid()
+  return { status: row.status, generation: text(row.generation), cursor: count(row.cursor) }
+}
+export async function getBomChangeListener(id: string, signal?: AbortSignal): Promise<BomChangeListener> {
+  return changeListener(await call(`${BASE}/${encodeURIComponent(id)}/change-listener`, 'GET', undefined, signal))
+}
+export async function startBomChangeListener(id: string, expectedVersion: number, signal?: AbortSignal): Promise<BomChangeListener> {
+  const data = object(await call(`${BASE}/${encodeURIComponent(id)}/change-listener`, 'POST', { expectedVersion }, signal))
+  const result = changeListener(data)
+  if (result.status !== 'active' || data.bindingVersion !== expectedVersion) return invalid()
+  return result
 }
