@@ -31,7 +31,7 @@
       </button>
     </div>
     <div v-if="open" class="directory-picker__panel">
-      <p v-if="loading" class="directory-picker__hint">加载中...</p>
+      <p v-if="loading && !loaded" class="directory-picker__hint">加载中...</p>
       <p v-else-if="error" class="directory-picker__hint directory-picker__hint--empty">{{ error }}</p>
       <p v-else-if="!loaded" class="directory-picker__hint">{{ notLoadedText }}</p>
       <p v-else-if="options.length === 0" class="directory-picker__hint directory-picker__hint--empty">{{ emptyText }}</p>
@@ -41,12 +41,14 @@
           class="directory-picker__search"
           type="search"
           :placeholder="searchPlaceholder"
+          :aria-label="searchPlaceholder"
         />
         <ul class="directory-picker__options">
           <li v-for="option in visibleOptions" :key="option.value">
             <label class="directory-picker__option" :data-value="option.value">
               <input
                 :type="multiple ? 'checkbox' : 'radio'"
+                :name="multiple ? undefined : radioGroupName"
                 :checked="selectedSet.has(option.value)"
                 @change="toggleValue(option.value)"
               />
@@ -64,8 +66,12 @@
   </div>
 </template>
 
+<script lang="ts">
+let nextPickerInstanceId = 0
+</script>
+
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { DirectoryPickerOption } from '../../views/directoryConfigPickerOptions'
 
 const props = withDefaults(defineProps<{
@@ -104,6 +110,18 @@ const emit = defineEmits<{
 
 const open = ref(false)
 const query = ref('')
+const radioGroupName = `directory-picker-${(nextPickerInstanceId += 1)}`
+
+// An open panel whose candidates went away (the parent cleared them after a save, or an
+// integration switch dropped an in-flight load) asks for them again instead of sitting on
+// "loading" with no request running. A failed load is NOT re-requested here (no retry loop);
+// reopening the panel retries it.
+watch(
+  () => [props.loaded, props.loading, props.error] as const,
+  ([loaded, loading, error]) => {
+    if (open.value && !loaded && !loading && !error) emit('open')
+  },
+)
 
 const optionByValue = computed(() => new Map(props.options.map((option) => [option.value, option])))
 const selectedSet = computed(() => new Set(props.selected))

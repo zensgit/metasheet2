@@ -281,7 +281,8 @@
               aria-label="根部门"
               data-testid="directory-root-department-select"
             >
-              <option v-if="!rootDepartmentInTree" :value="draft.rootDepartmentId">
+              <option v-if="!rootDepartmentTreeIds.has('1')" value="1">全公司（ID 1）</option>
+              <option v-if="rootDepartmentNeedsFallbackOption" :value="draft.rootDepartmentId">
                 {{ readRootDepartmentFallbackLabel(draft.rootDepartmentId) }}
               </option>
               <option
@@ -292,6 +293,23 @@
                 {{ readDepartmentPickerPath(department) }}{{ department.isActive ? '' : '（已停用）' }}
               </option>
             </select>
+            <details
+              v-if="rootDepartmentPickerAvailable"
+              class="directory-admin__manual-ids"
+              data-testid="directory-root-department-manual"
+            >
+              <summary>高级：手动填写 ID</summary>
+              <p class="directory-admin__hint">
+                下拉只列出当前根部门下已同步的部门；要扩大同步范围（例如改回全公司），可在这里直接填写部门 ID。
+              </p>
+              <input
+                v-model.trim="draft.rootDepartmentId"
+                class="directory-admin__input"
+                type="text"
+                placeholder="默认 1"
+                aria-label="手动填写根部门 ID"
+              />
+            </details>
             <template v-else>
               <input v-model.trim="draft.rootDepartmentId" class="directory-admin__input" type="text" placeholder="默认 1" />
               <p class="directory-admin__hint" data-testid="directory-root-department-hint">
@@ -2164,9 +2182,11 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import DirectoryDeprovisionEvidencePanel from '../components/directory/DirectoryDeprovisionEvidencePanel.vue'
 import DirectoryOptionPicker from '../components/directory/DirectoryOptionPicker.vue'
+import { presentRoleTitle } from './builtinCatalogPresentation'
 import {
   buildMemberGroupNamespaceOptions,
   buildMemberGroupRoleOptions,
+  isRoleRejectedAsMemberGroupDefault,
   normalizeDirectoryRoleCatalog,
   type DirectoryPickerOption,
   type DirectoryRoleCatalogItem,
@@ -2853,9 +2873,13 @@ const departmentPickerEmptyText = '请先同步一次目录以加载部门'
 const memberGroupRoleOptions = computed(() => buildMemberGroupRoleOptions(roleCatalog.value))
 const memberGroupNamespaceOptions = computed(() => buildMemberGroupNamespaceOptions(roleCatalog.value))
 const rootDepartmentPickerAvailable = computed(() => departmentsLoaded.value && departmentRows.value.length > 0)
-const rootDepartmentInTree = computed(() => {
+const rootDepartmentTreeIds = computed(() => new Set(departmentRows.value.map((department) => department.externalDepartmentId)))
+// The mirror only holds departments under the CURRENT root (the sync walks down from it), so
+// 全公司 (ID 1) is always offered as its own option, and any other id outside the tree keeps an
+// option of its own instead of being silently replaced by the first row.
+const rootDepartmentNeedsFallbackOption = computed(() => {
   const rootDepartmentId = draft.rootDepartmentId.trim()
-  return departmentRows.value.some((department) => department.externalDepartmentId === rootDepartmentId)
+  return rootDepartmentId !== '1' && !rootDepartmentTreeIds.value.has(rootDepartmentId)
 })
 const departmentViewFilterActive = computed(() =>
   departmentFilterActive.value || departmentScopeFilter.value !== 'all',
@@ -3049,6 +3073,7 @@ function resetDraft() {
   testResult.value = null
   runs.value = []
   accounts.value = []
+  cancelPendingDepartmentLoad()
   departments.value = []
   departmentsLoaded.value = false
   departmentLoadError.value = ''
@@ -3760,7 +3785,11 @@ function readUnknownDepartmentLabel(departmentId: string): string {
 }
 
 function readUnknownRoleLabel(roleId: string): string {
-  return `未知角色（${roleId}）`
+  const role = roleCatalog.value.find((item) => item.id === roleId)
+  if (role && isRoleRejectedAsMemberGroupDefault(roleId)) {
+    return `${presentRoleTitle(role) || roleId}（${roleId}，不可作为默认角色，保存会被拒绝）`
+  }
+  return `已删除的角色（${roleId}）`
 }
 
 function readUnknownNamespaceLabel(namespace: string): string {
@@ -3769,14 +3798,18 @@ function readUnknownNamespaceLabel(namespace: string): string {
 
 function readRootDepartmentFallbackLabel(rootDepartmentId: string): string {
   const normalized = rootDepartmentId.trim()
-  if (!normalized || normalized === '1') return '全公司（ID 1）'
+  if (!normalized) return '未填写（保存时按 ID 1）'
+  if (normalized === '1') return '全公司（ID 1）'
   return readUnknownDepartmentLabel(normalized)
 }
 
 async function loadDepartmentsForPicker(): Promise<void> {
   const integration = selectedIntegration.value
-  if (!integration || departmentsLoaded.value || loadingDepartments.value) return
-  await loadDepartments(integration.id)
+  if (!integration || loadingDepartments.value) return
+  // A failed load leaves departmentsLoaded=true (the mirror section shows the error); reopening a
+  // picker retries it, the same way the role catalog does.
+  if (departmentsLoaded.value && !departmentLoadError.value) return
+  await loadDepartments(integration.id, { force: true })
 }
 
 async function ensureRoleCatalogLoaded(): Promise<void> {
@@ -3943,7 +3976,16 @@ function describeDepartmentParent(department: DirectoryDepartment): string {
   return parent ? `${parent.name} (${parent.externalDepartmentId})` : parentId
 }
 
-async function selectIntegration(integrationId: string): Promise<void> {
+async function selectIntegration(
+  integrationId: string,
+  options: { keepDepartments?: boolean } = {},
+): Promise<void> {
+  // A same-integration refresh after a save keeps the loaded tree on screen (pickers stay open,
+  // the root-department select does not flip back to a text box) and reloads it in place.
+  const keepDepartments = options.keepDepartments === true
+    && selectedIntegrationId.value === integrationId
+    && departmentsLoaded.value
+    && !departmentLoadError.value
   // Poll + preview are integration-scoped: kill them only when actually SWITCHING integration
   // (selectIntegration also runs as a same-integration refresh after saves — an active
   // background-sync poll must survive those).
@@ -3952,14 +3994,17 @@ async function selectIntegration(integrationId: string): Promise<void> {
   selectedIntegrationId.value = integrationId
   approvalCardLinkSecretEnvOverrideActive.value = false
   testResult.value = null
-  departments.value = []
-  departmentsLoaded.value = false
-  departmentLoadError.value = ''
-  departmentQuery.value = ''
-  departmentScopeFilter.value = 'all'
+  if (!keepDepartments) {
+    cancelPendingDepartmentLoad()
+    departments.value = []
+    departmentsLoaded.value = false
+    departmentLoadError.value = ''
+    departmentQuery.value = ''
+    departmentScopeFilter.value = 'all'
+    pickedDepartmentId.value = ''
+  }
   manualDepartmentId.value = ''
   manualDepartmentName.value = ''
-  pickedDepartmentId.value = ''
   clearAutoAdmissionOnboardingPackets()
   clearBatchAdmissionOnboardingPackets()
   clearFocusedAccount()
@@ -3984,6 +4029,7 @@ async function selectIntegration(integrationId: string): Promise<void> {
     loadAlerts(integrationId),
     loadReviewItems(integrationId),
     loadAccounts(integrationId),
+    keepDepartments ? loadDepartments(integrationId, { force: true }) : Promise.resolve(),
   ])
 }
 
@@ -4516,7 +4562,7 @@ async function saveIntegration() {
     setStatus(selectedIntegration.value ? '目录集成已更新' : '目录集成已创建')
     testResult.value = null
     await loadIntegrations()
-    if (integration?.id) await selectIntegration(integration.id)
+    if (integration?.id) await selectIntegration(integration.id, { keepDepartments: true })
   } catch (error) {
     setStatus(error instanceof Error ? error.message : '保存目录集成失败', 'error')
   } finally {
@@ -5060,23 +5106,37 @@ async function loadAccounts(integrationId: string) {
   }
 }
 
+// Bumped whenever an in-flight department load must be ignored (integration switch, draft reset,
+// or a newer load). DingTalk department ids repeat across corps, so a late response for
+// integration A must never land in integration B's tree / pickers.
+let departmentLoadToken = 0
+
+function cancelPendingDepartmentLoad(): void {
+  departmentLoadToken += 1
+  loadingDepartments.value = false
+}
+
 async function loadDepartments(integrationId: string, options: { force?: boolean } = {}) {
   if (departmentsLoaded.value && options.force !== true) return
+  const token = ++departmentLoadToken
+  const isStale = () => token !== departmentLoadToken || selectedIntegrationId.value !== integrationId
   loadingDepartments.value = true
   departmentLoadError.value = ''
   try {
     const response = await apiFetch(`/api/admin/directory/integrations/${integrationId}/departments`)
     const body = await readJson(response)
+    if (isStale()) return
     if (!response.ok) throw new Error(readApiError(body, '加载组织架构失败'))
     departments.value = Array.isArray(body?.data?.items) ? body.data.items : []
     departmentsLoaded.value = true
   } catch (error) {
+    if (isStale()) return
     departments.value = []
     departmentsLoaded.value = true
     departmentLoadError.value = error instanceof Error ? error.message : '加载组织架构失败'
     setStatus(departmentLoadError.value, 'error')
   } finally {
-    loadingDepartments.value = false
+    if (token === departmentLoadToken) loadingDepartments.value = false
   }
 }
 

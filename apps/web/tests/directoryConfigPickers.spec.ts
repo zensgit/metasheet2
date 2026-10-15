@@ -305,7 +305,7 @@ describe('directory config pickers', () => {
 
   it('offers only roles and namespaces the backend accepts', async () => {
     installApi(createIntegration({
-      memberGroupDefaultRoleIds: ['retired_role'],
+      memberGroupDefaultRoleIds: ['retired_role', 'attendance_admin'],
       memberGroupDefaultNamespaces: ['legacy-plugin'],
     }))
     const root = await mount()
@@ -317,7 +317,7 @@ describe('directory config pickers', () => {
     expect(optionValues(roles)).not.toContain('admin')
     expect(optionValues(roles)).not.toContain('attendance_admin')
     expect(roles.querySelector('.directory-picker__option[data-value="attendance_employee"]')?.textContent).toContain('考勤员工')
-    expect(chipTexts(roles)).toEqual(['未知角色（retired_role）'])
+    expect(chipTexts(roles)).toEqual(['已删除的角色（retired_role）', '考勤管理员（attendance_admin，不可作为默认角色，保存会被拒绝）'])
     await checkOption(roles, 'crm_user')
 
     const namespaces = await openPicker(root, 'directory-member-group-namespace-picker')
@@ -331,7 +331,7 @@ describe('directory config pickers', () => {
     await checkOption(namespaces, 'stock-prep')
 
     const payload = await save(root)
-    expect(payload.memberGroupDefaultRoleIds).toEqual(['retired_role', 'crm_user'])
+    expect(payload.memberGroupDefaultRoleIds).toEqual(['retired_role', 'attendance_admin', 'crm_user'])
     expect(payload.memberGroupDefaultNamespaces).toEqual(['legacy-plugin', 'stock-prep'])
   })
 
@@ -476,5 +476,131 @@ describe('directory config pickers', () => {
     select.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi()
     expect((await save(root)).rootDepartmentId).toBe('2')
+  })
+
+  it('can widen a too-narrow root back to 全公司 or a typed id even though the mirror never held them', async () => {
+    // Synced from root 2, so department 1 never entered the mirror.
+    installApi(createIntegration({ rootDepartmentId: '2' }), {
+      departments: [
+        department('2', '技术部', '技术部', null, 1),
+        department('5', '前端组', '技术部 / 前端组', '2', 2),
+      ],
+    })
+    const root = await mount()
+    button(root, '从已同步部门中选择').click()
+    await flushUi()
+    const select = root.querySelector('[data-testid="directory-root-department-select"]') as HTMLSelectElement
+    expect(Array.from(select.options).map((option) => option.textContent?.trim())).toEqual(['全公司（ID 1）', '技术部', '技术部 / 前端组'])
+    select.value = '1'
+    select.dispatchEvent(new Event('change', { bubbles: true }))
+    await flushUi()
+    expect((await save(root)).rootDepartmentId).toBe('1')
+
+    const manual = root.querySelector('[data-testid="directory-root-department-manual"]') as HTMLDetailsElement
+    expect(manual.open).toBe(false)
+    expect(manual.querySelector('summary')?.textContent).toContain('高级：手动填写 ID')
+    const input = manual.querySelector('input') as HTMLInputElement
+    input.value = 'corp-wide-9'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await flushUi()
+    const refreshedSelect = root.querySelector('[data-testid="directory-root-department-select"]') as HTMLSelectElement
+    expect(refreshedSelect.value).toBe('corp-wide-9')
+    expect(Array.from(refreshedSelect.options).map((option) => option.textContent?.trim())).toContain('未知部门（ID corp-wide-9）')
+    apiFetchMock.mockClear()
+    expect((await save(root)).rootDepartmentId).toBe('corp-wide-9')
+  })
+
+  it('drops a late department response for the previous integration and loads the new one', async () => {
+    const integrationA = createIntegration()
+    const integrationB = { ...createIntegration({ admissionDepartmentIds: ['2'] }), id: 'dir-2', name: 'DingTalk B', corpId: 'dingcorp-b' }
+    let releaseA: () => void = () => undefined
+    const pendingA = new Promise<void>((resolve) => { releaseA = resolve })
+    apiFetchMock.mockImplementation(async (url: string) => {
+      if (url === '/api/admin/directory/integrations') return json({ ok: true, data: { items: [integrationA, integrationB] } })
+      if (url === '/api/admin/directory/integrations/dir-1/departments') {
+        await pendingA
+        return json({ ok: true, data: { items: DEPARTMENTS, total: DEPARTMENTS.length } })
+      }
+      if (url === '/api/admin/directory/integrations/dir-2/departments') {
+        return json({ ok: true, data: { items: [department('2', 'B 研发部', 'B 公司 / B 研发部', null, 1)], total: 1 } })
+      }
+      if (url.includes('/schedule')) return json({ ok: true, data: { snapshot: null } })
+      return json({ ok: true, data: { items: [], total: 0, page: 1, pageSize: 25 } })
+    })
+    const root = await mount()
+    const admission = await openPicker(root, 'directory-admission-department-picker')
+    expect(countCalls('/api/admin/directory/integrations/dir-1/departments')).toBe(1)
+    expect(admission.textContent).toContain('加载中...')
+
+    const switchToB = Array.from(root.querySelectorAll('.directory-admin__item'))
+      .find((item) => item.textContent?.includes('DingTalk B')) as HTMLButtonElement
+    switchToB.click()
+    await flushUi()
+    // The still-open picker asks for B's departments by itself.
+    expect(countCalls('/api/admin/directory/integrations/dir-2/departments')).toBe(1)
+
+    releaseA()
+    await flushUi()
+    const pickerAfter = picker(root, 'directory-admission-department-picker')
+    expect(optionValues(pickerAfter)).toEqual(['2'])
+    expect(chipTexts(pickerAfter)).toEqual(['B 研发部'])
+    expect(root.textContent).not.toContain('钉钉 / 财务部')
+  })
+
+  it('keeps the tree, the open picker and the root select on screen across a save, reloading in place', async () => {
+    let departmentCalls = 0
+    let releaseReload: () => void = () => undefined
+    installApi(createIntegration({ admissionDepartmentIds: ['2'] }))
+    const fallthrough = apiFetchMock.getMockImplementation()!
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.endsWith('/departments')) {
+        departmentCalls += 1
+        if (departmentCalls === 2) await new Promise<void>((resolve) => { releaseReload = resolve })
+      }
+      return fallthrough(url, init)
+    })
+    const root = await mount()
+    const admission = await openPicker(root, 'directory-admission-department-picker')
+    expect(optionValues(admission)).toEqual(['1', '2', '3'])
+    expect(root.querySelector('[data-testid="directory-root-department-select"]')).toBeTruthy()
+
+    button(root, '保存变更').click()
+    await flushUi()
+    expect(departmentCalls).toBe(2)
+    // Reload still in flight: nothing flips back to the loading text or the root text box.
+    expect(root.querySelector('[data-testid="directory-root-department-select"]')).toBeTruthy()
+    expect(admission.textContent).not.toMatch(/正在加载已同步的部门|加载中/)
+    expect(optionValues(admission)).toEqual(['1', '2', '3'])
+
+    releaseReload()
+    await flushUi()
+    expect(optionValues(admission)).toEqual(['1', '2', '3'])
+    expect(chipTexts(admission)).toEqual(['技术部'])
+  })
+
+  it('retries a failed department load when the picker is reopened', async () => {
+    let departmentCalls = 0
+    installApi(createIntegration())
+    const fallthrough = apiFetchMock.getMockImplementation()!
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url.endsWith('/departments')) {
+        departmentCalls += 1
+        if (departmentCalls === 1) return json({ ok: false, error: { message: 'boom' } }, 500)
+      }
+      return fallthrough(url, init)
+    })
+    const root = await mount()
+    const admission = await openPicker(root, 'directory-admission-department-picker')
+    expect(admission.textContent).toContain('加载部门失败')
+    expect(departmentCalls).toBe(1)
+
+    const toggle = admission.querySelector('.directory-picker__toggle') as HTMLButtonElement
+    toggle.click()
+    await flushUi()
+    toggle.click()
+    await flushUi()
+    expect(departmentCalls).toBe(2)
+    expect(admission.textContent).not.toContain('加载部门失败')
+    expect(optionValues(admission)).toEqual(['1', '2', '3'])
   })
 })
