@@ -49,7 +49,8 @@ export default function plmEmbedRouter(): Router {
   router.get('/api/plm-embed/config', (_req: Request, res: Response) => {
     res.json({
       ok: true,
-      data: { allowed_origins: embedAllowedOrigins(), frame_ancestors: frameAncestorsValue() },
+      data: { allowed_origins: embedAllowedOrigins(), frame_ancestors: frameAncestorsValue(),
+        visual_preview_enabled: process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED === 'true' },
     })
   })
 

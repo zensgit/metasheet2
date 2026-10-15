@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { usePinnedServer } from '../utils/pinned-server'
 
 // Controllable DataSourceManager mock.
-const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn() }))
+const dsMocks = vi.hoisted(() => ({ getDataSource: vi.fn(), current: vi.fn() }))
 
 // Controllable single-use jti store -- same shared store the read relay uses.
 const jtiMocks = vi.hoisted(() => ({ consume: vi.fn() }))
@@ -18,7 +18,7 @@ vi.mock('../../src/db/sharding/tenant-context', () => ({ extractTenantFromHeader
 vi.mock('../../src/metrics/metrics', () => ({ metrics: new Proxy({}, { get: () => ({ inc: () => {} }) }) }))
 vi.mock('../../src/auth/AuthService', () => ({ authService: {} }))
 vi.mock('../../src/routes/data-sources', () => ({
-  getDataSourceManager: () => ({ getDataSource: dsMocks.getDataSource }),
+  getDataSourceManager: () => ({ getDataSource: dsMocks.getDataSource, isVisualReviewSourceCurrent: dsMocks.current }),
 }))
 
 import { isWhitelisted } from '../../src/auth/jwt-middleware'
@@ -139,6 +139,7 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   const pinned = usePinnedServer()
 
   beforeEach(() => {
+    dsMocks.current.mockReset().mockResolvedValue(true)
     dsMocks.getDataSource.mockReset()
     jtiMocks.consume.mockReset()
     jtiMocks.consume.mockResolvedValue(true) // default: first use
@@ -160,6 +161,32 @@ describe('PLM embed discussion WRITE relay (Discussion Phase-3 write-relay, Opti
   })
 
   // --- happy path + no-credential-leak (load-bearing security test) ---
+
+  it.each(['create', 'reply'])('Visual %s rechecks source after the exchange await', async mode => {
+    let release!: (value: ReturnType<typeof credentialResult>) => void
+    let entered!: () => void
+    const atExchange = new Promise<void>(resolve => { entered = resolve })
+    const exchangeDiscussionSession = vi.fn(() => {
+      entered()
+      return new Promise<ReturnType<typeof credentialResult>>(resolve => { release = resolve })
+    })
+    const a = fullAdapter({ exchangeDiscussionSession })
+    dsMocks.getDataSource.mockReturnValue(a)
+    const visual = { body: 'pin', anchor: { kind: 'cad_2d_markup', file_id: 'file', file_version: 'version',
+      content_checksum: 'a'.repeat(64), preview_checksum: 'b'.repeat(64), page: 0 },
+      markup: { schema_version: 1, markup_type: 'pin', file_id: 'file', geometry: { x: 0.2, y: 0.3 },
+        viewport: { width: 3, height: 2, rotation: 0 } } }
+    const pending = request(pinned.url()).post(mode === 'create' ? THREADS_URL : COMMENTS_URL())
+      .set('X-PLM-Embed-Token', mint()).send(mode === 'create' ? { ...visual, target_type: 'item', target_id: 'P1' } : visual)
+      .then(response => response)
+    await atExchange
+    dsMocks.current.mockResolvedValue(false)
+    release(credentialResult())
+    const response = await pending
+    expect(response.status).toBe(422)
+    expect(a.createDiscussionThread).not.toHaveBeenCalled()
+    expect(a.addDiscussionComment).not.toHaveBeenCalled()
+  })
 
   it('happy write: create a thread -> 200, exchange used, credential NEVER in the response body or headers', async () => {
     const createDiscussionThread = vi.fn().mockResolvedValue({ data: [THREAD_DETAIL], metadata: { totalCount: 1 } })

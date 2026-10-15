@@ -416,6 +416,7 @@ import workflowDesignerRouter, { shutdownWorkflowDesignerEngine } from './routes
 import { createPlmBomReviewsRouter } from './routes/plm-bom-reviews'
 import plmWorkbenchRouter from './routes/plm-workbench'
 import plmEmbedRouter from './routes/plm-embed'
+import plmEmbedVisualPreviewRouter from './routes/plm-embed-visual-preview'
 import plmEmbedDiscussionWriteRouter from './routes/plm-embed-discussion'
 import plmEmbedDiscussionReadRouter from './routes/plm-embed-discussion-read'
 import { createHostPluginStorage } from './plugins/plugin-durable-storage'
@@ -2027,6 +2028,7 @@ export class MetaSheetServer {
         }))
       }
       this.app.use(plmEmbedRouter())
+      this.app.use(plmEmbedVisualPreviewRouter())
       this.app.use(plmEmbedDiscussionWriteRouter())
       this.app.use(plmEmbedDiscussionReadRouter())
     } else {

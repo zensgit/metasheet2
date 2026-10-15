@@ -101,6 +101,7 @@ const refCountQueriedIds: string[] = []
 const groupedRefQueries: Array<{ kind: 'canonical' | 'legacy'; ids: string[] }> = []
 
 function fakeDb() {
+  const rows = new Map<string, Record<string, unknown>>()
   // Table-strict: only data_sources (+ integration_external_systems on selectFrom) is
   // modelled; any other table name is a harness error. The lock's table name is pinned in
   // data-source-remove-ordering.test.ts; this matrix only refuses drift.
@@ -177,17 +178,26 @@ function fakeDb() {
       // data_sources: loadFromDatabase's selectAll chain, and (W7-B) removeDataSource's
       // `SELECT id ... FOR UPDATE` lock step at the head of its transaction.
       onlyDataSources('selectFrom', table)
-      const b = { selectAll: () => b, select: () => b, forUpdate: () => b, where: () => b, execute: async () => [] }
+      let id: string | undefined
+      const b = { selectAll: () => b, select: () => b, forUpdate: () => b,
+        where: (key: string, _op: string, value: unknown) => { if (key === 'id') id = String(value); return b },
+        execute: async () => [...rows.values()].filter(row => (!id || row.id === id) && row.is_active && row.deleted_at == null) }
       return b
     },
     insertInto: (table: string) => {
       onlyDataSources('insertInto', table)
-      const b = { values: () => b, onConflict: () => b, execute: async () => [] }
+      let row: Record<string, unknown>
+      const b = { values: (value: Record<string, unknown>) => { row = value; return b },
+        execute: async () => { rows.set(String(row.id), structuredClone(row)); return [] } }
       return b
     },
     updateTable: (table: string) => {
       onlyDataSources('updateTable', table)
-      const b = { set: () => b, where: () => b, execute: async () => [] }
+      let id: string
+      let pending: Record<string, unknown>
+      const b = { set: (value: Record<string, unknown>) => { pending = value; return b },
+        where: (_key: string, _op: string, value: unknown) => { id = String(value); return b },
+        execute: async () => { rows.set(id, { ...rows.get(id), ...pending }); return [] } }
       return b
     },
     deleteFrom: (table: string) => {
@@ -781,7 +791,7 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
     })
     const withSource = async (db: unknown) => {
       const m = new DataSourceManager({ db: db as never })
-      await m.addDataSource(countCfg('err-src'), { ownerId: 'alice' })
+      await m.addDataSource(countCfg('err-src'), { ownerId: 'alice', persist: false })
       return m
     }
 
@@ -830,7 +840,7 @@ describe('DataSourceManager.countExternalSystemReferences (owner-attributed, P2-
       },
     }
     const m = new DataSourceManager({ db: ddlRaceDb as never })
-    await m.addDataSource(countCfg('ddl-race-src'), { ownerId: 'alice' })
+    await m.addDataSource(countCfg('ddl-race-src'), { ownerId: 'alice', persist: false })
     await expect(m.countExternalSystemReferences('ddl-race-src')).rejects.toThrow(/disappeared/)
   })
 })
@@ -1054,7 +1064,7 @@ describe('DataSourceManager.countExternalSystemReferencesByIds (batched; same se
         },
       } as never,
     })
-    await m.addDataSource(batchCfg('asked'), { ownerId: 'alice' })
+    await m.addDataSource(batchCfg('asked'), { ownerId: 'alice', persist: false })
     const counts = await m.countExternalSystemReferencesByIds(['asked'])
     expect([...counts.keys()]).toEqual(['asked'])
     // one canonical row + one legacy row for 'asked'; the unrequested id is dropped
@@ -1078,7 +1088,7 @@ describe('DataSourceManager.countExternalSystemReferencesByIds (batched; same se
     })
     const withSource = async (db: unknown) => {
       const m = new DataSourceManager({ db: db as never })
-      await m.addDataSource(batchCfg('batch-err-src'), { ownerId: 'alice' })
+      await m.addDataSource(batchCfg('batch-err-src'), { ownerId: 'alice', persist: false })
       return m
     }
 

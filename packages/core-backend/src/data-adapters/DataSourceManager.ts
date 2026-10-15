@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util'
+import { assertVisualReviewSourceScope } from '../auth/visual-review-source'
 import { EventEmitter } from 'eventemitter3'
 import { sql } from 'kysely'
 import type { Kysely } from 'kysely'
@@ -187,6 +189,28 @@ function normalizeActor(actor: DataSourceActor): DataSourceActorContext {
   if (actor === undefined) return {}
   if (typeof actor === 'string') return { userId: actor }
   return actor
+}
+
+export const VISUAL_REVIEW_SOURCE_ADMIN_REQUIRED = 'VISUAL_REVIEW_SOURCE_ADMIN_REQUIRED'
+
+function requireVisualSourceAdmin(actor: DataSourceActor): void {
+  if (normalizeActor(actor).platformAdmin === true) return
+  throw Object.assign(new Error('Visual review source configuration requires a platform administrator'), {
+    status: 403, code: VISUAL_REVIEW_SOURCE_ADMIN_REQUIRED,
+  })
+}
+
+// Naming a source does not redirect its approved authority. Every other config
+// field (including credentials) does. Normalize absent/empty optional objects
+// because the existing partial-update route materializes them during merging.
+function visualSourceBinding(config: DataSourceConfig): Omit<DataSourceConfig, 'name'> {
+  const { name: _name, ...binding } = config
+  return {
+    ...binding,
+    options: config.options ?? {},
+    credentials: config.credentials ?? {},
+    poolConfig: config.poolConfig ?? {},
+  }
 }
 
 type AdapterConstructor = new (config: DataSourceConfig) => BaseDataAdapter
@@ -399,6 +423,8 @@ export interface DataSourceManagerOptions {
 
 export class DataSourceManager extends EventEmitter {
   private adapters: Map<string, BaseDataAdapter> = new Map()
+  // Adapter connect may materialize runtime headers; preserve the approved source bytes.
+  private sourceConfigs = new Map<string, DataSourceConfig>()
   private adapterTypes: Map<string, AdapterConstructor> = new Map()
   private connectionPool: Map<string, Promise<void>> = new Map()
   // Per-source ownership for scope enforcement (A0.1). Owner is the enforced
@@ -464,6 +490,7 @@ export class DataSourceManager extends EventEmitter {
             throw new UnsupportedPersistedDataSourceTypeError(record.type)
           }
           const config = this.recordToConfig(record)
+          assertVisualReviewSourceScope(config, normalizeTenantId(record.tenant_id))
           await this.addDataSourceInternal(config, false, 'load') // Don't persist again; LOAD phase pins
           // Ownership lives on the DB record, not in config (recordToConfig strips it)
           this.scopes.set(record.id, this.scopeOfLoadedRecord(record))
@@ -631,6 +658,7 @@ export class DataSourceManager extends EventEmitter {
   async addDataSource(
     config: DataSourceConfig,
     options?: {
+      actor?: DataSourceActor
       ownerId?: string
       workspaceId?: string
       tenantId?: string | null
@@ -653,6 +681,8 @@ export class DataSourceManager extends EventEmitter {
     const ownerId = options?.ownerId || 'system'
     const workspaceId = options?.workspaceId
     const tenantId = normalizeTenantId(options?.tenantId)
+    assertVisualReviewSourceScope(config, tenantId)
+    if (config.options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
     const scopeKind = options?.scopeKind ?? 'private'
     if (!isDataSourceScopeKind(scopeKind)) {
       throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
@@ -671,7 +701,7 @@ export class DataSourceManager extends EventEmitter {
 
     // Persist to database first (if enabled)
     if (persist && this.db) {
-      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
+      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind, { actor: options?.actor })
     }
 
     const adapter = await this.addDataSourceInternal(config, false)
@@ -695,6 +725,7 @@ export class DataSourceManager extends EventEmitter {
     id: string,
     config: DataSourceConfig,
     options?: {
+      actor?: DataSourceActor
       ownerId?: string
       workspaceId?: string
       tenantId?: string | null
@@ -716,6 +747,15 @@ export class DataSourceManager extends EventEmitter {
       throw new Error(`Invalid data source scope kind: ${String(scopeKind)}`)
     }
 
+
+    assertVisualReviewSourceScope(config, tenantId)
+    const previousConfig = existing.getConfig()
+    const wasVisual = previousConfig.options?.visualReviewEnabled === true
+    const isVisual = config.options?.visualReviewEnabled === true
+    const bindingChanged = wasVisual && (!isDeepStrictEqual(visualSourceBinding(previousConfig), visualSourceBinding(config))
+      || ownerId !== priorScope?.ownerId || workspaceId !== (priorScope?.workspaceId ?? undefined)
+      || tenantId !== priorScope?.tenantId || scopeKind !== priorScope?.scopeKind)
+    if ((!wasVisual && isVisual) || bindingChanged) requireVisualSourceAdmin(options?.actor)
     // G-4 MARKER DURABILITY (P1). The k3Destination marker is SET-ONCE: once a source is a declared
     // K3 destination, no later update — from any caller, through any merge — may clear or unset it.
     // This is the manager chokepoint that makes the marker immutable; the route additionally returns a
@@ -740,7 +780,7 @@ export class DataSourceManager extends EventEmitter {
 
     // Persist first — if this throws, the live source is untouched.
     if (this.db !== undefined) {
-      await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind)
+      config = await this.persistDataSource(config, ownerId, workspaceId, tenantId, scopeKind, { actor: options?.actor, previousConfig: this.sourceConfigs.get(id) ?? previousConfig, previousScope: priorScope })
     }
 
     // Persist succeeded: swap the in-memory adapter (no further failure-prone I/O).
@@ -796,6 +836,28 @@ export class DataSourceManager extends EventEmitter {
     if (userId === undefined || scope.ownerId !== userId) {
       throw new Error(`Data source with id '${id}' not found`)
     }
+  }
+
+  /** Visual data-plane admission reads current storage, never just a process cache. */
+  async isVisualReviewSourceCurrent(id: string, tenantId: string, adapter: unknown): Promise<boolean> {
+    if (!this.db || this.adapters.get(id) !== adapter) return false
+    const approved = this.sourceConfigs.get(id)
+    const scope = this.scopes.get(id)
+    if (!approved || !scope || approved.options?.visualReviewEnabled !== true || scope.tenantId !== tenantId) return false
+    try {
+      const rows = await this.db.selectFrom('data_sources' as never).selectAll()
+        .where('id' as never, '=', id as never).where('is_active' as never, '=', true as never)
+        .where('deleted_at' as never, 'is', null).execute() as DataSourceRecord[]
+      const current = rows[0]
+      if (!current || current.type !== 'plm' || normalizeTenantId(current.tenant_id) !== tenantId
+        || current.owner_id !== scope.ownerId || (current.workspace_id ?? null) !== scope.workspaceId
+        || current.scope_kind !== scope.scopeKind) return false
+      const stored = this.recordToConfig(current)
+      assertVisualReviewSourceScope(stored, tenantId)
+      return stored.options?.visualReviewEnabled === true
+        && isDeepStrictEqual(visualSourceBinding(stored), visualSourceBinding(approved))
+        && this.adapters.get(id) === adapter
+    } catch { return false }
   }
 
   /** Stored ownership scope for a data source, if present. */
@@ -949,7 +1011,7 @@ export class DataSourceManager extends EventEmitter {
     }
     this.resealsInFlight.add(id)
     try {
-      return await this.resealLoadFailedDataSourceLocked(db, id, suppliedCredentials, failure)
+      return await this.resealLoadFailedDataSourceLocked(db, id, suppliedCredentials, failure, actor)
     } finally {
       this.resealsInFlight.delete(id)
     }
@@ -959,7 +1021,8 @@ export class DataSourceManager extends EventEmitter {
     db: Kysely<unknown>,
     id: string,
     suppliedCredentials: Credentials,
-    failure: DataSourceLoadFailure
+    failure: DataSourceLoadFailure,
+    actor: DataSourceActor
   ): Promise<DataSourceResealResult> {
     const gone = Symbol('data-source-row-gone')
     const supplied: Credentials = {}
@@ -1046,6 +1109,9 @@ export class DataSourceManager extends EventEmitter {
           poolConfig: storedConfig.poolConfig as DataSourceConfig['poolConfig'],
         }
 
+        assertVisualReviewSourceScope(config, current.tenantId)
+        if (config.options?.visualReviewEnabled === true) requireVisualSourceAdmin(actor)
+
         await trx
           .updateTable('data_sources' as never)
           .set({
@@ -1071,6 +1137,8 @@ export class DataSourceManager extends EventEmitter {
           DATA_SOURCE_LOAD_FAILED_STALE_CODE,
           DATA_SOURCE_LOAD_FAILED_NOT_RESEALABLE_CODE,
           DATA_SOURCE_CREDENTIALS_REQUIRED_CODE,
+          VISUAL_REVIEW_SOURCE_ADMIN_REQUIRED,
+          'VISUAL_REVIEW_SOURCE_SCOPE_INVALID',
         ].includes(code)) {
           throw err
         }
@@ -1333,6 +1401,7 @@ export class DataSourceManager extends EventEmitter {
       throw new Error(`Unsupported data source type: ${config.type}`)
     }
 
+    const approvedConfig = structuredClone(config)
     const adapter = new AdapterClass(config)
 
     // Set up event forwarding
@@ -1353,6 +1422,7 @@ export class DataSourceManager extends EventEmitter {
       this.updateStatus(config.id, 'error', redacted).catch(() => {})
     })
 
+    this.sourceConfigs.set(config.id, approvedConfig)
     this.adapters.set(config.id, adapter)
 
     // SQL WRITE ARM-BINDING (P1 + FIX 2): pin this source's connection fingerprint — but ONLY on the
@@ -1381,34 +1451,60 @@ export class DataSourceManager extends EventEmitter {
     ownerId: string,
     workspaceId: string | null | undefined,
     tenantId: string | null,
-    scopeKind: DataSourceScopeKind
-  ): Promise<void> {
-    if (!this.db) return
-
+    scopeKind: DataSourceScopeKind,
+    context: {
+      actor?: DataSourceActor
+      previousConfig?: DataSourceConfig
+      previousScope?: { ownerId: string; workspaceId: string | null; tenantId: string | null; scopeKind: DataSourceScopeKind }
+    }
+  ): Promise<DataSourceConfig> {
+    if (!this.db) return config
     const record = this.configToRecord(config, ownerId, workspaceId, tenantId, scopeKind)
-
-    await this.db
-      .insertInto('data_sources' as never)
-      .values(record as never)
-      .onConflict((oc) =>
-        oc.column('id' as never).doUpdateSet({
-          name: record.name,
-          type: record.type,
-          config: record.config,
-          owner_id: record.owner_id,
-          workspace_id: record.workspace_id,
-          tenant_id: record.tenant_id,
-          scope_kind: record.scope_kind,
-          status: record.status,
-          auto_connect: record.auto_connect,
-          // Revive a previously soft-deleted row (remove() sets these) so an
-          // updated or recreated-with-same-id source survives a restart.
-          is_active: true,
-          deleted_at: null,
-          updated_at: new Date()
-        } as never)
-      )
-      .execute()
+    const stale = () => Object.assign(new Error('Data source changed; reload before retrying'), {
+      status: 409, code: 'DATA_SOURCE_CONFIGURATION_CONFLICT',
+    })
+    try {
+      return await this.db.transaction().execute(async trx => {
+        const rows = await trx.selectFrom('data_sources' as never).selectAll()
+          .where('id' as never, '=', config.id as never).forUpdate().execute() as DataSourceRecord[]
+        const current = rows[0]
+        if (!context.previousConfig && current?.is_active && current.deleted_at == null) throw stale()
+        if (context.previousConfig && (!current || !current.is_active || current.deleted_at != null)) throw stale()
+        const currentVisual = (current?.config as { options?: AdapterOptions } | undefined)?.options?.visualReviewEnabled === true
+        if (normalizeActor(context.actor).platformAdmin !== true &&
+            (currentVisual || config.options?.visualReviewEnabled === true || context.previousConfig?.options?.visualReviewEnabled === true)) {
+          if (!context.previousConfig || !current || !context.previousScope) requireVisualSourceAdmin(context.actor)
+          else {
+            const scope = context.previousScope
+            if (!isDeepStrictEqual(visualSourceBinding(this.recordToConfig(current)), visualSourceBinding(context.previousConfig))
+              || current.owner_id !== scope.ownerId || (current.workspace_id ?? null) !== scope.workspaceId
+              || normalizeTenantId(current.tenant_id) !== scope.tenantId || current.scope_kind !== scope.scopeKind) throw stale()
+          }
+        }
+        if (currentVisual && normalizeActor(context.actor).platformAdmin !== true) {
+          await trx.updateTable('data_sources' as never).set({ name: record.name, updated_at: new Date() } as never)
+            .where('id' as never, '=', config.id as never).execute()
+          return { ...this.recordToConfig(current), name: config.name }
+        }
+        if (current) {
+          await trx.updateTable('data_sources' as never).set({
+            name: record.name, type: record.type, config: record.config,
+            owner_id: record.owner_id, workspace_id: record.workspace_id,
+            tenant_id: record.tenant_id, scope_kind: record.scope_kind,
+            status: record.status, auto_connect: record.auto_connect,
+            is_active: true, deleted_at: null, updated_at: new Date(),
+          } as never).where('id' as never, '=', config.id as never).execute()
+        } else {
+          // An absent-row lock does not serialize concurrent inserts. The unique
+          // key must refuse the loser; never turn its conflict into an overwrite.
+          await trx.insertInto('data_sources' as never).values(record as never).execute()
+        }
+        return config
+      })
+    } catch (error) {
+      if ((error as { code?: string } | null)?.code === '23505') throw stale()
+      throw error
+    }
   }
 
   /**
@@ -1485,11 +1581,13 @@ export class DataSourceManager extends EventEmitter {
    * database refuses the same delete on `DATA_SOURCE_LIVE_CONNECTION_FK`
    * (23503), which this method also maps to the same 409.
    */
-  async removeDataSource(id: string, options?: { hardDelete?: boolean }): Promise<void> {
+  async removeDataSource(id: string, options?: { hardDelete?: boolean; actor?: DataSourceActor }): Promise<void> {
     const adapter = this.adapters.get(id)
     if (!adapter) {
       throw new Error(`Data source with id '${id}' not found`)
     }
+
+    if (adapter.getConfig().options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
 
     // The 409 the referential check raises. Built once so the transactional, the
     // database-backstop and the memory-only path cannot drift apart.
@@ -1558,12 +1656,15 @@ export class DataSourceManager extends EventEmitter {
           // Lock step 1. Soft-deleted rows are not re-locked: `removeDataSource`
           // is reached only for a source still present in memory, and a row that
           // is already deleted has nothing left to protect.
-          await trx
+          const lockedRows = await trx
             .selectFrom('data_sources' as never)
-            .select('id' as never)
+            .selectAll()
             .where('id' as never, '=', id as never)
             .forUpdate()
-            .execute()
+            .execute() as Array<{ config?: { options?: { visualReviewEnabled?: unknown } } }>
+          // Another manager may have enabled Visual after this process loaded.
+          // Decide from the row protected by the same lock as the delete.
+          if (lockedRows[0]?.config?.options?.visualReviewEnabled === true) requireVisualSourceAdmin(options?.actor)
 
           // ALWAYS counted — there is no force bypass (owner ruling 2026-09-20 ①).
           const referenceCount = await this.countExternalSystemReferences(id, trx)
@@ -1589,7 +1690,8 @@ export class DataSourceManager extends EventEmitter {
       } catch (err) {
         // The referential 409 is a DECISION, not a persistence failure: it must
         // reach the client as itself. Only an uncoded failure is translated.
-        if ((err as { code?: string } | null)?.code === DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE) {
+        if ([DATA_SOURCE_REFERENCED_BY_EXTERNAL_SYSTEMS_CODE, VISUAL_REVIEW_SOURCE_ADMIN_REQUIRED]
+          .includes((err as { code?: string } | null)?.code ?? '')) {
           throw err
         }
         // DATABASE BACKSTOP (PR-B): the soft/hard delete itself violated the
@@ -1629,6 +1731,7 @@ export class DataSourceManager extends EventEmitter {
     this.connectionPool.delete(id)
     this.scopes.delete(id)
     this.loadFailures.delete(id)
+    this.sourceConfigs.delete(id)
 
     // ④ resource release last, and never a reason to undo ② / ③.
     adapter.removeAllListeners()
@@ -2133,6 +2236,7 @@ export class DataSourceManager extends EventEmitter {
   async dispose(): Promise<void> {
     await this.disconnectAll()
     this.adapters.clear()
+    this.sourceConfigs.clear()
     this.adapterTypes.clear()
     this.connectionPool.clear()
     this.scopes.clear()

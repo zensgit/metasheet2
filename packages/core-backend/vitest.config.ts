@@ -29,6 +29,8 @@ export default defineConfig({
     // Most integration tests require database/external services and custom PluginLoader API.
     // Mock-DB integration tests (comment-flow, collab-ux-flow) can run without a live DB.
     exclude: [
+      // Whole-file real PostgreSQL lane: plm-visual-consumer.yml.
+      'tests/integration/plm-visual-source-authority-realdb.test.ts',
       // Whole file runs with EXPECT_DB=1 in plm-bom-listener.yml.
       'tests/integration/plm-bom-review-realdb.test.ts',
       'tests/integration/plm-record-ingress-realdb.test.ts',

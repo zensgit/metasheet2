@@ -60,6 +60,7 @@ const TOKEN_ERROR_TYPE = 'plm-embed:token-error' as const
  * parent, not this module, is responsible for deciding what `purpose` authorizes. */
 const WRITE_TOKEN_PURPOSE = 'discussion-write' as const
 const READ_TOKEN_PURPOSE = 'discussion-read' as const
+const VISUAL_PREVIEW_TOKEN_PURPOSE = 'visual-preview' as const
 
 const TOKEN_REQUEST_TIMEOUT_MS = 5000
 
@@ -126,6 +127,11 @@ export interface PlmEmbedReadTokenClient {
   dispose(): void
 }
 
+export interface PlmEmbedVisualPreviewTokenClient {
+  requestToken(): Promise<string>
+  dispose(): void
+}
+
 /** Error-class pair a `createTokenClient(...)` instance uses to reject with, so the shared factory
  * below stays purpose-agnostic while each public wrapper still throws its own named error types. */
 interface TokenErrorFactory {
@@ -167,8 +173,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function createTokenClient(
   getParentOrigin: () => string | null,
-  purpose: typeof WRITE_TOKEN_PURPOSE | typeof READ_TOKEN_PURPOSE,
-  tokenLabel: 'write' | 'read',
+  purpose: typeof WRITE_TOKEN_PURPOSE | typeof READ_TOKEN_PURPOSE | typeof VISUAL_PREVIEW_TOKEN_PURPOSE,
+  tokenLabel: 'write' | 'read' | 'visual preview',
   errors: TokenErrorFactory,
 ): { request(): Promise<string>; dispose(): void } {
   let inFlight: InFlightRequest | null = null
@@ -298,4 +304,9 @@ export function createPlmEmbedReadTokenClient(getParentOrigin: () => string | nu
     requestReadToken: () => client.request(),
     dispose: () => client.dispose(),
   }
+}
+
+export function createPlmEmbedVisualPreviewTokenClient(getParentOrigin: () => string | null): PlmEmbedVisualPreviewTokenClient {
+  const client = createTokenClient(getParentOrigin, VISUAL_PREVIEW_TOKEN_PURPOSE, 'visual preview', readTokenErrors)
+  return { requestToken: () => client.request(), dispose: () => client.dispose() }
 }

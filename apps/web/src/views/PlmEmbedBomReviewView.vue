@@ -26,17 +26,23 @@
         未找到该 Part 的 BOM 数据。
       </p>
 
-      <template v-else-if="reviewState === 'table' && context">
-        <PlmBomReviewTable :context="context" />
-        <!-- Discussion panel (create + reply + resolve + reopen). Runtime stays DARK: with
-             DISCUSSION_SESSION_ENABLED off, an action's exchange returns the uniform 401 and the panel
-             shows a clean error. Keyed by part_id so switching Part remounts a fresh token client. -->
+      <PlmBomReviewTable v-else-if="reviewState === 'table' && context" :context="context" />
+      <div
+        v-if="visualPartId && (reviewState === 'table' || (visualPreviewEnabled && reviewState === 'empty'))"
+        class="plm-embed-bom__collaboration" :class="{ 'plm-embed-bom__collaboration--visual': visualPreviewEnabled }">
+        <PlmEmbedVisualPreviewPanel
+          v-if="visualPreviewEnabled" :key="`visual:${visualPartId}`"
+          ref="visualPanel" :parent-origin="parentOrigin" :part-id="visualPartId"
+          :comments="visualComments" :draft="visualDraft" :selected-id="selectedVisualComment" :busy="discussionBusy"
+          @draft="visualDraft = $event" @select="selectVisualComment" />
         <PlmEmbedDiscussionPanel
-          :key="context.part.part_id"
-          :parent-origin="parentOrigin"
-          :target="{ target_type: 'item', target_id: context.part.part_id }"
-        />
-      </template>
+          :key="`discussion:${visualPartId}`" ref="discussionPanel"
+          :parent-origin="parentOrigin" :target="{ target_type: 'item', target_id: visualPartId }"
+          :visual-draft="visualDraft" :selected-comment-id="selectedVisualComment"
+          @visual-comments="visualComments = $event" @clear-visual-draft="visualDraft = null"
+          @visual-rejected="invalidateVisual" @select-visual-comment="selectVisualComment"
+          @busy-change="discussionBusy = $event" />
+      </div>
     </div>
   </section>
 </template>
@@ -57,7 +63,7 @@
 //   3. call /api/plm-embed/bom-review/context with the token in the X-PLM-Embed-Token header. There
 //      is NO part input -- the part is bound to the token's part_id claim on the server.
 //   4. render the identical read-only table the standalone panel uses.
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   getPlmEmbedBomContext,
   getPlmEmbedConfig,
@@ -65,12 +71,35 @@ import {
 } from '../services/integration/plmEmbed'
 import PlmBomReviewTable from '../components/plm/PlmBomReviewTable.vue'
 import PlmEmbedDiscussionPanel from '../components/plm/PlmEmbedDiscussionPanel.vue'
+import PlmEmbedVisualPreviewPanel from '../components/plm/PlmEmbedVisualPreviewPanel.vue'
+import type { VisualComment, VisualMarkupDraft } from '../services/integration/plmVisualMarkup'
+
+const visualPanel = ref<InstanceType<typeof PlmEmbedVisualPreviewPanel> | null>(null)
+const discussionPanel = ref<InstanceType<typeof PlmEmbedDiscussionPanel> | null>(null)
+const visualDraft = ref<VisualMarkupDraft | null>(null)
+const visualComments = ref<VisualComment[]>([])
+const selectedVisualComment = ref<string | null>(null)
+const discussionBusy = ref(false)
+function selectVisualComment(id: string): void {
+  selectedVisualComment.value = id
+  discussionPanel.value?.focusComment(id)
+}
+function invalidateVisual(reason: 'stale' | 'denied'): void {
+  visualPanel.value?.invalidate(reason)
+  if (reason === 'denied') {
+    visualComments.value = []
+    selectedVisualComment.value = null
+  }
+}
+
+
 
 // the inbound postMessage envelope: { type: 'plm-embed:token', token: '<jwt>' }
 const EMBED_TOKEN_MESSAGE_TYPE = 'plm-embed:token'
 
 const configReady = ref(false)
 const allowedOrigins = ref<string[]>([])
+const visualPreviewEnabled = ref(false)
 // pinned to the first allowlisted sender; kept for any future outbound use (none today)
 const parentOrigin = ref<string | null>(null)
 const tokenReceived = ref(false)
@@ -80,6 +109,11 @@ const result = ref<PlmEmbedBomResult | null>(null)
 let pendingMessages: MessageEvent[] = []
 
 const context = computed(() => (result.value && result.value.available ? result.value.context : null))
+
+const visualPartId = computed(() => {
+  const current = result.value
+  return current?.available && current.entitled ? context.value?.part.part_id || current.partId : undefined
+})
 
 type EmbedReviewState =
   | 'not-configured'
@@ -109,6 +143,13 @@ const reviewState = computed<EmbedReviewState>(() => {
   if (current.context) return 'table'
   if (current.reason) return 'error'
   return 'empty'
+})
+
+watch([parentOrigin, visualPartId, reviewState], () => {
+  visualDraft.value = null
+  visualComments.value = []
+  selectedVisualComment.value = null
+  discussionBusy.value = false
 })
 
 function isOriginAllowed(origin: string): boolean {
@@ -158,6 +199,7 @@ onMounted(async () => {
   window.addEventListener('message', onMessage)
   const config = await getPlmEmbedConfig()
   allowedOrigins.value = config.allowedOrigins
+  visualPreviewEnabled.value = config.visualPreviewEnabled
   configReady.value = true
   const buffered = pendingMessages
   pendingMessages = []
@@ -175,4 +217,7 @@ onBeforeUnmount(() => {
 .plm-embed-bom__body { display: flex; flex-direction: column; gap: 8px; }
 .plm-embed-bom__hint--muted { opacity: 0.6; }
 .plm-embed-bom__hint--strong { font-weight: 600; }
+.plm-embed-bom__collaboration--visual { display: grid; grid-template-columns: minmax(0, 3fr) minmax(280px, 2fr); gap: 20px; }
+@media (max-width: 900px) { .plm-embed-bom__collaboration--visual { grid-template-columns: minmax(0, 1fr); } }
+
 </style>

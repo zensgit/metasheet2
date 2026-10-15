@@ -37,7 +37,12 @@ describe('getPlmEmbedConfig (P3-D2 — single-source allowlist, fail-closed)', (
     const c = await getPlmEmbedConfig()
     // token-only iframe: must opt out of apiFetch's 401/403 -> handleUnauthorized login redirect
     expect(apiFetchMock).toHaveBeenCalledWith('/api/plm-embed/config', { suppressUnauthorizedRedirect: true })
-    expect(c).toEqual({ allowedOrigins: ['https://plm.example.com'], frameAncestors: 'frame-ancestors https://plm.example.com' })
+    expect(c).toEqual({ allowedOrigins: ['https://plm.example.com'], frameAncestors: 'frame-ancestors https://plm.example.com', visualPreviewEnabled: false })
+  })
+
+  it.each([true, false, 'true', 1, null, undefined])('Visual preview requires literal true (%s)', async value => {
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { allowed_origins: [], visual_preview_enabled: value } }))
+    expect((await getPlmEmbedConfig()).visualPreviewEnabled).toBe(value === true)
   })
 
   it("strips '*', empty, and non-string entries from allowed_origins", async () => {
@@ -51,19 +56,19 @@ describe('getPlmEmbedConfig (P3-D2 — single-source allowlist, fail-closed)', (
   it('fails closed (empty allowlist + frame-ancestors none) on a non-ok response', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: false }, 500))
     const c = await getPlmEmbedConfig()
-    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'" })
+    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'", visualPreviewEnabled: false })
   })
 
   it('fails closed on a malformed (no data) response', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true }))
     const c = await getPlmEmbedConfig()
-    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'" })
+    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'", visualPreviewEnabled: false })
   })
 
   it('fails closed when apiFetch throws', async () => {
     apiFetchMock.mockRejectedValueOnce(new Error('network'))
     const c = await getPlmEmbedConfig()
-    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'" })
+    expect(c).toEqual({ allowedOrigins: [], frameAncestors: "frame-ancestors 'none'", visualPreviewEnabled: false })
   })
 })
 
@@ -84,7 +89,12 @@ describe('getPlmEmbedBomContext (P3-D2 — header-only token + envelope + transi
   it('entitled + valid context -> available/entitled/context', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { available: true, entitled: true, context: CONTEXT, part_id: 'P1' } }))
     const r = await getPlmEmbedBomContext('t')
-    expect(r).toEqual({ available: true, entitled: true, context: CONTEXT })
+    expect(r).toEqual({ available: true, entitled: true, context: CONTEXT, partId: 'P1' })
+  })
+
+  it.each([null, undefined, '', 8])('does not invent an empty-BOM Part from invalid part_id (%s)', async partId => {
+    apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { available: true, entitled: true, context: null, part_id: partId } }))
+    expect(await getPlmEmbedBomContext('t')).toEqual({ available: true, entitled: true, context: null })
   })
 
   it('entitled:false -> upgrade shape (null context)', async () => {
@@ -96,20 +106,20 @@ describe('getPlmEmbedBomContext (P3-D2 — header-only token + envelope + transi
   it('entitled + null context + reason -> keeps reason (transient, not empty)', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { available: true, entitled: true, context: null, reason: 'unavailable', part_id: 'P1' } }))
     const r = await getPlmEmbedBomContext('t')
-    expect(r).toEqual({ available: true, entitled: true, context: null, reason: 'unavailable' })
+    expect(r).toEqual({ available: true, entitled: true, context: null, partId: 'P1', reason: 'unavailable' })
   })
 
   it('entitled + null context + NO reason -> no reason (empty/not-found)', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { available: true, entitled: true, context: null, part_id: 'P1' } }))
     const r = await getPlmEmbedBomContext('t')
-    expect(r).toEqual({ available: true, entitled: true, context: null })
+    expect(r).toEqual({ available: true, entitled: true, context: null, partId: 'P1' })
     expect('reason' in r).toBe(false)
   })
 
   it('drops an entitled context that fails validation -> null context', async () => {
     apiFetchMock.mockResolvedValue(rawJsonResponse({ ok: true, data: { available: true, entitled: true, context: { not: 'a-context' }, part_id: 'P1' } }))
     const r = await getPlmEmbedBomContext('t')
-    expect(r).toEqual({ available: true, entitled: true, context: null })
+    expect(r).toEqual({ available: true, entitled: true, context: null, partId: 'P1' })
   })
 
   it('does not trust a context when entitled is false even if one is present', async () => {

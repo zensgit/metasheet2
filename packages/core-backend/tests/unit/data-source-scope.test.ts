@@ -104,6 +104,7 @@ function statefulFakeDb() {
       set: (s: Record<string, unknown>) => { setObj = s; return b },
       where: (_col: unknown, _op: unknown, val: unknown) => { whereId = val as string; return b },
       execute: async () => {
+        if (control.failUpsert) throw new Error('simulated persist failure')
         if (whereId != null && rows.has(whereId)) rows.set(whereId, { ...rows.get(whereId), ...setObj })
         return []
       },

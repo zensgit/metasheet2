@@ -20,13 +20,14 @@ export interface PlmEmbedConfig {
   allowedOrigins: string[]
   // the CSP frame-ancestors directive value the edge layer should set on the embed HTML document
   frameAncestors: string
+  visualPreviewEnabled: boolean
 }
 
 export type PlmEmbedBomResult =
-  | { available: true; entitled: boolean; context: PlmBomMultitableContext | null; reason?: string }
+  | { available: true; entitled: boolean; context: PlmBomMultitableContext | null; partId?: string; reason?: string }
   | { available: false; reason?: string }
 
-const FAIL_CLOSED_CONFIG: PlmEmbedConfig = { allowedOrigins: [], frameAncestors: "frame-ancestors 'none'" }
+const FAIL_CLOSED_CONFIG: PlmEmbedConfig = { allowedOrigins: [], frameAncestors: "frame-ancestors 'none'", visualPreviewEnabled: false }
 
 export async function getPlmEmbedConfig(): Promise<PlmEmbedConfig> {
   try {
@@ -47,7 +48,7 @@ export async function getPlmEmbedConfig(): Promise<PlmEmbedConfig> {
         typeof data.frame_ancestors === 'string' && data.frame_ancestors.trim()
           ? data.frame_ancestors
           : FAIL_CLOSED_CONFIG.frameAncestors
-      return { allowedOrigins, frameAncestors }
+      return { allowedOrigins, frameAncestors, visualPreviewEnabled: data.visual_preview_enabled === true }
     }
   } catch {
     /* fall through to fail-closed */
@@ -67,17 +68,19 @@ export async function getPlmEmbedBomContext(token: string): Promise<PlmEmbedBomR
     if (!response.ok || !body || body.ok !== true || !body.data || typeof body.data !== 'object') {
       return { available: false, reason: 'unavailable' }
     }
-    const data = body.data as Record<string, unknown>
-    const entitled = data.entitled === true
-    // context is trusted only when entitled AND it validates as a part+lines object
-    const context = entitled && isPlmBomMultitableContext(data.context) ? data.context : null
-    // a relayed reason on an entitled+null-context result means a TRANSIENT provider failure after
-    // the single-use embed token may already be spent. The parent must re-mint/re-post (reopen or
-    // reload the embed), NOT re-call with the same token. A reason-less null context is the
-    // empty/not-found case.
-    const reason = typeof data.reason === 'string' && data.reason.trim() ? data.reason.trim() : undefined
-    return { available: true, entitled, context, ...(reason ? { reason } : {}) }
+    return parsePlmEmbedBomData(body.data as Record<string, unknown>)
   } catch {
     return { available: false, reason: 'unavailable' }
   }
+}
+
+export function parsePlmEmbedBomData(data: Record<string, unknown>): PlmEmbedBomResult {
+  const entitled = data.entitled === true
+  // context is trusted only when entitled AND it validates as a part+lines object
+  const context = entitled && isPlmBomMultitableContext(data.context) ? data.context : null
+  // A reason on entitled+null-context denotes provider failure, not an empty BOM.
+  // The legacy one-shot caller must re-mint rather than replaying its spent token.
+  const reason = typeof data.reason === 'string' && data.reason.trim() ? data.reason.trim() : undefined
+  const partId = entitled && typeof data.part_id === 'string' && data.part_id ? data.part_id : undefined
+  return { available: true, entitled, context, ...(partId ? { partId } : {}), ...(reason ? { reason } : {}) }
 }

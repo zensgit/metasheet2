@@ -243,6 +243,7 @@ const DataSourceCreateSchema = z.object({
     // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
     k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
+    visualReviewEnabled: z.boolean().optional(),
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
@@ -303,6 +304,7 @@ const DataSourceUpdateSchema = z.object({
     // it can only ever make a source MORE restricted (a K3 write is banned by G-4), never less.
     k3Destination: z.boolean().optional(),
     // PLMAdapter runtime options for persisted Yuantus PLM sources.
+    visualReviewEnabled: z.boolean().optional(),
     apiMode: z.string().optional(),
     tenantId: z.string().optional(),
     orgId: z.string().optional(),
@@ -695,7 +697,8 @@ export function dataSourcesRouter(): Router {
       const adapter = await manager.addDataSource(config, {
         ownerId: userId,
         tenantId,
-        scopeKind: 'private'
+        scopeKind: 'private',
+        actor: resolveActor(req),
       })
 
       await auditLog({
@@ -867,7 +870,8 @@ export function dataSourcesRouter(): Router {
       // NOT become its owner. A failed update leaves the original intact.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
-        workspaceId: scope?.workspaceId ?? undefined
+        workspaceId: scope?.workspaceId ?? undefined,
+        actor,
       })
 
       await auditLog({
@@ -1005,7 +1009,8 @@ export function dataSourcesRouter(): Router {
       // credentials but no response surface ever returns credential values.
       const adapter = await manager.updateDataSource(id, newConfig, {
         ownerId: scope?.ownerId ?? resolveUserId(req)!,
-        workspaceId: scope?.workspaceId ?? undefined
+        workspaceId: scope?.workspaceId ?? undefined,
+        actor,
       })
 
       await auditLog({
@@ -1110,7 +1115,7 @@ export function dataSourcesRouter(): Router {
       // Durable-first removal (PERM-04): the manager writes the row FIRST and only then
       // clears memory, and it re-runs the referential count itself inside its transaction.
       // Nothing from the request can relax that check.
-      await manager.removeDataSource(id)
+      await manager.removeDataSource(id, { actor })
 
       await auditLog({
         actorId: req.user?.id?.toString(),

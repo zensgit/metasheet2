@@ -1,7 +1,12 @@
+import { hasVisualMarkupInput, validVisualMarkupBody, type VisualMarkupInput, type VisualMarkupRead } from '../auth/visual-review-markup'
+import { embedAllowedOrigins, embedAudience, embedPublicKeysByKid } from '../auth/embed-config'
+import { verifyEmbedToken, type EmbedTokenClaims } from '../auth/embed-token-verify'
+import { consumeVisualPreviewJti, verifyVisualPreviewToken, type VisualPreviewDescriptor } from '../auth/visual-preview-token'
+import { visualReviewSourceConfigured } from '../auth/visual-review-source'
 import { requirePlmApprovalCard, PlmPersonalApprovalError } from '../services/plm-personal-approval-wire'
 import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
 import { HTTPAdapter } from './HTTPAdapter'
 import type { QueryResult, DataSourceConfig } from './BaseAdapter'
@@ -979,6 +984,7 @@ export interface DiscussionThreadListResult {
 }
 
 export interface DiscussionComment {
+  markup?: VisualMarkupRead | null;
   id: string;
   parent_comment_id: string | null;
   // Soft-deleted comments keep their row (audit) but are redacted at the provider's API
@@ -1023,6 +1029,7 @@ export interface DiscussionSessionCredential {
 }
 
 export interface CreateThreadRequest {
+  markup?: VisualMarkupInput;
   target_type: DiscussionTargetType;
   target_id: string;
   title?: string;
@@ -1032,6 +1039,7 @@ export interface CreateThreadRequest {
 }
 
 export interface AddCommentRequest {
+  markup?: VisualMarkupInput;
   body: string;
   parent_comment_id?: string;
   mentioned_user_ids?: number[];
@@ -1046,6 +1054,12 @@ export interface ThreadTransitionRequest {
   comment?: string;
   mentioned_user_ids?: number[];
 }
+
+export interface VisualPreviewFile { file_id: string; version_id: string; filename: string; version_is_current: boolean }
+export interface VisualPreviewFileList { files: VisualPreviewFile[]; has_more?: boolean }
+export type VisualPreviewImage =
+  | { render: 'unavailable' }
+  | { render: 'available'; bytes: Buffer; mediaType: 'image/png' | 'image/jpeg'; descriptor: VisualPreviewDescriptor }
 
 export class PLMAdapter extends HTTPAdapter {
   private mockMode = false;
@@ -2958,6 +2972,106 @@ export class PLMAdapter extends HTTPAdapter {
     })
   }
 
+  isVisualReviewEnabled(tenantId?: string): boolean {
+    return visualReviewSourceConfigured(this.config, tenantId)
+  }
+
+  private verifyVisualEmbed(token: string): EmbedTokenClaims {
+    const claims = verifyEmbedToken(token, { publicKeysByKid: embedPublicKeysByKid(), audience: embedAudience() })
+    if (this.mockMode || this.apiMode !== 'yuantus' || !this.isVisualReviewEnabled(claims.tenant_id)
+      || this.getEffectiveTenantId() !== claims.tenant_id
+      || !claims.tenant_id || claims.feature_key !== 'bom_multitable'
+      || typeof claims.embed_origin !== 'string' || !embedAllowedOrigins().includes(claims.embed_origin)
+      || !Number.isSafeInteger(claims.exp) || claims.exp! <= Math.floor(Date.now() / 1000)) {
+      throw new Error('Visual preview unavailable')
+    }
+    return claims
+  }
+
+  private async readVisualBytes(response: Response, limit: number): Promise<Buffer> {
+    if (!response.body || Number(response.headers.get('content-length')) > limit) {
+      await response.body?.cancel()
+      throw new Error('Visual preview unavailable')
+    }
+    const reader = response.body.getReader()
+    const chunks: Uint8Array[] = []
+    let size = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      size += value.byteLength
+      if (size > limit) { await reader.cancel(); throw new Error('Visual preview unavailable') }
+      chunks.push(value)
+    }
+    return Buffer.concat(chunks)
+  }
+
+  private async visualPreviewJson(body: Record<string, unknown>): Promise<QueryResult<Record<string, unknown>>> {
+    const baseUrl = this.config.connection.baseURL || this.config.connection.url
+    if (!baseUrl) return { data: [], error: new Error('Visual preview unavailable') }
+    try {
+      const response = await fetch(`${baseUrl}/api/v1/auth/embed/visual-preview-session`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        redirect: 'error', signal: AbortSignal.timeout(15_000),
+      })
+      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0].trim() !== 'application/json') {
+        await response.body?.cancel()
+        return { data: [], error: new Error('Visual preview unavailable') }
+      }
+      const payload: unknown = JSON.parse((await this.readVisualBytes(response, 64 * 1024)).toString('utf8'))
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Invalid preview response')
+      return { data: [payload as Record<string, unknown>], metadata: { totalCount: 1 } }
+    } catch {
+      return { data: [], error: new Error('Visual preview unavailable') }
+    }
+  }
+
+  async listVisualPreviewFiles(embedToken: string): Promise<QueryResult<VisualPreviewFileList>> {
+    try { this.verifyVisualEmbed(embedToken) } catch { return { data: [], error: new Error('Visual preview unavailable') } }
+    const result = await this.visualPreviewJson({ embed_token: embedToken, action: 'list' })
+    if (result.error) return { data: [], error: result.error }
+    return { data: [result.data[0] as unknown as VisualPreviewFileList], metadata: result.metadata }
+  }
+
+  async getVisualPreviewImage(embedToken: string, fileId: string, versionId: string, origin: string): Promise<VisualPreviewImage> {
+    try {
+      const embed = this.verifyVisualEmbed(embedToken)
+      if (embed.embed_origin !== origin) return { render: 'unavailable' }
+      const minted = await this.visualPreviewJson({ embed_token: embedToken, file_id: fileId, version_id: versionId })
+      const capability = minted.data[0]
+      if (minted.error || capability?.render !== 'available' || typeof capability.preview_token !== 'string') return { render: 'unavailable' }
+      const { claims, descriptor } = verifyVisualPreviewToken(capability.preview_token, {
+        publicKeysByKid: embedPublicKeysByKid(), embed, fileId, versionId, origin,
+      })
+      // Metadata does not confer authority. Reject disagreement; all exposed values
+      // are constructed from the independently verified signed capability.
+      for (const key of ['file_id', 'version_id', 'checksum', 'preview_checksum', 'media_type', 'width', 'height', 'page', 'version_is_current'] as const) {
+        if (capability[key] !== claims[key]) return { render: 'unavailable' }
+      }
+      if (!await consumeVisualPreviewJti(claims)) return { render: 'unavailable' }
+      const baseUrl = this.config.connection.baseURL || this.config.connection.url
+      if (!baseUrl) return { render: 'unavailable' }
+      const response = await fetch(`${baseUrl}/api/v1/auth/embed/visual-preview-session`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preview_token: capability.preview_token, origin }),
+        redirect: 'error', signal: AbortSignal.timeout(15_000),
+      })
+      const mediaType = response.headers.get('content-type')?.split(';', 1)[0].trim()
+      if (!response.ok || mediaType !== claims.media_type) {
+        await response.body?.cancel()
+        return { render: 'unavailable' }
+      }
+      const bytes = await this.readVisualBytes(response, 8 * 1024 * 1024)
+      const validMagic = mediaType === 'image/png'
+        ? bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+        : bytes.subarray(0, 3).equals(Buffer.from([255, 216, 255]))
+      if (!validMagic || createHash('sha256').update(bytes).digest('hex') !== claims.preview_checksum
+        || claims.exp <= Math.floor(Date.now() / 1000)) return { render: 'unavailable' }
+      return { render: 'available', bytes, mediaType: claims.media_type, descriptor }
+    } catch {
+      return { render: 'unavailable' }
+    }
+  }
   /**
    * PLM-COLLAB Discussion read-relay: list discussion threads bound to a PLM target, authenticated
    * with a discussion READ credential (`readToken`, from `exchangeDiscussionReadSession`) as the
@@ -3052,6 +3166,10 @@ export class PLMAdapter extends HTTPAdapter {
     sessionToken: string,
     req: CreateThreadRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (hasVisualMarkupInput(req as unknown as Record<string, unknown>)
+      && (!this.isVisualReviewEnabled() || !validVisualMarkupBody(req as unknown as Record<string, unknown>, true))) {
+      return { data: [], error: Object.assign(new Error('Invalid visual markup'), { response: { status: 422 } }) }
+    }
     if (this.mockMode) {
       return {
         data: [{
@@ -3092,6 +3210,10 @@ export class PLMAdapter extends HTTPAdapter {
     threadId: string,
     req: AddCommentRequest,
   ): Promise<QueryResult<DiscussionThreadDetail>> {
+    if (hasVisualMarkupInput(req as unknown as Record<string, unknown>)
+      && (!this.isVisualReviewEnabled() || !validVisualMarkupBody(req as unknown as Record<string, unknown>, false))) {
+      return { data: [], error: Object.assign(new Error('Invalid visual markup'), { response: { status: 422 } }) }
+    }
     if (this.mockMode) {
       return {
         data: [{
