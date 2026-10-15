@@ -71,8 +71,15 @@ A branch run in `/workspace`, where every package's dependencies are installed, 
 | Bridge refusal (`0ac8b5f`) | With only `ApprovalBridgeService.ts` reverted: `expected 409 "Conflict", got 200 "OK"`, 1 failed / 30 passed (31) | 31/31; repeated 10× plus 3× combined with `federation.contract` and `plm-adapter-yuantus` (96/96). One earlier combined run during a concurrent full-suite load reported 1 failure that did not reproduce in those 13 reruns. |
 | Flag registration (`f46c317`) | Negative control (manifest entry removed): 2 failed / 48 passed (50), namely completeness and the reader test | `global-history-flag-manifest` 50/50 (handoff 49/49); `multitable-global-history-flag-status` 21/21 |
 | Vitest exclusion (`18922e0`) | Handoff default config: `Error: DATABASE_URL required` | Branch default config: "No test files found". The dedicated config still loads the file and enforces `DATABASE_URL`. |
+| Write-back audit (this pass) | `plm-workbench-writeback-audit.test.ts` against the unaudited routes: 6 failed / 2 passed (8). The two passes were the pre-provider refusals, which correctly write nothing. | 8/8. Together with the existing BOM write, ECO intent, write-error redaction and data-source ownership route files: 4 files, 67/67. |
 
-Other real-DB suites on the branch (class C, fresh database each): personal approval 16/0/0, record ingress 25/0/0, Visual source authority 14/0/0. Backend `tsc --noEmit` passes. No web source changed.
+Other real-DB suites on the branch (class C, fresh database each, previous pass): personal approval 16/0/0, record ingress 25/0/0, Visual source authority 14/0/0. Backend `tsc --noEmit` passed on the previous head. This pass changes `plm-workbench.ts` and does not rerun those real-DB files; they do not import the workbench router. No web source changed. The 19 pre-existing full-suite reds were not edited and were not rerun.
+
+## Second pass against the eight Yuantus documents
+
+The documents were read from the uploads, not from the Yuantus git tree. Wrapper lines around the fetch are ignored. Reconciliation, the dropped-line question, and the reclassification of SSO, Discussion visibility, revocation, DP1, Stage A, RG source binding and the version roadmap are in the design document. Whole-BOM completion stays unbuilt because those documents do not say how a refresh that drops lines counts.
+
+The write-back audit test does not catch an outcome row written with a different actor than the request, beyond the assertions on `actor_id`. It uses a mocked `pg` query, not PostgreSQL. A deployment whose `operation_audit_logs` table lacks `route` or `meta` fails closed (503, no provider call) rather than writing a partial row.
 
 ### Coverage of the requested scenarios
 
@@ -95,23 +102,26 @@ Gaps that tests here do not catch:
 
 ## Checklist
 
-**Done.** Remote-head verification. Exact-SHA CI read for all five PRs, including earlier failures and not-run checks. Inventory with evidence. Five code fixes and one test-config fix, each with red-then-green. Local real-DB lanes for all four PLM suites. Full-suite comparison at merge base, handoff and branch. Design and verification documents.
+**Done.** Remote-head verification. Exact-SHA CI read for #6413–#6424 and for the previous head `a802744` (48/48). Inventory. The first-pass fixes, each with red-then-green. Write-back audit, red then green (8/8, 67/67 with the surrounding route files). The eight uploaded Yuantus documents read and reconciled. Local real-DB lanes for all four PLM suites on the previous head.
 
 **Not done.**
-- Whole-BOM completion producer.
-- Write-back identity and audit, and a multitable write-back path.
-- Census and guard dispositions for #6418, #6423 and #6424.
-- The `outbound-sql-write-gate` test double.
-- MetaSheet-tenant scoping of personal bindings.
-- SSO, Discussion visibility, revocation propagation, DP1, Stage A, RG source binding, version roadmap.
-- Reading the Yuantus scope documents (not accessible from here).
+- Whole-BOM completion. Open question, in the design document: how lines dropped by a refresh count. Not guessed.
+- Which Yuantus account performs the write. The MetaSheet audit of who requested it is done.
+- Generic pre-review wiring. The reuse review does not name a template, trigger or form mapping.
+- The 19 pre-existing reds owned by #6418/#6423/#6424. Not edited.
+- Personal-binding MetaSheet tenant column.
+- Flag-off legacy bridge.
+
+**Classified, not built here.** SSO and Discussion visibility: Yuantus contract absent. Revocation: done as observe-on-next-call. DP1 and baseline batch: Yuantus-only. Stage A and RG: not defined for MetaSheet in the eight documents. Version/upgrade rehearsal: needs a real environment.
 
 **Pending real environment (owner-approved only).**
 - Paired Yuantus server with real accounts in a read-only window.
 - Real DingTalk delivery.
 - Embed edge CSP and TLS.
+- Upgrade-package install, backup, restore and failed-upgrade handling.
 - Full migration chain and server lifecycle with these commits.
 - Customer acceptance.
+- Exact-head CI of the commit that adds the write-back audit. It is checked once after the single push and recorded in the PR description, not by another commit.
 
 ## Reproduction
 
@@ -119,7 +129,7 @@ From `packages/core-backend`, with `<db-url>` a disposable PostgreSQL database U
 
 ```sh
 pnpm install --frozen-lockfile
-node node_modules/vitest/vitest.mjs run tests/unit/plm-embed-routes.test.ts tests/unit/plm-embed-visual-preview-routes.test.ts tests/unit/approvals-bridge-routes.test.ts tests/unit/plm-personal-approval-routes.test.ts tests/unit/supertest-app-mode-tripwire.test.ts
+node node_modules/vitest/vitest.mjs run tests/unit/plm-embed-routes.test.ts tests/unit/plm-embed-visual-preview-routes.test.ts tests/unit/approvals-bridge-routes.test.ts tests/unit/plm-personal-approval-routes.test.ts tests/unit/supertest-app-mode-tripwire.test.ts tests/unit/plm-workbench-writeback-audit.test.ts tests/unit/plm-workbench-bom-multitable-routes.test.ts tests/unit/plm-workbench-write-error-redaction.test.ts tests/unit/plm-workbench-datasource-ownership.test.ts
 DATABASE_URL=<db-url> EXPECT_DB=1 node node_modules/vitest/vitest.mjs run --config vitest.plm-bom-review.config.ts
 DATABASE_URL=<db-url> EXPECT_DB=1 node node_modules/vitest/vitest.mjs run --config vitest.plm-personal-approval.config.ts
 DATABASE_URL=<db-url> EXPECT_DB=1 node node_modules/vitest/vitest.mjs run --config vitest.plm-record-ingress.config.ts
@@ -133,6 +143,6 @@ From the repository root: `node --test scripts/ops/global-history-flag-manifest.
 ## Residual risks and limits
 
 - Deployments must configure the served org (`x-org-id` through `PLM_ORG_ID`, `plm.orgId` or the source's `options.orgId`). Otherwise the embed relays now refuse with 403 by design.
-- Until gap 2 in the design is closed, the workbench write-back may write as a shared integration account.
-- Whole-BOM completion can be configured but never fires.
-- The local runtime is Node 22, not CI's Node 20. Exact-head CI for #6425 is the authority for CI claims and is tracked in the PR body.
+- The workbench write-back is now audited in MetaSheet and may still be executed by the shared integration account. The audit records the MetaSheet actor, not the Yuantus subject.
+- Whole-BOM completion can be configured and does not fire. The dropped-line rule is unanswered.
+- The local runtime is Node 22, not CI's Node 20. Exact-head CI is the authority for CI claims.
