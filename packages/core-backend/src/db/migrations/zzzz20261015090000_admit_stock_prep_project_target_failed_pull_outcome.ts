@@ -24,6 +24,11 @@ import { sql, type Kysely } from 'kysely'
  *          REFUSES (throws, the migration transaction rolls back, the four-outcome constraint stands): it
  *          never rewrites, nulls or deletes a recorded outcome to make the old constraint fit.
  *
+ * UPGRADE ORDER: the upgrade must run migrations BEFORE the first apply on the new package. Until this migration
+ * has run, 087's CHECK refuses the `failed` stamp, the route logs and swallows that (the stamp never fails the
+ * pull), and the registry keeps the dry-run's `previewed` — a failed apply then shows as `previewed`, never as
+ * `applied`.
+ *
  * VALUES-FREE: the only thing this reads from the table is a count; the refusal names the count.
  */
 

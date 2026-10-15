@@ -8486,6 +8486,14 @@ function requireStockPreparationAudit() {
 
     async stockPreparationOptionsSync(req, res) {
       requireAccess(req, 'admin')
+      // G1 field defect (R67), review LOW-1: the repair leg is chosen by the JSON BODY only. A `projectNo` in
+      // the QUERY STRING (any spelling of its case) is refused before any IO, whatever the body says —
+      // otherwise `?projectNo=…` with an empty body answered 200 after syncing the DEPLOYMENT object, so a
+      // mistyped repair call looked like success while the project sheet stayed broken. A request without
+      // `projectNo` anywhere is unaffected.
+      if (Object.keys(requestQuery(req)).some((key) => key.toLowerCase() === 'projectno')) {
+        throw new HttpRouteError(400, 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID', 'projectNo must be sent in the JSON body, not in the query string', { field: 'projectNo' })
+      }
       // G1 field defect (R67): a body that NAMES `projectNo` is the project-sheet repair leg (see
       // `repairProjectSheetContractOptions`). Without the key nothing below changed — the same normalizer,
       // the same deployment-target sync, the same answer.

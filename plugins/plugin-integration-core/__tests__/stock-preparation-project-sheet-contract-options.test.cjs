@@ -37,6 +37,9 @@
 //   G1-10 THE OVERVIEW CELL: `failed` + code in zh / en; applied / previewed / refused unchanged.
 //   G1-11 THE VOCABULARY: the store enum is the four outcomes, set-equal to the web clamp's list and to the
 //         migration that admits `failed`; 087's list is untouched; the store stamps `failed`.
+//   G1-12 (review LOW-1) `projectNo` in the QUERY STRING, any case, is 400 with no IO — with an empty body (which
+//         used to answer 200 after syncing the DEPLOYMENT object) and with a body that names it too; the body-only
+//         repair is unchanged and a query without the key still reaches the legacy sync.
 
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -570,6 +573,56 @@ test('G1-11 the vocabulary: store = web clamp = the admitting migration; 087 unt
   assert.equal(rows[0].set.last_pull_outcome, 'failed')
   assert.equal(rows[0].set.last_pull_code, 'SELECT_OPTION_NOT_FOUND')
   assert.equal(await store.recordPullOutcome({ tenantId: TENANT, projectNo: PROJECT, outcome: 'succeeded' }), false, 'an outcome outside the enum still stamps nothing')
+})
+
+// ── G1-12 ────────────────────────────────────────────────────────────────────────────────────────────
+
+test('G1-12 projectNo in the query string (any case) is 400 before any IO, with or without a body projectNo; the body-only repair is unchanged', async () => {
+  const h = mount()
+  try {
+    const { objectId } = h.seedRegistryRow(PROJECT)
+    projectSheet.seedObject(h.provisioning, STAGING, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
+    const object = h.provisioning.objects.get(`${STAGING}/${objectId}`)
+    stripDecisionOptions(object)
+    for (const [query, body] of [
+      [{ projectNo: PROJECT }, {}],
+      [{ PROJECTNO: PROJECT }, {}],
+      [{ ProjectNo: PROJECT }, { optionSets: { material_type: [{ value: 'plate' }] } }],
+      [{ projectNo: PROJECT }, { projectNo: PROJECT }],
+      [{ projectno: '' }, { projectNo: PROJECT }],
+    ]) {
+      h.provisioning.calls.length = 0
+      h.db.calls.length = 0
+      const auditBefore = h.auditAppends.length
+      const res = await repair(h, body, { query })
+      assert.equal(res.statusCode, 400, `${JSON.stringify(query)} + ${JSON.stringify(body)}: ${JSON.stringify(res.body)}`)
+      assert.deepEqual(plain(res.body.error), {
+        code: 'STOCK_PREPARATION_OPTION_SYNC_REQUEST_INVALID',
+        message: 'projectNo must be sent in the JSON body, not in the query string',
+        details: { field: 'projectNo' },
+      })
+      assert.deepEqual(h.provisioning.calls, [], 'no host IO: neither the deployment object nor the project sheet is patched')
+      assert.deepEqual(h.db.calls, [], 'no registry IO')
+      assert.equal(h.auditAppends.length, auditBefore, 'no audit row')
+      assert.equal(decisionOptions(object), null, 'the project sheet is untouched')
+    }
+    // Below the admin tier the gate still answers first (403, not the 400).
+    assert.equal((await repair(h, {}, { user: PULLER, query: { projectNo: PROJECT } })).statusCode, 403)
+
+    // A query WITHOUT the key still reaches the legacy deployment sync (G1-09 pins its bytes).
+    h.provisioning.calls.length = 0
+    const legacy = await repair(h, { optionSets: { material_type: [{ value: 'plate', label: 'Plate' }] } }, { query: { tenantId: TENANT } })
+    assert.equal(legacy.statusCode, 200, JSON.stringify(legacy.body))
+    assert.equal(legacy.body.data.target.objectId, STOCK_PREPARATION_MAIN_TABLE_TEMPLATE.objectId)
+
+    // The body-only repair is unchanged.
+    h.provisioning.calls.length = 0
+    const repaired = await repair(h, { projectNo: PROJECT })
+    assert.equal(repaired.statusCode, 200, JSON.stringify(repaired.body))
+    assert.equal(repaired.body.data.target.objectId, objectId)
+    assert.deepEqual(patchCalls(h).map((call) => [call[1], call[2]]), [[objectId, DECISION_FIELD]])
+    assert.deepEqual(decisionOptions(object), CONTRACT_VALUES)
+  } finally { h.restore() }
 })
 
 runFailClosedSuite('stock-preparation-project-sheet-contract-options.test.cjs', tests)
