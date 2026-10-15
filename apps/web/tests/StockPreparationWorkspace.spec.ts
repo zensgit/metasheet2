@@ -228,7 +228,7 @@ describe('Stock Preparation route registration (source drift pin)', () => {
     })
 
     it('plm-workbench focus: anything else redirects to /plm (an empty/loose prefix would break this)', () => {
-      for (const path of ['/multitable', '/apps', '/stock-preparation', '/x', '']) {
+      for (const path of ['/multitable-extra', '/multitableevil/child', '/apps', '/stock-preparation', '/x', '']) {
         expect(decide(path, {}, { plmWorkbenchFocused: true })).toEqual({ action: 'redirect', target: '/plm' })
       }
     })
@@ -254,8 +254,8 @@ describe('Stock Preparation route registration (source drift pin)', () => {
         .toEqual({ action: 'allow' })
     })
 
-    it('the plm allowlist is exactly the five workbench prefixes — all non-empty absolute strings', () => {
-      expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep'])
+    it('the plm allowlist is exactly the six workbench prefixes — all non-empty absolute strings', () => {
+      expect([...PLM_WORKBENCH_ALLOWED_PREFIXES]).toEqual(['/plm', '/workflows', '/approvals', '/integrations', '/stock-prep', '/multitable'])
       expect(PLM_WORKBENCH_ALLOWED_PREFIXES.every((p) => typeof p === 'string' && p.startsWith('/') && p.length > 1)).toBe(true)
     })
 
