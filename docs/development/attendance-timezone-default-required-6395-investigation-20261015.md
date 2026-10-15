@@ -8,7 +8,9 @@
 
 多时区关闭、节假日同步时区、考勤组是否绑定，都不是这条 422 的条件。
 
-## 抛出点（当前 main，仅两处）
+2026-10-15 的[后续 QA 留言](https://github.com/zensgit/metasheet2/issues/6395#issuecomment-6189251143)报告：管理员已持久化本组织默认规则，`rules/default`、`timezone-policy` 及三条总览接口复验均为 200。这是 **QA 报告的配置修复结果**；本轮没有连接目标环境独立复测，也没有产品运行时修复。该 PUT 仅传名称与时区，其余规则字段会采用内置值，尚需业务负责人确认完整规则及打卡/关联单据结果，不能据五个接口 200 宣布全部验收或自动关闭 #6395。对已报告成功的 QA 实例，下一步是获批后的规则及业务核验，不是重复执行下述 PUT。
+
+## 抛出点（冻结源码基线，仅两处）
 
 1. **实际命中。** `plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs:135-148`，`readDefault`。
 
@@ -47,12 +49,12 @@
 
 `GET /api/attendance/settings` 里的 `holidaySync.auto.timezone` 是设置文档的默认值 `'UTC'`（`index.cjs:397-401`），与 `attendance_rules` 无关。
 
-因此响应里的 `orgId: "default"` 加上 `UTC` / `Default` / `09:00–18:00`，只说明下面二者之一：
+不能仅凭 `UTC`、名称或 `data.id` 判断会话组织，必须分开核对响应形状和可信会话中的组织：
 
-- 响应**没有** `data.id`：会话组织就是字面量 `default`，表里没有默认行，200 体是内存常量。
-- 响应**有** `data.id`：那一行属于哨兵组织 `default`；会话组织是另一个 id，严格 reader 只查会话组织，所以仍是零行 422。
+- 响应**没有** `data.id`：返回内存常量；普通组织和字面量 `default` 组织都可能出现。`loadDefaultRule` 用 `targetOrg` 覆盖常量的 `orgId`，查询缺列也可能触发回退；缺少 id 本身不能反推会话组织或表状态。
+- 响应**有** `data.id`：有数据库规则行，但仍须核对该行 `orgId` 是否匹配可信 actor/tenant。普通组织也可能得到哨兵组织 `default` 的行；返回了 id 不等于本组织已有默认规则。反之，会话本身为 `default` 时，也可能确实读到本组织的持久行。
 
-两种形状的操作含义相同：总览使用的会话组织没有自己的持久化默认规则。`timezone=UTC` 不能当作这一行已经写好。
+本现场“缺本组织默认规则”的判断来自同一会话的严格接口错误码；最新 QA 留言另外明确提供了会话组织信息，不是从缺少 id 推导。`timezone=UTC` 不能当作本组织默认规则已经写好。
 
 同一拒绝已有测试：`packages/core-backend/tests/unit/attendance-timezone-policy-routes.test.ts:105-107`（“refuses missing organization default instead of using a global fallback”）。空行、重复、非法时区、`timezone_version = 0` 的码也分开断言（`:224-228`）。
 
@@ -60,16 +62,24 @@
 
 不要做 (B)。让总览改走 `loadDefaultRule` 的内存 `UTC` 或哨兵组织，会绕过上面的测试，也和 #6395 已有决定冲突：多时区关闭时仍要组织自己的默认时区，不用静默回退掩盖缺行。
 
-不要现在做 (C)。Draft #6396 是历史上下文回填加上「已有排班时补默认规则」的受控流程，约 40 个文件。它不改变「零行就 422」这个判定，也不代替在目标环境写入一行。总览 422 本身不阻断打卡以外的已确认路径，不值得为它合并这套流程。
+不要仅为本次总览 422 自动执行 (C)。Draft #6396 是历史上下文回填加上「已有排班时补默认规则」的受控流程，约 40 个文件。它不改变「零行就 422」这个判定，也不代替目标组织的配置验收。原 QA 的“非阻断”仅限已报告的冒烟范围；新上班链路 `prepareLivePunch`（`attendance-timezone-runtime.cjs`，~L257–285）也使用严格 loader，不能推广为打卡不受影响。#6396 的合并、真实回填、部署和启用仍分别先批后动。
 
-**(A) 运维写入，且只写会话组织。** 管理员 `PUT /api/attendance/rules/default`，带上该组织真正使用的 IANA 时区。路由用 `actor.orgId` 插入一行 `is_default = true`（`index.cjs:42451-42476`）。插入前 `prepareSourceChange`（`attendance-timezone-runtime.cjs:849-857`）在本组织还没有默认行时，若已有有效排班、有效轮班、时区伴随行或未结束出差，返回 `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING`，不会插入。空白组织则可以插入，三条总览随后应改 200。写入前可只读看 `GET /api/attendance/timezone-policy`（`attendance-timezone-policy-routes.cjs:27-28`、`:169-170`）：它和总览共用 `readDefault`，现在应同样 422。同时看 `/rules/default` 的 `data.id`，用来区分上面两种显示形状。不要改哨兵组织的行来指望另一个会话组织通过。
+**(A) 仅在目标写入获批后，由管理员确认完整业务规则并写入会话组织。** `PUT /api/attendance/rules/default` 不是时区 PATCH。其 payload 构造（`index.cjs` / PUT default handler，~L42417）对未传字段使用 `DEFAULT_RULE`，再用 `actor.orgId` 插入新默认行（~L42451）。只传时区会同时采用 09:00–18:00、周一至周五、迟到/早退宽限各 10 分钟、严重迟到 30 分钟、缺勤 60 分钟、舍入 5 分钟及默认名称；这些内置值不是该组织历史或当前业务规则的证据。
 
-若 PUT 得到 `ATTENDANCE_TIMEZONE_DEFAULT_MISSING`，停在 **(D)**：总览继续显示「规则时区不可用」。不要手写 SQL 绕过守卫。以后若必须在已有排班上补默认规则，或要修缺冻结上下文的历史日期，再单独批准 #6396，而不是把它当作这次 422 的最小步骤。
+执行前必须确认并显式提供 `name`、`timezone`、`workStartTime`、`workEndTime`、`workingDays`、`lateGraceMinutes`、`earlyGraceMinutes`、`severeLateThresholdMinutes`、`absenceLateThresholdMinutes`、`roundingMinutes`，核对层级约束及可信会话组织。缺失业务依据则停止，不把 `/rules/default` 回退响应直接当作已批准配置复制。插入前 `prepareSourceChange`（`attendance-timezone-runtime.cjs`，~L849–857）若遇有效排班、轮班、时区伴随行或未结束出差，会返回 `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING`；没有这些来源的组织才可能走现有创建路径，这不证明其历史数据为空。其他非预期错误也停止，不反复 PUT 尝试。
+
+获批写入后，核对持久化规则 id、所属组织和全部规则字段，再复验 `rules/default`、`timezone-policy`、三条总览，以及批准测试身份的打卡、补卡/更正和请假等相关业务。接口 200 不能替代计算结果/组织隔离验收。修改默认规则也不恢复缺失的旧冻结上下文；相关历史另走 #6396 的受控门槛。不要修改另一组织的哨兵行或手写 SQL 绕过守卫。
+
+若 PUT 得到 `ATTENDANCE_TIMEZONE_DEFAULT_MISSING`，停在 **(D)**：保留现有错误提示并报告阻碍。不要把停止绕过解释为环境可发布。若必须在已有排班上补默认规则，或修缺冻结上下文的历史日期，按 #6396 的独立批准及验证流程处理。本轮只修正文档，没有再次执行目标 PUT、修复历史或变更开关。
+
+两项 P2 的修正和验证边界见[验证 MD](attendance-timezone-default-required-6395-verification-20261015.md)。
 
 ## English
 
 The 422 means the session org has zero `attendance_rules` rows with `is_default = true`. `readDefault` (`plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs:141`) throws `ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED`. All three overview routes call that reader, including when multi-timezone is off (`attendance-timezone-context-loader.cjs:73-85`). Group membership and `holidaySync.auto.timezone` are not this check.
 
-`GET /rules/default` uses `loadDefaultRule` (`plugins/plugin-attendance/index.cjs:15525-15549`). With no row for the session org it returns the in-memory `DEFAULT_RULE` (`UTC`, no `id`) or a row that belongs to sentinel org `default`. A missing `data.id` means the constant and a session org of literal `default`. A present `data.id` with `orgId` `default` means the sentinel row, while the overview routes query a different org.
+`GET /rules/default` uses `loadDefaultRule` (`plugins/plugin-attendance/index.cjs:15525-15549`). With no row for the session org it can return the in-memory `DEFAULT_RULE` (`UTC`, no `id`) or a row belonging to sentinel org `default`. Missing `data.id` identifies the in-memory result, not the session org: non-sentinel orgs can receive it too, and schema errors also trigger that fallback. A present id does not prove that the row belongs to the authenticated org. Check the trusted actor/tenant separately; the default-required error, not the response id, supports the missing-row diagnosis.
 
-Recommendation: (A) `PUT /api/attendance/rules/default` on the session org with the IANA zone that org uses. If that returns `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING` (`attendance-timezone-runtime.cjs:849-857`), stop at (D) and keep the overview fallback. Do not accept the in-memory UTC value in the overview reader (B). Do not merge Draft #6396 for this non-blocking 422 (C).
+Recommendation: (A) only after target-write approval, persist a fully reviewed rule on the authenticated org. This PUT inserts a default rule and fills omitted fields with built-in hours, working days, grace/threshold/rounding values and name; it is not a timezone-only patch. Explicitly confirm all fields listed above. Missing business evidence, `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING`, or other unexpected errors require a stop, not a SQL bypass or release approval. Validate the stored rule and actual attendance/request behavior. Do not use silent UTC fallback (B) or automatically merge #6396 (C).
+
+The later QA comment reports five endpoints returning 200 after a name/timezone-only PUT. This is reported configuration recovery, not independently rerun target validation or a runtime fix; omitted business-rule fields and end-to-end acceptance remain unconfirmed. The next step for that instance is authorized rule/business verification, not repeating the PUT. Keep #6395 open pending owner acceptance. #6396 merge, real backfill, deployment and enablement remain separately gated.
