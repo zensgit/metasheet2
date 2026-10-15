@@ -43,7 +43,7 @@
         <p data-testid="elearning-grading-attempt-learner">
           {{ elearningLabel('grading.learnerIdLabel', isZh) }}: {{ detail.userId }}
         </p>
-        <p>{{ detail.submittedAt }}</p>
+        <p>{{ formatElearningDate(detail.submittedAt, isZh) }}</p>
       </header>
 
       <p
@@ -166,6 +166,7 @@ import {
   elearningManualGradingErrorMessage,
   elearningManualGradingGradedLabel,
   elearningManualGradingScoreRangeError,
+  formatElearningDate,
 } from './elearningLabels'
 
 const props = defineProps<{ attemptId: string }>()

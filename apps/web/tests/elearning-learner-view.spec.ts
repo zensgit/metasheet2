@@ -118,6 +118,7 @@ import {
   elearningLearnerVideoProgressLabel,
   elearningVideoStatusLabel,
   elearningWatchProgressPercent,
+  formatElearningDate,
 } from '../src/views/elearningLabels'
 
 const COURSE = '11111111-1111-4111-8111-111111111111'
@@ -506,6 +507,27 @@ describe('ElearningLearnerView', () => {
     expect(h.getProfile).not.toHaveBeenCalled()
     const examBtn = root.querySelector('[data-testid="elearning-start-exam"]') as HTMLButtonElement
     expect(examBtn.disabled).toBe(true)
+  })
+
+  it('F13: renders the assignment deadline formatted in local time, never the raw ISO string', async () => {
+    const due = new Date(2026, 7, 25, 9, 5, 30).toISOString()
+    h.list.mockResolvedValue({
+      courses: [course({ assignment: { deadline: due, assignedAt: '2026-01-02T03:04:05.000Z' } })],
+    })
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toBe('2026-08-25 09:05')
+    expect(root.textContent).not.toContain(due)
+    useLocale().setLocale('en')
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toContain('Aug 25, 2026')
+    expect(root.textContent).not.toContain(due)
+  })
+
+  it('F13: shows the no-deadline label when the assignment has none', async () => {
+    const root = mountView()
+    await flushUi()
+    expect(root.querySelector(`[data-testid="elearning-due-${COURSE}"]`)?.textContent).toBe('无')
   })
 
   it('requires visible self-study registration and starts assessment learning after success', async () => {
@@ -3380,5 +3402,27 @@ describe('ElearningLearnerView organization context', () => {
     await flushUi()
     expect(h.startWatch).toHaveBeenCalledTimes(1)
     expect(select.disabled).toBe(true)
+  })
+})
+
+describe('formatElearningDate (F13)', () => {
+  it('formats an ISO instant in local time as YYYY-MM-DD HH:mm for zh', () => {
+    expect(formatElearningDate(new Date(2026, 0, 2, 3, 4, 59).toISOString(), true)).toBe('2026-01-02 03:04')
+    expect(formatElearningDate(new Date(2026, 11, 31, 23, 59).toISOString(), true)).toBe('2026-12-31 23:59')
+  })
+
+  it('uses the en medium date + short time when the viewer is not zh', () => {
+    const text = formatElearningDate(new Date(2026, 7, 25, 9, 5).toISOString(), false)
+    expect(text).toContain('Aug 25, 2026')
+    expect(text).not.toContain('T')
+  })
+
+  it('is null-safe and returns unparseable values unchanged', () => {
+    expect(formatElearningDate(null, true)).toBe('')
+    expect(formatElearningDate(undefined, true)).toBe('')
+    expect(formatElearningDate('', true)).toBe('')
+    expect(formatElearningDate('   ', false)).toBe('')
+    expect(formatElearningDate('not-a-date', true)).toBe('not-a-date')
+    expect(formatElearningDate('2026-13-45T99:00:00Z', false)).toBe('2026-13-45T99:00:00Z')
   })
 })

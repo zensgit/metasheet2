@@ -166,6 +166,7 @@ attendanceEmployeeQuickActionIcons
 attendanceEmployeeWorkspaceCommonIcons
 attendanceEmployeeWorkspacePresentation
 attendanceFeatureOverride
+attendanceLegacyPermissionPayload
 attendanceLocaleControls.spec.ts
 attendanceOverviewRequestReveal
 attendancePayrollHelp.spec.ts
@@ -463,6 +464,7 @@ newTodoPill
 pageShell
 parallelBranchRunsView
 permission-match-parity
+permissionManagementView
 personal-view-client
 platform-app-entry-mismatch-inventory
 platform-app-launcher
@@ -605,6 +607,7 @@ useAttendanceAdminUsers
 useAttendanceRequestTimezone
 useAutoSumTotal
 usePlmExportActions
+userManagementRoleMembership
 userManagementView
 uuid-no-bare-randomuuid
 view-manager-multitable-contract
