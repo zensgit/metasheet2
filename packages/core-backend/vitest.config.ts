@@ -1185,6 +1185,8 @@ export default defineConfig({
       'tests/integration/attendance-online-punch-server-time.db.test.ts',
       'tests/integration/attendance-online-punch-replay.db.test.ts',
       'tests/integration/attendance-schedule-dispatch.test.ts',
+      // Real PostgreSQL; whole-file arg of the approval real-DB step, so the no-DB job must not collect it.
+      'tests/integration/attendance-self-service-revocation-atomicity.db.test.ts',
       'tests/integration/attendance-shift-swap.test.ts',
       'tests/integration/attendance-unscheduled-reminder.test.ts',
       // OBS-1 completeness sweep (2026-08-07): four more non-.db attendance suites in the same
@@ -1197,6 +1199,8 @@ export default defineConfig({
       'tests/integration/attendance-csv-export-bom.test.ts',
       'tests/integration/attendance-files-acl.test.ts',
       'tests/integration/attendance-import-template-prefs.test.ts',
+      // Actual identifier SQL, optional alias schema and strict membership filters require PostgreSQL.
+      'tests/integration/attendance-import-user-identity.db.test.ts',
       'tests/integration/attendance-makeup-punch-policy.test.ts',
       // comment-reactions.api.test.ts needs setup.integration.ts + a live DB (real
       // MetaSheetServer on an ephemeral port + rbacGuard). It is excluded from the

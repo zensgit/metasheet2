@@ -28,6 +28,8 @@ export const IMPORT_HEADER_CONTEXT_KEYS = [
   'shiftname',
   '上班1打卡时间',
   '下班1打卡时间',
+  'clockin',
+  'clockout',
   '考勤结果',
   '考勤组',
   '班次',

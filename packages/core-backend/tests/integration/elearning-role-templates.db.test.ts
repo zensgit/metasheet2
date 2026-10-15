@@ -1660,3 +1660,100 @@ describe('2026-10-12 option ① split step of the legacy floor-role move (real P
     }
   })
 })
+
+describe('#6348 follow-ups of the legacy floor-role move (real PostgreSQL)', () => {
+  type TrimScript = S5aScript & { JS_TRIM_SET_SQL: string; JS_TRIM_CODE_POINTS: readonly number[] }
+
+  it('(c) the script trims in SQL exactly as String.prototype.trim does — U+3000, NBSP, U+FEFF … — where one-argument btrim strips U+0020 only', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as TrimScript
+    const client = await pool.connect()
+    try {
+      const encoding = await client.query<{ server_encoding: string }>('SHOW server_encoding')
+      expect(encoding.rows[0]?.server_encoding).toBe('UTF8')
+      const pads = [...script.JS_TRIM_CODE_POINTS, 0x200b, 0x180e, 0x0085].map((cp) => String.fromCodePoint(cp))
+      const samples = pads.flatMap((pad) => [`${pad}审批与提交${pad}`, `${pad}${pad}OPM x${pad}`, `${pad}`])
+      const rows = await client.query<{ i: number; js_set: string; one_arg: string }>(
+        `SELECT s.i, btrim(s.v, ${script.JS_TRIM_SET_SQL}) AS js_set, btrim(s.v) AS one_arg
+           FROM unnest($1::text[]) WITH ORDINALITY AS s(v, i) ORDER BY s.i`,
+        [samples],
+      )
+      expect(rows.rows).toHaveLength(samples.length)
+      for (const row of rows.rows) {
+        const sample = samples[Number(row.i) - 1]!
+        expect(row.js_set, JSON.stringify(sample)).toBe(sample.trim())
+      }
+      // the defect the follow-up closes: one-argument btrim keeps U+3000 / NBSP
+      const ideographic = rows.rows.find((row) => samples[Number(row.i) - 1] === '\u3000审批与提交\u3000')!
+      expect(ideographic.one_arg).toBe('\u3000审批与提交\u3000')
+      expect(ideographic.js_set).toBe('审批与提交')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('(c)+(d) on real rows: a split name another role carries with U+3000 / NBSP padding refuses; a template visible through the old role\'s padded display name is a LOSS and refuses while the old role has members; the split role stays on the after side on the post-split re-read — rolled back', async () => {
+    const script = (await import(pathToFileURL(S5A_SCRIPT_PATH).href)) as TrimScript
+    const rollback = new Error('rollback 6348 follow-up test')
+    const suffix = randomUUID().replace(/-/g, '').slice(0, 12)
+    const splitRoleId = script.RECOMMENDED_SPLIT_ROLE_ID
+    const member = `opm-f-${suffix}`
+    const split = { roleId: splitRoleId, roleName: script.DEFAULT_SPLIT_ROLE_NAME, roleNameGiven: false }
+    try {
+      await db.transaction().execute(async (trx) => {
+        const client = s5aTrxClient(trx)
+        await s5aResetTemplates(trx)
+        await s5aResetLegacyAndSplit(trx, splitRoleId)
+        await stockPrepTemplatesUp(trx)
+        // the old role's display name carries U+3000 / NBSP padding (trimmed by the server)
+        await sql`INSERT INTO roles (id, name) VALUES ('stock-prep-operator', ${'\u3000OPM legacy floor\u00a0'})`.execute(trx)
+        for (const code of ['stock-prep:read', 'stock-prep:operate', ...OPM_EXTRA_CODES]) {
+          await sql`INSERT INTO role_permissions (role_id, permission_code) VALUES ('stock-prep-operator', ${code})`.execute(trx)
+        }
+        await sql`INSERT INTO user_roles (user_id, role_id) VALUES (${member}, 'stock-prep-operator')`.execute(trx)
+        const runLines = async (apply: boolean) => {
+          const lines: string[] = []
+          const result = await script.run({ client, apply, split, manageTransaction: false, write: (line) => lines.push(line) })
+          return { result, lines }
+        }
+        const scenario = async (label: string, setup: () => Promise<void>, check: () => Promise<void>) => {
+          await sql`SAVEPOINT opm_6348_case`.execute(trx)
+          await setup()
+          await check()
+          await sql`ROLLBACK TO SAVEPOINT opm_6348_case`.execute(trx)
+        }
+
+        await scenario('split name taken under padding', async () => {
+          await sql`INSERT INTO roles (id, name) VALUES (${`opm-other-${suffix}`}, ${'\u3000审批与提交\u00a0'})`.execute(trx)
+        }, async () => {
+          const { result, lines } = await runLines(true)
+          expect(result.exitCode).toBe(2)
+          expect(lines.some((line) => line.startsWith('REFUSED: split:') && line.includes('another role already carries the display name'))).toBe(true)
+          expect(await s5aCodes(trx, 'stock-prep-operator')).toEqual([...OPM_EXTRA_CODES, 'stock-prep:operate', 'stock-prep:read'].sort())
+        })
+
+        await scenario('visibility LOSS through the padded display name', async () => {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-6348-loss-${suffix}`}, 'OPM visibility template', ${JSON.stringify({ type: 'role', ids: ['OPM legacy floor'] })}::jsonb)`.execute(trx)
+        }, async () => {
+          const dry = await runLines(false)
+          expect(dry.result.exitCode).toBe(2)
+          expect(dry.lines.some((line) => line.startsWith('--apply would refuse: stock-prep-operator makes 1 role-scoped approval template(s) visible'))).toBe(true)
+          const applied = await runLines(true)
+          expect(applied.result.exitCode).toBe(2)
+          expect(applied.result.membersMoved).toBe(0)
+          expect(await s5aRoleRows(trx, [splitRoleId])).toEqual([])
+          for (const line of [...dry.lines, ...applied.lines]) expect(line).not.toContain(suffix)
+        })
+
+        await scenario('a list naming the old role and the split role is kept, also after the split statements', async () => {
+          await sql`INSERT INTO approval_templates (key, name, visibility_scope) VALUES (${`opm-6348-kept-${suffix}`}, 'OPM visibility template', ${JSON.stringify({ type: 'role', ids: ['stock-prep-operator', splitRoleId] })}::jsonb)`.execute(trx)
+        }, async () => {
+          const applied = await runLines(true)
+          expect(applied.result, applied.lines.join('\n')).toMatchObject({ exitCode: 0, membersMoved: 1, split: { roleCreated: true, membersAdded: 1, codesRemoved: 3 } })
+        })
+        throw rollback
+      })
+    } catch (error) {
+      if (error !== rollback) throw error
+    }
+  })
+})

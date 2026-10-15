@@ -19,4 +19,17 @@ describe('admin page content search', () => {
     expect(root.querySelector('#absence')?.getAttribute('data-admin-page-search-hidden')).toBeNull()
     expect(root.querySelector('#lookback')?.classList.contains('attendance__page-search-hit')).toBe(false)
   })
+
+  it('leaves the page visible when nothing matches', () => {
+    const root = document.createElement('div')
+    root.innerHTML = `
+      <table><tbody><tr id="row"><td>张三</td></tr></tbody></table>
+      <label class="attendance__field" id="field"><span>班次</span></label>
+    `
+    const result = applyAdminPageContentSearch(root, 'zzz-no-such-page-text')
+    expect(result).toEqual({ matched: 0, hidden: 0 })
+    expect(root.querySelector('[data-admin-page-search-hidden]')).toBeNull()
+    expect(root.querySelector('#row')?.style.display ?? '').toBe('')
+    expect(root.querySelector('#field')?.style.display ?? '').toBe('')
+  })
 })

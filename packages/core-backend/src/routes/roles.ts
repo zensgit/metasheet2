@@ -13,6 +13,8 @@ import {
   type RoleAssignmentResult,
 } from '../rbac/role-assignment'
 import { sendIfRecoveryConflict } from '../db/recovery-conflict'
+// The reserved display-name table lives with the S8 check it also feeds (one source, #6348 fix round 1).
+import { reservedRoleDisplayNameOwner } from '../services/stock-preparation-members'
 import { parsePagination } from '../util/response'
 import { Logger } from '../core/logger'
 
@@ -75,6 +77,21 @@ function sendRolePermissionRequestError(res: Response, error: RolePermissionRequ
 export function isWellFormedNewRoleId(id: string): boolean {
   if (!id || id !== id.trim()) return false
   return !/[\p{Cc}\p{Cf}]/u.test(id)
+}
+
+/**
+ * 400 ROLE_NAME_RESERVED when role `roleId` may not take display name `name`, else null. Never echoes
+ * the name. The table and the comparison form are services/stock-preparation-members.ts
+ * RESERVED_ROLE_DISPLAY_NAME_OWNERS / `reservedRoleDisplayNameOwner`; here a name's OWNER id may take it.
+ */
+function reservedRoleNameRefusal(roleId: string, name: unknown): RolePermissionRequestError | null {
+  const owner = reservedRoleDisplayNameOwner(name)
+  if (owner === null || owner === roleId) return null
+  return new RolePermissionRequestError(
+    400,
+    'ROLE_NAME_RESERVED',
+    'this display name is reserved for a built-in role (admin, a seeded platform role or a built-in stock-prep role) in any case, width or spacing',
+  )
 }
 
 /** Keep log tokens to a conservative charset — a role id is caller-controlled text. */
@@ -601,6 +618,12 @@ export function rolesRouter(): Router {
       await recordRoleWriteRefusal({ action: 'create', actorId, roleId: id, error })
       return sendRolePermissionRequestError(res, error)
     }
+    // Reserved display names (#6348 follow-up): checked before any write, like S8's custom-role check.
+    const nameRefusal = reservedRoleNameRefusal(id, name)
+    if (nameRefusal) {
+      await recordRoleWriteRefusal({ action: 'create', actorId, roleId: id, error: nameRefusal })
+      return sendRolePermissionRequestError(res, nameRefusal)
+    }
     const perms: string[] = Array.isArray(req.body?.permissions)
       ? normalizePermissionCodes(req.body.permissions as unknown[], { strict: false })
       : []
@@ -739,6 +762,15 @@ export function rolesRouter(): Router {
               'This role changed since it was loaded; reload it and re-apply the change',
               { retryable: true },
             )
+          }
+
+          // Reserved display names (#6348 follow-up): a RENAME to one is refused unless this role owns
+          // it; the stored name submitted back unchanged always passes. Compared TRIMMED, not canonical:
+          // the editor sends `name.trim()` (RoleManagementView.vue), and the server reads names trimmed
+          // anyway, so edge whitespace is no change — but `Admin` -> `admin` still is (fix round 1).
+          if (String(name).trim() !== String(lockedRow.name ?? '').trim()) {
+            const nameRefusal = reservedRoleNameRefusal(id, name)
+            if (nameRefusal) throw nameRefusal
           }
 
           if (!desired) {

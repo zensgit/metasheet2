@@ -25,6 +25,7 @@ import {
   isNamespaceAdmissionControlledResource,
   listRoleNamespaces,
   listUserNamespaceAdmissionSnapshots,
+  lockNamespaceAdmissionWrites,
   normalizeNamespace,
   roleIdMatchesNamespaces as matchRoleIdToNamespaces,
   setUserNamespaceAdmission,
@@ -3482,6 +3483,7 @@ export function adminUsersRouter(): Router {
         ? { kind: 'platform-admin' }
         : { kind: 'namespaces', namespaces: delegation.delegableNamespaces }
       let membership: RoleAssignmentResult
+      let disabledNamespaces: string[] = []
       try {
         membership = await transaction(async (client) => {
           if (!delegation.isPlatformAdmin) {
@@ -3510,9 +3512,19 @@ export function adminUsersRouter(): Router {
             )
             if (refusal) throw refusal
           }
-          return action === 'assign'
-            ? assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
-            : unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          if (action === 'assign') {
+            return assignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          }
+          await lockNamespaceAdmissionWrites(client, userId)
+          const removed = await unassignUserRoles({ userIds: [userId], roleId, scope: delegationScope, executor: client })
+          disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
+            userId,
+            namespaces: await listRoleNamespaces(roleId, client.query),
+            actorId: delegation.actorId,
+            source: 'role_unassigned',
+            revokedRoleId: roleId,
+          }, client.query)
+          return removed
         })
       } catch (error) {
         if (!(error instanceof DelegatedRoleRefusal)) throw error
@@ -3537,14 +3549,6 @@ export function adminUsersRouter(): Router {
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, action === 'assign')
       }
-      const disabledNamespaces = action === 'assign'
-        ? []
-        : await disableNamespaceAdmissionsWithoutRoles({
-          userId,
-          namespaces: await listRoleNamespaces(roleId),
-          actorId: delegation.actorId,
-          source: 'role_unassigned',
-        })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5022,6 +5026,8 @@ export function adminUsersRouter(): Router {
         ...snapshot,
         changedRoleId: roleId,
         actorId: adminUserId,
+        roleHeld: Boolean(snapshot?.roles?.includes(roleId)),
+        membershipChanged: (membership?.rowCount ?? 0) > 0,
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return
@@ -5042,14 +5048,25 @@ export function adminUsersRouter(): Router {
       const profile = await fetchUserProfile(userId)
       if (!profile) return jsonError(res, 404, 'NOT_FOUND', 'User not found')
 
-      // One transaction so that losing a main-admin role and losing the audience it was scoped
-      // to land together (see `unassignUserRoles`).
-      const membership = await transaction((client) => unassignUserRoles({
-        userIds: [userId],
-        roleId,
-        scope: { kind: 'platform-admin' },
-        executor: client,
-      }))
+      // The role, scoped audience and revoke witness commit together. Bootstrap uses the
+      // same subject lock before reading eligibility, including when admission is absent.
+      const { membership, disabledNamespaces } = await transaction(async (client) => {
+        await lockNamespaceAdmissionWrites(client, userId)
+        const membership = await unassignUserRoles({
+          userIds: [userId],
+          roleId,
+          scope: { kind: 'platform-admin' },
+          executor: client,
+        })
+        const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
+          userId,
+          namespaces: await listRoleNamespaces(roleId, client.query),
+          actorId: adminUserId,
+          source: 'role_unassigned',
+          revokedRoleId: roleId,
+        }, client.query)
+        return { membership, disabledNamespaces }
+      })
       await auditDelegatedAdminScopeCleanup({
         actorId: adminUserId,
         roleId,
@@ -5059,12 +5076,6 @@ export function adminUsersRouter(): Router {
       if (roleId === PLATFORM_ADMIN_ROLE_ID) {
         await syncLegacyAdminProfile(userId, false)
       }
-      const disabledNamespaces = await disableNamespaceAdmissionsWithoutRoles({
-        userId,
-        namespaces: await listRoleNamespaces(roleId),
-        actorId: adminUserId,
-        source: 'role_unassigned',
-      })
       invalidateUserPerms(userId)
 
       await auditLog({
@@ -5086,6 +5097,8 @@ export function adminUsersRouter(): Router {
         ...snapshot,
         changedRoleId: roleId,
         actorId: adminUserId,
+        roleHeld: Boolean(snapshot?.roles?.includes(roleId)),
+        membershipChanged: (membership?.rowCount ?? 0) > 0,
       })
     } catch (error) {
       if (sendIfRecoveryAuthorityBusy(res, error)) return

@@ -186,6 +186,9 @@ export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-config-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-effectiveness-service.cjs',
   'plugins/plugin-attendance/lib/attendance-group-fixed-schedule-producer-key.cjs',
+  // Import identity resolution selects the employee whose frozen context is built.
+  // Both W6 aggregate bans apply; this is not an exclusion.
+  'plugins/plugin-attendance/lib/attendance-import-user-identity.cjs',
   'plugins/plugin-attendance/lib/attendance-live-punch-order.cjs',
   // The punch route uses this server instant for persisted events and calculations.
   'plugins/plugin-attendance/lib/attendance-online-punch-clock.cjs',

@@ -388,3 +388,12 @@ Mac mini / Node 20 synthetic isolated validation on the merge code: six focused 
 The complete SQL inventory collector passed 63 tests, zero skipped. Actual provenance loader and its test passed: all 63 SHA leaves match the frozen manifest; no manifest rewrite. Backend type-check and its recovery-acceptance configuration passed within `validate:all`; the remaining web/validation steps and new exact-head CI are recorded in the final validation MD and current PR checks after completion. Prior `c188` CI evidence is historical and must not be used for this aligned head.
 
 Release limits remain unchanged: apply the compatible migration and replace producer/worker together; old workers cannot consume extended plans. Retained extended plans block migration rollback. Empty-history rollback evidence does not establish nonempty-history rollback or production-scale performance. The member lock DB test proves `user_orgs` deactivation waits; the additional `users` lock is source-verified, not a new separate concurrent-deactivation drill.
+
+
+## 18. Combined alignment with merged #6404 (2026-10-15)
+
+Owner authorized normal alignment to main `b1cd77359fc6964ce3d71a4e30f208aaa2a67666`, Mac mini synthetic combined validation, existing Draft PR updates and 13 required CI checks. Ready, merge, deployment and enablement remain separately gated; the #6410 main-merge window hold is respected. No rebase or force push.
+
+The sole conflict is `attendance-uuid-validation-routes.test.ts`: imports and adjacent new tests retain both #6051 membership/streaming tests and #6404 alias/activity/CSV precedence tests. The plugin index and full HTTP suite auto-merge; their behavior still requires combined testing. Main includes the #6404 identity resolver, #6407 auth/revocation changes, #6398 repeated-rollback boundary and #6414 stock-prep migration/provenance update. No additional production change is introduced by the alignment.
+
+This section records alignment scope, not a new green claim. The final exact-head verification MD and current PR body will report actual Mac unit/HTTP/PG results, fresh/replayed migrations, rollback compatibility limits, SQL inventory, actual provenance and all 13 mandatory CI outcomes after they finish. Earlier CI evidence in section 17 remains historical.

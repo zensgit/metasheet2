@@ -26,6 +26,7 @@ import {
   recordElearningOpenCompletion,
   type ElearningOpenCompletionDb,
 } from '../../src/services/elearning-open-completion-postgres'
+import { searchElearningAssignees } from '../../src/services/elearning-assignee-directory'
 import {
   publishElearningCourse,
   type ElearningCoursePublishDb,
@@ -1162,5 +1163,75 @@ describe('e-learning content runtime PostgreSQL authority', () => {
     )).rejects.toThrow('ELEARNING_CONTENT_IMMUTABLE')
     await expect(firstPool.query('TRUNCATE elearning_open_completion_requests'))
       .rejects.toThrow('ELEARNING_CONTENT_IMMUTABLE')
+  })
+
+  it('F13 assignee search returns only active members of the caller org, by name or email, LIKE-escaped', async () => {
+    const db = runtimeDb(firstPool)
+    const orgA = org('assignee-a')
+    const orgB = org('assignee-b')
+    const seed = async (
+      userId: string,
+      orgId: string,
+      opts: { name: string; email: string | null; userActive?: boolean; memberActive?: boolean },
+    ): Promise<void> => {
+      await firstPool.query(
+        `INSERT INTO users (
+           id, email, name, password_hash, role, permissions,
+           is_active, is_admin, activation_status, local_password_set,
+           must_change_password, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, 'x', 'user', '[]'::jsonb,
+           $4, FALSE, 'activated', TRUE, FALSE, now(), now()
+         )`,
+        [userId, opts.email, opts.name, opts.userActive ?? true],
+      )
+      await firstPool.query(
+        'INSERT INTO user_orgs (user_id, org_id, is_active) VALUES ($1, $2, $3)',
+        [userId, orgId, opts.memberActive ?? true],
+      )
+    }
+    const tag = NS.replace(/[^a-z0-9]/gi, '')
+    const alice = `${NS}-assignee-alice`
+    const bob = `${NS}-assignee-bob`
+    const percent = `${NS}-assignee-percent`
+    await seed(alice, orgA, { name: `Alice ${tag}`, email: `alice.${tag}@assignee.test` })
+    await seed(bob, orgA, { name: `Bob ${tag}`, email: null })
+    await seed(percent, orgA, { name: `Pct 100% ${tag}`, email: `pct.${tag}@assignee.test` })
+    await seed(`${NS}-assignee-inactive-user`, orgA, { name: `Alice ${tag} gone`, email: null, userActive: false })
+    await seed(`${NS}-assignee-inactive-member`, orgA, { name: `Alice ${tag} left`, email: null, memberActive: false })
+    await seed(`${NS}-assignee-other-org`, orgB, { name: `Alice ${tag} elsewhere`, email: `alice.other.${tag}@assignee.test` })
+    // DingTalk JIT accounts store a synthetic `dingtalk_<unionId>@placeholder.local` mailbox.
+    const dingtalk = `${NS}-assignee-dingtalk`
+    await seed(dingtalk, orgA, { name: `Ding ${tag}`, email: `dingtalk_union${tag}@placeholder.local` })
+
+    const byName = await searchElearningAssignees(db, { orgId: orgA, query: `alice ${tag}`, limit: 20 })
+    expect(byName.items).toEqual([
+      { id: alice, name: `Alice ${tag}`, email: `alice.${tag}@assignee.test` },
+    ])
+    const byEmail = await searchElearningAssignees(db, { orgId: orgA, query: `ALICE.${tag}@`, limit: 20 })
+    expect(byEmail.items.map((item) => item.id)).toEqual([alice])
+    const nullEmail = await searchElearningAssignees(db, { orgId: orgA, query: `bob ${tag}`, limit: 20 })
+    expect(nullEmail.items).toEqual([{ id: bob, name: `Bob ${tag}`, email: null }])
+    // A typed % is literal: "100%" matches the one name containing it, not every row.
+    const literalPercent = await searchElearningAssignees(db, { orgId: orgA, query: '100%', limit: 20 })
+    expect(literalPercent.items.map((item) => item.id)).toEqual([percent])
+    const wildcardOnly = await searchElearningAssignees(db, { orgId: orgA, query: '%', limit: 20 })
+    expect(wildcardOnly.items.map((item) => item.id)).toEqual([percent])
+    // Whole-org listing (empty query) stays inside orgA's active members and honours the limit.
+    const listing = await searchElearningAssignees(db, { orgId: orgA, query: '', limit: 20 })
+    expect(listing.items.map((item) => item.id).sort()).toEqual([alice, bob, dingtalk, percent].sort())
+    // The placeholder mailbox is never returned and never matched; the person stays findable by name.
+    expect(listing.items.find((item) => item.id === dingtalk)).toEqual({ id: dingtalk, name: `Ding ${tag}`, email: null })
+    expect(JSON.stringify(listing)).not.toContain('placeholder.local')
+    const byPlaceholder = await searchElearningAssignees(db, { orgId: orgA, query: `dingtalk_union${tag}`, limit: 20 })
+    expect(byPlaceholder.items).toEqual([])
+    const byPlaceholderDomain = await searchElearningAssignees(db, { orgId: orgA, query: 'placeholder.local', limit: 20 })
+    expect(byPlaceholderDomain.items).toEqual([])
+    const dingByName = await searchElearningAssignees(db, { orgId: orgA, query: `ding ${tag}`, limit: 20 })
+    expect(dingByName.items).toEqual([{ id: dingtalk, name: `Ding ${tag}`, email: null }])
+    const limited = await searchElearningAssignees(db, { orgId: orgA, query: '', limit: 1 })
+    expect(limited.items).toHaveLength(1)
+    const otherOrg = await searchElearningAssignees(db, { orgId: orgB, query: `alice ${tag}`, limit: 20 })
+    expect(otherOrg.items.map((item) => item.id)).toEqual([`${NS}-assignee-other-org`])
   })
 })

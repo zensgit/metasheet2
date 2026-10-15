@@ -11,6 +11,7 @@ import http from 'http'
 import * as bcrypt from 'bcryptjs'
 import { AttendanceExpiryService } from '../../src/services/AttendanceExpiryService'
 import { AttendanceScheduler } from '../../src/services/AttendanceScheduler'
+import { assertLegacyGoldenCompletedJobTiming } from '../utils/attendance-legacy-golden-timing'
 import {
   snapshotAttendanceSettingsRow,
   restoreAttendanceSettingsRow,
@@ -332,12 +333,13 @@ async function waitForImportUploadCleanup(
   throw new Error(`ATTENDANCE_IMPORT_UPLOAD_CLEANUP_NOT_OBSERVED:${remainingCount}`)
 }
 
-async function fetchImportJob(baseUrl: string, token: string, jobId: string): Promise<any> {
+async function fetchImportJob(baseUrl: string, token: string, jobId: string, orgId?: string): Promise<any> {
   const jobRes = await requestJson(`${baseUrl}/api/attendance/import/jobs/${jobId}`, {
     method: 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
+      ...(orgId ? { 'x-org-id': orgId } : {}),
     },
   })
   expect(jobRes.status).toBe(200)
@@ -349,6 +351,7 @@ async function waitForImportJobCompletion(
   token: string,
   jobId: string,
   {
+    orgId,
     attempts = 480,
     intervalMs = 250,
     failureMessage = 'async import job failed',
@@ -356,6 +359,7 @@ async function waitForImportJobCompletion(
     settleAttempts = 40,
     settleIntervalMs = 250,
   }: {
+    orgId?: string
     attempts?: number
     intervalMs?: number
     failureMessage?: string
@@ -373,7 +377,7 @@ async function waitForImportJobCompletion(
   let lastJobData: any = null
 
   for (let index = 0; index < attempts; index += 1) {
-    lastJobData = await fetchImportJob(baseUrl, token, jobId)
+    lastJobData = await fetchImportJob(baseUrl, token, jobId, orgId)
     const status = String(lastJobData?.status || '')
     if (status === 'completed') {
       if (!settle) return lastJobData
@@ -383,7 +387,7 @@ async function waitForImportJobCompletion(
         // eslint-disable-next-line no-await-in-loop
         await delay(settleIntervalMs)
         // eslint-disable-next-line no-await-in-loop
-        lastJobData = await fetchImportJob(baseUrl, token, jobId)
+        lastJobData = await fetchImportJob(baseUrl, token, jobId, orgId)
       }
       throw new Error(
         `Import job ${jobId} reached 'completed' but its summary did not settle within ` +
@@ -1791,8 +1795,8 @@ attendanceIntegrationDescribe(
       },
     })
     expect(importTemplateCsvRes.status).toBe(200)
-    expect(importTemplateCsvRes.raw).toContain('日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
-    expect(importTemplateCsvRes.raw).toContain('2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,')
+    expect(importTemplateCsvRes.raw).toContain('UserId,日期,工号,姓名,考勤组,上班1打卡时间,下班1打卡时间,考勤结果,异常原因')
+    expect(importTemplateCsvRes.raw).toContain('user@example.com,2026-03-23,EMP001,张三,总部日班,2026-03-23 09:00,2026-03-23 18:00,正常,')
 
     const importTemplateCsvProfileRes = await requestJson(`${baseUrl}/api/attendance/import/template.csv?profileId=manual_rows`, {
       headers: {
@@ -14306,8 +14310,20 @@ attendanceIntegrationDescribe(
   it('keeps large rows payload for commit-async jobs when csv payload is absent', async () => {
     if (!baseUrl) return
 
-    const tokenRes = await requestJson(
-      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    // This stress fixture retains append-only history after rollback. Keep it out
+    // of the shared default org used by later calendar/source-change tests.
+    const orgId = randomUUID()
+    const ruleId = randomUUID()
+    await settingsRowPool!.query(
+      `INSERT INTO attendance_rules
+         (id, org_id, name, timezone, timezone_version, work_start_time, work_end_time, working_days, is_default)
+       VALUES ($1, $2, 'owned large rows fixture', 'UTC', 1, '09:00', '18:00', '[1,2,3,4,5]'::jsonb, true)`,
+      [ruleId, orgId],
+    )
+    seededDefaultRuleIds.push(ruleId)
+
+    const tokenRes = await requestAdminFixtureToken(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(sharedImportUserId)}&tenantId=${encodeURIComponent(orgId)}&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
     )
     const token = (tokenRes.body as { token?: string } | undefined)?.token
     if (!token) return
@@ -14316,6 +14332,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: '{}',
@@ -14327,6 +14344,8 @@ attendanceIntegrationDescribe(
     const seedDate = new Date(Date.UTC(2026, 0, 1))
     const totalRows = 5_001
     const distinctUsers = 500
+    const largeUserIds = Array.from({ length: distinctUsers }, () => randomUUID())
+    for (const userId of largeUserIds) await seedNeutralAttendanceSubjectForTest(userId, orgId)
     const rows = Array.from({ length: totalRows }, (_, index) => {
       const dayOffset = Math.floor(index / distinctUsers)
       const rowDate = new Date(seedDate)
@@ -14334,7 +14353,7 @@ attendanceIntegrationDescribe(
       const workDate = rowDate.toISOString().slice(0, 10)
       return {
         workDate,
-        userId: `attendance-large-${String((index % distinctUsers) + 1).padStart(5, '0')}`,
+        userId: largeUserIds[index % distinctUsers],
         fields: {
           firstInAt: `${workDate}T09:00:00Z`,
           lastOutAt: `${workDate}T18:00:00Z`,
@@ -14345,6 +14364,7 @@ attendanceIntegrationDescribe(
     const idempotencyKey = `integration-async-rows-large-${Date.now().toString(36)}`
 
     const commitPayload = {
+      orgId,
       userId: sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
@@ -14357,6 +14377,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(commitPayload),
@@ -14371,6 +14392,7 @@ attendanceIntegrationDescribe(
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(retryPayload),
@@ -14381,6 +14403,7 @@ attendanceIntegrationDescribe(
     expect(retryData?.idempotent).toBe(true)
 
     const completedJob = await waitForImportJobCompletion(baseUrl, token, initialJobId, {
+      orgId,
       attempts: 3000,
       intervalMs: 50,
       failureMessage: 'large rows async job failed',
@@ -14389,17 +14412,37 @@ attendanceIntegrationDescribe(
 
     expect(completedJob).toBeTruthy()
     expect(batchId).toBeTruthy()
-    expect(Number(completedJob?.processedRows ?? 0)).toBeGreaterThanOrEqual(totalRows)
+    expect(Number(completedJob?.processedRows ?? 0)).toBe(totalRows)
+    expect(Number(completedJob?.failedRows ?? 0)).toBe(0)
+    const writtenRows = await settingsRowPool!.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM attendance_records WHERE source_batch_id = $1 AND org_id = $2',
+      [batchId, orgId],
+    )
+    expect(writtenRows.rows).toEqual([{ n: totalRows }])
 
     const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${token}`,
+        'x-org-id': orgId,
         'Content-Type': 'application/json',
       },
       body: '{}',
     })
     expect(rollbackRes.status).toBe(200)
+
+    // Global calendar writes enumerate active members of every org. Retire only
+    // this fixture's newly inserted memberships after the completed rollback;
+    // retain immutable records and companions for the normal history contract.
+    const ownedMembers = seededNeutralMemberships
+      .filter(membership => membership.orgId === orgId)
+      .map(membership => membership.userId)
+    expect(ownedMembers).toHaveLength(distinctUsers)
+    const retired = await settingsRowPool!.query(
+      'UPDATE user_orgs SET is_active = false WHERE org_id = $1 AND user_id = ANY($2::text[]) AND is_active = true',
+      [orgId, ownedMembers],
+    )
+    expect(retired.rowCount).toBe(distinctUsers)
   }, 180000)
 
   it('keeps large entries payload for commit-async jobs when csv payload is absent', async () => {
@@ -15692,6 +15735,164 @@ attendanceIntegrationDescribe(
     await expect(fs.stat(metaPath)).rejects.toBeTruthy()
   })
 
+  it('resolves an email UserId on preview and commit, and skips an unknown email without HTTP 500', async () => {
+    if (!baseUrl) return
+    if (!importUploadDir) return
+
+    const subjectId = randomUUID()
+    await ensureActiveImportIdentitiesForTest(subjectId)
+    const tokenRes = await requestJson(
+      `${baseUrl}/api/auth/dev-token?userId=${encodeURIComponent(subjectId)}&tenantId=default&roles=admin&perms=attendance:read,attendance:write,attendance:admin`
+    )
+    const token = (tokenRes.body as { token?: string } | undefined)?.token
+    expect(token).toBeTruthy()
+    if (!token) return
+
+    const orgId = 'default'
+    const email = `${subjectId}@example.test`
+    const knownCsv = [
+      'UserId,Date,ClockIn,ClockOut',
+      `${email},2026-03-23,2026-03-23 09:00,2026-03-23 18:00`,
+      '',
+    ].join('\n')
+
+    const uploadKnown = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=email-userid.csv`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'text/csv',
+      },
+      body: knownCsv,
+    })
+    expect(uploadKnown.status).toBe(201)
+    const knownFileId = (uploadKnown.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    expect(typeof knownFileId).toBe('string')
+    if (!knownFileId) return
+
+    const preparePreview = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    expect(preparePreview.status).toBe(200)
+    const previewToken = (preparePreview.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(previewToken).toBeTruthy()
+    if (!previewToken) return
+
+    const previewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: knownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: previewToken,
+      }),
+    })
+    expect(previewRes.status).toBe(200)
+    const previewItem = (previewRes.body as { data?: { items?: Array<{ userId?: string; workDate?: string; status?: string; warnings?: string[] }> } } | undefined)?.data?.items?.[0]
+    expect(previewItem?.userId).toBe(subjectId)
+    expect(previewItem?.workDate).toBe('2026-03-23')
+    expect(previewItem?.status).not.toBe('invalid')
+    expect(previewItem?.warnings ?? []).not.toEqual(expect.arrayContaining([expect.stringContaining('Unresolved user identifier')]))
+
+    const prepareCommit = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const commitToken = (prepareCommit.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    expect(commitToken).toBeTruthy()
+    if (!commitToken) return
+
+    const commitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: knownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken,
+        returnItems: false,
+      }),
+    })
+    expect(commitRes.status).toBe(200)
+    const commitBody = commitRes.body as { ok?: boolean; error?: { code?: string }; data?: { imported?: number; failedRows?: number; batchId?: string } }
+    expect(commitBody.error?.code).not.toBe('INTERNAL_ERROR')
+    expect(commitBody.data?.imported).toBe(1)
+    expect(commitBody.data?.failedRows).toBe(0)
+
+    const unknownCsv = [
+      'UserId,日期,上班1打卡时间,下班1打卡时间',
+      'nobody-not-a-member@metasheet.test,2026-03-24,2026-03-24 09:00,2026-03-24 18:00',
+      '',
+    ].join('\n')
+    const uploadUnknown = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=unknown-email.csv`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'text/csv' },
+      body: unknownCsv,
+    })
+    expect(uploadUnknown.status).toBe(201)
+    const unknownFileId = (uploadUnknown.body as { data?: { fileId?: string } } | undefined)?.data?.fileId
+    if (!unknownFileId) return
+
+    const prepareUnknownPreview = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const unknownPreviewToken = (prepareUnknownPreview.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    const unknownPreviewRes = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: unknownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: unknownPreviewToken,
+      }),
+    })
+    expect(unknownPreviewRes.status).toBe(200)
+    const unknownItem = (unknownPreviewRes.body as { data?: { items?: Array<{ status?: string; warnings?: string[] }> } } | undefined)?.data?.items?.[0]
+    expect(unknownItem?.status).toBe('invalid')
+    expect(unknownItem?.warnings?.join('\n')).toContain('Unresolved user identifier')
+    expect(unknownItem?.warnings?.join('\n')).not.toContain('nobody-not-a-member@metasheet.test')
+
+    const prepareUnknownCommit = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const unknownCommitToken = (prepareUnknownCommit.body as { data?: { commitToken?: string } } | undefined)?.data?.commitToken
+    const unknownCommitRes = await requestJson(`${baseUrl}/api/attendance/import/commit`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        orgId,
+        fileId: unknownFileId,
+        timezone: 'Asia/Shanghai',
+        commitToken: unknownCommitToken,
+        returnItems: false,
+      }),
+    })
+    expect(unknownCommitRes.status).toBe(200)
+    const unknownCommit = unknownCommitRes.body as { error?: { code?: string }; data?: { imported?: number; failedRows?: number; skipped?: Array<{ warnings?: string[] }> } }
+    expect(unknownCommit.error?.code).not.toBe('INTERNAL_ERROR')
+    expect(unknownCommit.data?.imported).toBe(0)
+    expect(Number(unknownCommit.data?.failedRows ?? 0)).toBeGreaterThanOrEqual(1)
+    expect(unknownCommit.data?.skipped?.[0]?.warnings?.join('\n')).toContain('Unresolved user identifier')
+
+    const batchId = commitBody.data?.batchId
+    if (batchId) {
+      const rollbackRes = await requestJson(`${baseUrl}/api/attendance/import/rollback/${batchId}`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+      expect(rollbackRes.status, (rollbackRes.body as { error?: { code?: string } })?.error?.code).toBe(200)
+    }
+  })
+
   it('routes high-scale csvFileId imports to async endpoints and preserves upload for async lanes', async () => {
     if (!baseUrl) return
     if (!importUploadDir) return
@@ -15707,12 +15908,12 @@ attendanceIntegrationDescribe(
     const baseRows = 1000
     const totalRows = baseRows + 2
     const csvHeader = '日期,UserId,考勤组,上班1打卡时间,下班1打卡时间,考勤结果'
+    const highScaleUserId = (index: number) => `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`
     const csvRows = Array.from({ length: baseRows }, (_, index) => {
-      const rowUserId = `attendance-highscale-${String(index + 1).padStart(4, '0')}`
-      return `${workDate},${rowUserId},CSV High Scale,09:00,18:00,正常`
+      return `${workDate},${highScaleUserId(index + 1)},CSV High Scale,09:00,18:00,正常`
     })
-    csvRows.push(`${workDate},attendance-highscale-0001,CSV High Scale,09:05,18:05,正常`)
-    csvRows.push(`,attendance-highscale-invalid,CSV High Scale,09:10,18:10,正常`)
+    csvRows.push(`${workDate},${highScaleUserId(1)},CSV High Scale,09:05,18:05,正常`)
+    csvRows.push(`,${highScaleUserId(baseRows + 1)},CSV High Scale,09:10,18:10,正常`)
     const csvText = `${csvHeader}\n${csvRows.join('\n')}\n`
 
     const uploadRes = await requestJson(`${baseUrl}/api/attendance/import/upload?orgId=${encodeURIComponent(orgId)}&filename=highscale-async.csv`, {
@@ -17569,8 +17770,8 @@ attendanceIntegrationDescribe(
     const runSuffix = Date.now().toString(36)
     const orgId = 'default'
     const actorId = `attendance-h1-scope-actor-${runSuffix}`
-    const targetId = `attendance-h1-scope-target-${runSuffix}`
-    const outsideTargetId = `attendance-h1-scope-outside-${runSuffix}`
+    const targetId = randomUUID()
+    const outsideTargetId = randomUUID()
     const requestIds: string[] = []
     const approvalIds: string[] = []
     const scopeIds: string[] = []
@@ -17619,6 +17820,8 @@ attendanceIntegrationDescribe(
 
     try {
       await seedNeutralAttendanceSubjectForTest(actorId, orgId)
+      await seedNeutralAttendanceSubjectForTest(targetId, orgId)
+      await seedNeutralAttendanceSubjectForTest(outsideTargetId, orgId)
       process.env.RBAC_BYPASS = 'false'
       await pool.query(
         `INSERT INTO permissions (code, name, description)
@@ -17693,6 +17896,32 @@ attendanceIntegrationDescribe(
       expect((approveOutsideScope.body as { error?: { code?: string } } | undefined)?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
       const outsideStatus = (await pool.query('SELECT status FROM attendance_requests WHERE id = $1', [outsideRequestId])).rows[0]?.status
       expect(outsideStatus).toBe('pending')
+
+      // #6404: the real scoped route must authorize the resolved employee, not a raw email.
+      const importRows = (identifier: string) => [{
+        userId: identifier,
+        workDate: '2026-03-23',
+        fields: { Date: '2026-03-23', ClockIn: '09:00', ClockOut: '18:00' },
+      }]
+      for (const identifier of [targetId, `${targetId}@example.test`]) {
+        const preview = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+          method: 'POST', headers,
+          body: JSON.stringify({ orgId, timezone: 'Asia/Shanghai', rows: importRows(identifier) }),
+        })
+        expect(preview.status).toBe(200)
+        const items = (preview.body as { data?: { items?: Array<{ userId?: string; status?: string }> } })?.data?.items
+        expect(items).toHaveLength(1)
+        expect(items?.[0]?.userId).toBe(targetId)
+        expect(items?.[0]?.status).not.toBe('invalid')
+      }
+      const outsidePreview = await requestJson(`${baseUrl}/api/attendance/import/preview`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ orgId, timezone: 'Asia/Shanghai', rows: importRows(`${outsideTargetId}@example.test`) }),
+      })
+      expect(outsidePreview.status).toBe(403)
+      expect((outsidePreview.body as { error?: { code?: string } })?.error?.code).toBe('SCHEDULER_SCOPE_FORBIDDEN')
+      const previewWrites = await pool.query('SELECT count(*)::int AS count FROM attendance_records WHERE user_id = ANY($1::text[])', [[targetId, outsideTargetId]])
+      expect(previewWrites.rows).toEqual([{ count: 0 }])
 
       const prepareImport = await requestJson(`${baseUrl}/api/attendance/import/prepare`, {
         method: 'POST',
@@ -20327,6 +20556,7 @@ attendanceIntegrationDescribe(
         intervalMs: 25,
         settle: (job) => Array.isArray(job?.skippedRows),
       })
+      assertLegacyGoldenCompletedJobTiming(asyncCompleted)
 
       const asyncRacePayload = {
         ...asyncPayload,
@@ -20634,6 +20864,10 @@ attendanceIntegrationDescribe(
         sortRace(copy.sync.lockedRace)
         sortRace(copy.async.lockedRace)
         normalizeAsyncReplayLifecycle(copy.async.lockedRace)
+        // Wall-clock completion can be positive even while this fixture freezes Date.
+        // Raw timing is checked above; retain every other completed-job field in the golden.
+        copy.async.completedPublicJob.elapsedMs = '<completed-elapsed-ms>'
+        copy.async.completedPublicJob.throughputRowsPerSec = '<completed-throughput>'
         copy.database.batches.sort((left: any, right: any) =>
           compareText(left.idempotency_key, right.idempotency_key))
         for (const item of copy.database.items) {
