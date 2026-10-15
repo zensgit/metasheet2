@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'crypto'
 import type { Request, Response } from 'express'
 import { Router } from 'express'
 import { Logger } from '../core/logger'
@@ -906,6 +907,72 @@ export const PLM_BOM_WRITEBACK_FAILED_MESSAGE = 'BOM 写入失败，详情见服
 export const PLM_ECO_INTENT_FAILED_CODE = 'PLM_ECO_INTENT_FAILED'
 export const PLM_ECO_INTENT_FAILED_MESSAGE = 'ECO 意图请求失败，详情见服务端日志'
 
+export const PLM_WRITEBACK_AUDIT_RESOURCE_TYPE = 'plm-bom-writeback'
+export const PLM_WRITEBACK_AUDIT_UNAVAILABLE_CODE = 'PLM_WRITEBACK_AUDIT_UNAVAILABLE'
+const PLM_LINE_WRITEBACK_ROUTE = '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/lines/:bomLineId'
+const PLM_ECO_INTENT_ROUTE = '/api/plm-workbench/data-sources/:id/bom-multitable/:partId/eco-intent'
+
+type PlmWritebackAuditAction =
+  | 'line_writeback_attempt'
+  | 'line_writeback_outcome'
+  | 'eco_intent_attempt'
+  | 'eco_intent_outcome'
+
+// Unlike the best-effort collaborative audit above, a write-back attempt row must be stored before
+// Yuantus is called, so no provider write can happen without a MetaSheet record of who asked for it.
+// `status_code` 0 marks an attempt whose provider outcome is not yet known.
+async function insertPlmWritebackAudit(params: {
+  actorId: string | undefined
+  action: PlmWritebackAuditAction
+  attemptId: string
+  route: string
+  statusCode: number
+  meta: Record<string, unknown>
+}): Promise<void> {
+  await pgQuery(
+    `INSERT INTO operation_audit_logs (
+      actor_id, actor_type, action, resource_type, resource_id, request_id, ip, user_agent,
+      route, status_code, latency_ms, meta, occurred_at, created_at
+    ) VALUES ($1,'user',$2,$3,$4,$5,NULL,NULL,$6,$7,0,$8::jsonb, now(), now())`,
+    [
+      params.actorId ?? null,
+      params.action,
+      PLM_WRITEBACK_AUDIT_RESOURCE_TYPE,
+      params.attemptId,
+      params.attemptId,
+      params.route,
+      params.statusCode,
+      JSON.stringify({ attemptId: params.attemptId, ...params.meta }),
+    ],
+  )
+}
+
+// The outcome row never changes what the caller is told: the provider result is authoritative and
+// the committed attempt row (with the idempotency-key digest) remains for reconciliation.
+async function recordPlmWritebackOutcome(params: {
+  actorId: string | undefined
+  action: 'line_writeback_outcome' | 'eco_intent_outcome'
+  attemptId: string
+  route: string
+  statusCode: number
+  meta: Record<string, unknown>
+}): Promise<void> {
+  try {
+    await insertPlmWritebackAudit(params)
+  } catch (error: unknown) {
+    logger.error('BOM write-back outcome audit failed', error as Error)
+  }
+}
+
+function writebackAuditUnavailable(res: Response, dataSourceId: string) {
+  return res.status(503).json({
+    error: 'BOM write-back audit unavailable',
+    code: PLM_WRITEBACK_AUDIT_UNAVAILABLE_CODE,
+    data_source_id: dataSourceId,
+    reason: 'audit-unavailable',
+  })
+}
+
 function relayProviderEcoIntentError(error: unknown): { status: number; reason: string } {
   const status = providerErrorStatus(error)
   // 409 = discriminated by the intent endpoint's own namespace: `not_locked` (editable part —
@@ -1133,6 +1200,33 @@ router.patch(
 
     // Optional optimistic-concurrency: forward the client's If-Match to the provider unchanged.
     const ifMatch = (req.header('If-Match') || '').trim()
+    const actorId = resolveDataSourceOwnerId(req)
+    const attemptId = randomUUID()
+    try {
+      await insertPlmWritebackAudit({
+        actorId,
+        action: 'line_writeback_attempt',
+        attemptId,
+        route: PLM_LINE_WRITEBACK_ROUTE,
+        statusCode: 0,
+        meta: {
+          dataSourceId,
+          partId,
+          bomLineId,
+          fields: Object.keys(patch),
+          patch,
+          idempotencyKeySha256: createHash('sha256').update(idempotencyKey).digest('hex'),
+          ifMatchPresent: ifMatch.length > 0,
+        },
+      })
+    } catch (error: unknown) {
+      logger.error('BOM write-back attempt audit failed', error as Error)
+      return writebackAuditUnavailable(res, dataSourceId)
+    }
+    const outcome = (statusCode: number, meta: Record<string, unknown>) => recordPlmWritebackOutcome({
+      actorId, action: 'line_writeback_outcome', attemptId, route: PLM_LINE_WRITEBACK_ROUTE, statusCode,
+      meta: { statusCode, ...meta },
+    })
     const result = await adapter.updateBomMultitableLine(partId, bomLineId, patch, {
       idempotencyKey,
       ...(ifMatch ? { ifMatch } : {}),
@@ -1140,6 +1234,7 @@ router.patch(
     if (result.error) {
       const relayed = relayProviderWritebackError(result.error)
       logger.error('BOM write-back failed', result.error)
+      await outcome(relayed.status, { outcome: 'refused', reason: relayed.reason })
       return res.status(relayed.status).json({
         error: PLM_BOM_WRITEBACK_FAILED_MESSAGE,
         code: PLM_BOM_WRITEBACK_FAILED_CODE,
@@ -1149,12 +1244,14 @@ router.patch(
     }
     const payload = result.data?.[0]
     if (!payload || payload.ok !== true || typeof payload.bom_line_id !== 'string') {
+      await outcome(502, { outcome: 'malformed', reason: 'malformed-response' })
       return res.status(502).json({
         error: 'BOM write-back returned a malformed response',
         data_source_id: dataSourceId,
         reason: 'malformed-response',
       })
     }
+    await outcome(200, { outcome: 'accepted' })
     return res.json(payload)
   },
 )
@@ -1226,10 +1323,26 @@ router.post(
       })
     }
 
+    const actorId = resolveDataSourceOwnerId(req)
+    const attemptId = randomUUID()
+    try {
+      await insertPlmWritebackAudit({
+        actorId, action: 'eco_intent_attempt', attemptId, route: PLM_ECO_INTENT_ROUTE, statusCode: 0,
+        meta: { dataSourceId, partId },
+      })
+    } catch (error: unknown) {
+      logger.error('ECO revision intent attempt audit failed', error as Error)
+      return writebackAuditUnavailable(res, dataSourceId)
+    }
+    const outcome = (statusCode: number, meta: Record<string, unknown>) => recordPlmWritebackOutcome({
+      actorId, action: 'eco_intent_outcome', attemptId, route: PLM_ECO_INTENT_ROUTE, statusCode,
+      meta: { statusCode, ...meta },
+    })
     const result = await adapter.requestBomEcoRevisionIntent(partId)
     if (result.error) {
       const relayed = relayProviderEcoIntentError(result.error)
       logger.error('ECO revision intent failed', result.error)
+      await outcome(relayed.status, { outcome: 'refused', reason: relayed.reason })
       return res.status(relayed.status).json({
         error: PLM_ECO_INTENT_FAILED_MESSAGE,
         code: PLM_ECO_INTENT_FAILED_CODE,
@@ -1244,12 +1357,16 @@ router.post(
       || typeof payload.state !== 'string'
       || typeof payload.attached !== 'boolean'
     ) {
+      await outcome(502, { outcome: 'malformed', reason: 'malformed-response' })
       return res.status(502).json({
         error: 'ECO revision intent returned a malformed response',
         data_source_id: dataSourceId,
         reason: 'malformed-response',
       })
     }
+    await outcome(200, {
+      outcome: 'accepted', ecoId: payload.eco_id, ecoState: payload.state, attached: payload.attached,
+    })
     return res.json(payload)
   },
 )
