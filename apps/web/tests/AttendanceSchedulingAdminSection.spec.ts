@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, reactive, type App, type Ref, ref, nextTick } from 'vue'
+import { attendanceSessionGuardKey, createAttendanceSessionGuard } from '../src/composables/useAttendanceSessionGuard'
 import AttendanceSchedulingAdminSection from '../src/views/attendance/AttendanceSchedulingAdminSection.vue'
 import type {
   AttendanceAssignmentItem,
@@ -284,6 +285,7 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -386,6 +388,7 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -438,6 +441,7 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -509,6 +513,7 @@ describe('AttendanceSchedulingAdminSection', () => {
         } satisfies CalendarEffectiveChip,
       ],
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -562,6 +567,7 @@ describe('AttendanceSchedulingAdminSection', () => {
         } satisfies CalendarEffectiveChip,
       ],
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -593,6 +599,7 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -637,6 +644,7 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
@@ -652,21 +660,26 @@ describe('AttendanceSchedulingAdminSection', () => {
       tr,
       scheduling,
     })
+    app.provide(attendanceSessionGuardKey, createAttendanceSessionGuard('org-1', () => 'epoch'))
     app.mount(container!)
     await flushUi()
 
-    const defaultRuleTimezone = container!.querySelector<HTMLSelectElement>('#attendance-rule-timezone')
+    const defaultRuleTimezone = container!.querySelector<HTMLInputElement>('#attendance-rule-timezone')
     const rotationTimezone = container!.querySelector<HTMLSelectElement>('#attendance-rotation-timezone')
     const shiftTimezone = container!.querySelector<HTMLSelectElement>('#attendance-shift-timezone')
 
     expect(defaultRuleTimezone).toBeTruthy()
     expect(rotationTimezone).toBeTruthy()
     expect(shiftTimezone).toBeTruthy()
-    expect(defaultRuleTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
-    expect(rotationTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
-    expect(shiftTimezone!.selectedOptions[0]?.textContent).toContain('UTC+00:00')
-    expect(Array.from(defaultRuleTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Common timezones')
-    expect(Array.from(rotationTimezone!.querySelectorAll('optgroup')).map((group) => group.label)).toContain('Asia')
-    expect(container!.textContent).toContain('UTC (UTC+00:00)')
+    expect(defaultRuleTimezone!.value).toContain('UTC+00:00')
+    expect(rotationTimezone!.value).toContain('UTC+00:00')
+    expect(shiftTimezone!.value).toContain('UTC+00:00')
+    expect(defaultRuleTimezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
+    defaultRuleTimezone!.dispatchEvent(new Event('focus'))
+    await flushUi()
+    const menu = defaultRuleTimezone!.closest('[data-attendance-timezone-field]')!
+    expect(menu.querySelector('[data-attendance-timezone-menu]')?.textContent).toContain('Common timezones')
+    expect(menu.querySelector('[data-attendance-timezone-menu]')?.textContent).toContain('Asia')
+    expect(menu.textContent).toContain('UTC (UTC+00:00)')
   })
 })

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import AttendanceAudienceChipField from '../src/views/attendance/AttendanceAudienceChipField.vue'
 import AttendanceHolidayIndexHelp from '../src/views/attendance/AttendanceHolidayIndexHelp.vue'
@@ -40,8 +40,56 @@ describe('attendance audience chip field', () => {
     await flush()
     expect(value).toBe('单休办公,白班')
 
+    draft!.value = ''
+    draft!.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+    draft!.value = '没有这个'
+    draft!.dispatchEvent(new Event('input'))
+    await flush()
+    expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+
     app.unmount()
     container.remove()
+  })
+
+  it('waits for a live search before showing 搜索不到', async () => {
+    vi.useFakeTimers()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    let resolveSearch: (hits: string[]) => void = () => {}
+    const app = createApp(AttendanceAudienceChipField, {
+      modelValue: '',
+      options: [],
+      tr,
+      search: () => new Promise<string[]>((resolve) => { resolveSearch = resolve }),
+    })
+    try {
+      app.mount(container)
+      await flush()
+      const draft = container.querySelector<HTMLInputElement>('input[type="text"]')!
+      draft.focus()
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      draft.value = '张'
+      draft.dispatchEvent(new Event('input'))
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      await vi.advanceTimersByTimeAsync(250)
+      await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')).toBeNull()
+
+      resolveSearch([])
+      for (let i = 0; i < 4; i += 1) await flush()
+      expect(container.querySelector('[data-attendance-search-empty]')?.textContent).toContain('搜索不到')
+    } finally {
+      app.unmount()
+      container.remove()
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -63,7 +111,7 @@ describe('holiday index help', () => {
 })
 
 describe('locale time input', () => {
-  it('shows 上午/下午 in Chinese and keeps a 24-hour value', async () => {
+  it('shows one 24-hour field and a read-only 上午/下午 hint', async () => {
     useLocale().setLocale('zh-CN')
     const container = document.createElement('div')
     document.body.appendChild(container)
@@ -78,15 +126,27 @@ describe('locale time input', () => {
     app.mount(container)
     await flush()
 
-    expect(container.textContent).toContain('上午')
-    expect(container.textContent).toContain('下午')
+    const typed = container.querySelector<HTMLInputElement>('[data-attendance-locale-time-typed]')
+    expect(typed?.value).toBe('01:30')
+    expect(typed?.getAttribute('aria-label')).toContain('24 小时')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('上午')
+    expect(container.querySelector('select')).toBeNull()
+    expect(container.querySelector('[data-attendance-locale-time-period]')).toBeNull()
     expect(container.querySelector('input[type="time"]')).toBeNull()
-    const period = container.querySelector<HTMLSelectElement>('[data-attendance-locale-time-period]')
-    expect(period?.value).toBe('am')
-    period!.value = 'pm'
-    period!.dispatchEvent(new Event('change'))
+
+    typed!.value = '18:00'
+    typed!.dispatchEvent(new Event('change'))
     await flush()
-    expect(value).toBe('13:30')
+    expect(value).toBe('18:00')
+    expect(typed!.value).toBe('18:00')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('下午')
+
+    typed!.value = '9:05'
+    typed!.dispatchEvent(new Event('change'))
+    await flush()
+    expect(value).toBe('09:05')
+    expect(typed!.value).toBe('09:05')
+    expect(container.querySelector('[data-attendance-locale-time-hint]')?.textContent).toBe('上午')
 
     useLocale().setLocale('en')
     app.unmount()

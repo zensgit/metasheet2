@@ -889,12 +889,7 @@ async function executeLegacyRollback(
     fail('IMPORT_ROLLBACK_PREIMAGE_UNAVAILABLE')
   }
   if (lockedBatch.status === 'rolled_back') {
-    return Object.freeze({
-      kind: 'legacy',
-      id: request.batchId,
-      deleted: 0,
-      status: 'rolled_back',
-    })
+    fail('IMPORT_ROLLBACK_CONFLICT')
   }
   await resolveRollbackActorPosture(trx, request, source, lockedTargets)
   const deleted = await trx.query(
@@ -1005,6 +1000,7 @@ async function rollbackInTransaction(
 
   const legacyBatch = await loadLegacyBatch(trx, request)
   if (!legacyBatch) fail('IMPORT_ROLLBACK_NOT_FOUND')
+  if (legacyBatch.status === 'rolled_back') fail('IMPORT_ROLLBACK_CONFLICT')
   const sourceJobs = await readAttendanceImportRollbackSourceJobsV1(
     trx,
     request.orgId,
