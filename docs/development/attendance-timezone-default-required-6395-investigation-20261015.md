@@ -65,3 +65,11 @@
 **(A) 运维写入，且只写会话组织。** 管理员 `PUT /api/attendance/rules/default`，带上该组织真正使用的 IANA 时区。路由用 `actor.orgId` 插入一行 `is_default = true`（`index.cjs:42451-42476`）。插入前 `prepareSourceChange`（`attendance-timezone-runtime.cjs:849-857`）在本组织还没有默认行时，若已有有效排班、有效轮班、时区伴随行或未结束出差，返回 `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING`，不会插入。空白组织则可以插入，三条总览随后应改 200。写入前可只读看 `GET /api/attendance/timezone-policy`（`attendance-timezone-policy-routes.cjs:27-28`、`:169-170`）：它和总览共用 `readDefault`，现在应同样 422。同时看 `/rules/default` 的 `data.id`，用来区分上面两种显示形状。不要改哨兵组织的行来指望另一个会话组织通过。
 
 若 PUT 得到 `ATTENDANCE_TIMEZONE_DEFAULT_MISSING`，停在 **(D)**：总览继续显示「规则时区不可用」。不要手写 SQL 绕过守卫。以后若必须在已有排班上补默认规则，或要修缺冻结上下文的历史日期，再单独批准 #6396，而不是把它当作这次 422 的最小步骤。
+
+## English
+
+The 422 means the session org has zero `attendance_rules` rows with `is_default = true`. `readDefault` (`plugins/plugin-attendance/lib/attendance-timezone-policy-store.cjs:141`) throws `ATTENDANCE_TIMEZONE_DEFAULT_REQUIRED`. All three overview routes call that reader, including when multi-timezone is off (`attendance-timezone-context-loader.cjs:73-85`). Group membership and `holidaySync.auto.timezone` are not this check.
+
+`GET /rules/default` uses `loadDefaultRule` (`plugins/plugin-attendance/index.cjs:15525-15549`). With no row for the session org it returns the in-memory `DEFAULT_RULE` (`UTC`, no `id`) or a row that belongs to sentinel org `default`. A missing `data.id` means the constant and a session org of literal `default`. A present `data.id` with `orgId` `default` means the sentinel row, while the overview routes query a different org.
+
+Recommendation: (A) `PUT /api/attendance/rules/default` on the session org with the IANA zone that org uses. If that returns `503 ATTENDANCE_TIMEZONE_DEFAULT_MISSING` (`attendance-timezone-runtime.cjs:849-857`), stop at (D) and keep the overview fallback. Do not accept the in-memory UTC value in the overview reader (B). Do not merge Draft #6396 for this non-blocking 422 (C).
