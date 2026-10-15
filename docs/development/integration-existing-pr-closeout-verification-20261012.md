@@ -1,5 +1,95 @@
 # 既有 #6337 收口验证
 
+## 2026-10-15 本轮追加提交授权（CI 尚待新 head 证明）
+
+Owner 已明确授权本轮两个诊断/合同文件及两份既有 MD 推入现有草稿 #6337，并运行既有合成 CI。准备从当前远端 head `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35` 追加，严格四文件；代码的准确 LF SHA 仍为本轮表列两项。只更新公开白名单诊断，不修改原验收通过条件或生产行为。新提交、新 run 与实际终态另记，本地 manual/interval 通过不覆盖远端原失败。禁止新增切片、自动失败重跑、合并、部署、客户读取或真实宜搭发送。
+
+## 2026-10-15 本轮收尾裁决：诊断修复完成，历史取消未复现
+
+原 public CLI 的 manual 与 interval 各一轮完整合成验收均已 exit0，分别独立创建/迁移/重放/构建/执行/停止/删除自有 PG，没有为凑绿重跑失败业务阶段。manual 回执 SHA `32a1d3e6d4e8ee6527271d787b55895424f3846de99717f28d12ff07919c4710`；interval 回执 `artifacts/stock-preparation-plm-full-app/4f9b311c-b523-4b1d-a769-edd15377494f.json`，SHA `1da73d8b706c68a327724af6bb3858dc877b35244357c1ca56adfbe913c70507`。此前进行中描述为历史快照。
+
+两轮均另行调用原阶段/嵌套日志与全部业务验收器复核，每轮9阶段18份阶段流、2个嵌套浏览器进程、6,587源码输入；长度及 SHA 逐项一致，stopResolved/stopVerified/ownedPgDirectoriesAbsent 均 true。interval 共132条原传输记录，options 上游200（122ms），SDK EOF（131ms），该请求未取消。两轮 sourceAndTargetUnchanged=true，responseStubs/storageInjections=0，customerIO/externalSend=false。namespace 原终态均证明 worker 正常退出、PID1 capabilities zero、ordinary worker；Chrome 对照不借此声称也有内核隔离。
+
+本轮准确改动仍仅两个现有诊断/合同文件（相对已发布36cdb），加两份既有 MD；没有修 SDK、请求取消、事务、授权、host.stop 或时钟行为，没有新增业务切片/端点/flag/依赖/workflow，也没有推送或重跑 CI。合同187/187、四组真实测试变异全杀、provenance1/1与 Astra ultra 只读复核无阻断已完成。13,758项最终后验仅六个前轮已发布文件＋这两个新增本地文件相对准入基线变化，交付副本原 LF 匹配，无临时源码插桩遗留；主检出仍只有原 artifacts/reviews 未跟踪目录。
+
+为确认能否利用已有失败而避免反复本地跑绿，只读列出旧 run 38541640996 的 artifact 元数据：仅有无关的 dingtalk-p4-ops-regression-gate 一项，没有 PLM 阶段产物。未下载该无关产物、未读取远端私有日志/凭据，也未触发 CI。不能从不存在的 PLM 产物补造历史取消来源。
+
+**不报“历史取消根因已修”或“稳定发布就绪”。** 本次观察未复现远端 ABORTED，增加诊断输出也可能改变时序；不能用本地两轮成功覆盖旧 CI 失败、source-pin短租约和 WSL 回拨风险。此后若再出现失败，可准确区分 SDK/代理/浏览器阶段及实际 stop 与前置验证失败。本轮不继续无目标重复运行，远端 Chromium/宜搭正式步骤的发布门保留。两份 MD 与两文件补丁只在本地交付副本，当前没有推送/CI/合并/部署/真实读取或发送权限。
+
+## 2026-10-15 manual 原完整合成验收通过（interval 仍待终态）
+
+本轮未经推送的两文件观测候选，原 public CLI / Linux non-root / user-net-PID namespace / 能力清零 / 临时真实 PG / 固定 Chromium，以原 manual 场景完整执行，exit0。result=passed，cleanup=stopped-and-owned-database-removed，namespace 终态 passed/workerReceiptObserved/normalChildExit/pidInitCapabilitiesZero/ordinaryWorker 均 true。没有暂停校时或放宽任何预算。
+
+原回执 `artifacts/stock-preparation-plm-full-app/f243a6e3-7afb-4930-8843-1ff287d7f06b.json`，SHA `32a1d3e6d4e8ee6527271d787b55895424f3846de99717f28d12ff07919c4710`。另运行原 verifyStageLogs、production-stop/K3/静态宜搭/OFF/初始化/Automation/浏览器进程验收器及原 OFF raw-log 核验；9阶段18份流、2个嵌套浏览器进程均验证；6,587源码输入长度/哈希逐项一致。sourceAndTargetUnchanged=true、responseStubs=0、storageInjections=0、ownedPgDirectoriesAbsent=true、customerIO/externalSend=false。不以宽泛 test 数量替代这套业务验收器。
+
+实际 options 顺序：SDK request → PROXY upstream 200（210ms，end/complete）→ downstream finish（211ms）→ SDK headers（220ms）→ SDK BODY_DONE（221ms）。该请求没有 signalAborted 或失败；整链216条三层传输观测，actual-stop-resolved 与 production-stop-verified 同时存在。**本轮未复现 CI 的取消；观测修复不等于历史取消根因已修**。原 CI 失败和 Chromium 发布阻断继续保留；后续不盲目改 SDK 或增加重试。
+
+完整 provenance 整文件 1/1 PASS，无 pin 改动。13,758项后验仅六个已发布文件与本次两个本地观测文件有差异，LF交付副本匹配；原主检出仍仅既有 artifacts/reviews 未跟踪目录。当前 interval 原完整场景运行中，不计通过。
+
+Chrome 收尾时扩展连接断开，工具库存已不含 Chrome/Edge，因此没能确认临时标签页关闭或发送 Network.disable；不绕过浏览器机制、不改系统权限。合成私有内存字段 password/material 已删除，本次服务已 STOPPED、PG/handoff 已移除，不把浏览器断开当业务故障。截图留作默认关闭对照，不作为启用 Automation 场景验收。
+
+## 2026-10-15 本地 Chrome 对照及诊断补丁（进行中）
+
+- 已获 owner 授权仅本地复现/最小修复/合成验证与必要 Astra ultra 只读复核；无推送、CI 重跑、合并、部署、客户读取或真实发送。
+- Chrome 扩展已连接，独立标签页通过真实合成账户登录原生产 bundle，进入 SYN-YIDA-PREVIEW 项目及 Automation 面板。第一次观察器在整页导航后未保留事件，记录为空不作网络证明；重新启用后明确执行第二次单次 UI 读取，CDP 实际记录 request → response 503 → loadingFinished，没有 loadingFailed/ABORTED。未读响应正文/凭据；本入口默认读取 OFF，因此是对照，不冒称 CI 场景复现或同因。
+- 截图 `E:/Projects/metasheet/tmp/pr6337-chrome-options-default-off-20261015.png`。不注入 token、不调用页面私有状态或 fetch，不向客户系统发送。
+- 本次 exec 会话 stdin 已关闭，写 stop 未成功；没有重启同一应用。核对本次 owner 与公共 CLI 完整命令后精确 SIGTERM，浏览器连接仍在：terminal code0、signal=null、passed=true、STOPPED、sourceUnchanged/handoffRemoved/ownedPgDirectoriesAbsent=true。wrapper head 字段仍标历史 0a，但运行代码是已核六文件候选（与发布 36cdb 代码一致）；不将旧字段冒称正式新 head CI。私有输出 371/0 字节，SHA `a5d6ae537b1613318fa04ab8bed663b24b1f1727244fb9534498fd21b699c359` / 空流 SHA `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`。
+
+### 两文件观测修复与实际路径测试
+
+`run-stock-preparation-plm-full-app.mjs` 的原 transport 帧在公开投影被丢弃。新增仅固定 enum、有限整数/严格 boolean 的二次投影，丢弃 url/header/body/token/原异常；新增 actual-stop 固定帧与精确 COLLAB_CHILD_REQUIRED reason。原 timeout、输出上限、退出码、真实 stop 和 validateProductionStopEvidence 全部不变。
+
+| 文件 | 当前 LF SHA-256 |
+| --- | --- |
+| `scripts/ops/run-stock-preparation-plm-full-app.mjs` | `51246a22d33c9bc2f90f8a3217362560f0fea00c089ffcf42bd33baa2b878adc` |
+| `scripts/ops/stock-preparation-plm-full-app-contract.test.mjs` | `7e24ad937fc2d1a1762516b48426e2899b72ff40f6144068109f7813c16ec852` |
+
+原完整合同 **187/187**、fail/skip/cancel=0、exit0。新增实际链为 createFullAppStageRunner → spawn node → stdout → 投影 → emit，子进程原 exit1 保留，非 Chromium 业务验收。定向变异基线 2 passed/185 skipped；移除 transport 投影与改为原 record 展开各 0 passed/2 failed；移除 stop 投影或 collab 原因各 1 passed/1 failed，四组均被真实测试杀死。此定向 skip 不计为完整验收。首次变异工具错误地假定 drop-transport 只会杀一条，实际两条都红，修正工具计数断言后四组完成；未改测试或候选来迎合工具。来源字节保持不变，回执目录 `metasheet-6337-projection-mutations-bDAlgr`。
+
+实际 Astra ultra 子代理只读复核了两文件 diff 与真实调用点：无阻断项；确认没有扩大通过条件或输出私有值。其测试计数引用父任务运行，并非代理又跑一遍。合同使用 READER_REJECT 枚举，实际 SDK reader 拒绝为 SDK_REJECT+READ，两者均有限接受，但合同不冒充真实 SDK 故障证据。
+
+### 原 full-app 入口
+
+首轮原 namespace/public CLI 在 stage 启动前失败；查明 runAcceptance 的 git rev-parse HEAD 需要 Git 元数据，隔离副本没有 .git。仅为准入的 13,758 文件创建无历史的本地 Git 快照 `7ccd6da23c92d45a0c4ef4ee02de7111d8310291`，没有导入其它文件或历史，也没有改网络隔离。当前再次运行原公开 manual 入口，已完成类型、两端构建、迁移与重放并进入 configured-app；尚未取得终态，不能报通过。保持原失败和远端阻断。
+
+## 公开日志投影层复核：保留已知与未知
+
+亲读 `scripts/ops/run-stock-preparation-plm-full-app.mjs:185–251`：生产诊断前缀在公开出口映射为有限 reason 枚举，所以先前扫描 APP_* 前缀没有命中，不代表原诊断为空。按模块定义的准确白名单重新提取同一公开日志，实际为 isolated-browser-failed / REQUEST_FAILED、configured-app-failed / BROWSER_PROCESS_FAILED、production-stop-failed / OTHER。原错误前缀、正文与私有日志仍未读取或输出。
+
+公开记录只有 26 个 browser-phase、一次 browser-request-failure 和上述失败/退出帧，没有浏览器 SDK 传输阶段。不能从当前公开证据判断请求是在 headers 前、响应流读取中、15 秒超时或会话释放时取消。stop reason=OTHER，不能把代码中 EARLIER_PROBE_FAILED 的可能性认成这次实际原因；也不能认定实际 host/socket 关闭超时。无修改/重跑，保持失败及发布门。
+
+## 新 head 失败的只读调用链核查（不改代码）
+
+核对已发布 `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35` 的 `verify-stock-preparation-plm-full-app.mts` 与本地准入副本原字节一致，SHA `327ad0ad62aea6c83004d9c08b540b91eb71bab78232ed6b1aa44882b4ffce6c`。真实 manual 浏览器链先等待 automationOptions 响应，再点击 automation-read-load（`stock-preparation-automation-full-app-browser.ts:53`）；尚未取得 options 时不能推定已经创建 grant 或发送执行请求。
+
+生产 `automationRead.ts:496` 起维护实际 AbortController：session/dispose 会 abort；request 的 15 秒 timer 会 abort；响应流类型/长度/解码/结构失败也会 abort。因此 ABORTED 不是单一根因码；仅凭该网络标签不能断言 Chromium 缺陷、后台超时、会话撤销或响应解析中的哪一种，更不能删 guard、增加重试或放宽大小预算来修。
+
+停止证据另需区分：宿主 stop 有独立 try/actual-stop-resolved 或 failed，而后置 proof 在 `verify-stock-preparation-plm-full-app.mts:817` 先断言原业务 probe 的 process.exitCode 必须为零；已有业务失败也能触发 production-stop-failed 标签。故现有日志的这一标签不独自证明 socket drain 再次超时。该轮未捕获能区分上述两种失败的完整固定诊断，保留为未证实；父级临时库已清除仍不替代宿主成功的证据。
+
+后续最小本地复现应首先捕获取消来源、请求/响应阶段与独立 stop 状态，而不是直接修改生产超时或取消语义。本次只读核查不包含启动合成应用、子代理、代码修改、CI 重跑或真实系统操作。
+
+## 2026-10-14 18:21 新 head CI 失败终态（新加坡时间）
+
+只读确认 run `38541640996` attempt 1，head `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35`，run 与 test (20.x) 均 completed/failure。checkpoint、Chromium 安装、PLM 前置合同成功；`Run synthetic PLM full-app manual and interval acceptance` 失败，后续 `Run owner YiDa JWT HTTP and browser real-DB proof` skipped，不能判宜搭 71 项正式 CI 已通过，也不能解除 Chromium 发布门。
+
+失败公开日志仅内存解析固定标签与字段，未输出原文：10,837 字节，SHA-256 `6ec61623710a95717d63ce7af42623f2276d2903c31d108f9823185612454c28`。类型、两端构建、迁移阶段均 code=0；configured-app code=1，固定失败标签 `PLM_FULL_APP_STAGE_FAILED_CONFIGURED_APP`。浏览器走到 `AUTOMATION_MANUAL` 阶段，记录 API surface / automationOptions / ABORTED，随后 isolated-browser-failed 与 configured-app-failed。没有日志标签足以证明具体根因，也不能倒推为 503、时钟回拨或上一轮宜搭失败同因。
+
+同次另记录 production-stop-failed，保留而不粉饰为宿主干净退出；父级最终 result=failed、cleanup=stopped-and-owned-database-removed，证明最终临时库已清除，不替代宿主停止成功证明。前面的宜搭静态预演与 default-off 阶段标签只证明抵达阶段，不冒称独立初始化/浏览器 proof 通过。
+
+本次仅只读诊断与 MD 续记，未下载私有产物、读取凭据、重跑、改代码、推送、合并、部署或真实发送。原 `6337-ci` 跟踪已按终态更新为 PAUSED；后续代码复现/修复与再次 CI 需新的明确范围授权。旧失败、租约风险与本机回拨风险继续保留。
+
+## 2026-10-14 18:01 新 head 前置合同进展（新加坡时间）
+
+run `38541640996` attempt 1、head `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35`：test (20.x) 仍 in_progress。checkpoint、Chromium 安装、PLM full-app acceptance isolation and CI contracts 均 completed/success。synthetic PLM manual/interval 与 owner YiDa JWT HTTP/browser proof 仍 pending；安装与合同成功不等于实际业务或浏览器验收成功。历史失败与发布门继续保留；仅只读观察及本地 MD 续记。
+
+## 2026-10-14 17:51 新 head checkpoint 进展（新加坡时间）
+
+只读再核 run `38541640996` attempt 1，head `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35`：test (20.x) 仍 in_progress；isolated manual checkpoint acceptance 已 completed/success。Chromium 安装、PLM full-app 合同与 manual/interval、owner YiDa JWT HTTP/browser proof 仍 pending，不计通过。旧 head attempt 1 的 250ms source-pin lease 到期失败继续保留，新 head 此步骤成功不证明时序风险已解决。未重跑或修改任何代码，发布门仍保留。
+
+## 2026-10-14 17:31 新 head CI 只读观察（新加坡时间）
+
+实际 head `36cdb73f8ac9c42719965d4ffaa3b050ee82fa35`。同 head Integration Guard run `38541513035` 已 completed/success。Plugin System Tests run `38541640996` attempt 1 仍 in_progress，test (20.x) 仍 in_progress；checkpoint、Chromium 安装、PLM 合同/manual+interval、owner YiDa JWT HTTP/browser proof 均 pending，尚无业务通过证据。不因 Integration Guard 成功解除 Chromium/宜搭发布门，保留旧租约到期、宜搭失败及本机回拨风险。只读观察，未重跑、改代码、推送、合并、部署或真实发送。
+
 ## 2026-10-14 Owner 授权发布当前候选
 
 Owner 已明确批准“允许将六文件补丁及 MD 推入现有草稿 #6337，并运行既有合成 CI”。本次准备准确六个代码/测试文件与本设计、验证两份 MD，在 `0a33783580fc6d6e5f3fc5e698f2edf717d2f024` 上追加；不夹带主检出或其它工作区改动、不新增切片。下方禁止推送记录保留为历史状态。当前提交准备不等于 CI 通过；新 head/run 与最终结果另记。原失败、时钟风险、Chromium 发布门仍未消除，不授权合并、部署、真实客户读取或真实宜搭发送。

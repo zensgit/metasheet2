@@ -695,6 +695,57 @@ test('actual stage runner preserves closed host failure and browser exit diagnos
   await verifyStageLogs({ ...f, stages: [result] })
 })
 
+test('actual stage runner exposes only closed transport and independent stop diagnostics', async () => {
+  const f = await ownedLogFixture()
+  const secret = 'SYNTHETIC_PRIVATE_VALUE'
+  const records = [
+    { stage: 'browser-transport-diagnostic', transport: 'SDK', ordinal: 1, requestSequence: 2,
+      apiKey: 'automationOptions', method: 'GET', event: 'READER_REJECT', operation: 'READ', elapsedMs: 12,
+      status: 200, signalAborted: false, complete: false, failure: 'TYPE', token: secret, body: secret, url: secret },
+    { stage: 'browser-transport-diagnostic', transport: secret, ordinal: -1, requestSequence: 10000001,
+      apiKey: secret, method: secret, event: secret, operation: secret, elapsedMs: Infinity,
+      status: 600, signalAborted: secret, complete: secret, failure: secret, headers: secret },
+    { stage: 'actual-stop-resolved', token: secret },
+    { stage: 'actual-stop-failed', error: secret },
+    { stage: 'production-stop-failed', diagnostic: 'APP_CONFIGURED_COLLAB_CHILD_REQUIRED', body: secret },
+  ]
+  const result = await f.run('transport-and-stop', ['-e',
+    `for (const record of ${JSON.stringify(records)}) console.log('PLM_FULL_APP_PROBE ' + JSON.stringify(record)); process.exitCode = 1`],
+  cleanEnvironment(process.env))
+  assert.equal(result.code, 1)
+  const frames = f.emitted.filter(line => line.startsWith('PLM_FULL_APP_PROBE '))
+    .map(line => JSON.parse(line.slice('PLM_FULL_APP_PROBE '.length)))
+  assert.deepEqual(frames, [
+    { stage: 'browser-transport-diagnostic', transport: 'SDK', ordinal: 1, requestSequence: 2,
+      apiKey: 'automationOptions', method: 'GET', event: 'READER_REJECT', operation: 'READ', elapsedMs: 12,
+      signalAborted: false, complete: false, status: 200, failure: 'TYPE' },
+    { stage: 'browser-transport-diagnostic', transport: 'OTHER', ordinal: 0, requestSequence: 0,
+      apiKey: 'unknown', method: 'OTHER', event: 'OTHER', operation: 'OTHER', elapsedMs: 0,
+      signalAborted: false, complete: false, status: 0, failure: 'OTHER' },
+    { stage: 'actual-stop-resolved' }, { stage: 'actual-stop-failed' },
+    { stage: 'production-stop-failed', reason: 'COLLAB_CHILD_REQUIRED' },
+  ])
+  assert(!f.emitted.join('\n').includes(secret))
+  await verifyStageLogs({ ...f, stages: [result] })
+})
+
+test('transport projection rejects tainted enum suffixes and unbounded counters', () => {
+  const secret = 'SYNTHETIC_PRIVATE_VALUE'
+  for (const field of ['transport', 'apiKey', 'method', 'event', 'operation', 'failure']) {
+    const result = publicBrowserFailure({ stage: 'browser-transport-diagnostic', [field]: 'SDK_' + secret })
+    assert(!JSON.stringify(result).includes(secret))
+  }
+  for (const value of [-1, 1.5, Number.MAX_SAFE_INTEGER, '1', true, { secret }]) {
+    const result = publicBrowserFailure({ stage: 'browser-transport-diagnostic', ordinal: value,
+      requestSequence: value, elapsedMs: value, status: value })
+    assert.equal(result.ordinal, 0); assert.equal(result.requestSequence, 0)
+    assert.equal(result.elapsedMs, 0); assert.equal(result.status, 0)
+  }
+  assert.deepEqual(publicBrowserFailure({ stage: 'production-stop-failed',
+    diagnostic: 'APP_CONFIGURED_COLLAB_CHILD_REQUIRED_' + secret }),
+  { stage: 'production-stop-failed', reason: 'OTHER' })
+})
+
 test('host failure projection accepts only exact fixed reasons and bounded lifecycle metadata', () => {
   for (const diagnostic of ['APP_BROWSER_CAPTURE_FAILED', 'APP_CONFIGURED_MAINTENANCE_REMAINS']) {
     const stage = diagnostic.includes('MAINTENANCE') ? 'production-stop-failed' : 'failed'

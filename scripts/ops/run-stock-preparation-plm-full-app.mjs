@@ -182,6 +182,33 @@ export function publicBrowserFailure(record) {
       malformedFrame: boolean(record.malformedFrame), hasResult: boolean(record.hasResult),
       captureFailed: boolean(record.captureFailed) }
   }
+  if (record.stage === 'actual-stop-resolved' || record.stage === 'actual-stop-failed') {
+    return { stage: record.stage }
+  }
+  if (record.stage === 'browser-transport-diagnostic') {
+    // Re-project at the public boundary even when the child already sanitized.
+    // Never forward URLs, headers, response bytes, identities or raw exceptions.
+    const member = (value, choices, fallback = 'OTHER') => choices.includes(value) ? value : fallback
+    const integer = (value, maximum) => Number.isSafeInteger(value) && value >= 0 && value <= maximum ? value : 0
+    return { stage: record.stage,
+      transport: member(record.transport, ['SDK', 'PROXY', 'PLAYWRIGHT']),
+      ordinal: integer(record.ordinal, 10000000), requestSequence: integer(record.requestSequence, 10000000),
+      apiKey: member(record.apiKey, ['automationOptions', 'automationGrants', 'automationRequests',
+        'automationGrantDetail', 'automationRequestDetail', 'automationRevoke', 'automationScheduleActivation'], 'unknown'),
+      method: member(record.method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']),
+      event: member(record.event, ['REQUEST', 'HEADERS', 'BODY_DONE', 'SDK_REJECT', 'SIGNAL_ABORT',
+        'REQUEST_FINISHED', 'REQUEST_FAILED', 'READER_REJECT', 'UPSTREAM_HEADERS', 'UPSTREAM_END',
+        'UPSTREAM_COMPLETE', 'UPSTREAM_EARLY_CLOSE', 'DOWNSTREAM_FINISH', 'DOWNSTREAM_EARLY_CLOSE', 'ERROR']),
+      operation: member(record.operation, ['FETCH', 'GET_READER', 'READ', 'PROXY', 'MONITOR',
+        'UPSTREAM_REQUEST', 'UPSTREAM_RESPONSE', 'DOWNSTREAM']),
+      elapsedMs: integer(record.elapsedMs, 3600000),
+      signalAborted: record.signalAborted === true, complete: record.complete === true,
+      status: Number.isInteger(record.status) && record.status >= 100 && record.status <= 599 ? record.status : 0,
+      failure: member(record.failure, ['ABORT', 'TYPE', 'SYNTAX', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'ETIMEDOUT',
+        'ABORTED', 'FAILED', 'BLOCKED_BY_CLIENT', 'CONNECTION_RESET', 'CONNECTION_CLOSED', 'CONNECTION_REFUSED',
+        'EMPTY_RESPONSE', 'TIMED_OUT', 'NETWORK_CHANGED', 'NAME_NOT_RESOLVED', 'INTERNET_DISCONNECTED', 'NONE']),
+    }
+  }
   if (record.stage === 'failed' || record.stage === 'production-stop-failed') {
     // The host can fail after the last browser phase without a browser catch
     // frame. Preserve that distinction, but never publish raw codes or stacks.
@@ -193,6 +220,7 @@ export function publicBrowserFailure(record) {
       ['STARTUP_OR_PROBE_FAILED', 'STARTUP_OR_PROBE_FAILED'],
     ]) : new Map([
       ['APP_CONFIGURED_PROBE_MUST_PASS_BEFORE_STOP_PROOF', 'EARLIER_PROBE_FAILED'],
+      ['APP_CONFIGURED_COLLAB_CHILD_REQUIRED', 'COLLAB_CHILD_REQUIRED'],
       ['APP_CONFIGURED_MAIN_POOL_NOT_ENDED', 'MAIN_POOL_NOT_ENDED'],
       ['APP_CONFIGURED_HTTP_NOT_CLOSED', 'HTTP_NOT_CLOSED'],
       ['APP_CONFIGURED_COLLAB_NOT_CLOSED', 'COLLAB_NOT_CLOSED'],
