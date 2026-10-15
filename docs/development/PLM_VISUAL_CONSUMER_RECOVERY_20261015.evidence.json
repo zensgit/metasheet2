@@ -33,7 +33,11 @@
     },
     "backendTypes": "passed",
     "webTypes": "passed",
-    "actionlint": "passed"
+    "actionlint": "passed",
+    "webFinal": {
+      "modules": 10,
+      "passed": 199
+    }
   },
   "browserFull": {
     "run": "browser-04-locked",
@@ -72,7 +76,7 @@
     "No distributed atomic cancellation after outgoing business POST."
   ],
   "currentInputHashes": {
-    "metasheet/.github/workflows/plm-visual-consumer.yml": "bc3dbeb460f30c03177a4656ae580c1a84719d71a8ed3559bc823078b5a047bf",
+    "metasheet/.github/workflows/plm-visual-consumer.yml": "7fa6510627a909da65f0f8d43da028399873edcf9a2c913e98c6b8139fa1c81c",
     "metasheet/apps/web/src/components/plm/PlmEmbedVisualPreviewPanel.vue": "b831b563cb715b904c23af8546f97da06197eb6147eab6c6112e1a60c90c47a2",
     "metasheet/apps/web/src/components/plm/PlmVisualMarkupCanvas.vue": "981927c5ba20c9a7d3d52fe87e9e62ef9e860fa57015ecd100ca56e9a6e0e397",
     "metasheet/apps/web/src/components/plm/visualMarkupGeometry.ts": "790c1b6415e0092664d9586fbf8c07babee3b617f1eb69ba01de360c31133435",
@@ -118,7 +122,8 @@
     "metasheet/packages/core-backend/tests/unit/plm-embed-discussion-routes.test.ts": "7ae85fdbc2089355e21bcdadba52749564bf2c110c0703a8bf4eaa89913caf0a",
     "metasheet/packages/core-backend/vitest.config.ts": "7b082ca7620d7ba8021a2b2387d32dee89f39ad63360e4d7aaceb5f2148d6fb6",
     "yuantus/src/yuantus/api/tests/test_plm_workspace_router.py": "b8f24589a47fcb5dedbf806e6e6bf80706f388bc71214f0fc6ada74b6b7c8004",
-    "yuantus/src/yuantus/web/plm_workspace.html": "3032d7778b615454b58284f0c3d92dd2dcbc65acdfa8761a464ce3c018e793f6"
+    "yuantus/src/yuantus/web/plm_workspace.html": "3032d7778b615454b58284f0c3d92dd2dcbc65acdfa8761a464ce3c018e793f6",
+    "metasheet/apps/web/tests/plm-embed-service.spec.ts": "1ead3ecc4c1845889a0f9103ce3a8e3cb856711d0cf0182cffe34c57e081a862"
   },
   "earlierBrowserRuns": {
     "browser-02": {
@@ -150,5 +155,14 @@
       ]
     }
   ],
-  "dependencyRecordSha256": "d7695dd168be17cd6b6a668fe3389e579371618005a425231dbdbae5da33df4f"
+  "dependencyRecordSha256": "d7695dd168be17cd6b6a668fe3389e579371618005a425231dbdbae5da33df4f",
+  "ciFirstHead": {
+    "head": "9d8938059c7ffeb3280bcb287e2ec57c3d067c87",
+    "failure": "PLM Embed Web Guard old exact-shape expectations",
+    "run": "https://github.com/zensgit/metasheet2/actions/runs/38731299585",
+    "job": 116409470300,
+    "failedLegacyAssertions": 8,
+    "localFollowup": "199 passed across 10 web modules; product source unchanged",
+    "followupRemote": "pending"
+  }
 }

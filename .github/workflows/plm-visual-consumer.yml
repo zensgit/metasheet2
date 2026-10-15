@@ -82,4 +82,4 @@ jobs:
           tests/plm-embed-visual-preview.spec.ts tests/plm-embed-visual-preview-service.spec.ts
           tests/plm-embed-visual-token.spec.ts tests/plm-embed-read-token.spec.ts
           tests/plm-embed-write-token.spec.ts tests/plm-embed-bom-review.spec.ts
-          tests/plm-embed-discussion-panel.spec.ts
+          tests/plm-embed-discussion-panel.spec.ts tests/plm-embed-service.spec.ts

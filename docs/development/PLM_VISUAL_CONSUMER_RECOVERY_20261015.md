@@ -50,3 +50,8 @@ Use Node20 and pnpm10.16.1. The dedicated workflow contains the exact focused ba
 For the browser fixture, set `RUN_PLM_VISUAL_BROWSER_E2E=1`, `E2E_YUANTUS_WORKTREE` to the companion markup checkout, `E2E_YUANTUS_PYTHON` to a Python3.11 environment matching its requirements.lock, and `PLM_VISUAL_BROWSER_OUTPUT` to a fresh artifact directory. From packages/core-backend, run `pnpm exec vitest run --config vitest.visual-preview-browser.config.ts`. Local Chromium must already be installed. Redis/source-registry substitutes remain explicit.
 
 The final narrow-screen capture is [available here](assets/plm-visual-consumer-20261015-narrow.png), with a [desktop capture](assets/plm-visual-consumer-20261015-desktop.png). The compact evidence JSON records current input hashes and observed PostgreSQL blocker/waiter IDs; raw local browser/PG logs remain under artifacts/plm-visual-consumer-20261015. Independent read-only review found and closed the described authority and await-boundary findings; it is not a second test execution.
+
+
+## First remote CI contract follow-up
+
+On source9d8938, PLM Embed Web Guard run38731299585/job116409470300 failed eight legacy service assertions: exact result objects lacked the newly returned default-false Visual flag or entitled Part identifier. Update their complete expected shapes and add ten literal-boolean/invalid-Part counterexamples; no assertion was loosened to partial matching. The existing guard plus all Visual web modules now pass **199tests across10modules** locally. The new dedicated consumer lane also runs this service suite. This follow-up changes only tests, CI wiring and documentation; browser-verified product source bytes are unchanged. New-head remote CI remains pending.
