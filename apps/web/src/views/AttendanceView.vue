@@ -3,7 +3,7 @@
     <p>{{ tr('Your session changed. This page belongs to the previous session; actions are disabled and unsaved drafts remain here until you reload.', '会话已变化。本页面属于原会话，操作已停用；未保存草稿保留在此，直到您重新加载。') }}</p>
     <button type="button" @click="reloadAttendanceSession">{{ tr('Discard unsaved drafts and reload', '放弃未保存草稿并重新加载') }}</button>
   </section>
-  <div class="attendance" :class="{ 'attendance--overview': showOverview }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
+      <div class="attendance" :class="{ 'attendance--overview': showOverview, 'attendance--reports': showReports }" :inert="attendanceSessionStale || undefined" :aria-hidden="attendanceSessionStale || undefined">
     <div v-if="pluginLoading" class="attendance__card attendance__card--empty">
       <h3>{{ tr('Checking attendance module...', '正在检查考勤模块...') }}</h3>
       <p class="attendance__empty">{{ tr('Loading plugin status.', '正在加载插件状态。') }}</p>
@@ -23,7 +23,7 @@
           <p class="attendance__subtitle">
             {{
               showReports
-                ? tr('Review records, exports, and request totals in one place.', '集中查看记录、导出与申请汇总。')
+                ? tr('Filter a date range, scan the records table, and export.', '选定区间后查看记录表并导出。')
                 : tr('Track punches, summaries, and adjustments.', '跟踪打卡、汇总和补卡调整。')
             }}
           </p>
@@ -89,6 +89,38 @@
         <button class="attendance__btn" :disabled="loading || reportLoading" @click="refreshVisibleSurfaceWithStatus">
           {{ tr('Reload report', '重载报表') }}
         </button>
+        <div class="attendance__reports-toolbar">
+          <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
+            <summary>{{ tr('Columns', '显示字段') }}</summary>
+            <div class="attendance__records-column-actions">
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
+                {{ tr('Show all', '全部显示') }}
+              </button>
+              <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
+                {{ tr('Restore default', '恢复默认') }}
+              </button>
+            </div>
+            <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
+              <strong>{{ group.label }}</strong>
+              <label v-for="column in group.columns" :key="column.code">
+                <input
+                  type="checkbox"
+                  :data-record-column-code="column.code"
+                  :checked="visibleRecordReportCodeSet.has(column.code)"
+                  :disabled="recordReportColumnPinned(column.code)"
+                  @change="onToggleRecordReportColumn(column.code, $event)"
+                />
+                {{ column.label }}
+              </label>
+            </div>
+          </details>
+          <button class="attendance__btn" type="button" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
+            {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
+          </button>
+          <button class="attendance__btn" type="button" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
+            {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
+          </button>
+        </div>
         <details class="attendance__filters-more">
           <summary>{{ tr('More filters', '更多筛选') }}</summary>
           <label class="attendance__field" for="attendance-org-id">
@@ -353,172 +385,68 @@
         collapsed-by-default details — not an equal-weight sibling of the
         calendar. Quick actions and approval-center deep links open it.
       -->
-      <section v-if="showReports" class="attendance__reports-brief">
-        <div class="attendance__card" data-reports-insight="snapshot">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Report Snapshot', '报表快照') }}</h3>
-            <button
-              v-if="reportsFiltersActive"
-              class="attendance__btn attendance__btn--inline"
-              type="button"
-              @click="clearReportsFilters"
-            >
-              {{ tr('Clear filters', '清除筛选') }}
-            </button>
-          </div>
-          <p class="attendance__field-hint attendance__reports-quiet">
-            {{ reportRangeLabel }}
-          </p>
-          <div
-            v-if="reportsUnavailable"
-            class="attendance__empty"
-            data-reports-state="unavailable"
+      <section v-if="showReports" class="attendance__reports-brief" data-reports-layout="table-first">
+        <div
+          v-if="reportsUnavailable"
+          class="attendance__empty"
+          data-reports-state="unavailable"
+        >
+          {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
+        </div>
+        <p
+          v-else-if="reportsDataStale"
+          class="attendance__field-hint attendance__field-hint--strong"
+          data-reports-state="stale"
+        >
+          {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
+        </p>
+        <div
+          v-if="!reportsUnavailable"
+          class="attendance__kpi-strip"
+          data-reports-insight="snapshot"
+        >
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'all' }"
+            type="button"
+            data-report-kpi="records"
+            :aria-pressed="recordStatusFilter === 'all'"
+            @click="applyReportRecordKpi('all')"
           >
-            {{ tr('Report data is unavailable for the current filters.', '当前筛选条件下报表数据不可用。') }}
-          </div>
-          <p
-            v-else-if="reportsDataStale"
-            class="attendance__field-hint attendance__field-hint--strong"
-            data-reports-state="stale"
+            <span>{{ tr('Records', '记录') }}</span>
+            <strong>{{ records.length }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'flagged' }"
+            type="button"
+            data-report-kpi="flagged"
+            :aria-pressed="recordStatusFilter === 'flagged'"
+            @click="applyReportRecordKpi('flagged')"
           >
-            {{ tr('Filters changed. Reload the report before exporting.', '筛选条件已变化，请先重载报表再导出。') }}
-          </p>
-          <div class="attendance__summary attendance__summary--reports">
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible requests', '筛选后申请') }}</span>
-              <strong>{{ filteredRequestReportTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible minutes', '筛选后分钟') }}</span>
-              <strong>{{ filteredRequestReportMinutesTotal }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible groups', '筛选后分组') }}</span>
-              <strong>{{ filteredRequestReport.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Visible records', '筛选后记录') }}</span>
-              <strong>{{ filteredRecords.length }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Flagged records', '异常记录') }}</span>
-              <strong>{{ filteredFlaggedRecordsCount }}</strong>
-            </div>
-            <div class="attendance__summary-item">
-              <span>{{ tr('Work minutes', '工时分钟') }}</span>
-              <strong>{{ filteredRecordsWorkMinutes }}</strong>
-            </div>
-          </div>
+            <span>{{ tr('Flagged', '异常') }}</span>
+            <strong>{{ reportPageFlaggedCount }}</strong>
+          </button>
+          <button
+            class="attendance__kpi"
+            :class="{ 'attendance__kpi--active': recordStatusFilter === 'early_leave' }"
+            type="button"
+            data-report-kpi="early-leave"
+            :aria-pressed="recordStatusFilter === 'early_leave'"
+            @click="applyReportRecordKpi('early_leave')"
+          >
+            <span>{{ tr('Early leave', '早退') }}</span>
+            <strong>{{ reportPageEarlyLeaveCount }}</strong>
+          </button>
+          <button
+            v-if="reportsFiltersActive"
+            class="attendance__btn attendance__btn--inline"
+            type="button"
+            @click="clearReportsFilters"
+          >
+            {{ tr('Clear filters', '清除筛选') }}
+          </button>
         </div>
-
-        <div class="attendance__card" data-reports-insight="trend">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportTrendItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.count }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="metrics">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
-          </div>
-          <div class="attendance__summary attendance__summary--reports">
-            <div v-for="item in reportMetricItems" :key="item.key" class="attendance__summary-item">
-              <span>{{ item.label }}</span>
-              <strong>{{ item.value }}</strong>
-            </div>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="request-type">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="request-type">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="requestReportTypeFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ requestReportTotal }}
-            </button>
-            <button
-              v-for="item in requestReportTypeBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="requestReportTypeFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
-        <div class="attendance__card" data-reports-insight="record-status">
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
-          </div>
-          <div class="attendance__filter-pills" data-report-filter-group="record-status">
-            <button
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
-              type="button"
-              data-report-filter-value="all"
-              @click="recordStatusFilter = 'all'"
-            >
-              {{ tr('All', '全部') }} · {{ records.length }}
-            </button>
-            <button
-              v-for="item in recordStatusBreakdown"
-              :key="item.key"
-              class="attendance__filter-pill"
-              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
-              type="button"
-              :data-report-filter-value="item.key"
-              @click="recordStatusFilter = item.key"
-            >
-              {{ item.label }} · {{ item.count }}
-            </button>
-          </div>
-        </div>
-
         <details class="attendance__reports-caliber" data-reports-insight="caliber-guide" data-attendance-caliber-guide>
           <summary>{{ tr('Caliber guide', '口径说明') }}</summary>
           <p class="attendance__field-hint">
@@ -549,7 +477,7 @@
         class="attendance__grid"
         :class="{ 'attendance__grid--overview-history': showOverview }"
         :data-attendance-overview-history="showOverview ? 'true' : undefined"
-        v-if="showOverview || showReports"
+        v-if="showOverview"
       >
         <div v-if="showOverview" class="attendance__card" v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requests)">
           <h3>{{ tr('Summary', '汇总') }}</h3>
@@ -1208,54 +1136,6 @@
             </table>
           </div>
         </div>
-
-        <div
-          v-if="showReports"
-          class="attendance__card"
-          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
-          data-reports-surface="reports"
-          data-report-card="request-report"
-        >
-          <div class="attendance__requests-header">
-            <h3>{{ tr('Request Report', '申请报表') }}</h3>
-            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
-              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
-            </button>
-          </div>
-          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
-          <p class="attendance__field-hint attendance__field-hint--strong">
-            {{
-              tr(
-                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
-                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
-              )
-            }}
-          </p>
-          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
-          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
-            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
-          </div>
-          <div v-else class="attendance__table-wrapper">
-            <table class="attendance__table">
-              <thead>
-                <tr>
-                  <th>{{ tr('Type', '类型') }}</th>
-                  <th>{{ tr('Status', '状态') }}</th>
-                  <th>{{ tr('Total', '总数') }}</th>
-                  <th>{{ tr('Minutes', '分钟') }}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
-                  <td>{{ formatRequestType(row.requestType) }}</td>
-                  <td>{{ formatStatus(row.status) }}</td>
-                  <td>{{ row.total }}</td>
-                  <td>{{ row.minutes }}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-        </div>
       </section>
 
       <section v-if="showOverview" class="attendance__card attendance__card--selfservice" data-selfservice-card="guide">
@@ -1374,39 +1254,6 @@
                 )
               }}
             </p>
-          </div>
-          <div class="attendance__records-actions">
-            <button class="attendance__btn" :disabled="loading" @click="reloadRecordsWithStatus">{{ tr('Reload', '重载') }}</button>
-            <details class="attendance__report-tech attendance__records-columns" data-record-column-picker>
-              <summary>{{ tr('Columns', '显示字段') }}</summary>
-              <div class="attendance__records-column-actions">
-                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = showAllRecordReportColumns()">
-                  {{ tr('Show all', '全部显示') }}
-                </button>
-                <button class="attendance__btn attendance__btn--inline" type="button" @click="recordReportColumnPrefs = resetRecordReportColumns()">
-                  {{ tr('Restore default', '恢复默认') }}
-                </button>
-              </div>
-              <div v-for="group in recordReportColumnGroups" :key="group.id" class="attendance__records-column-group">
-                <strong>{{ group.label }}</strong>
-                <label v-for="column in group.columns" :key="column.code">
-                  <input
-                    type="checkbox"
-                    :data-record-column-code="column.code"
-                    :checked="visibleRecordReportCodeSet.has(column.code)"
-                    :disabled="recordReportColumnPinned(column.code)"
-                    @change="onToggleRecordReportColumn(column.code, $event)"
-                  />
-                  {{ column.label }}
-                </label>
-              </div>
-            </details>
-            <button class="attendance__btn" :disabled="exporting || loading || reportsExportBlocked" @click="exportCsv">
-              {{ exporting ? tr('Exporting...', '导出中...') : tr('Export CSV', '导出 CSV') }}
-            </button>
-            <button class="attendance__btn" data-testid="attendance-export-xlsx" :disabled="exportingXlsx || loading || reportsExportBlocked" @click="exportXlsx">
-              {{ exportingXlsx ? tr('Exporting...', '导出中...') : tr('Export Excel', '导出 Excel') }}
-            </button>
           </div>
         </div>
         <details
@@ -1556,56 +1403,273 @@
         </div>
       </section>
 
+      <details
+        v-if="showReports"
+        class="attendance__reports-more"
+        data-reports-insight="more-stats"
+      >
+        <summary>{{ tr('Breakdown / more stats', '分布 / 更多统计') }}</summary>
+
+        <section data-reports-insight="trend">
+          <h3>{{ tr('Attendance Trend', '考勤趋势') }}</h3>
+          <p v-if="visibleReportTrendItems.length === 0" class="attendance__empty" data-reports-empty="trend">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportTrendItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.count }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="metrics">
+          <h3>{{ tr('Management Metrics', '管理统计') }}</h3>
+          <p v-if="visibleReportMetricItems.length === 0" class="attendance__empty" data-reports-empty="metrics">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__summary attendance__summary--reports">
+            <div v-for="item in visibleReportMetricItems" :key="item.key" class="attendance__summary-item">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+            </div>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-status">
+          <h3>{{ tr('Request Status Mix', '申请状态分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="request-type">
+          <h3>{{ tr('Request Type Mix', '申请类型分布') }}</h3>
+          <p v-if="requestReportTotal === 0" class="attendance__empty" data-reports-empty="request-type">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="request-type">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="requestReportTypeFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ requestReportTotal }}
+            </button>
+            <button
+              v-for="item in requestReportTypeBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': requestReportTypeFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="requestReportTypeFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <section data-reports-insight="record-status">
+          <h3>{{ tr('Record Status Mix', '记录状态分布') }}</h3>
+          <p v-if="records.length === 0" class="attendance__empty" data-reports-empty="record-status">
+            {{ tr('None yet', '暂无') }}
+          </p>
+          <div v-else class="attendance__filter-pills" data-report-filter-group="record-status">
+            <button
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === 'all' }"
+              type="button"
+              data-report-filter-value="all"
+              @click="recordStatusFilter = 'all'"
+            >
+              {{ tr('All', '全部') }} · {{ records.length }}
+            </button>
+            <button
+              v-for="item in recordStatusBreakdown"
+              :key="item.key"
+              class="attendance__filter-pill"
+              :class="{ 'attendance__filter-pill--active': recordStatusFilter === item.key }"
+              type="button"
+              :data-report-filter-value="item.key"
+              @click="recordStatusFilter = item.key"
+            >
+              {{ item.label }} · {{ item.count }}
+            </button>
+          </div>
+        </section>
+
+        <div
+          class="attendance__card"
+          v-bind="overviewSectionBinding(ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport)"
+          data-reports-surface="reports"
+          data-report-card="request-report"
+        >
+          <div class="attendance__requests-header">
+            <h3>{{ tr('Request Report', '申请报表') }}</h3>
+            <button class="attendance__btn" :disabled="reportLoading" @click="reloadRequestReportWithStatus">
+              {{ reportLoading ? tr('Loading...', '加载中...') : tr('Reload report', '重载报表') }}
+            </button>
+          </div>
+          <small class="attendance__field-hint attendance__reports-quiet">{{ requestReportTimezoneContextHint }}</small>
+          <p class="attendance__field-hint">
+            {{
+              tr(
+                `Showing ${filteredRequestReport.length} groups / ${filteredRequestReportTotal} requests / ${filteredRequestReportMinutesTotal} minutes.`,
+                `当前显示 ${filteredRequestReport.length} 个分组 / ${filteredRequestReportTotal} 条申请 / ${filteredRequestReportMinutesTotal} 分钟。`,
+              )
+            }}
+          </p>
+          <div v-if="requestReport.length === 0" class="attendance__empty">{{ tr('No report data.', '暂无报表数据。') }}</div>
+          <div v-else-if="filteredRequestReport.length === 0" class="attendance__empty">
+            {{ tr('No report rows match the current filters.', '当前筛选条件下没有匹配的报表行。') }}
+          </div>
+          <div v-else class="attendance__table-wrapper">
+            <table class="attendance__table">
+              <thead>
+                <tr>
+                  <th>{{ tr('Type', '类型') }}</th>
+                  <th>{{ tr('Status', '状态') }}</th>
+                  <th>{{ tr('Total', '总数') }}</th>
+                  <th>{{ tr('Minutes', '分钟') }}</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in filteredRequestReport" :key="`${row.requestType}-${row.status}`">
+                  <td>{{ formatRequestType(row.requestType) }}</td>
+                  <td>{{ formatStatus(row.status) }}</td>
+                  <td>{{ row.total }}</td>
+                  <td>{{ row.minutes }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </details>
+
       <section class="attendance__grid" v-if="showAdmin">
         <div ref="adminConsoleRef" class="attendance__card attendance__card--admin">
-          <div class="attendance__admin-header">
+          <div v-if="adminTaskHomeOpen" class="attendance__admin-header">
             <h3>{{ tr('Admin Console', '管理控制台') }}</h3>
-            <div class="attendance__admin-actions">
-              <div class="attendance__admin-page-search" data-admin-page-search="true">
-                <button
-                  v-if="!adminPageSearchOpen"
-                  class="attendance__btn"
-                  type="button"
-                  data-admin-page-search-toggle="true"
-                  @click="openAdminPageSearch"
-                >
-                  {{ tr('Search this page', '搜索本页') }}
-                </button>
-                <div v-else class="attendance__admin-page-search-field" role="search">
-                  <input
-                    ref="adminPageSearchInputRef"
-                    v-model="adminPageSearchQuery"
-                    class="attendance__admin-page-search-input"
-                    type="search"
-                    data-admin-page-search-input="true"
-                    :placeholder="tr('Search titles, fields, and rows', '搜索标题、字段和列表')"
-                    :aria-label="tr('Search this page', '搜索本页')"
-                    @keydown.esc.prevent="closeAdminPageSearch"
-                  />
+            <div class="attendance__admin-header-tools">
+              <div class="attendance__admin-actions">
+                <div class="attendance__admin-page-search" data-admin-page-search="true">
                   <button
-                    class="attendance__btn attendance__btn--inline"
+                    v-if="!adminPageSearchOpen"
+                    class="attendance__btn"
                     type="button"
-                    data-admin-page-search-clear="true"
-                    @click="clearAdminPageSearchQuery"
+                    data-admin-page-search-toggle="true"
+                    @click="openAdminPageSearch"
                   >
-                    {{ tr('Clear', '清除') }}
+                    {{ tr('Search this page', '搜索本页') }}
                   </button>
-                  <span
-                    v-if="adminPageSearchQuery.trim()"
-                    class="attendance__admin-page-search-status"
-                    data-admin-page-search-status
-                  >
-                    {{
-                      adminPageSearchMatched === 0
-                        ? tr('No matches on this page.', '当前页面没有匹配内容。')
-                        : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched}`
-                    }}
-                  </span>
+                  <div v-else class="attendance__admin-page-search-field" role="search">
+                    <div
+                      class="attendance__admin-page-search-scope"
+                      role="group"
+                      :aria-label="tr('Search scope', '搜索范围')"
+                    >
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                        type="button"
+                        data-admin-page-search-scope="page"
+                        :aria-pressed="adminPageSearchScope === 'page'"
+                        @click="setAdminPageSearchScope('page')"
+                      >
+                        {{ tr('This page', '本页') }}
+                      </button>
+                      <button
+                        class="attendance__admin-page-search-scope-btn"
+                        :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                        type="button"
+                        data-admin-page-search-scope="workbench"
+                        :aria-pressed="adminPageSearchScope === 'workbench'"
+                        @click="setAdminPageSearchScope('workbench')"
+                      >
+                        {{ tr('All workbench', '全部工作台') }}
+                      </button>
+                    </div>
+                    <div class="attendance__admin-page-search-combo">
+                      <input
+                        ref="adminPageSearchInputRef"
+                        v-model="adminPageSearchQuery"
+                        class="attendance__admin-page-search-input"
+                        type="search"
+                        data-admin-page-search-input="true"
+                        :placeholder="adminPageSearchPlaceholder"
+                        :aria-label="adminPageSearchAriaLabel"
+                        @keydown="onAdminPageSearchKeydown"
+                      />
+                      <ul
+                        v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
+                        class="attendance__admin-page-search-results"
+                        data-admin-page-search-results
+                        role="listbox"
+                      >
+                        <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                          <button
+                            class="attendance__admin-page-search-result"
+                            type="button"
+                            role="option"
+                            :data-admin-page-search-result="item.id"
+                            @click="openAdminWorkbenchSearchHit(item.id)"
+                          >
+                            {{ item.contextLabel }}
+                          </button>
+                        </li>
+                        <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                          {{ tr('No matches', '搜索不到') }}
+                        </li>
+                      </ul>
+                    </div>
+                    <button
+                      class="attendance__btn attendance__btn--inline"
+                      type="button"
+                      data-admin-page-search-clear="true"
+                      @click="clearAdminPageSearchQuery"
+                    >
+                      {{ tr('Clear', '清除') }}
+                    </button>
+                    <span
+                      v-if="adminPageSearchStatusText"
+                      class="attendance__admin-page-search-status"
+                      data-admin-page-search-status
+                      :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
+                    >
+                      {{ adminPageSearchStatusText }}
+                    </span>
+                  </div>
                 </div>
+                <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                  {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                </button>
               </div>
-              <button class="attendance__btn" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
-                {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
-              </button>
+              <AttendanceAdminGuide :tr="tr" @select-section="selectAdminSection" />
             </div>
           </div>
           <div v-if="statusMessage" class="attendance__status-block attendance__status-block--admin">
@@ -1664,7 +1728,6 @@
                   </button>
                 </div>
               </div>
-              <AttendanceAdminGuide :tr="tr" @select-section="selectAdminSection" />
               <AttendanceAdminTaskHome
                 :tr="tr"
                 :groups="adminTaskHomeGroups"
@@ -1682,9 +1745,11 @@
               :active-admin-section-context-label="activeAdminSectionContextLabel"
               :is-compact-admin-nav="isCompactAdminNav"
               :admin-compact-nav-open="adminCompactNavOpen"
+              :admin-section-filter="adminSectionFilter"
               :visible-admin-section-nav-groups="visibleAdminSectionNavGroups"
               :admin-active-section-id="adminActiveSectionId"
               @update:compact-nav-open="adminCompactNavOpen = $event"
+              @update:section-filter="adminSectionFilter = $event"
               @toggle-group="toggleAdminSectionGroup"
               @select-section="selectAdminSection"
             />
@@ -1698,11 +1763,106 @@
               data-admin-current-section="true"
             >
               <strong class="attendance__admin-current-section-title">{{ activeAdminSectionContextLabel }}</strong>
-              <AttendanceAdminGuide
-                :tr="tr"
-                :active-section-id="adminActiveSectionId"
-                @select-section="selectAdminSection"
-              />
+              <div v-if="!adminTaskHomeOpen" class="attendance__admin-current-section-tools">
+                <div class="attendance__admin-actions">
+                  <div class="attendance__admin-page-search" data-admin-page-search="true">
+                    <button
+                      v-if="!adminPageSearchOpen"
+                      class="attendance__btn"
+                      type="button"
+                      data-admin-page-search-toggle="true"
+                      @click="openAdminPageSearch"
+                    >
+                      {{ tr('Search this page', '搜索本页') }}
+                    </button>
+                    <div v-else class="attendance__admin-page-search-field" role="search">
+                      <div
+                        class="attendance__admin-page-search-scope"
+                        role="group"
+                        :aria-label="tr('Search scope', '搜索范围')"
+                      >
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'page' }"
+                          type="button"
+                          data-admin-page-search-scope="page"
+                          :aria-pressed="adminPageSearchScope === 'page'"
+                          @click="setAdminPageSearchScope('page')"
+                        >
+                          {{ tr('This page', '本页') }}
+                        </button>
+                        <button
+                          class="attendance__admin-page-search-scope-btn"
+                          :class="{ 'attendance__admin-page-search-scope-btn--active': adminPageSearchScope === 'workbench' }"
+                          type="button"
+                          data-admin-page-search-scope="workbench"
+                          :aria-pressed="adminPageSearchScope === 'workbench'"
+                          @click="setAdminPageSearchScope('workbench')"
+                        >
+                          {{ tr('All workbench', '全部工作台') }}
+                        </button>
+                      </div>
+                      <div class="attendance__admin-page-search-combo">
+                        <input
+                          ref="adminPageSearchInputRef"
+                          v-model="adminPageSearchQuery"
+                          class="attendance__admin-page-search-input"
+                          type="search"
+                          data-admin-page-search-input="true"
+                          :placeholder="adminPageSearchPlaceholder"
+                          :aria-label="adminPageSearchAriaLabel"
+                          @keydown="onAdminPageSearchKeydown"
+                        />
+                        <ul
+                          v-if="adminPageSearchScope === 'workbench' && adminPageSearchQuery.trim()"
+                          class="attendance__admin-page-search-results"
+                          data-admin-page-search-results
+                          role="listbox"
+                        >
+                          <li v-for="item in adminWorkbenchSearchHits" :key="item.id" role="presentation">
+                            <button
+                              class="attendance__admin-page-search-result"
+                              type="button"
+                              role="option"
+                              :data-admin-page-search-result="item.id"
+                              @click="openAdminWorkbenchSearchHit(item.id)"
+                            >
+                              {{ item.contextLabel }}
+                            </button>
+                          </li>
+                          <li v-if="adminPageSearchEmpty" class="attendance__admin-page-search-empty" data-attendance-search-empty>
+                            {{ tr('No matches', '搜索不到') }}
+                          </li>
+                        </ul>
+                      </div>
+                      <button
+                        class="attendance__btn attendance__btn--inline"
+                        type="button"
+                        data-admin-page-search-clear="true"
+                        @click="clearAdminPageSearchQuery"
+                      >
+                        {{ tr('Clear', '清除') }}
+                      </button>
+                      <span
+                        v-if="adminPageSearchStatusText"
+                        class="attendance__admin-page-search-status"
+                        data-admin-page-search-status
+                        :data-attendance-search-empty="adminPageSearchEmpty ? '' : undefined"
+                      >
+                        {{ adminPageSearchStatusText }}
+                      </span>
+                    </div>
+                  </div>
+                  <button class="attendance__btn" type="button" data-admin-reload="true" :disabled="settingsLoading || ruleLoading" @click="loadAdminData">
+                    {{ settingsLoading || ruleLoading ? tr('Loading...', '加载中...') : tr('Reload admin', '重载管理数据') }}
+                  </button>
+                </div>
+                <AttendanceAdminGuide
+                  :tr="tr"
+                  :active-section-id="adminActiveSectionId"
+                  @select-section="selectAdminSection"
+                />
+              </div>
             </div>
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.setup)"
@@ -6576,7 +6736,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.importBatches)"
             >
               <AttendanceImportBatchesSection
@@ -6592,10 +6752,10 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability)"
             >
-              <AttendanceTeamAvailabilitySection :tr="tr" />
+              <AttendanceTeamAvailabilitySection :tr="tr" :user-scope="attendanceTeamAvailabilityUserScope" />
             </div>
 
             <div
@@ -7437,7 +7597,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations)"
             >
               <div class="attendance__admin-section-header">
@@ -7462,11 +7622,18 @@
                       data-annual-ops-adjust-person
                       @input="onAnnualAdjustPersonInput"
                     />
-                    <ul v-if="annualAdjustPersonHits.length > 0" class="attendance__typeahead-menu">
+                    <ul
+                      v-if="annualAdjustPersonHits.length > 0 || annualAdjustPersonSearchEmpty"
+                      class="attendance__typeahead-menu"
+                      data-annual-ops-adjust-person-menu
+                    >
                       <li v-for="person in annualAdjustPersonHits" :key="person.id">
                         <button type="button" @click="chooseAnnualAdjustPerson(person)">
                           {{ annualAdjustPersonLabel(person) }}
                         </button>
+                      </li>
+                      <li v-if="annualAdjustPersonSearchEmpty" class="attendance__typeahead-empty" data-attendance-search-empty>
+                        {{ tr('No matches', '搜索不到') }}
                       </li>
                     </ul>
                   </label>
@@ -8352,7 +8519,7 @@
 
             <div
               v-show="shouldShowAdminSection(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
-              class="attendance__admin-section"
+              class="attendance__admin-section attendance__form-sheet attendance__ch-preview"
               v-bind="adminSectionBinding(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview)"
               data-attendance-comprehensive-hours-preview
             >
@@ -8360,29 +8527,12 @@
                 <div>
                   <h4>{{ tr('Comprehensive hours preview', '综合工时预览') }}</h4>
                   <small class="attendance__field-hint">
-                    {{ tr('Read-only cap comparison for explicit users. It does not save policies or block schedule changes.', '面向指定员工的只读工时上限对比，不保存策略，也不会阻断排班变更。') }}
+                    {{ tr('Read-only cap check. Nothing is saved or blocked.', '只读对比工时上限，不保存，也不拦截排班。') }}
                   </small>
                 </div>
-                <button
-                  class="attendance__btn"
-                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
-                  @click="previewComprehensiveHours"
-                  data-attendance-comprehensive-hours-preview-run
-                >
-                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
-                </button>
               </div>
 
-              <div class="attendance__admin-meta">
-                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
-                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
-                </span>
-                <span class="attendance__status-chip">
-                  {{ comprehensiveHoursPreviewPeriodLabel }}
-                </span>
-              </div>
-
-              <div class="attendance__admin-grid">
+              <div class="attendance__admin-grid attendance__admin-grid--thirds">
                 <label class="attendance__field" for="attendance-comprehensive-hours-user-mode">
                   <span>{{ tr('Scope', '范围') }}</span>
                   <select
@@ -8391,41 +8541,39 @@
                     data-attendance-comprehensive-hours-user-mode
                   >
                     <option value="single">{{ tr('Single user', '单个员工') }}</option>
-                    <option value="multiple">{{ tr('User IDs', '多个员工 ID') }}</option>
+                    <option value="multiple">{{ tr('Several employees', '多名员工') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr('Preview v1 intentionally requires explicit users; all-users batch remains out of scope.', '预览 v1 必须显式指定员工；全员批量仍不在本次范围。') }}
-                  </small>
                 </label>
-                <label
+                <AttendanceUserPickerField
                   v-if="comprehensiveHoursPreviewForm.userMode === 'single'"
-                  class="attendance__field"
-                  for="attendance-comprehensive-hours-user-id"
-                >
-                  <span>{{ tr('User ID', '员工 ID') }}</span>
-                  <input
-                    id="attendance-comprehensive-hours-user-id"
-                    v-model="comprehensiveHoursPreviewForm.userId"
-                    type="text"
-                    placeholder="user-1"
-                    data-attendance-comprehensive-hours-user-id
-                  />
-                </label>
+                  v-model="comprehensiveHoursPreviewForm.userId"
+                  :tr="tr"
+                  typeahead
+                  :label="tr('Employee name', '员工姓名')"
+                  name="comprehensiveHoursUserId"
+                  input-id="attendance-comprehensive-hours-user-id"
+                  endpoint="/api/attendance-admin/users/search"
+                  :org-id="orgId"
+                  :global-scope="attendanceAdminGlobalUserScope"
+                  :search-placeholder="tr('Type a name', '输入姓名')"
+                  :help-text="tr('Type a name. Matches appear as you type.', '输入姓名，输入时自动匹配。')"
+                  @update:display-name="comprehensiveHoursPreviewUserLabel = $event"
+                />
                 <label
                   v-else
                   class="attendance__field"
                   for="attendance-comprehensive-hours-user-ids"
                 >
-                  <span>{{ tr('User IDs', '员工 ID 列表') }}</span>
+                  <span>{{ tr('Employees', '员工') }}</span>
                   <textarea
                     id="attendance-comprehensive-hours-user-ids"
                     v-model="comprehensiveHoursPreviewForm.userIds"
-                    rows="3"
-                    placeholder="user-1, user-2"
+                    rows="2"
+                    :placeholder="tr('Separate with commas', '用逗号分隔')"
                     data-attendance-comprehensive-hours-user-ids
                   />
                   <small class="attendance__field-hint">
-                    {{ tr('Comma, space, or newline separated. The backend caps preview scope at 100 users.', '可用逗号、空格或换行分隔；后端最多预览 100 人。') }}
+                    {{ tr('Comma or newline. Up to 100.', '逗号或换行，最多 100 人。') }}
                   </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-metric">
@@ -8460,29 +8608,6 @@
                     <option value="warn">{{ tr('Warn preview', '预警预览') }}</option>
                     <option value="block">{{ tr('Strict preview', '严格预览') }}</option>
                   </select>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'Mode only changes preview status. It is not persisted. See \'Save-time strong control\' below to enable save blocking.',
-                      '模式只影响预览状态，不会持久化。如需保存时拦截，请使用下方“保存时强管控”。'
-                    ) }}
-                  </small>
-                </label>
-                <label
-                  class="attendance__field attendance__field--checkbox"
-                  data-attendance-comprehensive-hours-save-block-mode
-                >
-                  <input
-                    type="checkbox"
-                    id="attendance-comprehensive-hours-save-block-mode"
-                    v-model="comprehensiveHoursSaveBlockMode"
-                  />
-                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
-                  <small class="attendance__field-hint">
-                    {{ tr(
-                      'When enabled, shift and rotation assignment saves are blocked if the comprehensive-hours preview returns a violation. Preview errors and degraded data never block saves.',
-                      '启用后，若综合工时预览返回违规，将拦截班次和轮班分配保存；预览失败或降级数据不会拦截保存。'
-                    ) }}
-                  </small>
                 </label>
                 <label class="attendance__field" for="attendance-comprehensive-hours-period-type">
                   <span>{{ tr('Period', '周期') }}</span>
@@ -8585,6 +8710,32 @@
                 </label>
               </div>
 
+              <div class="attendance__ch-save-row" data-attendance-comprehensive-hours-save-block-mode>
+                <label class="attendance__field attendance__field--checkbox" for="attendance-comprehensive-hours-save-block-mode">
+                  <input
+                    type="checkbox"
+                    id="attendance-comprehensive-hours-save-block-mode"
+                    v-model="comprehensiveHoursSaveBlockMode"
+                  />
+                  <span>{{ tr('Save-time strong control', '保存时强管控') }}</span>
+                </label>
+                <small class="attendance__field-hint">
+                  {{ tr('Blocks shift and rotation saves on a violation. A failed preview does not block.', '违规时拦截班次和轮班保存。预览失败不拦截。') }}
+                </small>
+              </div>
+
+              <div class="attendance__form-actions">
+                <button
+                  class="attendance__btn attendance__btn--primary"
+                  type="button"
+                  :disabled="comprehensiveHoursPreviewLoading || !comprehensiveHoursCanPreview"
+                  data-attendance-comprehensive-hours-preview-run
+                  @click="previewComprehensiveHours"
+                >
+                  {{ comprehensiveHoursPreviewLoading ? tr('Previewing...', '预览中...') : tr('Preview comprehensive hours', '预览综合工时') }}
+                </button>
+              </div>
+
               <p
                 v-if="comprehensiveHoursPreviewStatus.message"
                 class="attendance__status"
@@ -8594,22 +8745,39 @@
                 {{ comprehensiveHoursPreviewStatus.message }}
               </p>
 
-              <div class="attendance__summary attendance__summary--workbench" data-attendance-comprehensive-hours-aggregate>
-                <div
-                  v-for="item in comprehensiveHoursPreviewAggregateItems"
+              <p
+                v-if="!comprehensiveHoursPreview"
+                class="attendance__ch-empty"
+                data-attendance-comprehensive-hours-empty
+              >
+                {{ tr('Not previewed yet', '尚未预览') }}
+              </p>
+              <div
+                v-else
+                class="attendance__kpi-strip attendance__ch-results"
+                data-attendance-comprehensive-hours-aggregate
+              >
+                <span class="attendance__status-chip" data-attendance-comprehensive-hours-readonly>
+                  {{ comprehensiveHoursPreviewReadOnlyLabel }}
+                </span>
+                <span class="attendance__status-chip">
+                  {{ comprehensiveHoursPreviewPeriodLabel }}
+                </span>
+                <span
+                  v-for="item in comprehensiveHoursPreviewVisibleAggregateItems"
                   :key="item.key"
-                  class="attendance__summary-item"
+                  class="attendance__kpi attendance__kpi--static"
                   :data-attendance-comprehensive-hours-aggregate-item="item.key"
                 >
                   <span>{{ item.label }}</span>
                   <strong>{{ item.value }}</strong>
-                </div>
+                </span>
               </div>
 
-              <div v-if="comprehensiveHoursPreviewRows.length === 0" class="attendance__empty" data-attendance-comprehensive-hours-empty>
-                {{ tr('Run a read-only preview to compare comprehensive-hours caps.', '运行只读预览以对比综合工时上限。') }}
+              <div v-if="comprehensiveHoursPreview && comprehensiveHoursPreviewRows.length === 0" class="attendance__empty">
+                {{ tr('No employee rows in this preview.', '这次预览没有员工结果。') }}
               </div>
-              <div v-else class="attendance__table-wrapper">
+              <div v-else-if="comprehensiveHoursPreviewRows.length > 0" class="attendance__table-wrapper">
                 <table class="attendance__table" data-attendance-comprehensive-hours-rows>
                   <thead>
                     <tr>
@@ -8625,7 +8793,8 @@
                   <tbody>
                     <tr v-for="row in comprehensiveHoursPreviewRows" :key="row.userId">
                       <td>
-                        <strong>{{ row.userId }}</strong>
+                        <strong>{{ comprehensiveHoursRowPrimaryLabel(row.userId) || tr('Employee', '员工') }}</strong>
+                        <span class="attendance__id-clip">{{ row.userId }}</span>
                         <div v-if="row.days !== undefined" class="attendance__field-hint">
                           {{ tr(`${row.workingDays ?? 0}/${row.days ?? 0} working days`, `${row.workingDays ?? 0}/${row.days ?? 0} 个工作日`) }}
                         </div>
@@ -13491,8 +13660,13 @@ const lastRecordCsvExportDetails = computed<AttendanceRecordReportConfigDetail[]
 
 const recordsTableColumnCount = computed(() => Math.max(1, visibleRecordReportColumns.value.length) + 1)
 
+function isFlaggedAttendanceRecord(record: AttendanceRecord): boolean {
+  return !['normal', 'off'].includes(String(record.status || ''))
+}
+
 const filteredRecords = computed(() =>
   records.value.filter((record) => {
+    if (recordStatusFilter.value === 'flagged') return isFlaggedAttendanceRecord(record)
     if (recordStatusFilter.value !== 'all' && record.status !== recordStatusFilter.value) {
       return false
     }
@@ -13500,12 +13674,12 @@ const filteredRecords = computed(() =>
   })
 )
 
-const filteredFlaggedRecordsCount = computed(() =>
-  filteredRecords.value.filter(record => !['normal', 'off'].includes(record.status)).length
+const reportPageFlaggedCount = computed(() =>
+  records.value.filter(record => isFlaggedAttendanceRecord(record)).length
 )
 
-const filteredRecordsWorkMinutes = computed(() =>
-  filteredRecords.value.reduce((sum, record) => sum + (Number(record.work_minutes) || 0), 0)
+const reportPageEarlyLeaveCount = computed(() =>
+  records.value.filter(record => record.status === 'early_leave').length
 )
 
 const reportTrendItems = computed(() => {
@@ -13531,6 +13705,14 @@ const reportMetricItems = computed(() => {
     { key: 'off-days', label: tr('Off days', '休息日'), value: current?.off_days ?? 0 },
   ]
 })
+
+const visibleReportTrendItems = computed(() =>
+  reportTrendItems.value.filter(item => Number(item.count) > 0)
+)
+
+const visibleReportMetricItems = computed(() =>
+  reportMetricItems.value.filter(item => Number(item.value) > 0)
+)
 
 // #3575 caliber-transparency lock (G3): one-sentence definitions for the headline attendance
 // numbers, reusing the same field codes + labels as the record-report column catalog
@@ -13905,6 +14087,10 @@ function clearReportsFilters(): void {
   requestReportStatusFilter.value = 'all'
   requestReportTypeFilter.value = 'all'
   recordStatusFilter.value = 'all'
+}
+
+function applyReportRecordKpi(filter: 'all' | 'flagged' | 'early_leave'): void {
+  recordStatusFilter.value = filter === 'all' || recordStatusFilter.value === filter ? 'all' : filter
 }
 
 function clearReportsDataset(): void {
@@ -15454,6 +15640,7 @@ const {
   readLastAdminSection,
   collapseAllAdminSectionGroups,
   toggleAdminSectionGroup,
+  orderedAdminSectionNavItems,
   visibleAdminSectionNavGroups,
   visibleRecentAdminSectionNavItems,
 } = useAttendanceAdminRail({
@@ -15481,8 +15668,46 @@ const showAdminSectionWorkspace = computed(() => showAdmin.value && !adminTaskHo
 const adminConsoleRef = ref<HTMLElement | null>(null)
 const adminPageSearchOpen = ref(false)
 const adminPageSearchQuery = ref('')
+const adminPageSearchScope = ref<'page' | 'workbench'>('page')
 const adminPageSearchInputRef = ref<HTMLInputElement | null>(null)
 const adminPageSearchMatched = ref(0)
+const ADMIN_WORKBENCH_SEARCH_LIMIT = 8
+
+const adminWorkbenchSearchMatches = computed(() => {
+  const query = adminPageSearchQuery.value.trim().toLowerCase()
+  if (adminPageSearchScope.value !== 'workbench' || !query) return []
+  return orderedAdminSectionNavItems.value.filter(item =>
+    `${item.matchText ?? ''}\n${item.contextLabel}`.toLowerCase().includes(query),
+  )
+})
+const adminWorkbenchSearchHits = computed(() => adminWorkbenchSearchMatches.value.slice(0, ADMIN_WORKBENCH_SEARCH_LIMIT))
+const adminPageSearchEmpty = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return false
+  if (adminPageSearchScope.value === 'workbench') return adminWorkbenchSearchMatches.value.length === 0
+  return adminPageSearchMatched.value === 0
+})
+const adminPageSearchPlaceholder = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search workbench sections', '搜索工作台区块')
+    : tr('Search titles, fields, and rows', '搜索标题、字段和列表')
+))
+const adminPageSearchAriaLabel = computed(() => (
+  adminPageSearchScope.value === 'workbench'
+    ? tr('Search all workbench sections', '搜索全部工作台')
+    : tr('Search this page', '搜索本页')
+))
+const adminPageSearchStatusText = computed(() => {
+  if (!adminPageSearchQuery.value.trim()) return ''
+  if (adminPageSearchScope.value === 'workbench') {
+    const count = adminWorkbenchSearchMatches.value.length
+    return count === 0
+      ? tr('No matches', '搜索不到')
+      : `${tr('Workbench matches', '工作台匹配')}: ${count}`
+  }
+  return adminPageSearchMatched.value === 0
+    ? tr('No matches', '搜索不到')
+    : `${tr('Matches on this page', '本页匹配')}: ${adminPageSearchMatched.value}`
+})
 
 function adminPageSearchRoot(): HTMLElement | null {
   const host = adminConsoleRef.value
@@ -15498,7 +15723,7 @@ function syncAdminPageContentSearch(): void {
   if (!host) return
   clearAdminPageContentSearch(host)
   const query = adminPageSearchQuery.value.trim()
-  if (!query) {
+  if (!query || adminPageSearchScope.value !== 'page') {
     adminPageSearchMatched.value = 0
     return
   }
@@ -15515,6 +15740,11 @@ function openAdminPageSearch(): void {
   void nextTick(() => adminPageSearchInputRef.value?.focus())
 }
 
+function setAdminPageSearchScope(scope: 'page' | 'workbench'): void {
+  adminPageSearchScope.value = scope
+  void nextTick(() => adminPageSearchInputRef.value?.focus())
+}
+
 function clearAdminPageSearchQuery(): void {
   adminPageSearchQuery.value = ''
 }
@@ -15524,7 +15754,24 @@ function closeAdminPageSearch(): void {
   adminPageSearchOpen.value = false
 }
 
-watch(adminPageSearchQuery, () => {
+function openAdminWorkbenchSearchHit(id: string): void {
+  selectAdminSection(id)
+}
+
+function onAdminPageSearchKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closeAdminPageSearch()
+    return
+  }
+  if (event.key !== 'Enter' || adminPageSearchScope.value !== 'workbench') return
+  const first = adminWorkbenchSearchHits.value[0]
+  if (!first) return
+  event.preventDefault()
+  openAdminWorkbenchSearchHit(first.id)
+}
+
+watch([adminPageSearchQuery, adminPageSearchScope], () => {
   syncAdminPageContentSearch()
 }, { flush: 'post' })
 
@@ -16205,6 +16452,10 @@ async function focusInitialAttendanceSection(): Promise<void> {
 
   if ((!showOverview.value && !showReports.value) || !isKnownOverviewSectionId(targetId) || typeof document === 'undefined') return
   await nextTick()
+  if (showReports.value && targetId === ATTENDANCE_OVERVIEW_SECTION_IDS.requestReport) {
+    const moreStats = document.querySelector('[data-reports-insight="more-stats"]')
+    if (moreStats instanceof HTMLDetailsElement) moreStats.open = true
+  }
   if (revealRequests) {
     revealOverviewRequestTools()
   }
@@ -17241,6 +17492,8 @@ const comprehensiveHoursPreviewForm = reactive({
   capHours: 160,
   enforcement: 'warn' as AttendanceComprehensiveHoursEnforcement,
 })
+const comprehensiveHoursPreviewUserLabel = ref('')
+const comprehensiveHoursPreviewNames = ref<Record<string, string>>({})
 
 function comprehensiveHoursUserIds(): string[] {
   if (comprehensiveHoursPreviewForm.userMode === 'multiple') {
@@ -17323,6 +17576,48 @@ const comprehensiveHoursPreviewAggregateItems = computed(() => {
     { key: 'excess', label: tr('Excess minutes', '超出分钟'), value: aggregate?.totalExcessMinutes ?? 0 },
   ]
 })
+
+const comprehensiveHoursPreviewVisibleAggregateItems = computed(() =>
+  comprehensiveHoursPreviewAggregateItems.value.filter(item => Number(item.value) !== 0),
+)
+
+function comprehensiveHoursRowPrimaryLabel(userId: string): string {
+  const picked = comprehensiveHoursPreviewUserLabel.value.trim()
+  const selectedId = comprehensiveHoursPreviewForm.userId.trim()
+  if (picked && selectedId && userId === selectedId && picked !== userId) return picked
+  const resolved = comprehensiveHoursPreviewNames.value[userId]?.trim() || ''
+  if (resolved && resolved !== userId) return resolved
+  return ''
+}
+
+async function resolveComprehensiveHoursPreviewNames(userIds: string[]): Promise<void> {
+  const ids = Array.from(new Set(userIds.map(id => id.trim()).filter(Boolean)))
+  const scope = attendanceTeamAvailabilityUserScope.value
+  if (!scope || ids.length === 0) return
+  try {
+    const response = await apiFetch('/api/attendance-admin/users/batch/resolve', {
+      method: 'POST',
+      body: JSON.stringify({ userIds: ids, ...scope }),
+    })
+    if (!response.ok) return
+    const payload = await response.json().catch(() => null)
+    if (!payload?.ok) return
+    const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+    const next: Record<string, string> = { ...comprehensiveHoursPreviewNames.value }
+    for (const raw of items) {
+      if (!raw || typeof raw !== 'object') continue
+      const id = String((raw as { id?: string }).id || '').trim()
+      if (!id) continue
+      const name = (raw as { name?: unknown }).name == null ? '' : String((raw as { name?: unknown }).name).trim()
+      const email = String((raw as { email?: unknown }).email || '').trim()
+      const label = name || (email && email !== id ? email : '')
+      if (label) next[id] = label
+    }
+    comprehensiveHoursPreviewNames.value = next
+  } catch {
+    // A failed lookup leaves the preview in place. The raw id stays out of the name cell.
+  }
+}
 
 function toDateKey(date: Date): string {
   const year = date.getFullYear()
@@ -18073,6 +18368,12 @@ function attendanceAdminUserScopePayload(): { scope: 'global' } | { orgId: strin
     ? { scope: 'global' }
     : { orgId: requiredAttendanceAdminOrgId() }
 }
+
+const attendanceTeamAvailabilityUserScope = computed<{ scope: 'global' } | { orgId: string } | null>(() => {
+  if (attendanceAdminGlobalUserScope.value) return { scope: 'global' }
+  const org = normalizedOrgId()
+  return org ? { orgId: org } : null
+})
 
 function attendanceAdminUserScopeQuery(): string {
   return new URLSearchParams(attendanceAdminUserScopePayload()).toString()
@@ -23569,25 +23870,6 @@ async function reloadRequestReportWithStatus() {
   }
 }
 
-async function reloadRecordsWithStatus() {
-  try {
-    await loadRecords()
-    setStatus(
-      appendStatusContext(
-        tr(`Records loaded (${records.value.length}).`, `记录已加载（${records.value.length} 条）。`),
-        recordsTimezoneContextHint.value,
-      ),
-    )
-  } catch (error: any) {
-    setStatusFromErrorWithContext(
-      error,
-      tr('Failed to load records', '加载记录失败'),
-      recordsTimezoneContextHint.value,
-      'refresh',
-    )
-  }
-}
-
 async function reloadRequestsWithStatus() {
   try {
     await loadRequests()
@@ -26413,6 +26695,15 @@ interface AnnualAdjustResult { id: string; delta: number; applied: boolean; alre
 const annualAdjustForm = reactive<{ userId: string; deltaMinutes: number; reason: string }>({ userId: '', deltaMinutes: 0, reason: '' })
 const annualAdjustPersonText = ref('')
 const annualAdjustPersonHits = ref<AnnualAdjustPersonHit[]>([])
+const annualAdjustPersonSearchPending = ref(false)
+const annualAdjustPersonSearchSettled = ref(false)
+let annualAdjustPersonSearchSeq = 0
+const annualAdjustPersonSearchEmpty = computed(() => (
+  annualAdjustPersonText.value.trim().length > 0
+  && annualAdjustPersonHits.value.length === 0
+  && annualAdjustPersonSearchSettled.value
+  && !annualAdjustPersonSearchPending.value
+))
 const annualAdjustReasonPresets = computed(() => [
   tr('Grant', '补发'),
   tr('Reversal', '冲正'),
@@ -26436,29 +26727,39 @@ function onAnnualAdjustPersonInput(event: Event): void {
   annualAdjustPersonText.value = value
   annualAdjustForm.userId = value.trim()
   annualAdjustPersonHits.value = []
-  if ((event as InputEvent).isTrusted) void searchAnnualAdjustPeople(value)
+  annualAdjustPersonSearchSettled.value = false
+  void searchAnnualAdjustPeople(value)
 }
 
 function chooseAnnualAdjustPerson(person: AnnualAdjustPersonHit): void {
   annualAdjustForm.userId = person.id
   annualAdjustPersonText.value = person.name?.trim() || person.email.trim() || person.id
   annualAdjustPersonHits.value = []
+  annualAdjustPersonSearchPending.value = false
+  annualAdjustPersonSearchSettled.value = false
 }
 
 async function searchAnnualAdjustPeople(query: string): Promise<void> {
   const q = query.trim()
+  const seq = ++annualAdjustPersonSearchSeq
   if (!q) {
     annualAdjustPersonHits.value = []
+    annualAdjustPersonSearchPending.value = false
+    annualAdjustPersonSearchSettled.value = false
     return
   }
+  annualAdjustPersonSearchPending.value = true
+  annualAdjustPersonSearchSettled.value = false
   try {
     const params = new URLSearchParams({ q, ...attendanceAdminUserScopePayload() })
     const response = await apiFetch(`/api/attendance-admin/users/search?${params.toString()}`)
+    if (seq !== annualAdjustPersonSearchSeq) return
     if (!response.ok) {
       annualAdjustPersonHits.value = []
       return
     }
     const data = await response.json()
+    if (seq !== annualAdjustPersonSearchSeq) return
     const items = data?.data?.items
     annualAdjustPersonHits.value = Array.isArray(items)
       ? items.slice(0, 8).map((item: { id?: string; email?: string | null; name?: string | null }) => ({
@@ -26468,7 +26769,13 @@ async function searchAnnualAdjustPeople(query: string): Promise<void> {
       })).filter((item: AnnualAdjustPersonHit) => item.id)
       : []
   } catch {
+    if (seq !== annualAdjustPersonSearchSeq) return
     annualAdjustPersonHits.value = []
+  } finally {
+    if (seq === annualAdjustPersonSearchSeq) {
+      annualAdjustPersonSearchPending.value = false
+      annualAdjustPersonSearchSettled.value = Boolean(q)
+    }
   }
 }
 
@@ -27565,7 +27872,7 @@ async function previewComprehensiveHours() {
   if (userIds.length === 0) {
     comprehensiveHoursPreviewStatus.value = {
       kind: 'error',
-      message: tr('Enter at least one user ID before previewing.', '请先填写至少一个员工 ID。'),
+      message: tr('Choose an employee before previewing.', '请先选择员工。'),
     }
     return
   }
@@ -27599,6 +27906,9 @@ async function previewComprehensiveHours() {
     }
     adminForbidden.value = false
     comprehensiveHoursPreview.value = data.data ?? null
+    void resolveComprehensiveHoursPreviewNames(
+      (data.data?.rows ?? []).map((row: { userId?: string }) => String(row.userId || '')),
+    )
     comprehensiveHoursPreviewStatus.value = {
       kind: data.data?.degraded ? 'warn' : 'info',
       message: data.data?.degraded
@@ -30777,7 +31087,7 @@ watch(requestReportTypeBreakdown, (items) => {
 }, { immediate: true })
 
 watch(recordStatusBreakdown, (items) => {
-  if (recordStatusFilter.value === 'all') return
+  if (recordStatusFilter.value === 'all' || recordStatusFilter.value === 'flagged') return
   if (!items.some(item => item.key === recordStatusFilter.value)) {
     recordStatusFilter.value = 'all'
   }
@@ -31455,11 +31765,78 @@ defineExpose({
 .attendance__reports-brief {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  margin-bottom: 20px;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 
-.attendance__reports-brief > .attendance__card {
+.attendance__reports-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.attendance__kpi {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  border: 1px solid var(--ms-border);
+  background: var(--ms-bg-card);
+  color: var(--ms-text-2);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.attendance__kpi strong {
+  color: var(--ms-text-1);
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__kpi--active {
+  border-color: var(--ms-color-primary);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary-dark-2);
+}
+
+.attendance--reports [data-report-card="records"] {
+  margin-top: 0;
+}
+
+.attendance__reports-more {
+  margin-top: 12px;
+  color: var(--ms-text-2, #475467);
+  font-size: 13px;
+}
+
+.attendance__reports-more > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.attendance__reports-more > section {
+  margin-top: 14px;
+}
+
+.attendance__reports-more h3 {
+  margin: 16px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.attendance__reports-more .attendance__card {
   border: 0;
   box-shadow: none;
   padding: 0;
@@ -32337,6 +32714,28 @@ defineExpose({
   margin-bottom: var(--ms-space-4);
 }
 
+.attendance__admin-header-tools,
+.attendance__admin-current-section-tools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.attendance__admin-header-tools .attendance__admin-actions,
+.attendance__admin-current-section-tools .attendance__admin-actions {
+  flex-wrap: nowrap;
+  gap: 8px;
+}
+
+.attendance__admin-header-tools :deep(.admin-guide),
+.attendance__admin-current-section-tools :deep(.admin-guide) {
+  margin-left: 0;
+  flex: 0 0 auto;
+}
+
 .attendance__admin-header h3,
 .attendance__admin-section-header h4 {
   margin: 0;
@@ -32346,6 +32745,8 @@ defineExpose({
 }
 
 .attendance__admin-page-search {
+  position: relative;
+  z-index: 8;
   display: flex;
   align-items: center;
   min-width: 0;
@@ -32354,13 +32755,50 @@ defineExpose({
 .attendance__admin-page-search-field {
   display: inline-flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 8px;
   min-width: 0;
 }
 
+.attendance__admin-page-search-scope {
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+}
+
+.attendance__admin-page-search-scope-btn {
+  border: 0;
+  background: transparent;
+  color: var(--ms-text-2);
+  font-size: 12px;
+  line-height: 1;
+  min-height: 32px;
+  padding: 6px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-scope-btn + .attendance__admin-page-search-scope-btn {
+  border-left: 1px solid var(--ms-border);
+}
+
+.attendance__admin-page-search-scope-btn--active {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+  font-weight: var(--ms-font-weight-title);
+}
+
+.attendance__admin-page-search-combo {
+  position: relative;
+  min-width: 0;
+}
+
 .attendance__admin-page-search-input {
-  width: 220px;
-  max-width: 42vw;
+  width: 168px;
+  max-width: 32vw;
   min-height: 32px;
   padding: 6px 10px;
   border: 1px solid var(--ms-border);
@@ -32370,9 +32808,55 @@ defineExpose({
   font-size: 13px;
 }
 
-.attendance__admin-page-search-status {
+.attendance__admin-page-search-results {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 30;
+  width: max(240px, 100%);
+  max-height: 240px;
+  margin: 0;
+  padding: 4px;
+  overflow: auto;
+  list-style: none;
+  border: 1px solid var(--ms-border);
+  border-radius: var(--ms-radius-md);
+  background: var(--ms-bg-card);
+  box-shadow: var(--ms-shadow-card);
+}
+
+.attendance__admin-page-search-result {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ms-text-1);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attendance__admin-page-search-result:hover,
+.attendance__admin-page-search-result:focus {
+  background: var(--el-color-primary-light-9);
+  color: var(--ms-color-primary);
+}
+
+.attendance__admin-page-search-empty {
+  padding: 6px 8px;
   color: var(--ms-text-3);
   font-size: 12px;
+}
+
+.attendance__admin-page-search-status {
+  max-width: 148px;
+  overflow: hidden;
+  color: var(--ms-text-3);
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -32465,8 +32949,9 @@ defineExpose({
   z-index: 6;
   display: flex;
   align-items: center;
+  gap: 12px;
   margin-bottom: var(--ms-space-4);
-  padding: var(--ms-space-3) var(--ms-space-4);
+  padding: var(--ms-space-2) var(--ms-space-4);
   border: 1px solid var(--ms-border-light);
   border-radius: var(--ms-radius-lg);
   background: var(--ms-bg-card);
@@ -32474,6 +32959,10 @@ defineExpose({
 }
 
 .attendance__admin-current-section-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--ms-text-1);
   font-size: var(--ms-font-size-section-title);
   font-weight: var(--ms-font-weight-title);
@@ -33260,6 +33749,12 @@ defineExpose({
   cursor: pointer;
 }
 
+.attendance__typeahead-empty {
+  padding: 4px 8px;
+  color: #667085;
+  font-size: 12px;
+}
+
 .attendance__group-role-badge {
   display: inline-flex;
   align-items: center;
@@ -33593,6 +34088,22 @@ defineExpose({
 
   .attendance__admin-current-section {
     top: 8px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .attendance__admin-header,
+  .attendance__admin-header-tools,
+  .attendance__admin-current-section-tools,
+  .attendance__admin-header-tools .attendance__admin-actions,
+  .attendance__admin-current-section-tools .attendance__admin-actions,
+  .attendance__admin-page-search-field {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .attendance__admin-page-search-input {
+    width: min(168px, 70vw);
   }
 
   .attendance__missed-reminder-toolbar {
@@ -34263,6 +34774,7 @@ defineExpose({
 .attendance__form-sheet :deep(.attendance__admin-grid),
 .attendance__form-sheet :deep(.attendance__calendar-preview-controls),
 .attendance__form-sheet .attendance__override-filters {
+  display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
   gap: var(--ms-space-3) var(--ms-space-4);
@@ -34501,6 +35013,49 @@ defineExpose({
   justify-content: flex-end;
 }
 
+.attendance__ch-save-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 8px;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox {
+  flex: 0 0 auto;
+  width: max-content;
+  min-width: max-content;
+  max-width: none;
+  white-space: nowrap;
+}
+
+.attendance__form-sheet .attendance__ch-save-row label.attendance__field--checkbox > span {
+  white-space: nowrap;
+}
+
+.attendance__ch-save-row .attendance__field-hint {
+  margin: 0;
+  flex: 1 1 220px;
+}
+
+.attendance__ch-preview .attendance__form-actions {
+  margin-top: 8px;
+}
+
+.attendance__ch-empty {
+  margin: 12px 0 0;
+  color: var(--ms-text-3);
+  font-size: 13px;
+}
+
+.attendance__ch-results {
+  margin-top: 12px;
+}
+
+.attendance__kpi--static {
+  cursor: default;
+}
+
 .attendance__form-sheet .attendance__btn,
 .attendance__form-sheet :deep(.attendance__btn) {
   align-self: flex-start;
@@ -34519,6 +35074,21 @@ defineExpose({
   border-color: var(--ms-color-primary);
   background: var(--ms-color-primary);
   color: var(--ms-bg-card);
+}
+
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead select),
+.attendance__form-sheet :deep(.attendance__user-picker--typeahead .attendance__user-picker-controls button) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-width: 0;
+  min-height: 0;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
+  white-space: nowrap;
 }
 
 .attendance__form-sheet .attendance__btn--danger,
@@ -34731,11 +35301,12 @@ defineExpose({
   min-width: 0;
 }
 
-.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time select),
-#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time select) {
+.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint),
+#attendance-admin-settings.attendance__form-sheet .attendance__field--compact-control :deep(.attendance-locale-time__hint) {
   width: auto;
-  max-width: 4.75rem;
-  min-width: 0;
+  max-width: 3rem;
+  color: var(--ms-text-3);
+  font-size: 12px;
 }
 
 .attendance__control-with-unit {

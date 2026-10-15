@@ -70,6 +70,9 @@ export function applyAdminPageContentSearch(root: HTMLElement, query: string): A
     .filter((element) => !isInClosedSection(element, root))
     .sort((left, right) => elementDepth(right) - elementDepth(left))
 
+  const hasMatch = units.some((unit) => normalizeSearchText(unit.textContent ?? '').includes(needle))
+  if (!hasMatch) return { matched: 0, hidden: 0 }
+
   let matched = 0
   let hidden = 0
   for (const unit of units) {
