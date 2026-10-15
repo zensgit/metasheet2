@@ -1653,6 +1653,7 @@ exec npx vitest run \
   automation-save-block-reasons \
   automation-target-sheet-options \
   AutomationExecutionsView \
+  builtinCatalogPresentation \
   cancelRoundEntryApproverList \
   cancelRoundEntryAttendancePanel \
   cancelRoundEntryCenterRoute \
@@ -1922,6 +1923,7 @@ exec npx vitest run \
   requesterPreviewFields \
   roleDelegationView \
   roleManagementSave \
+  roleMembers \
   routePreviewErrors \
   run-required-web-tests-shape \
   searchApprovalDirectoryUsers \

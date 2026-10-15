@@ -30,7 +30,7 @@
           type="button"
           @click="selectRole(role)"
         >
-          <strong>{{ role.name }}</strong>
+          <strong>{{ presentRoleTitle(role) }}</strong>
           <span>{{ role.id }}</span>
           <small>成员数：{{ role.memberCount }}</small>
         </button>
@@ -44,7 +44,7 @@
           </label>
           <label class="admin-page__field">
             <span>角色名称</span>
-            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin">
+            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin" @input="markNameEdited()">
           </label>
         </div>
 
@@ -63,8 +63,8 @@
               >
               <div>
                 <strong>{{ permission.code }}</strong>
-                <p>{{ permission.name }}</p>
-                <small>{{ permission.description || '无描述' }}</small>
+                <p>{{ presentPermission(permission).name }}</p>
+                <small>{{ presentPermission(permission).description || '无描述' }}</small>
               </div>
             </label>
           </div>
@@ -82,6 +82,8 @@
             <span v-if="selectedPermissions.length === 0" class="admin-page__empty">尚未选择权限</span>
           </div>
         </section>
+
+        <RoleMembersPanel v-if="isEditing" :role-id="selectedRoleId" />
 
         <footer class="admin-page__footer">
           <button class="admin-page__button" type="button" :disabled="busy || !canSave" @click="void saveRole()">
@@ -108,6 +110,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { presentPermission, presentRoleTitle, roleNameForSave } from './builtinCatalogPresentation'
+import RoleMembersPanel from './RoleMembersPanel.vue'
 
 type RoleCatalogItem = {
   id: string
@@ -137,6 +141,7 @@ const permissions = ref<PermissionCatalogItem[]>([])
 const selectedRoleId = ref('')
 const draftRoleId = ref('')
 const draftRoleName = ref('')
+const nameEdited = ref(false)
 const selectedPermissions = ref<string[]>([])
 
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) || null)
@@ -174,10 +179,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
   }
 }
 
+function markNameEdited(): void {
+  nameEdited.value = true
+}
+
 function applyRole(role: RoleCatalogItem | null): void {
   selectedRoleId.value = role?.id || ''
   draftRoleId.value = role?.id || ''
-  draftRoleName.value = role?.name || ''
+  draftRoleName.value = role ? presentRoleTitle(role) : ''
+  nameEdited.value = false
   selectedPermissions.value = [...(role?.permissions || [])]
 }
 
@@ -258,7 +268,11 @@ async function saveRole(): Promise<void> {
   try {
     const payload: Record<string, unknown> = {
       id: wasEditing ? selectedRoleId.value : draftRoleId.value.trim(),
-      name: draftRoleName.value.trim(),
+      // The name field may show a Chinese builtin title. Leaving it untouched keeps the
+      // loaded raw name; typing in the field is an explicit rename.
+      name: wasEditing
+        ? roleNameForSave(selectedRole.value ? selectedRole.value.name : null, draftRoleName.value, nameEdited.value)
+        : draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
     // Mid-air-collision token: the grid being submitted is the one loaded with this

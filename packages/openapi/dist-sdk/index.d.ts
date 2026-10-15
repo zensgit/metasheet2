@@ -16491,6 +16491,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/admin/roles/{roleId}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List role member display names
+         * @description Platform-admin read of persisted role members. Page defaults are 1 and 20, and pageSize is capped at 100. Items contain only id and displayName.
+         */
+        get: operations["listAdminRoleMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/spreadsheets/{id}/permissions": {
         parameters: {
             query?: never;
@@ -26257,6 +26277,70 @@ export interface operations {
             409: components["responses"]["ElearningError"];
             410: components["responses"]["ElearningError"];
             503: components["responses"]["ElearningError"];
+        };
+    };
+    listAdminRoleMembers: {
+        parameters: {
+            query?: {
+                page?: number;
+                pageSize?: number;
+            };
+            header?: never;
+            path: {
+                roleId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        ok: true;
+                        data: {
+                            items: {
+                                id: string;
+                                displayName: string;
+                            }[];
+                            page: number;
+                            pageSize: number;
+                            total: number;
+                        };
+                    };
+                };
+            };
+            /** @description Role id is required */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Role members are temporarily unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        /** @enum {boolean} */
+                        ok: false;
+                        error: {
+                            /** @enum {string} */
+                            code: "ROLE_MEMBERS_UNAVAILABLE";
+                            message: string;
+                        };
+                    };
+                };
+            };
         };
     };
 }
