@@ -923,6 +923,19 @@ test('ACP connection uncertainty keeps its inherited registry name and internal-
   assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
 })
 
+test('rollout session-lock uncertainty stays internal-error, not a boundary refusal', () => {
+  // AttendanceRolloutConnectionUncertainError means the session lock release could not be
+  // proved. Callers destroy the pooled connection. That is not a confirmed rollout refusal
+  // (busy / not-idle / illegal transition), so apply must not report exit 7.
+  const code = 'ATTENDANCE_ROLLOUT_CONNECTION_UNCERTAIN'
+  const error = Object.assign(new Error(code), {
+    name: 'AttendanceRolloutConnectionUncertainError',
+    code,
+  })
+  assert.equal(describeAttendanceW4C5ErrorV1(error), code)
+  assert.equal(exitCodeForAttendanceW4C5ErrorV1(error), ATTENDANCE_W4C5_EXIT_INTERNAL_ERROR_V1)
+})
+
 test('exitCodeForAttendanceW4C5ErrorV1 does not fire on a raw driver-shaped error (negative control: `.name` is never one of the three boundary class names)', () => {
   // A real PostgreSQL/pg-driver error has `.code` as a 5-character SQLSTATE, `.message` as a
   // distinct human-readable sentence, and a driver-assigned `.name` (never one of this repo's own
@@ -966,6 +979,9 @@ const ATTENDANCE_W4C5_KNOWN_NOT_BOUNDARY_ERROR_NAMES = [
   'AttendanceW4RegistryError',
   // Inherits registry name; uncertain commit/connection remains INTERNAL_ERROR, never refusal.
   'AttendanceCleaningConnectionUncertainError',
+  // Session-lock release could not be proved. Destroy the connection; do not treat it as a
+  // confirmed boundary refusal (exit 7). See the dedicated exit-code test above.
+  'AttendanceRolloutConnectionUncertainError',
 ]
 // The base-class alternation is load-bearing, not defensive breadth. With `extends Error` alone,
 // `export class AttendanceW4FooError extends AttendanceW4IdentityError` — a subclass of a class
