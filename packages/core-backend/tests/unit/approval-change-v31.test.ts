@@ -23,6 +23,7 @@ import {
   planApprovedLeaveDayRecalcV1,
   recalcWritesCompanionV1,
 } from '../../src/attendance/approval-change-legacy-repair'
+import { decideLeaveDayRecalcV1, type LeaveDayRecalcFactsV1 } from '../../src/attendance/approval-change-day-recalc'
 import {
   ATTENDANCE_RECOMPUTE_OBLIGATION_SQL_V1,
   ATTENDANCE_SETTLED_WORK_DATE_SQL_V1,
@@ -308,15 +309,56 @@ describe('day recalculation is planned before any write', () => {
   })
 })
 
+describe('leave day recalc decides absence only for a finished uncovered workday', () => {
+  const base: LeaveDayRecalcFactsV1 = {
+    now: new Date('2049-06-04T12:00:00.000Z'),
+    shiftEndAt: new Date('2049-06-04T08:00:00.000Z'),
+    isWorkday: true,
+    hasFrozenFrame: true,
+    hasRecord: true,
+    projectionOwner: 'legacy_untracked',
+    visibilityState: 'active',
+    manualEdit: false,
+    hasFirstIn: false,
+    hasLastOut: false,
+    otherCoverage: false,
+  }
+
+  it('a finished workday with no punches and no other coverage is absent', () => {
+    expect(decideLeaveDayRecalcV1(base)).toEqual({
+      action: 'apply', status: 'absent', workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0,
+    })
+  })
+
+  it('an open shift and a missing schedule do not become absence', () => {
+    expect(decideLeaveDayRecalcV1({
+      ...base,
+      now: new Date('2049-06-04T07:00:00.000Z'),
+    })).toEqual({ action: 'defer', reason: 'shift_open' })
+    expect(decideLeaveDayRecalcV1({ ...base, isWorkday: false })).toEqual({
+      action: 'apply', status: 'off', workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0,
+    })
+    expect(decideLeaveDayRecalcV1({ ...base, hasRecord: false, hasFrozenFrame: false, isWorkday: null })).toEqual({
+      action: 'defer', reason: 'schedule_unknown',
+    })
+  })
+
+  it('punches and other coverage are not rewritten into absence', () => {
+    expect(decideLeaveDayRecalcV1({ ...base, hasFirstIn: true, hasLastOut: true }).action).toBe('retain_punches')
+    expect(decideLeaveDayRecalcV1({ ...base, otherCoverage: true })).toMatchObject({ action: 'apply', status: 'adjusted' })
+    expect(decideLeaveDayRecalcV1({ ...base, hasFirstIn: true })).toMatchObject({ action: 'apply', status: 'partial' })
+  })
+})
+
 describe('v3.1 acceptance ids that this slice can observe', () => {
-  const cases: Array<[string, 'partial' | 'gap', string]> = [
-    ['DAY-01', 'gap', 'inline absence calculation is not invoked'],
-    ['DAY-02', 'gap', 'shift-end and rest-day predicates are not calculated here'],
-    ['DAY-03', 'gap', 'other coverage is not recalculated inline'],
-    ['DAY-04', 'gap', 'no deferred worker consumes the obligation'],
+  const cases: Array<[string, 'passed' | 'partial' | 'gap', string]> = [
+    ['DAY-01', 'passed', 'a finished legacy workday with a frozen frame, no punches, and no other coverage is projected absent in the correction transaction'],
+    ['DAY-02', 'passed', 'an open shift stays a pending obligation and the existing row is not marked absent; a rowless day is not given an absence row'],
+    ['DAY-03', 'gap', 'days that already have both punches are not recalculated into a new late or early status'],
+    ['DAY-04', 'partial', 'a due pending obligation is leased and applied once by consumeOneDueRecomputeObligationV1; a second call finds nothing. No timer is registered'],
     ['DAY-05', 'partial', 'an active row without a companion throws before any write'],
     ['DAY-06', 'partial', 'a successful correction inserts a pending obligation the payroll barrier selects'],
-    ['DAY-07', 'gap', 'obligation completion and the day write are not the same transaction'],
+    ['DAY-07', 'partial', 'the projection update and the completed receipt share the caller transaction; a rollback undoes both'],
     ['DAY-08', 'gap', 'payroll and writer lock interleaving is not executed here'],
     ['EXP-01', 'gap', 'deadline equality is unchanged in this slice'],
     ['EXP-02', 'gap', 'post-event successor rounds are not created'],
@@ -373,9 +415,12 @@ describe('v3.1 acceptance ids that this slice can observe', () => {
   it('names each of the 45 cases once and does not mark a gap as passed', () => {
     expect(cases).toHaveLength(45)
     expect(new Set(cases.map(([id]) => id)).size).toBe(45)
+    expect(cases.filter(([, status]) => status === 'passed').map(([id]) => id)).toEqual(['DAY-01', 'DAY-02'])
     expect(cases.filter(([, status]) => status === 'partial').map(([id]) => id)).toEqual([
+      'DAY-04',
       'DAY-05',
       'DAY-06',
+      'DAY-07',
       'EXP-04',
       'AMD-03',
       'AMD-07',
@@ -384,7 +429,7 @@ describe('v3.1 acceptance ids that this slice can observe', () => {
     ])
     for (const [, status, observation] of cases) {
       expect(observation.length).toBeGreaterThan(0)
-      expect(status === 'partial' || status === 'gap').toBe(true)
+      expect(status === 'passed' || status === 'partial' || status === 'gap').toBe(true)
     }
   })
 })

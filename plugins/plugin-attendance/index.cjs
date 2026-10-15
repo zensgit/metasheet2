@@ -40552,6 +40552,10 @@ module.exports = {
             res.status(409).json({ ok: false, error: { code: error.code, message: '该日期已有历史考勤记录，但缺少可用的冻结上下文' } })
             return
           }
+          if (error?.code === 'ATTENDANCE_DAY_RECALC_W4_OWNED' || error?.code === 'ATTENDANCE_DAY_RECALC_MANUAL_EDIT' || error?.code === 'ATTENDANCE_DAY_RECALC_RETIRED') {
+            res.status(409).json({ ok: false, error: { code: error.code, message: '该日记录不能在本次撤销中重算' } })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return

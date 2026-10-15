@@ -4,17 +4,25 @@
  * Day recalculation goes through `planApprovedLeaveDayRecalcV1` before any write.
  * A legacy_repair frame and any other fingerprinted companion are reused.
  * An active row without a usable companion throws and writes nothing.
- * This module does not insert a companion, does not rewrite `attendance_records`,
- * and does not call `appendRecomputeCalculationV1` (that path replays a prior
- * calculation; it does not remove one leave). A successful correction records an
- * open recompute obligation so payroll close stays blocked until a later worker
- * finishes the day.
+ * A finished legacy row with no punches is projected in the caller's transaction
+ * and the obligation is stored completed. An open shift stays a pending obligation.
+ * This module does not insert a companion and does not call
+ * `appendRecomputeCalculationV1`.
  *
  * Balance reversal uses document + revision + operation. It does not call
  * `reverseLeaveBalanceDeduction`.
  */
 
 import { randomUUID } from 'node:crypto'
+import {
+  applyLegacyLeaveDayProjectionV1,
+  decideLeaveDayRecalcV1,
+  AttendanceDayRecalcRefusedError,
+  loadLeaveDayRecalcFactsV1,
+  recordLeaveRevisionObligationV1,
+  refusalFromDecisionV1,
+  type LeaveDayRecalcDecisionV1,
+} from './approval-change-day-recalc'
 import { leaveRevisionReversalSourceIdV1 } from './approval-change-leave-reversal'
 import {
   planApprovedLeaveDayRecalcV1,
@@ -37,6 +45,7 @@ export interface LeaveRevisionCorrectionInputV1 {
   readonly operationId: string
   readonly workDate: string
   readonly fingerprint: string
+  readonly now?: Date
 }
 
 export class AttendanceRevisionCorrectionBlockedError extends Error {
@@ -88,21 +97,16 @@ export async function loadApprovedLeaveDayRecalcPlanV1(
   return planApprovedLeaveDayRecalcV1({ activeRecord, companion })
 }
 
-async function ensureRecomputeObligationV1(
+async function recordDayRecalcV1(
   db: ApprovalChangeQueryV1,
-  input: { readonly orgId: string; readonly userId: string; readonly workDate: string; readonly sourceId: string },
-): Promise<void> {
-  await db.query(
-    `INSERT INTO attendance_recompute_obligations
-       (id, org_id, user_id, work_date, source_kind, source_id, status)
-     SELECT $1, $2, $3, $4::date, 'leave_revision', $5, 'pending'
-      WHERE NOT EXISTS (
-        SELECT 1 FROM attendance_recompute_obligations
-         WHERE org_id = $2 AND user_id = $3 AND work_date = $4::date AND source_id = $5
-           AND status IN ('pending', 'leased', 'failed') AND superseded_by IS NULL
-      )`,
-    [randomUUID(), input.orgId, input.userId, input.workDate, input.sourceId],
-  )
+  input: LeaveRevisionCorrectionInputV1,
+  now: Date,
+): Promise<{ decision: LeaveDayRecalcDecisionV1; shiftEndAt: Date | null }> {
+  const facts = await loadLeaveDayRecalcFactsV1(db, { ...input, now })
+  const decision = decideLeaveDayRecalcV1(facts)
+  const refusal = refusalFromDecisionV1(decision)
+  if (refusal) throw refusal
+  return { decision, shiftEndAt: facts.shiftEndAt }
 }
 
 /**
@@ -173,9 +177,13 @@ export async function applyLeaveRevisionCorrectionV1(
   plan: ApprovedLeaveDayRecalcPlanV1
   reversal: { reversed: number; alreadyReversed: boolean }
   revisionInserted: boolean
+  dayRecalc: LeaveDayRecalcDecisionV1
 }> {
+  const now = input.now ?? new Date()
   const plan = await loadApprovedLeaveDayRecalcPlanV1(db, input)
   if (plan.action === 'migration_required') throw new AttendanceRevisionCorrectionBlockedError()
+  const prepared = await recordDayRecalcV1(db, input, now)
+  const dayRecalc = prepared.decision
   const inserted = await db.query(
     `INSERT INTO attendance_document_revisions
        (id, org_id, document_id, revision_id, operation_id, status, fingerprint)
@@ -185,13 +193,35 @@ export async function applyLeaveRevisionCorrectionV1(
     [randomUUID(), input.orgId, input.documentId, input.revisionId, input.operationId, input.fingerprint],
   )
   const reversal = await reverseLeaveBalanceForRevisionV1(db, input)
-  await ensureRecomputeObligationV1(db, {
-    orgId: input.orgId,
-    userId: input.userId,
-    workDate: input.workDate,
-    sourceId: input.documentId,
-  })
-  return { plan, reversal, revisionInserted: inserted.rows.length === 1 }
+  if (dayRecalc.action === 'apply') {
+    const wrote = await applyLegacyLeaveDayProjectionV1(db, {
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      status: dayRecalc.status,
+    })
+    if (!wrote) throw new AttendanceDayRecalcRefusedError('ATTENDANCE_DAY_RECALC_W4_OWNED')
+    await recordLeaveRevisionObligationV1(db, {
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      sourceId: input.documentId,
+      status: 'completed',
+      dueAt: null,
+      decision: dayRecalc.status,
+    })
+  } else {
+    await recordLeaveRevisionObligationV1(db, {
+      orgId: input.orgId,
+      userId: input.userId,
+      workDate: input.workDate,
+      sourceId: input.documentId,
+      status: 'pending',
+      dueAt: dayRecalc.action === 'defer' && dayRecalc.reason === 'shift_open' ? prepared.shiftEndAt : null,
+      decision: dayRecalc.action === 'defer' ? dayRecalc.reason : 'retain_punches',
+    })
+  }
+  return { plan, reversal, revisionInserted: inserted.rows.length === 1, dayRecalc }
 }
 
 export async function closeApprovalRoundAsAdminV1(

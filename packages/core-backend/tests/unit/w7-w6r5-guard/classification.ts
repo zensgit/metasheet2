@@ -70,6 +70,7 @@ export interface AttendanceW7NotCalculationPathEntryV1 {
 export const ATTENDANCE_W7_CALCULATION_PATH_FILES_V1: readonly string[] = Object.freeze([
   // Approval-change readers and writers. They do not build a frozen context.
   // Classified calculation_path so both W6 aggregate bans still apply. No carve-out.
+  'packages/core-backend/src/attendance/approval-change-day-recalc.ts',
   'packages/core-backend/src/attendance/approval-change-leave-reversal.ts',
   'packages/core-backend/src/attendance/approval-change-legacy-repair.ts',
   'packages/core-backend/src/attendance/approval-change-policy.ts',

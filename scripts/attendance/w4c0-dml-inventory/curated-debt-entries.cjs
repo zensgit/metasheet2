@@ -728,6 +728,18 @@ const CURATED_DEBT_ENTRIES = [
       'packages/core-backend/src/attendance/approval-change-revision-writer.ts::reverseLeaveBalanceForRevisionV1::attendance_leave_balance_events::insert',
     ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
   },
+  {
+    id: 'X11',
+    title: 'Approval-change v3.1 legacy day projection after a removed leave.',
+    owningSlice: 'approval-change-v31',
+    sharedHook: false,
+    canonicalizedBy: 'approval-change-v31',
+    // One UPDATE. It refuses W4-owned, manual-edit, and retired parents in the
+    // WHERE clause. It does not insert a companion or a calculation row.
+    claims: (site) => [
+      'packages/core-backend/src/attendance/approval-change-day-recalc.ts::applyLegacyLeaveDayProjectionV1::attendance_records::update',
+    ].includes([site.relPath, site.enclosingSymbol, site.table, site.verb].join('::')),
+  },
 
 ]
 

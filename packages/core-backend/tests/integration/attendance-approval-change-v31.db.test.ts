@@ -12,6 +12,7 @@ import {
   loadApprovedLeaveDayRecalcPlanV1,
 } from '../../src/attendance/approval-change-revision-writer'
 import { leaveRevisionReversalSourceIdV1 } from '../../src/attendance/approval-change-leave-reversal'
+import { consumeOneDueRecomputeObligationV1 } from '../../src/attendance/approval-change-day-recalc'
 
 const dbUrl = process.env.ATTENDANCE_TEST_DATABASE_URL || process.env.DATABASE_URL
 const describeIfDatabase = dbUrl ? describe : describe.skip
@@ -239,5 +240,131 @@ describeIfDatabase('approval-change v3.1 revision, recalc, and admin close', () 
     expect(round.rows).toEqual([{ outcome: 'blocked', block_reason: 'admin_closed' }])
     const documentRow = await pool.query('SELECT status FROM approval_instances WHERE id = $1', [document])
     expect(documentRow.rows).toEqual([{ status: 'approved' }])
+  })
+
+  async function legacyDay(workDate: string, status: string) {
+    const recordId = randomUUID()
+    const fingerprint = hex
+    await pool.query(
+      `INSERT INTO attendance_records
+         (id, org_id, user_id, work_date, timezone, status, is_workday, meta, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'UTC', $5, true, '{}'::jsonb, now(), now())`,
+      [recordId, orgId, userId, workDate, status],
+    )
+    await pool.query(
+      `INSERT INTO attendance_timezone_context_companions
+         (record_id, org_id, user_id, work_date, timezone, absolute_start_at, absolute_end_at,
+          attribution_start_at, attribution_end_at, context_fingerprint, original_freeze_fingerprint,
+          frame_snapshot, original_freeze_snapshot)
+       VALUES ($1, $2, $3, $4, 'UTC', $5, $6, $5, $6, $7, $7, $8::jsonb, '{}'::jsonb)`,
+      [
+        recordId, orgId, userId, workDate,
+        `${workDate}T00:00:00.000Z`, `${workDate}T08:00:00.000Z`, fingerprint,
+        JSON.stringify({ identity: { source: 'legacy_repair' }, fingerprint }),
+      ],
+    )
+    return recordId
+  }
+
+  it('a finished uncovered legacy workday is projected absent and the obligation is completed', async () => {
+    const workDate = '2049-06-04'
+    const recordId = await legacyDay(workDate, 'adjusted')
+    const document = randomUUID()
+    const result = await applyLeaveRevisionCorrectionV1(db(), {
+      orgId, userId, documentId: document, revisionId: 'rev-day', operationId: randomUUID(),
+      workDate, fingerprint: hex, now: new Date(`${workDate}T12:00:00.000Z`),
+    })
+    expect(result.dayRecalc).toEqual({
+      action: 'apply', status: 'absent', workMinutes: 0, lateMinutes: 0, earlyLeaveMinutes: 0,
+    })
+    const row = await pool.query(
+      'SELECT status, work_minutes, late_minutes, early_leave_minutes FROM attendance_records WHERE id = $1',
+      [recordId],
+    )
+    expect(row.rows[0]).toEqual({ status: 'absent', work_minutes: 0, late_minutes: 0, early_leave_minutes: 0 })
+    const obligation = await pool.query(
+      'SELECT status, decision FROM attendance_recompute_obligations WHERE source_id = $1',
+      [document],
+    )
+    expect(obligation.rows).toEqual([{ status: 'completed', decision: 'absent' }])
+    const companions = await pool.query(
+      'SELECT count(*)::int AS n FROM attendance_timezone_context_companions WHERE record_id = $1',
+      [recordId],
+    )
+    expect(companions.rows[0].n).toBe(1)
+  })
+
+  it('an open shift is not marked absent and stays a pending obligation', async () => {
+    const workDate = '2049-06-05'
+    const recordId = await legacyDay(workDate, 'adjusted')
+    const document = randomUUID()
+    const result = await applyLeaveRevisionCorrectionV1(db(), {
+      orgId, userId, documentId: document, revisionId: 'rev-open', operationId: randomUUID(),
+      workDate, fingerprint: hex, now: new Date(`${workDate}T07:00:00.000Z`),
+    })
+    expect(result.dayRecalc).toEqual({ action: 'defer', reason: 'shift_open' })
+    const row = await pool.query('SELECT status FROM attendance_records WHERE id = $1', [recordId])
+    expect(row.rows[0].status).toBe('adjusted')
+    const obligation = await pool.query(
+      'SELECT status, decision FROM attendance_recompute_obligations WHERE source_id = $1',
+      [document],
+    )
+    expect(obligation.rows).toEqual([{ status: 'pending', decision: 'shift_open' }])
+  })
+
+  it('a due obligation is applied once by the worker, and a rollback undoes the projection and the receipt', async () => {
+    await pool.query(
+      `UPDATE attendance_recompute_obligations
+          SET status = 'completed', decision = 'test_isolate', updated_at = now()
+        WHERE org_id = $1 AND status = 'pending'`,
+      [orgId],
+    )
+    const workDate = '2049-06-06'
+    const recordId = await legacyDay(workDate, 'adjusted')
+    const document = randomUUID()
+    await pool.query(
+      `INSERT INTO attendance_recompute_obligations
+         (id, org_id, user_id, work_date, source_kind, source_id, status, due_at, decision)
+       VALUES ($1, $2, $3, $4::date, 'leave_revision', $5, 'pending', $6::timestamptz, 'shift_open')`,
+      [randomUUID(), orgId, userId, workDate, document, `${workDate}T08:00:00.000Z`],
+    )
+    const applied = await consumeOneDueRecomputeObligationV1(db(), {
+      orgId, now: new Date(`${workDate}T12:00:00.000Z`),
+    })
+    expect(applied?.decision).toBe('absent')
+    const row = await pool.query('SELECT status FROM attendance_records WHERE id = $1', [recordId])
+    expect(row.rows[0].status).toBe('absent')
+    const again = await consumeOneDueRecomputeObligationV1(db(), {
+      orgId, now: new Date(`${workDate}T13:00:00.000Z`),
+    })
+    expect(again).toBeNull()
+
+    const otherDate = '2049-06-07'
+    const otherId = await legacyDay(otherDate, 'adjusted')
+    const otherDocument = randomUUID()
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const tx = {
+        query: async (sql: string, params?: readonly unknown[]) => ({
+          rows: (await client.query(sql, params ? [...params] : [])).rows as Array<Record<string, unknown>>,
+        }),
+      }
+      await applyLeaveRevisionCorrectionV1(tx, {
+        orgId, userId, documentId: otherDocument, revisionId: 'rev-rollback', operationId: randomUUID(),
+        workDate: otherDate, fingerprint: hex, now: new Date(`${otherDate}T12:00:00.000Z`),
+      })
+      await client.query('ROLLBACK')
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+      client.release()
+    }
+    const untouched = await pool.query('SELECT status FROM attendance_records WHERE id = $1', [otherId])
+    expect(untouched.rows[0].status).toBe('adjusted')
+    const receipts = await pool.query(
+      'SELECT count(*)::int AS n FROM attendance_recompute_obligations WHERE source_id = $1',
+      [otherDocument],
+    )
+    expect(receipts.rows[0].n).toBe(0)
   })
 })
