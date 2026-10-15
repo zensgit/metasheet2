@@ -682,21 +682,31 @@ export function createAttendanceRequestOperationBoundaryV1(
     async execute(rawInput) {
       const input = normalizeInput(rawInput)
       const connection = await deps.acquireConnection()
-      const rolloutOrgId = canonicalRolloutOrgCandidateV1(input.routeInput)
+      let rolloutOrgId = canonicalRolloutOrgCandidateV1(input.routeInput)
       let uncertain = false
       try {
-        const result = await runAttendanceResultOperationTransactionV1(
-          connection.client,
-          async (trx) => runRequestOperationProtocolV1(trx, deps.adapters, input, undefined, rolloutOrgId),
-          rolloutOrgId ? { rolloutSnapshotLock: { orgId: rolloutOrgId, mode: 'shared' } } : undefined,
-        )
-        // Unreachable by construction: without `mode.externalTransaction` the protocol THROWS the
-        // adapter's own HTTP error on a business refusal rather than returning one, which is what
-        // keeps this entry's observable behaviour byte-identical to what shipped. Asserted anyway,
-        // fail-closed, so that a future edit which makes the protocol return here cannot silently
-        // hand a refusal to an HTTP caller as if it were a result.
-        if (result.kind === 'business_refused') fail('W4C3B_REQUEST_BUSINESS_REFUSAL_UNHANDLED', 500)
-        return result
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const result = await runAttendanceResultOperationTransactionV1(
+              connection.client,
+              async (trx) => runRequestOperationProtocolV1(trx, deps.adapters, input, undefined, rolloutOrgId),
+              rolloutOrgId ? { rolloutSnapshotLock: { orgId: rolloutOrgId, mode: 'shared' } } : undefined,
+            )
+            // Unreachable by construction: without `mode.externalTransaction` the protocol THROWS the
+            // adapter's own HTTP error on a business refusal rather than returning one, which is what
+            // keeps this entry's observable behaviour byte-identical to what shipped. Asserted anyway,
+            // fail-closed, so that a future edit which makes the protocol return here cannot silently
+            // hand a refusal to an HTTP caller as if it were a result.
+            if (result.kind === 'business_refused') fail('W4C3B_REQUEST_BUSINESS_REFUSAL_UNHANDLED', 500)
+            return result
+          } catch (error) {
+            if (!(error instanceof AttendanceRolloutOrgRetryError) || attempt === 1) throw error
+            const resolved = canonicalOrgIdOrNullV1(error.resolvedOrgId)
+            if (resolved === rolloutOrgId) throw error
+            rolloutOrgId = resolved
+          }
+        }
+        fail('W4C3B_REQUEST_ROLLOUT_ORG_MISMATCH', 409)
       } catch (error) {
         if (error instanceof AttendanceRolloutConnectionUncertainError) uncertain = true
         throw error
@@ -786,9 +796,17 @@ export async function runExternalTransactionAttemptInSavepointV1(
  * it never changes which steps run, in which order, or with what inputs. Every step after it is
  * reached identically by both entries.
  */
-function canonicalRolloutOrgCandidateV1(routeInput: unknown): string | null {
-  if (typeof routeInput !== 'object' || routeInput === null || !('orgId' in routeInput)) return null
-  const orgId = (routeInput as { orgId?: unknown }).orgId
+/** The route org was only a lock candidate. The caller must roll back and retry under `resolvedOrgId`. */
+export class AttendanceRolloutOrgRetryError extends Error {
+  readonly code = 'ATTENDANCE_ROLLOUT_ORG_RETRY'
+
+  constructor(readonly resolvedOrgId: string) {
+    super('ATTENDANCE_ROLLOUT_ORG_RETRY')
+    this.name = 'AttendanceRolloutOrgRetryError'
+  }
+}
+
+function canonicalOrgIdOrNullV1(orgId: unknown): string | null {
   if (typeof orgId !== 'string' || orgId.length === 0) return null
   try {
     parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
@@ -796,6 +814,11 @@ function canonicalRolloutOrgCandidateV1(routeInput: unknown): string | null {
   } catch {
     return null
   }
+}
+
+function canonicalRolloutOrgCandidateV1(routeInput: unknown): string | null {
+  if (typeof routeInput !== 'object' || routeInput === null || !('orgId' in routeInput)) return null
+  return canonicalOrgIdOrNullV1((routeInput as { orgId?: unknown }).orgId)
 }
 
 async function runRequestOperationProtocolV1(
@@ -820,9 +843,10 @@ async function runRequestOperationProtocolV1(
           })
           const identityPrepared = await adapter.prepareIdentity(shapedTrx,input.routeInput,operation)
           if (rolloutOrgId !== null && identityPrepared.orgId !== rolloutOrgId) {
-            // The pre-transaction org is only a lock candidate. A different org must not
-            // continue under that lock or take a second org lock in this snapshot.
-            fail('W4C3B_REQUEST_ROLLOUT_ORG_MISMATCH', 409)
+            // The pre-transaction org is only a lock candidate. Do not continue under it
+            // and do not take a second org lock in this snapshot. The HTTP entry rolls
+            // this transaction back and retries once under the resolved org.
+            throw new AttendanceRolloutOrgRetryError(identityPrepared.orgId)
           }
 
           const takeTripPrefix = () => acquireBusinessTripRequestPrefixV1(trx, {
