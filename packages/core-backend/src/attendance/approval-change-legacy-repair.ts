@@ -12,6 +12,7 @@ export interface LegacyRepairFrameProbeV1 {
 
 export type ApprovedLeaveDayRecalcPlanV1 =
   | { readonly action: 'use_legacy_repair_frame'; readonly fingerprint: string }
+  | { readonly action: 'use_existing_frame'; readonly fingerprint: string }
   | { readonly action: 'migration_required' }
   | { readonly action: 'no_record' }
 
@@ -19,11 +20,14 @@ export function planApprovedLeaveDayRecalcV1(input: {
   readonly activeRecord: boolean
   readonly companion: LegacyRepairFrameProbeV1 | null
 }): ApprovedLeaveDayRecalcPlanV1 {
+  const fingerprint = input.companion?.fingerprint
+  const hasFingerprint = typeof fingerprint === 'string' && fingerprint.length > 0
   if (input.companion?.source === 'legacy_repair') {
-    if (typeof input.companion.fingerprint !== 'string' || input.companion.fingerprint.length === 0) {
-      throw new Error('ATTENDANCE_LEGACY_REPAIR_FRAME_INVALID')
-    }
-    return { action: 'use_legacy_repair_frame', fingerprint: input.companion.fingerprint }
+    if (!hasFingerprint) throw new Error('ATTENDANCE_LEGACY_REPAIR_FRAME_INVALID')
+    return { action: 'use_legacy_repair_frame', fingerprint: fingerprint as string }
+  }
+  if (input.companion && hasFingerprint) {
+    return { action: 'use_existing_frame', fingerprint: fingerprint as string }
   }
   if (input.activeRecord) return { action: 'migration_required' }
   return { action: 'no_record' }

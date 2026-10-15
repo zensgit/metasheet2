@@ -200,6 +200,19 @@ import {
   W4_TRANSACTION_LOCK_TIMEOUT_MS,
 } from './attendance/w4c0-operation-contract'
 import { runAttendanceResultOperationTransactionV1 } from './attendance/w4c0-operation-registry'
+import {
+  applyLeaveRevisionCorrectionV1,
+  closeApprovalRoundAsAdminV1,
+  type ApprovalChangeQueryV1,
+} from './attendance/approval-change-revision-writer'
+
+function pluginRowsToApprovalChangeDb(
+  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+): ApprovalChangeQueryV1 {
+  return {
+    query: async (sql, params) => ({ rows: await trx.query(sql, params ? [...params] : undefined) }),
+  }
+}
 // W4C-2 P1-1 fix (#4612 verdict second gate round): the recovery-sweep tick and admin-abandon
 // connection wrappers (amendment sections 1.7 / 1.1.2) — same least-privilege posture as every
 // other `attendanceW4SegmentCalculation` port method below.
@@ -3009,6 +3022,14 @@ export class MetaSheetServer {
                 // decision. The plugin's canonical live adapter consumes this
                 // instead of the removed second mutable post-upsert pass — the
                 // plugin never copies the branch logic, one source, no drift.
+                applyLeaveRevisionCorrectionV1: (
+                  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+                  input: Parameters<typeof applyLeaveRevisionCorrectionV1>[1],
+                ) => applyLeaveRevisionCorrectionV1(pluginRowsToApprovalChangeDb(trx), input),
+                closeApprovalRoundAsAdminV1: (
+                  trx: { query: (sql: string, params?: unknown[]) => Promise<Array<Record<string, unknown>>> },
+                  engineInstanceId: string,
+                ) => closeApprovalRoundAsAdminV1(pluginRowsToApprovalChangeDb(trx), engineInstanceId),
                 applyMergePolicyPure: (input: unknown) =>
                   applyAttendanceInOutMergePolicyPureV1(
                     input as Parameters<typeof applyAttendanceInOutMergePolicyPureV1>[0],

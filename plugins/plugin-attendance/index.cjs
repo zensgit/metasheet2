@@ -40421,6 +40421,148 @@ module.exports = {
     )
 
     context.api.http.addRoute(
+      'POST',
+      '/api/attendance/requests/:id/admin-correction',
+      withPermission('attendance:admin', async (req, res) => {
+        const parsed = z.object({
+          action: z.enum(['close-round', 'correct']),
+          reason: z.string().trim().min(1).max(500),
+          roundEngineInstanceId: z.string().trim().min(1).max(200).optional(),
+          revisionId: z.string().trim().min(1).max(128).optional(),
+          operationId: z.string().uuid().optional(),
+          fingerprint: z.string().trim().min(1).max(128).optional(),
+        }).strict().safeParse(req.body ?? {})
+        if (!parsed.success) {
+          res.status(400).json({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid admin correction payload' } })
+          return
+        }
+        const actorId = getUserId(req)
+        if (!actorId) {
+          res.status(401).json({ ok: false, error: { code: 'UNAUTHORIZED', message: 'User ID not found' } })
+          return
+        }
+        const requestId = normalizeUuidString(req.params.id)
+        if (!requestId) {
+          respondInvalidUuid(res)
+          return
+        }
+        if (typeof db.transactionWithRolloutLock !== 'function'
+          || typeof attendanceW4SegmentCalculationPort?.applyLeaveRevisionCorrectionV1 !== 'function'
+          || typeof attendanceW4SegmentCalculationPort?.closeApprovalRoundAsAdminV1 !== 'function') {
+          res.status(503).json({ ok: false, error: { code: 'ATTENDANCE_ADMIN_CORRECTION_UNAVAILABLE', message: 'Admin correction is not available' } })
+          return
+        }
+        try {
+          const rows = await db.query(
+            `SELECT id, org_id, user_id, work_date::text AS work_date, status, request_type
+               FROM attendance_requests WHERE id = $1::uuid`,
+            [requestId],
+          )
+          const requestRow = rows[0]
+          if (!requestRow) {
+            res.status(404).json({ ok: false, error: { code: 'NOT_FOUND', message: 'Request not found' } })
+            return
+          }
+          if (String(requestRow.user_id) === actorId) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin correction does not apply to your own request' } })
+            return
+          }
+          const member = await db.query(
+            'SELECT 1 FROM user_orgs WHERE user_id = $1 AND org_id = $2 AND is_active = TRUE',
+            [actorId, requestRow.org_id],
+          )
+          if (member.length !== 1) {
+            res.status(403).json({ ok: false, error: { code: 'FORBIDDEN', message: 'Not a member of this organization' } })
+            return
+          }
+          if (!isCanonicalPayrollOrg(requestRow.org_id)) {
+            res.status(409).json({ ok: false, error: { code: 'ATTENDANCE_ROLLOUT_ORG_KEY_INVALID', message: '考勤周期结算需要规范的组织标识' } })
+            return
+          }
+          const outcome = await db.transactionWithRolloutLock(requestRow.org_id, 'shared', async (trx) => {
+            const lockedRows = await trx.query(
+              `SELECT id, org_id, user_id, work_date::text AS work_date, status, request_type
+                 FROM attendance_requests WHERE id = $1::uuid FOR UPDATE`,
+              [requestId],
+            )
+            const locked = lockedRows[0]
+            if (!locked) throw new HttpError(404, 'NOT_FOUND', 'Request not found')
+            if (String(locked.user_id) === actorId) {
+              throw new HttpError(403, 'FORBIDDEN', 'Admin correction does not apply to your own request')
+            }
+            if (String(locked.org_id) !== String(requestRow.org_id) || !isCanonicalPayrollOrg(locked.org_id)) {
+              throw new HttpError(409, 'ATTENDANCE_ROLLOUT_ORG_KEY_INVALID', '考勤周期结算需要规范的组织标识')
+            }
+            if (parsed.data.action === 'close-round') {
+              if (!parsed.data.roundEngineInstanceId) {
+                throw new HttpError(400, 'VALIDATION_ERROR', 'roundEngineInstanceId is required')
+              }
+              const closed = await attendanceW4SegmentCalculationPort.closeApprovalRoundAsAdminV1(
+                trx,
+                parsed.data.roundEngineInstanceId,
+              )
+              if (!closed) throw new HttpError(409, 'CANCEL_ROUND_ALREADY_PENDING', 'The round is no longer pending')
+              return { action: 'close-round', requestStatus: locked.status, closedRoundId: closed.id }
+            }
+            if (locked.request_type !== 'leave' || locked.status !== 'approved') {
+              throw new HttpError(409, 'ATTENDANCE_ADMIN_CORRECTION_UNSUPPORTED', 'Only an approved leave can be corrected')
+            }
+            if (!parsed.data.revisionId || !parsed.data.operationId || !parsed.data.fingerprint) {
+              throw new HttpError(400, 'VALIDATION_ERROR', 'revisionId, operationId, and fingerprint are required')
+            }
+            if (typeof locked.work_date !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(locked.work_date)) {
+              throw new HttpError(409, 'ATTENDANCE_ADMIN_CORRECTION_UNSUPPORTED', 'The leave has no work date')
+            }
+            await rejectSettledWorkDate(trx, locked.org_id, locked.work_date)
+            const correction = await attendanceW4SegmentCalculationPort.applyLeaveRevisionCorrectionV1(trx, {
+              orgId: locked.org_id,
+              userId: locked.user_id,
+              documentId: requestId,
+              revisionId: parsed.data.revisionId,
+              operationId: parsed.data.operationId,
+              workDate: locked.work_date.slice(0, 10),
+              fingerprint: parsed.data.fingerprint,
+            })
+            const updated = await trx.query(
+              `UPDATE attendance_requests
+                  SET status = 'cancelled', resolved_by = $2, resolved_at = now(), updated_at = now()
+                WHERE id = $1::uuid AND org_id = $3 AND status = 'approved'
+                RETURNING status`,
+              [requestId, actorId, locked.org_id],
+            )
+            return {
+              action: 'correct',
+              requestStatus: updated[0]?.status ?? locked.status,
+              plan: correction.plan.action,
+              reversed: correction.reversal.reversed,
+              alreadyReversed: correction.reversal.alreadyReversed,
+            }
+          })
+          res.json({ ok: true, data: outcome })
+        } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY') {
+            res.status(503).json({ ok: false, error: { code: error.code, message: '考勤组织锁繁忙，请稍后重试' } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_TIMEZONE_FROZEN_CONTEXT_MIGRATION_REQUIRED') {
+            res.status(409).json({ ok: false, error: { code: error.code, message: '该日期已有历史考勤记录，但缺少可用的冻结上下文' } })
+            return
+          }
+          if (isDatabaseSchemaError(error)) {
+            res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
+            return
+          }
+          logger.error('Attendance admin correction failed', error)
+          res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to correct request' } })
+        }
+      }),
+    )
+
+    context.api.http.addRoute(
       'GET',
       '/api/attendance/leave-types',
       withPermission('attendance:read', async (req, res) => {

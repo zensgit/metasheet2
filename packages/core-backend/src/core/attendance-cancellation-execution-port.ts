@@ -354,6 +354,7 @@ export const CANCEL_ROUND_CLOSE_REASON_MAX_LENGTH = 256
 export const CANCEL_ROUND_CLOSE_REASON_EXACT_TOKENS_V1 = Object.freeze([
   'event_started',
   'superseded_by_revision',
+  'admin_closed',
 ] as const)
 
 const CANCEL_ROUND_CLOSE_REASON_EXACT = new Set<string>([
