@@ -70,7 +70,11 @@ describe('attendance import permission wiring', () => {
     const end = pluginSource.indexOf('\n}\n', start) + 2
     const helper = pluginSource.slice(start, end)
     expect(start).toBeGreaterThanOrEqual(0)
-    expect(helper).toContain('user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId')
+    expect(helper).toContain('user?.orgId')
+    expect(helper).toContain('user?.workspaceId')
+    expect(helper).toContain('req.authenticatedTenantId')
+    expect(helper).toContain('raw.trim().length > 0')
+    expect(helper).not.toContain('user?.orgId ?? user?.workspaceId ?? req.authenticatedTenantId')
     expect(helper).not.toContain('user?.tenantId')
     expect(helper).not.toContain("req.headers['x-org-id']")
     expect(helper).not.toContain('DEFAULT_ORG_ID')
@@ -93,5 +97,81 @@ describe('attendance import permission wiring', () => {
     expect(subjectHelper).not.toContain("req.headers['x-user-id']")
     expect(pluginSource).toContain('tokenSubjectUserId,')
     expect(pluginSource).not.toContain('tokenSubjectUserId: actorId')
+  })
+
+  it('binds the import permission wrapper to the authenticated org', () => {
+    const start = pluginSource.indexOf('const withAttendanceImportPermission =')
+    const end = pluginSource.indexOf('const emitEvent', start)
+    const wrapper = pluginSource.slice(start, end)
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(wrapper).toContain('resolveAttendanceImportActor(req, res)')
+    expect(wrapper).toContain('req.attendanceImportAccess = access')
+
+    const boundReads = [
+      '/api/attendance/import/jobs/:id',
+      '/api/attendance/import/batches',
+      '/api/attendance/import/batches/:id',
+      '/api/attendance/import/batches/:id/items',
+      '/api/attendance/import/batches/:id/export.csv',
+      '/api/attendance/import/template-prefs',
+      '/api/attendance/import/upload',
+      '/api/attendance/import/upload-artifact',
+      '/api/attendance/integrations',
+      '/api/attendance/integrations/:id/runs',
+    ]
+    for (const path of boundReads) {
+      const marker = pluginSource.indexOf(`'${path}'`)
+      expect(marker, path).toBeGreaterThanOrEqual(0)
+      const next = pluginSource.indexOf('context.api.http.addRoute', marker + path.length)
+      const body = pluginSource.slice(marker, next === -1 ? marker + 1200 : next)
+      expect(body, path).not.toContain('getOrgId(req)')
+      expect(body, path).toContain('readBoundAttendanceImportOrg')
+    }
+  })
+
+  it('keeps every import and integration handler off getOrgId', () => {
+    const expected = [
+      'POST /api/attendance/import/upload-artifact',
+      'GET /api/attendance/import/template',
+      'GET /api/attendance/import/template.csv',
+      'GET /api/attendance/import/template-prefs',
+      'PUT /api/attendance/import/template-prefs',
+      'POST /api/attendance/import/upload',
+      'POST /api/attendance/import/prepare',
+      'POST /api/attendance/import/preview',
+      'POST /api/attendance/import/commit',
+      'POST /api/attendance/import/preview-async',
+      'POST /api/attendance/import/commit-async',
+      'GET /api/attendance/import/jobs/:id',
+      'POST /api/attendance/import',
+      'GET /api/attendance/integrations',
+      'POST /api/attendance/integrations',
+      'PUT /api/attendance/integrations/:id',
+      'DELETE /api/attendance/integrations/:id',
+      'GET /api/attendance/integrations/:id/runs',
+      'POST /api/attendance/integrations/:id/sync',
+      'GET /api/attendance/import/batches',
+      'GET /api/attendance/import/batches/:id',
+      'GET /api/attendance/import/batches/:id/items',
+      'GET /api/attendance/import/batches/:id/export.csv',
+      'POST /api/attendance/import/rollback/:id',
+    ]
+    const found: string[] = []
+    const re = /context\.api\.http\.addRoute\(\s*'([^']+)'\s*,\s*'([^']+)'/g
+    for (const match of pluginSource.matchAll(re)) {
+      const method = match[1]
+      const path = match[2]
+      if (!path.startsWith('/api/attendance/import') && !path.startsWith('/api/attendance/integrations')) continue
+      const next = pluginSource.indexOf('context.api.http.addRoute', (match.index ?? 0) + 10)
+      const body = pluginSource.slice(match.index ?? 0, next === -1 ? pluginSource.length : next)
+      const label = `${method} ${path}`
+      expect(body, label).not.toContain('getOrgId(req)')
+      expect(
+        /withAttendanceImportPermission\(|resolveAuthenticatedAttendanceOrg\(|\baccess\.orgId\b|importAccess\.orgId/.test(body),
+        label,
+      ).toBe(true)
+      found.push(label)
+    }
+    expect(found).toEqual(expected)
   })
 })
