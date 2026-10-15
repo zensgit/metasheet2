@@ -39,3 +39,11 @@ Publication base for this repository: `ad2246fecd7af5227f8f4a68ee5c8ba8512e212c`
 ## Reproduction
 
 From `packages/core-backend`, run the workflow unit list and `node node_modules/vitest/vitest.mjs run --config vitest.plm-bom-review.config.ts` with a disposable `DATABASE_URL` and `EXPECT_DB=1`. The standalone DB suite has 124 tests; only the paired Yuantus runner registers the 125th cross-process test. From the repository root, `python3 scripts/plm-listener/run-pg.py RUN_NAME` provisions a private local cluster; `python3 scripts/plm-listener/run-app.py RUN_NAME` validates full core startup/shutdown using locally available Docker images `postgres:16` and `redis:7-alpine`. Set `NODE_BINARY` for Node 20 and optionally `PG_BIN` for PostgreSQL binaries.
+
+## CI follow-up: native writer contracts
+
+The broad CI writer census identified the new snapshot writer. It now uses the common `ensureRecordNotLocked` rule: an unrelated lock rejects the refresh and rolls back all changes; the record owner or locker can write under the existing native policy. PostgreSQL regression covers rejection, rollback and both permitted cases. The snapshot writer emits revisions in the same transaction and writes only fixed source `string` fields whose types are protected by the existing BOM field trigger; local rich-text fields are not patched. Its fence/call-site dispositions are explicitly recorded, without excluding it from scans.
+
+When BOM review is disabled, server route setup no longer obtains its pool. Route tests use the repository's pinned HTTP listener. The standalone real-DB suite is excluded only from the no-database test configuration and remains mandatory as a whole file in its dedicated PostgreSQL CI.
+
+Follow-up local verification: 125 standalone PostgreSQL tests; 126 paired cross-process tests; full core application startup/shutdown with fresh PostgreSQL/Redis passed again; TypeScript passed. Eight broad guard/wiring suites passed, with the HTTP tripwire subsequently repaired and rerun together with route tests (13 passed). Remote CI on the new commit remains pending.

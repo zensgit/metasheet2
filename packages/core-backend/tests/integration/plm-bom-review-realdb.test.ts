@@ -2269,6 +2269,33 @@ describe('PLM success outbound delivery', () => {
 })
 
 
+describe('PLM snapshot uses the native record-lock rule', () => {
+  it('rejects a foreign lock atomically, then permits the record owner and locker', async () => {
+    const saved = current
+    current = shareSnapshot()
+    try {
+      const created = await service.create('owner', { previewId: (await makePreview()).previewId, requestId: randomUUID() })
+      const binding = (await pool.query('SELECT * FROM meta_plm_bom_review_bindings WHERE id=$1', [created.id])).rows[0]
+      const record = (await pool.query("SELECT record_id FROM meta_plm_bom_review_rows WHERE binding_id=$1 AND bom_line_id='RA1'", [created.id])).rows[0].record_id
+      const read = async () => (await pool.query('SELECT data,version FROM meta_records WHERE id=$1',[record])).rows[0]
+      await pool.query("UPDATE meta_records SET locked=true,locked_by='member',created_by='member' WHERE id=$1",[record])
+      const before = await read()
+      current.context.lines[0].quantity = 17
+      await expect(service.refresh('owner',created.id,{ expectedVersion: Number(binding.version) })).rejects.toMatchObject({ code: 'FORBIDDEN' })
+      expect(await read()).toEqual(before)
+      expect(Number((await pool.query('SELECT version FROM meta_plm_bom_review_bindings WHERE id=$1',[created.id])).rows[0].version)).toBe(Number(binding.version))
+      // Native policy permits the record owner even if another actor placed the lock.
+      await pool.query("UPDATE meta_records SET created_by='owner' WHERE id=$1",[record])
+      const updated = await service.refresh('owner',created.id,{ expectedVersion: Number(binding.version) })
+      expect((await read()).data[binding.fields.quantity]).toBe('17')
+      await pool.query("UPDATE meta_records SET created_by='member',locked_by='owner' WHERE id=$1",[record])
+      current.context.lines[0].quantity = 18
+      await service.refresh('owner',created.id,{ expectedVersion: updated.version })
+      expect((await read()).data[binding.fields.quantity]).toBe('18')
+    } finally { current = saved }
+  })
+})
+
 describe('durable owner-authorized PLM listener', () => {
   it.each(['bom_line_writeback','eco_batch_apply'])('baselines, atomically consumes and stops %s', async kind => {
     const local = await service.create('owner',{ previewId: (await makePreview()).previewId,requestId: randomUUID() })

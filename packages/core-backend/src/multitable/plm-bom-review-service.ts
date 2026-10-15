@@ -21,6 +21,7 @@ import {
   loadRecordPermissionScopeMap,
   loadFieldPermissionScopeMap,
 } from './permission-service'
+import { ensureRecordNotLocked } from './record-lock'
 import { fenceWriterEntry, isWriterFenceEnabled } from './canonical-sheet-fence'
 import { isDurableDeliveryEnabled } from './automation-durable-delivery'
 import { mintOperation, sealOperation } from './operation-ledger'
@@ -1492,10 +1493,10 @@ export class PlmBomReviewService {
       ).get(r.record_id)
       if (
         scope?.accessLevel === 'none' ||
-        scope?.accessLevel === 'read' ||
-        (old.locked && old.locked_by !== actor)
+        scope?.accessLevel === 'read'
       )
         throw new Failure(403, 'FORBIDDEN')
+      ensureRecordNotLocked(actor, old, () => new Failure(403, 'FORBIDDEN'))
       const row = projected.get(r.bom_line_id)
       const cells =
         row?.cells ??
@@ -1559,10 +1560,13 @@ export class PlmBomReviewService {
       const row = (
         p.data
           ? await query(
+              // lock-guarded: writeSnapshot checks the locked row through ensureRecordNotLocked.
+              // revision-emitted: recordRecordRevision and sealOperation below share this transaction.
               'UPDATE meta_records SET data=data||$1::jsonb,version=version+1,modified_by=$3,updated_at=now() WHERE id=$2 RETURNING data,version',
               [JSON.stringify(p.patch), p.id, actor],
             )
           : await query(
+              // revision-emitted: recordRecordRevision and sealOperation below share this transaction.
               'INSERT INTO meta_records(id,sheet_id,data,created_by,modified_by) VALUES($1,$2,$3::jsonb,$4,$4) RETURNING data,version',
               [p.id, b.sheet_id, JSON.stringify(p.patch), actor],
             )

@@ -131,7 +131,7 @@ export function createPlmBomReviewsRouter(deps: BomReviewDependencies): Router {
       try {
         res.json({
           ok: true,
-          data: await service[action](
+          data: await service[action].call(service,
             String(req.user!.id),
             id.parse(req.params.id),
             req.body ?? null,

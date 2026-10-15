@@ -2002,10 +2002,12 @@ export class MetaSheetServer {
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)
-      this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
-        pool: poolManager.get(),
-        dataSourceManager: getDataSourceManager(),
-      }))
+      if (process.env.PLM_BOM_REVIEW_ENABLED === 'true') {
+        this.app.use('/api/plm-bom-reviews', createPlmBomReviewsRouter({
+          pool: poolManager.get(),
+          dataSourceManager: getDataSourceManager(),
+        }))
+      }
       this.app.use(plmEmbedRouter())
       this.app.use(plmEmbedDiscussionWriteRouter())
       this.app.use(plmEmbedDiscussionReadRouter())
