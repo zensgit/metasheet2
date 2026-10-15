@@ -98,6 +98,10 @@ const ALLOWLIST: Record<
     disposition: 'CHOKEPOINT',
     reason: 'HTTP form-submit / import-xlsx / record routes validate longText via validateLongTextValue',
   },
+  'multitable/plm-record-ingress-service.ts': {
+    disposition: 'SAFE',
+    reason: 'Fixed binding maps four validated text cells only to existing string fields locked FOR SHARE; the database source-field guard forbids retyping. Local rich-text cells are not patched.',
+  },
   'multitable/plm-bom-review-service.ts': {
     disposition: 'SAFE',
     reason: 'Owner-authorized snapshot sync writes only SOURCE_FIELDS created as string; the database field guard forbids retyping/deleting them. Local rich-text fields are never in the patch.',

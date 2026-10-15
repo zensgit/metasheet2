@@ -1,0 +1,81 @@
+name: PLM record ingress
+on:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/multitable/plm-*.ts'
+      - 'packages/core-backend/src/routes/plm-record-ingress.ts'
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/db/migrations/*plm*.ts'
+      - 'packages/core-backend/tests/**/plm-*'
+      - 'packages/core-backend/tests/plm-record-ingress/**'
+      - 'packages/core-backend/tests/fixtures/plm-record-event-v1-fixtures.json'
+      - 'packages/core-backend/src/multitable/automation-service.ts'
+      - 'scripts/ops/global-history-flag-manifest*'
+      - 'packages/core-backend/tests/unit/multitable-*.guard.test.ts'
+      - 'packages/core-backend/tests/unit/multitable-oapi-allowlist-guard-tripwire.test.ts'
+      - 'packages/core-backend/tests/unit/multitable-automation-service.test.ts'
+      - 'packages/core-backend/tests/unit/automation-durable-consumer-handlers.test.ts'
+      - 'packages/core-backend/scripts/plm-record-ingress-provision.ts'
+      - 'packages/core-backend/vitest*.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/plm-record-ingress-realdb.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  record-ingress-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: plm_record
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d plm_record"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      EXPECT_DB: '1'
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Type check
+        working-directory: packages/core-backend
+        run: node node_modules/typescript/bin/tsc --noEmit
+      - name: Real PostgreSQL authority and concurrency regression
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/plm_record
+        working-directory: packages/core-backend
+        run: node node_modules/vitest/vitest.mjs run --config vitest.plm-record-ingress.config.ts --reporter=default --reporter=junit --outputFile=plm-record-ingress.xml
+      - name: Require nonempty PostgreSQL execution without skips
+        working-directory: packages/core-backend
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          cases = list(ET.parse('plm-record-ingress.xml').getroot().iter('testcase'))
+          assert cases and all(c.find('skipped') is None and c.find('failure') is None and c.find('error') is None for c in cases)
+          PY
+      - name: Wire, token routes, durable handler and structural guards
+        working-directory: packages/core-backend
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/unit/plm-record-ingress-wire.test.ts tests/unit/plm-record-ingress-routes.test.ts
+          tests/unit/multitable-automation-service.test.ts tests/unit/automation-durable-consumer-handlers.test.ts
+          tests/unit/multitable-oapi-allowlist-guard-tripwire.test.ts
+          tests/unit/multitable-field-schema-fence-recheck.guard.test.ts
+          tests/unit/multitable-w13-write-path-layer3-gate.guard.test.ts
+          tests/unit/multitable-richtext-longtext-write-sink.guard.test.ts
+      - name: Exact flag manifest and dependency controls
+        run: node --test scripts/ops/global-history-flag-manifest.test.mjs

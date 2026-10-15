@@ -1,0 +1,140 @@
+{
+  "schema": "yuantus.bom-record-event-fixtures.v1",
+  "cases": [
+    {
+      "name": "decimal",
+      "event": {
+        "schema": "yuantus.bom-record-event.v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "event_type": "bom.line.updated",
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "fixture-yuantus",
+          "tenant_id": "fixture-tenant",
+          "org_id": "fixture-org",
+          "part_id": "fixture-part",
+          "bom_line_id": "fixture-line"
+        },
+        "source_sequence": 1,
+        "occurred_at": "2026-10-01T00:00:00.000000Z",
+        "cells": {
+          "quantity": "1.5",
+          "uom": "ea",
+          "find_num": "10",
+          "refdes": null
+        }
+      },
+      "canonical_json": "{\"binding_id\":\"00000000-0000-4000-8000-000000000002\",\"binding_version\":1,\"cells\":{\"find_num\":\"10\",\"quantity\":\"1.5\",\"refdes\":null,\"uom\":\"ea\"},\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"event_type\":\"bom.line.updated\",\"occurred_at\":\"2026-10-01T00:00:00.000000Z\",\"schema\":\"yuantus.bom-record-event.v1\",\"source\":{\"bom_line_id\":\"fixture-line\",\"connection_id\":\"fixture-yuantus\",\"org_id\":\"fixture-org\",\"part_id\":\"fixture-part\",\"tenant_id\":\"fixture-tenant\"},\"source_sequence\":1}",
+      "sha256": "a39ba41f8988376b1ccb0974fae06b296aa0c40c67c45140d688a3530bc6eb10"
+    },
+    {
+      "name": "large-integer-text",
+      "event": {
+        "schema": "yuantus.bom-record-event.v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "event_type": "bom.line.updated",
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "fixture-yuantus",
+          "tenant_id": "fixture-tenant",
+          "org_id": "fixture-org",
+          "part_id": "fixture-part",
+          "bom_line_id": "fixture-line"
+        },
+        "source_sequence": 1,
+        "occurred_at": "2026-10-01T00:00:00.000000Z",
+        "cells": {
+          "quantity": "900719925474099312345",
+          "uom": "件",
+          "find_num": "0010",
+          "refdes": "R1,R2"
+        }
+      },
+      "canonical_json": "{\"binding_id\":\"00000000-0000-4000-8000-000000000002\",\"binding_version\":1,\"cells\":{\"find_num\":\"0010\",\"quantity\":\"900719925474099312345\",\"refdes\":\"R1,R2\",\"uom\":\"件\"},\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"event_type\":\"bom.line.updated\",\"occurred_at\":\"2026-10-01T00:00:00.000000Z\",\"schema\":\"yuantus.bom-record-event.v1\",\"source\":{\"bom_line_id\":\"fixture-line\",\"connection_id\":\"fixture-yuantus\",\"org_id\":\"fixture-org\",\"part_id\":\"fixture-part\",\"tenant_id\":\"fixture-tenant\"},\"source_sequence\":1}",
+      "sha256": "e810aff53bb340810fabe5098c6e40954acc76e4a8d3ac976265718f102f93f3"
+    },
+    {
+      "name": "unicode-control-text",
+      "event": {
+        "schema": "yuantus.bom-record-event.v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "event_type": "bom.line.updated",
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "fixture-yuantus",
+          "tenant_id": "fixture-tenant",
+          "org_id": "fixture-org",
+          "part_id": "fixture-part",
+          "bom_line_id": "fixture-line"
+        },
+        "source_sequence": 1,
+        "occurred_at": "2026-10-01T00:00:00.000000Z",
+        "cells": {
+          "quantity": " 1e+03 ",
+          "uom": "台🛠",
+          "find_num": "\"\\\t\n",
+          "refdes": "中  文"
+        }
+      },
+      "canonical_json": "{\"binding_id\":\"00000000-0000-4000-8000-000000000002\",\"binding_version\":1,\"cells\":{\"find_num\":\"\\\"\\\\\\t\\n\",\"quantity\":\" 1e+03 \",\"refdes\":\"中  文\",\"uom\":\"台🛠\"},\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"event_type\":\"bom.line.updated\",\"occurred_at\":\"2026-10-01T00:00:00.000000Z\",\"schema\":\"yuantus.bom-record-event.v1\",\"source\":{\"bom_line_id\":\"fixture-line\",\"connection_id\":\"fixture-yuantus\",\"org_id\":\"fixture-org\",\"part_id\":\"fixture-part\",\"tenant_id\":\"fixture-tenant\"},\"source_sequence\":1}",
+      "sha256": "5ea0988381869a5008bc5034d6eac4e2e139c42650937d3af9f10ce984834696"
+    },
+    {
+      "name": "null-cells",
+      "event": {
+        "schema": "yuantus.bom-record-event.v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "event_type": "bom.line.updated",
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "fixture-yuantus",
+          "tenant_id": "fixture-tenant",
+          "org_id": "fixture-org",
+          "part_id": "fixture-part",
+          "bom_line_id": "fixture-line"
+        },
+        "source_sequence": 1,
+        "occurred_at": "2026-10-01T00:00:00.000000Z",
+        "cells": {
+          "quantity": null,
+          "uom": null,
+          "find_num": null,
+          "refdes": null
+        }
+      },
+      "canonical_json": "{\"binding_id\":\"00000000-0000-4000-8000-000000000002\",\"binding_version\":1,\"cells\":{\"find_num\":null,\"quantity\":null,\"refdes\":null,\"uom\":null},\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"event_type\":\"bom.line.updated\",\"occurred_at\":\"2026-10-01T00:00:00.000000Z\",\"schema\":\"yuantus.bom-record-event.v1\",\"source\":{\"bom_line_id\":\"fixture-line\",\"connection_id\":\"fixture-yuantus\",\"org_id\":\"fixture-org\",\"part_id\":\"fixture-part\",\"tenant_id\":\"fixture-tenant\"},\"source_sequence\":1}",
+      "sha256": "30977cd0cfad8dfd6fb6ce67236c7c06406b36768fd1848f59caed0cfe62e75a"
+    },
+    {
+      "name": "maximum-safe-sequence",
+      "event": {
+        "schema": "yuantus.bom-record-event.v1",
+        "event_id": "00000000-0000-4000-8000-000000000001",
+        "event_type": "bom.line.updated",
+        "binding_id": "00000000-0000-4000-8000-000000000002",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "fixture-yuantus",
+          "tenant_id": "fixture-tenant",
+          "org_id": "fixture-org",
+          "part_id": "fixture-part",
+          "bom_line_id": "fixture-line"
+        },
+        "source_sequence": 9007199254740991,
+        "occurred_at": "2026-10-01T00:00:00.000000Z",
+        "cells": {
+          "quantity": "1.5",
+          "uom": "ea",
+          "find_num": "10",
+          "refdes": null
+        }
+      },
+      "canonical_json": "{\"binding_id\":\"00000000-0000-4000-8000-000000000002\",\"binding_version\":1,\"cells\":{\"find_num\":\"10\",\"quantity\":\"1.5\",\"refdes\":null,\"uom\":\"ea\"},\"event_id\":\"00000000-0000-4000-8000-000000000001\",\"event_type\":\"bom.line.updated\",\"occurred_at\":\"2026-10-01T00:00:00.000000Z\",\"schema\":\"yuantus.bom-record-event.v1\",\"source\":{\"bom_line_id\":\"fixture-line\",\"connection_id\":\"fixture-yuantus\",\"org_id\":\"fixture-org\",\"part_id\":\"fixture-part\",\"tenant_id\":\"fixture-tenant\"},\"source_sequence\":9007199254740991}",
+      "sha256": "ed2b62527bd6b485d153fa053b47180bfe4db63b57c223f637ce5b0f9a597f23"
+    }
+  ]
+}

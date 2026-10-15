@@ -31,6 +31,7 @@ export default defineConfig({
     exclude: [
       // Whole file runs with EXPECT_DB=1 in plm-bom-listener.yml.
       'tests/integration/plm-bom-review-realdb.test.ts',
+      'tests/integration/plm-record-ingress-realdb.test.ts',
       '**/node_modules/**',
       '**/dist/**',
       // Integration tests requiring a live DB or pluginDirs PluginLoader API:

@@ -1,3 +1,4 @@
+import { createPlmRecordIngressBodyParser, createPlmRecordIngressRouter } from './routes/plm-record-ingress'
 import { shutdownSafetyGuard } from './guards/SafetyGuard'
 import { shutdownIdempotency } from './guards/idempotency'
 /**
@@ -1823,6 +1824,8 @@ export class MetaSheetServer {
     }
 
     // Body parsing
+    const plmRecordIngressParser = createPlmRecordIngressBodyParser()
+    if (plmRecordIngressParser) this.app.use('/api/multitable/plm-record-ingress', plmRecordIngressParser)
     this.app.use(express.json({ limit: '10mb' }))
     this.app.use(express.urlencoded({ extended: true }))
 
@@ -1999,6 +2002,8 @@ export class MetaSheetServer {
     this.app.use('/api/workflow', workflowRouter)
     // 路由：工作流设计器 (V2 Visual Designer)
     this.app.use('/api/workflow-designer', workflowDesignerRouter)
+    const plmRecordIngressRouter = createPlmRecordIngressRouter()
+    if (plmRecordIngressRouter) this.app.use('/api/multitable', plmRecordIngressRouter)
     const plmEnabled = isPlmEnabled(process.env.PRODUCT_MODE, process.env.ENABLE_PLM)
     if (plmEnabled) {
       this.app.use(plmWorkbenchRouter)

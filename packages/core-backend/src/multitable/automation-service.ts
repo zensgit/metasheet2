@@ -3366,6 +3366,8 @@ export class AutomationService {
           `Automation rule ${rule.id} action failed`,
           err instanceof Error ? err : undefined,
         )
+        // Reject durable handler failures so the dispatcher retains the event for retry.
+        if (isDurableDeliveryEnabled()) throw err
       }
     }
   }

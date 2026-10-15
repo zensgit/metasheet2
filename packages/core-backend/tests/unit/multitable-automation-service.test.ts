@@ -402,6 +402,26 @@ describe('AutomationService', () => {
     })
   })
 
+  it.each(['true', 'false'])('propagates unexpected record-handler errors only for durable delivery (%s)', async flag => {
+    const previous = process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+    process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = flag
+    try {
+      const rule = createMockRule()
+      service = new AutomationService(bus, createMockDb([rule]) as never, createMockQuery([rule]))
+      const failure = new Error('synthetic execution unavailable')
+      vi.spyOn(service, 'executeRule').mockRejectedValueOnce(failure)
+      const result = service.handleEvent('multitable.record.created', {
+        sheetId: 'sheet1', recordId: 'rec1', actorId: 'user1', data: {},
+        _origin: 'plm_domain_event', _automationDepth: 0,
+      })
+      if (flag === 'true') await expect(result).rejects.toBe(failure)
+      else await expect(result).resolves.toBeUndefined()
+    } finally {
+      if (previous === undefined) delete process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED
+      else process.env.AUTOMATION_DURABLE_DELIVERY_ENABLED = previous
+    }
+  })
+
   describe('disabled rules', () => {
     it('skips disabled rules (query returns only enabled)', async () => {
       // The query only returns enabled rules, so we simulate empty result
