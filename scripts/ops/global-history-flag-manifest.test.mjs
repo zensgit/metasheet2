@@ -391,7 +391,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED')
+  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|PLM_APPROVAL_CARD_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED')
   return [...new Set([...plmBom, ...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 
@@ -768,7 +768,7 @@ test('mutation guard: every FlagSpec.rules[] entry is reachable by evaluateFlagR
   const allRuleIds = GLOBAL_HISTORY_FLAG_MANIFEST.flatMap((spec) => (spec.rules || []).map((r) => r.id))
   assert.deepEqual(
     [...allRuleIds].sort(),
-    ['plm-ingress-without-durable-writer-fence', 'plm-bom-review-without-durable-writer-fence', 'archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
+    ['plm-personal-cards-without-durable', 'plm-ingress-without-durable-writer-fence', 'plm-bom-review-without-durable-writer-fence', 'archive-without-exact-writer-fence', 'field-retype-convert-with-legacy-manage-schema', 'lossy-without-base', 'pit-reset-intent-with-retention-on', 'sheet-revert-intent-with-retention-on', 'side-door-without-capture', 'undelete-without-revert-gate'].sort(),
     'manifest rule set changed — update this test deliberately if a rule was intentionally added/removed',
   )
 })
@@ -882,4 +882,14 @@ test('PLM record ingress requires each durable/fence dependency and exact opt-in
   }
   assert.ok(!violationIds({ PLM_RECORD_INGRESS_ENABLED: 'TRUE' }).includes(id))
   assert.ok(!violationIds({ PLM_RECORD_INGRESS_ENABLED: 'true', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' }).includes(id))
+})
+
+// Personal source tasks must never silently bypass the transactional event producer.
+test('personal PLM cards require durable delivery and exact literal enablement', () => {
+  const id = 'plm-personal-cards-without-durable'
+  assert.ok(violationIds({ PLM_APPROVAL_CARD_ENABLED: 'true' }).includes(id))
+  assert.ok(!violationIds({ PLM_APPROVAL_CARD_ENABLED: 'true', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true' }).includes(id))
+  for (const flag of [undefined, 'TRUE', '1', ' true ']) assert.ok(!violationIds({ PLM_APPROVAL_CARD_ENABLED: flag }).includes(id))
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY.PLM_APPROVAL_CARD_ENABLED
+  assert.equal(spec.source, 'packages/core-backend/src/services/plm-personal-approval-wire.ts#isPlmApprovalCardEnabled')
 })

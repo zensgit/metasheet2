@@ -68,6 +68,7 @@ import {
   type ApprovalCardDeliverySummary,
 } from '../../services/ApprovalCardDeliveryAction'
 import type { ApprovalProductService } from '../../services/ApprovalProductService'
+import type { PlmPersonalApprovalBindingService } from '../../services/PlmPersonalApprovalBindingService'
 
 const logger = new Logger('DingTalkInteractiveCardCallback')
 
@@ -350,6 +351,7 @@ export function parseDingTalkApprovalCardCallback(payload: unknown): DingTalkApp
 export type DingTalkApprovalCardCallbackDeps = {
   query: QueryFn
   approvals: Pick<ApprovalProductService, 'dispatchAction'>
+  plmPersonalCards?: PlmPersonalApprovalBindingService
   /**
    * B-4 card-update sender override (tests / alternate transports). Omitted → the production
    * sender behind the SAME env gate as the B-2 send (`resolveDingTalkInteractiveCardStreamConfig`);
@@ -539,7 +541,7 @@ async function resolveDingTalkApprovalCardCallbackOutcome(
   const token = createHmac('sha256', linkSecret).update(delivery.id).digest('hex').slice(0, 32)
 
   const outcome = await executeApprovalActionFromCardDelivery(
-    { query: deps.query, approvals: deps.approvals },
+    { query: deps.query, approvals: deps.approvals, plmPersonalCards: deps.plmPersonalCards },
     {
       deliveryId: delivery.id,
       token,

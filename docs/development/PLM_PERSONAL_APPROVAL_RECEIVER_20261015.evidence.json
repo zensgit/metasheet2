@@ -1,0 +1,93 @@
+{
+  "scope": "local synthetic feature routes; not full MetaSheet server, paired Yuantus HTTP, enterprise DingTalk or deployment",
+  "backend_unit": {
+    "files": 16,
+    "passed": 240,
+    "failed": 0,
+    "skipped": 0
+  },
+  "web_unit": {
+    "files": 5,
+    "passed": 54,
+    "failed": 0,
+    "skipped": 0
+  },
+  "postgres": {
+    "passed": 16,
+    "failed": 0,
+    "skipped": 0,
+    "cleanup": true,
+    "elapsed_seconds": 8.227
+  },
+  "browser": {
+    "exitCode": 0,
+    "checks": {
+      "real-auth-plm-focus": true,
+      "ordinary-user": true,
+      "anonymous-binding-denied": true,
+      "settings-binding-entry-visible": true,
+      "real-binding-api": true,
+      "actual-grant-management-link": true,
+      "settings-refresh-stays": true,
+      "both-real-main-entry-paths": true,
+      "real-invalid-ledger-request-404": true,
+      "invalid-card-zero-actions": true,
+      "missing-parameters-no-summary": true,
+      "signed-revoked-summary-no-actions": true,
+      "existing-card-bad-hmac-denied": true,
+      "foreign-recipient-no-actions": true,
+      "settings-requires-login": true,
+      "decision-keeps-local-login-flow": true,
+      "no-card-command-or-grant-write": true,
+      "no-page-errors": true
+    },
+    "pageErrors": [],
+    "cleanup": true,
+    "seconds": 6.413
+  },
+  "browser_source_scope": "browser-02 ran the final UI/route/auth sources. Later sender-only post-send-failure fix was tested by PG; browser made no card/approval grant writes.",
+  "flags": {
+    "passed": 49,
+    "failed": 0
+  },
+  "review": {
+    "model": "gpt-6-astra",
+    "effort": "ultra",
+    "mode": "independent read-only; parent reproduced and fixed two recovery findings and post-send retry follow-up"
+  },
+  "negative_evidence": {
+    "pg-01": "12 passed / 1 downgrade-lock regression failed before fix",
+    "pg-03": "13 passed / 2 recovery regressions failed before fix",
+    "pg-05": "15 passed / 1 post-send failure regression failed; observed 2 OA sends",
+    "pg-06": "repeat of pg-05 after patch precondition aborted, no fix applied; retained failure",
+    "browser-01": "failed only on current localized English error copy; fixture now explicitly selects zh-CN",
+    "route-red-03": "2 failed / 3 passed before focus exact-path fix; earlier red invocations had fixture/cwd errors and are not product failure evidence"
+  },
+  "base": "a5ed6d86376d25e93c9a9904fc044ba0eadfab8b",
+  "paired_yuantus": "5dc3b1c41c0e07c1f9b71d7c760e77171a92152c",
+  "types": {
+    "backend": "passed",
+    "web_application": "passed",
+    "full_web_build": "TS2769 in unchanged baseline Vite Node config; reproduced with byte-identical baseline config"
+  },
+  "source_sha256": {
+    "apps/web/src/components/plm/PlmApprovalBindingsPanel.vue": "3039cc69e3c65773f05b79509255c1821c5bf07ab75cd3ca1ab919b9c7b77a7f",
+    "apps/web/src/router/guardPolicy.ts": "031171dc876a699987eb7ff2df6d26b3457fbc5a555758ca356c49caf3410ec0",
+    "apps/web/src/services/plm/plmApprovalBindings.ts": "bda1739704204cd3c197b43269460a49c2164d78d12fc6a7232d32d660a6f03a",
+    "apps/web/src/views/SessionCenterView.vue": "e9eb23af811a9e94737e903885da12cd550fe58e4e342c373a6b52d9376a1cab",
+    "packages/core-backend/src/data-adapters/PLMAdapter.ts": "a380a1ef8f64ceb988aa3ab4832992e5ba463e18b9d2c25202512d07689e885d",
+    "packages/core-backend/src/db/migrations/zzzz20261015040000_create_plm_personal_approval_cards.ts": "62912ef97fbffb28e9c2cb7f81cc9942df134c170790394013ef8363e4303720",
+    "packages/core-backend/src/index.ts": "2f3abb5efe915d7008cc7e248524d6905aefecd400019d92e00b601de93398fe",
+    "packages/core-backend/src/integrations/dingtalk/approval-card-deliveries.ts": "e60cf9df4e9938e428f5d4e084f5493b8db72011fbc570b7a1a1e57c9b2a342c",
+    "packages/core-backend/src/integrations/dingtalk/interactive-card-callback.ts": "084c14b65134871cde4f120531451c5ed1971cc633eba14a300e9cea2b9b9533",
+    "packages/core-backend/src/integrations/dingtalk/interactive-card-stream.ts": "9977397fd0ecd9b9f3fffa800c2742da4e87e9770a7b906a872c616d4db7ab47",
+    "packages/core-backend/src/multitable/automation-executor.ts": "9bef22da49ccaf4fdad8f732e4fe8574cd3d0c68e6af39275e90b2c5cf9404c9",
+    "packages/core-backend/src/multitable/automation-service.ts": "74ae0cbb2a55abbb84ab7a78aa1aa41db57312acde4b8d10543ba5f7169fff33",
+    "packages/core-backend/src/routes/approvals.ts": "374691add410c4805441e9f9ab8060e90290546003f13b87fd73288e8ec03af9",
+    "packages/core-backend/src/routes/plm-approval-bindings.ts": "52727f0f341b89fb2f1c48129067b8aad5d74af9e97c65dd083bf30c97d6c40c",
+    "packages/core-backend/src/services/ApprovalCardDeliveryAction.ts": "67fd10d7c074d838839c3780f406fbd170853ead81dc59825e016a938c92aaf6",
+    "packages/core-backend/src/services/PlmPersonalApprovalBindingService.ts": "8f6369bb0b48fcca059b6f769095d6c7f66020289e590dc23b368ed5fb841c4b",
+    "packages/core-backend/src/services/PlmPersonalApprovalWorker.ts": "da357881cede369e723d411627d95e1265c0938a2ed04d0c6daac201b9d91b92",
+    "packages/core-backend/src/services/plm-personal-approval-wire.ts": "d1e41ee64f21d3e0727843cc98d42c52fcf10e5e0a7873ae544eb8b6c2cb3ae5"
+  }
+}

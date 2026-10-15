@@ -48,6 +48,13 @@
 /** @type {FlagSpec[]} */
 export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
   {
+    key: 'PLM_APPROVAL_CARD_ENABLED', type: 'boolean', activationValue: 'true',
+    dependsOn: ['AUTOMATION_DURABLE_DELIVERY_ENABLED'], conflictsWith: [], danger: 'high',
+    purpose: 'Default-off personal Yuantus approval bindings, source tasks and recoverable card commands. Requires a fixed server connection, migrated schema, personal grants and configured DingTalk delivery. No service-account approval fallback.',
+    source: 'packages/core-backend/src/services/plm-personal-approval-wire.ts#isPlmApprovalCardEnabled',
+    rules: [{ kind: 'requires', id: 'plm-personal-cards-without-durable', description: 'Personal PLM task projection requires transactional durable approval events.' }],
+  },
+  {
     key: 'PLM_RECORD_INGRESS_ENABLED', type: 'boolean', activationValue: 'true',
     dependsOn: ['AUTOMATION_DURABLE_DELIVERY_ENABLED', 'MULTITABLE_ENABLE_WRITER_FENCE'], conflictsWith: [], danger: 'high',
     purpose: 'Default-off bounded Yuantus BOM source record ingress. Exact true only. Requires current mst_ creator/binding authority, writer fence/operation and durable automation schema; source columns remain protected after disable.',

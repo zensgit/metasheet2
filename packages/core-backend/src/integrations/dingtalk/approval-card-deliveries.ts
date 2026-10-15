@@ -23,6 +23,7 @@
  * helpers ahead of need).
  */
 import { randomUUID } from 'crypto'
+import { isPlmApprovalCardEnabled } from '../../services/plm-personal-approval-wire'
 
 export const DINGTALK_APPROVAL_CARD_DELIVERY_KINDS = ['work_notice_action_card', 'interactive_card'] as const
 export type DingTalkApprovalCardDeliveryKind = (typeof DINGTALK_APPROVAL_CARD_DELIVERY_KINDS)[number]
@@ -32,7 +33,8 @@ export type DingTalkApprovalCardState = (typeof DINGTALK_APPROVAL_CARD_STATES)[n
 
 export interface DingTalkApprovalCardDeliveryRow {
   id: string
-  instance_id: string
+  instance_id: string | null
+  plm_task_id?: string | null
   node_key: string
   recipient_user_id: string
   recipient_dingtalk_user_id: string
@@ -79,7 +81,8 @@ const RETURNING_COLUMNS =
 export interface InsertDingTalkApprovalCardDeliveryInput {
   /** Optional caller-supplied id; defaults to a fresh UUID. Doubles as the interactive-card outTrackId (Slice B). */
   id?: string
-  instanceId: string
+  instanceId: string | null
+  plmTaskId?: string
   nodeKey: string
   recipientUserId: string
   recipientDingTalkUserId: string
@@ -108,11 +111,27 @@ export async function insertDingTalkApprovalCardDelivery(
       ? input.integrationId.trim()
       : null
   const entryEpoch = typeof input.entryEpoch === 'number' && Number.isInteger(input.entryEpoch) ? input.entryEpoch : null
+  if (input.plmTaskId) {
+    if (!isPlmApprovalCardEnabled() || input.instanceId || entryEpoch === null) throw new Error('PLM_CARD_SOURCE_INVALID')
+    const result = await query(`INSERT INTO dingtalk_approval_card_deliveries
+      (id,instance_id,plm_task_id,node_key,recipient_user_id,recipient_dingtalk_user_id,delivery_kind,task_id,integration_id,entry_epoch)
+      VALUES($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(plm_task_id,entry_epoch) WHERE plm_task_id IS NOT NULL DO UPDATE
+        SET send_status='pending',send_error=NULL,updated_at=now(),
+          recipient_dingtalk_user_id=EXCLUDED.recipient_dingtalk_user_id,
+          integration_id=EXCLUDED.integration_id,delivery_kind=EXCLUDED.delivery_kind,task_id=NULL
+        WHERE dingtalk_approval_card_deliveries.send_status='failed'
+          AND dingtalk_approval_card_deliveries.card_state='sent'
+      RETURNING ${RETURNING_COLUMNS},plm_task_id`,
+      [id,input.plmTaskId,input.nodeKey,input.recipientUserId,input.recipientDingTalkUserId,input.deliveryKind,input.taskId??null,integrationId,entryEpoch])
+    if (!result.rows[0]) throw new Error('PLM_CARD_ALREADY_CLAIMED')
+    return result.rows[0] as DingTalkApprovalCardDeliveryRow
+  }
+  if (!input.instanceId) throw new Error('APPROVAL_CARD_SOURCE_INVALID')
   const result = await query(
     `INSERT INTO dingtalk_approval_card_deliveries
        (id, instance_id, node_key, recipient_user_id, recipient_dingtalk_user_id, delivery_kind, task_id, integration_id, entry_epoch)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-     RETURNING ${RETURNING_COLUMNS}`,
+     RETURNING ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}`,
     [
       id,
       input.instanceId,
@@ -133,7 +152,7 @@ export async function findDingTalkApprovalCardDeliveryById(
   id: string,
 ): Promise<DingTalkApprovalCardDeliveryRow | null> {
   const result = await query(
-    `SELECT ${RETURNING_COLUMNS} FROM dingtalk_approval_card_deliveries WHERE id = $1`,
+    `SELECT ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''} FROM dingtalk_approval_card_deliveries WHERE id = $1`,
     [id],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
@@ -157,7 +176,7 @@ export async function findDingTalkApprovalCardDeliveriesByTaskId(
   const trimmed = taskId.trim()
   if (trimmed.length === 0) return []
   const result = await query(
-    `SELECT ${RETURNING_COLUMNS}
+    `SELECT ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}
        FROM dingtalk_approval_card_deliveries
       WHERE task_id = $1
       ORDER BY created_at DESC`,
@@ -185,7 +204,7 @@ export async function claimDingTalkApprovalCardDeliveryActed(
     `UPDATE dingtalk_approval_card_deliveries
      SET card_state = 'acted', acted_action = $2, acted_by = $3, acted_at = NOW(), updated_at = NOW()
      WHERE id = $1 AND card_state = 'sent' AND send_status IN ('sent', 'outcome_unknown')
-     RETURNING ${RETURNING_COLUMNS}`,
+     RETURNING ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}`,
     [id, input.action, input.actedBy],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
@@ -201,7 +220,7 @@ export async function markDingTalkApprovalCardDeliverySent(
     `UPDATE dingtalk_approval_card_deliveries
      SET send_status = 'sent', task_id = $2, send_error = NULL, updated_at = NOW()
      WHERE id = $1 AND send_status = 'pending'
-     RETURNING ${RETURNING_COLUMNS}`,
+     RETURNING ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}`,
     [id, taskId],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
@@ -217,7 +236,7 @@ export async function markDingTalkApprovalCardDeliverySendFailed(
     `UPDATE dingtalk_approval_card_deliveries
      SET send_status = 'failed', send_error = $2, updated_at = NOW()
      WHERE id = $1 AND send_status = 'pending'
-     RETURNING ${RETURNING_COLUMNS}`,
+     RETURNING ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}`,
     [id, error],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null
@@ -239,7 +258,7 @@ export async function markDingTalkApprovalCardDeliverySendOutcomeUnknown(
     `UPDATE dingtalk_approval_card_deliveries
      SET send_status = 'outcome_unknown', send_error = $2, updated_at = NOW()
      WHERE id = $1 AND send_status = 'pending'
-     RETURNING ${RETURNING_COLUMNS}`,
+     RETURNING ${RETURNING_COLUMNS}${isPlmApprovalCardEnabled() ? ', plm_task_id' : ''}`,
     [id, error],
   )
   return (result.rows[0] as DingTalkApprovalCardDeliveryRow | undefined) ?? null

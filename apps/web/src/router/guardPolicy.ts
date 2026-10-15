@@ -240,7 +240,7 @@ export function resolveRouteGuardDecision(
   if (ctx.plmWorkbenchFocused) {
     const allowed = PLM_WORKBENCH_ALLOWED_PREFIXES.some(
       (prefix) => path === prefix || path.startsWith(`${prefix}/`),
-    ) || isElearningFocusExactPath(path)
+    ) || path === '/settings' || path === '/m/approval-decision' || isElearningFocusExactPath(path)
     if (!allowed) {
       return { action: 'redirect', target: '/plm' }
     }

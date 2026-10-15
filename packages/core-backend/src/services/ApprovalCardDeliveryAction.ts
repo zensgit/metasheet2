@@ -35,6 +35,8 @@
 import { createHmac, timingSafeEqual } from 'crypto'
 
 import type { ApprovalProductService } from './ApprovalProductService'
+import type { PlmPersonalApprovalBindingService } from './PlmPersonalApprovalBindingService'
+import { isPlmApprovalCardEnabled } from './plm-personal-approval-wire'
 import {
   resolveApprovalCardLinkSecret,
   resolveApprovalCardLinkSecretForIntegration,
@@ -233,7 +235,7 @@ async function buildSummary(
 }
 
 export async function getApprovalCardDeliverySummary(
-  deps: { query: QueryFn },
+  deps: { query: QueryFn; plmPersonalCards?: PlmPersonalApprovalBindingService },
   input: { deliveryId: string; token: string; viewerUserId: string },
 ): Promise<{ status: 'ok'; summary: ApprovalCardDeliverySummary } | { status: 'not_found' }> {
   // DT-R2: the row is loaded before verify so the token checks against the DELIVERY's own
@@ -241,13 +243,19 @@ export async function getApprovalCardDeliverySummary(
   const delivery = await findDingTalkApprovalCardDeliveryById(deps.query, input.deliveryId)
   if (!delivery) return { status: 'not_found' }
   if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query, delivery.integration_id))) return { status: 'not_found' }
+  if (delivery.plm_task_id) {
+    if (!isPlmApprovalCardEnabled() || delivery.instance_id || !deps.plmPersonalCards) return { status: 'not_found' }
+    const summary = await deps.plmPersonalCards.summary(delivery, input.viewerUserId)
+    return summary ? { status: 'ok', summary } : { status: 'not_found' }
+  }
+  if (!delivery.instance_id) return { status: 'not_found' }
   const summary = await buildSummary(deps.query, delivery, input.viewerUserId)
   if (!summary) return { status: 'not_found' }
   return { status: 'ok', summary }
 }
 
 export async function executeApprovalActionFromCardDelivery(
-  deps: { query: QueryFn; approvals: Pick<ApprovalProductService, 'dispatchAction'> },
+  deps: { query: QueryFn; approvals: Pick<ApprovalProductService, 'dispatchAction'>; plmPersonalCards?: PlmPersonalApprovalBindingService },
   input: {
     deliveryId: string
     token: string
@@ -261,6 +269,14 @@ export async function executeApprovalActionFromCardDelivery(
   if (!delivery) return { status: 'not_found' }
   if (!(await verifyApprovalCardLinkToken(input.deliveryId, input.token, deps.query, delivery.integration_id))) return { status: 'not_found' }
 
+  if (delivery.plm_task_id) {
+    if (!isPlmApprovalCardEnabled() || delivery.instance_id || !deps.plmPersonalCards) return { status: 'not_found' }
+    const summary = await deps.plmPersonalCards.summary(delivery, input.actor.userId)
+    if (!summary) return { status: 'not_found' }
+    try { return await deps.plmPersonalCards.execute(delivery.id, input.actor.userId, input.decision, input.comment) }
+    catch (error) { const e = error as { status?: number; code?: string }; return { status: 'engine_rejected', code: e.code || 'PLM_PROVIDER_UNAVAILABLE', message: 'PLM approval could not be confirmed. Retry or reconnect your personal grant.', httpStatus: e.status || 503, summary } }
+  }
+  if (!delivery.instance_id) return { status: 'not_found' }
   const preSummary = await buildSummary(deps.query, delivery, input.actor.userId)
   if (!preSummary) return { status: 'not_found' }
   if (!preSummary.actionable) return { status: 'stale', summary: preSummary }
