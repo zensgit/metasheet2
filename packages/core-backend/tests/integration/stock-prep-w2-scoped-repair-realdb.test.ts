@@ -2486,3 +2486,200 @@ describeDb('S5b members port — role-row lock redesign (real host wiring, real 
     }
   }, 30_000)
 })
+
+// ---------------------------------------------------------------------------------------------
+// 一个项目一张备料表 — THE G1 FIELD DEFECT (R67), against real PostgreSQL.
+//
+//   G1R-01 the migration that admits `failed` (zzzz20261015090000), in an ISOLATED schema over the REAL 087
+//          SQL: before up() a `failed` outcome violates 087's CHECK; up() admits it (run twice: idempotent)
+//          and still refuses a word outside the enum; down() REFUSES while a `failed` row exists and changes
+//          nothing; with no such row down() restores 087's three and `failed` is refused again.
+//   G1R-02 the REAL registry store over the plugin's REAL db helper stamps `failed` + the dominant code on
+//          the MIGRATED table (db:migrate ran the migration) and reads it back; `applied` clears the code.
+//   G1R-03 the defect and the fix on a REAL provisioned project sheet: the host's own record write refuses
+//          the decision value `add` (no options — the field report's `select_option_not_found`); the
+//          plugin's project-sheet contract sync through the REAL `patchObjectFieldProperty` writes the 5
+//          options; the same write is then accepted, a value outside the contract set still refused, and
+//          the config_info selects carry no options.
+// Synthetic ids, random per run; everything is cleaned up afterwards.
+// ---------------------------------------------------------------------------------------------
+import { readFileSync as g1ReadFileSync } from 'node:fs'
+import { Kysely as G1Kysely, PostgresDialect as G1PostgresDialect, sql as g1Sql } from 'kysely'
+import { patchObjectFieldProperty as g1PatchObjectFieldProperty } from '../../src/multitable/provisioning'
+import {
+  up as g1MigrationUp,
+  down as g1MigrationDown,
+  FAILED_PULL_OUTCOME_DOWN_REFUSED_CODE as G1_DOWN_REFUSED_CODE,
+  PULL_OUTCOME_CONSTRAINT as G1_OUTCOME_CONSTRAINT,
+} from '../../src/db/migrations/zzzz20261015090000_admit_stock_prep_project_target_failed_pull_outcome'
+
+const G1_MIGRATION_087_SQL = g1ReadFileSync(path.join(__dirname, '..', '..', 'migrations', '087_create_integration_stock_prep_project_target.sql'), 'utf8')
+
+describeDb('G1 field defect (R67): the failed pull outcome and project-sheet contract options (real DB)', () => {
+  const suffix = randomUUID().replace(/-/g, '').slice(0, 10)
+  const tenantId = `g1r_${suffix}`
+  const projectId = `${tenantId}:integration-core`
+  const sheets: string[] = []
+  let pool: Pool
+
+  type Q = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[]; rowCount: number | null }>
+  const inTx = async <T>(fn: (cq: Q) => Promise<T>): Promise<T> => {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const out = await fn(async (sql, params) => {
+        const r = await client.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      })
+      await client.query('COMMIT')
+      return out
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw e
+    } finally {
+      client.release()
+    }
+  }
+
+  beforeAll(async () => {
+    pool = new Pool({ connectionString: dbUrl })
+  })
+
+  afterAll(async () => {
+    if (sheets.length) {
+      await pool.query('DELETE FROM meta_record_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_records WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_config_revisions WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM plugin_multitable_object_registry WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_fields WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_views WHERE sheet_id = ANY($1::text[])', [sheets]).catch(() => {})
+      await pool.query('DELETE FROM meta_sheets WHERE id = ANY($1::text[])', [sheets]).catch(() => {})
+    }
+    await pool.query('DELETE FROM integration_stock_prep_project_target WHERE tenant_id = $1', [tenantId]).catch(() => {})
+    await pool.end()
+  })
+
+  it('G1R-01 the migration: 087 refuses failed → up() admits it (idempotent) → down() refuses while a failed row exists → down() restores 087', async () => {
+    const schema = `g1rmig_${suffix}`
+    await pool.query(`CREATE SCHEMA "${schema}"`)
+    const testPool = new Pool({ connectionString: dbUrl, options: `-c search_path=${schema}` })
+    const testDb = new G1Kysely<unknown>({ dialect: new G1PostgresDialect({ pool: testPool }) })
+    try {
+      // The REAL 087 SQL, verbatim, so the constraint up() replaces is the one production carries.
+      await g1Sql.raw(G1_MIGRATION_087_SQL).execute(testDb)
+      const insert = (id: string, outcome: string) => testPool.query(
+        `INSERT INTO integration_stock_prep_project_target (id, tenant_id, project_no, sheet_id, object_id, last_pull_outcome)
+         VALUES ($1, 'g1r-tenant', $2, $3, 'g1r-object', $4)`,
+        [id, `g1r-project-${id}`, `g1r-sheet-${id}`, outcome],
+      )
+      const constraintDef = async () => {
+        const r = await testPool.query(
+          'SELECT pg_get_constraintdef(c.oid) AS def FROM pg_constraint c WHERE c.conname = $1 AND c.connamespace = $2::regnamespace',
+          [G1_OUTCOME_CONSTRAINT, schema],
+        )
+        expect(r.rows).toHaveLength(1)
+        return String((r.rows[0] as { def: string }).def)
+      }
+      await insert('a', 'applied')
+      await expect(insert('f0', 'failed')).rejects.toMatchObject({ code: '23514' })
+      expect(await constraintDef()).not.toContain("'failed'")
+
+      await g1MigrationUp(testDb)
+      await g1MigrationUp(testDb)
+      expect(await constraintDef()).toContain("'failed'")
+      await insert('f1', 'failed')
+      await expect(insert('x', 'succeeded')).rejects.toMatchObject({ code: '23514' })
+
+      await expect(g1MigrationDown(testDb)).rejects.toMatchObject({ code: G1_DOWN_REFUSED_CODE })
+      expect(await constraintDef()).toContain("'failed'")
+      await insert('f2', 'failed')
+      const failedRows = await testPool.query("SELECT count(*)::int AS n FROM integration_stock_prep_project_target WHERE last_pull_outcome = 'failed'")
+      expect(Number((failedRows.rows[0] as { n: number }).n)).toBe(2)
+
+      await testPool.query("DELETE FROM integration_stock_prep_project_target WHERE last_pull_outcome = 'failed'")
+      await g1MigrationDown(testDb)
+      expect(await constraintDef()).not.toContain("'failed'")
+      await expect(insert('f3', 'failed')).rejects.toMatchObject({ code: '23514' })
+      await insert('r', 'refused')
+    } finally {
+      await testDb.destroy()
+      await pool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+    }
+  })
+
+  it('G1R-02 the real store stamps failed + the dominant code on the migrated registry table', async () => {
+    const database = {
+      query: (async (sql, params) => {
+        const r = await pool.query(sql, params as unknown[])
+        return { rows: r.rows as unknown[], rowCount: r.rowCount }
+      }) as Q,
+      transaction: async <T>(fn: (trx: { query: Q; commit: () => Promise<void>; rollback: () => Promise<void> }) => Promise<T>): Promise<T> => {
+        const client = await pool.connect()
+        try {
+          await client.query('BEGIN')
+          const out = await fn({
+            query: async (sql, params) => {
+              const r = await client.query(sql, params as unknown[])
+              return { rows: r.rows as unknown[], rowCount: r.rowCount }
+            },
+            commit: async () => { await client.query('COMMIT') },
+            rollback: async () => { await client.query('ROLLBACK') },
+          })
+          await client.query('COMMIT')
+          return out
+        } catch (e) {
+          await client.query('ROLLBACK').catch(() => {})
+          throw e
+        } finally {
+          client.release()
+        }
+      },
+    }
+    const store = projectTargetStore.createStockPreparationProjectTargetStore({ db: pluginDb.createDb({ database }) })
+    const projectNo = `G1R-${suffix}`
+    await store.create({ tenantId, projectNo, sheetId: `sheet_g1r_${suffix}`, objectId: `plm_stock_preparation_sandbox_p_g1r${suffix}`, createdBy: 'g1r', maxPerTenant: 200 })
+    await expect(store.recordPullOutcome({ tenantId, projectNo, outcome: 'failed', code: 'SELECT_OPTION_NOT_FOUND' })).resolves.toBe(true)
+    await expect(store.get({ tenantId, projectNo })).resolves.toMatchObject({ lastPullOutcome: 'failed', lastPullCode: 'SELECT_OPTION_NOT_FOUND' })
+    const raw = await pool.query('SELECT last_pull_outcome, last_pull_code FROM integration_stock_prep_project_target WHERE tenant_id = $1 AND project_no = $2', [tenantId, projectNo])
+    expect(raw.rows).toEqual([{ last_pull_outcome: 'failed', last_pull_code: 'SELECT_OPTION_NOT_FOUND' }])
+    await expect(store.recordPullOutcome({ tenantId, projectNo, outcome: 'applied' })).resolves.toBe(true)
+    await expect(store.get({ tenantId, projectNo })).resolves.toMatchObject({ lastPullOutcome: 'applied', lastPullCode: null })
+  })
+
+  it('G1R-03 a real project sheet: the host refuses `add` with no options, the contract sync writes the 5 options, the host then accepts it', async () => {
+    const projectNo = `G1R-OPT-${suffix}`
+    const template = projectTargets.projectSheetTemplate({ tenantId, projectNo })
+    const descriptor = targetProvisioning.buildStockPreparationTargetDescriptor({ template })
+    const ensured = await inTx((cq) => ensureObject({ query: cq as never, projectId, baseId: null, descriptor }))
+    const sheetId = ensured.sheet.id
+    sheets.push(sheetId)
+    const fieldIds = resolveObjectFieldIds(projectId, template.objectId, ['lastPlmRefreshDecision', 'materialType', 'blankType', 'stockPreparationStatus', 'makeOrBuy'])
+    const decision = fieldIds.lastPlmRefreshDecision
+    const write = (value: string) => inTx((cq) => createMultitableRecord({ query: cq as never, sheetId, data: { [decision]: value } }))
+
+    // THE DEFECT, on the real host: the freshly provisioned decision column admits no value.
+    await expect(write('add')).rejects.toThrow(/Invalid select option/)
+
+    // THE FIX: the plugin's project-sheet contract sync through the REAL field-metadata write.
+    const provisioning = {
+      patchObjectFieldProperty: (input: { projectId: string; objectId: string; fieldId: string; propertyPatch: Record<string, unknown> }) =>
+        inTx((cq) => g1PatchObjectFieldProperty({ ...input, query: cq as never })),
+    }
+    const summary = await projectTargets.syncProjectSheetContractOptions({ provisioning, projectId, objectId: template.objectId })
+    expect(summary).toMatchObject({ synced: 1, skipped: 0, fieldIds: ['lastPlmRefreshDecision'], optionCount: 5 })
+    const stored = await pool.query('SELECT id, property FROM meta_fields WHERE sheet_id = $1 AND id = ANY($2::text[])', [sheetId, Object.values(fieldIds)])
+    const propertyOf = (id: string) => ((stored.rows as Array<{ id: string; property: { options?: Array<{ value: string }> } }>).find((row) => row.id === id) || { property: {} }).property
+    expect((propertyOf(decision).options || []).map((option) => option.value)).toEqual(['add', 'update', 'skip', 'inactive', 'manual_confirm'])
+    for (const id of [fieldIds.materialType, fieldIds.blankType, fieldIds.stockPreparationStatus, fieldIds.makeOrBuy]) {
+      expect(propertyOf(id).options ?? []).toEqual([])
+    }
+
+    const created = await write('add')
+    expect(created.sheetId).toBe(sheetId)
+    await expect(write('not_a_contract_value')).rejects.toThrow(/Invalid select option/)
+    // Idempotent on the real host: a second sync leaves the same option list.
+    await projectTargets.syncProjectSheetContractOptions({ provisioning, projectId, objectId: template.objectId })
+    const again = await pool.query('SELECT property FROM meta_fields WHERE sheet_id = $1 AND id = $2', [sheetId, decision])
+    expect(((again.rows[0] as { property: { options: Array<{ value: string }> } }).property.options).map((option) => option.value)).toEqual(['add', 'update', 'skip', 'inactive', 'manual_confirm'])
+  })
+})
