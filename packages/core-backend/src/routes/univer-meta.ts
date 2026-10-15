@@ -1,3 +1,4 @@
+import { loadPlmBomSourceNavigation } from '../multitable/plm-bom-source-navigation'
 import type { Request, Response } from 'express'
 import { randomUUID, createHash } from 'crypto'
 import * as path from 'path'
@@ -9484,9 +9485,14 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
         selectedCopiedFrom = serializeCopiedFrom(selectedSheet, canReadSource)
       }
 
+      const plmBomSource = effectiveSheetId && capabilities.canRead
+        ? await loadPlmBomSourceNavigation(pool.query.bind(pool), access.userId, effectiveSheetId)
+        : undefined
+
       return res.json({
         ok: true,
         data: {
+          ...(plmBomSource ? { plmBomSource } : {}),
           base: baseRow ? serializeBaseRow(baseRow) : null,
           sheet: selectedSheet
             ? {
@@ -21259,6 +21265,12 @@ export function univerMetaRouter(options: UniverMetaRouterOptions = {}): Router 
       }
       const hint = getDbNotReadyMessage(err)
       if (hint) return res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: hint } })
+      if ((err as { code?: string }).code === '23514' &&
+          (err as Error).message === 'bom_review_state_transition_invalid') {
+        return res.status(400).json({ ok: false, error: {
+          code: 'BOM_REVIEW_STATE_TRANSITION_INVALID', message: 'Invalid BOM review state transition',
+        } })
+      }
       console.error('[univer-meta] patch failed:', err)
       return res.status(500).json({ ok: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to patch meta records' } })
     }

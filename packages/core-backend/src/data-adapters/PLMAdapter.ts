@@ -1,3 +1,4 @@
+import { parsePlmChangeEvent, hashPlmChangeEvent, parsePlmChangePage, plmChangePageRequestSchema, type PlmChangePageRequest, type PlmChangePage, type PlmChangeEvent } from '../multitable/plm-change-ingress-wire'
 import { Optional } from '@wendellhu/redi'
 import { randomUUID } from 'node:crypto'
 import { IConfigService, ILogger } from '../di/identifiers'
@@ -2437,6 +2438,83 @@ export class PLMAdapter extends HTTPAdapter {
       data: [this.mapYuantusReleaseReadiness(itemId, entry, options)],
       metadata: { totalCount: 1 },
       error: result.error,
+    }
+  }
+
+  // W20 uses only the caller's freshly revalidated, persisted per-source configuration.
+  // Legacy connect() may normalize config or choose global defaults; none are authority for sharing.
+  async getBomShareContext(partId: string, sourceConfig: DataSourceConfig): Promise<unknown> {
+    return this.requestBomSource(partId, '/share-context', sourceConfig)
+  }
+
+  // Only a freshly owner-validated source config may be supplied. Never trust the incoming event alone.
+  async verifyPlmChangeEvent(input: unknown, sourceConfig: DataSourceConfig): Promise<PlmChangeEvent> {
+    try {
+      const expected = parsePlmChangeEvent(input)
+      const params = new URLSearchParams({ binding_id: expected.binding_id,
+        binding_version: String(expected.binding_version), connection_id: expected.source.connection_id })
+      const raw = await this.requestBomSource(expected.source.part_id,
+        `/change-events/${expected.event_id}?${params}`, sourceConfig)
+      const actual = parsePlmChangeEvent(raw)
+      if (hashPlmChangeEvent(actual) !== hashPlmChangeEvent(expected)) throw Object.assign(new Error('source mismatch'), { response: { status: 409 } })
+      return actual
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status ?? 502
+      throw Object.assign(new Error('PLM change source unavailable'), { response: { status } })
+    }
+  }
+
+  // Reads facts only; enabling a listener and advancing its cursor require separate owner authorization.
+  async getPlmChangePage(input: PlmChangePageRequest, sourceConfig: DataSourceConfig): Promise<PlmChangePage> {
+    try {
+      const request = plmChangePageRequestSchema.parse(input)
+      const params = new URLSearchParams({ binding_id: request.binding_id,
+        binding_version: String(request.binding_version), connection_id: request.source.connection_id })
+      if (request.after_sequence !== undefined) params.set('after_sequence', String(request.after_sequence))
+      const raw = await this.requestBomSource(request.source.part_id, `/change-events?${params}`, sourceConfig)
+      return parsePlmChangePage(raw, request)
+    } catch (error) {
+      const status = (error as { response?: { status?: number } })?.response?.status ?? 502
+      throw Object.assign(new Error('PLM change page unavailable'), { response: { status } })
+    }
+  }
+
+  private async requestBomSource(partId: string, suffix: string, sourceConfig: DataSourceConfig): Promise<unknown> {
+    const fail = (status = 502): Error => Object.assign(new Error('BOM share source unavailable'), { response: { status } })
+    try {
+      const connection = sourceConfig.connection, credentials = sourceConfig.credentials
+      const rawUrl = connection.url || connection.baseURL
+      if (typeof rawUrl !== 'string' || sourceConfig.type !== 'plm' || sourceConfig.options?.apiMode !== 'yuantus') throw fail()
+      const url = new URL(rawUrl)
+      if (url.username || url.password || url.search || url.hash ||
+        (url.protocol !== 'https:' && !(process.env.NODE_ENV === 'test' && url.protocol === 'http:' && ['127.0.0.1','localhost','[::1]'].includes(url.hostname)))) throw fail()
+      if (connection.url && connection.baseURL && new URL(String(connection.url)).href !== new URL(String(connection.baseURL)).href) throw fail()
+      const scope = (header: string, option: unknown): string => {
+        const aliases = Object.entries(connection.headers || {}).filter(([k]) => k.toLowerCase() === header).map(([,v]) => v)
+        if (option !== undefined) aliases.push(option as string)
+        if (!aliases.length || aliases.some(v => typeof v !== 'string' || !v.trim()) || new Set(aliases).size !== 1) throw fail()
+        return aliases[0] as string
+      }
+      const tenant = scope('x-tenant-id',sourceConfig.options?.tenantId), org = scope('x-org-id',sourceConfig.options?.orgId)
+      const signal = AbortSignal.timeout(8000), headers = { 'Content-Type':'application/json','x-tenant-id':tenant,'x-org-id':org }
+      let token = credentials?.token
+      if (!token) {
+        if (typeof credentials?.username !== 'string' || !credentials.username || typeof credentials?.password !== 'string' || !credentials.password) throw fail(403)
+        const login = await fetch(new URL('/api/v1/auth/login',url),{method:'POST',redirect:'error',signal,headers,
+          body:JSON.stringify({username:credentials.username,password:credentials.password,tenant_id:tenant,org_id:org})})
+        if (!login.ok) throw fail(login.status)
+        token = ((await login.json()) as {access_token?:string}).access_token
+      }
+      if (typeof token !== 'string' || !token || /[\r\n]/.test(token)) throw fail(403)
+      const response = await fetch(new URL(`/api/v1/bom/multitable/${encodeURIComponent(partId)}${suffix}`,url),
+        {method:'GET',redirect:'error',signal,headers:{...headers,Authorization:`Bearer ${token}`}})
+      if (!response.ok) throw fail(response.status)
+      const body = await response.json() as {entitled?:unknown;source?:{tenant_id?:unknown;org_id?:unknown}}
+      if ((body.entitled === true || suffix !== '/share-context') && (body.source?.tenant_id !== tenant || body.source?.org_id !== org)) throw fail()
+      return body
+    } catch(error) {
+      const status = (error as {response?:{status?:number}})?.response?.status
+      throw fail(status ?? 502)
     }
   }
 

@@ -1,0 +1,361 @@
+{
+  "cases": [
+    {
+      "name": "line",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      },
+      "canonical_json": "{\"binding_id\":\"23456789-1234-4234-8234-123456789abc\",\"binding_version\":1,\"change\":{\"audit_id\":\"34567890-1234-4234-8234-123456789abc\",\"bom_line_id\":\"line-one\",\"kind\":\"bom_line_writeback\"},\"event_id\":\"12345678-1234-4234-8234-123456789abc\",\"event_type\":\"bom.plm_change.applied\",\"occurred_at\":\"2026-10-14T13:00:00.123456Z\",\"schema\":\"yuantus.plm-change-event.v1\",\"source\":{\"connection_id\":\"plm-one\",\"org_id\":\"org-one\",\"part_id\":\"part-one\",\"tenant_id\":\"租户😀\"}}",
+      "sha256": "49dce5ffe888ee1dc82c2f9a38ea93b742b6953939c0fe4ac98728c9673d0b9d"
+    },
+    {
+      "name": "eco",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "eco_batch_apply",
+          "eco_id": "ECO-重开",
+          "target_version_id": "v2"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      },
+      "canonical_json": "{\"binding_id\":\"23456789-1234-4234-8234-123456789abc\",\"binding_version\":1,\"change\":{\"eco_id\":\"ECO-重开\",\"kind\":\"eco_batch_apply\",\"target_version_id\":\"v2\"},\"event_id\":\"12345678-1234-4234-8234-123456789abc\",\"event_type\":\"bom.plm_change.applied\",\"occurred_at\":\"2026-10-14T13:00:00.123456Z\",\"schema\":\"yuantus.plm-change-event.v1\",\"source\":{\"connection_id\":\"plm-one\",\"org_id\":\"org-one\",\"part_id\":\"part-one\",\"tenant_id\":\"租户😀\"}}",
+      "sha256": "291d8a88439619c74cd71aff36b566bdb283b620437ad651935e9dfe03380822"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "projection_event",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.line.updated",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "review_event",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.review.completed",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "caller_authority",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z",
+        "actor_auth_id": 42
+      }
+    },
+    {
+      "name": "boolean_version",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": true,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "unsafe_version",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 9007199254740992,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "upper_uuid",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789ABC",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "mixed_source",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one",
+          "eco_id": "e"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "missing_reference",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "eco_batch_apply",
+          "eco_id": "e"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "unknown_kind",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "applied"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "bad_timestamp",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-02-30T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "offset",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456+00:00"
+      }
+    },
+    {
+      "name": "precision",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "part-one"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00Z"
+      }
+    },
+    {
+      "name": "nul",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "\u0000"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    },
+    {
+      "name": "long_id",
+      "event": {
+        "schema": "yuantus.plm-change-event.v1",
+        "event_type": "bom.plm_change.applied",
+        "event_id": "12345678-1234-4234-8234-123456789abc",
+        "binding_id": "23456789-1234-4234-8234-123456789abc",
+        "binding_version": 1,
+        "source": {
+          "connection_id": "plm-one",
+          "tenant_id": "租户😀",
+          "org_id": "org-one",
+          "part_id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        },
+        "change": {
+          "kind": "bom_line_writeback",
+          "audit_id": "34567890-1234-4234-8234-123456789abc",
+          "bom_line_id": "line-one"
+        },
+        "occurred_at": "2026-10-14T13:00:00.123456Z"
+      }
+    }
+  ]
+}

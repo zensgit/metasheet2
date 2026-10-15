@@ -1,0 +1,59 @@
+name: PLM BOM listener
+on:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/multitable/plm-*.ts'
+      - 'packages/core-backend/src/routes/plm-bom-reviews.ts'
+      - 'packages/core-backend/src/data-adapters/PLMAdapter.ts'
+      - 'packages/core-backend/src/index.ts'
+      - 'packages/core-backend/src/db/migrations/*plm*.ts'
+      - 'packages/core-backend/tests/**/plm-*'
+      - 'packages/core-backend/tests/plm-bom-review/**'
+      - '.github/workflows/plm-bom-listener.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  listener-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: plm_listener
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d plm_listener"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports[5432] }}/plm_listener
+      EXPECT_DB: '1'
+      NODE_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Type check
+        working-directory: packages/core-backend
+        run: node node_modules/typescript/bin/tsc --noEmit
+      - name: Real PostgreSQL authority and concurrency regression
+        working-directory: packages/core-backend
+        run: node node_modules/vitest/vitest.mjs run --config vitest.plm-bom-review.config.ts
+      - name: Wire, transport, login and worker regression
+        working-directory: packages/core-backend
+        run: >-
+          node node_modules/vitest/vitest.mjs run
+          tests/unit/plm-bom-notification-worker.test.ts tests/unit/plm-bom-review-routes.test.ts
+          tests/unit/plm-change-page.test.ts tests/unit/plm-change-ingress-wire.test.ts
+          tests/unit/plm-change-source-verification.test.ts tests/unit/record-subscription-service.test.ts
+          tests/unit/plm-bom-review-service.test.ts tests/unit/plm-bom-review-wire.test.ts
+          tests/unit/idempotency-redis.test.ts tests/unit/approval-completion-shutdown-lifecycle.test.ts
