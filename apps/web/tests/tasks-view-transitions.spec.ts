@@ -231,6 +231,8 @@ afterEach(() => {
   app = null
   container = null
   router = null
+  // The status switch remembers its choice in this browser's storage; no cell may leak one.
+  window.localStorage.removeItem('metasheet.tasks.statusFilter')
 })
 
 describe('TasksView route-id watch — real router, SAME component instance (P2-2)', () => {
@@ -444,5 +446,47 @@ describe('TasksView list READ in flight when navigating to /tasks/:id', () => {
 
     expect(shown(el, 'tasks-view-org-missing')).toBeNull()
     expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-t2')
+  })
+})
+
+// The notice a create shows while 已完成 hides the new task links to that task's page. Following the
+// link changes the route on the same component instance, and the notice must not come back when
+// the viewer returns to /tasks: by then the task may be completed and listed under 已完成.
+describe('TasksView hidden-by-filter create notice — its link and a route change', () => {
+  it('following the notice link opens the new task, and back on /tasks the notice is gone', async () => {
+    window.localStorage.setItem('metasheet.tasks.statusFilter', 'done')
+    h_.createTask.mockResolvedValueOnce({ kind: 'ok', id: 'n1' })
+    h_.getTask.mockImplementation(async (id: string) =>
+      ({ kind: 'ok', task: taskDetail({ id, title: `Title-${id}` }) }))
+    const el = await mountAt('/tasks')
+    expect(h_.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+
+    const input = shown(el, 'tasks-create-title') as HTMLInputElement
+    input.value = 'Fresh Task'
+    input.dispatchEvent(new Event('input'))
+    await flush()
+    ;(shown(el, 'tasks-create-form') as HTMLFormElement).dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+    await flush()
+    expect(h_.createTask).toHaveBeenCalledTimes(1)
+    expect(shown(el, 'tasks-create-hidden-notice')).not.toBeNull()
+
+    const link = shown(el, 'tasks-create-hidden-open-task') as HTMLAnchorElement
+    expect(link.tagName).toBe('A')
+    expect(link.getAttribute('href')).toBe('/tasks/n1')
+    link.click()
+    // The link's navigation does not land within one flush in jsdom.
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await flush()
+    }
+    expect(router!.currentRoute.value.path).toBe('/tasks/n1')
+    expect(h_.getTask).toHaveBeenCalledWith('n1')
+    expect(shown(el, 'tasks-detail-title')?.textContent).toBe('Title-n1')
+
+    await router!.push('/tasks')
+    await flush()
+    expect(router!.currentRoute.value.path).toBe('/tasks')
+    expect(h_.listTasks).toHaveBeenLastCalledWith('assigned', undefined, 'done')
+    expect(shown(el, 'tasks-create-hidden-notice')).toBeNull()
   })
 })
