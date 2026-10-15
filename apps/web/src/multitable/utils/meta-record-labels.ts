@@ -487,10 +487,11 @@ const META_RECORD_LABELS: Record<MetaRecordLabelKey, { en: string; zh: string }>
   'dispatch.inactiveSkipped': { en: 'Deactivated people in the person field were not filled in.', zh: '人员字段中已停用的人员未带入。' },
   // True in every case that latches the refusal (another account, the same account after a sign-out
   // or an expired session, an org switch, a change while a create is out or after it landed): it
-  // claims neither that the account changed nor anything about a dispatch, and names no task.
+  // says only that dispatching is off on this page and the form was cleared, claims neither that the
+  // account changed nor anything about any particular dispatch, and names no task.
   'dispatch.identityChanged': {
-    en: 'Your sign-in or organization changed after this page was opened (for example, you signed out or signed in again here or in another tab, your session expired, or you switched account or organization). For safety, dispatching is turned off on this page and anything entered in the form was cleared. Reload the page to dispatch again.',
-    zh: '此页面打开后，登录状态或所在组织有过变化（例如在本页或其他标签页退出或重新登录、登录已过期，或切换了账号或组织）。为安全起见，本页已停用派发任务，表单中填写的内容已清空。请刷新页面后再派发。',
+    en: 'Your sign-in or organization changed after this page was opened (for example, you signed out, signed in again or switched account in another tab, your session expired, or you switched organization here or in another tab). For safety, dispatching is turned off on this page and anything entered in the form was cleared. Reload the page to dispatch again.',
+    zh: '本页打开后，登录状态或所在组织有过变化（例如在其他标签页退出、重新登录或切换了账号，登录已过期，或在本页或其他标签页切换了组织）。为安全起见，本页已停用派发任务，表单内容已清空。请刷新页面后再派发。',
   },
   'dispatch.identityUnavailable': { en: 'The signed-in account could not be confirmed. Sign in again, then reload the page to dispatch a task.', zh: '无法确认当前登录账号。请重新登录并刷新页面后再派发任务。' },
   // 记录级送审 (design §5): kebab row + submit dialog + drawer panel. zh/en both explicit, same
