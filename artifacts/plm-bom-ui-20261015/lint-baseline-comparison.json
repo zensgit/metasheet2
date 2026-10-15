@@ -1,0 +1,84 @@
+{
+  "apps/web/src/multitable/components/MetaGridTable.vue:base": [
+    [
+      "vue/no-use-v-if-with-v-for",
+      2,
+      "This 'v-if' should be moved to the wrapper element."
+    ]
+  ],
+  "apps/web/src/multitable/components/MetaGridTable.vue:current": [
+    [
+      "vue/no-use-v-if-with-v-for",
+      2,
+      "This 'v-if' should be moved to the wrapper element."
+    ]
+  ],
+  "apps/web/src/multitable/components/MetaToolbar.vue:base": [
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'groupFieldIds' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'rowDensity' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'searchText' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'totalRows' requires default value to be set."
+    ]
+  ],
+  "apps/web/src/multitable/components/MetaToolbar.vue:current": [
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'groupFieldIds' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'rowDensity' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'searchText' requires default value to be set."
+    ],
+    [
+      "vue/require-default-prop",
+      1,
+      "Prop 'totalRows' requires default value to be set."
+    ]
+  ],
+  "apps/web/src/views/IntegrationWorkbenchView.vue:base": [
+    [
+      "@typescript-eslint/no-unused-vars",
+      2,
+      "'MetaIntegrationFieldRuleAuthoring' is defined but never used. Allowed unused vars must match /^_/u."
+    ],
+    [
+      "@typescript-eslint/no-unused-vars",
+      2,
+      "'PlmBomReviewPanel' is defined but never used. Allowed unused vars must match /^_/u."
+    ]
+  ],
+  "apps/web/src/views/IntegrationWorkbenchView.vue:current": [
+    [
+      "@typescript-eslint/no-unused-vars",
+      2,
+      "'MetaIntegrationFieldRuleAuthoring' is defined but never used. Allowed unused vars must match /^_/u."
+    ],
+    [
+      "@typescript-eslint/no-unused-vars",
+      2,
+      "'PlmBomReviewPanel' is defined but never used. Allowed unused vars must match /^_/u."
+    ]
+  ]
+}

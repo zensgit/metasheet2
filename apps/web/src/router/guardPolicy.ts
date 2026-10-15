@@ -85,6 +85,7 @@ export const PLM_WORKBENCH_ALLOWED_PREFIXES: readonly string[] = Object.freeze([
   '/approvals',
   '/integrations',
   '/stock-prep',
+  '/multitable',
 ])
 
 /**

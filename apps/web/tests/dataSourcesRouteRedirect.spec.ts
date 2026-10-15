@@ -145,3 +145,22 @@ describe('the redirect target is reachable where the old path was not (guardPoli
     ).toEqual({ action: 'redirect', target: '/' })
   })
 })
+
+describe('BOM collaboration table reachability in PLM focus', () => {
+  const focused = { hasFeature: () => true, hasPermission: () => true, attendanceFocused: false,
+    plmWorkbenchFocused: true, resolveHomePath: () => '/' }
+  it.each(['/multitable', '/multitable/sheet/view'])('allows native collaboration path %s', (path) => {
+    expect(resolveRouteGuardDecision({ path, meta: { requiresAuth: true } }, focused)).toEqual({ action: 'allow' })
+  })
+  it('does not admit a prefix lookalike', () => {
+    expect(resolveRouteGuardDecision({ path: '/multitable-admin', meta: {} }, focused)).toEqual({ action: 'redirect', target: '/plm' })
+  })
+  it('still enforces declared route permissions before focus reachability', () => {
+    expect(resolveRouteGuardDecision({ path: '/multitable/sheet/view', meta: workbenchRoute.meta },
+      { ...focused, hasPermission: () => false })).toEqual({ action: 'redirect', target: '/' })
+  })
+  it('keeps attendance focus precedence', () => {
+    expect(resolveRouteGuardDecision({ path: '/multitable/sheet/view', meta: {} },
+      { ...focused, attendanceFocused: true })).toEqual({ action: 'redirect', target: '/attendance' })
+  })
+})

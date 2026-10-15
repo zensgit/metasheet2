@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { effectScope } from 'vue'
+import { notifyAuthPrincipalChange } from '../src/composables/authPrincipal'
 import { useLocale } from '../src/composables/useLocale'
 import { useMultitableWorkbench } from '../src/multitable/composables/useMultitableWorkbench'
 import { MultitableApiClient } from '../src/multitable/api/client'
@@ -36,6 +38,94 @@ describe('workbench context request ownership', () => {
     const fields = vi.spyOn(client, 'listFields').mockImplementation(async (sheetId) => fieldData(sheetId))
     return { wb, client, context, fieldData, contexts, fields }
   }
+
+  it('BOM return link metadata follows fresh context, clears on missing/failed context and cannot cross sheets', async () => {
+    const { wb, contexts, context } = fixture()
+    const source = { dataSourceId: 'plm-ds', partId: 'P1' }
+    contexts.mockResolvedValue({ ...context('a'), plmBomSource: source } as any)
+    await wb.loadSheetMeta('sheet_a')
+    expect(wb.plmBomSource.value).toEqual(source)
+    contexts.mockResolvedValue(context('a'))
+    await wb.loadSheetMeta('sheet_a')
+    expect(wb.plmBomSource.value).toBeNull()
+    contexts.mockResolvedValue({ ...context('a'), plmBomSource: source } as any)
+    await wb.loadSheetMeta('sheet_a')
+    wb.selectSheet('sheet_b')
+    expect(wb.plmBomSource.value).toBeNull()
+    wb.selectSheet('')
+    expect(wb.plmBomSource.value).toBeNull()
+    wb.activeSheetId.value = 'sheet_a'
+    await wb.loadSheetMeta('sheet_a')
+    contexts.mockRejectedValue(new Error('revoked'))
+    await wb.loadSheetMeta('sheet_a')
+    expect(wb.plmBomSource.value).toBeNull()
+  })
+
+  it('clears source navigation on a session switch and discards the old pending context', async () => {
+    const previous = localStorage.getItem('auth_token')
+    localStorage.setItem('auth_token', 'source-owner-session')
+    const scope = effectScope()
+    try {
+      const { wb, contexts, context } = scope.run(() => fixture())!
+      const response = { ...context('a'), plmBomSource: { dataSourceId: 'private-source', partId: 'P1' } }
+      contexts.mockResolvedValueOnce(response as any)
+      await wb.loadSheetMeta('sheet_a')
+      const late = deferred<any>()
+      contexts.mockImplementationOnce(() => late.promise)
+      const pending = wb.loadSheetMeta('sheet_a')
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'different-session')
+      await Promise.resolve()
+      const afterSwitch = wb.plmBomSource.value
+      late.resolve(response)
+      const applied = await pending
+      expect(afterSwitch).toBeNull()
+      expect(applied).toBe(false)
+      expect(wb.plmBomSource.value).toBeNull()
+    } finally {
+      scope.stop()
+      if (previous === null) localStorage.removeItem('auth_token')
+      else localStorage.setItem('auth_token', previous)
+    }
+  })
+
+  it('releases pending base loading on session switch without accepting the old response', async () => {
+    const previous = localStorage.getItem('auth_token')
+    localStorage.setItem('auth_token', 'base-owner-session')
+    const scope = effectScope()
+    try {
+      const { wb, contexts, context } = scope.run(() => fixture())!
+      const late = deferred<any>()
+      contexts.mockImplementationOnce(() => late.promise)
+      const pending = wb.switchBase('base_b')
+      expect(wb.loading.value).toBe(true)
+      notifyAuthPrincipalChange()
+      localStorage.setItem('auth_token', 'replacement-session')
+      await Promise.resolve()
+      const loadingAfterSwitch = wb.loading.value
+      late.resolve({ ...context('b'), plmBomSource: { dataSourceId: 'old-source', partId: 'P1' } })
+      const applied = await pending
+      expect(loadingAfterSwitch).toBe(false)
+      expect(wb.loading.value).toBe(false)
+      expect(applied).toBe(false)
+      expect(wb.plmBomSource.value).toBeNull()
+    } finally {
+      scope.stop()
+      if (previous === null) localStorage.removeItem('auth_token')
+      else localStorage.setItem('auth_token', previous)
+    }
+  })
+
+  it('BOM return link rejects a stale context response after switching to another sheet', async () => {
+    const { wb, contexts, context } = fixture()
+    const late = deferred<any>()
+    contexts.mockImplementationOnce(() => late.promise)
+    const old = wb.loadSheetMeta('sheet_a')
+    await wb.switchBase('base_b')
+    late.resolve({ ...context('a'), plmBomSource: { dataSourceId: 'old-ds', partId: 'P1' } })
+    expect(await old).toBe(false)
+    expect(wb.plmBomSource.value).toBeNull()
+  })
 
   it('does not let an older poll overwrite a newer restore refresh on the same sheet', async () => {
     const { wb, fields, fieldData } = fixture()

@@ -1,0 +1,86 @@
+{
+  "status": "passed",
+  "cleanup": true,
+  "inputCount": 3497,
+  "changedInputs": [],
+  "seconds": 87.035,
+  "exitCode": 0,
+  "migrationHeads": {
+    "alembic_tenant.ini": "t17_plm_change_sequence",
+    "alembic.identity.ini": "i9b0c1d2e3f4",
+    "alembic.ini": "plm_change_sequence_008"
+  },
+  "observed": {
+    "mode": "green",
+    "entry": "real-components-harness",
+    "routeFulfill": false,
+    "actualAuthMe": true,
+    "testModeLoopbackTransport": true,
+    "tamperedJwtAndInactiveDeniedRestoredActive": true,
+    "actualIntegrationPluginWithTenantMembership": true,
+    "actualOwnerContext": true,
+    "afterConfirmUrl": "#/multitable/sheet_ed2bd21e309ea3798fc75418/view_d4132821ca7c281cf6c092b1?baseId=browser-base",
+    "focusBounce": false,
+    "browserPoliciesPersistOnReopen": true,
+    "completionUiSeparatesSourcesAndRequiresOwnerListener": true,
+    "listenerCasRefreshRequiresNewConsent": true,
+    "listenerOwnerExplicitStartAndRebind": true,
+    "primaryViewRemainsUngrouped": true,
+    "nativeHttpRead": true,
+    "longTextEditorMissing": false,
+    "memberSeesRefreshedChildLeafQuantity": "7",
+    "persistedPerson": [
+      "browser-assignee"
+    ],
+    "persistedDateTime": "2026-10-08T02:30:00.000Z",
+    "commentRetainedAfterReload": true,
+    "fullMainNativeReload": true,
+    "localFieldsPreservedAfterActualSourceRefresh": true,
+    "memberCannotBorrowSource": true,
+    "outsiderDenied": true,
+    "sourceReadOnly": true,
+    "ownerViewGroupsAssignedAndUnassigned": true,
+    "ownerViewNativeGroupSubtotals": {
+      "assigned": 1,
+      "unassigned": 2
+    },
+    "ownerViewPersistsOnNativeReload": true,
+    "statusViewsActuallyFilterInNativeBrowser": {
+      "pending": 3,
+      "issues": 0
+    },
+    "nativeBrowserIssueReceiptAndPositiveFilter": true,
+    "revokedRecipientCancelsPreparedNextRound": true,
+    "actualShortSlaElapsed": {
+      "thresholdMs": 60000,
+      "waitMs": 60159,
+      "issueAgeMs": 60552
+    },
+    "nativeBrowserThreeNotificationKinds": [
+      "issue",
+      "reminder",
+      "escalation"
+    ],
+    "realWorkbenchNamespaceAdmission": true,
+    "returnPrefillsOriginalSourceWithoutBomLoad": true,
+    "returnLandsOnSourceSection": true,
+    "explicitOriginalSourceLoadStatus": 304,
+    "originalSourceTableRoundTrip": true,
+    "nonOwnerWithWorkbenchPermissionHasNoReturnLink": true,
+    "unavailableSourceCannotFallback": true,
+    "viteStopped": true,
+    "finalActiveResources": [
+      "FSReqCallback",
+      "PipeWrap",
+      "PipeWrap",
+      "PipeWrap",
+      "PipeWrap",
+      "PipeWrap",
+      "PipeWrap",
+      "Timeout"
+    ]
+  },
+  "httpCount": 438,
+  "http5xx": 0,
+  "pageErrors": []
+}

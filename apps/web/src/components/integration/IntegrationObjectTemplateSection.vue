@@ -69,6 +69,7 @@
           <PlmBomReviewPanel
             v-if="selectedPlmBomMultitableCapabilityEntry.state === 'enabled' && selectedSourcePlmDataSourceId"
             :data-source-id="selectedSourcePlmDataSourceId"
+            :initial-part-id="initialPlmPartId"
             :eco-intent-enabled="selectedPlmBomEcoIntentEnabled"
           />
         </div>
@@ -213,6 +214,7 @@ defineProps<{
   // ECO Phase 3: capability-advisory pre-gate for the locked-BOM ECO-revision CTA (computed by
   // the workbench view from features.bom_eco_revision; the panel never fetches capabilities).
   selectedPlmBomEcoIntentEnabled: boolean
+  initialPlmPartId?: string
   selectedSourcePlmDataSourceId: string
   hasRunnableSourceSystem: boolean
   showStagingSetup: () => void

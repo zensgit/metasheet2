@@ -1,6 +1,8 @@
-import { ref, computed, toRaw, watch } from 'vue'
+import { ref, computed, toRaw, watch, getCurrentScope, onScopeDispose } from 'vue'
+import { onAuthSessionSwitch } from '../../composables/authPrincipal'
 import { useLocale } from '../../composables/useLocale'
 import type {
+  MetaContext,
   MetaCapabilityOrigin,
   MetaCapabilities,
   MetaField,
@@ -75,12 +77,21 @@ export function useMultitableWorkbench(opts?: {
   const activeViewId = ref(opts?.initialViewId ?? '')
   const capabilities = ref<MetaCapabilities>({ ...EMPTY_CAPABILITIES })
   const capabilityOrigin = ref<MetaCapabilityOrigin | null>(null)
+  const plmBomSource = ref<MetaContext['plmBomSource'] | null>(null)
   const fieldPermissions = ref<Record<string, MetaFieldPermission>>({})
   const viewPermissions = ref<Record<string, MetaViewPermission>>({})
   const loading = ref(false)
   const error = ref<string | null>(null)
   const suppressedSheetMetaReloads = new Set<string>()
   let contextLoadGeneration = 0
+  if (getCurrentScope()) {
+    const unsubscribe = onAuthSessionSwitch(() => {
+      contextLoadGeneration++
+      plmBomSource.value = null
+      loading.value = false
+    })
+    onScopeDispose(unsubscribe)
+  }
 
   // A newer load or a user selection owns the context, even if an older request finishes last.
   function currentContextRequest(generation = contextLoadGeneration): () => boolean {
@@ -154,6 +165,7 @@ export function useMultitableWorkbench(opts?: {
       views: toRaw(views.value),
       capabilities: toRaw(capabilities.value),
       capabilityOrigin: toRaw(capabilityOrigin.value),
+      plmBomSource: toRaw(plmBomSource.value),
       fieldPermissions: toRaw(fieldPermissions.value),
       viewPermissions: toRaw(viewPermissions.value),
       personalOverrideViewIds: toRaw(personalOverrideViewIds.value),
@@ -219,6 +231,7 @@ export function useMultitableWorkbench(opts?: {
       fieldPermissions?: Record<string, MetaFieldPermission>
       viewPermissions?: Record<string, MetaViewPermission>
       personalOverrideViewIds?: string[]
+      plmBomSource?: MetaContext['plmBomSource']
     },
     preferredViewId?: string | null,
   ) {
@@ -245,6 +258,7 @@ export function useMultitableWorkbench(opts?: {
     } else if (!views.value.find((view) => view.id === activeViewId.value)) {
       activeViewId.value = views.value[0]?.id ?? ''
     }
+    plmBomSource.value = ctx.sheet?.id === activeSheetId.value ? ctx.plmBomSource ?? null : null
     noteContextApplication()
   }
 
@@ -313,6 +327,7 @@ export function useMultitableWorkbench(opts?: {
         views: ctx?.views ?? null,
         capabilities: ctx?.capabilities ?? null,
         capabilityOrigin: ctx?.capabilityOrigin ?? null,
+        plmBomSource: ctx?.plmBomSource ?? null,
         fieldPermissions: ctx?.fieldPermissions ?? null,
         viewPermissions: ctx?.viewPermissions ?? null,
         personalOverrideViewIds: ctx?.personalOverrideViewIds ?? null,
@@ -337,7 +352,10 @@ export function useMultitableWorkbench(opts?: {
       }
       return true
     } catch (e: any) {
-      if (isCurrent()) error.value = e.message ?? fallback('error.loadSheetMetadata')
+      if (isCurrent()) {
+        plmBomSource.value = null
+        error.value = e.message ?? fallback('error.loadSheetMetadata')
+      }
       return false
     } finally {
       if (generation === contextLoadGeneration) loading.value = false
@@ -367,7 +385,10 @@ export function useMultitableWorkbench(opts?: {
       fields.value = fData.fields ?? []
       return true
     } catch (e: any) {
-      if (isCurrent()) error.value = e.message ?? fallback('error.loadBaseMetadata')
+      if (isCurrent()) {
+        plmBomSource.value = null
+        error.value = e.message ?? fallback('error.loadBaseMetadata')
+      }
       return false
     } finally {
       if (generation === contextLoadGeneration) loading.value = false
@@ -521,6 +542,8 @@ export function useMultitableWorkbench(opts?: {
     activeViewId.value = viewId
   }
 
+  watch([activeBaseId, activeSheetId], () => { plmBomSource.value = null }, { flush: 'sync' })
+
   watch(
     () => activeSheetId.value,
     (id) => {
@@ -544,6 +567,7 @@ export function useMultitableWorkbench(opts?: {
     activeViewId,
     capabilities,
     capabilityOrigin,
+    plmBomSource,
     fieldPermissions,
     viewPermissions,
     personalOverrideViewIds,

@@ -452,7 +452,7 @@ interface ConditionalFormattingByRecord {
 }
 import MetaCellRenderer from './cells/MetaCellRenderer.vue'
 import MetaCellEditor from './cells/MetaCellEditor.vue'
-import { dateTimeExportText } from '../utils/field-display'
+import { dateTimeExportText, formatFieldDisplay } from '../utils/field-display'
 import { parseDateTimeTextToUtcMs, resolveDateTimeTimezone } from '../utils/business-timezone'
 import MetaFieldHeader from './MetaFieldHeader.vue'
 import MetaGridRangeToolbar from './MetaGridRangeToolbar.vue'
@@ -482,7 +482,7 @@ import {
   type MetaCoreLabelKey,
 } from '../utils/meta-core-labels'
 
-const EDITABLE = new Set(['string', 'number', 'boolean', 'date', 'select', 'link', 'attachment', 'person', 'multiSelect', 'dateTime'])
+const EDITABLE = new Set(['string', 'longText', 'number', 'boolean', 'date', 'select', 'link', 'attachment', 'person', 'multiSelect', 'dateTime'])
 
 interface EditingCell { recordId: string; fieldId: string; value: unknown }
 
@@ -935,18 +935,22 @@ const GROUP_UNGROUPED = '__ungrouped__'
 
 // ONE per-level normalizer used on BOTH the client page-row bucketing side AND the server-tree lookup
 // side, so per-level key agreement holds by construction (the highest-risk silent-wrong bug otherwise).
-// Empty cell / server null → the synthetic ungrouped key; everything else → String(val). Valid only
-// because GROUPABLE_TYPES keeps group fields primitive (select/string/boolean/number/date).
+// Match the server aggregation contract: empty arrays are empty; complex values emit their JSON
+// string without sorting or splitting arrays. Server keys are already primitives / JSON strings.
 function levelKey(val: unknown): string {
-  return val == null || val === '' ? GROUP_UNGROUPED : String(val)
+  if (val == null || val === '' || (Array.isArray(val) && val.length === 0)) return GROUP_UNGROUPED
+  return typeof val === 'object' ? JSON.stringify(val) : String(val)
 }
-// The KEY stays the raw String(val) (server-tree agreement, above); only the LABEL is humanised. 客户反馈
-// 2026-09-24 #4c (N5): a date-time group header shows the business wall clock the cells show, not the raw
-// stored `…T01:00:00.000Z`; an unparseable key keeps its raw text.
-function groupLabel(key: string, field?: MetaField): string {
+// Humanise only the label; group identity and subtotal lookup keep the server key.
+function groupLabel(key: string, field: MetaField, rows: MetaRecord[]): string {
   if (key === GROUP_UNGROUPED) return groupNoValue(isZh.value)
-  if (field) return dateTimeExportText(field, key) ?? key
-  return key
+  if (field.type === 'person') return formatFieldDisplay({
+    field,
+    value: rows[0]?.data[field.id],
+    personSummaries: rows.flatMap(row => props.personSummaries?.[row.id]?.[field.id] ?? []),
+    isZh: isZh.value,
+  })
+  return dateTimeExportText(field, key) ?? key
 }
 
 // Nested group node over the current page rows. `path` is the composite key (ancestor keys + own key).
@@ -976,7 +980,7 @@ function buildGroupTree(rows: MetaRecord[], level: number, parentPath: string): 
     groups.push({
       key,
       path,
-      label: groupLabel(key, field),
+      label: groupLabel(key, field, groupRows),
       level,
       rows: groupRows,
       count: groupRows.length,

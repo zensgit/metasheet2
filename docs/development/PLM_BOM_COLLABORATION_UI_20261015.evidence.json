@@ -1,0 +1,233 @@
+{
+  "base": "d6cd2064d9800589d6a9fd8d79e9363b00b3aad6",
+  "sourceHashes": {
+    "apps/web/src/components/integration/IntegrationObjectTemplateSection.vue": "a807358cf761483cc8498f2970ad68f1db8871d8cb4bcd0d13fed60f3fe66580",
+    "apps/web/src/components/plm/PlmBomCollaborationDialog.vue": "0dcb46b72a4d09c39fa0285f25b2e9e5b2614264756d5786ec3e277a3dc3a67c",
+    "apps/web/src/components/plm/PlmBomCompletionWebhookConfig.vue": "52715bd8fd28206c4de521b52d54e0aacb203e89ef4bc70bf284bc04cf445b07",
+    "apps/web/src/components/plm/PlmBomNotificationConfig.vue": "440cff9abd5204ab69a0a8e0225c1badbedb6d010eef59e4debf9f3c8a72eb3d",
+    "apps/web/src/components/plm/PlmBomReviewPanel.vue": "8ba1d0e9450c680222601a36789f327e0924cc7cc9ed4be89ca721ac37f133f5",
+    "apps/web/src/multitable/components/MetaGridTable.vue": "917d410746cb332ddf4a9bfb024a1a2053a2ca17884df29d3d7cf857e22400df",
+    "apps/web/src/multitable/components/MetaToolbar.vue": "8a031d5e0f851d1e879fe2dad26477d2a10aeeceb3ddc56a64cb107bb700faab",
+    "apps/web/src/multitable/composables/useMultitableWorkbench.ts": "f4b5721febd7c0a1ee4ee43c335fc105d2cd15e9a5d3e0a8aa5c1fe7eb79f269",
+    "apps/web/src/multitable/types.ts": "9141ae4eade07c06f8ce68cb78c789c590727711c260754442a132cdbef6e3ed",
+    "apps/web/src/multitable/views/MultitableWorkbench.vue": "2adcc2f950c0e3890ecb958834d176dcef01cd10d40bfe7cd3e4844cb69e197e",
+    "apps/web/src/router/guardPolicy.ts": "318c8bd453e5fe4ba7ff587e739f3aedc467cd6d86991de776dc57740f487c8c",
+    "apps/web/src/services/plm/plmBomCollaboration.ts": "36cc326c73e34ece364a89d1efc949e581a20fff408e79afd1b4c854c426cd7f",
+    "apps/web/src/views/IntegrationWorkbenchView.vue": "0be9abce5551eaee5d58f06057375382fc49f318f188138e7ac62664820acdbb",
+    "apps/web/src/components/plm/PlmBomChangeListenerConfig.vue": "081a5cdf042949dd849f89b0d25bb036937fae6f6c082db69472d09a2162491d"
+  },
+  "focusedTests": {
+    "modules": 15,
+    "passed": 445,
+    "failed": 0,
+    "skipped": 0
+  },
+  "typecheck": true,
+  "browserAndRealBackend": {
+    "rehearsal07": {
+      "status": "passed",
+      "cleanup": true,
+      "inputCount": 3496,
+      "changedInputs": [],
+      "seconds": 88.319,
+      "exitCode": 0,
+      "migrationHeads": {
+        "alembic_tenant.ini": "t17_plm_change_sequence",
+        "alembic.identity.ini": "i9b0c1d2e3f4",
+        "alembic.ini": "plm_change_sequence_008"
+      },
+      "observed": {
+        "mode": "green",
+        "entry": "real-components-harness",
+        "routeFulfill": false,
+        "actualAuthMe": true,
+        "testModeLoopbackTransport": true,
+        "tamperedJwtAndInactiveDeniedRestoredActive": true,
+        "actualIntegrationPluginWithTenantMembership": true,
+        "actualOwnerContext": true,
+        "afterConfirmUrl": "#/multitable/sheet_099749800003a402137dafbe/view_94f881842fc580941c26cf56?baseId=browser-base",
+        "focusBounce": false,
+        "browserPoliciesPersistOnReopen": true,
+        "completionUiSeparatesSourcesAndRequiresOwnerListener": true,
+        "primaryViewRemainsUngrouped": true,
+        "nativeHttpRead": true,
+        "longTextEditorMissing": false,
+        "memberSeesRefreshedChildLeafQuantity": "7",
+        "persistedPerson": [
+          "browser-assignee"
+        ],
+        "persistedDateTime": "2026-10-08T02:30:00.000Z",
+        "commentRetainedAfterReload": true,
+        "fullMainNativeReload": true,
+        "localFieldsPreservedAfterActualSourceRefresh": true,
+        "memberCannotBorrowSource": true,
+        "outsiderDenied": true,
+        "sourceReadOnly": true,
+        "ownerViewGroupsAssignedAndUnassigned": true,
+        "ownerViewNativeGroupSubtotals": {
+          "assigned": 1,
+          "unassigned": 2
+        },
+        "ownerViewPersistsOnNativeReload": true,
+        "statusViewsActuallyFilterInNativeBrowser": {
+          "pending": 3,
+          "issues": 0
+        },
+        "nativeBrowserIssueReceiptAndPositiveFilter": true,
+        "revokedRecipientCancelsPreparedNextRound": true,
+        "actualShortSlaElapsed": {
+          "thresholdMs": 60000,
+          "waitMs": 60122,
+          "issueAgeMs": 60500
+        },
+        "nativeBrowserThreeNotificationKinds": [
+          "issue",
+          "reminder",
+          "escalation"
+        ],
+        "realWorkbenchNamespaceAdmission": true,
+        "returnPrefillsOriginalSourceWithoutBomLoad": true,
+        "returnLandsOnSourceSection": true,
+        "explicitOriginalSourceLoadStatus": 304,
+        "originalSourceTableRoundTrip": true,
+        "nonOwnerWithWorkbenchPermissionHasNoReturnLink": true,
+        "unavailableSourceCannotFallback": true,
+        "viteStopped": true,
+        "finalActiveResources": [
+          "FSReqCallback",
+          "Timeout"
+        ]
+      },
+      "httpCount": 421,
+      "http5xx": 0,
+      "pageErrors": []
+    },
+    "scope": "actual routes/auth/PG and browser; test application, not full server lifecycle"
+  },
+  "ci": "not published yet",
+  "models": {
+    "kimi": {
+      "version": "2.1.1",
+      "requested": "kimi-code/k3",
+      "exit": 1,
+      "result": "403 monthly quota; no review"
+    },
+    "grok": {
+      "actualUi": "Grok 4.7 (xhigh)",
+      "scope": "3 read-only source files",
+      "result": "incomplete; connection retry; interrupted and closed",
+      "reviewPassed": false
+    },
+    "astra": {
+      "model": "gpt-6-astra",
+      "effort": "ultra",
+      "result": "independent bounded review; identified loading recovery bug; reproduced and fixed"
+    }
+  },
+  "lint": {
+    "newUiModules": "passed",
+    "fullChangedRuntime": "3 errors and 4 warnings, identical to base d6cd2064",
+    "baselineComparison": "artifacts/plm-bom-ui-20261015/lint-baseline-comparison.json"
+  },
+  "listenerFollowup": {
+    "tests": {
+      "modules": 10,
+      "passed": 165,
+      "failed": 0,
+      "skipped": 0
+    },
+    "typecheck": true,
+    "targetedLint": true,
+    "casRecoveryRedControl": {
+      "failed": 1,
+      "passed": 13
+    },
+    "browser09": {
+      "status": "passed",
+      "cleanup": true,
+      "inputCount": 3497,
+      "changedInputs": [],
+      "seconds": 87.035,
+      "exitCode": 0,
+      "migrationHeads": {
+        "alembic_tenant.ini": "t17_plm_change_sequence",
+        "alembic.identity.ini": "i9b0c1d2e3f4",
+        "alembic.ini": "plm_change_sequence_008"
+      },
+      "observed": {
+        "mode": "green",
+        "entry": "real-components-harness",
+        "routeFulfill": false,
+        "actualAuthMe": true,
+        "testModeLoopbackTransport": true,
+        "tamperedJwtAndInactiveDeniedRestoredActive": true,
+        "actualIntegrationPluginWithTenantMembership": true,
+        "actualOwnerContext": true,
+        "afterConfirmUrl": "#/multitable/sheet_ed2bd21e309ea3798fc75418/view_d4132821ca7c281cf6c092b1?baseId=browser-base",
+        "focusBounce": false,
+        "browserPoliciesPersistOnReopen": true,
+        "completionUiSeparatesSourcesAndRequiresOwnerListener": true,
+        "listenerCasRefreshRequiresNewConsent": true,
+        "listenerOwnerExplicitStartAndRebind": true,
+        "primaryViewRemainsUngrouped": true,
+        "nativeHttpRead": true,
+        "longTextEditorMissing": false,
+        "memberSeesRefreshedChildLeafQuantity": "7",
+        "persistedPerson": [
+          "browser-assignee"
+        ],
+        "persistedDateTime": "2026-10-08T02:30:00.000Z",
+        "commentRetainedAfterReload": true,
+        "fullMainNativeReload": true,
+        "localFieldsPreservedAfterActualSourceRefresh": true,
+        "memberCannotBorrowSource": true,
+        "outsiderDenied": true,
+        "sourceReadOnly": true,
+        "ownerViewGroupsAssignedAndUnassigned": true,
+        "ownerViewNativeGroupSubtotals": {
+          "assigned": 1,
+          "unassigned": 2
+        },
+        "ownerViewPersistsOnNativeReload": true,
+        "statusViewsActuallyFilterInNativeBrowser": {
+          "pending": 3,
+          "issues": 0
+        },
+        "nativeBrowserIssueReceiptAndPositiveFilter": true,
+        "revokedRecipientCancelsPreparedNextRound": true,
+        "actualShortSlaElapsed": {
+          "thresholdMs": 60000,
+          "waitMs": 60159,
+          "issueAgeMs": 60552
+        },
+        "nativeBrowserThreeNotificationKinds": [
+          "issue",
+          "reminder",
+          "escalation"
+        ],
+        "realWorkbenchNamespaceAdmission": true,
+        "returnPrefillsOriginalSourceWithoutBomLoad": true,
+        "returnLandsOnSourceSection": true,
+        "explicitOriginalSourceLoadStatus": 304,
+        "originalSourceTableRoundTrip": true,
+        "nonOwnerWithWorkbenchPermissionHasNoReturnLink": true,
+        "unavailableSourceCannotFallback": true,
+        "viteStopped": true,
+        "finalActiveResources": [
+          "FSReqCallback",
+          "PipeWrap",
+          "PipeWrap",
+          "PipeWrap",
+          "PipeWrap",
+          "PipeWrap",
+          "PipeWrap",
+          "Timeout"
+        ]
+      },
+      "httpCount": 438,
+      "http5xx": 0,
+      "pageErrors": []
+    },
+    "review": "Astra ultra found CAS reload recovery omission; fixed with parent binding reload and fresh consent"
+  }
+}
