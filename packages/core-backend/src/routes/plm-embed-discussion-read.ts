@@ -1,3 +1,4 @@
+import { isCurrentVisualSource } from './plm-embed-visual-source'
 /**
  * PLM-COLLAB Discussion read-auth line, metasheet2 sub-slice 2: the discussion READ relay.
  * Companion to the WRITE relay (`./plm-embed-discussion.ts` -- READ IT FIRST, this file mirrors
@@ -47,6 +48,8 @@ import type {
 } from '../data-adapters/PLMAdapter'
 import type { EmbedTokenClaims } from '../auth/embed-token-verify'
 
+import { projectVisualMarkups } from '../auth/visual-review-markup'
+
 const BOM_FEATURE_KEY = 'bom_multitable'
 
 interface PlmDiscussionReadAdapter {
@@ -54,6 +57,7 @@ interface PlmDiscussionReadAdapter {
   getDiscussionsWithReadToken(readToken: string, target: { targetType: string; targetId: string }): Promise<QueryResult<DiscussionThreadListResult>>
   getDiscussionThreadWithReadToken(readToken: string, threadId: string): Promise<QueryResult<DiscussionThreadDetail>>
   // tenant/connect surface, same duck-type contract the write relay enforces
+  isVisualReviewEnabled?(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
@@ -241,7 +245,9 @@ export default function plmEmbedDiscussionReadRouter(): Router {
     if (!readToken) return
     const result = await guarded.adapter.getDiscussionThreadWithReadToken(readToken, threadId)
     if (result.error) return respondReadError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   return router

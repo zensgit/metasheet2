@@ -1,3 +1,4 @@
+import { isCurrentVisualSource } from './plm-embed-visual-source'
 /**
  * PLM-COLLAB Discussion Phase-3 WRITE relay (Lane C write-relay; taskbook
  * docs/development/plm-discussion-consumer-taskbook-20260709.md §4's Gate-2 REWORKED contract,
@@ -48,6 +49,8 @@ import type {
 } from '../data-adapters/PLMAdapter'
 import type { EmbedTokenClaims } from '../auth/embed-token-verify'
 
+import { projectVisualMarkups, hasVisualMarkupInput, validVisualMarkupBody, type VisualMarkupInput } from '../auth/visual-review-markup'
+
 const BOM_FEATURE_KEY = 'bom_multitable'
 const TARGET_TYPES: ReadonlySet<DiscussionTargetType> = new Set([
   'item',
@@ -66,6 +69,7 @@ interface PlmDiscussionWriteAdapter {
   resolveDiscussionThread(sessionToken: string, threadId: string, req?: ThreadTransitionRequest): Promise<QueryResult<DiscussionThreadDetail>>
   reopenDiscussionThread(sessionToken: string, threadId: string, req?: ThreadTransitionRequest): Promise<QueryResult<DiscussionThreadDetail>>
   // tenant/connect surface, same duck-type contract the read relay enforces
+  isVisualReviewEnabled?(tenantId: string): boolean
   getEffectiveTenantId(): string | undefined
   isConnected(): boolean
   connect(): Promise<void>
@@ -249,8 +253,18 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
 
   // POST /api/plm-embed/discussion/threads -- open a new thread.
   router.post('/api/plm-embed/discussion/threads', embedTokenAuth, async (req: Request, res: Response) => {
+    const rawBody = (req.body ?? {}) as Record<string, unknown>
+    const visual = hasVisualMarkupInput(rawBody)
+    if (visual && !validVisualMarkupBody(rawBody, true)) return badBody(res, 'invalid visual markup')
+    if (visual && !await isCurrentVisualSource(undefined, req.embedToken!.tenant_id)) return badBody(res, 'visual markup unavailable')
     const guarded = await runEmbedWriteGuards(req, res)
     if (!guarded) return
+    if (visual && !await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id)) {
+      return badBody(res, 'visual markup unavailable')
+    }
+    if (visual && (rawBody.target_type !== 'item' || rawBody.target_id !== guarded.claims.part_id)) {
+      return badBody(res, 'invalid visual markup target')
+    }
 
     const body = (req.body ?? {}) as Record<string, unknown>
     const targetType = body.target_type
@@ -282,19 +296,30 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
       ...(title !== undefined ? { title } : {}),
       ...(mentioned_user_ids !== undefined ? { mentioned_user_ids } : {}),
       ...(anchor !== undefined ? { anchor } : {}),
+      ...(visual ? { markup: body.markup as VisualMarkupInput } : {}),
     }
 
     const accessToken = await exchangeForAccessToken(req, res, guarded.adapter)
     if (!accessToken) return
+    if (visual && !await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id)) return badBody(res, 'visual markup unavailable')
     const result = await guarded.adapter.createDiscussionThread(accessToken, createReq)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   // POST /api/plm-embed/discussion/threads/:threadId/comments -- reply on a thread.
   router.post('/api/plm-embed/discussion/threads/:threadId/comments', embedTokenAuth, async (req: Request, res: Response) => {
+    const rawBody = (req.body ?? {}) as Record<string, unknown>
+    const visual = hasVisualMarkupInput(rawBody)
+    if (visual && !validVisualMarkupBody(rawBody, false)) return badBody(res, 'invalid visual markup')
+    if (visual && !await isCurrentVisualSource(undefined, req.embedToken!.tenant_id)) return badBody(res, 'visual markup unavailable')
     const guarded = await runEmbedWriteGuards(req, res)
     if (!guarded) return
+    if (visual && !await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id)) {
+      return badBody(res, 'visual markup unavailable')
+    }
 
     const threadId = req.params.threadId
     const body = (req.body ?? {}) as Record<string, unknown>
@@ -318,17 +343,24 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
       ...(parent_comment_id !== undefined ? { parent_comment_id } : {}),
       ...(mentioned_user_ids !== undefined ? { mentioned_user_ids } : {}),
       ...(anchor !== undefined ? { anchor } : {}),
+      ...(visual ? { markup: body.markup as VisualMarkupInput } : {}),
     }
 
     const accessToken = await exchangeForAccessToken(req, res, guarded.adapter)
     if (!accessToken) return
+    if (visual && !await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id)) return badBody(res, 'visual markup unavailable')
     const result = await guarded.adapter.addDiscussionComment(accessToken, threadId, commentReq)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   // PATCH /api/plm-embed/discussion/threads/:threadId/comments/:commentId -- edit a comment body.
   router.patch('/api/plm-embed/discussion/threads/:threadId/comments/:commentId', embedTokenAuth, async (req: Request, res: Response) => {
+    if (req.body && typeof req.body === 'object' && ('anchor' in req.body || 'markup' in req.body)) {
+      return badBody(res, 'visual binding is immutable')
+    }
     const guarded = await runEmbedWriteGuards(req, res)
     if (!guarded) return
 
@@ -341,7 +373,9 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     if (!accessToken) return
     const result = await guarded.adapter.editDiscussionComment(accessToken, threadId, commentId, editReq)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   // DELETE /api/plm-embed/discussion/threads/:threadId/comments/:commentId -- soft-delete a comment.
@@ -354,7 +388,9 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     if (!accessToken) return
     const result = await guarded.adapter.deleteDiscussionComment(accessToken, threadId, commentId)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   // POST /api/plm-embed/discussion/threads/:threadId/resolve -- transition a thread to resolved.
@@ -370,7 +406,9 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     if (!accessToken) return
     const result = await guarded.adapter.resolveDiscussionThread(accessToken, threadId, transitionReq)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   // POST /api/plm-embed/discussion/threads/:threadId/reopen -- transition a resolved thread back to open.
@@ -386,7 +424,9 @@ export default function plmEmbedDiscussionWriteRouter(): Router {
     if (!accessToken) return
     const result = await guarded.adapter.reopenDiscussionThread(accessToken, threadId, transitionReq)
     if (result.error) return respondWriteError(res, result.error)
-    return res.json({ ok: true, data: result.data[0] ?? null })
+    const detail = result.data[0]
+    return res.json({ ok: true, data: detail ? projectVisualMarkups(detail,
+      await isCurrentVisualSource(guarded.adapter, guarded.claims.tenant_id), guarded.claims.part_id) : null })
   })
 
   return router

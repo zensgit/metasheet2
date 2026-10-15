@@ -10,6 +10,7 @@
 // Every function resolves to a discriminated result and NEVER throws (mirrors the read service):
 // a caller decides how to surface `{ ok: false }`. `suppressUnauthorizedRedirect` keeps a 401 from
 // bouncing the token-only iframe to the login page.
+import type { VisualMarkupInput } from './plmVisualMarkup'
 import { apiFetch } from '../../utils/api'
 
 const WRITE_BASE = '/api/plm-embed/discussion'
@@ -25,6 +26,7 @@ export interface CreateThreadInput {
   title?: string
   mentioned_user_ids?: number[]
   anchor?: Record<string, unknown> | null
+  markup?: VisualMarkupInput
 }
 
 export interface CommentInput {
@@ -32,6 +34,7 @@ export interface CommentInput {
   parent_comment_id?: string
   mentioned_user_ids?: number[]
   anchor?: Record<string, unknown> | null
+  markup?: VisualMarkupInput
 }
 
 export interface TransitionInput {

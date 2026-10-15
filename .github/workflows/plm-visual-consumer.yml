@@ -1,0 +1,85 @@
+name: PLM Visual consumer verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/unit/**'
+      - 'packages/core-backend/tests/integration/plm-visual-source-authority-realdb.test.ts'
+      - 'packages/core-backend/vitest*.config.ts'
+      - 'apps/web/src/**'
+      - 'apps/web/tests/plm-*.spec.ts'
+      - 'apps/web/vite.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/plm-visual-consumer.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'packages/core-backend/src/**'
+      - 'packages/core-backend/tests/unit/**'
+      - 'packages/core-backend/tests/integration/plm-visual-source-authority-realdb.test.ts'
+      - 'packages/core-backend/vitest*.config.ts'
+      - 'apps/web/src/**'
+      - 'apps/web/tests/plm-*.spec.ts'
+      - 'apps/web/vite.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/plm-visual-consumer.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  visual-consumer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: visual_disposable
+        ports: ['5432/tcp']
+        options: >-
+          --health-cmd "pg_isready -U postgres -d visual_disposable"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.16.1
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - name: Visual consumer contracts and source management
+        working-directory: packages/core-backend
+        run: >-
+          pnpm exec vitest run --config vitest.config.ts
+          tests/unit/visual-review-source.test.ts tests/unit/visual-preview-token.test.ts
+          tests/unit/visual-review-markup.test.ts tests/unit/plm-adapter-visual-preview.test.ts
+          tests/unit/plm-embed-visual-preview-routes.test.ts tests/unit/plm-visual-source-management.test.ts
+          tests/unit/plm-embed-discussion-routes.test.ts tests/unit/plm-embed-discussion-read-routes.test.ts
+      - name: PostgreSQL source authority and observed lock waits
+        working-directory: packages/core-backend
+        env:
+          EXPECT_PLM_VISUAL_SOURCE_DB: '1'
+          PLM_VISUAL_SOURCE_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/visual_disposable
+        run: >-
+          pnpm exec vitest run --config vitest.integration.config.ts
+          tests/integration/plm-visual-source-authority-realdb.test.ts
+      - name: Backend source types
+        run: pnpm --filter @metasheet/core-backend exec tsc --noEmit
+      - name: Web source types
+        run: pnpm --filter @metasheet/web exec vue-tsc --noEmit -p tsconfig.app.json
+      - name: Visual web interactions and parent protocol
+        working-directory: apps/web
+        run: >-
+          pnpm exec vitest run --config vite.config.ts
+          tests/plm-visual-markup.spec.ts tests/plm-visual-markup-canvas.spec.ts
+          tests/plm-embed-visual-preview.spec.ts tests/plm-embed-visual-preview-service.spec.ts
+          tests/plm-embed-visual-token.spec.ts tests/plm-embed-read-token.spec.ts
+          tests/plm-embed-write-token.spec.ts tests/plm-embed-bom-review.spec.ts
+          tests/plm-embed-discussion-panel.spec.ts

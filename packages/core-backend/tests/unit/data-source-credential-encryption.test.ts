@@ -19,20 +19,19 @@ function statefulFakeDb() {
   const selectBuilder = () => {
     const b = {
       selectAll: () => b,
+      forUpdate: () => b,
       where: () => b,
       execute: async () => [...rows.values()].filter((r) => r.is_active === true && r.deleted_at == null),
     }
     return b
   }
-  return {
-    rows,
-    db: {
+  const executor = {
       selectFrom: () => selectBuilder(),
       insertInto: () => insertBuilder(),
       updateTable: () => ({ set: () => ({ where: () => ({ execute: async () => [] }) }) }),
       deleteFrom: () => ({ where: () => ({ execute: async () => [] }) }),
-    },
   }
+  return { rows, db: { ...executor, transaction: () => ({ execute: async (fn: (trx: typeof executor) => unknown) => fn(executor) }) } }
 }
 
 function dbRow(id: string, credentials: Record<string, unknown>) {

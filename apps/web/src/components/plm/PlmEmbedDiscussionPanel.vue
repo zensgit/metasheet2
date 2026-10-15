@@ -1,7 +1,11 @@
 <template>
-  <section class="plm-disc-panel" data-testid="plm-discussion-panel">
+  <section ref="panel" class="plm-disc-panel" data-testid="plm-discussion-panel">
     <header class="plm-disc-panel__head"><strong>讨论</strong></header>
 
+    <p v-if="visualDraft" class="plm-disc-panel__visual-draft" data-testid="plm-visual-draft-attached">
+      已选择标注位置，将随下一条讨论或回复保存。
+      <button type="button" :disabled="busy" @click="emit('clear-visual-draft')">取消标注</button>
+    </p>
     <!-- Create a new thread. -->
     <form class="plm-disc-panel__composer" data-testid="plm-discussion-create" @submit.prevent="create">
       <textarea
@@ -54,7 +58,11 @@
           >{{ detailBusy[t.id] ? '加载中…' : '加载详情' }}</button>
         </div>
         <ul class="plm-disc-panel__comments">
-          <li v-for="(c, ci) in t.comments" :key="c.id ?? `${t.id}-c${ci}`" class="plm-disc-panel__comment">{{ c.body ?? '（已删除）' }}</li>
+          <li v-for="(c, ci) in t.comments" :key="c.id ?? `${t.id}-c${ci}`" class="plm-disc-panel__comment" :data-comment-id="c.id" :data-selected="selectedCommentId === c.id" tabindex="-1">
+            <div>{{ c.body ?? '（已删除）' }}</div>
+            <button v-if="c.markup?.binding_state === 'bound' && c.id" type="button" @click="emit('select-visual-comment', c.id)">定位标注</button>
+            <small v-else-if="c.markup?.binding_state === 'legacy_unbound'" data-testid="plm-legacy-markup">历史标注未绑定预览，仅保留讨论文本。</small>
+          </li>
         </ul>
         <!-- REPLY-GATING LOCK: the input + submit stay disabled until this thread's DETAIL has
              been fetched (detailLoaded[t.id]) AND it has a root (first) comment. A thread whose
@@ -104,6 +112,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   createPlmEmbedWriteTokenClient,
   createPlmEmbedReadTokenClient,
+  PlmEmbedReadTokenError,
   type PlmEmbedWriteTokenClient,
   type PlmEmbedReadTokenClient,
 } from '../../services/integration/plmEmbedWriteToken'
@@ -121,19 +130,47 @@ import {
   type PlmDiscussionReadResult,
 } from '../../services/integration/plmEmbedDiscussionRead'
 
-interface ThreadComment { id: string | null; body: string | null }
+import { parseStoredVisualMarkup, visualMarkupWrite,
+  type StoredVisualMarkup, type VisualMarkupDraft, type VisualComment,
+} from '../../services/integration/plmVisualMarkup'
+
+interface ThreadComment {
+  id: string | null
+  body: string | null
+  markup: StoredVisualMarkup | null
+}
 interface ThreadDetail { id: string; status: string; comments: ThreadComment[] }
 interface ThreadSummary { id: string; status: string }
 
 const props = defineProps<{
   parentOrigin: string | null
   target: { target_type: CreateThreadInput['target_type']; target_id: string }
+  visualDraft?: VisualMarkupDraft | null
+  selectedCommentId?: string | null
 }>()
 
+const emit = defineEmits<{
+  'visual-comments': [comments: VisualComment[]]
+  'clear-visual-draft': []
+  'visual-rejected': [reason: 'stale' | 'denied']
+  'select-visual-comment': [id: string]
+  'busy-change': [busy: boolean]
+}>()
+let generation = 0
+let disposed = false
+const panel = ref<HTMLElement | null>(null)
+function focusComment(id: string): void {
+  const element = Array.from(panel.value?.querySelectorAll<HTMLElement>('[data-comment-id]') || [])
+    .find((candidate) => candidate.dataset.commentId === id)
+  element?.focus({ preventScroll: true })
+  element?.scrollIntoView({ block: 'nearest', behavior: 'auto' })
+}
+defineExpose({ focusComment })
 const draft = ref('')
 const replyDraft = reactive<Record<string, string>>({})
 const busy = ref(false)
 const error = ref<string | null>(null)
+watch(busy, (value) => emit('busy-change', value), { flush: 'sync' })
 const threads = ref<ThreadDetail[]>([])
 // Set to true ONLY by `upsert` (a full-detail apply, from a write response or an explicit detail
 // fetch) -- the reply-gating lock's source of truth.
@@ -153,6 +190,8 @@ function disposeReadClient(): void {
 }
 watch(() => props.parentOrigin, (o) => {
   if (!o) {
+    generation += 1
+    emit('visual-comments', [])
     disposeClient()
     disposeReadClient()
   }
@@ -166,13 +205,14 @@ function asThread(data: unknown): ThreadDetail | null {
   const d = data as Record<string, unknown>
   if (typeof d.id !== 'string' || typeof d.status !== 'string') return null
   const comments = Array.isArray(d.comments)
-    ? (d.comments as Record<string, unknown>[]).map((c) => ({
+    ? (d.comments as Record<string, unknown>[]).filter((c) => c && typeof c === 'object' && !Array.isArray(c)).map((c) => ({
         // FAIL CLOSED (adversarial-verify P3): only a real non-empty string id counts. String(c.id)
         // would coerce a missing/object/null id to a TRUTHY "undefined"/"[object Object]"/"null",
         // unlocking reply + minting a write token for a comment with no real parent. null keeps the
         // comment visible but makes replyEnabled() fail closed for a rootless-id thread.
         id: typeof c.id === 'string' && c.id ? c.id : null,
         body: typeof c.body === 'string' ? c.body : null,
+        markup: typeof c.body === 'string' ? parseStoredVisualMarkup(c.markup) : null,
       }))
     : []
   return { id: d.id, status: d.status, comments }
@@ -191,6 +231,7 @@ function replyEnabled(threadId: string): boolean {
   const rootId = thread?.comments[0]?.id
   return typeof rootId === 'string' && rootId.length > 0
 }
+
 
 // Applies a server LIST summary: a not-yet-seen thread is added with EMPTY comments (the list
 // omits them, so it starts detail-NOT-loaded); an already-known thread has ONLY its status synced
@@ -214,13 +255,32 @@ function upsert(t: ThreadDetail): void {
   if (i >= 0) threads.value.splice(i, 1, t)
   else threads.value.unshift(t)
   detailLoaded[t.id] = true
+  emit('visual-comments', threads.value.flatMap((thread) => thread.comments
+    .filter((comment) => comment.id !== null && comment.body !== null)
+    .map((comment) => ({ id: comment.id!, body: comment.body!, markup: comment.markup }))))
+}
+
+async function freshReadToken(current: number): Promise<string | undefined> {
+  const activeClient = readClient
+  if (!activeClient || disposed) return undefined
+  try { return await activeClient.requestReadToken() }
+  catch (error) {
+    if (!(error instanceof PlmEmbedReadTokenError) || error.message !== 'rate_limited') throw error
+    // Preview and Discussion share the parent's per-frame mint budget.
+    await new Promise((resolve) => setTimeout(resolve, 6100))
+    if (disposed || current !== generation || readClient !== activeClient) return undefined
+    return activeClient.requestReadToken() // new nonce; retry the read credential once
+  }
 }
 
 async function loadThreads(): Promise<void> {
-  if (!readClient) return
+  if (!readClient || disposed) return
+  const current = generation
   try {
-    const token = await readClient.requestReadToken() // fresh, single-use, this read only
+    const token = await freshReadToken(current)
+    if (!token || disposed || current !== generation) return
     const result: PlmDiscussionReadResult = await listDiscussionThreads(token)
+    if (disposed || current !== generation) return
     if (result.ok) {
       const data = result.data as { threads?: unknown[] } | null
       const list = Array.isArray(data?.threads) ? data.threads : []
@@ -229,59 +289,80 @@ async function loadThreads(): Promise<void> {
         if (summary) applySummary(summary)
       }
     } else {
+      if ([401, 403, 404].includes(result.status ?? 0)) emit('visual-rejected', 'denied')
       error.value = '加载讨论列表失败，请重试'
     }
   } catch {
-    error.value = '加载讨论列表失败，请重试'
+    if (!disposed && current === generation) error.value = '加载讨论列表失败，请重试'
   }
 }
 
 async function loadDetail(threadId: string): Promise<void> {
-  if (!readClient || detailBusy[threadId]) return
+  if (!readClient || detailBusy[threadId] || disposed) return
+  const current = generation
   detailBusy[threadId] = true
   try {
-    const token = await readClient.requestReadToken() // fresh, single-use, this read only
+    const token = await freshReadToken(current)
+    if (!token || disposed || current !== generation) return
     const result: PlmDiscussionReadResult = await getDiscussionThread(token, threadId)
+    if (disposed || current !== generation) return
     if (result.ok) {
       const t = asThread(result.data)
       if (t) upsert(t)
     } else {
+      if ([401, 403, 404].includes(result.status ?? 0)) emit('visual-rejected', 'denied')
       error.value = '加载讨论详情失败，请重试'
     }
   } catch {
-    error.value = '加载讨论详情失败，请重试'
+    if (!disposed && current === generation) error.value = '加载讨论详情失败，请重试'
   } finally {
-    detailBusy[threadId] = false
+    if (!disposed && current === generation) detailBusy[threadId] = false
   }
 }
 
 // Wraps a single WRITE action: mint ONE fresh token, run the relay call, apply the server response.
-async function run(call: (token: string) => Promise<PlmDiscussionWriteResult>, apply: (t: ThreadDetail) => void): Promise<void> {
-  if (busy.value || !canWrite.value || !client) return
+async function run(call: (token: string) => Promise<PlmDiscussionWriteResult>, apply: (t: ThreadDetail) => void, visual = false): Promise<void> {
+  if (busy.value || !canWrite.value || !client || disposed) return
+  const current = generation
   busy.value = true
   error.value = null
   try {
     const token = await client.requestWriteToken() // fresh, single-use, per action
+    if (disposed || current !== generation) return
     const result = await call(token)
+    if (disposed || current !== generation) return
     if (result.ok) {
       const t = asThread(result.data)
       if (t) apply(t)
     } else {
+      if ([401, 403, 404].includes(result.status ?? 0)) emit('visual-rejected', 'denied')
+      else if (visual && [409, 422].includes(result.status ?? 0)) emit('visual-rejected', 'stale')
       error.value = '操作失败，请重试' // failure keeps drafts; a retry mints a brand-new token
     }
   } catch {
-    error.value = '操作失败，请重试'
+    if (!disposed && current === generation) error.value = '操作失败，请重试'
   } finally {
-    busy.value = false
+    if (!disposed && current === generation) busy.value = false
   }
+}
+
+function attachedMarkup() {
+  const value = props.visualDraft
+  if (!value) return {}
+  if (props.target.target_type !== 'item' || value.descriptor.part_id !== props.target.target_id) return null
+  return visualMarkupWrite(value.descriptor, value.tool, value.geometry)
 }
 
 async function create(): Promise<void> {
   const body = draft.value.trim()
   if (!body) return
+  const visual = attachedMarkup()
+  if (!visual) { emit('visual-rejected', 'stale'); return }
+  const target = { ...props.target }
   await run(
-    (token) => createDiscussionThread(token, { target_type: props.target.target_type, target_id: props.target.target_id, body }),
-    (t) => { upsert(t); draft.value = '' },
+    (token) => createDiscussionThread(token, { target_type: target.target_type, target_id: target.target_id, body, ...visual }),
+    (t) => { upsert(t); draft.value = ''; emit('clear-visual-draft') },
+    Boolean(props.visualDraft),
   )
 }
 
@@ -291,12 +372,15 @@ async function reply(threadId: string): Promise<void> {
   if (!replyEnabled(threadId)) return
   const body = (replyDraft[threadId] || '').trim()
   if (!body) return
+  const visual = attachedMarkup()
+  if (!visual) { emit('visual-rejected', 'stale'); return }
   const thread = threads.value.find((x) => x.id === threadId)
   const parentId = thread?.comments[0]?.id
   if (typeof parentId !== 'string' || !parentId) return // never send without a real root id
   await run(
-    (token) => addDiscussionComment(token, threadId, { body, parent_comment_id: parentId }),
-    (t) => { upsert(t); replyDraft[threadId] = '' },
+    (token) => addDiscussionComment(token, threadId, { body, parent_comment_id: parentId, ...visual }),
+    (t) => { upsert(t); replyDraft[threadId] = ''; emit('clear-visual-draft') },
+    Boolean(props.visualDraft),
   )
 }
 
@@ -308,19 +392,28 @@ async function transition(threadId: string, kind: 'resolve' | 'reopen'): Promise
 }
 
 onBeforeUnmount(() => {
+  disposed = true
+  generation += 1
   disposeClient()
   disposeReadClient()
 })
 </script>
 
 <style scoped>
-.plm-disc-panel { display: flex; flex-direction: column; gap: 10px; padding: 8px 0; }
+.plm-disc-panel { min-width: 0; display: flex; flex-direction: column; gap: 10px; padding: 8px 0; }
 .plm-disc-panel__composer, .plm-disc-panel__reply { display: flex; gap: 8px; align-items: flex-start; }
 .plm-disc-panel__input { flex: 1; box-sizing: border-box; resize: vertical; }
 .plm-disc-panel__threads { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px; }
 .plm-disc-panel__thread { border: 1px solid #ddd; border-radius: 6px; padding: 8px; }
-.plm-disc-panel__thread-head { display: flex; align-items: center; gap: 8px; }
+.plm-disc-panel__thread-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .plm-disc-panel__status { font-weight: 600; }
 .plm-disc-panel__comments { list-style: disc; margin: 6px 0; padding-left: 18px; }
+.plm-disc-panel__comment { overflow-wrap: anywhere; }
+.plm-disc-panel__comment[data-selected='true'] { outline: 2px solid #095bb5; outline-offset: 3px; }
+.plm-disc-panel__visual-draft { padding: 8px; border: 1px solid #095bb5; }
 .plm-disc-panel__error { color: #b00020; }
+@media (max-width: 600px) {
+  .plm-disc-panel__composer, .plm-disc-panel__reply { flex-wrap: wrap; }
+  .plm-disc-panel__input, .plm-disc-panel__reply > input { flex: 1 1 100%; min-width: 0; width: 100%; }
+}
 </style>

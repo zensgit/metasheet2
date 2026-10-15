@@ -1,0 +1,154 @@
+{
+  "status": "local_verified_remote_ci_pending",
+  "consumerBase": "c11e3a2a2010d5a17ef886bbb9551eca13ba3818",
+  "yuantusBase": "1f295bfca8ca23389a2ec610b4eb74d9bfb4d961",
+  "checks": {
+    "focusedBackend": {
+      "modules": 8,
+      "passed": 198
+    },
+    "adjacentBeforeFinalExchangeGuard": {
+      "modules": 24,
+      "passed": 482
+    },
+    "finalAffected": {
+      "modules": 3,
+      "passed": 60
+    },
+    "web": {
+      "modules": 9,
+      "passed": 174
+    },
+    "realPostgres": {
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0,
+      "cleanup": true
+    },
+    "nativeWorkspaceAndLogin": {
+      "passed": 76
+    },
+    "globalFlagManifest": {
+      "passed": 49
+    },
+    "backendTypes": "passed",
+    "webTypes": "passed",
+    "actionlint": "passed"
+  },
+  "browserFull": {
+    "run": "browser-04-locked",
+    "passed": 3,
+    "failed": 0,
+    "skipped": 0,
+    "durationSeconds": 249.49,
+    "cleanup": true,
+    "recordedInputs": 3804,
+    "inputsStableDuringRun": true,
+    "inputsManifestSha256": "e477cf0c96b34b3d9c7b8e037e4ae704b32b5c73dde10b8c6f2dbbcbd78138a6",
+    "lockedPythonDependencyPinsMatched": 71,
+    "coversExternalApiBaseLogout": true
+  },
+  "negativeControls": {
+    "originalPersistRealPG": {
+      "failed": 7,
+      "passed": 1,
+      "cleanup": true
+    },
+    "exchangeAwaitBeforeFix": {
+      "failed": 2,
+      "passed": 30
+    },
+    "firstBrowser": {
+      "failed": 3,
+      "passed": 0,
+      "cleanup": true
+    }
+  },
+  "limits": [
+    "Browser registry/admission and Redis are substitutes; actual durable admission is verified separately with PostgreSQL and HTTP.",
+    "Feature Express relay and Vite; not full MetaSheetServer or complete migration catalog.",
+    "Synthetic PNG/JPEG and private SQLite authorities; not customer drawings, production or enterprise notification acceptance.",
+    "Presentation logout clears UI cookie; API bearer revocation is separate.",
+    "No distributed atomic cancellation after outgoing business POST."
+  ],
+  "currentInputHashes": {
+    "metasheet/.github/workflows/plm-visual-consumer.yml": "bc3dbeb460f30c03177a4656ae580c1a84719d71a8ed3559bc823078b5a047bf",
+    "metasheet/apps/web/src/components/plm/PlmEmbedVisualPreviewPanel.vue": "b831b563cb715b904c23af8546f97da06197eb6147eab6c6112e1a60c90c47a2",
+    "metasheet/apps/web/src/components/plm/PlmVisualMarkupCanvas.vue": "981927c5ba20c9a7d3d52fe87e9e62ef9e860fa57015ecd100ca56e9a6e0e397",
+    "metasheet/apps/web/src/components/plm/visualMarkupGeometry.ts": "790c1b6415e0092664d9586fbf8c07babee3b617f1eb69ba01de360c31133435",
+    "metasheet/apps/web/src/services/integration/plmEmbedVisualPreview.ts": "8fb2ffaec01c196a35591fa83b9cf8f2ffadf2372ca9742535284b744e1a45d0",
+    "metasheet/apps/web/src/services/integration/plmVisualMarkup.ts": "890c9d2d2dbaa8b316d2d6e2412186378527272ecb1279024b606e4c01288b5e",
+    "metasheet/apps/web/tests/plm-embed-visual-preview-service.spec.ts": "fbaef3a0a3ce60d0e3cbef6ba789abbd0ed0cbe44e2b3ddb9f964fdadce13558",
+    "metasheet/apps/web/tests/plm-embed-visual-preview.spec.ts": "5e23c3794b97732ac5d3f604f60fb236ac78e93dc47901105e98d434bd591c47",
+    "metasheet/apps/web/tests/plm-embed-visual-token.spec.ts": "c63b7b61831b1e912281e54a6395e5aae35d9f6f0802a1cbe47d25dad74aab9d",
+    "metasheet/apps/web/tests/plm-visual-markup-canvas.spec.ts": "05a049c3642a61afe5aeea5c03be2204ae0b665ca80e6b688f5ead8ce4ffeb39",
+    "metasheet/apps/web/tests/plm-visual-markup.spec.ts": "caaad5ea8e12442f9bb9251a60441232459d4b491682deb347ae92b1af567418",
+    "metasheet/packages/core-backend/src/auth/visual-preview-token.ts": "ef548409a210937f3443d6c7b30e8aeea031a91b4ceb1131bee0a954762e3494",
+    "metasheet/packages/core-backend/src/auth/visual-review-markup.ts": "0f4bd46fcb5b0b7274c1db069770cb9a2891fbcefbab9496fecb91f58ca54d42",
+    "metasheet/packages/core-backend/src/auth/visual-review-source.ts": "751fd74d4c53beee7f197f386f09e44093ba867309f426157b456285d28a9463",
+    "metasheet/packages/core-backend/src/routes/plm-embed-visual-preview.ts": "e77e0752570dfa3489e6872139e8b92afbba49ca458a64b422ff4060dedfeeb2",
+    "metasheet/packages/core-backend/src/routes/plm-embed-visual-source.ts": "7846d25201b48cdf4aa3cac2c388cb03ae40350f95203b98bd60bb1092745ac5",
+    "metasheet/packages/core-backend/tests/e2e/plm-visual-preview-browser-e2e.test.ts": "c55833288e4ae627d82618e7d9e9995f47cea76a16f3dc8402d73e725321800b",
+    "metasheet/packages/core-backend/tests/e2e/seed_visual_preview.py": "d21dca9f168f8decdb6c09487f8cc793e14b61d37acc0b4ec2cdbbcfed3cbd23",
+    "metasheet/packages/core-backend/tests/integration/plm-visual-source-authority-realdb.test.ts": "49516cb6a7f015e685f8fa07cabeff44d600bc6c7950137a22688320df729ee3",
+    "metasheet/packages/core-backend/tests/unit/plm-adapter-visual-preview.test.ts": "abba2702b610830cb5d0dee2cfc809e2959e96a8d4c68b6ecbe8539fcbd917c9",
+    "metasheet/packages/core-backend/tests/unit/plm-embed-visual-preview-routes.test.ts": "853fcc14c93626c5ac65b13195822c2c0218c3df0eb472907efc74f7d2c1e45c",
+    "metasheet/packages/core-backend/tests/unit/plm-visual-source-management.test.ts": "ab891075a47b7f9548b4b1374cf6e11d1544f7d169901e3e4ff28af463bd7fe6",
+    "metasheet/packages/core-backend/tests/unit/visual-preview-token.test.ts": "be0e9325332ac8541dec918907b34c3f8cbd762bc0047319cedab94763005d8d",
+    "metasheet/packages/core-backend/tests/unit/visual-review-markup.test.ts": "12ed77b3ed3609b4dd184d7a79e61c54a62ccbdd5b66b32f3ddbddedb12a5524",
+    "metasheet/packages/core-backend/tests/unit/visual-review-source.test.ts": "05c46e05d9fb2e98ce3469931fc350e331e5c86ba1f1514b73a3961454f8e3aa",
+    "metasheet/packages/core-backend/vitest.visual-preview-browser.config.ts": "f0b8812980297530e7a0ce42a61a929e803cc665d843674c647dcc97a52829f2",
+    "metasheet/apps/web/src/components/plm/PlmEmbedDiscussionPanel.vue": "b4463899f37eb0ee5cb88245bd6c5d2b8e2658ba55b226a05e1e0130dfceb53a",
+    "metasheet/apps/web/src/services/integration/plmEmbed.ts": "2a100bb2e99e2d7f14dbad788916db0c60052f1a0b7cf8335f6f5427946ffd50",
+    "metasheet/apps/web/src/services/integration/plmEmbedDiscussionWrite.ts": "fc8e5b9c34989f5acec572d8a56432e76ff92c9169c0436e3345b6d98a087859",
+    "metasheet/apps/web/src/services/integration/plmEmbedWriteToken.ts": "dd59ad02aee064acd81bdb0a7ab8cbe4c8291834789068f3c9231556d0a84916",
+    "metasheet/apps/web/src/views/PlmEmbedBomReviewView.vue": "738a95d5abef7ffe7d5bd91a3cdc4f2eaff9ae898672492df4e6d6d97a99a408",
+    "metasheet/packages/core-backend/src/data-adapters/DataSourceManager.ts": "9e1ae0952d9898e9980a9741d1532821650fc2505e2468b9f89dafbb7f21bb99",
+    "metasheet/packages/core-backend/src/data-adapters/PLMAdapter.ts": "b4c5fbc1f6d2b83d48b62501aee77031d012227c45c583e2812f9ca5206fb83e",
+    "metasheet/packages/core-backend/src/index.ts": "74a33f0c71a6626193803d7684a336d33592d4d44a283be9a47189740fdcd5ea",
+    "metasheet/packages/core-backend/src/routes/data-sources.ts": "638f21e8d66c9fdc5c8f403da3a54f6c1e121ce2ab12732ac65712f8c9312836",
+    "metasheet/packages/core-backend/src/routes/plm-embed-discussion-read.ts": "aa9bfc5fd317f7d8955d2ba7dfbbabb9f0dc558662b5794969e3c1947e529974",
+    "metasheet/packages/core-backend/src/routes/plm-embed-discussion.ts": "b6eab5915be9b81595e08eba656b4e37af9538307a86f05287a86d9e469cea2d",
+    "metasheet/packages/core-backend/src/routes/plm-embed.ts": "b1d81f7b1681ce67d2e90ae385f7fd4debccb73ccc34962c0ec193ec4f4ed5b2",
+    "metasheet/packages/core-backend/tests/unit/data-source-credential-encryption.test.ts": "d1d3c5a98c812fe1a6bbfaa1a0cd54e859bdc8e5dad7337300fa32168afec14c",
+    "metasheet/packages/core-backend/tests/unit/data-source-live-id-binding-lock-migration.test.ts": "26ddd69ff0879b5c17011a34e11b949068b67b4f8428361210db09b8e4611717",
+    "metasheet/packages/core-backend/tests/unit/data-source-remove-ordering.test.ts": "381b3a8be33f977ea2b6dcfd7a7e8413c0c8d60e925c48a64021a0fd3e61d103",
+    "metasheet/packages/core-backend/tests/unit/data-source-scope.test.ts": "c86316a78bc7056f4e244e19245d837cfc37a0ce6cd1badd21f7a84320b8400d",
+    "metasheet/packages/core-backend/tests/unit/data-source-visibility-authority-matrix.test.ts": "12ba88f47335527328445ec1a2ab3ef70b748dda963e7a2ffda1feb8e7ebc23b",
+    "metasheet/packages/core-backend/tests/unit/plm-embed-discussion-routes.test.ts": "7ae85fdbc2089355e21bcdadba52749564bf2c110c0703a8bf4eaa89913caf0a",
+    "metasheet/packages/core-backend/vitest.config.ts": "7b082ca7620d7ba8021a2b2387d32dee89f39ad63360e4d7aaceb5f2148d6fb6",
+    "yuantus/src/yuantus/api/tests/test_plm_workspace_router.py": "b8f24589a47fcb5dedbf806e6e6bf80706f388bc71214f0fc6ada74b6b7c8004",
+    "yuantus/src/yuantus/web/plm_workspace.html": "3032d7778b615454b58284f0c3d92dd2dcbc65acdfa8761a464ce3c018e793f6"
+  },
+  "earlierBrowserRuns": {
+    "browser-02": {
+      "passed": 3,
+      "cleanup": true,
+      "inputsStable": true,
+      "environment": "historical development venv; not lock matched"
+    },
+    "browser-03-origin": {
+      "passed": 1,
+      "filteredOut": 2,
+      "cleanup": true,
+      "environment": "same historical development venv"
+    }
+  },
+  "realPostgresLockObservations": [
+    {
+      "proof": "pg_blocking_pids",
+      "blocker": 94507,
+      "waiters": [
+        94506
+      ]
+    },
+    {
+      "proof": "pg_blocking_pids",
+      "blocker": 94507,
+      "waiters": [
+        94506
+      ]
+    }
+  ],
+  "dependencyRecordSha256": "d7695dd168be17cd6b6a668fe3389e579371618005a425231dbdbae5da33df4f"
+}

@@ -110,7 +110,7 @@ describe('force is retired (owner ruling 2026-09-20 ①) — source-level tripwi
     expect(route).not.toMatch(/req\.query\.force/)
     expect(route).not.toContain('DATA_SOURCE_FORCE_DELETE_ADMIN_ONLY')
     expect(route).not.toContain('forcedReferenceBreak')
-    expect(route).toContain('await manager.removeDataSource(id)')
+    expect(route).toContain('await manager.removeDataSource(id, { actor })')
     expect(route).toContain('请先解绑 ${referenceCount} 个外部系统')
   })
 })

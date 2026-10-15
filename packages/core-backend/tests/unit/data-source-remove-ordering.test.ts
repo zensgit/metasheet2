@@ -376,6 +376,9 @@ function seedPool(m: DataSourceManager, id: string): void {
 async function managerWith(id: string, harness: Harness) {
   const m = new DataSourceManager({ db: harness.db as never })
   await m.addDataSource(pgConfig(id), { ownerId: 'alice' })
+  // Observe deletion only; source creation now has its own persistence transaction.
+  harness.ops.length = 0
+  harness.transactions.length = 0
   seedPool(m, id)
   const adapter = m.getDataSource(id)
   return { m, adapter }
