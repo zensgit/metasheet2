@@ -72,7 +72,7 @@ describe('mapActivateError (activate endpoint error surface)', () => {
     // DT-HARDEN-02 on the activation path: a caller-fixable state — 409 with OUR message.
     ACTIVATE_DINGTALK_OPEN_ID_REQUIRED: {
       status: 409,
-      message: 'DingTalk login cannot be granted yet: this member has not signed in with DingTalk, so no openId is available (missing DingTalk openId). Activate without the DingTalk grant, or ask them to scan in once first',
+      message: 'DingTalk login cannot be granted yet: no DingTalk openId is available for this member (missing DingTalk openId). Activate without the DingTalk grant first, have them sign in with DingTalk once, then enable DingTalk login',
     },
     ACTIVATE_SOURCE_INACTIVE: {
       status: 409,

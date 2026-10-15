@@ -816,10 +816,10 @@
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__warning">
-              当前钉钉身份缺少 openId：该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉扫码。
+              当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__hint">
-              修复建议：请让他先用钉钉扫码登录一次（登录会补齐 openId），再刷新本页开通钉钉扫码。
+              修复建议：确认账号已激活并已绑定钉钉身份 → 让成员用钉钉扫码登录一次（登录会补齐 openId）→ 刷新本页后再开通钉钉扫码。
             </p>
             <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
               开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
@@ -1698,7 +1698,7 @@ function exportGovernanceValidationResultTemplate(): void {
     '- [ ] 缺 OpenID 成员清单与预期一致',
     '  - 实际结果：',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步可补齐 openId / 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后已补齐 openId（目录同步本身不返回 openId）/ 或确认仍缺失原因',
     '  - 实际结果：',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口数量正确变化',
@@ -1814,7 +1814,7 @@ function exportGovernanceFullValidationPackage(): void {
     '## 联调检查单',
     '- [ ] 缺 OpenID 成员清单与预期一致',
     `  - 入口：${buildMissingOpenIdUserManagementLocation()}`,
-    '- [ ] 目录同步页可用于补齐 openId 或确认仍缺失原因',
+    '- [ ] 成员用钉钉扫码登录一次后，目录同步页刷新可见 openId 已补齐 / 或确认仍缺失原因',
     `  - 入口：${buildDirectoryMissingOpenIdWorkbenchLocation()}`,
     '- [ ] 批量关闭缺 OpenID 钉钉扫码后，待收口和已收口统计变化正确',
     '- [ ] 最近 7 天收口审计可看到动作、处理时间和处理人',
@@ -2758,7 +2758,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setStatus('当前钉钉身份缺少 openId：该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉扫码。', 'error')
+    setStatus('当前钉钉身份缺少 openId：暂时拿不到该成员的 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
   busy.value = true

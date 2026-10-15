@@ -39,6 +39,8 @@ import {
   __directorySyncInternalsForTests,
   bindDirectoryAccount,
   getDirectoryAccountSummary,
+  getDirectoryReviewItem,
+  listDirectoryIntegrationAccounts,
   listDirectoryReviewItems,
   resolveDirectoryAutoAdmissionCanGrantDingTalkLogin,
 } from '../../src/directory/directory-sync'
@@ -91,7 +93,10 @@ describe('DT-HARDEN-02 grant predicate — openId source', () => {
       message = (error as Error).message
     }
     expect(message).toContain('missing DingTalk openId')
-    expect(message).toContain('has not signed in to this system with DingTalk yet')
+    // the workable order: bind/admit WITHOUT the grant → sign in once → refresh → grant
+    // (a pending or unbound member's scan records no openId, so "just scan in" was a dead end)
+    expect(message).toContain('bind (or admit) the member without the DingTalk grant first')
+    expect(message).toContain('have them sign in with DingTalk once')
     expect(message).toContain('refresh this member')
     expect(message).not.toMatch(/resync/i)
   })
@@ -332,58 +337,122 @@ const SUMMARY_ROW = {
   department_paths: [],
 }
 
-describe('page verdict — grantOpenIdAvailable comes from the same predicate and subquery as the grant check', () => {
+
+/**
+ * The four places the directory page reads an account from. Each must load the linked openId
+ * through the shared subquery (alias `a`) and compute the verdict with the shared predicate.
+ * The mock only hands back `linked_identity_open_id` when the SQL actually selects it through
+ * that subquery — so dropping the subquery from ANY one source flips that source's verdict.
+ */
+type VerdictSource = {
+  name: string
+  run: () => Promise<{ grantOpenIdAvailable?: boolean; missingOpenId?: boolean } | null>
+  /** marks the statement that loads the account row(s) */
+  rowsSqlMarker: RegExp
+  /** extra rows the source issues before/after the row load (counts, recommendations) */
+  otherRows?: (sql: string) => Array<Record<string, unknown>> | null
+  review: boolean
+}
+
+const VERDICT_SOURCES: VerdictSource[] = [
+  {
+    name: 'account summary (getDirectoryAccountSummary)',
+    run: async () => {
+      const summary = await getDirectoryAccountSummary('account-1')
+      return summary ? { grantOpenIdAvailable: summary.grantOpenIdAvailable } : null
+    },
+    rowsSqlMarker: /AS directory_account_id/,
+    review: false,
+  },
+  {
+    name: 'member list (listDirectoryIntegrationAccounts)',
+    run: async () => {
+      const result = await listDirectoryIntegrationAccounts('dir-1', { limit: 10, offset: 0 })
+      const item = result.items[0]
+      return item ? { grantOpenIdAvailable: item.grantOpenIdAvailable } : null
+    },
+    rowsSqlMarker: /AS directory_account_id/,
+    otherRows: (sql) => (/COUNT\(\*\)::int AS total/.test(sql) ? [{ total: 1 }] : null),
+    review: false,
+  },
+  {
+    name: 'review list (listDirectoryReviewItems)',
+    run: async () => {
+      const result = await listDirectoryReviewItems('dir-1', { limit: 10, offset: 0 })
+      const item = result.items[0]
+      return item ? { grantOpenIdAvailable: item.account.grantOpenIdAvailable, missingOpenId: item.flags.missingOpenId } : null
+    },
+    rowsSqlMarker: /AS review_kind/,
+    otherRows: (sql) => (/COUNT\(\*\)::int AS total/.test(sql) ? [{ total: 1 }] : null),
+    review: true,
+  },
+  {
+    name: 'single review-item refresh (getDirectoryReviewItem)',
+    run: async () => {
+      const item = await getDirectoryReviewItem('account-1')
+      return item ? { grantOpenIdAvailable: item.account.grantOpenIdAvailable, missingOpenId: item.flags.missingOpenId } : null
+    },
+    rowsSqlMarker: /AS review_kind/,
+    review: true,
+  },
+]
+
+const VERDICT_CASES: Array<{ name: string; row: Partial<typeof SUMMARY_ROW>; available: boolean }> = [
+  { name: 'corp member, no openId anywhere', row: {}, available: false },
+  { name: 'corp member who scanned in (linked openId only)', row: { linked_identity_open_id: 'open-linked' }, available: true },
+  { name: 'corp member with own openId', row: { open_id: 'open-own' }, available: true },
+  { name: 'non-corp member, no openId', row: { corp_id: null }, available: true },
+]
+
+function selectsLinkedOpenIdThroughSharedSubquery(sql: string): boolean {
+  return sql.includes('AS linked_identity_open_id')
+    && sql.includes('identity.provider = a.provider')
+    && sql.includes('identity.corp_id = a.corp_id')
+    && sql.includes('identity.provider_union_id = a.union_id')
+    && sql.includes('COUNT(DISTINCT identity.provider_open_id) = 1')
+}
+
+describe('page verdict — every source the page reads computes grantOpenIdAvailable with the shared predicate + subquery', () => {
   beforeEach(() => {
     pgMocks.query.mockReset()
     pgMocks.transaction.mockReset()
   })
 
-  const VERDICT_CASES: Array<{ name: string; row: Partial<typeof SUMMARY_ROW>; available: boolean; missing: boolean }> = [
-    { name: 'corp member, no openId anywhere', row: {}, available: false, missing: true },
-    { name: 'corp member who scanned in (linked openId only)', row: { linked_identity_open_id: 'open-linked' }, available: true, missing: false },
-    { name: 'corp member with own openId', row: { open_id: 'open-own' }, available: true, missing: false },
-    { name: 'non-corp member, no openId', row: { corp_id: null }, available: true, missing: true },
-  ]
+  for (const source of VERDICT_SOURCES) {
+    for (const testCase of VERDICT_CASES) {
+      it(`${source.name}: ${testCase.name} → grantOpenIdAvailable=${testCase.available}${source.review ? `, missingOpenId=${!testCase.available}` : ''}`, async () => {
+        const row: Record<string, unknown> = {
+          ...SUMMARY_ROW,
+          ...testCase.row,
+          ...(source.review ? { review_kind: 'inactive_linked', review_reason: 'x', missing_union_id: false } : {}),
+        }
+        const rowSqls: string[] = []
+        pgMocks.query.mockImplementation(async (sql: string) => {
+          const statement = String(sql)
+          const other = source.otherRows?.(statement)
+          if (other) return { rows: other }
+          if (source.rowsSqlMarker.test(statement)) {
+            rowSqls.push(statement)
+            // a real database only returns the column the statement selects
+            const returned = { ...row }
+            if (!selectsLinkedOpenIdThroughSharedSubquery(statement)) delete returned.linked_identity_open_id
+            return { rows: [returned] }
+          }
+          return { rows: [] }
+        })
 
-  for (const testCase of VERDICT_CASES) {
-    it(`account summary: ${testCase.name} → grantOpenIdAvailable=${testCase.available} (agrees with the assertion)`, async () => {
-      const row = { ...SUMMARY_ROW, ...testCase.row }
-      pgMocks.query.mockResolvedValueOnce({ rows: [row] })
-
-      const summary = await getDirectoryAccountSummary('account-1')
-      expect(summary?.grantOpenIdAvailable).toBe(testCase.available)
-      // the page verdict and the server-side assertion can never disagree
-      expect(assertThrows(row, true)).toBe(!testCase.available)
-      expectLinkedOpenIdSubqueryOnAlias(String(pgMocks.query.mock.calls[0]?.[0]), 'a')
-    })
-
-    it(`review item: ${testCase.name} → missingOpenId=${testCase.missing}, account.grantOpenIdAvailable=${testCase.available}`, async () => {
-      const row = {
-        ...SUMMARY_ROW,
-        ...testCase.row,
-        review_kind: 'inactive_linked',
-        review_reason: 'x',
-        missing_union_id: false,
-      }
-      pgMocks.query
-        .mockResolvedValueOnce({ rows: [{ total: 1 }] })
-        .mockResolvedValueOnce({ rows: [row] })
-        .mockResolvedValue({ rows: [] })
-
-      const result = await listDirectoryReviewItems('dir-1', { limit: 10, offset: 0 })
-      expect(result.items[0]?.flags.missingOpenId).toBe(testCase.missing)
-      expect(result.items[0]?.account.grantOpenIdAvailable).toBe(testCase.available)
-      const itemsSql = pgMocks.query.mock.calls.map((call) => String(call[0])).find((sql) => sql.includes('review_kind'))
-      expectLinkedOpenIdSubqueryOnAlias(String(itemsSql), 'a')
-      expect(itemsSql).not.toContain('AS missing_open_id')
-    })
+        const verdict = await source.run()
+        expect(rowSqls, 'expected exactly one account-row statement').toHaveLength(1)
+        expect(selectsLinkedOpenIdThroughSharedSubquery(rowSqls[0]!)).toBe(true)
+        expect(verdict?.grantOpenIdAvailable).toBe(testCase.available)
+        // the page verdict and the server-side bind/admit assertion can never disagree
+        expect(assertThrows(row as GrantCase['account'], true)).toBe(!testCase.available)
+        if (source.review) {
+          // the "缺 openId" chip is exactly the inverse of the verdict
+          expect(verdict?.missingOpenId).toBe(!testCase.available)
+          expect(rowSqls[0]).not.toContain('AS missing_open_id')
+        }
+      })
+    }
   }
 })
-
-function expectLinkedOpenIdSubqueryOnAlias(sql: string, alias: string): void {
-  expect(sql).toContain('AS linked_identity_open_id')
-  expect(sql).toContain(`identity.provider = ${alias}.provider`)
-  expect(sql).toContain(`identity.corp_id = ${alias}.corp_id`)
-  expect(sql).toContain(`identity.provider_union_id = ${alias}.union_id`)
-  expect(sql).toContain('COUNT(DISTINCT identity.provider_open_id) = 1')
-}

@@ -1207,10 +1207,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__status directory-admin__status--error">
-                该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，当前无法同时开通钉钉登录。
+                暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐），当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__hint">
-                修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）。
+                修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="reviewProcessingAccountId === item.account.id" @click="void refreshSingleReviewItem(item.account.id)">
@@ -1721,10 +1721,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__status directory-admin__status--error">
-                该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，当前无法同时开通钉钉登录。
+                暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐），当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__hint">
-                修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）。
+                修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="bindingAccountId === account.id" @click="void refreshSingleAccount(account.id)">
@@ -4060,7 +4060,7 @@ function onGrantToggleChange(account: DirectoryAccount, event: Event) {
   const target = event.target
   if (!canEnableDingTalkGrant(account)) {
     updateGrantToggle(account.id, false)
-    setStatus(`目录成员 ${account.name} 还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉登录；请让他先扫码登录一次，再刷新当前成员并开通（或到用户管理开通）`, 'error')
+    setStatus(`目录成员 ${account.name} 暂时拿不到 openId，暂不能开通钉钉登录；请先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）`, 'error')
     return
   }
   updateGrantToggle(account.id, target instanceof HTMLInputElement ? target.checked : true)

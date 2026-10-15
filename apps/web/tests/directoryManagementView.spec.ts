@@ -1044,8 +1044,8 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).toContain('该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId')
-    expect(container?.textContent).toContain('修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）')
+    expect(container?.textContent).toContain('暂时拿不到该成员的 openId（成员完成绑定或激活后用钉钉扫码登录一次才会补齐）')
+    expect(container?.textContent).toContain('修复建议：先不勾选开通，完成绑定或激活 → 让成员用钉钉扫码登录一次 → 刷新当前成员后再开通（或到用户管理开通）。')
     expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
@@ -1101,7 +1101,7 @@ describe('DirectoryManagementView', () => {
     await flushUi()
 
     const accountsSection = findAccountsSection(container!)
-    expect(accountsSection.textContent).not.toContain('暂时拿不到 openId')
+    expect(accountsSection.textContent).not.toContain('暂时拿不到该成员的 openId')
     const grantInput = Array.from(accountsSection.querySelectorAll('label.directory-admin__toggle'))
       .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
       ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
@@ -1146,7 +1146,7 @@ describe('DirectoryManagementView', () => {
       .find((label) => label.textContent?.includes('绑定后同时开通钉钉登录'))
       ?.querySelector('input[type="checkbox"]') as HTMLInputElement | null
     expect(grantInput?.disabled).toBe(true)
-    expect(accountsSection.textContent).toContain('暂时拿不到 openId')
+    expect(accountsSection.textContent).toContain('暂时拿不到该成员的 openId')
   })
 
   it('binds an openId-missing account without enabling DingTalk grant', async () => {

@@ -81,7 +81,7 @@ const DEFAULT_PAGE_SIZE = 50
 const DEFAULT_ADMISSION_MODE = 'manual_only'
 const DEFAULT_MEMBER_GROUP_SYNC_MODE = 'disabled'
 const DINGTALK_OPEN_ID_REQUIRED_FOR_GRANT_ERROR =
-  'Directory account is missing DingTalk openId: this member has not signed in to this system with DingTalk yet, so no openId is available. Ask them to scan in with DingTalk once, then refresh this member and enable DingTalk login (or enable it from User Management)'
+  'Directory account is missing DingTalk openId, so DingTalk login cannot be enabled yet: bind (or admit) the member without the DingTalk grant first, have them sign in with DingTalk once, then refresh this member and enable DingTalk login (or enable it from User Management)'
 
 type JsonRecord = Record<string, unknown>
 export type DirectoryAdmissionMode = 'manual_only' | 'auto_for_scoped_departments'
@@ -2021,8 +2021,9 @@ function summarizeReviewItem(
       : null,
     flags: {
       missingUnionId: Boolean(row.missing_union_id),
-      // the same openId resolution the grant predicate uses (own openId, else the linked login openId)
-      missingOpenId: !resolveDirectoryAccountGrantOpenId(row),
+      // exactly !grantOpenIdAvailable: the "缺 openId" chip means "the grant is blocked for lack of
+      // an openId" (a non-corp member keys on unionId and is never flagged)
+      missingOpenId: !canDirectoryAccountEnableDingTalkGrant(row),
     },
     actionable: {
       canBatchUnbind: kind === 'inactive_linked' && Boolean(row.local_user_id),

@@ -194,9 +194,13 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
     // for a corp member without an openId; activation used to write the grant row unconditionally
     // (see the grant INSERT below), so a pending corp member could be granted here without one.
     // Same predicate and same linked-openId SQL as the directory page (one shared module).
-    // SSO mode is not re-checked: its source match already requires the directory account's
-    // openId to EQUAL the openId of the DingTalk login doing the activation — strictly stronger.
-    if (input.enableDingTalkGrant === true && input.mode !== 'sso') {
+    // EVERY mode, SSO included: the admin route also accepts mode 'sso' and forwards no
+    // expectedDingTalkIdentity, and without one the SSO source match does not pin any openId.
+    // The DingTalk-callback SSO activation is unaffected: its source row's openId already equals
+    // the scanning login's openId, so the predicate holds.
+    // Scope: the source(s) this activation can use — active, linked, DingTalk; narrowed to the
+    // named account when the caller passed one (a deactivated old link does not block).
+    if (input.enableDingTalkGrant === true) {
       const linkedAccounts = await client.query(
         `SELECT account.corp_id,
                 account.open_id,
@@ -205,8 +209,10 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
            JOIN directory_accounts account ON account.id = link.directory_account_id
           WHERE link.local_user_id = $1
             AND link.link_status = 'linked'
-            AND account.provider = 'dingtalk'`,
-        [userId],
+            AND account.provider = 'dingtalk'
+            AND account.is_active = TRUE
+            AND ($2::uuid IS NULL OR account.id = $2::uuid)`,
+        [userId, input.directoryAccountId?.trim() || null],
       )
       const rows = linkedAccounts.rows as DirectoryAccountGrantOpenIdSource[]
       if (rows.some((row) => !canDirectoryAccountEnableDingTalkGrant(row))) {
