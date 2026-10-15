@@ -1339,6 +1339,68 @@ export async function acquireAttendanceCalculationRolloutLock(
  * (non-crash) return path immediate, so a pooled connection is never returned to the pool still
  * holding this lock for an unrelated future checkout.
  */
+/**
+ * The session-level rollout lock did not come back, or the connection can no longer prove it.
+ * Callers destroy the pooled connection instead of returning it.
+ */
+export class AttendanceRolloutConnectionUncertainError extends Error {
+  readonly code = 'ATTENDANCE_ROLLOUT_CONNECTION_UNCERTAIN'
+  readonly httpStatus = 503
+
+  constructor() {
+    super('ATTENDANCE_ROLLOUT_CONNECTION_UNCERTAIN')
+    this.name = 'AttendanceRolloutConnectionUncertainError'
+  }
+}
+
+/**
+ * Session-level class-`00` rollout lock in shared or exclusive mode. Same key as
+ * `acquireAttendanceCalculationRolloutLock`. The wait finishes before the caller opens a
+ * transaction, so a SERIALIZABLE snapshot is not fixed at the start of the wait.
+ * The 5s helper budget maps to `ATTENDANCE_CALCULATION_ROLLOUT_BUSY` (55P03).
+ */
+export async function acquireAttendanceCalculationRolloutLockSessionV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+  mode: 'shared' | 'exclusive',
+): Promise<void> {
+  if (mode !== 'shared' && mode !== 'exclusive') fail('W4C0_LOCK_MODE_INVALID')
+  await assertConnectionIsIdleV1(connection)
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  const acquisitionSql = mode === 'shared'
+    ? 'SELECT pg_advisory_lock_shared($1::bigint)'
+    : 'SELECT pg_advisory_lock($1::bigint)'
+  await connection.query("SELECT set_config('lock_timeout', $1, false)", [
+    `${W4_ADVISORY_HELPER_WAIT_MS}ms`,
+  ])
+  try {
+    await connection.query(acquisitionSql, [key.toString()])
+  } catch (error) {
+    if (isLockNotAvailable(error)) throw busyError('rollout')
+    throw error
+  } finally {
+    await connection.query('RESET lock_timeout').catch(() => undefined)
+  }
+}
+
+/**
+ * Release the one session lock acquired above. `false` means this connection did not hold it.
+ * A thrown query leaves the connection uncertain — the caller must not return it to the pool.
+ */
+export async function releaseAttendanceCalculationRolloutLockSessionV1(
+  connection: AttendanceW4TransactionClientV1,
+  org: CanonicalAttendanceRolloutOrgKeyV1,
+  mode: 'shared' | 'exclusive',
+): Promise<boolean> {
+  if (mode !== 'shared' && mode !== 'exclusive') fail('W4C0_LOCK_MODE_INVALID')
+  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
+  const releaseSql = mode === 'shared'
+    ? 'SELECT pg_advisory_unlock_shared($1::bigint) AS released'
+    : 'SELECT pg_advisory_unlock($1::bigint) AS released'
+  const result = await connection.query(releaseSql, [key.toString()])
+  return (result.rows[0] as { released?: unknown } | undefined)?.released === true
+}
+
 export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
   connection: AttendanceW4TransactionClientV1,
   org: CanonicalAttendanceRolloutOrgKeyV1,
@@ -1349,28 +1411,8 @@ export async function acquireAttendanceCalculationRolloutLockSessionExclusiveV1(
   // silently ran the rest of the transition inside ITS OWN already-fixed snapshot (PostgreSQL
   // does not error on a nested `BEGIN`, it only WARNs and no-ops), reintroducing the exact P1-2
   // defect this function exists to close, with no red test anywhere. Enforced now, first
-  // statement, before any lock side effect.
-  await assertConnectionIsIdleV1(connection)
-  const key = buildAttendanceCalculationRolloutAdvisoryKey(org)
-  // `SET lock_timeout = $1` is not valid SQL (SET does not accept a bind parameter);
-  // `set_config(..., false)` is a normal function call and does, and `false` (not the
-  // transaction-local `true` used everywhere else in this file) is required here because there
-  // is no open transaction yet for a local setting to attach to.
-  await connection.query("SELECT set_config('lock_timeout', $1, false)", [
-    `${W4_ADVISORY_HELPER_WAIT_MS}ms`,
-  ])
-  try {
-    await connection.query('SELECT pg_advisory_lock($1::bigint)', [key.toString()])
-  } catch (error) {
-    if (isLockNotAvailable(error)) throw busyError('rollout')
-    throw error
-  } finally {
-    // `RESET lock_timeout` (not `set_config('lock_timeout', '0', false)`): hardcoding '0' would
-    // permanently stomp any non-default `postgresql.conf`/`ALTER ROLE ... SET lock_timeout` value
-    // for the rest of this pooled connection's session, whereas RESET restores whatever the
-    // session's actual configured default was before this function overrode it.
-    await connection.query('RESET lock_timeout').catch(() => undefined)
-  }
+  // statement, before any lock side effect. Shared mode uses the same idle proof.
+  await acquireAttendanceCalculationRolloutLockSessionV1(connection, org, 'exclusive')
 }
 
 /**

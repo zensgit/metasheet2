@@ -201,9 +201,14 @@ import type { CancelRoundCancellationOutcomeV1 } from '../core/attendance-cancel
 import type { AttendanceRequestOperationBoundaryResultV1 } from '../attendance/w4c3b-request-operation-boundary'
 import {
   acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceCalculationRolloutLockSessionV1,
+  AttendanceRolloutConnectionUncertainError,
   parseCanonicalAttendanceRolloutOrgKeyV1,
+  releaseAttendanceCalculationRolloutLockSessionV1,
   type AttendanceW4TransactionClientV1,
 } from '../attendance/w4c0-identity'
+import { readAttendanceChangePolicyV1 } from '../attendance/approval-change-policy'
+import { closePendingApprovalRoundV1 } from '../attendance/approval-change-round-close'
 import { isRetryableSqlState } from '../attendance/w4c0-operation-registry'
 import { getApprovalMetricsService, type ApprovalMetricsService, type ApprovalTerminalState } from './ApprovalMetricsService'
 import {
@@ -9029,13 +9034,49 @@ export class ApprovalProductService {
     const createdTaskEvents: ApprovalTaskCreatedTaskSnapshot[] = []
     let client: ApprovalDbClient | null = null
     let initialAssignmentCount = 0
+    let createSessionOrg: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+    let destroyCreateClient = false
+    let lockedAttendanceOrgId: string | null = null
     try {
       client = await pool.connect()
-      await client.query('BEGIN')
+      const attendanceCandidate = await client.query<{ org_id: string | null }>(
+        `SELECT org_id FROM attendance_requests WHERE approval_instance_id = $1 LIMIT 1`,
+        [documentId],
+      )
+      const candidateOrgId = attendanceCandidate.rows[0]?.org_id ?? null
+      let candidateKey: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+      if (typeof candidateOrgId === 'string') {
+        try {
+          candidateKey = parseCanonicalAttendanceRolloutOrgKeyV1(candidateOrgId)
+        } catch {
+          candidateKey = null
+        }
+      }
+      if (candidateKey) {
+        const rolloutClient = client as unknown as AttendanceW4TransactionClientV1
+        await acquireAttendanceCalculationRolloutLockSessionV1(rolloutClient, candidateKey, 'shared')
+        createSessionOrg = candidateKey
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
+        await acquireAttendanceCalculationRolloutLock(rolloutClient, candidateKey, 'shared')
+        let released = false
+        try {
+          released = await releaseAttendanceCalculationRolloutLockSessionV1(rolloutClient, candidateKey, 'shared')
+        } catch {
+          destroyCreateClient = true
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
+        createSessionOrg = null
+        if (released !== true) {
+          destroyCreateClient = true
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
+        lockedAttendanceOrgId = candidateOrgId
+      } else {
+        await client.query('BEGIN')
+      }
 
-      // §9-4 order for this path: no rollout/advisory lock is taken here at all (creation never
-      // touches W4 attendance calculation) — the only row this transaction must serialize against
-      // is the original document instance itself, locked FIRST and before any INSERT (Q-A).
+      // The org rollout lock, when this document is an attendance request in a canonical org,
+      // is held before the original instance row. Non-attendance documents keep a plain BEGIN.
       const originalResult = await client.query<ApprovalInstanceRow & { org_id: string | null }>(
         `SELECT * FROM approval_instances WHERE id = $1 FOR UPDATE`,
         [documentId],
@@ -9052,6 +9093,67 @@ export class ApprovalProductService {
           409,
           'CANCEL_ROUND_DOCUMENT_NOT_APPROVED',
         )
+      }
+
+      if (lockedAttendanceOrgId) {
+        const freshAttendance = await client.query<{ org_id: string | null; work_date: string | null }>(
+          `SELECT org_id, work_date::text AS work_date
+             FROM attendance_requests
+            WHERE approval_instance_id = $1
+            LIMIT 1`,
+          [documentId],
+        )
+        const fresh = freshAttendance.rows[0]
+        if (!fresh || fresh.org_id !== lockedAttendanceOrgId) {
+          throw new ServiceError(
+            'Cancel-round rollout lock scope changed before the document lock',
+            409,
+            'CANCEL_ROUND_ROLLOUT_LOCK_SCOPE_CHANGED',
+          )
+        }
+        const policy = await readAttendanceChangePolicyV1(
+          async (sql, params) => client.query(sql, [...params]),
+          lockedAttendanceOrgId,
+        )
+        if (policy.status === 'fault') {
+          throw new ServiceError(
+            'Attendance change policy could not be read',
+            503,
+            'ATTENDANCE_CHANGE_POLICY_UNAVAILABLE',
+          )
+        }
+        if (policy.status === 'off') {
+          throw new ServiceError(
+            '本类单据未开启通过后撤销',
+            409,
+            'ATTENDANCE_CHANGE_POLICY_OFF',
+          )
+        }
+        const workDate = fresh.work_date
+        if (typeof workDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(workDate)) {
+          const settled = await client.query(
+            `SELECT 1
+               FROM attendance_payroll_cycles c
+              WHERE c.org_id = $1
+                AND $2::date BETWEEN c.start_date AND c.end_date
+                AND (
+                  c.status IN ('closed', 'archived')
+                  OR EXISTS (
+                    SELECT 1 FROM attendance_payroll_cycle_settlements s
+                     WHERE s.cycle_id = c.id AND s.org_id = c.org_id
+                  )
+                )
+              LIMIT 1`,
+            [lockedAttendanceOrgId, workDate],
+          )
+          if (settled.rows.length > 0) {
+            throw new ServiceError(
+              '该日所在的考勤周期已结账，不能撤销或修改',
+              409,
+              'ATTENDANCE_PERIOD_SETTLED',
+            )
+          }
+        }
       }
 
       // WI-16 — see method doc. `requester_snapshot` is `NOT NULL DEFAULT '{}'::jsonb`, so a
@@ -9765,9 +9867,26 @@ export class ApprovalProductService {
           'CANCEL_ROUND_ALREADY_PENDING',
         )
       }
+      if (error instanceof AttendanceRolloutConnectionUncertainError) destroyCreateClient = true
       throw error
     } finally {
-      client?.release()
+      if (createSessionOrg && client) {
+        try {
+          const released = await releaseAttendanceCalculationRolloutLockSessionV1(
+            client as unknown as AttendanceW4TransactionClientV1,
+            createSessionOrg,
+            'shared',
+          )
+          if (released !== true) destroyCreateClient = true
+        } catch {
+          destroyCreateClient = true
+        }
+      }
+      if (destroyCreateClient && client) {
+        ;(client.release as (error?: Error) => void)(new AttendanceRolloutConnectionUncertainError())
+      } else {
+        client?.release()
+      }
     }
 
     await this.projectApprovalOnCreate(instanceId)
@@ -10084,21 +10203,13 @@ export class ApprovalProductService {
     // 轮次 `expired`/`blocked` + `ended_at` (I3 「终结即释放」: the partial unique index is
     // `WHERE outcome = 'pending'`, so this write is what frees the document for a next round) and
     // §4's decision-time snapshot, written 同形 on this branch too.
-    const roundResult = await client.query(
-      `UPDATE approval_rounds
-          SET outcome = $2,
-              ended_at = now(),
-              block_reason = $3,
-              policy_snapshot_at_decision = $4
-        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
-      [
-        engineInstanceId,
-        evaluation.decision,
-        evaluation.decision === 'blocked' ? reason : null,
-        params.policySnapshotAtDecision,
-      ],
-    )
-    if (roundResult.rowCount !== 1) {
+    const closedRound = await closePendingApprovalRoundV1(client, {
+      engineInstanceId,
+      outcome: evaluation.decision,
+      blockReason: evaluation.decision === 'blocked' ? reason : null,
+      policySnapshotAtDecision: params.policySnapshotAtDecision,
+    })
+    if (!closedRound) {
       throw new ServiceError(
         'Cancel-round instance has no single matching pending round to close',
         409,
@@ -10275,15 +10386,13 @@ export class ApprovalProductService {
 
     // 轮次 `applied` (lock §3 C-2 step ⑤) + I3 「终结即释放」 + §4's decision-time snapshot, written
     // 同形 with the C-3 closure's.
-    const roundResult = await client.query(
-      `UPDATE approval_rounds
-          SET outcome = 'applied',
-              ended_at = now(),
-              policy_snapshot_at_decision = $2
-        WHERE engine_instance_id = $1 AND outcome = 'pending'`,
-      [engineInstanceId, params.policySnapshotAtDecision],
-    )
-    if (roundResult.rowCount !== 1) {
+    const closedRound = await closePendingApprovalRoundV1(client, {
+      engineInstanceId,
+      outcome: 'applied',
+      blockReason: null,
+      policySnapshotAtDecision: params.policySnapshotAtDecision,
+    })
+    if (!closedRound) {
       throw new ServiceError(
         'Cancel-round instance has no single matching pending round to redeem',
         409,
@@ -11675,6 +11784,8 @@ export class ApprovalProductService {
     // lock, so only it can produce a serialization failure / advisory deadlock that did not exist
     // before. Every other dispatch keeps its previous error behaviour byte for byte.
     let rolloutLock: CancelRoundRolloutLockRequirementV1 = { kind: 'none' }
+    let cancelRoundSessionOrg: ReturnType<typeof parseCanonicalAttendanceRolloutOrgKeyV1> | null = null
+    let destroyDispatchClient = false
     // lock:86's 呈现 payload. Hoisted for the SAME structural reason as `rolloutLock`: it is
     // produced deep inside the cancel-round branch of the `try` and consumed by the method's
     // bottom `return`, which sits AFTER the `finally`. Stays `null` for every dispatch that is not
@@ -11700,14 +11811,28 @@ export class ApprovalProductService {
       rolloutLock = await resolveCancelRoundRolloutLockRequirementV1(client, id, request.action)
 
       if (rolloutLock.kind === 'required') {
+        const rolloutOrg = parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId)
+        const rolloutClient = client as unknown as AttendanceW4TransactionClientV1
+        // Wait on the session lock before BEGIN so the SERIALIZABLE snapshot is not
+        // the one taken at the start of an in-transaction lock wait.
+        await acquireAttendanceCalculationRolloutLockSessionV1(rolloutClient, rolloutOrg, 'shared')
+        cancelRoundSessionOrg = rolloutOrg
         await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE')
         // FIRST lock of the transaction — before the instance row lock below, which is the whole
         // point. Reuses the production acquirer (one key derivation, no local hash).
-        await acquireAttendanceCalculationRolloutLock(
-          client as unknown as AttendanceW4TransactionClientV1,
-          parseCanonicalAttendanceRolloutOrgKeyV1(rolloutLock.orgId),
-          'shared',
-        )
+        await acquireAttendanceCalculationRolloutLock(rolloutClient, rolloutOrg, 'shared')
+        let released = false
+        try {
+          released = await releaseAttendanceCalculationRolloutLockSessionV1(rolloutClient, rolloutOrg, 'shared')
+        } catch {
+          destroyDispatchClient = true
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
+        cancelRoundSessionOrg = null
+        if (released !== true) {
+          destroyDispatchClient = true
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
         await acquireBusinessTripRequestPrefixV1(client as unknown as AttendanceW4TransactionClientV1, {
           orgId: rolloutLock.orgId, requestId: rolloutLock.requestId,
         })
@@ -13812,6 +13937,7 @@ export class ApprovalProductService {
       // is not a repo-wide retry-semantics change smuggled in under a cancel-round commit.
       // `isRetryableSqlState` is the repo's single predicate for the pair (exported by
       // w4c0-operation-registry precisely so two layers cannot drift).
+      if (error instanceof AttendanceRolloutConnectionUncertainError) destroyDispatchClient = true
       if (rolloutLock.kind === 'required' && isRetryableSqlState(error)) {
         throw new ServiceError(
           'Approval action hit transient transaction contention; retry the action',
@@ -13821,7 +13947,23 @@ export class ApprovalProductService {
       }
       throw error
     } finally {
-      client?.release()
+      if (cancelRoundSessionOrg && client) {
+        try {
+          const released = await releaseAttendanceCalculationRolloutLockSessionV1(
+            client as unknown as AttendanceW4TransactionClientV1,
+            cancelRoundSessionOrg,
+            'shared',
+          )
+          if (released !== true) destroyDispatchClient = true
+        } catch {
+          destroyDispatchClient = true
+        }
+      }
+      if (destroyDispatchClient && client) {
+        ;(client.release as (error?: Error) => void)(new AttendanceRolloutConnectionUncertainError())
+      } else {
+        client?.release()
+      }
     }
 
     const approval = await this.getApproval(id, actor.userId, actor.roles)

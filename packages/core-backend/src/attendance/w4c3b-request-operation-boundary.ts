@@ -17,6 +17,7 @@ import { acquireBusinessTripRequestPrefixV1 } from './attendance-business-trip-l
 import type { AttendanceW4TransactionClientV1 } from './w4c0-identity'
 import {
   acquireAttendanceCalculationRolloutLock,
+  AttendanceRolloutConnectionUncertainError,
   buildAttendanceCalculationRolloutAdvisoryKey,
   parseCanonicalAttendanceRolloutOrgKeyV1,
   resolveSegmentCalculationPosture,
@@ -290,7 +291,8 @@ export type AttendanceRequestOperationAdaptersV1 = Readonly<{
 
 export interface AttendanceRequestOperationBoundaryConnectionV1 {
   readonly client: AttendanceW4TransactionClientV1
-  release(): void
+  /** Pass an error to drop the connection instead of returning it to the pool. */
+  release(error?: Error): void
 }
 
 export interface AttendanceRequestOperationBoundaryInputV1 {
@@ -680,9 +682,14 @@ export function createAttendanceRequestOperationBoundaryV1(
     async execute(rawInput) {
       const input = normalizeInput(rawInput)
       const connection = await deps.acquireConnection()
+      const rolloutOrgId = canonicalRolloutOrgCandidateV1(input.routeInput)
+      let uncertain = false
       try {
-        const result = await runAttendanceResultOperationTransactionV1(connection.client, async (trx) =>
-          runRequestOperationProtocolV1(trx, deps.adapters, input))
+        const result = await runAttendanceResultOperationTransactionV1(
+          connection.client,
+          async (trx) => runRequestOperationProtocolV1(trx, deps.adapters, input, undefined, rolloutOrgId),
+          rolloutOrgId ? { rolloutSnapshotLock: { orgId: rolloutOrgId, mode: 'shared' } } : undefined,
+        )
         // Unreachable by construction: without `mode.externalTransaction` the protocol THROWS the
         // adapter's own HTTP error on a business refusal rather than returning one, which is what
         // keeps this entry's observable behaviour byte-identical to what shipped. Asserted anyway,
@@ -690,8 +697,11 @@ export function createAttendanceRequestOperationBoundaryV1(
         // hand a refusal to an HTTP caller as if it were a result.
         if (result.kind === 'business_refused') fail('W4C3B_REQUEST_BUSINESS_REFUSAL_UNHANDLED', 500)
         return result
+      } catch (error) {
+        if (error instanceof AttendanceRolloutConnectionUncertainError) uncertain = true
+        throw error
       } finally {
-        connection.release()
+        connection.release(uncertain ? new AttendanceRolloutConnectionUncertainError() : undefined)
       }
     },
 
@@ -776,11 +786,24 @@ export async function runExternalTransactionAttemptInSavepointV1(
  * it never changes which steps run, in which order, or with what inputs. Every step after it is
  * reached identically by both entries.
  */
+function canonicalRolloutOrgCandidateV1(routeInput: unknown): string | null {
+  if (typeof routeInput !== 'object' || routeInput === null || !('orgId' in routeInput)) return null
+  const orgId = (routeInput as { orgId?: unknown }).orgId
+  if (typeof orgId !== 'string' || orgId.length === 0) return null
+  try {
+    parseCanonicalAttendanceRolloutOrgKeyV1(orgId)
+    return orgId
+  } catch {
+    return null
+  }
+}
+
 async function runRequestOperationProtocolV1(
   trx: AttendanceW4TransactionClientV1,
   adapters: AttendanceRequestOperationAdaptersV1,
   input: AttendanceRequestOperationBoundaryInputV1,
   mode?: { readonly externalTransaction: true },
+  rolloutOrgId: string | null = null,
 ): Promise<AttendanceRequestOperationExternalTransactionResultV1> {
         {
           const shapedTrx = pluginTrx(trx)
@@ -796,6 +819,11 @@ async function runRequestOperationProtocolV1(
             cancelRoundAuthorized: mode?.externalTransaction === true,
           })
           const identityPrepared = await adapter.prepareIdentity(shapedTrx,input.routeInput,operation)
+          if (rolloutOrgId !== null && identityPrepared.orgId !== rolloutOrgId) {
+            // The pre-transaction org is only a lock candidate. A different org must not
+            // continue under that lock or take a second org lock in this snapshot.
+            fail('W4C3B_REQUEST_ROLLOUT_ORG_MISMATCH', 409)
+          }
 
           const takeTripPrefix = () => acquireBusinessTripRequestPrefixV1(trx, {
             orgId: identityPrepared.orgId,

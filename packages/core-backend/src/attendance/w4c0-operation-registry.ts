@@ -40,6 +40,9 @@ import type {
 import { canonicalSheetFenceKey } from '../multitable/canonical-sheet-fence'
 import {
   acquireAttendanceCalculationRolloutLock,
+  acquireAttendanceCalculationRolloutLockSessionV1,
+  AttendanceRolloutConnectionUncertainError,
+  releaseAttendanceCalculationRolloutLockSessionV1,
   acquireAttendanceResultOperationLocks,
   assertConnectionIsIdleV1,
   createVerifiedAttendanceOperationIdentityV1,
@@ -1050,11 +1053,24 @@ async function releaseCleaningSessionFences(
 export async function runAttendanceResultOperationTransactionV1<T>(
   connection: AttendanceW4TransactionClientV1,
   body: (trx: AttendanceW4TransactionClientV1) => Promise<T>,
-  options?: { readonly attendanceCleaningAuthority: true; readonly attendanceCleaningSheetIds: readonly string[] },
+  options?:
+    | { readonly attendanceCleaningAuthority: true; readonly attendanceCleaningSheetIds: readonly string[] }
+    | { readonly rolloutSnapshotLock: { readonly orgId: string; readonly mode: 'shared' | 'exclusive' } },
 ): Promise<T> {
-  if (options !== undefined && (options.attendanceCleaningAuthority !== true
-    || !Array.isArray(options.attendanceCleaningSheetIds) || options.attendanceCleaningSheetIds.length < 1
-    || options.attendanceCleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  const rolloutSnapshotLock = options && 'rolloutSnapshotLock' in options ? options.rolloutSnapshotLock : undefined
+  const cleaningSheetIds = options && 'attendanceCleaningSheetIds' in options
+    ? options.attendanceCleaningSheetIds
+    : undefined
+  if (cleaningSheetIds !== undefined && (options === undefined || !('attendanceCleaningAuthority' in options)
+    || options.attendanceCleaningAuthority !== true
+    || !Array.isArray(cleaningSheetIds) || cleaningSheetIds.length < 1
+    || cleaningSheetIds.length > 2)) fail('W4C0_ATTENDANCE_CLEANING_REPLAY_INVALID')
+  if (rolloutSnapshotLock !== undefined && (rolloutSnapshotLock.mode !== 'shared' && rolloutSnapshotLock.mode !== 'exclusive')) {
+    fail('W4C0_LOCK_MODE_INVALID')
+  }
+  const rolloutOrg = rolloutSnapshotLock
+    ? parseCanonicalAttendanceRolloutOrgKeyV1(rolloutSnapshotLock.orgId)
+    : null
   // Gate E (#4844) first batch: `connection` is CALLER-supplied. PostgreSQL only WARNs on a
   // nested `BEGIN` (never errors) — on a dirty caller connection this function's own `COMMIT`
   // below would durably publish the caller's uncommitted writes, strictly worse than a merely
@@ -1069,16 +1085,38 @@ export async function runAttendanceResultOperationTransactionV1<T>(
   // W4_TRANSACTION_MAX_RETRIES retries => up to (1 + retries) attempts.
   for (;;) {
     const held: string[] = []
-    const sessionFenced = options?.attendanceCleaningSheetIds !== undefined
+    const sessionFenced = cleaningSheetIds !== undefined
+    let rolloutSessionHeld = false
     try {
-      if (sessionFenced) await acquireCleaningSessionFences(connection, options.attendanceCleaningSheetIds!, held)
+      if (sessionFenced && cleaningSheetIds) await acquireCleaningSessionFences(connection, cleaningSheetIds, held)
+      if (rolloutOrg && rolloutSnapshotLock) {
+        await acquireAttendanceCalculationRolloutLockSessionV1(connection, rolloutOrg, rolloutSnapshotLock.mode)
+        rolloutSessionHeld = true
+      }
       try {
         await connection.query('BEGIN ISOLATION LEVEL SERIALIZABLE', [])
       } catch (error) {
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
         throw error
       }
-      if (options?.attendanceCleaningAuthority === true) {
+      if (rolloutOrg && rolloutSnapshotLock && rolloutSessionHeld) {
+        // The session lock is already held, so this transaction lock does not wait.
+        // Releasing the session lock only after the transaction lock is granted leaves no gap.
+        await acquireAttendanceCalculationRolloutLock(connection, rolloutOrg, rolloutSnapshotLock.mode)
+        let released = false
+        try {
+          released = await releaseAttendanceCalculationRolloutLockSessionV1(
+            connection,
+            rolloutOrg,
+            rolloutSnapshotLock.mode,
+          )
+        } catch {
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
+        rolloutSessionHeld = false
+        if (released !== true) throw new AttendanceRolloutConnectionUncertainError()
+      }
+      if (cleaningSheetIds !== undefined) {
         // LOCK is a utility statement: fence before even set_config's SELECT can
         // establish the SERIALIZABLE snapshot. Fixed relations only, no table input.
         // Deliberately table-wide and default-off; unrelated authority DML waits.
@@ -1113,9 +1151,25 @@ export async function runAttendanceResultOperationTransactionV1<T>(
       }
       return result
     } catch (error) {
+      if (error instanceof AttendanceRolloutConnectionUncertainError) throw error
       try { await connection.query('ROLLBACK', []) } catch {
+        if (rolloutSessionHeld) throw new AttendanceRolloutConnectionUncertainError()
         if (sessionFenced) throw new AttendanceCleaningConnectionUncertainError()
         if (error instanceof OnlinePunchClaimCollisionError) throw new OnlinePunchConnectionUncertainError()
+      }
+      if (rolloutSessionHeld && rolloutOrg && rolloutSnapshotLock) {
+        try {
+          const released = await releaseAttendanceCalculationRolloutLockSessionV1(
+            connection,
+            rolloutOrg,
+            rolloutSnapshotLock.mode,
+          )
+          rolloutSessionHeld = false
+          if (released !== true) throw new AttendanceRolloutConnectionUncertainError()
+        } catch (releaseError) {
+          if (releaseError instanceof AttendanceRolloutConnectionUncertainError) throw releaseError
+          throw new AttendanceRolloutConnectionUncertainError()
+        }
       }
       if (isRetryableSqlState(error) && attempt < W4_TRANSACTION_MAX_RETRIES) {
         attempt += 1

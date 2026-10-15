@@ -47,6 +47,10 @@ const { createAttendanceTimezoneReadContext, withTimezoneExportColumns } = requi
 const { createAttendanceTimezoneRuntime } = require('./lib/attendance-timezone-runtime.cjs')
 const { authorizeAttendanceTimezoneManage } = require('./lib/attendance-timezone-manage-authority.cjs')
 const { createBusinessTripService, getBusinessTripServerInstant } = require('./lib/attendance-business-trip.cjs')
+const {
+  assertAttendanceWorkDateOpen,
+  assertNoOpenRecomputeObligation,
+} = require('./lib/attendance-period-gate.cjs')
 const { lockAttendanceTimezoneOrg, AttendanceTimezonePolicyError } = require('./lib/attendance-timezone-policy-store.cjs')
 const { createBusinessTripRequestAdapter } = require('./lib/attendance-business-trip-request-adapter.cjs')
 const {
@@ -26339,6 +26343,7 @@ module.exports = {
     // (closed codes only; the raw caller value is never echoed). Returns true when handled.
     const W4_ERROR_NAMES = new Set([
       'AttendanceW4OperationError',
+      'AttendanceRolloutConnectionUncertainError',
       'OnlinePunchConnectionUncertainError',
       'AttendanceW4RegistryError',
       'AttendanceW4CommandError',
@@ -34718,6 +34723,7 @@ module.exports = {
       if (duplicateRequest) {
         throw new HttpError(409, 'DUPLICATE_REQUEST', 'Duplicate attendance request already exists for this date')
       }
+      await rejectSettledWorkDate(trx, route.orgId, draft.workDate)
       if (makeupPunchPolicy) {
         const enforcement = await enforceMakeupPunchPolicy(trx, {
           policy: makeupPunchPolicy,
@@ -34975,6 +34981,7 @@ module.exports = {
       if (dup.length > 0) {
         throw new HttpError(409, 'DUPLICATE_REQUEST', 'Outdoor punch already pending or approved for this day and event type')
       }
+      await rejectSettledWorkDate(trx, route.orgId, workDate)
       const { orgId: stampedOrgId } = await upsertAttendanceApprovalInstance(trx, approvalPayload)
       await replaceAttendanceApprovalAssignments(trx, approvalId, approvalAssignments)
       const rows = await trx.query(
@@ -36308,6 +36315,17 @@ module.exports = {
         await loadLatestRequestSnapshotToken(trx, route, requestRow, { forUpdate: true })
         const approvedTrip = requestRow.status === 'approved' && requestRow.request_type === 'business_trip'
         if (approvedTrip && operation.cancelRoundAuthorized !== true) businessTripService.fail('CANCEL_ROUND_REQUIRED',409)
+        const approvedNeedsRound = requestRow.status === 'approved' && (
+          requestRow.request_type === 'leave'
+          || requestRow.request_type === 'shift_swap'
+          || requestRow.request_type === 'schedule_dispatch'
+        )
+        if (approvedNeedsRound && operation.cancelRoundAuthorized !== true) {
+          throw new HttpError(409, 'CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED', '已通过的申请需通过撤销申请取消')
+        }
+        if ((approvedLeave || approvedTrip) && operation.cancelRoundAuthorized === true) {
+          await rejectSettledWorkDate(trx, requestRow.org_id ?? DEFAULT_ORG_ID, requestRow.work_date)
+        }
         if (requestRow.status !== 'pending' && !approvedLeave && !approvedTrip) {
           throw new HttpError(400, 'INVALID_STATUS', 'Request already resolved')
         }
@@ -39470,6 +39488,18 @@ module.exports = {
               requestType,
               subjectUserId: requestRow.user_id,
             })
+          }
+
+          if (action === 'approve' && isFinalApproval && (
+            requestType === 'leave'
+            || requestType === 'overtime'
+            || requestType === 'business_trip'
+            || requestType === 'missed_check_in'
+            || requestType === 'missed_check_out'
+            || requestType === 'time_correction'
+            || requestType === 'outdoor_punch'
+          )) {
+            await rejectSettledWorkDate(trx, orgId, requestRow.work_date)
           }
 
           // W2: final overtime approval must validate its creation-frozen anchor before any
@@ -46216,6 +46246,38 @@ module.exports = {
       })
     )
 
+    function isCanonicalPayrollOrg(orgId) {
+      return orgId === 'default'
+        || (typeof orgId === 'string' && /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(orgId))
+    }
+
+    function respondPayrollOrgRejected(res, orgId) {
+      if (isCanonicalPayrollOrg(orgId)) return false
+      res.status(409).json({
+        ok: false,
+        error: { code: 'ATTENDANCE_ROLLOUT_ORG_KEY_INVALID', message: '考勤周期结算需要规范的组织标识' },
+      })
+      return true
+    }
+
+    async function rejectSettledWorkDate(trx, orgId, workDate) {
+      try {
+        await assertAttendanceWorkDateOpen(trx, orgId, workDate)
+      } catch (error) {
+        if (error && (error.code === 'ATTENDANCE_PERIOD_SETTLED' || error.code === 'ATTENDANCE_PERIOD_SETTLED_UNAVAILABLE')) {
+          throw new HttpError(error.status, error.code, error.message)
+        }
+        throw error
+      }
+    }
+
+    async function withPayrollRolloutTransaction(orgId, work) {
+      if (typeof db.transactionWithRolloutLock !== 'function') {
+        throw new HttpError(503, 'ATTENDANCE_ROLLOUT_LOCK_UNAVAILABLE', '组织锁事务不可用')
+      }
+      return db.transactionWithRolloutLock(orgId, 'exclusive', work)
+    }
+
     context.api.http.addRoute(
       'POST',
       '/api/attendance/payroll-cycles',
@@ -46288,8 +46350,12 @@ module.exports = {
           metadata: parsed.data.metadata ?? {},
         }
 
+        if (respondPayrollOrgRejected(res, orgId)) return
         try {
-          const rows = await db.transaction(async (trx) => {
+          const rows = await withPayrollRolloutTransaction(orgId, async (trx) => {
+            if (payload.status === 'closed') {
+              await assertNoOpenRecomputeObligation(trx, orgId, payload.startDate, payload.endDate)
+            }
             const created = await trx.query(
               `INSERT INTO attendance_payroll_cycles
                (id, org_id, template_id, name, start_date, end_date, status, metadata)
@@ -46318,6 +46384,18 @@ module.exports = {
           emitEvent('attendance.payrollCycle.created', { orgId, payrollCycleId: mapped.id })
           res.status(201).json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_OPEN' || error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_UNAVAILABLE') {
+            res.status(error.status || 409).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY') {
+            res.status(503).json({ ok: false, error: { code: error.code, message: '考勤组织锁繁忙，请稍后重试' } })
+            return
+          }
           if (error?.code === '23505') {
             res.status(409).json({ ok: false, error: { code: 'ALREADY_EXISTS', message: 'Payroll cycle already exists' } })
             return
@@ -46386,8 +46464,9 @@ module.exports = {
 
         const created = []
         const skipped = []
+        if (respondPayrollOrgRejected(res, orgId)) return
         try {
-          await db.transaction(async (trx) => {
+          await withPayrollRolloutTransaction(orgId, async (trx) => {
             for (let i = 0; i < count; i += 1) {
               const anchor = addMonthsToDate(anchorBase, i)
               const window = resolvePayrollWindow(mapPayrollTemplateRow(template), anchor)
@@ -46419,6 +46498,7 @@ module.exports = {
                 created.push(mapPayrollCycleRow(rows[0]))
                 // 加班银行 v1-5b-ii: generate-as-closed must NOT bypass the close-snapshot path (§3); same txn.
                 if (status === 'closed') {
+                  await assertNoOpenRecomputeObligation(trx, orgId, window.startDate, window.endDate)
                   await snapshotCycleSettlementOnClose(trx, rows[0])
                 }
               } else {
@@ -46436,6 +46516,17 @@ module.exports = {
             },
           })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_OPEN' || error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_UNAVAILABLE' || error?.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY') {
+            res.status(error.status || (error.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' ? 503 : 409)).json({
+              ok: false,
+              error: { code: error.code, message: error.message || error.code },
+            })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
@@ -46526,30 +46617,37 @@ module.exports = {
             metadata: parsed.data.metadata ?? normalizeMetadata(existing.metadata),
           }
 
-          // 加班银行 v1-5b-ii [P1/P2 owner #3233]: a POST-CLOSE cycle's period is FROZEN — the settlement snapshot
-          // was computed against this period (v1-5 design-lock §3). The freeze covers BOTH 'closed' AND
-          // 'archived' (archived is ONCE-CLOSED: closed→archived must NOT reopen the period), PLUS a durable
-          // backstop — any cycle that already has settlement rows (covers a reopened-with-settlements edge and a
-          // zero-row closed cycle's later states). Otherwise close→archive→change re-hangs the old snapshot under
-          // a new period. Only status-only transitions and name/metadata edits stay allowed.
-          const cycleIsFrozen = existing.status === 'closed' || existing.status === 'archived'
-            || (await db.query('SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1', [payrollCycleId, orgId])).length > 0
-          if (cycleIsFrozen) {
-            const sameDate = (a, b) => {
-              const pa = parseDateInput(a)
-              const pb = parseDateInput(b)
-              return pa && pb ? formatDateOnly(pa) === formatDateOnly(pb) : String(a) === String(b)
+          if (respondPayrollOrgRejected(res, orgId)) return
+          // The existing-row read and the frozen check run inside the org rollout lock,
+          // not against the unlocked read above (that read only chooses the template).
+          const rows = await withPayrollRolloutTransaction(orgId, async (trx) => {
+            const lockedRows = await trx.query(
+              'SELECT * FROM attendance_payroll_cycles WHERE id = $1 AND org_id = $2',
+              [payrollCycleId, orgId],
+            )
+            if (!lockedRows.length) throw new HttpError(404, 'NOT_FOUND', 'Payroll cycle not found')
+            const locked = lockedRows[0]
+            const settlementRows = await trx.query(
+              'SELECT 1 FROM attendance_payroll_cycle_settlements WHERE cycle_id = $1 AND org_id = $2 LIMIT 1',
+              [payrollCycleId, orgId],
+            )
+            const cycleIsFrozen = locked.status === 'closed' || locked.status === 'archived' || settlementRows.length > 0
+            if (cycleIsFrozen) {
+              const sameDate = (a, b) => {
+                const pa = parseDateInput(a)
+                const pb = parseDateInput(b)
+                return pa && pb ? formatDateOnly(pa) === formatDateOnly(pb) : String(a) === String(b)
+              }
+              const periodChanged = !sameDate(payload.startDate, locked.start_date)
+                || !sameDate(payload.endDate, locked.end_date)
+                || (payload.templateId ?? null) !== (locked.template_id ?? null)
+              if (periodChanged) {
+                throw new HttpError(409, 'CYCLE_CLOSED_PERIOD_FROZEN', 'A settled (closed/archived) payroll cycle has a snapshot; start_date / end_date / template_id cannot be changed. Reopen/recompute explicitly.')
+              }
             }
-            const periodChanged = !sameDate(payload.startDate, existing.start_date)
-              || !sameDate(payload.endDate, existing.end_date)
-              || (payload.templateId ?? null) !== (existing.template_id ?? null)
-            if (periodChanged) {
-              res.status(409).json({ ok: false, error: { code: 'CYCLE_CLOSED_PERIOD_FROZEN', message: 'A settled (closed/archived) payroll cycle has a snapshot; start_date / end_date / template_id cannot be changed. Reopen/recompute explicitly.' } })
-              return
+            if (locked.status !== 'closed' && payload.status === 'closed') {
+              await assertNoOpenRecomputeObligation(trx, orgId, payload.startDate, payload.endDate)
             }
-          }
-
-          const rows = await db.transaction(async (trx) => {
             const updated = await trx.query(
               `UPDATE attendance_payroll_cycles
                SET template_id = $3,
@@ -46574,7 +46672,7 @@ module.exports = {
             )
             // 加班银行 v1-5b-ii: ONLY on the TRANSITION to closed, snapshot the settlement in the SAME txn
             // (atomic with the status write). A re-PUT of an already-closed cycle does NOT re-snapshot.
-            if (existing.status !== 'closed' && payload.status === 'closed' && updated[0]) {
+            if (locked.status !== 'closed' && payload.status === 'closed' && updated[0]) {
               await snapshotCycleSettlementOnClose(trx, updated[0])
             }
             return updated
@@ -46584,6 +46682,17 @@ module.exports = {
           emitEvent('attendance.payrollCycle.updated', { orgId, payrollCycleId: mapped.id })
           res.json({ ok: true, data: mapped })
         } catch (error) {
+          if (error instanceof HttpError) {
+            res.status(error.status).json({ ok: false, error: { code: error.code, message: error.message } })
+            return
+          }
+          if (error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_OPEN' || error?.code === 'ATTENDANCE_RECOMPUTE_OBLIGATION_UNAVAILABLE' || error?.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY') {
+            res.status(error.status || (error.code === 'ATTENDANCE_CALCULATION_ROLLOUT_BUSY' ? 503 : 409)).json({
+              ok: false,
+              error: { code: error.code, message: error.message || error.code },
+            })
+            return
+          }
           if (isDatabaseSchemaError(error)) {
             res.status(503).json({ ok: false, error: { code: 'DB_NOT_READY', message: 'Attendance tables missing' } })
             return
