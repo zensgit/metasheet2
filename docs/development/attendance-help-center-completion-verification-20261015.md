@@ -57,9 +57,15 @@
 
 ## 测试
 
-相关检查：`apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言上述短语、团队可用性打开、搜索「口径说明」只命中报表、以及简介/场景/步骤/常见问题四段。
+相关检查是帮助组件规格 `apps/web/tests/attendanceAdminGuide.spec.ts`。它挂载帮助组件，断言既有短语、团队可用性打开对应文章、搜索「口径说明」只命中报表，以及简介、场景、步骤、常见问题四段。
 
-结果见 PR 说明中的命令输出。
+2026-10-15 在本分支执行：
+
+- `pnpm install --frozen-lockfile`：退出码 0（约 4.2s；esbuild 等安装脚本被 pnpm 忽略，未影响本次测试）。
+- `pnpm --filter @metasheet/web exec vitest run --watch=false tests/attendanceAdminGuide.spec.ts`：1 个文件、5 个测试通过（97ms）。
+- `pnpm --filter @metasheet/web exec eslint src/views/attendance/attendanceAdminGuideContent.ts --max-warnings=0`：退出码 0。
+
+`apps/web` 的 `lint` 脚本文件清单不包含这篇帮助，所以上面的 eslint 是对改动文件的直接检查。未跑全量 `pnpm lint` / `pnpm type-check`。
 
 ## 缺口清单
 
