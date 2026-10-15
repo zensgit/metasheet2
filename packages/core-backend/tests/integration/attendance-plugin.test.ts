@@ -14541,7 +14541,7 @@ attendanceIntegrationDescribe(
     expect(rollbackRes.status).toBe(200)
   }, 180000)
 
-  it('supports async import preview jobs (preview-async + job polling)', async () => {
+  it.each(['canonical', 'email'])('supports async import preview jobs with group assignment (%s)', async (identityKind) => {
     if (!baseUrl) return
 
     const tokenRes = await requestJson(
@@ -14566,9 +14566,10 @@ attendanceIntegrationDescribe(
     expect(commitToken).toBeTruthy()
 
     const previewPayload = {
-      userId: sharedImportUserId,
+      userId: identityKind === 'email' ? `${sharedImportUserId}@example.test` : sharedImportUserId,
       idempotencyKey,
       timezone: 'UTC',
+      groupSync: { autoCreate: true, autoAssignMembers: true },
       previewLimit: 2,
       rows: [
         {
@@ -14577,6 +14578,7 @@ attendanceIntegrationDescribe(
             firstInAt: `${workDate}T09:00:00Z`,
             lastOutAt: `${workDate}T18:00:00Z`,
             status: 'normal',
+            attendanceGroup: `Alias preview ${idempotencyKey}`,
           },
         },
         {
@@ -14585,6 +14587,7 @@ attendanceIntegrationDescribe(
             firstInAt: `${workDate}T09:10:00Z`,
             lastOutAt: `${workDate}T18:10:00Z`,
             status: 'normal',
+            attendanceGroup: `Alias preview ${idempotencyKey}`,
           },
         },
       ],
@@ -14643,6 +14646,7 @@ attendanceIntegrationDescribe(
         expect(Array.isArray(jobData?.preview?.items)).toBe(true)
         expect(jobData?.preview?.items?.length).toBeGreaterThan(0)
         expect(jobData?.preview?.rowCount).toBe(2)
+        expect(jobData?.preview?.items?.[0]?.userId).toBe(sharedImportUserId)
         completedPreviewJob = jobData
         finished = true
         break

@@ -2941,7 +2941,7 @@ describe('attendance UUID route validation', () => {
     function installImportPipelineMock(
       db: { query: { mockImplementation: (impl: (query: unknown, params?: unknown[]) => Promise<unknown>) => void } },
       activeUserIds: string[] | null,
-      options: { groups?: Array<{ id: string; name: string }> } = {},
+      options: { groups?: Array<{ id: string; name: string }>; aliases?: Array<{ id: string; email?: string; username?: string; mobile?: string }> } = {},
     ) {
       db.query.mockImplementation(async (query: unknown, paramsArg: unknown[] = []) => {
         const sql = sqlText(query)
@@ -2950,6 +2950,7 @@ describe('attendance UUID route validation', () => {
         if (rbac !== undefined) return rbac
         const actor = actorContextQueryResult(sql)
         if (actor !== undefined) return actor
+        if (sql.includes('FROM users u') && sql.includes('JOIN user_orgs uo')) return options.aliases ?? []
         if (sql.includes('FROM user_orgs uo') && sql.includes('JOIN users u')) {
           if (activeUserIds === null) throw new Error(`unexpected membership query: ${sql}`)
           const requested = Array.isArray(params[1]) ? params[1].map(String) : []
@@ -2982,7 +2983,7 @@ describe('attendance UUID route validation', () => {
         if (sql.includes('INSERT INTO attendance_records')) {
           return [{
             id: '00000000-0000-4000-8000-000000000401',
-            user_id: 'worker-1',
+            user_id: '00000000-0000-4000-8000-000000000421',
             work_date: '2026-06-10',
           }]
         }
@@ -3008,9 +3009,9 @@ describe('attendance UUID route validation', () => {
     }
 
     it.each([
-      ['inactive user', 'inactive-user'],
-      ['user from another org', 'other-org-user'],
-      ['nonexistent user', 'missing-user'],
+      ['inactive user', '00000000-0000-4000-8000-000000000423'],
+      ['user from another org', '00000000-0000-4000-8000-000000000424'],
+      ['nonexistent user', '00000000-0000-4000-8000-000000000422'],
     ])('preview rejects auto-assign for %s with a per-row warning and does not succeed', async (_label, userId) => {
       const { db, routes } = await createHarness('true')
       installImportPipelineMock(db, [])
@@ -3032,14 +3033,14 @@ describe('attendance UUID route validation', () => {
 
     it('preview rejects a mixed auto-assign batch and reports only the rejected rows', async () => {
       const { db, routes } = await createHarness('true')
-      installImportPipelineMock(db, ['worker-1'])
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
           rows: [
-            importAssignRow('worker-1', '2026-06-10'),
-            importAssignRow('not-in-this-org', '2026-06-11'),
-            importAssignRow('not-in-this-org', '2026-06-12'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-10'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-11'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-12'),
           ],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
@@ -3049,7 +3050,7 @@ describe('attendance UUID route validation', () => {
       expectMemberNotInOrg(res, [1, 2])
       expect(db.query).toHaveBeenCalledWith(
         expect.stringContaining('uo.user_id = ANY($2::text[])'),
-        ['default', ['worker-1', 'not-in-this-org']],
+        ['default', ['00000000-0000-4000-8000-000000000421', '00000000-0000-4000-8000-000000000425']],
       )
     })
 
@@ -3060,8 +3061,8 @@ describe('attendance UUID route validation', () => {
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
           rows: [
-            importAssignRow('missing-user'),
-            importAssignRow('missing-user'),
+            importAssignRow('00000000-0000-4000-8000-000000000422'),
+            importAssignRow('00000000-0000-4000-8000-000000000422'),
           ],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
@@ -3078,7 +3079,7 @@ describe('attendance UUID route validation', () => {
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
           rows: [{
-            userId: 'missing-user',
+            userId: '00000000-0000-4000-8000-000000000422',
             workDate: '2026-06-10',
             fields: {
               firstInAt: '2026-06-10T09:00:00.000Z',
@@ -3094,7 +3095,7 @@ describe('attendance UUID route validation', () => {
       expect(res.body).toMatchObject({
         ok: true,
         data: {
-          items: [{ userId: 'missing-user', workDate: '2026-06-10' }],
+          items: [{ userId: '00000000-0000-4000-8000-000000000422', workDate: '2026-06-10' }],
         },
       })
     })
@@ -3105,7 +3106,7 @@ describe('attendance UUID route validation', () => {
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
-          rows: [importAssignRow('missing-user')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
           groupSync: { autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'default' },
@@ -3126,7 +3127,7 @@ describe('attendance UUID route validation', () => {
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
-          rows: [importAssignRow('missing-user')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
           groupSync: { autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'default' },
@@ -3137,12 +3138,12 @@ describe('attendance UUID route validation', () => {
 
     it('rejects preview when the org selector is not the authenticated org', async () => {
       const { db, routes } = await createHarness('true')
-      installImportPipelineMock(db, ['worker-1'])
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
           orgId: 'org-b',
-          rows: [importAssignRow('worker-1')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'org-a' },
@@ -3158,7 +3159,7 @@ describe('attendance UUID route validation', () => {
 
       const queryRes = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
-          rows: [importAssignRow('worker-1')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
         query: { orgId: 'org-b' },
@@ -3173,11 +3174,11 @@ describe('attendance UUID route validation', () => {
 
     it('preview accepts an active org member for auto-assign', async () => {
       const { db, routes } = await createHarness('true')
-      installImportPipelineMock(db, ['worker-1'])
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview', {
         body: {
-          rows: [importAssignRow('worker-1')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000421')],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'default' },
@@ -3187,7 +3188,7 @@ describe('attendance UUID route validation', () => {
       expect(res.body).toMatchObject({
         ok: true,
         data: {
-          items: [{ userId: 'worker-1', workDate: '2026-06-10' }],
+          items: [{ userId: '00000000-0000-4000-8000-000000000421', workDate: '2026-06-10' }],
         },
       })
       const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
@@ -3195,9 +3196,9 @@ describe('attendance UUID route validation', () => {
     })
 
     it.each([
-      ['inactive user', 'inactive-user'],
-      ['user from another org', 'other-org-user'],
-      ['nonexistent user', 'missing-user'],
+      ['inactive user', '00000000-0000-4000-8000-000000000423'],
+      ['user from another org', '00000000-0000-4000-8000-000000000424'],
+      ['nonexistent user', '00000000-0000-4000-8000-000000000422'],
     ])('commit rejects auto-assign for %s before the sync plan and inserts no members', async (_label, userId) => {
       const commitSyncImportPlan = vi.fn(async () => syncImportResult(
         '00000000-0000-4000-8000-000000000411',
@@ -3227,13 +3228,13 @@ describe('attendance UUID route validation', () => {
         '00000000-0000-4000-8000-000000000401',
       ))
       const { db, routes } = await createHarness('true', commitSyncImportPlan)
-      installImportPipelineMock(db, ['worker-1'])
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
         body: {
           rows: [
-            importAssignRow('worker-1', '2026-06-10'),
-            importAssignRow('not-in-this-org', '2026-06-11'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-10'),
+            importAssignRow('00000000-0000-4000-8000-000000000425', '2026-06-11'),
           ],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
@@ -3251,15 +3252,15 @@ describe('attendance UUID route validation', () => {
         '00000000-0000-4000-8000-000000000401',
       ))
       const { db, routes } = await createHarness('true', commitSyncImportPlan)
-      installImportPipelineMock(db, ['worker-1'])
+      installImportPipelineMock(db, ['00000000-0000-4000-8000-000000000421'])
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/commit', {
         body: {
           rows: [
-            importAssignRow('worker-1'),
-            importAssignRow('worker-1', '2026-06-11', { fields: { firstInAt: '2026-06-11T09:00:00.000Z', lastOutAt: '2026-06-11T18:00:00.000Z' } }),
-            importAssignRow('worker-1'),
-            importAssignRow('worker-1', '2026-06-12'),
+            importAssignRow('00000000-0000-4000-8000-000000000421'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-11', { fields: { firstInAt: '2026-06-11T09:00:00.000Z', lastOutAt: '2026-06-11T18:00:00.000Z' } }),
+            importAssignRow('00000000-0000-4000-8000-000000000421'),
+            importAssignRow('00000000-0000-4000-8000-000000000421', '2026-06-12'),
           ],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
@@ -3271,7 +3272,7 @@ describe('attendance UUID route validation', () => {
         groupEffects: expect.arrayContaining([
           expect.objectContaining({
             kind: 'ensure_member',
-            userId: 'worker-1',
+            userId: '00000000-0000-4000-8000-000000000421',
             groupRef: 'day shift',
             sourceOrdinals: [0, 3],
           }),
@@ -3289,7 +3290,7 @@ describe('attendance UUID route validation', () => {
     ])('uploaded async preview streams only when autoAssign=%s (active=%s)', async (autoAssignMembers, active, enqueued) => {
       const queue = { add: vi.fn(async () => undefined) }
       const { db, routes } = await createHarness('true', undefined, undefined, queue)
-      installImportPipelineMock(db, active ? ['worker-1'] : [])
+      installImportPipelineMock(db, active ? ['00000000-0000-4000-8000-000000000421'] : [])
       const pipelineQuery = db.query.getMockImplementation()!
       db.query.mockImplementation(async (query: unknown, params: unknown[] = []) => {
         const sql = sqlText(query)
@@ -3301,10 +3302,10 @@ describe('attendance UUID route validation', () => {
       })
       const csv = [
         'userId,workDate,attendanceGroup,firstInAt,lastOutAt',
-        'worker-1,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
-        'worker-1,2026-06-11,,2026-06-11T09:00:00.000Z,2026-06-11T18:00:00.000Z',
-        'worker-1,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
-        'worker-1,2026-06-12,Day Shift,2026-06-12T09:00:00.000Z,2026-06-12T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-11,,2026-06-11T09:00:00.000Z,2026-06-11T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-10,Day Shift,2026-06-10T09:00:00.000Z,2026-06-10T18:00:00.000Z',
+        '00000000-0000-4000-8000-000000000421,2026-06-12,Day Shift,2026-06-12T09:00:00.000Z,2026-06-12T18:00:00.000Z',
       ].join('\n')
       const readFile = vi.spyOn(fsp, 'readFile').mockImplementation(async (file: unknown) => {
         if (String(file).endsWith('.json')) return JSON.stringify({ rowCount: 4, kind: 'csv' })
@@ -3330,11 +3331,69 @@ describe('attendance UUID route validation', () => {
         expect(queue.add).not.toHaveBeenCalled()
       }
       expect(readFile.mock.calls.filter(([file]) => String(file).endsWith('.csv'))).toEqual([])
-      expect(stream).toHaveBeenCalledTimes(autoAssignMembers ? 1 : 0)
+      expect(stream).toHaveBeenCalledTimes(autoAssignMembers ? 2 : 0)
       const sql = db.query.mock.calls.map(([query]) => sqlText(query)).join('\n')
       if (autoAssignMembers) expectActiveOrgMemberPredicate(sql)
       else expect(sql).not.toContain('FROM user_orgs uo')
       expect(sql.includes('INSERT INTO attendance_import_jobs')).toBe(enqueued)
+    })
+
+    it.each([
+      ['POST /api/attendance/import/preview', 'worker@example.test'],
+      ['POST /api/attendance/import/preview', 'worker-login'],
+      ['POST /api/attendance/import/preview', '+86 138-0000-0000'],
+      ['POST /api/attendance/import/commit', 'worker@example.test'],
+      ['POST /api/attendance/import/commit', 'worker-login'],
+      ['POST /api/attendance/import/commit', '+86 138-0000-0000'],
+      ['POST /api/attendance/import/preview-async', 'worker@example.test'],
+      ['POST /api/attendance/import/preview-async', 'worker-login'],
+      ['POST /api/attendance/import/preview-async', '+86 138-0000-0000'],
+    ])('uses the canonical member id for auto-assignment (%s, %s)', async (route, identifier) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const commit = vi.fn(async () => syncImportResult(attendanceGroupId, importEmployeeId))
+      const { db, routes } = await createHarness('true', commit, undefined, queue)
+      installImportPipelineMock(db, [importEmployeeId], {
+        aliases: [{ id: importEmployeeId, email: 'worker@example.test', username: 'worker-login', mobile: '+86 13800000000' }],
+      })
+      const pipelineQuery = db.query.getMockImplementation()!
+      db.query.mockImplementation(async (query: unknown, params: unknown[] = []) => {
+        const sql = sqlText(query)
+        if (sql.includes('INSERT INTO attendance_import_jobs')) return []
+        if (sql.includes('FROM attendance_import_jobs AS job')) return [{ id: params[0], org_id: 'default', status: 'queued', total: 1, payload: {} }]
+        return pipelineQuery(query, params)
+      })
+      const res = await invokeRoute(routes, route, {
+        body: { rows: [importAssignRow(identifier)], groupSync: { autoCreate: true, autoAssignMembers: true } },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expect(res.statusCode).toBe(200)
+      const membershipCalls = db.query.mock.calls.filter(([query]) => sqlText(query).includes('FROM user_orgs uo'))
+      expect(membershipCalls.length).toBeGreaterThan(0)
+      for (const [query, params] of membershipCalls) expect(queryParams(query, params)).toEqual(['default', [importEmployeeId]])
+      if (route.endsWith('preview-async')) expect(queue.add).toHaveBeenCalledTimes(1)
+      else if (route.endsWith('commit')) expect(commit).toHaveBeenCalledWith(expect.objectContaining({
+        groupEffects: expect.arrayContaining([expect.objectContaining({ kind: 'ensure_member', userId: importEmployeeId, sourceOrdinals: [0] })]),
+      }))
+      else expect(res.body).toMatchObject({ ok: true, data: { items: [{ userId: importEmployeeId }] } })
+    })
+
+    it.each([
+      'POST /api/attendance/import/preview',
+      'POST /api/attendance/import/commit',
+      'POST /api/attendance/import/preview-async',
+    ])('rechecks membership after alias lookup before auto-assignment (%s)', async (route) => {
+      const queue = { add: vi.fn(async () => undefined) }
+      const commit = vi.fn()
+      const { db, routes } = await createHarness('true', commit, undefined, queue)
+      installImportPipelineMock(db, [], { aliases: [{ id: importEmployeeId, email: 'worker@example.test' }] })
+      const res = await invokeRoute(routes, route, {
+        body: { rows: [importAssignRow('worker@example.test')], groupSync: { autoCreate: true, autoAssignMembers: true } },
+        user: { id: 'admin-1', orgId: 'default' },
+      })
+      expectMemberNotInOrg(res, [0])
+      expect(commit).not.toHaveBeenCalled()
+      expect(queue.add).not.toHaveBeenCalled()
+      expect(db.query.mock.calls.some(([query]) => sqlText(query).includes('INSERT INTO attendance_group_members'))).toBe(false)
     })
 
     it('async preview rejects an inactive auto-assign user before inserting a job', async () => {
@@ -3343,7 +3402,7 @@ describe('attendance UUID route validation', () => {
 
       const res = await invokeRoute(routes, 'POST /api/attendance/import/preview-async', {
         body: {
-          rows: [importAssignRow('missing-user')],
+          rows: [importAssignRow('00000000-0000-4000-8000-000000000422')],
           groupSync: { autoCreate: true, autoAssignMembers: true },
         },
         user: { id: 'admin-1', orgId: 'default' },

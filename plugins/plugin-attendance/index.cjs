@@ -9711,6 +9711,7 @@ function createImportGroupMemberAssignmentCollector({
   userMap,
   userMapKeyField,
   userMapSourceFields,
+  userIdentifierIndex,
   requiredFields,
   punchRequiredFields,
   groupSync,
@@ -9724,13 +9725,13 @@ function createImportGroupMemberAssignmentCollector({
   const punchRequired = Array.isArray(punchRequiredFields) ? punchRequiredFields : []
   const addRow = (row, rowIndex) => {
     const workDate = row?.workDate
-    const rowUserId = resolveRowUserId({
-      row,
+    const rowUserId = resolveImportRowUserReference(row, {
       fallbackUserId,
       userMap,
       userMapKeyField,
       userMapSourceFields,
-    })
+      userIdentifierIndex,
+    }).userId
     let rejected = !rowUserId || !workDate
     if (!rejected && required.length) {
       rejected = required.some((field) => {
@@ -28926,6 +28927,7 @@ module.exports = {
 	          userMap: payload.userMap,
 	          userMapKeyField: payload.userMapKeyField,
 	          userMapSourceFields: payload.userMapSourceFields,
+	          userIdentifierIndex: asyncPreviewUserIndex,
 	          requiredFields,
 	          punchRequiredFields,
 	          groupSync: asyncGroupSync,
@@ -43547,6 +43549,7 @@ module.exports = {
               userMap: parsed.data.userMap,
               userMapKeyField: parsed.data.userMapKeyField,
               userMapSourceFields: parsed.data.userMapSourceFields,
+              userIdentifierIndex: scopedAccess.userIdentifierIndex,
               requiredFields,
               punchRequiredFields,
               groupSync,
@@ -44450,11 +44453,23 @@ module.exports = {
 	              orgId,
 	              fallbackUserId: parsed.data.userId ?? requesterId,
 	            })
+	            const previewUserIndex = await loadImportUserIdentifierIndexForIterator(
+	              db,
+	              orgId,
+	              (onRow) => previewRowSource.iterateRows(onRow),
+	              {
+	                fallbackUserId: parsed.data.userId ?? requesterId,
+	                userMap: parsed.data.userMap,
+	                userMapKeyField: parsed.data.userMapKeyField,
+	                userMapSourceFields: parsed.data.userMapSourceFields,
+	              },
+	            )
 	            const previewCollector = createImportGroupMemberAssignmentCollector({
 	              fallbackUserId: parsed.data.userId ?? requesterId,
 	              userMap: parsed.data.userMap,
 	              userMapKeyField: parsed.data.userMapKeyField,
 	              userMapSourceFields: parsed.data.userMapSourceFields,
+	              userIdentifierIndex: previewUserIndex,
 	              requiredFields: previewProfile?.requiredFields ?? [],
 	              punchRequiredFields: previewProfile?.punchRequiredFields ?? [],
 	              groupSync: previewGroupSync,
