@@ -3055,8 +3055,10 @@ async function g9TheCommittedProseMatchesTheCodeItDescribes() {
   // tenant's staging project is where it creates the read-only overview.
   // S5b (R-39) added ONE — the members project-sheet add (section E, item E1): the registry rows it may
   // name and the staging project its G1 grants address are the proven tenant's.
-  assert.equal(callSites, 20, 'G9: twenty call sites — if this changes, the header list must too')
-  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets']) {
+  // The G1 field defect (R67) added ONE — the options-sync REPAIR leg (section D, item 20): the registry
+  // row it patches and the staging project the patch addresses are the proven tenant's.
+  assert.equal(callSites, 21, 'G9: twenty-one call sites — if this changes, the header list must too')
+  for (const marker of ['stockPreparationHandoffStatus', 'stockPreparationHandoffAdvance', 'stockPreparationOperatorProjectBoard', 'tableActionDryRun', 'stockPreparationProjectTargetArchive', 'stockPreparationProjectTargetRestore', 'stockPreparationProjectFieldsGet', 'stockPreparationProjectFieldsUpdate', 'stockPreparationProjectOverviewRefresh', 'stockPreparationMembersCustomRoleProjectTargets', 'repairProjectSheetContractOptions']) {
     assert.ok(scope.includes(marker), `G9: the header enumerates ${marker}`)
   }
   // ...and the entry that went with the deleted call site is GONE from the header. Dropping a name
