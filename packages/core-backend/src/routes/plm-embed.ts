@@ -19,7 +19,7 @@
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId, frameAncestorsValue } from '../auth/embed-config'
+import { embedAllowedOrigins, embedDataSourceId, frameAncestorsValue, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { BomMultitableContextResult } from '../data-adapters/PLMAdapter'
 
@@ -52,7 +52,7 @@ export default function plmEmbedRouter(): Router {
     res.json({
       ok: true,
       data: { allowed_origins: embedAllowedOrigins(), frame_ancestors: frameAncestorsValue(),
-        visual_preview_enabled: process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED === 'true' },
+        visual_preview_enabled: isPlmEmbedVisualPreviewEnabled() },
     })
   })
 

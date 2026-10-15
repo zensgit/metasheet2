@@ -74,6 +74,12 @@ export const GLOBAL_HISTORY_FLAG_MANIFEST = Object.freeze([
     rules: [{ kind: 'requires', id: 'plm-bom-review-without-durable-writer-fence', description: 'BOM collaboration requires canonical writer fences and durable local record events.' }],
   },
   {
+    key: 'PLM_EMBED_VISUAL_PREVIEW_ENABLED', type: 'boolean', activationValue: 'true',
+    dependsOn: [], conflictsWith: [], danger: 'medium',
+    purpose: 'Default-off Visual preview relay inside the Yuantus-embedded BOM review. Exact true only. Additionally requires the server-bound embed data source with an administrator-approved visualReviewEnabled tenant; every request consumes a single-use embed token whose tenant and org must equal the served source.',
+    source: 'packages/core-backend/src/auth/embed-config.ts#isPlmEmbedVisualPreviewEnabled',
+  },
+  {
     key: 'MULTITABLE_LEGACY_WRITE_IMPLIES_MANAGE_SCHEMA',
     type: 'boolean',
     activationValue: 'true',

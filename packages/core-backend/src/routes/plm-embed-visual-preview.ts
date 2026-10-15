@@ -2,7 +2,7 @@ import { isCurrentVisualSource } from './plm-embed-visual-source'
 import { Router, type Request, type Response } from 'express'
 import { getDataSourceManager } from './data-sources'
 import { embedTokenAuth } from '../middleware/embed-token-auth'
-import { embedAllowedOrigins, embedDataSourceId } from '../auth/embed-config'
+import { embedAllowedOrigins, embedDataSourceId, isPlmEmbedVisualPreviewEnabled } from '../auth/embed-config'
 import { consumeEmbedJti, embedJtiKey } from '../auth/embed-jti-store'
 import type { QueryResult } from '../data-adapters/BaseAdapter'
 import type { VisualPreviewFileList, VisualPreviewImage } from '../data-adapters/PLMAdapter'
@@ -80,7 +80,7 @@ async function guardedAdapter(req: Request, res: Response): Promise<PreviewAdapt
 export default function plmEmbedVisualPreviewRouter(): Router {
   const router = Router()
   router.use('/api/plm-embed/visual-preview', (req, res, next) => {
-    if (process.env.PLM_EMBED_VISUAL_PREVIEW_ENABLED !== 'true') {
+    if (!isPlmEmbedVisualPreviewEnabled()) {
       return res.status(404).json({ ok: false, error: { code: 'EMBED_UNAVAILABLE' } })
     }
     next()

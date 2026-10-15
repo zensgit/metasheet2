@@ -391,7 +391,7 @@ function globalHistoryFlagsInSource() {
   // there: the plugin's older env flags go through its lenient parseBoolean and are NOT registered here.
   const attendanceCancelRound = grepFlagTokens('ATTENDANCE_CANCEL_ROUND_[A-Z_0-9]+', { file: ATTENDANCE_PLUGIN_SOURCE })
     .filter((t) => t.endsWith('_ENABLED'))
-  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|PLM_APPROVAL_CARD_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED')
+  const plmBom = grepFlagTokens('PLM_RECORD_INGRESS_ENABLED|PLM_BOM_REVIEW_ENABLED|PLM_APPROVAL_CARD_ENABLED|AUTOMATION_DURABLE_DELIVERY_ENABLED|PLM_EMBED_VISUAL_PREVIEW_ENABLED')
   return [...new Set([...plmBom, ...tokens, ...elearning, ...dingtalkTodoMirror, ...tasks, ...approvalBadges, ...stockPrepProjectSheets, ...stockPrepMembersPage, ...attendanceCancelRound])].sort()
 }
 
@@ -882,6 +882,25 @@ test('PLM record ingress requires each durable/fence dependency and exact opt-in
   }
   assert.ok(!violationIds({ PLM_RECORD_INGRESS_ENABLED: 'TRUE' }).includes(id))
   assert.ok(!violationIds({ PLM_RECORD_INGRESS_ENABLED: 'true', AUTOMATION_DURABLE_DELIVERY_ENABLED: 'true', MULTITABLE_ENABLE_WRITER_FENCE: 'true' }).includes(id))
+})
+
+test('PLM embed Visual preview flag: one byte-exact reader, registered against it', () => {
+  const key = 'PLM_EMBED_VISUAL_PREVIEW_ENABLED'
+  const spec = GLOBAL_HISTORY_FLAG_BY_KEY[key]
+  assert.ok(spec, `${key} must be registered in the manifest`)
+  assert.equal(spec.type, 'boolean')
+  assert.equal(spec.activationValue, 'true')
+  assert.equal(spec.caseInsensitive, undefined)
+  assert.equal(spec.source, 'packages/core-backend/src/auth/embed-config.ts#isPlmEmbedVisualPreviewEnabled')
+  const source = readFileSync(path.join(REPO_ROOT, 'packages/core-backend/src/auth/embed-config.ts'), 'utf8')
+  const reader = /\nexport function isPlmEmbedVisualPreviewEnabled\(\): boolean \{\n([\s\S]*?)\n\}\n/.exec(source)
+  assert.ok(reader, 'the reader isPlmEmbedVisualPreviewEnabled must be found')
+  assert.equal(reader[1].trim(), `return process.env.${key} === 'true'`)
+  for (const file of ['packages/core-backend/src/routes/plm-embed.ts', 'packages/core-backend/src/routes/plm-embed-visual-preview.ts']) {
+    assert.doesNotMatch(readFileSync(path.join(REPO_ROOT, file), 'utf8'), /process\.env\.PLM_EMBED_VISUAL_PREVIEW_ENABLED/, `${file} must use the registered reader`)
+  }
+  for (const value of ['TRUE', ' true', '1']) assert.equal(isActivated(spec, value), false)
+  assert.equal(isActivated(spec, 'true'), true)
 })
 
 // Personal source tasks must never silently bypass the transactional event producer.
