@@ -18,6 +18,11 @@ import {
   type RoleAssignmentScope,
 } from '../rbac/role-assignment'
 import {
+  disableNamespaceAdmissionsWithoutRoles,
+  listRoleNamespaces,
+  lockNamespaceAdmissionWrites,
+} from '../rbac/namespace-admission'
+import {
   ATTENDANCE_SETUP_READINESS_PER_STEP,
   ATTENDANCE_SETUP_READINESS_RECIPIENT_SCOPE_CONFIG,
   computeAttendanceSetupReadinessDeliveryRuntime,
@@ -1312,12 +1317,27 @@ export function attendanceAdminRouter(): Router {
         const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers(userIds, scope, runQuery, true)
         assertAllRoleTargetsEligible(userIds, resolved)
+        // Every subject lock is taken, in sorted id order, before the membership
+        // DELETE. Each witness uses this same client and finishes before commit.
+        const admissionTargetIds = [...userIds].sort()
+        for (const targetId of admissionTargetIds) {
+          await lockNamespaceAdmissionWrites(client, targetId)
+        }
         const result = await unassignUserRoles({
           userIds,
           roleId: finalRoleId,
           scope: roleWriteScope,
           executor: client,
         })
+        for (const targetId of admissionTargetIds) {
+          await disableNamespaceAdmissionsWithoutRoles({
+            userId: targetId,
+            namespaces: await listRoleNamespaces(finalRoleId, client.query),
+            actorId: getAttendanceAdminRequestUserId(req),
+            source: 'role_unassigned',
+            revokedRoleId: finalRoleId,
+          }, client.query)
+        }
         return { del: result, resolvedUsers: resolved }
       })
       // Post-commit: revoking `attendance_admin` dropped the delegated audience inside the
@@ -1479,12 +1499,21 @@ export function attendanceAdminRouter(): Router {
         const roleWriteScope = deriveAttendanceRoleAssignmentScope(scope)
         const resolved = await resolveBatchUsers([userId], scope, runQuery, true)
         assertAllRoleTargetsEligible([userId], resolved)
+        // Same client through the subject lock, membership DELETE and revoke witness.
+        await lockNamespaceAdmissionWrites(client, userId)
         membership = await unassignUserRoles({
           userIds: [userId],
           roleId: finalRoleId,
           scope: roleWriteScope,
           executor: client,
         })
+        await disableNamespaceAdmissionsWithoutRoles({
+          userId,
+          namespaces: await listRoleNamespaces(finalRoleId, client.query),
+          actorId: getAttendanceAdminRequestUserId(req),
+          source: 'role_unassigned',
+          revokedRoleId: finalRoleId,
+        }, client.query)
         return fetchUserProfile(userId, runQuery)
       })
       await auditDelegatedAdminScopeCleanup({

@@ -30,7 +30,7 @@
           type="button"
           @click="selectRole(role)"
         >
-          <strong>{{ role.name }}</strong>
+          <strong>{{ presentRoleTitle(role) }}</strong>
           <span>{{ role.id }}</span>
           <small>成员数：{{ role.memberCount }}</small>
         </button>
@@ -44,7 +44,7 @@
           </label>
           <label class="admin-page__field">
             <span>角色名称</span>
-            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin">
+            <input v-model.trim="draftRoleName" class="admin-page__input" type="text" placeholder="例如 Attendance Admin" @input="markNameEdited()">
           </label>
         </div>
 
@@ -63,8 +63,8 @@
               >
               <div>
                 <strong>{{ permission.code }}</strong>
-                <p>{{ permission.name }}</p>
-                <small>{{ permission.description || '无描述' }}</small>
+                <p>{{ presentPermission(permission).name }}</p>
+                <small>{{ presentPermission(permission).description || '无描述' }}</small>
               </div>
             </label>
           </div>
@@ -82,6 +82,8 @@
             <span v-if="selectedPermissions.length === 0" class="admin-page__empty">尚未选择权限</span>
           </div>
         </section>
+
+        <RoleMembersPanel v-if="isEditing" :role-id="selectedRoleId" />
 
         <footer class="admin-page__footer">
           <button class="admin-page__button" type="button" :disabled="busy || !canSave" @click="void saveRole()">
@@ -108,6 +110,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { apiFetch } from '../utils/api'
+import { presentPermission, presentRoleTitle, roleNameForSave } from './builtinCatalogPresentation'
+import RoleMembersPanel from './RoleMembersPanel.vue'
 
 type RoleCatalogItem = {
   id: string
@@ -137,11 +141,30 @@ const permissions = ref<PermissionCatalogItem[]>([])
 const selectedRoleId = ref('')
 const draftRoleId = ref('')
 const draftRoleName = ref('')
+const nameEdited = ref(false)
 const selectedPermissions = ref<string[]>([])
 
 const selectedRole = computed(() => roles.value.find((role) => role.id === selectedRoleId.value) || null)
 const isEditing = computed(() => selectedRoleId.value.length > 0)
 const canSave = computed(() => draftRoleName.value.trim().length > 0 && draftRoleId.value.trim().length > 0)
+
+/**
+ * Server refusal codes this page words itself (the server message is English). zh is shown; en is kept
+ * for a later locale switch. ROLE_NAME_RESERVED: POST / PUT /api/roles refuse `admin` and the built-in
+ * role names in any spelling (#6348 follow-up).
+ */
+const ROLE_WRITE_ERROR_COPY: Record<string, { zh: string; en: string }> = {
+  ROLE_NAME_RESERVED: {
+    zh: '该名称为系统保留名，不能用于自定义角色',
+    en: 'This name is reserved for a built-in role and cannot be used for a custom role.',
+  },
+}
+
+function roleWriteErrorMessage(error: unknown, fallback: string): string {
+  const record = (error ?? {}) as Record<string, unknown>
+  const copy = ROLE_WRITE_ERROR_COPY[String(record.code || '')]
+  return copy ? copy.zh : String(record.message || fallback)
+}
 
 function setStatus(message: string, tone: 'info' | 'error' = 'info'): void {
   status.value = message
@@ -156,10 +179,15 @@ async function readJson(response: Response): Promise<Record<string, unknown>> {
   }
 }
 
+function markNameEdited(): void {
+  nameEdited.value = true
+}
+
 function applyRole(role: RoleCatalogItem | null): void {
   selectedRoleId.value = role?.id || ''
   draftRoleId.value = role?.id || ''
-  draftRoleName.value = role?.name || ''
+  draftRoleName.value = role ? presentRoleTitle(role) : ''
+  nameEdited.value = false
   selectedPermissions.value = [...(role?.permissions || [])]
 }
 
@@ -240,7 +268,11 @@ async function saveRole(): Promise<void> {
   try {
     const payload: Record<string, unknown> = {
       id: wasEditing ? selectedRoleId.value : draftRoleId.value.trim(),
-      name: draftRoleName.value.trim(),
+      // The name field may show a Chinese builtin title. Leaving it untouched keeps the
+      // loaded raw name; typing in the field is an explicit rename.
+      name: wasEditing
+        ? roleNameForSave(selectedRole.value ? selectedRole.value.name : null, draftRoleName.value, nameEdited.value)
+        : draftRoleName.value.trim(),
       permissions: selectedPermissions.value,
     }
     // Mid-air-collision token: the grid being submitted is the one loaded with this
@@ -275,7 +307,7 @@ async function saveRole(): Promise<void> {
       return
     }
     if (!response.ok || body.ok !== true) {
-      throw new Error(String((body.error as Record<string, unknown> | undefined)?.message || '保存角色失败'))
+      throw new Error(roleWriteErrorMessage(body.error, '保存角色失败'))
     }
 
     const currentId = String((body.data as Record<string, unknown> | undefined)?.id || payload.id)

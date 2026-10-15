@@ -219,6 +219,8 @@ describe('e-learning analytics period section', () => {
       .toBe(true)
     await click(root, 'elearning-analytics-export-refresh')
     expect(getExportMock).toHaveBeenCalledWith(EXPORT)
+    // F13: the export expiry goes through the shared formatter, never the raw ISO string.
+    expect(root.textContent).not.toContain('2026-09-06T00:00:00.000Z')
     expect(root.querySelector('[data-testid="elearning-analytics-export-status"]')?.textContent)
       .toBe('succeeded')
     await click(root, 'elearning-analytics-export-download')

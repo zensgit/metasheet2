@@ -98,16 +98,15 @@
         </button>
       </div>
 
-      <label v-if="assignmentEnabled" class="elearning-content-field">
-        <span>{{ elearningLabel('contentAdmin.optionalAssignee', isZh) }}</span>
-        <input
-          v-model="targetUserId"
-          data-testid="elearning-content-target-user"
-          type="text"
-          :disabled="busy"
-          autocomplete="off"
-        >
-      </label>
+      <ElearningAssigneePicker
+        v-if="assignmentEnabled"
+        v-model="targetUserId"
+        :label="elearningLabel('contentAdmin.optionalAssignee', isZh)"
+        :is-zh="isZh"
+        test-id-prefix="elearning-content-assignee"
+        paste-test-id="elearning-content-target-user"
+        :disabled="busy"
+      />
 
       <button
         class="elearning-content-admin__publish"
@@ -139,6 +138,7 @@ import { ref } from 'vue'
 import { useLocale } from '../composables/useLocale'
 import { randomUuid } from '../utils/uuid'
 import { assignElearningDirect, ElearningApiError } from '../services/elearning'
+import ElearningAssigneePicker from './ElearningAssigneePicker.vue'
 import {
   createElearningContentRequestIdTracker,
   createElearningContentRevision,

@@ -112,7 +112,7 @@
               <td>{{ item.userId }}</td>
               <td>{{ item.examTitle }}</td>
               <td>{{ item.courseTitle }}</td>
-              <td>{{ item.submittedAt }}</td>
+              <td>{{ formatElearningDate(item.submittedAt, isZh) }}</td>
               <td>{{ elearningManualGradingProgressLabel(item.gradedQuestions, item.manualQuestions) }}</td>
               <td>
                 <button
@@ -171,6 +171,7 @@ import {
   elearningManualGradingErrorMessage,
   elearningManualGradingProgressLabel,
   elearningManualGradingQueuePageLabel,
+  formatElearningDate,
 } from './elearningLabels'
 
 const { isZh } = useLocale()

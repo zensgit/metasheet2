@@ -2082,8 +2082,8 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(section!.querySelector('[data-attendance-help="annual-policy"]')?.textContent).toContain('Attendance help')
     expect(section!.textContent).toContain('ATTENDANCE_SCHEDULER_ENABLED')
-    const tzInput = section!.querySelector<HTMLSelectElement>('#attendance-annual-policy-tz')!
-    expect(tzInput.value).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
+    const tzInput = section!.querySelector<HTMLInputElement>('#attendance-annual-policy-tz')!
+    expect(tzInput.getAttribute('data-attendance-timezone-value')).toBe('Asia/Shanghai') // hydrated on first screen via loadSettings, NOT a Reload click
     const saveBtn = Array.from(section!.querySelectorAll<HTMLButtonElement>('button')).find(b => b.textContent?.includes('Save policy'))!
 
     // FIRST save WITHOUT ever clicking Reload → must PUT the real (hydrated) policy, never the local defaults.
@@ -2229,6 +2229,14 @@ describe('Attendance admin regressions', () => {
     const section = await openOpsSection()
     const card = section.querySelector<HTMLElement>('[data-annual-ops-card="adjust"]')!
     const inputs = card.querySelectorAll<HTMLInputElement>('input')
+    inputs[0].value = '没有此人'
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(6)
+    expect(card.querySelector('[data-annual-ops-adjust-person-menu] [data-attendance-search-empty]')?.textContent).toContain('No matches')
+    inputs[0].value = ''
+    inputs[0].dispatchEvent(new Event('input'))
+    await flushUi(2)
+    expect(card.querySelector('[data-attendance-search-empty]')).toBeNull()
     inputs[0].value = 'u1'; inputs[0].dispatchEvent(new Event('input'))
     inputs[1].value = '240'; inputs[1].dispatchEvent(new Event('input'))
     inputs[2].value = 'comp grant'; inputs[2].dispatchEvent(new Event('input'))
@@ -4628,7 +4636,9 @@ describe('Attendance admin regressions', () => {
 
     // Hydrated by loadSettings() on the first screen; no "reload section" action is required.
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(channel!.value).toBe('email_smtp')
     expect(dailySendAt!.value).toBe('18:45')
     expect(weeklyWeekday!.value).toBe('5')
@@ -4728,7 +4738,9 @@ describe('Attendance admin regressions', () => {
     expect(Boolean(enabled && timezone && cycleType && cycleStartDay && quotaMax && countPending && countApproved && quotaPrincipal && windowUnit && windowDays && missingCheckIn && earlyLeave && normal && requestTypesReadonly && missedCheckIn && missedCheckOut && timeCorrection && requireReason && requireAttachment)).toBe(true)
 
     expect(enabled!.checked).toBe(true)
-    expect(timezone!.value).toBe('America/Los_Angeles')
+    expect(timezone!.getAttribute('data-attendance-timezone-value')).toBe('America/Los_Angeles')
+    expect(timezone!.value).toContain('America/Los_Angeles')
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
     expect(cycleType!.textContent).toContain('Calendar month')
     expect(cycleStartDay!.value).toBe('15')
     expect(quotaMax!.value).toBe('5')
@@ -4811,12 +4823,11 @@ describe('Attendance admin regressions', () => {
 
     const section = container!.querySelector<HTMLElement>('[data-attendance-makeup-punch-policy]')
     expect(section).toBeTruthy()
-    const timezone = section!.querySelector<HTMLSelectElement>('[data-makeup-punch="timezone"]')
+    const timezone = section!.querySelector<HTMLInputElement>('[data-makeup-punch="timezone"]')
     expect(timezone).toBeTruthy()
-    const timezoneQuery = section!.querySelector<HTMLInputElement>('[data-attendance-timezone-query]')
-    expect(timezoneQuery).toBeTruthy()
-    timezoneQuery!.value = 'Not/AZone'
-    timezoneQuery!.dispatchEvent(new Event('change', { bubbles: true }))
+    expect(timezone!.closest('[data-attendance-timezone-field]')!.querySelector('select')).toBeNull()
+    timezone!.value = 'Not/AZone'
+    timezone!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
     section!.querySelector<HTMLButtonElement>('[data-makeup-punch="save"]')!.click()
     await flushUi(6)
@@ -7593,6 +7604,7 @@ describe('Attendance admin regressions', () => {
   })
 
   it('runs the read-only comprehensive hours preview without write controls', async () => {
+    window.localStorage.setItem('tenantId', 'default')
     app = createAttendanceApp(AttendanceView, { mode: 'admin' })
     app.mount(container!)
     await flushUi()
@@ -7606,11 +7618,53 @@ describe('Attendance admin regressions', () => {
     expect(section).toBeTruthy()
     expect(window.getComputedStyle(section!).display).not.toBe('none')
 
-    const userInput = section!.querySelector<HTMLInputElement>('[data-attendance-comprehensive-hours-user-id]')
-    expect(userInput).toBeTruthy()
-    userInput!.value = 'user-1'
-    userInput!.dispatchEvent(new Event('input', { bubbles: true }))
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')?.textContent).toContain('Not previewed yet')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate]')).toBeNull()
+    expect(section!.querySelector('.attendance__admin-section-header [data-attendance-comprehensive-hours-preview-run]')).toBeNull()
+    expect(section!.querySelector('.attendance__form-actions [data-attendance-comprehensive-hours-preview-run]')).toBeTruthy()
+    expect(section!.querySelector('.attendance__admin-grid [data-attendance-comprehensive-hours-save-block-mode]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-save-block-mode]')?.textContent).toContain('Save-time strong control')
+    const nameInput = section!.querySelector<HTMLInputElement>('#attendance-comprehensive-hours-user-id')
+    expect(nameInput).toBeTruthy()
+    expect(nameInput?.getAttribute('placeholder')).toContain('Type a name')
+    expect(nameInput?.closest('.attendance__field')?.textContent).toContain('Employee name')
+    expect(nameInput?.closest('.attendance__user-picker')?.classList.contains('attendance__user-picker--typeahead')).toBe(true)
+    expect(section!.textContent).not.toContain('User ID')
+
+    const previousFetch = vi.mocked(apiFetch).getMockImplementation()
+    vi.mocked(apiFetch).mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url.includes('/api/attendance-admin/users/search')) {
+        return jsonResponse(200, {
+          ok: true,
+          data: {
+            items: [{
+              id: 'user-1',
+              name: '张三',
+              email: 'zhang@example.com',
+              role: 'user',
+              is_active: true,
+              is_admin: false,
+              last_login_at: null,
+              created_at: '',
+            }],
+          },
+        })
+      }
+      if (previousFetch) return previousFetch(input, init)
+      return emptyAttendanceResponse()
+    })
+    nameInput!.value = '张三'
+    nameInput!.dispatchEvent(new Event('input'))
+    nameInput!.closest('.attendance__field')!.querySelector<HTMLButtonElement>('.attendance__user-picker-controls button')!.click()
+    await flushUi(4)
+    const nameSelect = nameInput!.closest('.attendance__field')!.querySelector<HTMLSelectElement>('select')
+    expect(nameSelect).toBeTruthy()
+    nameSelect!.value = 'user-1'
+    nameSelect!.dispatchEvent(new Event('change', { bubbles: true }))
     await flushUi(2)
+    expect(nameInput!.value).toContain('张三')
+    expect(nameInput!.value).not.toContain('user-1')
 
     const runButton = section!.querySelector<HTMLButtonElement>('[data-attendance-comprehensive-hours-preview-run]')
     expect(runButton).toBeTruthy()
@@ -7631,7 +7685,10 @@ describe('Attendance admin regressions', () => {
     })
 
     expect(section!.textContent).toContain('Read-only preview')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-empty]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-status]')?.textContent).toContain('No policy was saved')
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="ok"]')).toBeNull()
+    expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="warning"]')).toBeNull()
     expect(section!.querySelector('[data-attendance-comprehensive-hours-aggregate-item="violation"]')?.textContent).toContain('1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('user-1')
     expect(section!.querySelector('[data-attendance-comprehensive-hours-rows]')?.textContent).toContain('Violation')

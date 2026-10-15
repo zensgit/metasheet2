@@ -458,9 +458,12 @@ function onAddFilterGroup() {
 .meta-toolbar__panel--filter { min-width: 420px; }
 /* Hide-fields panel (UI-P2-1c slice-3): hosted inside MtPopover's own `.mt-popover` surface (which
    only pads top/bottom), so this class supplies the horizontal breathing room the old
-   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides. */
-.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; box-sizing: border-box; }
-.meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; }
+   `.meta-toolbar__panel { padding: 8px }` gave the toggle rows — same 8px, all sides.
+   Viewport cap: computePosition clamps the teleported border box with an 8px inset. Popover chrome
+   is padding 4+4 and border 1+1 vertical, border 1+1 horizontal, so this inner box stays within
+   100vh-18px / 100vw-10px. Both axes scroll; each name stays one line (no wrap, no ellipsis). */
+.meta-toolbar__field-panel { padding: var(--ms-space-2); min-width: 200px; max-width: calc(100vw - 10px); max-height: calc(100vh - 18px); box-sizing: border-box; overflow: auto; }
+.meta-toolbar__field-toggle { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; cursor: pointer; width: max-content; min-width: 100%; white-space: nowrap; }
 /* Sort builder panel (UI-P2-1c slice-4): same rationale as the hide-fields panel above — hosted
    inside MtPopover's own `.mt-popover` surface (which only pads top/bottom), so this class supplies
    the horizontal breathing room the old `.meta-toolbar__panel { padding: 8px }` gave the rows. */

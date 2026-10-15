@@ -63,7 +63,7 @@
         <dt>{{ text('Status', '状态') }}</dt>
         <dd data-testid="elearning-analytics-export-status">{{ exportResult.status }}</dd>
         <dt>{{ text('Expires', '过期时间') }}</dt>
-        <dd>{{ exportResult.expiresAt }}</dd>
+        <dd>{{ formatElearningDate(exportResult.expiresAt, isZh) }}</dd>
       </dl>
     </section>
   </section>
@@ -77,6 +77,7 @@ import { ElearningApiError } from '../services/elearning'
 import {
   elearningLabel,
   isElearningAnalyticsExportStorageUnavailable,
+  formatElearningDate,
 } from './elearningLabels'
 import {
   createElearningAnalyticsExport,

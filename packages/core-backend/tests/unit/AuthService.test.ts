@@ -78,6 +78,53 @@ function recoveryAuthorityBusyError(): Error & { code: string } {
   return error
 }
 
+function schemaMissingRelation(relation: string): Error & { code: string } {
+  return Object.assign(new Error(`relation "${relation}" does not exist`), { code: '42P01' }) as Error & { code: string }
+}
+
+function platformAuthUserRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'u5',
+    email: 'worker@x',
+    name: 'Worker',
+    role: 'user',
+    permissions: ['spreadsheet:read', 'spreadsheet:write'],
+    password_hash: 'hash',
+    activation_status: 'activated',
+    local_password_set: true,
+    is_active: true,
+    created_at: new Date(),
+    updated_at: new Date(),
+    ...overrides,
+  }
+}
+
+function stubPoolForAuthReads(options: {
+  userRow: Record<string, unknown>
+  admissionRows?: unknown[]
+  admissionError?: Error
+}) {
+  const roleInsertParams: unknown[][] = []
+  const admissionParams: unknown[][] = []
+  poolMocks.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    const text = String(sql)
+    if (text.includes('user_namespace_admissions')) {
+      admissionParams.push(params ?? [])
+      if (options.admissionError) throw options.admissionError
+      return { rows: options.admissionRows ?? [] }
+    }
+    if (text.includes('INSERT INTO user_roles')) {
+      roleInsertParams.push(params ?? [])
+      return { rows: [] }
+    }
+    if (text.includes('FROM users')) {
+      return { rows: [options.userRow] }
+    }
+    return { rows: [] }
+  })
+  return { roleInsertParams, admissionParams }
+}
+
 describe('AuthService.verifyToken', () => {
   beforeEach(() => {
     process.env.NODE_ENV = 'test'
@@ -151,26 +198,28 @@ describe('AuthService.verifyToken', () => {
   // unpersisted attendance:read/attendance:write permissions must not leak into the returned user.
   it('[recovery-census:auth-service:self-service-backfill] omits unpersisted attendance self-service permissions when backfill role assignment cannot persist under a busy recovery lease', async () => {
     jwtMocks.verify.mockReturnValue({ userId: 'u-backfill', email: 'backfill@x', role: 'user', iat: 0, exp: 0 })
-    poolMocks.query.mockResolvedValueOnce({
-      rows: [{
-        id: 'u-backfill',
-        email: 'backfill@x',
-        name: 'Backfill',
-        role: 'user',
-        permissions: [],
-        password_hash: 'hash',
-        is_active: true,
-        activation_status: 'activated',
-        local_password_set: true,
-        created_at: new Date(),
-        updated_at: new Date(),
-      }],
-    })
+    const backfillUserRow = {
+      id: 'u-backfill',
+      email: 'backfill@x',
+      name: 'Backfill',
+      role: 'user',
+      permissions: [],
+      password_hash: 'hash',
+      is_active: true,
+      activation_status: 'activated',
+      local_password_set: true,
+      created_at: new Date(),
+      updated_at: new Date(),
+    }
     let userRolesAttempts = 0
     poolMocks.query.mockImplementation(async (sql: string) => {
-      if (String(sql).includes('INSERT INTO user_roles')) {
+      const text = String(sql)
+      if (text.includes('INSERT INTO user_roles')) {
         userRolesAttempts++
         throw recoveryAuthorityBusyError()
+      }
+      if (text.includes('FROM users')) {
+        return { rows: [backfillUserRow] }
       }
       return { rows: [] }
     })
@@ -358,10 +407,114 @@ describe('AuthService.verifyToken', () => {
     // same role id — the assertion tracks the parameter shape, not a changed behaviour.
     expect(poolMocks.query).toHaveBeenNthCalledWith(
       2,
+      expect.stringContaining('pg_advisory_xact_lock'),
+      ['namespace-admission:u5'],
+    )
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      3,
+      expect.stringContaining('user_namespace_admissions'),
+      ['u5', 'attendance'],
+    )
+    expect(poolMocks.query).toHaveBeenNthCalledWith(
+      4,
       expect.stringContaining('INSERT INTO user_roles'),
       [['u5'], 'attendance_employee'],
     )
     expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('u5')
+  })
+
+  it('does not merge attendance permissions when a non-recovery INSERT fails', async () => {
+    process.env.PRODUCT_MODE = 'platform'
+    jwtMocks.verify.mockReturnValue({ userId: 'u5', role: 'user', iat: 0, exp: 0 })
+    rbacMocks.isAdmin.mockResolvedValue(false)
+    rbacMocks.listUserPermissions.mockResolvedValue(['workflow:read'])
+    poolMocks.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('INSERT INTO user_roles')) throw Object.assign(new Error('write failed'), { code: '23503' })
+      if (sql.includes('FROM users')) return { rows: [platformAuthUserRow()] }
+      return { rows: [] }
+    })
+
+    const user = await new AuthService().verifyToken('token')
+
+    expect(user?.permissions).toEqual(['workflow:read'])
+    expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+  })
+
+  it('does not reinsert attendance_employee on next auth after explicit role_unassigned admission', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      jwtMocks.verify.mockReturnValue({ userId: 'u-revoked', email: 'revoked@x', role: 'user', iat: 0, exp: 0 })
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ id: 'u-revoked', email: 'revoked@x', name: 'Revoked' }),
+        admissionRows: [{ enabled: false, source: 'role_unassigned' }],
+      })
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      rbacMocks.listUserPermissions.mockResolvedValue(['spreadsheets:read'])
+
+      const auth = new AuthService()
+      const user = await auth.verifyToken('next-auth-token')
+
+      expect(user).toBeTruthy()
+      expect(user?.permissions).not.toContain('attendance:read')
+      expect(user?.permissions).not.toContain('attendance:write')
+      expect(tracked.admissionParams).toEqual([['u-revoked', 'attendance']])
+      expect(tracked.roleInsertParams).toEqual([])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  it('does not backfill a blocked subject with disabled platform_admin attendance admission', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      jwtMocks.verify.mockReturnValue({ userId: 'u-blocked', email: 'blocked@x', role: 'user', iat: 0, exp: 0 })
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ id: 'u-blocked', email: 'blocked@x', name: 'Blocked' }),
+        admissionRows: [{ enabled: false, source: 'platform_admin' }],
+      })
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+
+      const auth = new AuthService()
+      const user = await auth.verifyToken('blocked-subject-token')
+
+      expect(user).toBeTruthy()
+      expect(user?.permissions).not.toContain('attendance:read')
+      expect(tracked.roleInsertParams).toEqual([])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  it('skips attendance backfill when the admission row cannot be read', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      jwtMocks.verify.mockReturnValue({ userId: 'u-unavail', email: 'unavail@x', role: 'user', iat: 0, exp: 0 })
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({ id: 'u-unavail', email: 'unavail@x', name: 'Unavailable' }),
+        admissionError: schemaMissingRelation('user_namespace_admissions'),
+      })
+      rbacMocks.isAdmin.mockResolvedValue(false)
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+
+      const auth = new AuthService()
+      const user = await auth.verifyToken('unavailable-admission-token')
+
+      expect(user).toBeTruthy()
+      expect(user?.permissions).not.toContain('attendance:read')
+      expect(tracked.roleInsertParams).toEqual([])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
   })
 
   it('trusts token claims and skips DB lookup when RBAC_TOKEN_TRUST is enabled', async () => {
@@ -674,6 +827,7 @@ describe('AuthService.login', () => {
     rbacMocks.isAdmin.mockResolvedValue(false)
     rbacMocks.listUserPermissions.mockReset()
     rbacMocks.listUserPermissions.mockResolvedValue(['attendance:read'])
+    rbacMocks.invalidateUserPerms.mockReset()
     sessionMocks.createUserSession.mockReset()
     sessionMocks.isUserSessionRevoked.mockReset()
     sessionMocks.isUserSessionActive.mockReset()
@@ -736,6 +890,84 @@ describe('AuthService.login', () => {
     expect(loginSql).not.toContain('COALESCE(email')
     expect(loginSql).not.toContain('COALESCE(username')
     expect(loginSql).not.toContain('COALESCE(mobile')
+  })
+
+  it('does not reinsert attendance_employee on fresh login after explicit role_unassigned admission', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+      rbacMocks.listUserPermissions.mockResolvedValue(['spreadsheets:read'])
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({
+          id: 'user-login-revoked',
+          email: 'login-revoked@x',
+          username: 'loginrevoked',
+          name: 'Login Revoked',
+          password_hash: passwordHash,
+        }),
+        admissionRows: [{ enabled: false, source: 'role_unassigned' }],
+      })
+      jwtMocks.verify.mockReturnValue({
+        userId: 'user-login-revoked',
+        email: 'login-revoked@x',
+        role: 'user',
+        exp: Math.floor(new Date('2026-04-19T00:00:00.000Z').getTime() / 1000),
+        iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
+        sid: 'session-revoked',
+      })
+
+      const auth = new AuthService()
+      const result = await auth.login('loginrevoked', 'WelcomePass9A')
+
+      expect(result?.user.id).toBe('user-login-revoked')
+      expect(result?.user.permissions).not.toContain('attendance:read')
+      expect(result?.user.permissions).not.toContain('attendance:write')
+      expect(tracked.admissionParams).toEqual([['user-login-revoked', 'attendance']])
+      expect(tracked.roleInsertParams).toEqual([])
+      expect(rbacMocks.invalidateUserPerms).not.toHaveBeenCalled()
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
+  })
+
+  it('still bootstraps attendance self-service on fresh login for eligible never-revoked users', async () => {
+    const previousMode = process.env.PRODUCT_MODE
+    process.env.PRODUCT_MODE = 'platform'
+    try {
+      const passwordHash = await bcrypt.hash('WelcomePass9A', 10)
+      rbacMocks.listUserPermissions.mockResolvedValue([])
+      const tracked = stubPoolForAuthReads({
+        userRow: platformAuthUserRow({
+          id: 'user-login-eligible',
+          email: 'login-eligible@x',
+          username: 'logineligible',
+          name: 'Login Eligible',
+          password_hash: passwordHash,
+        }),
+        admissionRows: [],
+      })
+      jwtMocks.verify.mockReturnValue({
+        userId: 'user-login-eligible',
+        email: 'login-eligible@x',
+        role: 'user',
+        exp: Math.floor(new Date('2026-04-19T00:00:00.000Z').getTime() / 1000),
+        iat: Math.floor(new Date('2026-04-18T00:00:00.000Z').getTime() / 1000),
+        sid: 'session-eligible',
+      })
+
+      const auth = new AuthService()
+      const result = await auth.login('logineligible', 'WelcomePass9A')
+
+      expect(result?.user.permissions).toEqual(expect.arrayContaining(['attendance:read', 'attendance:write']))
+      expect(tracked.admissionParams).toEqual([['user-login-eligible', 'attendance']])
+      expect(tracked.roleInsertParams).toEqual([[['user-login-eligible'], 'attendance_employee']])
+      expect(rbacMocks.invalidateUserPerms).toHaveBeenCalledWith('user-login-eligible')
+    } finally {
+      if (previousMode === undefined) delete process.env.PRODUCT_MODE
+      else process.env.PRODUCT_MODE = previousMode
+    }
   })
 
   it('returns null when a mobile identifier matches multiple users', async () => {

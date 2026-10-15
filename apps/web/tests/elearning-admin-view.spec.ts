@@ -15,6 +15,7 @@ const h = vi.hoisted(() => ({
   publishExam: vi.fn(),
   createPractice: vi.fn(),
   listPractice: vi.fn(),
+  searchAssignees: vi.fn(),
 }))
 
 vi.mock('../src/services/elearning', async () => {
@@ -41,6 +42,13 @@ vi.mock('../src/services/elearningAssessmentAdmin', async () => {
     publishElearningFixedPaper: h.publishPaper,
     publishElearningPaperExam: h.publishExam,
   }
+})
+
+vi.mock('../src/services/elearningContent', async () => {
+  const actual = await vi.importActual<typeof import('../src/services/elearningContent')>(
+    '../src/services/elearningContent',
+  )
+  return { ...actual, searchElearningAssignees: h.searchAssignees }
 })
 
 vi.mock('../src/services/elearningPractice', async () => {
@@ -652,6 +660,33 @@ describe('ElearningAdminView', () => {
     await flushUi(12)
     expect(operationStageText(root)).toBeNull()
     expect(root.querySelector('[data-testid="elearning-admin-status"]')?.textContent).toContain('完成指派')
+  })
+
+  it('F13: the video form picks the assignee by name and sends the picked id, not the name', async () => {
+    const picked = '12121212-1212-4121-8121-121212121212'
+    h.searchAssignees.mockResolvedValue([{ id: picked, name: '王五', email: 'wangwu@example.test' }])
+    const root = mountView()
+    await fillMinimum(root)
+    expect(root.textContent).toContain('指派对象')
+    expect(root.textContent).not.toContain('指派对象（用户 ID）')
+    const search = root.querySelector('[data-testid="elearning-admin-assignee-search"]') as HTMLInputElement
+    fillInput(search, '王')
+    search.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    await flushUi()
+    expect(h.searchAssignees).toHaveBeenCalledWith('王')
+    ;(root.querySelector('[data-testid="elearning-admin-assignee-option-0"]') as HTMLButtonElement).click()
+    await flushUi()
+    expect(root.querySelector('[data-testid="elearning-admin-assignee-selected"]')?.textContent).toContain('王五')
+    expect((root.querySelector('[data-testid="elearning-admin-target"]') as HTMLInputElement).value).toBe(picked)
+
+    ;(root.querySelector('[data-testid="elearning-admin-publish"]') as HTMLButtonElement).click()
+    await flushUi(12)
+    expect(h.assign).toHaveBeenCalledTimes(1)
+    const payload = h.assign.mock.calls[0]?.[0] as Record<string, unknown>
+    expect(payload).toEqual({ targetUserId: picked, courseVersionId: VERSION, sourceKey: SOURCE })
+    // After publish the picker is frozen with the rest of the form.
+    expect(search.disabled).toBe(true)
+    expect((root.querySelector('[data-testid="elearning-admin-assignee-clear"]') as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('freezes target/deadline after publish and retries only the original assignment payload', async () => {

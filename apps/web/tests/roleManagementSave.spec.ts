@@ -37,6 +37,17 @@ function jsonResponse(payload: unknown, status = 200) {
   }
 }
 
+function isRoleMembersGet(url: string): boolean {
+  return url.startsWith('/api/admin/roles/') && url.includes('/members')
+}
+
+function membersResponse() {
+  return jsonResponse({
+    ok: true,
+    data: { items: [], page: 1, pageSize: 20, total: 0 },
+  })
+}
+
 const PERMISSIONS = [
   { code: 'stock-prep:read', name: '备料查看', description: null },
   { code: 'stock-prep:write', name: '备料写入', description: null },
@@ -111,6 +122,47 @@ afterEach(() => {
   container = null
 })
 
+describe('RoleManagementView — reserved role name (#6348 follow-up)', () => {
+  it('a 400 ROLE_NAME_RESERVED is shown in Chinese, not as the server\'s English message', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
+      if (url === '/api/admin/roles') return jsonResponse(roleCatalog(['stock-prep:read']))
+      if (init?.method === 'PUT') {
+        return jsonResponse({ ok: false, error: { code: 'ROLE_NAME_RESERVED', message: 'this display name is reserved for a built-in role' } }, 400)
+      }
+      throw new Error(`unexpected call ${url}`)
+    })
+
+    await mountView()
+    clickRole()
+    await flushUi()
+    clickSave()
+    await flushUi()
+
+    expect(statusText()).toBe('该名称为系统保留名，不能用于自定义角色')
+    expect(statusText()).not.toContain('reserved')
+  })
+
+  it('another refusal still shows the server message', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: { method?: string }) => {
+      if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
+      if (url === '/api/admin/roles') return jsonResponse(roleCatalog(['stock-prep:read']))
+      if (init?.method === 'PUT') {
+        return jsonResponse({ ok: false, error: { code: 'ROLE_ID_INVALID', message: '角色 ID 不合法' } }, 400)
+      }
+      throw new Error(`unexpected call ${url}`)
+    })
+
+    await mountView()
+    clickRole()
+    await flushUi()
+    clickSave()
+    await flushUi()
+
+    expect(statusText()).toBe('角色 ID 不合法')
+  })
+})
+
 describe('RoleManagementView — save reconciliation', () => {
   it('does NOT claim a permission mismatch when it is the post-save RELOAD that failed', async () => {
     let rolesReads = 0
@@ -126,6 +178,7 @@ describe('RoleManagementView — save reconciliation', () => {
       if (init?.method === 'PUT') {
         return jsonResponse({ ok: true, data: { id: 'role-1', name: '备料角色', permissions: ['stock-prep:read', 'stock-prep:write'] } })
       }
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
@@ -154,6 +207,7 @@ describe('RoleManagementView — save reconciliation', () => {
       if (init?.method === 'PUT') {
         return jsonResponse({ ok: true, data: { id: 'role-1', name: '备料角色' } })
       }
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
@@ -176,6 +230,7 @@ describe('RoleManagementView — save reconciliation', () => {
       if (init?.method === 'PUT') {
         return jsonResponse({ ok: true, data: { id: 'role-1', name: '备料角色', permissions: ['stock-prep:read', 'stock-prep:write'] } })
       }
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
@@ -206,6 +261,7 @@ describe('RoleManagementView — save reconciliation', () => {
           error: { code: 'ROLE_MODIFIED', message: 'This role changed since it was loaded; reload it and re-apply the change' },
         }, 409)
       }
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
@@ -235,6 +291,7 @@ describe('RoleManagementView — save reconciliation', () => {
       if (init?.method === 'PUT') {
         return jsonResponse({ ok: true, data: { id: 'role-1', name: '备料角色', permissions: ['stock-prep:read', 'stock-prep:write'] } })
       }
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
@@ -291,6 +348,7 @@ describe('RoleManagementView — an existing role is addressed by the id it was 
       if (url === '/api/permissions') return jsonResponse({ ok: true, data: PERMISSIONS })
       if (url === '/api/admin/roles') return jsonResponse(lookAlikeCatalog())
       if (init?.method === 'PUT' || init?.method === 'DELETE') return jsonResponse({ ok: true, data: {} })
+      if (isRoleMembersGet(url)) return membersResponse()
       throw new Error(`unexpected call ${url}`)
     })
 
