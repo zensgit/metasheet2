@@ -156,4 +156,63 @@ describe('useAttendanceAdminRail', () => {
 
     scope.stop()
   })
+
+  it('filters jump-block entries by Chinese label, expands the matching group, and restores the tree', async () => {
+    const showAdmin = ref(true)
+    const scope = effectScope()
+    const rail = scope.run(() =>
+      useAttendanceAdminRail({
+        tr: (_en: string, zh: string) => zh,
+        resolveStorageScope: () => undefined,
+        showAdmin,
+        notify: () => undefined,
+      }),
+    )!
+
+    await flushUi()
+    rail.collapseAllAdminSectionGroups()
+    rail.adminActiveSectionId.value = ATTENDANCE_ADMIN_SECTION_IDS.settings
+    await flushUi()
+    expect(rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'scheduling')?.expanded).toBe(false)
+
+    rail.adminSectionFilter.value = '班次'
+    await flushUi()
+    const scheduling = rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'scheduling')
+    expect(scheduling?.expanded).toBe(true)
+    expect(scheduling?.items.map(item => item.label)).toEqual(['班次'])
+    expect(rail.visibleAdminSectionNavGroups.value.some(group => group.id === 'workspace')).toBe(false)
+
+    rail.adminSectionFilter.value = '排班执行'
+    await flushUi()
+    const schedulingGroup = rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'scheduling')
+    expect(schedulingGroup?.expanded).toBe(true)
+    expect(schedulingGroup?.items.map(item => item.label)).toEqual([
+      '高级排班',
+      '综合工时',
+      '轮班规则',
+      '轮班分配',
+      '班次',
+      '排班分配',
+      '排班管理范围',
+      '节假日',
+    ])
+    expect(rail.visibleAdminSectionNavGroups.value).toHaveLength(1)
+
+    rail.adminActiveSectionId.value = ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy
+    rail.adminSectionFilter.value = '补卡'
+    await flushUi()
+    const workspace = rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'workspace')
+    expect(workspace?.expanded).toBe(true)
+    expect(workspace?.items.map(item => item.label)).toEqual(['补卡策略'])
+
+    rail.adminSectionFilter.value = '   '
+    await flushUi()
+    expect(rail.visibleAdminSectionNavGroups.value).toHaveLength(6)
+    expect(rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'scheduling')?.expanded).toBe(false)
+    expect(rail.visibleAdminSectionNavGroups.value.find(group => group.id === 'workspace')?.items.some(
+      item => item.id === ATTENDANCE_ADMIN_SECTION_IDS.settings,
+    )).toBe(true)
+
+    scope.stop()
+  })
 })

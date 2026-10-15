@@ -35,6 +35,20 @@ export function formatLocaleTimeInput(value: string, locale: 'zh' | 'en'): strin
   return `${parts.hour12}:${String(parts.minute).padStart(2, '0')} ${period}`
 }
 
+/** Visible clock text. Always 24-hour HH:mm, such as 09:00 or 18:00. */
+export function formatClockTime(value: string): string {
+  return parseLocaleTimeInput(value) || ''
+}
+
+/** Read-only 上午/下午 (or AM/PM) derived from a stored or typed time. */
+export function localeTimePeriodLabel(value: string, locale: 'zh' | 'en'): string {
+  const stored = parseLocaleTimeInput(value)
+  const parts = stored ? parseStoredTime(stored) : null
+  if (!parts) return ''
+  if (locale === 'zh') return parts.period === 'pm' ? '下午' : '上午'
+  return parts.period === 'pm' ? 'PM' : 'AM'
+}
+
 /** Accepts 9:00, 18:00, 9:00上午, 上午9:00, 6:00 PM. Returns 24-hour HH:mm, or null. */
 export function parseLocaleTimeInput(raw: string): string | null {
   const compact = raw.trim().replace(/：/g, ':').replace(/\s+/g, '')

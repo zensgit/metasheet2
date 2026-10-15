@@ -58,6 +58,8 @@ export const ATTENDANCE_ADMIN_SECTION_IDS = {
 export type AdminSectionNavItem = {
   id: string
   label: string
+  /** Lowercased English, Chinese, and any extra aliases. The visible label is `label`. */
+  matchText?: string
 }
 
 export type AdminSectionNavDisplayItem = AdminSectionNavItem & {
@@ -68,6 +70,7 @@ export type AdminSectionNavDisplayItem = AdminSectionNavItem & {
 type AdminSectionNavGroupDefinition = {
   id: string
   label: string
+  matchText: string
   itemIds: string[]
 }
 
@@ -175,6 +178,21 @@ export function useAttendanceAdminRail({
   showAdmin,
   notify,
 }: UseAttendanceAdminRailOptions) {
+  function sectionNavItem(id: string, en: string, zh: string): AdminSectionNavItem {
+    return {
+      id,
+      label: tr(en, zh),
+      matchText: `${en}\n${zh}`.toLowerCase(),
+    }
+  }
+  function sectionNavGroup(id: string, en: string, zh: string, itemIds: string[]): AdminSectionNavGroupDefinition {
+    return {
+      id,
+      label: tr(en, zh),
+      matchText: `${en}\n${zh}`.toLowerCase(),
+      itemIds,
+    }
+  }
   const adminSectionNavItems = computed<AdminSectionNavItem[]>(() => [
     // W4-1 setup wizard sits AFTER Settings/User Access on purpose: `adminSectionNavItems[0]`
     // doubles as the observer-sync default active section (useAttendanceAdminRailNavigation
@@ -182,113 +200,89 @@ export function useAttendanceAdminRail({
     // default active section on every admin mount and pollute the recents rail with a
     // visit-style signal (§6.1 rejects visit-history signals). Its designed primary entry is
     // the task-home 「启用准备」 action, not rail position.
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.settings, label: tr('Settings', '设置') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.userAccess, label: tr('User Access', '用户权限') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.setup, label: tr('Setup readiness', '启用准备') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, label: tr('Batch Provisioning', '批量授权') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, label: tr('Audit Logs', '审计日志') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace, label: tr('Decision trace', '决策轨迹') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, label: tr('Notification deliveries', '通知投递') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy, label: tr('Report digest subscription', '统计通知订阅') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy, label: tr('Makeup punch policy', '补卡策略') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.holidaySync, label: tr('Holiday Sync', '节假日同步') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.defaultRule, label: tr('Default Rule', '默认规则') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleSets, label: tr('Rule Sets', '规则集') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary, label: tr('Rule Template Library', '规则模板库') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups, label: tr('Attendance groups', '考勤组') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability, label: tr('Team availability', '团队可用性') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.import, label: tr('Import', '导入') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.importBatches, label: tr('Import batches', '导入批次') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.reportFields, label: tr('Report fields', '统计字段') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates, label: tr('Payroll Templates', '计薪模板') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles, label: tr('Payroll Cycles', '计薪周期') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes, label: tr('Leave Types', '请假类型') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules, label: tr('Overtime Rules', '加班规则') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows, label: tr('Approval Flows', '审批流') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench, label: tr('Advanced scheduling', '高级排班') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview, label: tr('Comprehensive hours', '综合工时') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationRules, label: tr('Rotation Rules', '轮班规则') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments, label: tr('Rotation Assignments', '轮班分配') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.shifts, label: tr('Shifts', '班次') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.assignments, label: tr('Assignments', '排班分配') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes, label: tr('Scheduler scope mgmt', '排班管理范围') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.holidays, label: tr('Holidays', '节假日') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance, label: tr('Annual leave balance', '年假余额') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy, label: tr('Annual leave policy', '年假策略') },
-    { id: ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations, label: tr('Annual leave operations', '年假操作') },
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.settings, 'Settings', '设置'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.userAccess, 'User Access', '用户权限'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.setup, 'Setup readiness', '启用准备'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning, 'Batch Provisioning', '批量授权'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.auditLogs, 'Audit Logs', '审计日志'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace, 'Decision trace', '决策轨迹'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries, 'Notification deliveries', '通知投递'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy, 'Report digest subscription', '统计通知订阅'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy, 'Makeup punch policy', '补卡策略'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.holidaySync, 'Holiday Sync', '节假日同步'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.defaultRule, 'Default Rule', '默认规则'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.ruleSets, 'Rule Sets', '规则集'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary, 'Rule Template Library', '规则模板库'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups, 'Attendance groups', '考勤组'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability, 'Team availability', '团队可用性'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.import, 'Import', '导入'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.importBatches, 'Import batches', '导入批次'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.reportFields, 'Report fields', '统计字段'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates, 'Payroll Templates', '计薪模板'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles, 'Payroll Cycles', '计薪周期'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes, 'Leave Types', '请假类型'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules, 'Overtime Rules', '加班规则'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows, 'Approval Flows', '审批流'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench, 'Advanced scheduling', '高级排班'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview, 'Comprehensive hours', '综合工时'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.rotationRules, 'Rotation Rules', '轮班规则'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments, 'Rotation Assignments', '轮班分配'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.shifts, 'Shifts', '班次'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.assignments, 'Assignments', '排班分配'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes, 'Scheduler scope mgmt', '排班管理范围'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.holidays, 'Holidays', '节假日'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance, 'Annual leave balance', '年假余额'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy, 'Annual leave policy', '年假策略'),
+    sectionNavItem(ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations, 'Annual leave operations', '年假操作'),
   ])
   const adminSectionItemMap = computed(() => new Map(adminSectionNavItems.value.map(item => [item.id, item])))
   const adminSectionNavGroups = computed<AdminSectionNavGroupDefinition[]>(() => [
-    {
-      id: 'workspace',
-      label: tr('Workspace', '工作台'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.settings,
-        ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
-        ATTENDANCE_ADMIN_SECTION_IDS.setup,
-        ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
-        ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
-        ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace,
-        ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
-        ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy,
-        ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy,
-      ],
-    },
-    {
-      id: 'scheduling',
-      label: tr('Scheduling', '排班执行'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench,
-        ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview,
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
-        ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.shifts,
-        ATTENDANCE_ADMIN_SECTION_IDS.assignments,
-        ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes,
-        ATTENDANCE_ADMIN_SECTION_IDS.holidays,
-      ],
-    },
-    {
-      id: 'organization',
-      label: tr('Organization', '组织分组'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
-        ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability,
-      ],
-    },
-    {
-      id: 'policies',
-      label: tr('Policies', '规则策略'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.holidaySync,
-        ATTENDANCE_ADMIN_SECTION_IDS.defaultRule,
-        ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
-        ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary,
-        ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes,
-        ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules,
-        ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows,
-      ],
-    },
-    {
-      id: 'annual-leave',
-      label: tr('Annual leave', '年假/法定假'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance,
-        ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy,
-        ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations,
-      ],
-    },
-    {
-      id: 'data-payroll',
-      label: tr('Data & Payroll', '数据与计薪'),
-      itemIds: [
-        ATTENDANCE_ADMIN_SECTION_IDS.import,
-        ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
-        ATTENDANCE_ADMIN_SECTION_IDS.reportFields,
-        ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
-        ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
-      ],
-    },
+    sectionNavGroup('workspace', 'Workspace', '工作台', [
+      ATTENDANCE_ADMIN_SECTION_IDS.settings,
+      ATTENDANCE_ADMIN_SECTION_IDS.userAccess,
+      ATTENDANCE_ADMIN_SECTION_IDS.setup,
+      ATTENDANCE_ADMIN_SECTION_IDS.batchProvisioning,
+      ATTENDANCE_ADMIN_SECTION_IDS.auditLogs,
+      ATTENDANCE_ADMIN_SECTION_IDS.decisionTrace,
+      ATTENDANCE_ADMIN_SECTION_IDS.notificationDeliveries,
+      ATTENDANCE_ADMIN_SECTION_IDS.reportDigestPolicy,
+      ATTENDANCE_ADMIN_SECTION_IDS.makeupPunchPolicy,
+    ]),
+    sectionNavGroup('scheduling', 'Scheduling', '排班执行', [
+      ATTENDANCE_ADMIN_SECTION_IDS.advancedSchedulingWorkbench,
+      ATTENDANCE_ADMIN_SECTION_IDS.comprehensiveHoursPreview,
+      ATTENDANCE_ADMIN_SECTION_IDS.rotationRules,
+      ATTENDANCE_ADMIN_SECTION_IDS.rotationAssignments,
+      ATTENDANCE_ADMIN_SECTION_IDS.shifts,
+      ATTENDANCE_ADMIN_SECTION_IDS.assignments,
+      ATTENDANCE_ADMIN_SECTION_IDS.schedulerScopes,
+      ATTENDANCE_ADMIN_SECTION_IDS.holidays,
+    ]),
+    sectionNavGroup('organization', 'Organization', '组织分组', [
+      ATTENDANCE_ADMIN_SECTION_IDS.attendanceGroups,
+      ATTENDANCE_ADMIN_SECTION_IDS.teamAvailability,
+    ]),
+    sectionNavGroup('policies', 'Policies', '规则策略', [
+      ATTENDANCE_ADMIN_SECTION_IDS.holidaySync,
+      ATTENDANCE_ADMIN_SECTION_IDS.defaultRule,
+      ATTENDANCE_ADMIN_SECTION_IDS.ruleSets,
+      ATTENDANCE_ADMIN_SECTION_IDS.ruleTemplateLibrary,
+      ATTENDANCE_ADMIN_SECTION_IDS.leaveTypes,
+      ATTENDANCE_ADMIN_SECTION_IDS.overtimeRules,
+      ATTENDANCE_ADMIN_SECTION_IDS.approvalFlows,
+    ]),
+    sectionNavGroup('annual-leave', 'Annual leave', '年假/法定假', [
+      ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveBalance,
+      ATTENDANCE_ADMIN_SECTION_IDS.annualLeavePolicy,
+      ATTENDANCE_ADMIN_SECTION_IDS.annualLeaveOperations,
+    ]),
+    sectionNavGroup('data-payroll', 'Data & Payroll', '数据与计薪', [
+      ATTENDANCE_ADMIN_SECTION_IDS.import,
+      ATTENDANCE_ADMIN_SECTION_IDS.importBatches,
+      ATTENDANCE_ADMIN_SECTION_IDS.reportFields,
+      ATTENDANCE_ADMIN_SECTION_IDS.payrollTemplates,
+      ATTENDANCE_ADMIN_SECTION_IDS.payrollCycles,
+    ]),
   ])
   const adminSectionGroupIdByItemId = computed(() => {
     const groupIds = new Map<string, string>()
@@ -428,8 +422,9 @@ export function useAttendanceAdminRail({
         const allItems = group.itemIds
           .map(id => adminSectionItemMap.value.get(id))
           .filter((item): item is AdminSectionNavItem => Boolean(item))
+        const groupMatches = Boolean(query) && group.matchText.includes(query)
         const items = query
-          ? allItems.filter(item => item.label.toLowerCase().includes(query))
+          ? allItems.filter(item => groupMatches || (item.matchText ?? item.label).toLowerCase().includes(query))
           : allItems
         if (items.length === 0) return null
         const countLabel = query && items.length !== allItems.length
@@ -465,6 +460,9 @@ export function useAttendanceAdminRail({
             ...item,
             groupLabel,
             contextLabel,
+            // Item aliases plus the group name, so workbench search matches the
+            // same Chinese and English catalog as the jump-block filter.
+            matchText: `${item.matchText ?? item.label}\n${group.matchText}`.toLowerCase(),
           }
         })
     })
@@ -483,7 +481,7 @@ export function useAttendanceAdminRail({
           contextLabel,
         }
       })
-      .filter(item => !query || item.contextLabel.toLowerCase().includes(query))
+      .filter(item => !query || `${item.matchText ?? ''}\n${item.contextLabel}`.toLowerCase().includes(query))
   })
   const activeAdminSectionContextLabel = computed(() => {
     const activeItem = adminSectionItemMap.value.get(adminActiveSectionId.value)
