@@ -9867,6 +9867,15 @@ export class ApprovalProductService {
           'CANCEL_ROUND_ALREADY_PENDING',
         )
       }
+      // SERIALIZABLE create can lose the race as 40001/40P01 before the unique index
+      // reports 23505. The loser still has no round of its own.
+      if (lockedAttendanceOrgId && isRetryableSqlState(error)) {
+        throw new ServiceError(
+          'This document already has a cancel round in progress',
+          409,
+          'CANCEL_ROUND_ALREADY_PENDING',
+        )
+      }
       if (error instanceof AttendanceRolloutConnectionUncertainError) destroyCreateClient = true
       throw error
     } finally {

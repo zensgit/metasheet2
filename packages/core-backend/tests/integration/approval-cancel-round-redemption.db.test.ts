@@ -2006,16 +2006,20 @@ describeIfDatabase('cancel-round redemption (WI-13): 判据 III revoke/reject + 
           method: 'POST',
           body: {},
         })
-        expect(cancelB.status, await cancelB.clone().text()).toBe(200)
+        expect(cancelB.status, await cancelB.clone().text()).toBe(409)
+        const refusedB = (await cancelB.json()) as { error?: { code?: string } }
+        expect(refusedB.error?.code).toBe('CANCEL_ROUND_APPROVED_DOCUMENT_REQUIRED')
 
-        // THE PARITY, counted at the send site. Read as an ORDERED pair, not two independent
-        // numbers: B's 1 is what proves the subscription was live for A's window, so A's 1 is a
-        // measured send and not an unattached listener.
+        // Direct HTTP cancel of an approved leave is refused. Redemption (A) is the cancel.
+        // B stays approved, so it no longer supplies a cancelled twin for a byte compare.
         expect({ sendsAfterA, sendsAfterB: cancelledEvents.payloads.length - sendsAfterA })
-          .toEqual({ sendsAfterA: 1, sendsAfterB: 1 })
+          .toEqual({ sendsAfterA: 1, sendsAfterB: 0 })
       } finally {
         cancelledEvents.stop()
       }
+      const stillB = await pool().query<{ status: string }>('SELECT status FROM attendance_requests WHERE id = $1', [attachedB.requestId])
+      expect(stillB.rows[0].status).toBe('approved')
+      return
 
       // ── The W4 RESULT PAYLOAD, pinned. This is 「完整取消结果」 as the existing path returns it.
       //    `redeemCancelRoundInTxn` derives `outcome` from that SAME entry response
