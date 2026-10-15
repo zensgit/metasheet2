@@ -192,6 +192,7 @@ automation-rule-concurrent-merge
 automation-save-block-reasons
 automation-target-sheet-options
 AutomationExecutionsView
+builtinCatalogPresentation
 cancelRoundEntryApproverList
 cancelRoundEntryAttendancePanel
 cancelRoundEntryCenterRoute
@@ -474,6 +475,7 @@ recordReportPresentation.spec.ts
 requesterPreviewFields
 roleDelegationView
 roleManagementSave
+roleMembers
 routePreviewErrors
 run-required-web-tests-shape
 searchApprovalDirectoryDepartments
