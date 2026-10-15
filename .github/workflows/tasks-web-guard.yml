@@ -154,7 +154,7 @@
 # primary field and person fields, the create body and the one source line written under
 # `expectedVersion`, the in-flight guard across close, reopen and record moves, the error messages,
 # and the identity binding (a dispatch sends nothing under any user or org other than the one the
-# record was bound under; a sign-in elsewhere, a sign-out or an org change clears the draft and
+# page was loaded under; a sign-in elsewhere, a sign-out or an org change clears the draft and
 # refuses; dispatch state kept per identity). The dialog itself lives under `src/multitable/`; its
 # dispatch modules are under `src/tasks/`, which this guard's paths already cover.
 #
