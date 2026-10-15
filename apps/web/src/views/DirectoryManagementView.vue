@@ -1207,10 +1207,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__status directory-admin__status--error">
-                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+                该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__hint">
-                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+                修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(item.account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="reviewProcessingAccountId === item.account.id" @click="void refreshSingleReviewItem(item.account.id)">
@@ -1721,10 +1721,10 @@
                 <span>绑定后同时开通钉钉登录</span>
               </label>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__status directory-admin__status--error">
-                openId 缺失，当前无法同时开通钉钉登录；请重新同步目录或让用户完成钉钉 OAuth 绑定后再开通。
+                该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，当前无法同时开通钉钉登录。
               </p>
               <p v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__hint">
-                修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员；若刷新后仍缺失 openId，请检查钉钉目录同步返回值，再决定是否重新同步当前集成。
+                修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）。
               </p>
               <div v-if="shouldWarnMissingOpenIdForGrant(account)" class="directory-admin__actions">
                 <button class="directory-admin__button directory-admin__button--secondary" type="button" :disabled="bindingAccountId === account.id" @click="void refreshSingleAccount(account.id)">

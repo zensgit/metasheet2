@@ -1742,6 +1742,7 @@ jobs:
             tests/integration/dept-head-sync-plumbing.test.ts \
             tests/integration/approval-manager-chain.db.test.ts \
             tests/integration/directory-sync-admission-orphan-guard.db.test.ts \
+            tests/integration/directory-dingtalk-openid-grant-path.db.test.ts \
             tests/integration/approval-requester-department.db.test.ts \
             tests/integration/approval-requester-title.db.test.ts \
             tests/integration/approval-requester-role.db.test.ts \

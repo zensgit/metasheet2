@@ -1037,8 +1037,9 @@ describe('DirectoryManagementView', () => {
     app.mount(container!)
     await flushUi()
 
-    expect(container?.textContent).toContain('openId 缺失，当前无法同时开通钉钉登录')
-    expect(container?.textContent).toContain('修复建议：若该成员刚完成钉钉登录/绑定，先刷新当前成员')
+    expect(container?.textContent).toContain('该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId')
+    expect(container?.textContent).toContain('修复建议：请让他先用钉钉扫码登录一次，再回来刷新当前成员并开通（或到用户管理开通）')
+    expect(container?.textContent).not.toContain('检查钉钉目录同步返回值')
     const refreshButtons = Array.from(container!.querySelectorAll('button')).filter((button) => button.textContent?.includes('刷新当前成员'))
     expect(refreshButtons.length).toBeGreaterThanOrEqual(2)
     const userLinks = Array.from(container!.querySelectorAll('a')).filter((link) => link.textContent?.includes('前往用户管理'))
