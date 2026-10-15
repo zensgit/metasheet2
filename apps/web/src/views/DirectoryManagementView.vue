@@ -2164,6 +2164,11 @@ type DirectoryAccount = {
   externalUserId: string
   unionId: string | null
   openId: string | null
+  /**
+   * Server-computed with the SAME predicate the bind/admit grant check runs (own openId, else the
+   * openId a DingTalk login recorded for the same corp+unionId). Missing ⇒ treated as not grantable.
+   */
+  grantOpenIdAvailable?: boolean
   externalKey: string
   name: string
   email: string | null
@@ -4032,15 +4037,18 @@ function readGrantToggle(accountId: string): boolean {
   return grantToggles[accountId] ?? true
 }
 
-function canEnableDingTalkGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
-  return !((account.corpId?.trim() ?? '').length > 0 && (account.openId?.trim() ?? '').length === 0)
+// The page does NOT re-derive the DT-HARDEN-02 rule from corpId/openId: the server computes
+// grantOpenIdAvailable with the same predicate its grant check runs (which also accepts the openId
+// a DingTalk login recorded for this person), so the checkbox can never disagree with the server.
+function canEnableDingTalkGrant(account: Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): boolean {
+  return account.grantOpenIdAvailable === true
 }
 
 function readAccountGrantToggle(account: DirectoryAccount): boolean {
   return canEnableDingTalkGrant(account) && readGrantToggle(account.id)
 }
 
-function shouldWarnMissingOpenIdForGrant(account: Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): boolean {
+function shouldWarnMissingOpenIdForGrant(account: Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): boolean {
   return !canEnableDingTalkGrant(account)
 }
 
@@ -4052,7 +4060,7 @@ function onGrantToggleChange(account: DirectoryAccount, event: Event) {
   const target = event.target
   if (!canEnableDingTalkGrant(account)) {
     updateGrantToggle(account.id, false)
-    setStatus(`目录成员 ${account.name} 缺少 openId，暂不能开通钉钉登录；请重新同步目录或完成钉钉 OAuth 绑定`, 'error')
+    setStatus(`目录成员 ${account.name} 还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉登录；请让他先扫码登录一次，再刷新当前成员并开通（或到用户管理开通）`, 'error')
     return
   }
   updateGrantToggle(account.id, target instanceof HTMLInputElement ? target.checked : true)
@@ -5224,13 +5232,14 @@ async function handleDirectoryNavigationChange(): Promise<void> {
   ])
 }
 
-function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'> & Partial<Pick<DirectoryAccount, 'corpId' | 'openId'>>): string {
+function buildUserManagementLocation(userId: string, account: Pick<DirectoryAccount, 'id' | 'integrationId'> & Partial<Pick<DirectoryAccount, 'grantOpenIdAvailable'>>): string {
   const params = new URLSearchParams()
   params.set('userId', userId)
   params.set('source', 'directory-sync')
   params.set('integrationId', account.integrationId)
   params.set('accountId', account.id)
-  if (shouldWarnMissingOpenIdForGrant(account)) {
+  // only when the server said so: a bare {id, integrationId} (manual admission result) carries no verdict
+  if (account.grantOpenIdAvailable === false) {
     params.set('filter', 'dingtalk-openid-missing')
   }
   return `/admin/users?${params.toString()}`

@@ -28,6 +28,11 @@ import {
 } from '../directory/access-graph-mutex'
 import { claimLoginAlias } from './login-alias-service'
 import { buildUnusablePasswordHash } from './user-activation'
+import {
+  buildDirectoryAccountLinkedIdentityOpenIdSql,
+  canDirectoryAccountEnableDingTalkGrant,
+  type DirectoryAccountGrantOpenIdSource,
+} from '../directory/dingtalk-grant-open-id'
 
 export type ActivateMode = 'temp_password' | 'sso' | 'admin_no_password'
 
@@ -102,6 +107,12 @@ export type ActivateErrorCode =
   | 'ACTIVATE_ORG_MISMATCH'
   /** Multiple ACTIVE directory sources in different orgs; the caller must name one (#4833). */
   | 'ACTIVATE_ORG_AMBIGUOUS'
+  /**
+   * DT-HARDEN-02: a non-SSO activation asked for the DingTalk grant, but a linked corp DingTalk
+   * directory account has no openId — neither its own nor one a DingTalk login recorded for the
+   * same corp+unionId. Same rule as the directory page's bind/admit grant check.
+   */
+  | 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED'
 
 function throwCoded(message: string, code: ActivateErrorCode): never {
   const err = new Error(message)
@@ -178,6 +189,33 @@ export async function activatePendingUser(input: ActivateUserInput): Promise<Act
       requestedOrgId: input.orgId?.trim() || null,
     })
     membershipOrgId = sourceOrgId
+
+    // DT-HARDEN-02 on the activation path. The directory page's bind/admit refuses a DingTalk grant
+    // for a corp member without an openId; activation used to write the grant row unconditionally
+    // (see the grant INSERT below), so a pending corp member could be granted here without one.
+    // Same predicate and same linked-openId SQL as the directory page (one shared module).
+    // SSO mode is not re-checked: its source match already requires the directory account's
+    // openId to EQUAL the openId of the DingTalk login doing the activation — strictly stronger.
+    if (input.enableDingTalkGrant === true && input.mode !== 'sso') {
+      const linkedAccounts = await client.query(
+        `SELECT account.corp_id,
+                account.open_id,
+                ${buildDirectoryAccountLinkedIdentityOpenIdSql('account')} AS linked_identity_open_id
+           FROM directory_account_links link
+           JOIN directory_accounts account ON account.id = link.directory_account_id
+          WHERE link.local_user_id = $1
+            AND link.link_status = 'linked'
+            AND account.provider = 'dingtalk'`,
+        [userId],
+      )
+      const rows = linkedAccounts.rows as DirectoryAccountGrantOpenIdSource[]
+      if (rows.some((row) => !canDirectoryAccountEnableDingTalkGrant(row))) {
+        throwCoded(
+          'DingTalk login cannot be granted yet: the linked DingTalk directory member has no openId (missing DingTalk openId)',
+          'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED',
+        )
+      }
+    }
 
     const updated = await client.query(
       `UPDATE users

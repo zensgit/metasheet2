@@ -69,6 +69,11 @@ describe('mapActivateError (activate endpoint error surface)', () => {
       status: 409,
       message: 'Multiple active directory sources in different orgs; orgId is required to disambiguate',
     },
+    // DT-HARDEN-02 on the activation path: a caller-fixable state — 409 with OUR message.
+    ACTIVATE_DINGTALK_OPEN_ID_REQUIRED: {
+      status: 409,
+      message: 'DingTalk login cannot be granted yet: this member has not signed in with DingTalk, so no openId is available (missing DingTalk openId). Activate without the DingTalk grant, or ask them to scan in once first',
+    },
     ACTIVATE_SOURCE_INACTIVE: {
       status: 409,
       message: 'Directory account is inactive; cannot activate',
@@ -109,7 +114,7 @@ describe('mapActivateError (activate endpoint error surface)', () => {
 
   it('asserts the RULED transcription covers exactly the policy table (no silent drift)', () => {
     expect(Object.keys(RULED).sort()).toEqual(Object.keys(ACTIVATE_ERROR_POLICY).sort())
-    expect(Object.keys(RULED)).toHaveLength(14)
+    expect(Object.keys(RULED)).toHaveLength(15)
   })
 
   it('collapses an unauthored but ACTIVATE_-shaped code — the fail-open the owner reproduced', () => {

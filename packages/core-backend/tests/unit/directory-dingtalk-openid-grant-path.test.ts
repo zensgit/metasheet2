@@ -38,6 +38,8 @@ import {
   DirectoryValidationError,
   __directorySyncInternalsForTests,
   bindDirectoryAccount,
+  getDirectoryAccountSummary,
+  listDirectoryReviewItems,
   resolveDirectoryAutoAdmissionCanGrantDingTalkLogin,
 } from '../../src/directory/directory-sync'
 
@@ -252,8 +254,11 @@ describe('bindDirectoryAccount — grant backed by the linked identity openId', 
     const normalized = update!.sql.replace(/\s+/g, ' ')
     expect(normalized).not.toMatch(/provider_open_id = \$5::text,/)
     expect(normalized).toContain("provider_open_id = COALESCE( NULLIF($5::text, ''), CASE")
-    expect(normalized).toContain('WHEN provider_union_id IS NOT DISTINCT FROM $4::text AND corp_id IS NOT DISTINCT FROM $6::text THEN NULLIF(provider_open_id, \'\')')
+    // `=` on the unionId: a NULL unionId never counts as "the same person"
+    expect(normalized).toContain('WHEN provider_union_id = $4::text AND corp_id IS NOT DISTINCT FROM $6::text THEN NULLIF(provider_open_id, \'\')')
     // $4 = unionId, $5 = the directory row's own openId (NULL here), $6 = corp
+    // N3: $3 external_key is keyed on the resolved (linked) openId, not flipped to corp:unionId
+    expect(update!.params[2]).toBe('dingcorp:open-linked')
     expect(update!.params[3]).toBe('union-1')
     expect(update!.params[4]).toBeNull()
     expect(update!.params[5]).toBe('dingcorp')
@@ -293,9 +298,92 @@ describe('directory sync upsert — openId is not overwritten with NULL', () => 
     expect(clause).not.toMatch(/open_id = EXCLUDED\.open_id,/)
     expect(clause).toContain(
       "open_id = CASE WHEN COALESCE(EXCLUDED.open_id, '') <> '' THEN EXCLUDED.open_id "
-      + 'WHEN directory_accounts.union_id IS NOT DISTINCT FROM EXCLUDED.union_id '
+      + 'WHEN directory_accounts.union_id = EXCLUDED.union_id '
       + 'AND directory_accounts.corp_id IS NOT DISTINCT FROM EXCLUDED.corp_id '
       + 'THEN directory_accounts.open_id ELSE NULL END,',
     )
   })
 })
+
+const SUMMARY_ROW = {
+  integration_id: 'dir-1',
+  provider: 'dingtalk',
+  corp_id: 'dingcorp',
+  directory_account_id: 'account-1',
+  external_user_id: 'emp-1',
+  union_id: 'union-1',
+  open_id: null as string | null,
+  linked_identity_open_id: null as string | null,
+  external_key: 'union-1',
+  account_name: 'Member',
+  account_email: null,
+  account_mobile: null,
+  account_is_active: true,
+  account_updated_at: '2026-10-15T00:00:00.000Z',
+  link_status: 'linked',
+  match_strategy: 'manual_admin',
+  reviewed_by: 'admin-1',
+  review_note: null,
+  link_updated_at: '2026-10-15T00:00:00.000Z',
+  local_user_id: 'user-1',
+  local_user_email: 'alpha@example.com',
+  local_user_username: null,
+  local_user_name: 'Alpha',
+  department_paths: [],
+}
+
+describe('page verdict — grantOpenIdAvailable comes from the same predicate and subquery as the grant check', () => {
+  beforeEach(() => {
+    pgMocks.query.mockReset()
+    pgMocks.transaction.mockReset()
+  })
+
+  const VERDICT_CASES: Array<{ name: string; row: Partial<typeof SUMMARY_ROW>; available: boolean; missing: boolean }> = [
+    { name: 'corp member, no openId anywhere', row: {}, available: false, missing: true },
+    { name: 'corp member who scanned in (linked openId only)', row: { linked_identity_open_id: 'open-linked' }, available: true, missing: false },
+    { name: 'corp member with own openId', row: { open_id: 'open-own' }, available: true, missing: false },
+    { name: 'non-corp member, no openId', row: { corp_id: null }, available: true, missing: true },
+  ]
+
+  for (const testCase of VERDICT_CASES) {
+    it(`account summary: ${testCase.name} → grantOpenIdAvailable=${testCase.available} (agrees with the assertion)`, async () => {
+      const row = { ...SUMMARY_ROW, ...testCase.row }
+      pgMocks.query.mockResolvedValueOnce({ rows: [row] })
+
+      const summary = await getDirectoryAccountSummary('account-1')
+      expect(summary?.grantOpenIdAvailable).toBe(testCase.available)
+      // the page verdict and the server-side assertion can never disagree
+      expect(assertThrows(row, true)).toBe(!testCase.available)
+      expectLinkedOpenIdSubqueryOnAlias(String(pgMocks.query.mock.calls[0]?.[0]), 'a')
+    })
+
+    it(`review item: ${testCase.name} → missingOpenId=${testCase.missing}, account.grantOpenIdAvailable=${testCase.available}`, async () => {
+      const row = {
+        ...SUMMARY_ROW,
+        ...testCase.row,
+        review_kind: 'inactive_linked',
+        review_reason: 'x',
+        missing_union_id: false,
+      }
+      pgMocks.query
+        .mockResolvedValueOnce({ rows: [{ total: 1 }] })
+        .mockResolvedValueOnce({ rows: [row] })
+        .mockResolvedValue({ rows: [] })
+
+      const result = await listDirectoryReviewItems('dir-1', { limit: 10, offset: 0 })
+      expect(result.items[0]?.flags.missingOpenId).toBe(testCase.missing)
+      expect(result.items[0]?.account.grantOpenIdAvailable).toBe(testCase.available)
+      const itemsSql = pgMocks.query.mock.calls.map((call) => String(call[0])).find((sql) => sql.includes('review_kind'))
+      expectLinkedOpenIdSubqueryOnAlias(String(itemsSql), 'a')
+      expect(itemsSql).not.toContain('AS missing_open_id')
+    })
+  }
+})
+
+function expectLinkedOpenIdSubqueryOnAlias(sql: string, alias: string): void {
+  expect(sql).toContain('AS linked_identity_open_id')
+  expect(sql).toContain(`identity.provider = ${alias}.provider`)
+  expect(sql).toContain(`identity.corp_id = ${alias}.corp_id`)
+  expect(sql).toContain(`identity.provider_union_id = ${alias}.union_id`)
+  expect(sql).toContain('COUNT(DISTINCT identity.provider_open_id) = 1')
+}

@@ -11,6 +11,12 @@ import { query, transaction } from '../db/pg'
 import { RecoveryConflictError, translateRecoveryConflict } from '../db/recovery-conflict'
 import { sweepStaleDepartmentBindings } from './department-binding-reconciliation'
 import {
+  buildDirectoryAccountLinkedIdentityOpenIdSql,
+  canDirectoryAccountEnableDingTalkGrant,
+  resolveDirectoryAccountGrantOpenId,
+  type DirectoryAccountGrantOpenIdSource,
+} from './dingtalk-grant-open-id'
+import {
   fetchDingTalkAppAccessToken,
   getDingTalkDepartmentDetail,
   getDingTalkUserDetail,
@@ -219,6 +225,8 @@ type DirectoryIntegrationAccountRow = {
   external_user_id: string
   union_id: string | null
   open_id: string | null
+  /** buildDirectoryAccountLinkedIdentityOpenIdSql('a') — the same source the grant assertion reads. */
+  linked_identity_open_id?: string | null
   external_key: string
   account_name: string
   account_email: string | null
@@ -241,7 +249,6 @@ type DirectoryReviewItemRow = DirectoryIntegrationAccountRow & {
   review_kind: string
   review_reason: string
   missing_union_id: boolean
-  missing_open_id: boolean
 }
 
 type DirectoryBindingUserRow = {
@@ -571,6 +578,12 @@ export type DirectoryIntegrationAccountSummary = {
   externalUserId: string
   unionId: string | null
   openId: string | null
+  /**
+   * Whether enabling DingTalk login is allowed for this member under DT-HARDEN-02 — computed by
+   * the SAME predicate the bind/admit assertion runs (own openId, else the openId a DingTalk login
+   * recorded for the same corp+unionId). The directory page gates its grant checkbox on this.
+   */
+  grantOpenIdAvailable: boolean
   externalKey: string
   name: string
   email: string | null
@@ -1224,33 +1237,11 @@ export function resolveDirectoryAutoAdmissionCanGrantDingTalkLogin(
   return canDirectoryAccountEnableDingTalkGrant(account)
 }
 
-/** The fields the DT-HARDEN-02 grant predicate reads. */
-export type DirectoryAccountGrantOpenIdSource = {
-  corp_id: string | null
-  open_id: string | null
-  linked_identity_open_id?: string | null
-}
-
-/**
- * The openId that backs a corp-scoped grant: the directory row's own openId, else the openId a
- * DingTalk OAuth login recorded for the same person. 通讯录 user/get never returns openId and a
- * login only writes `user_external_identities`, so without the second source a member who HAS
- * scanned in could still never be granted from the directory page (the dead end this fixes).
- * The second source is only ever loaded through DIRECTORY_ACCOUNT_LINKED_IDENTITY_OPEN_ID_SQL,
- * which requires the same corp_id AND the same unionId — the stable key stays corpId+openId of
- * THIS person, never an openId borrowed from whoever the local user happens to be bound to.
- */
-export function resolveDirectoryAccountGrantOpenId(account: DirectoryAccountGrantOpenIdSource): string | null {
-  return normalizeText(account.open_id) || normalizeText(account.linked_identity_open_id) || null
-}
-
-/**
- * DT-HARDEN-02 single predicate shared by `assertDirectoryAccountCanEnableDingTalkGrant` and
- * `resolveDirectoryAutoAdmissionCanGrantDingTalkLogin` so the two can never drift apart.
- */
-function canDirectoryAccountEnableDingTalkGrant(account: DirectoryAccountGrantOpenIdSource): boolean {
-  return !normalizeText(account.corp_id) || Boolean(resolveDirectoryAccountGrantOpenId(account))
-}
+// DT-HARDEN-02 predicate, openId resolution and linked-openId SQL live in
+// ./dingtalk-grant-open-id so this module, the directory page verdict and pending-user activation
+// all read ONE rule. Re-exported for existing importers.
+export { resolveDirectoryAccountGrantOpenId }
+export type { DirectoryAccountGrantOpenIdSource }
 
 /**
  * The directory sync's per-member upsert (params $1..$16 in column order). A module constant so
@@ -1273,7 +1264,8 @@ const DIRECTORY_ACCOUNT_UPSERT_SQL = `INSERT INTO directory_accounts (
      -- person (DT-HARDEN-02) — so it is cleared and must be re-learned from a login.
      open_id = CASE
        WHEN COALESCE(EXCLUDED.open_id, '') <> '' THEN EXCLUDED.open_id
-       WHEN directory_accounts.union_id IS NOT DISTINCT FROM EXCLUDED.union_id
+       -- plain = on purpose: a NULL unionId (either side) is NOT the same person, so the openId is cleared
+       WHEN directory_accounts.union_id = EXCLUDED.union_id
          AND directory_accounts.corp_id IS NOT DISTINCT FROM EXCLUDED.corp_id
          THEN directory_accounts.open_id
        ELSE NULL
@@ -1292,23 +1284,10 @@ const DIRECTORY_ACCOUNT_UPSERT_SQL = `INSERT INTO directory_accounts (
      updated_at = NOW()
    RETURNING (xmax = 0) AS created`
 
-/**
- * Scalar subquery (alias the directory account `account`) yielding the openId a DingTalk login
- * recorded for the same person: same provider, same corp_id, same unionId. A corp-less or
- * union-less account never matches (NULL = NULL is not true). If more than one distinct openId
- * is on file (only possible before the corp-scoped identity unique indexes are deployed) the
- * result is NULL — ambiguity fails closed instead of picking one.
- */
-const DIRECTORY_ACCOUNT_LINKED_IDENTITY_OPEN_ID_SQL = `(
-       SELECT CASE WHEN COUNT(DISTINCT identity.provider_open_id) = 1
-                   THEN MIN(identity.provider_open_id)
-              END
-       FROM user_external_identities identity
-       WHERE identity.provider = account.provider
-         AND identity.corp_id = account.corp_id
-         AND identity.provider_union_id = account.union_id
-         AND COALESCE(identity.provider_open_id, '') <> ''
-     )`
+// ONE builder for every reader: the bind/admit loaders (alias `account`) feed the grant
+// assertion, and the account summary / review-item queries (alias `a`) feed the page's
+// `grantOpenIdAvailable`, so the page can never gate the checkbox on a different rule.
+const DIRECTORY_ACCOUNT_LINKED_IDENTITY_OPEN_ID_SQL = buildDirectoryAccountLinkedIdentityOpenIdSql('account')
 
 /** The identity fields the matching cascade below needs from a pulled/upserted account. */
 export type DirectoryIdentityMatchAccount = {
@@ -2042,7 +2021,8 @@ function summarizeReviewItem(
       : null,
     flags: {
       missingUnionId: Boolean(row.missing_union_id),
-      missingOpenId: Boolean(row.missing_open_id),
+      // the same openId resolution the grant predicate uses (own openId, else the linked login openId)
+      missingOpenId: !resolveDirectoryAccountGrantOpenId(row),
     },
     actionable: {
       canBatchUnbind: kind === 'inactive_linked' && Boolean(row.local_user_id),
@@ -2060,6 +2040,7 @@ function summarizeDirectoryAccount(row: DirectoryIntegrationAccountRow): Directo
     externalUserId: row.external_user_id,
     unionId: row.union_id,
     openId: row.open_id,
+    grantOpenIdAvailable: canDirectoryAccountEnableDingTalkGrant(row),
     externalKey: row.external_key,
     name: row.account_name,
     email: row.account_email,
@@ -5630,6 +5611,7 @@ export async function listDirectoryReviewItems(
           a.external_user_id,
           a.union_id,
           a.open_id,
+          ${buildDirectoryAccountLinkedIdentityOpenIdSql('a')} AS linked_identity_open_id,
           a.external_key,
           a.name AS account_name,
           a.email AS account_email,
@@ -5657,8 +5639,7 @@ export async function listDirectoryReviewItems(
             WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'
             ELSE '目录成员当前不是已确认绑定状态，建议复核。'
           END AS review_reason,
-          (COALESCE(a.union_id, '') = '') AS missing_union_id,
-          (COALESCE(a.open_id, '') = '') AS missing_open_id
+          (COALESCE(a.union_id, '') = '') AS missing_union_id
        FROM directory_accounts a
        LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
        LEFT JOIN users u ON u.id = l.local_user_id
@@ -5709,6 +5690,7 @@ export async function getDirectoryReviewItem(
         a.external_user_id,
         a.union_id,
         a.open_id,
+        ${buildDirectoryAccountLinkedIdentityOpenIdSql('a')} AS linked_identity_open_id,
         a.external_key,
         a.name AS account_name,
         a.email AS account_email,
@@ -5736,8 +5718,7 @@ export async function getDirectoryReviewItem(
           WHEN u.id IS NULL THEN '目录成员尚未绑定本地用户。'
           ELSE '目录成员当前不是已确认绑定状态，建议复核。'
         END AS review_reason,
-        (COALESCE(a.union_id, '') = '') AS missing_union_id,
-        (COALESCE(a.open_id, '') = '') AS missing_open_id
+        (COALESCE(a.union_id, '') = '') AS missing_union_id
      FROM directory_accounts a
      LEFT JOIN directory_account_links l ON l.directory_account_id = a.id
      LEFT JOIN users u ON u.id = l.local_user_id
@@ -6143,7 +6124,14 @@ async function applyDirectoryAccountBindInTransaction(
   const account = await lockAuthoritativeDirectoryBindingAccount(client, normalizedAccountId)
   if (!account) throw new DirectoryNotFoundError('Directory account not found')
   if (!account.is_active) throw new DirectoryConflictError('Directory account is inactive and cannot be bound')
-  const identityExternalKey = buildDingTalkIdentityExternalKey(account.corp_id, account.open_id, account.union_id)
+  // Keyed on the SAME openId the grant check resolves (own openId, else the one a DingTalk login
+  // recorded for this corp+unionId), so a re-bind keeps the corp:openId key that login wrote
+  // instead of flipping it to corp:unionId (and back on the next login, superseding evidence).
+  const identityExternalKey = buildDingTalkIdentityExternalKey(
+    account.corp_id,
+    resolveDirectoryAccountGrantOpenId(account),
+    account.union_id,
+  )
   if (!identityExternalKey) {
     throw new DirectoryValidationError('Directory account is missing DingTalk openId/unionId and cannot be pre-bound for DingTalk login')
   }
@@ -6259,7 +6247,7 @@ async function applyDirectoryAccountBindInTransaction(
            provider_open_id = COALESCE(
              NULLIF($5::text, ''),
              CASE
-               WHEN provider_union_id IS NOT DISTINCT FROM $4::text
+               WHEN provider_union_id = $4::text
                  AND corp_id IS NOT DISTINCT FROM $6::text
                THEN NULLIF(provider_open_id, '')
              END
@@ -6805,6 +6793,7 @@ export async function getDirectoryAccountSummary(accountId: string): Promise<Dir
         a.external_user_id,
         a.union_id,
         a.open_id,
+        ${buildDirectoryAccountLinkedIdentityOpenIdSql('a')} AS linked_identity_open_id,
         a.external_key,
         a.name AS account_name,
         a.email AS account_email,
@@ -6982,6 +6971,7 @@ export async function listDirectoryIntegrationAccounts(
           a.external_user_id,
           a.union_id,
           a.open_id,
+          ${buildDirectoryAccountLinkedIdentityOpenIdSql('a')} AS linked_identity_open_id,
           a.external_key,
           a.name AS account_name,
           a.email AS account_email,

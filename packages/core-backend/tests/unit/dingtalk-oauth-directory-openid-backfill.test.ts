@@ -60,7 +60,7 @@ const IDENTITY_USER = {
   activation_status: 'activated',
 }
 
-function installTransaction(options: { failBackfill?: boolean } = {}): Call[] {
+function installTransaction(options: { failBackfill?: boolean; failRollback?: boolean; failSavepoint?: boolean } = {}): Call[] {
   const calls: Call[] = []
   pgMocks.transaction.mockImplementation(async (callback: (client: unknown) => Promise<unknown>) => callback({
     query: async (sql: string, params: unknown[] = []) => {
@@ -82,6 +82,12 @@ function installTransaction(options: { failBackfill?: boolean } = {}): Call[] {
       }
       if (/UPDATE users[\s\S]*access_generation/i.test(statement)) return { rows: [{ access_generation: 1 }] }
       if (/INSERT INTO user_external_identities/i.test(statement)) return { rows: [{ id: 'identity-new' }] }
+      if (options.failSavepoint && /^SAVEPOINT /.test(statement)) {
+        throw new Error('current transaction is aborted')
+      }
+      if (options.failRollback && /^ROLLBACK TO SAVEPOINT /.test(statement)) {
+        throw new Error('connection terminated')
+      }
       if (options.failBackfill && statement.includes('UPDATE directory_accounts')) {
         throw new Error('canceling statement due to lock timeout')
       }
@@ -162,6 +168,24 @@ describe('DingTalk login backfills the directory member openId', () => {
 
     await expect(exchangeCodeForUser('code-rejected')).rejects.toMatchObject({ code: 'grant_required' })
     expectScopedBackfill(backfillCall(calls))
+  })
+
+  it('a failing ROLLBACK TO SAVEPOINT is NOT swallowed (else COMMIT would silently roll back the identity write)', async () => {
+    installTransaction({ failBackfill: true, failRollback: true })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+      .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+    await expect(exchangeCodeForUser('code-rollback-fails')).rejects.toThrow('connection terminated')
+  })
+
+  it('a failing SAVEPOINT is NOT swallowed either (the transaction is already unusable)', async () => {
+    installTransaction({ failSavepoint: true })
+    pgMocks.query
+      .mockResolvedValueOnce({ rows: [IDENTITY_USER] })
+      .mockResolvedValueOnce({ rows: [{ enabled: true }] })
+
+    await expect(exchangeCodeForUser('code-savepoint-fails')).rejects.toThrow('current transaction is aborted')
   })
 
   it('a failing backfill is rolled back to its savepoint and the login still succeeds', async () => {

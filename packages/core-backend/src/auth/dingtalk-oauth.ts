@@ -546,12 +546,15 @@ const DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT = 'dingtalk_directory_open_id_backfil
  * without this the directory page kept showing "缺 openId" (and its "refresh this member" hint
  * could never succeed) even after the member had scanned in.
  *
- * Best effort and never on the login's critical path:
+ * Best effort, never able to fail a login on its own:
  *  - runs inside the caller's transaction (commits together with the identity write) behind a
- *    SAVEPOINT, so a failing UPDATE is rolled back to the savepoint and only logged;
+ *    SAVEPOINT, so a failing UPDATE is rolled back to the savepoint and only logged. Only a
+ *    failure of the SAVEPOINT / ROLLBACK TO SAVEPOINT statements themselves propagates — the
+ *    transaction is unusable then, and hiding it would silently roll back the identity write;
  *  - `FOR UPDATE SKIP LOCKED` never waits: a member row held by a running directory sync is
- *    skipped (that sync now keeps a known openId, and the grant check also reads the identity's
- *    openId directly), so a login can neither block on nor deadlock with a sync;
+ *    skipped (that sync now keeps a known openId, and both the grant check and the directory
+ *    page's grantOpenIdAvailable read the identity's openId directly), so a login can neither
+ *    block on nor deadlock with a sync;
  *  - only rows whose open_id is empty are touched — an openId already on file is never replaced.
  */
 async function backfillDirectoryAccountOpenIdInTransaction(
@@ -564,12 +567,9 @@ async function backfillDirectoryAccountOpenIdInTransaction(
   const normalizedCorpId = String(corpId ?? '').trim()
   if (!openId || !unionId || !normalizedCorpId) return
 
-  try {
-    await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
-  } catch (error) {
-    logger.warn('DingTalk directory openId backfill skipped: savepoint unavailable', error instanceof Error ? error : undefined)
-    return
-  }
+  // Not caught: a failing SAVEPOINT leaves the transaction aborted, and swallowing it would turn
+  // the caller's COMMIT into a silent ROLLBACK of the identity write.
+  await client.query(`SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   try {
     await client.query(
       `UPDATE directory_accounts AS account
@@ -582,18 +582,19 @@ async function backfillDirectoryAccountOpenIdInTransaction(
            AND candidate.union_id = $3
            AND COALESCE(candidate.open_id, '') = ''
          FOR UPDATE SKIP LOCKED
-       )
-         AND COALESCE(account.open_id, '') = ''`,
+       )`,
+      // The candidate filter is the ONLY "never replace a known openId" guard: under READ COMMITTED
+      // a row locked by FOR UPDATE is re-checked against it on its latest version, so a row that
+      // gained an openId meanwhile is dropped. (A duplicate outer re-check would mask its removal.)
       [PROVIDER, normalizedCorpId, unionId, openId],
     )
     await client.query(`RELEASE SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   } catch (error) {
     logger.warn('DingTalk directory openId backfill failed; login continues', error instanceof Error ? error : undefined)
-    try {
-      await client.query(`ROLLBACK TO SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
-    } catch (rollbackError) {
-      logger.warn('DingTalk directory openId backfill savepoint rollback failed', rollbackError instanceof Error ? rollbackError : undefined)
-    }
+    // If the rollback itself fails the transaction stays aborted, and PostgreSQL answers the
+    // caller's COMMIT with a silent ROLLBACK — the identity write would vanish while the login
+    // "succeeded". Let that failure surface instead (the login transaction fails visibly).
+    await client.query(`ROLLBACK TO SAVEPOINT ${DIRECTORY_OPEN_ID_BACKFILL_SAVEPOINT}`)
   }
 }
 

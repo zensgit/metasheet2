@@ -32,10 +32,17 @@ vi.mock('../../src/integrations/dingtalk/client', async (importOriginal) => ({
 
 import { query } from '../../src/db/pg'
 import { exchangeCodeForUser } from '../../src/auth/dingtalk-oauth'
-import { __directorySyncInternalsForTests, bindDirectoryAccount } from '../../src/directory/directory-sync'
+import { __directorySyncInternalsForTests, bindDirectoryAccount, getDirectoryAccountSummary } from '../../src/directory/directory-sync'
 
 const describeIfDb = process.env.DATABASE_URL ? describe : describe.skip
 const q = (sql: string, params?: unknown[]) => query(sql, params)
+
+// Module level on purpose (outside describeIfDb): the real-DB CI step arms EXPECT_DB=1, so a
+// DATABASE_URL that does not reach this worker reds instead of skip-greening the whole file.
+const itIfExpectDb = process.env.EXPECT_DB === '1' ? it : it.skip
+itIfExpectDb('sentinel: EXPECT_DB lane must have DATABASE_URL (a DB-expected run must never skip-green)', () => {
+  expect(process.env.DATABASE_URL).toBeTruthy()
+})
 
 const RUN = `dto_${Date.now()}`
 const CORP = `corp_${RUN}`
@@ -53,7 +60,7 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
     )).rows[0].id
   }
 
-  async function seedAccount(opts: { tag: string; unionId: string | null; openId?: string | null; integration?: string }) {
+  async function seedAccount(opts: { tag: string; unionId: string | null; openId?: string | null; integration?: string; externalKey?: string }) {
     const integration = opts.integration ?? integrationId
     const external = `emp_${RUN}_${opts.tag}`
     const row = (await q(
@@ -61,7 +68,7 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
        SELECT $1::uuid, 'dingtalk', corp_id, $2, $3, $4, $5, 'Fixture', true
        FROM directory_integrations WHERE id = $1::uuid
        RETURNING id::text AS id`,
-      [integration, external, opts.unionId, opts.openId ?? null, opts.unionId || external],
+      [integration, external, opts.unionId, opts.openId ?? null, opts.externalKey ?? (opts.unionId || external)],
     )).rows[0]
     return row.id as string
   }
@@ -143,10 +150,6 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
     await q(`DELETE FROM users WHERE id LIKE $1`, [users]).catch(() => {})
   })
 
-  it('sentinel: DATABASE_URL is set', () => {
-    expect(process.env.DATABASE_URL).toBeTruthy()
-  })
-
   // ── 1. grant check: same corp + same unionId only ───────────────────────────────────────────
 
   it('grants a member whose openId is known only from their own DingTalk login (same corp + unionId), and the re-bind keeps it', async () => {
@@ -155,17 +158,26 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
     const accountId = await seedAccount({ tag: 'same', unionId: union })
     const userId = await seedUser('same')
     await seedIdentity({ userId, corpId: CORP, unionId: union, openId })
+    // B1: the page verdict (same builder/predicate, real GROUP BY query) agrees before the bind
+    await expect(getDirectoryAccountSummary(accountId)).resolves.toMatchObject({ openId: null, grantOpenIdAvailable: true })
 
     await expect(bind(accountId, userId, true)).resolves.toBeTruthy()
     await expect(grantOf(userId)).resolves.toBe(true)
     // 4. the bind's identity UPDATE did not erase the login-proven openId
     await expect(identityOf(userId)).resolves.toEqual({ provider_union_id: union, provider_open_id: openId })
+    // N3: and kept the corp:openId key the login wrote (no flip to corp:unionId)
+    const key = (await q(
+      `SELECT external_key FROM user_external_identities WHERE provider = 'dingtalk' AND local_user_id = $1`,
+      [userId],
+    )).rows[0]?.external_key
+    expect(key).toBe(`${CORP}:${openId}`)
   })
 
   it('does NOT borrow the openId of the local user\'s identity when its unionId differs', async () => {
     const accountId = await seedAccount({ tag: 'union-mismatch', unionId: `union_${RUN}_um_account` })
     const userId = await seedUser('union-mismatch')
     await seedIdentity({ userId, corpId: CORP, unionId: `union_${RUN}_um_identity`, openId: `open_${RUN}_um` })
+    await expect(getDirectoryAccountSummary(accountId)).resolves.toMatchObject({ grantOpenIdAvailable: false })
 
     await expect(bind(accountId, userId, true)).rejects.toThrow('missing DingTalk openId')
     await expect(grantOf(userId)).resolves.toBeNull()
@@ -176,6 +188,7 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
     const accountId = await seedAccount({ tag: 'corp-mismatch', unionId: union })
     const userId = await seedUser('corp-mismatch')
     await seedIdentity({ userId, corpId: OTHER_CORP, unionId: union, openId: `open_${RUN}_cm` })
+    await expect(getDirectoryAccountSummary(accountId)).resolves.toMatchObject({ grantOpenIdAvailable: false })
 
     await expect(bind(accountId, userId, true)).rejects.toThrow('missing DingTalk openId')
     await expect(grantOf(userId)).resolves.toBeNull()
@@ -195,10 +208,10 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
 
   it('the sync upsert keeps a known openId while unionId/corp are unchanged, and clears it when the unionId changes', async () => {
     const external = `emp_${RUN}_sync`
-    const upsert = (unionId: string, openId: string | null) => q(
+    const upsert = (unionId: string | null, openId: string | null) => q(
       __directorySyncInternalsForTests.DIRECTORY_ACCOUNT_UPSERT_SQL,
       [
-        integrationId, 'dingtalk', CORP, external, unionId, openId, unionId,
+        integrationId, 'dingtalk', CORP, external, unionId, openId, unionId ?? external,
         'Fixture', null, null, null, null, null, null, JSON.stringify({}), new Date(),
       ],
     )
@@ -221,6 +234,13 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
 
     await upsert(`union_${RUN}_sync_b`, `open_${RUN}_sync_pulled`) // a pull that does carry one wins
     await expect(read()).resolves.toBe(`open_${RUN}_sync_pulled`)
+
+    // N1: a NULL unionId is never "the same person" — not even NULL→NULL — so the openId is cleared
+    await upsert(null, null)
+    await expect(read()).resolves.toBeNull()
+    await q(`UPDATE directory_accounts SET open_id = $3 WHERE integration_id = $1::uuid AND external_user_id = $2`, [integrationId, external, `open_${RUN}_sync_null_union`])
+    await upsert(null, null)
+    await expect(read()).resolves.toBeNull()
   })
 
   // ── 3. login backfill ───────────────────────────────────────────────────────────────────────
@@ -238,7 +258,15 @@ describeIfDb('directory DingTalk grant — openId source (real DB)', () => {
     const target = await seedAccount({ tag: 'login-target', unionId: union })
     const neighbour = await seedAccount({ tag: 'login-neighbour', unionId: `union_${RUN}_login_other` })
     const foreignCorp = await seedAccount({ tag: 'login-foreign', unionId: union, integration: otherIntegrationId })
-    const alreadyKnown = await seedAccount({ tag: 'login-known', unionId: `union_${RUN}_login_known`, openId: `open_${RUN}_known` })
+    // SAME corp + SAME unionId as the target, but an openId is already on file: the backfill must
+    // leave it alone (this row matches every other backfill condition, so only the empty-openId
+    // guard keeps it unchanged).
+    const alreadyKnown = await seedAccount({
+      tag: 'login-known',
+      unionId: union,
+      openId: `open_${RUN}_known`,
+      externalKey: `ext_${RUN}_login_known`,
+    })
 
     primeWebLogin(union, openId)
     const result = await exchangeCodeForUser(`code-${RUN}-login`)

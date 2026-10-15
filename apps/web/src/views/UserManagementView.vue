@@ -816,10 +816,10 @@
               最近钉钉登录：{{ formatDate(dingtalkAccess.identity.lastLoginAt) }}
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__warning">
-              当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。
+              当前钉钉身份缺少 openId：该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉扫码。
             </p>
             <p v-if="shouldWarnMissingDingTalkOpenId(dingtalkAccess)" class="user-admin__hint">
-              修复建议：先回到目录同步查看该成员是否已补齐 openId；如果目录仍未返回，请让用户先完成一次钉钉 OAuth 绑定；确认 openId 已补齐后刷新本页，再开通钉钉扫码。
+              修复建议：请让他先用钉钉扫码登录一次（登录会补齐 openId），再刷新本页开通钉钉扫码。
             </p>
             <p v-if="dingtalkAccess?.grant.updatedAt" class="user-admin__hint">
               开通状态更新时间：{{ formatDate(dingtalkAccess.grant.updatedAt) }}
@@ -2758,7 +2758,7 @@ async function updateNamespaceAdmission(admission: NamespaceAdmission, enabled: 
 async function updateDingTalkGrant(enabled: boolean): Promise<void> {
   if (!access.value) return
   if (enabled && !canEnableDingTalkGrant(dingtalkAccess.value)) {
-    setStatus('当前钉钉身份缺少 openId，暂不能开通钉钉扫码；请重新同步目录或让用户完成一次钉钉 OAuth 绑定。', 'error')
+    setStatus('当前钉钉身份缺少 openId：该成员还没用钉钉扫码登录过本系统，暂时拿不到 openId，暂不能开通钉钉扫码。', 'error')
     return
   }
   busy.value = true

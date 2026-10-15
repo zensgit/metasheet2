@@ -167,6 +167,10 @@ export default defineConfig({
       // INSERT when the bind throws after it. DATABASE_URL-gated; excluded here so the no-DB job
       // cannot skip-green it, and wired as a WHOLE FILE into the approval real-DB step.
       'tests/integration/directory-sync-admission-orphan-guard.db.test.ts',
+      // DT-HARDEN-02 grant openId source (real DB): same corp+union linked openId, sync/bind keep or
+      // clear, login backfill. DATABASE_URL-gated; excluded here so the no-DB job cannot skip-green
+      // it, and wired as a WHOLE FILE into the approval real-DB step (EXPECT_DB sentinel armed there).
+      'tests/integration/directory-dingtalk-openid-grant-path.db.test.ts',
       // O2-S1 register() whole-transaction atomicity goldens: DATABASE_URL-gated; excluded here so
       // the no-DB job cannot skip-green it; wired whole-file into the auth real-DB step in plugin-tests.yml.
       'tests/integration/auth-register-atomicity.db.test.ts',

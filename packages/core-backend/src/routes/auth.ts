@@ -626,6 +626,9 @@ function mapDingTalkActivationFailure(error: unknown): DingTalkActivationIntentE
     // conflict is the exact drift the admin-route closure tests exist to prevent (#4833).
     || code === 'ACTIVATE_ORG_MISMATCH'
     || code === 'ACTIVATE_ORG_AMBIGUOUS'
+    // Unreachable from this SSO callback (the activation grant check is non-SSO only); tracked so
+    // the closed set follows the enum instead of falling through to 500.
+    || code === 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED'
   ) {
     return new DingTalkActivationIntentError(
       409,

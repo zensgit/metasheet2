@@ -260,7 +260,8 @@ describe('activate error closure — LAYER 3: static consistency, NOT a behaviou
       + `site, so their row is unreachable and untested: ${JSON.stringify(tableNotThrown)}`,
     ).toEqual([])
 
-    expect(reasons.size).toBe(14)
+    // 15: + ACTIVATE_DINGTALK_OPEN_ID_REQUIRED (DT-HARDEN-02 on the non-SSO activation grant)
+    expect(reasons.size).toBe(15)
   })
 
   it('mapActivateError reads ONLY `.code` off its error parameter — never `.message`', () => {

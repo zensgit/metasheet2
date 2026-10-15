@@ -724,3 +724,60 @@ describe('activatePendingUser (T3)', () => {
       String(call[0]).includes('UPDATE users'))).toBe(false)
   })
 })
+
+describe('activatePendingUser — DT-HARDEN-02 grant check (same predicate as the directory page)', () => {
+  const PENDING_ROW = {
+    id: 'u1',
+    email: 'a@x.com',
+    username: 'alice',
+    mobile: null,
+    activation_status: 'pending_activation',
+    is_active: false,
+  }
+
+  function installQueries(linkedAccounts: Array<Record<string, unknown>>): void {
+    pgMocks.query.mockReset()
+    pgMocks.query.mockImplementation(async (sql: string) => {
+      const statement = String(sql)
+      if (/FROM users[\s\S]*FOR UPDATE/.test(statement)) return { rows: [PENDING_ROW] }
+      if (statement.includes('AS linked_identity_open_id')) return { rows: linkedAccounts }
+      if (/FROM directory_accounts|FROM directory_account_links/.test(statement)) return { rows: [LINKED_ACTIVE_SOURCE] }
+      if (statement.includes('UPDATE users') && statement.includes("activation_status = 'activated'")) return { rows: [{ id: 'u1' }] }
+      if (statement.includes('access_generation = COALESCE')) return { rows: [{ access_generation: 1 }] }
+      return { rows: [] }
+    })
+  }
+
+  const grantWrites = () => pgMocks.query.mock.calls.filter((call) =>
+    String(call[0]).includes('INSERT INTO user_external_auth_grants'))
+  const activationWrites = () => pgMocks.query.mock.calls.filter((call) =>
+    String(call[0]).includes("activation_status = 'activated'"))
+
+  it('refuses a non-SSO grant for a corp member with no openId anywhere — before any write', async () => {
+    installQueries([{ corp_id: 'corp-1', open_id: null, linked_identity_open_id: null }])
+    for (const mode of ['admin_no_password', 'temp_password'] as const) {
+      await expect(activatePendingUser({ userId: 'u1', mode, enableDingTalkGrant: true }))
+        .rejects.toMatchObject({ code: 'ACTIVATE_DINGTALK_OPEN_ID_REQUIRED' })
+    }
+    expect(grantWrites()).toHaveLength(0)
+    expect(activationWrites()).toHaveLength(0)
+    const check = pgMocks.query.mock.calls.map((call) => String(call[0])).find((sql) => sql.includes('AS linked_identity_open_id'))
+    // the shared corp+union-scoped subquery, over the user's LINKED DingTalk accounts
+    expect(check).toContain('identity.corp_id = account.corp_id')
+    expect(check).toContain('identity.provider_union_id = account.union_id')
+    expect(check).toContain("link.link_status = 'linked'")
+  })
+
+  it('grants when the openId is known from the member\'s own DingTalk login (linked identity, same corp+union)', async () => {
+    installQueries([{ corp_id: 'corp-1', open_id: null, linked_identity_open_id: 'open-linked' }])
+    await activatePendingUser({ userId: 'u1', mode: 'admin_no_password', enableDingTalkGrant: true })
+    expect(grantWrites()).toHaveLength(1)
+  })
+
+  it('does not run the check when no grant is requested, nor in SSO mode (its source match already pins the openId)', async () => {
+    installQueries([{ corp_id: 'corp-1', open_id: null, linked_identity_open_id: null }])
+    await activatePendingUser({ userId: 'u1', mode: 'admin_no_password' })
+    expect(pgMocks.query.mock.calls.some((call) => String(call[0]).includes('AS linked_identity_open_id'))).toBe(false)
+    expect(grantWrites()).toHaveLength(0)
+  })
+})
