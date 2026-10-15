@@ -21,7 +21,7 @@
   link is captured when submit is clicked, so a late source-line write always names the record the
   task was created from.
 
-  IDENTITY: the dialog is bound to the signed-in user and org read when the drawer bound this record
+  IDENTITY: the dialog is bound to the signed-in user and org the page was loaded under
   (`boundIdentity`, tasks/recordTaskDispatchIdentity.ts). The identity the request will carry is read
   again on open, right before the create (with no await between that check and the send) and right
   before each read/write of the description step. On any mismatch nothing more is sent, the draft is
@@ -281,7 +281,7 @@ const props = withDefaults(defineProps<{
   personSummaries?: Record<string, PersonSummary[]>
   /** The record's deep link (ids only), written into the task description after the create. */
   recordLink: string
-  /** The signed-in user and org read when the drawer bound this record (`readDispatchIdentity()`). */
+  /** The signed-in user and org the page was loaded under (`readDispatchIdentity()`, read once). */
   boundIdentity: string
   /** The record's dispatch-state key under that identity (`dispatchRunKey(boundIdentity, sheetId, recordId)`). */
   runKey: string

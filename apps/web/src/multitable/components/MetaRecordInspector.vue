@@ -512,7 +512,7 @@
          (in flight / created) is NOT in the child: it is kept per identity and record under `run-key`
          (tasks/recordTaskDispatchRuns.ts), so closing the dialog or moving between records cannot
          lose a result or allow a second create, and the dialog captures the record link at submit.
-         `bound-identity` is the signed-in user and org read when this record was bound; the dialog
+         `bound-identity` is the signed-in user and org the page was loaded under; the dialog
          sends nothing under any other (tasks/recordTaskDispatchIdentity.ts). -->
     <MetaRecordTaskDispatchDialog
       v-if="canDispatchTask && sheetId && viewId && record"
@@ -648,6 +648,10 @@ const props = withDefaults(defineProps<{
    *  reaches this prop through attribute fallthrough). `baseId` is added to the link when known. */
   viewId?: string
   baseId?: string
+  /** 派发任务: the signed-in user and org the page holding this drawer was loaded under
+   *  (`readDispatchIdentity()`, read once by the workbench). Without it the drawer reads it once when
+   *  it is set up. */
+  dispatchIdentity?: string
   apiClient?: MultitableApiClient
   /** A3: shared AI shortcut UI state from the workbench useAiShortcut instance. */
   aiShortcut?: AiShortcutState | null
@@ -1523,14 +1527,12 @@ const canDispatchTask = computed(() => {
     isPlmWorkbenchFocused: featureFlags.isPlmWorkbenchFocused,
   })
 })
-// The identity (signed-in user + the org the requests carry) this record was bound under: read now and
-// again whenever the drawer moves to another record, never when the dialog opens. The record's values
-// on screen were read under it, so the dialog may send them only under it; see
-// tasks/recordTaskDispatchIdentity.ts.
-const dispatchIdentity = ref(readDispatchIdentity())
-watch(() => props.record?.id, () => {
-  dispatchIdentity.value = readDispatchIdentity()
-})
+// The identity (signed-in user + the org the requests carry) the records on screen were read under:
+// the workbench's, read once when the page was loaded, or this drawer's own, read once at set-up. It is
+// NOT re-read when the drawer moves to another record or the dialog opens: the rows came from the same
+// load, so a fresh read would let a later identity send them. See tasks/recordTaskDispatchIdentity.ts.
+const ownDispatchIdentity = readDispatchIdentity()
+const dispatchIdentity = computed(() => props.dispatchIdentity ?? ownDispatchIdentity)
 // The title the dispatcher confirms: the header's own display text of the primary field, or nothing
 // when that value is empty (the header's '—' placeholder is not a title).
 const dispatchDefaultTitle = computed(() => {

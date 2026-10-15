@@ -24,11 +24,10 @@
  *     names nobody.
  *  7. Success: a link to /tasks/:id and a nudge to the top-bar badge; a failed description write
  *     still reports the task as created, with a note.
- *  8. Identity: a dispatch is bound to the signed-in user and org read when the drawer bound the
- *     record. A sign-in as someone else in another tab, a sign-out, an org change (stored hint or an
+ *  8. Identity: a dispatch is bound to the signed-in user and org the page was loaded under. A sign-in as someone else in another tab, a sign-out, an org change (stored hint or an
  *     explicit session org) or a sign-in in this tab makes the dialog send nothing more — no create,
- *     no description read or write — clear the draft and refuse for good (a reopen does not offer a
- *     fresh form for the same record). Dispatch state is kept per identity: another identity sees
+ *     no description read or write — clear the draft and refuse until the page is reloaded (a reopen,
+ *     or a move to another record and back, does not offer a fresh form from the old load). Dispatch state is kept per identity: another identity sees
  *     neither a pending note nor a created task, and a session change in this tab drops the state of
  *     every other identity.
  */
@@ -198,6 +197,8 @@ interface HarnessOptions {
   /** The router history base (the app served under a sub-path). */
   routerBase?: string
   fieldPermissions?: Record<string, { visible: boolean; readOnly: boolean }>
+  /** The identity the page was loaded under, as the workbench passes it. */
+  dispatchIdentity?: string
 }
 
 function mountInspector(options: HarnessOptions = {}) {
@@ -226,6 +227,7 @@ function mountInspector(options: HarnessOptions = {}) {
           fld_reviewer: [{ id: 'usr_c', display: 'Person C' }],
         },
         ...(options.fieldPermissions ? { fieldPermissions: options.fieldPermissions } : {}),
+        ...(options.dispatchIdentity !== undefined ? { dispatchIdentity: options.dispatchIdentity } : {}),
       })
     },
   })
@@ -317,11 +319,15 @@ beforeEach(() => {
   useLocale().setLocale('zh-CN')
 })
 
-afterEach(() => {
+function unmountAll() {
   while (mountedApps.length > 0) {
     try { mountedApps.pop()!.unmount() } catch { /* already unmounted */ }
   }
   document.body.innerHTML = ''
+}
+
+afterEach(() => {
+  unmountAll()
   resetDispatchRunsForTests()
   localStorage.clear()
   useLocale().setLocale('en')
@@ -479,6 +485,14 @@ describe('record drawer 派发任务 entry (gating)', () => {
     const binding = source.slice(source.indexOf('<MetaRecordInspector'), source.indexOf('/>', source.indexOf('<MetaRecordInspector')))
     expect(binding).toContain(':view-id="workbench.activeViewId.value ?? undefined"')
     expect(binding).toContain(':base-id="activeBaseId || undefined"')
+  })
+
+  it('the workbench hands the inspector the identity it read once at set-up (page load), not a live read', async () => {
+    const source = (await import('../src/multitable/views/MultitableWorkbench.vue?raw')).default as string
+    const binding = source.slice(source.indexOf('<MetaRecordInspector'), source.indexOf('/>', source.indexOf('<MetaRecordInspector')))
+    expect(binding).toContain(':dispatch-identity="dispatchIdentity"')
+    // A top-level constant of the setup script: read once, never inside a watcher or a computed.
+    expect(source).toMatch(/^const dispatchIdentity = readDispatchIdentity\(\)$/m)
   })
 })
 
@@ -1144,23 +1158,47 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     expectRefused()
   })
 
-  it('dispatch state is per identity: another identity sees a fresh form, not the pending note; the first sees its task', async () => {
-    let release: (value: Response) => void = () => {}
-    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+  it('after a change elsewhere, moving to another record and back still refuses: the rows are from the old load', async () => {
+    serveTasks()
     const { container, vm } = mountInspector()
     await flushUi()
-    await openDialog(container)
-    setInput('due-date', '2031-05-06')
-    await submit()
-    q<HTMLButtonElement>('cancel')!.click()
-    await flushUi()
-    // B signs in elsewhere; the drawer then binds the record again (a move away and back) under B.
     signInElsewhere(TOKEN_B)
     vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
     await flushUi(6)
     vm.record = RECORD
     await flushUi(6)
     await openDialog(container)
+    expectRefused()
+    expect(tasksCalls('POST', '/api/tasks')).toHaveLength(0)
+  })
+
+  it('the drawer uses the identity the page was loaded under, not its own later read', async () => {
+    serveTasks()
+    const pageIdentity = readDispatchIdentity()
+    signInElsewhere(TOKEN_B)
+    // The drawer is set up after the change, but the page (and its rows) were loaded under A.
+    const { container } = mountInspector({ dispatchIdentity: pageIdentity })
+    await flushUi()
+    await openDialog(container)
+    expectRefused()
+  })
+
+  it('dispatch state is per identity: a page loaded under another identity sees a fresh form, not the pending note; the first sees its task', async () => {
+    let release: (value: Response) => void = () => {}
+    serveTasks({ create: () => new Promise<Response>((resolve) => { release = resolve }) })
+    const first = mountInspector()
+    await flushUi()
+    await openDialog(first.container)
+    setInput('due-date', '2031-05-06')
+    await submit()
+    q<HTMLButtonElement>('cancel')!.click()
+    await flushUi()
+    unmountAll()
+    // B signs in elsewhere and the page is loaded again under B.
+    signInElsewhere(TOKEN_B)
+    const second = mountInspector()
+    await flushUi()
+    await openDialog(second.container)
     expect(q('pending')).toBeNull()
     expect(q('identity-refused')).toBeNull()
     expect(q<HTMLButtonElement>('submit')!.disabled).toBe(false)
@@ -1169,18 +1207,17 @@ describe('派发任务 dialog: bound to the signed-in identity', () => {
     // A's create lands; B still sees nothing of it.
     release(jsonResponse(200, { id: 'tsk_9', version: 1 }))
     await flushUi(10)
-    await openDialog(container)
+    await openDialog(second.container)
     expect(q('open-task')).toBeNull()
     expect(q('success')).toBeNull()
     q<HTMLButtonElement>('cancel')!.click()
     await flushUi()
-    // Back to A (another tab again): the record bound under A shows A's task.
+    unmountAll()
+    // Back to A (another tab again), page loaded under A: A's task is shown.
     signInElsewhere(TOKEN_A)
-    vm.record = { ...RECORD, id: 'rec_2' } as unknown as MetaRecord
-    await flushUi(6)
-    vm.record = RECORD
-    await flushUi(6)
-    await openDialog(container)
+    const third = mountInspector()
+    await flushUi()
+    await openDialog(third.container)
     expect(q<HTMLAnchorElement>('open-task')!.getAttribute('href')).toBe('/tasks/tsk_9')
   })
 

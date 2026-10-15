@@ -463,6 +463,7 @@
         :sheet-id="workbench.activeSheetId.value ?? undefined"
         :view-id="workbench.activeViewId.value ?? undefined"
         :base-id="activeBaseId || undefined"
+        :dispatch-identity="dispatchIdentity"
         :api-client="workbench.client"
         :can-edit="effectiveRowActions.canEdit" :can-comment="effectiveRowActions.canComment" :can-delete="effectiveRowActions.canDelete"
         :can-create="caps.canCreateRecord.value"
@@ -890,6 +891,7 @@ import { buildBatchExpectedVersions } from '../utils/batch-restore-expected-vers
 import { resolveSelectionLabels } from '../utils/batch-restore-labels'
 import MetaFormView from '../components/MetaFormView.vue'
 import MetaRecordInspector from '../components/MetaRecordInspector.vue'
+import { readDispatchIdentity } from '../../tasks/recordTaskDispatchIdentity'
 import MetaNotificationBell from '../components/MetaNotificationBell.vue'
 import MetaLinkPicker from '../components/MetaLinkPicker.vue'
 import MetaPersonPicker from '../components/MetaPersonPicker.vue'
@@ -1628,6 +1630,10 @@ const favoriteBaseIds = ref<string[]>(readFavoriteBaseIds())
 const recentBaseOpens = ref(readRecentBaseOpens())
 const basePickerBases = computed(() => decorateAndSortBases(bases.value, favoriteBaseIds.value, recentBaseOpens.value))
 const activeBaseId = computed(() => workbench.activeBaseId.value)
+// 派发任务 (R-45 step 1): the signed-in user and org this page was loaded under, read once. The rows
+// the record drawer shows were read under it, so a dispatch from them may be sent only under it; after
+// any change the dialog refuses until the page is reloaded (tasks/recordTaskDispatchIdentity.ts).
+const dispatchIdentity = readDispatchIdentity()
 const toastRef = ref<InstanceType<typeof MetaToast> | null>(null)
 // PR-B2 round 2 (§1.3 "Field-anchored server errors"): imperative query handle on the record inspector —
 // `onDrawerPatch` asks its exposed `canAnchorFieldError(recordId, fieldId)` BEFORE writing an inline

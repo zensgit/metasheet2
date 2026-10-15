@@ -2,12 +2,14 @@
  * 派发任务 from a multitable record: WHO a dispatch belongs to.
  *
  * The rule. A dispatch is bound to the signed-in user and the organization its requests will carry,
- * read when the drawer binds the record. The record's title, person ids and link were read under
- * that identity, so they may only be sent under it. Before the create and before the description
- * write, the identity the request will actually carry is read again; if it is not the bound one,
- * nothing is sent and the dialog refuses (it does not offer a fresh form for the same on-screen
- * record, since that record was read under the other identity). The dispatch state of each record
- * is kept per identity as well, so one identity never sees another's pending or created task.
+ * read once when the multitable page was loaded (the workbench; a drawer used elsewhere reads it once
+ * when it is set up). The rows on screen — and so a record's title, person ids and link — were read
+ * under that identity, so they may only be sent under it. It is not re-read on a move to another
+ * record or on opening the dialog, since those rows come from the same load. Before the create and
+ * before the description write, the identity the request will actually carry is read again; if it is
+ * not the bound one, nothing is sent and the dialog refuses until the page is reloaded. The dispatch
+ * state of each record is kept per identity as well, so one identity never sees another's pending or
+ * created task.
  *
  * Why a value check and not only a notification: `useAuth` announces the transitions THIS tab
  * performs, but a sign-in in another tab only rewrites the shared storage, and an ordinary (not
